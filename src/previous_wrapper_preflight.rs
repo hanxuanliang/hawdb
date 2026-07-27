@@ -717,6 +717,25 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 )
                 .is_some_and(|count| count > 0),
                 search_candidate_missing_required_fields_ready(&replacement_summary),
+                bool_path(
+                    &replacement_summary,
+                    &[
+                        "search_candidate_shadow_evidence",
+                        "filter_pushdown_field_capabilities_ready",
+                    ],
+                ) == Some(true),
+                search_candidate_missing_capability_fields_ready(
+                    &replacement_summary,
+                    "filter_pushdown_missing_value_summary_fields",
+                ),
+                search_candidate_missing_capability_fields_ready(
+                    &replacement_summary,
+                    "filter_pushdown_missing_numeric_range_fields",
+                ),
+                search_candidate_missing_capability_fields_ready(
+                    &replacement_summary,
+                    "filter_pushdown_missing_timestamp_range_fields",
+                ),
             ],
             [
                 "production_cutover_ready",
@@ -774,6 +793,10 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 "search_candidate_shadow_evidence.filter_pushdown_ready",
                 "search_candidate_shadow_evidence.filter_pushdown_field_summary_count",
                 "search_candidate_shadow_evidence.filter_pushdown_missing_required_fields",
+                "search_candidate_shadow_evidence.filter_pushdown_field_capabilities_ready",
+                "search_candidate_shadow_evidence.filter_pushdown_missing_value_summary_fields",
+                "search_candidate_shadow_evidence.filter_pushdown_missing_numeric_range_fields",
+                "search_candidate_shadow_evidence.filter_pushdown_missing_timestamp_range_fields",
             ],
             blocker_codes(
                 &replacement_summary,
@@ -1447,6 +1470,53 @@ fn previous_wrapper_preflight_release_summary(
     );
     insert_json_value(
         &mut summary,
+        "search_candidate_shadow_filter_pushdown_field_capabilities_ready",
+        bool_path(
+            replacement_summary,
+            &[
+                "search_candidate_shadow_evidence",
+                "filter_pushdown_field_capabilities_ready",
+            ],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "search_candidate_shadow_filter_pushdown_missing_value_summary_fields",
+        value_path(
+            replacement_summary,
+            &[
+                "search_candidate_shadow_evidence",
+                "filter_pushdown_missing_value_summary_fields",
+            ],
+        )
+        .cloned(),
+    );
+    insert_json_value(
+        &mut summary,
+        "search_candidate_shadow_filter_pushdown_missing_numeric_range_fields",
+        value_path(
+            replacement_summary,
+            &[
+                "search_candidate_shadow_evidence",
+                "filter_pushdown_missing_numeric_range_fields",
+            ],
+        )
+        .cloned(),
+    );
+    insert_json_value(
+        &mut summary,
+        "search_candidate_shadow_filter_pushdown_missing_timestamp_range_fields",
+        value_path(
+            replacement_summary,
+            &[
+                "search_candidate_shadow_evidence",
+                "filter_pushdown_missing_timestamp_range_fields",
+            ],
+        )
+        .cloned(),
+    );
+    insert_json_value(
+        &mut summary,
         "query_runtime_preflight_ready",
         bool_path(query_runtime_preflight, &["ready"]),
     );
@@ -1686,6 +1756,15 @@ fn search_candidate_missing_required_fields_ready(value: &serde_json::Value) -> 
         "search_candidate_shadow_evidence",
         "filter_pushdown_missing_required_fields",
     ];
+    value_path(value, path).is_some_and(serde_json::Value::is_array)
+        && string_array_path(value, path).is_empty()
+}
+
+fn search_candidate_missing_capability_fields_ready(
+    value: &serde_json::Value,
+    field: &str,
+) -> bool {
+    let path = &["search_candidate_shadow_evidence", field];
     value_path(value, path).is_some_and(serde_json::Value::is_array)
         && string_array_path(value, path).is_empty()
 }
@@ -2016,6 +2095,26 @@ mod tests {
             "search_candidate_shadow_filter_pushdown_field_summary_count",
             NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len(),
         );
+        assert_release_summary_field(
+            summary,
+            "search_candidate_shadow_filter_pushdown_field_capabilities_ready",
+            true,
+        );
+        assert_release_summary_field(
+            summary,
+            "search_candidate_shadow_filter_pushdown_missing_value_summary_fields",
+            serde_json::json!([]),
+        );
+        assert_release_summary_field(
+            summary,
+            "search_candidate_shadow_filter_pushdown_missing_numeric_range_fields",
+            serde_json::json!([]),
+        );
+        assert_release_summary_field(
+            summary,
+            "search_candidate_shadow_filter_pushdown_missing_timestamp_range_fields",
+            serde_json::json!([]),
+        );
         assert_release_summary_field(summary, "query_runtime_preflight_ready", true);
         assert_release_summary_field(summary, "query_runtime_preflight_database_opened", true);
         assert_release_summary_field(
@@ -2151,7 +2250,11 @@ mod tests {
                 "search_candidate_shadow_evidence.candidate_identity_parity",
                 "search_candidate_shadow_evidence.filter_pushdown_ready",
                 "search_candidate_shadow_evidence.filter_pushdown_field_summary_count",
-                "search_candidate_shadow_evidence.filter_pushdown_missing_required_fields"
+                "search_candidate_shadow_evidence.filter_pushdown_missing_required_fields",
+                "search_candidate_shadow_evidence.filter_pushdown_field_capabilities_ready",
+                "search_candidate_shadow_evidence.filter_pushdown_missing_value_summary_fields",
+                "search_candidate_shadow_evidence.filter_pushdown_missing_numeric_range_fields",
+                "search_candidate_shadow_evidence.filter_pushdown_missing_timestamp_range_fields"
             ])
         );
     }
@@ -2314,8 +2417,16 @@ mod tests {
             ["filter_pushdown_field_summary_count"] = serde_json::json!(0);
         replacement_summary["search_candidate_shadow_evidence"]
             ["filter_pushdown_missing_required_fields"] = serde_json::json!(["lifecycle_state"]);
+        replacement_summary["search_candidate_shadow_evidence"]
+            ["filter_pushdown_field_capabilities_ready"] = serde_json::json!(false);
+        replacement_summary["search_candidate_shadow_evidence"]
+            ["filter_pushdown_missing_value_summary_fields"] =
+            serde_json::json!(["lifecycle_state"]);
         replacement_summary["search_candidate_shadow_evidence"]["blocker_codes"] =
-            serde_json::json!(["search_candidate_field_pruning_missing"]);
+            serde_json::json!([
+                "search_candidate_field_pruning_missing",
+                "search_candidate_field_pruning_capability_missing"
+            ]);
 
         let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
 
@@ -2330,12 +2441,17 @@ mod tests {
                 "search_candidate_shadow_evidence.candidate_identity_ready",
                 "search_candidate_shadow_evidence.filter_pushdown_ready",
                 "search_candidate_shadow_evidence.filter_pushdown_field_summary_count",
-                "search_candidate_shadow_evidence.filter_pushdown_missing_required_fields"
+                "search_candidate_shadow_evidence.filter_pushdown_missing_required_fields",
+                "search_candidate_shadow_evidence.filter_pushdown_field_capabilities_ready",
+                "search_candidate_shadow_evidence.filter_pushdown_missing_value_summary_fields"
             ])
         );
         assert_eq!(
             check_by_name(&report, "replacement_summary")["blocker_codes"],
-            serde_json::json!(["search_candidate_field_pruning_missing"])
+            serde_json::json!([
+                "search_candidate_field_pruning_capability_missing",
+                "search_candidate_field_pruning_missing"
+            ])
         );
     }
 
@@ -3216,6 +3332,10 @@ mod tests {
             "filter_pushdown_ready": true,
             "filter_pushdown_field_summary_count": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len(),
             "filter_pushdown_missing_required_fields": [],
+            "filter_pushdown_field_capabilities_ready": true,
+            "filter_pushdown_missing_value_summary_fields": [],
+            "filter_pushdown_missing_numeric_range_fields": [],
+            "filter_pushdown_missing_timestamp_range_fields": [],
             "blocker_codes": []
         })
     }

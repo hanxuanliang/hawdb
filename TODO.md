@@ -306,6 +306,9 @@ contract.
     - [x] Require Rust-bridge search candidate shadow evidence in final
       previous-wrapper preflight before treating LanceDB candidate replacement
       as production-ready.
+    - [x] Require typed search candidate pruning capability evidence in final
+      previous-wrapper preflight so value, numeric-range, and timestamp-range
+      descriptor gaps fail closed.
     - [x] Recompute search projection and search projection shadow raw fields
       in embedded-library readiness so forged `ready=true` evidence cannot
       bypass LanceDB replacement gates.
