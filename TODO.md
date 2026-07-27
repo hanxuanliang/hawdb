@@ -161,6 +161,9 @@ contract.
     execution and preserve response shape.
   - Acceptance: every migrated group adds route evidence and keeps production
     handlers free of request-time shadow compare.
+  - [x] Add a library-first `/graph/node-details/{node_id}` Memory detail
+    runtime and route-query evidence helper that reuse shared Cypher contracts
+    and bounded query execution without request-time dual-read compare.
 - [ ] PR 4: Add search projection scan-pruning evidence for production filters.
   - Scope: prove search projection segment descriptors prune `unit_type`,
     lifecycle state, metadata keys, `importance`, `confidence`, and timestamps

@@ -128,6 +128,8 @@ pub const NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL: &str = "skein-nowledge-mem-query-r
 pub const NOWLEDGE_MEM_READ_REPORT_PROTOCOL: &str = "skein-nowledge-mem-read-report";
 pub const NOWLEDGE_MEM_GRAPH_OVERVIEW_ROUTE_REPORT_PROTOCOL: &str =
     "skein-nowledge-mem-graph-overview-route-report-v1";
+pub const NOWLEDGE_MEM_GRAPH_NODE_DETAILS_ROUTE_REPORT_PROTOCOL: &str =
+    "skein-nowledge-mem-graph-node-details-route-report-v1";
 pub const NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL: &str = "skein-nowledge-mem-retrieval-report";
 pub const NOWLEDGE_MEM_SEARCH_CANDIDATE_REPORT_PROTOCOL: &str =
     "skein-nowledge-mem-search-candidate-report-v1";
@@ -194,6 +196,30 @@ m.event_end AS event_end, \
 m.importance AS importance \
 ORDER BY COALESCE(m.pagerank_score, m.importance, 0.5) DESC \
 LIMIT $limit";
+pub const NOWLEDGE_MEM_GRAPH_NODE_DETAILS_ROUTE: &str = "/graph/node-details/{node_id}";
+pub const NOWLEDGE_MEM_GRAPH_NODE_DETAILS_MEMORY_QUERY: &str = "\
+MATCH (m:Memory) \
+WHERE id(m) = $node_id \
+RETURN id(m) AS node_id, \
+m.id AS memory_id, \
+'Memory' AS node_kind, \
+COALESCE(m.title, LEFT(m.content, 60), m.id, 'Memory') AS label, \
+m.title AS title, \
+m.content AS content, \
+LEFT(COALESCE(m.content, ''), 500) AS content_preview, \
+m.summary AS summary, \
+m.source AS source, \
+m.space_id AS raw_space_id, \
+m.community_id AS community_id, \
+m.created_at AS created_at, \
+m.updated_at AS updated_at, \
+m.event_start AS event_start, \
+m.event_end AS event_end, \
+m.importance AS importance, \
+m.confidence AS confidence, \
+m.is_latest AS is_latest, \
+m.is_deleted AS is_deleted \
+LIMIT 1";
 pub const REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES: &[&str] = &[
     "/communities",
     "/communities/{community_id}",
@@ -1597,6 +1623,103 @@ impl NowledgeMemGraphOverviewOutput {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemGraphNodeDetailsOptions {
+    pub node_id: u64,
+    pub read_options: NowledgeMemReadOptions,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemGraphNodeDetailsRow {
+    pub node_id: u64,
+    pub memory_id: Option<String>,
+    pub node_kind: String,
+    pub label: Option<String>,
+    pub title: Option<String>,
+    pub content: Option<String>,
+    pub content_preview: Option<String>,
+    pub summary: Option<String>,
+    pub source: Option<String>,
+    pub raw_space_id: Option<String>,
+    pub community_id: Option<Value>,
+    pub created_at: Option<Value>,
+    pub updated_at: Option<Value>,
+    pub event_start: Option<Value>,
+    pub event_end: Option<Value>,
+    pub importance: Option<Value>,
+    pub confidence: Option<Value>,
+    pub is_latest: Option<bool>,
+    pub is_deleted: Option<bool>,
+}
+
+impl NowledgeMemGraphNodeDetailsRow {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "node_id": self.node_id,
+            "memory_id": self.memory_id,
+            "node_kind": self.node_kind,
+            "label": self.label,
+            "title": self.title,
+            "content": self.content,
+            "content_preview": self.content_preview,
+            "summary": self.summary,
+            "source": self.source,
+            "raw_space_id": self.raw_space_id,
+            "community_id": self.community_id.as_ref().map(nowledge_value_json),
+            "created_at": self.created_at.as_ref().map(nowledge_value_json),
+            "updated_at": self.updated_at.as_ref().map(nowledge_value_json),
+            "event_start": self.event_start.as_ref().map(nowledge_value_json),
+            "event_end": self.event_end.as_ref().map(nowledge_value_json),
+            "importance": self.importance.as_ref().map(nowledge_value_json),
+            "confidence": self.confidence.as_ref().map(nowledge_value_json),
+            "is_latest": self.is_latest,
+            "is_deleted": self.is_deleted,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemGraphNodeDetailsRouteReport {
+    pub protocol: String,
+    pub route: String,
+    pub read_engine: crate::route_ownership::NowledgeMemRouteReadEngine,
+    pub route_catalog_version: String,
+    pub route_catalog_digest: String,
+    pub node_id: u64,
+    pub row_count: usize,
+    pub read_report: NowledgeMemReadReport,
+}
+
+impl NowledgeMemGraphNodeDetailsRouteReport {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": self.protocol,
+            "route": self.route,
+            "read_engine": self.read_engine.as_str(),
+            "route_catalog_version": self.route_catalog_version,
+            "route_catalog_digest": self.route_catalog_digest,
+            "node_id": self.node_id,
+            "row_count": self.row_count,
+            "read_report": self.read_report.json(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemGraphNodeDetailsOutput {
+    pub node: Option<NowledgeMemGraphNodeDetailsRow>,
+    pub report: NowledgeMemGraphNodeDetailsRouteReport,
+}
+
+impl NowledgeMemGraphNodeDetailsOutput {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "node": self.node.as_ref().map(NowledgeMemGraphNodeDetailsRow::json),
+            "report": self.report.json(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NowledgeMemQueryExecutionPath {
     FastPath,
@@ -2707,6 +2830,39 @@ impl NowledgeMemGraph {
         };
         Ok(NowledgeMemGraphOverviewOutput { rows, report })
     }
+
+    pub fn read_graph_node_details(
+        &mut self,
+        options: &NowledgeMemGraphNodeDetailsOptions,
+    ) -> Result<NowledgeMemGraphNodeDetailsOutput> {
+        let node_id = i64::try_from(options.node_id).map_err(|_| {
+            SkeinError::Semantic("graph node details node_id exceeds supported range".to_string())
+        })?;
+        let mut parameters = BTreeMap::new();
+        parameters.insert("node_id".to_string(), Value::Int(node_id));
+        let read = self.read_query_with_params(
+            NOWLEDGE_MEM_GRAPH_NODE_DETAILS_MEMORY_QUERY,
+            &parameters,
+            &graph_node_details_read_options(options),
+        )?;
+        let node = read
+            .output
+            .rows
+            .first()
+            .map(decode_graph_node_details_row)
+            .transpose()?;
+        let report = NowledgeMemGraphNodeDetailsRouteReport {
+            protocol: NOWLEDGE_MEM_GRAPH_NODE_DETAILS_ROUTE_REPORT_PROTOCOL.to_string(),
+            route: NOWLEDGE_MEM_GRAPH_NODE_DETAILS_ROUTE.to_string(),
+            read_engine: crate::route_ownership::NowledgeMemRouteReadEngine::Skein,
+            route_catalog_version: NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION.to_string(),
+            route_catalog_digest: nowledge_mem_graph_read_route_catalog_digest(),
+            node_id: options.node_id,
+            row_count: usize::from(node.is_some()),
+            read_report: read.report,
+        };
+        Ok(NowledgeMemGraphNodeDetailsOutput { node, report })
+    }
 }
 
 fn graph_overview_read_options(
@@ -2716,6 +2872,17 @@ fn graph_overview_read_options(
     read_options.max_rows = Some(match read_options.max_rows {
         Some(max_rows) => max_rows.min(options.limit),
         None => options.limit,
+    });
+    read_options
+}
+
+fn graph_node_details_read_options(
+    options: &NowledgeMemGraphNodeDetailsOptions,
+) -> NowledgeMemReadOptions {
+    let mut read_options = options.read_options.clone();
+    read_options.max_rows = Some(match read_options.max_rows {
+        Some(max_rows) => max_rows.min(1),
+        None => 1,
     });
     read_options
 }
@@ -2739,6 +2906,32 @@ fn decode_graph_overview_row(row: &BTreeMap<String, Value>) -> Result<NowledgeMe
     })
 }
 
+fn decode_graph_node_details_row(
+    row: &BTreeMap<String, Value>,
+) -> Result<NowledgeMemGraphNodeDetailsRow> {
+    Ok(NowledgeMemGraphNodeDetailsRow {
+        node_id: required_u64_field(row, "node_id")?,
+        memory_id: optional_string_field(row, "memory_id")?,
+        node_kind: required_string_field(row, "node_kind")?,
+        label: optional_string_field(row, "label")?,
+        title: optional_string_field(row, "title")?,
+        content: optional_string_field(row, "content")?,
+        content_preview: optional_string_field(row, "content_preview")?,
+        summary: optional_string_field(row, "summary")?,
+        source: optional_string_field(row, "source")?,
+        raw_space_id: optional_string_field(row, "raw_space_id")?,
+        community_id: optional_value_field(row, "community_id"),
+        created_at: optional_value_field(row, "created_at"),
+        updated_at: optional_value_field(row, "updated_at"),
+        event_start: optional_value_field(row, "event_start"),
+        event_end: optional_value_field(row, "event_end"),
+        importance: optional_value_field(row, "importance"),
+        confidence: optional_value_field(row, "confidence"),
+        is_latest: optional_bool_field(row, "is_latest")?,
+        is_deleted: optional_bool_field(row, "is_deleted")?,
+    })
+}
+
 fn optional_value_field(row: &BTreeMap<String, Value>, field: &str) -> Option<Value> {
     match row.get(field) {
         Some(Value::Null) | None => None,
@@ -2751,7 +2944,29 @@ fn optional_string_field(row: &BTreeMap<String, Value>, field: &str) -> Result<O
         Some(Value::Null) | None => Ok(None),
         Some(Value::String(value)) => Ok(Some(value.clone())),
         Some(value) => Err(SkeinError::Semantic(format!(
-            "graph overview field {field} expected string or null, got {value}"
+            "graph route field {field} expected string or null, got {value}"
+        ))),
+    }
+}
+
+fn required_string_field(row: &BTreeMap<String, Value>, field: &str) -> Result<String> {
+    match row.get(field) {
+        Some(Value::String(value)) => Ok(value.clone()),
+        Some(value) => Err(SkeinError::Semantic(format!(
+            "graph route field {field} expected string, got {value}"
+        ))),
+        None => Err(SkeinError::Semantic(format!(
+            "graph route field {field} is missing"
+        ))),
+    }
+}
+
+fn optional_bool_field(row: &BTreeMap<String, Value>, field: &str) -> Result<Option<bool>> {
+    match row.get(field) {
+        Some(Value::Null) | None => Ok(None),
+        Some(Value::Bool(value)) => Ok(Some(*value)),
+        Some(value) => Err(SkeinError::Semantic(format!(
+            "graph route field {field} expected boolean or null, got {value}"
         ))),
     }
 }
@@ -2762,7 +2977,7 @@ fn optional_f64_field(row: &BTreeMap<String, Value>, field: &str) -> Result<Opti
         Some(Value::Int(value)) => Ok(Some(*value as f64)),
         Some(Value::Float(value)) => Ok(Some(*value)),
         Some(value) => Err(SkeinError::Semantic(format!(
-            "graph overview field {field} expected number or null, got {value}"
+            "graph route field {field} expected number or null, got {value}"
         ))),
     }
 }
@@ -2771,10 +2986,10 @@ fn required_u64_field(row: &BTreeMap<String, Value>, field: &str) -> Result<u64>
     match row.get(field) {
         Some(Value::Int(value)) if *value >= 0 => Ok(*value as u64),
         Some(value) => Err(SkeinError::Semantic(format!(
-            "graph overview field {field} expected non-negative integer, got {value}"
+            "graph route field {field} expected non-negative integer, got {value}"
         ))),
         None => Err(SkeinError::Semantic(format!(
-            "graph overview field {field} is missing"
+            "graph route field {field} is missing"
         ))),
     }
 }
@@ -2982,6 +3197,13 @@ impl NowledgeMemEmbeddedStoreHandle {
         options: &NowledgeMemGraphOverviewOptions,
     ) -> Result<NowledgeMemGraphOverviewOutput> {
         self.lock_store()?.read_graph_overview(options)
+    }
+
+    pub fn read_graph_node_details(
+        &self,
+        options: &NowledgeMemGraphNodeDetailsOptions,
+    ) -> Result<NowledgeMemGraphNodeDetailsOutput> {
+        self.lock_store()?.read_graph_node_details(options)
     }
 
     pub fn search_candidates(
@@ -3365,6 +3587,13 @@ impl NowledgeMemEmbeddedStore {
         options: &NowledgeMemGraphOverviewOptions,
     ) -> Result<NowledgeMemGraphOverviewOutput> {
         self.graph.read_graph_overview(options)
+    }
+
+    pub fn read_graph_node_details(
+        &mut self,
+        options: &NowledgeMemGraphNodeDetailsOptions,
+    ) -> Result<NowledgeMemGraphNodeDetailsOutput> {
+        self.graph.read_graph_node_details(options)
     }
 
     pub fn background_maintenance_summary(
@@ -5218,21 +5447,22 @@ mod tests {
         nowledge_mem_bounded_read_evidence_json,
         nowledge_mem_bounded_read_evidence_json_with_route_readiness, nowledge_mem_graph_config,
         nowledge_mem_graph_config_with_search_mode,
-        nowledge_mem_search_candidate_shadow_evidence_json, NowledgeMemEmbeddedStore,
-        NowledgeMemEmbeddedStoreHandle, NowledgeMemGraph, NowledgeMemGraphMode,
-        NowledgeMemGraphOverviewOptions, NowledgeMemOpenOptions, NowledgeMemQueryExecutionPath,
-        NowledgeMemQueryReportOptions, NowledgeMemReadOptions, NowledgeMemReadReport,
-        NowledgeMemReadinessAreaSummary, NowledgeMemReadinessDashboard,
-        NowledgeMemReadinessOptions, NowledgeMemRouteReadinessSummary,
-        NowledgeMemSearchCandidateReadinessOptions, NowledgeMemSearchCandidateRequest,
-        NowledgeMemSearchCandidateShadowAccumulator, NowledgeMemSearchCandidateShadowEvidence,
-        NowledgeMemSearchProjection, NowledgeMemStorageRecoveryReport,
-        NowledgeQueryRuntimePreflightProbe, NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL,
-        NOWLEDGE_MEM_GRAPH_OVERVIEW_ROUTE, NOWLEDGE_MEM_GRAPH_OVERVIEW_ROUTE_REPORT_PROTOCOL,
-        NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL, NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL,
-        NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL, NOWLEDGE_MEM_READINESS_DASHBOARD_PROTOCOL,
-        NOWLEDGE_MEM_READ_REPORT_PROTOCOL, NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL,
-        NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
+        nowledge_mem_search_candidate_shadow_evidence_json, required_u64_field,
+        NowledgeMemEmbeddedStore, NowledgeMemEmbeddedStoreHandle, NowledgeMemGraph,
+        NowledgeMemGraphMode, NowledgeMemGraphNodeDetailsOptions, NowledgeMemGraphOverviewOptions,
+        NowledgeMemOpenOptions, NowledgeMemQueryExecutionPath, NowledgeMemQueryReportOptions,
+        NowledgeMemReadOptions, NowledgeMemReadReport, NowledgeMemReadinessAreaSummary,
+        NowledgeMemReadinessDashboard, NowledgeMemReadinessOptions,
+        NowledgeMemRouteReadinessSummary, NowledgeMemSearchCandidateReadinessOptions,
+        NowledgeMemSearchCandidateRequest, NowledgeMemSearchCandidateShadowAccumulator,
+        NowledgeMemSearchCandidateShadowEvidence, NowledgeMemSearchProjection,
+        NowledgeMemStorageRecoveryReport, NowledgeQueryRuntimePreflightProbe,
+        NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL, NOWLEDGE_MEM_GRAPH_NODE_DETAILS_ROUTE,
+        NOWLEDGE_MEM_GRAPH_NODE_DETAILS_ROUTE_REPORT_PROTOCOL, NOWLEDGE_MEM_GRAPH_OVERVIEW_ROUTE,
+        NOWLEDGE_MEM_GRAPH_OVERVIEW_ROUTE_REPORT_PROTOCOL, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
+        NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL, NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL,
+        NOWLEDGE_MEM_READINESS_DASHBOARD_PROTOCOL, NOWLEDGE_MEM_READ_REPORT_PROTOCOL,
+        NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_READINESS_PROTOCOL,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_REPORT_PROTOCOL,
@@ -5243,6 +5473,7 @@ mod tests {
     };
     use crate::search::CompressedVectorSearchMode;
     use crate::search::SearchFusionWeights;
+    use crate::Value;
     use crate::{
         BackgroundMaintenanceKind, BackgroundMaintenanceOptions, BackgroundWorkHint, Database,
         DatabaseConfig, KnowledgeCandidateScoringPolicy, KnowledgeRetrievalRequest, LocalQosPolicy,
@@ -5354,6 +5585,83 @@ mod tests {
             Some("overview-memory-1")
         );
         assert_eq!(output.report.route, NOWLEDGE_MEM_GRAPH_OVERVIEW_ROUTE);
+    }
+
+    #[test]
+    fn graph_node_details_route_runs_through_bounded_query_runtime() {
+        let db = Database::new();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        graph
+            .query("CREATE (:Memory {id: 'detail-memory-1', title: 'Detail One', content: 'detail body', summary: 'detail summary', source: 'detail-source', space_id: 'default', community_id: 42, created_at: 101, updated_at: 201, event_start: 301, event_end: 401, importance: 0.8, confidence: 0.7, is_latest: true, is_deleted: false})")
+            .unwrap();
+        let node_id = memory_node_id(&mut graph, "detail-memory-1");
+
+        let output = graph
+            .read_graph_node_details(&NowledgeMemGraphNodeDetailsOptions {
+                node_id,
+                read_options: NowledgeMemReadOptions::default(),
+            })
+            .unwrap();
+        let node = output.node.as_ref().expect("node details row");
+
+        assert_eq!(node.node_id, node_id);
+        assert_eq!(node.memory_id.as_deref(), Some("detail-memory-1"));
+        assert_eq!(node.node_kind, "Memory");
+        assert_eq!(node.label.as_deref(), Some("Detail One"));
+        assert_eq!(node.content.as_deref(), Some("detail body"));
+        assert_eq!(node.content_preview.as_deref(), Some("detail body"));
+        assert_eq!(node.summary.as_deref(), Some("detail summary"));
+        assert_eq!(node.raw_space_id.as_deref(), Some("default"));
+        assert_eq!(node.is_latest, Some(true));
+        assert_eq!(node.is_deleted, Some(false));
+        assert_eq!(
+            output.report.protocol,
+            NOWLEDGE_MEM_GRAPH_NODE_DETAILS_ROUTE_REPORT_PROTOCOL
+        );
+        assert_eq!(output.report.route, NOWLEDGE_MEM_GRAPH_NODE_DETAILS_ROUTE);
+        assert_eq!(output.report.node_id, node_id);
+        assert_eq!(output.report.row_count, 1);
+        assert_eq!(output.report.read_report.row_count, 1);
+        assert!(output.report.read_report.row_limit_enforced_before_output);
+        assert_eq!(output.json()["report"]["read_engine"], "skein");
+        assert_eq!(output.json()["node"]["memory_id"], "detail-memory-1");
+    }
+
+    #[test]
+    fn embedded_store_handle_exposes_graph_node_details_route() {
+        let db = Database::new();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        graph
+            .query("CREATE (:Memory {id: 'detail-memory-handle', title: 'Handle Detail'})")
+            .unwrap();
+        let node_id = memory_node_id(&mut graph, "detail-memory-handle");
+        let store = NowledgeMemEmbeddedStore::new(graph, None);
+        let handle = NowledgeMemEmbeddedStoreHandle::new(store);
+
+        let output = handle
+            .read_graph_node_details(&NowledgeMemGraphNodeDetailsOptions {
+                node_id,
+                read_options: NowledgeMemReadOptions::default(),
+            })
+            .unwrap();
+
+        assert_eq!(
+            output
+                .node
+                .as_ref()
+                .and_then(|node| node.memory_id.as_deref()),
+            Some("detail-memory-handle")
+        );
+        assert_eq!(output.report.route, NOWLEDGE_MEM_GRAPH_NODE_DETAILS_ROUTE);
+
+        let missing = handle
+            .read_graph_node_details(&NowledgeMemGraphNodeDetailsOptions {
+                node_id: node_id + 10_000,
+                read_options: NowledgeMemReadOptions::default(),
+            })
+            .unwrap();
+        assert!(missing.node.is_none());
+        assert_eq!(missing.report.row_count, 0);
     }
 
     #[test]
@@ -8135,6 +8443,18 @@ mod tests {
         graph
             .query("CREATE (:Memory {id: 'overview-memory-3', title: 'Overview Three', pagerank_score: 1.0, importance: 0.3, community_id: 7003, space_id: 'default', created_at: 103, updated_at: 203, source: 'overview', event_start: 303, event_end: 403})")
             .unwrap();
+    }
+
+    fn memory_node_id(graph: &mut NowledgeMemGraph, memory_id: &str) -> u64 {
+        let mut parameters = BTreeMap::new();
+        parameters.insert("id".to_string(), Value::String(memory_id.to_string()));
+        let output = graph
+            .query_with_params(
+                "MATCH (m:Memory {id: $id}) RETURN id(m) AS node_id",
+                &parameters,
+            )
+            .unwrap();
+        required_u64_field(&output.rows[0], "node_id").unwrap()
     }
 
     fn ready_query_family_replacement() -> serde_json::Value {
