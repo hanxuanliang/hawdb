@@ -70,6 +70,8 @@ pub struct BackgroundMaintenanceEvidenceHealth {
     pub executable_search_projection_graph_delta_operations: Option<u64>,
     pub admitted_search_projection_graph_delta_operations: Option<u64>,
     pub max_search_projection_graph_delta_complete_through_graph_commit_epoch: Option<u64>,
+    pub foreground_admission_probe_ready: Option<bool>,
+    pub foreground_admission_probe_admission_name: Option<String>,
     pub memory_pressure_ready: Option<bool>,
     pub memory_budget_bytes: Option<u64>,
     pub estimated_memory_bytes: Option<u64>,
@@ -663,6 +665,18 @@ fn insert_cutover_evidence_json(
     );
     insert_json(
         &mut evidence,
+        "background_maintenance_foreground_admission_probe_ready",
+        background_maintenance_health.foreground_admission_probe_ready,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_foreground_admission_probe_admission",
+        background_maintenance_health
+            .foreground_admission_probe_admission_name
+            .as_deref(),
+    );
+    insert_json(
+        &mut evidence,
         "background_maintenance_memory_pressure_ready",
         background_maintenance_health.memory_pressure_ready,
     );
@@ -870,6 +884,8 @@ pub fn background_maintenance_evidence_health(
             executable_search_projection_graph_delta_operations: None,
             admitted_search_projection_graph_delta_operations: None,
             max_search_projection_graph_delta_complete_through_graph_commit_epoch: None,
+            foreground_admission_probe_ready: None,
+            foreground_admission_probe_admission_name: None,
             memory_pressure_ready: None,
             memory_budget_bytes: None,
             estimated_memory_bytes: None,
@@ -963,6 +979,13 @@ pub fn background_maintenance_evidence_health(
         )
     });
     let memory_pressure = background_maintenance.get("memory_pressure");
+    let foreground_admission_probe_ready = background_maintenance
+        .get("foreground_admission_probe_ready")
+        .and_then(serde_json::Value::as_bool);
+    let foreground_admission_probe_admission_name = background_maintenance
+        .get("foreground_admission_probe_admission")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
     let raw_memory_pressure_ready = memory_pressure
         .and_then(|memory_pressure| memory_pressure.get("ready"))
         .or_else(|| background_maintenance.get("memory_pressure_ready"))
@@ -1021,6 +1044,13 @@ pub fn background_maintenance_evidence_health(
         blocker_codes.push("no_ranked_work".to_string());
         blockers.push("background maintenance evidence has no ranked work".to_string());
     }
+    if required && foreground_admission_probe_ready != Some(true) {
+        blocker_codes.push("foreground_admission_probe_missing".to_string());
+        blockers.push(
+            "background maintenance evidence lacks a passing foreground admission probe"
+                .to_string(),
+        );
+    }
     if foreground_ranked_count > 0 {
         blocker_codes.push("foreground_ranked_work".to_string());
         blockers.push("background maintenance evidence ranked foreground work".to_string());
@@ -1048,6 +1078,8 @@ pub fn background_maintenance_evidence_health(
         executable_search_projection_graph_delta_operations,
         admitted_search_projection_graph_delta_operations,
         max_search_projection_graph_delta_complete_through_graph_commit_epoch,
+        foreground_admission_probe_ready,
+        foreground_admission_probe_admission_name,
         memory_pressure_ready,
         memory_budget_bytes,
         estimated_memory_bytes,
@@ -1328,6 +1360,16 @@ pub fn background_maintenance_summary_to_json(
         &mut object,
         "max_search_projection_graph_delta_complete_through_graph_commit_epoch",
         summary.max_search_projection_graph_delta_complete_through_graph_commit_epoch,
+    );
+    insert_json(
+        &mut object,
+        "foreground_admission_probe_ready",
+        summary.foreground_admission_probe_ready,
+    );
+    insert_json(
+        &mut object,
+        "foreground_admission_probe_admission",
+        summary.foreground_admission_probe_admission_name.as_deref(),
     );
     insert_json(
         &mut object,
@@ -2846,6 +2888,8 @@ mod tests {
                 background_maintenance: Some(serde_json::json!({
                     "protocol": "skein-background-maintenance-report",
                     "total_candidates": 0,
+                    "foreground_admission_probe_ready": true,
+                    "foreground_admission_probe_admission": "admit",
                     "ranked": []
                 })),
                 ..NowledgeCypherMigrationGateJsonOptions::default()
@@ -2880,6 +2924,8 @@ mod tests {
         let summary = serde_json::json!({
             "protocol": "unexpected-background-report",
             "total_candidates": 1,
+            "foreground_admission_probe_ready": true,
+            "foreground_admission_probe_admission": "admit",
             "ranked": [
                 {
                     "kind": "schema_maintenance",
@@ -3042,6 +3088,8 @@ mod tests {
     fn background_maintenance_evidence_health_rejects_foreground_ranked_work() {
         let summary = serde_json::json!({
             "total_candidates": 1,
+            "foreground_admission_probe_ready": true,
+            "foreground_admission_probe_admission": "admit",
             "ranked": [
                 {
                     "kind": "schema_maintenance",
@@ -3074,6 +3122,8 @@ mod tests {
         let summary = serde_json::json!({
             "protocol": "skein-background-maintenance-report",
             "total_candidates": 1,
+            "foreground_admission_probe_ready": true,
+            "foreground_admission_probe_admission": "admit",
             "memory_pressure": {
                 "ready": true,
                 "budget_bytes": 4096,
@@ -3103,6 +3153,39 @@ mod tests {
         assert_eq!(
             health.blocker_codes,
             vec!["memory_budget_exceeded".to_string()]
+        );
+    }
+
+    #[test]
+    fn background_maintenance_evidence_health_requires_foreground_admission_probe() {
+        let summary = serde_json::json!({
+            "protocol": "skein-background-maintenance-report",
+            "total_candidates": 1,
+            "ranked": [
+                {
+                    "kind": "search_projection_graph_delta",
+                    "work_class": "projection",
+                    "priority": "background",
+                    "admission": "admit"
+                }
+            ]
+        });
+
+        let health = super::background_maintenance_evidence_health(Some(&summary), true);
+
+        assert!(health.present);
+        assert!(!health.ready);
+        assert_eq!(health.foreground_admission_probe_ready, None);
+        assert_eq!(
+            health.blockers,
+            vec![
+                "background maintenance evidence lacks a passing foreground admission probe"
+                    .to_string()
+            ]
+        );
+        assert_eq!(
+            health.blocker_codes,
+            vec!["foreground_admission_probe_missing".to_string()]
         );
     }
 

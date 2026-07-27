@@ -57,6 +57,8 @@ pub fn nowledge_background_maintenance_evidence_json(
         "executable_search_projection_graph_delta_operations": health.executable_search_projection_graph_delta_operations,
         "admitted_search_projection_graph_delta_operations": health.admitted_search_projection_graph_delta_operations,
         "max_search_projection_graph_delta_complete_through_graph_commit_epoch": health.max_search_projection_graph_delta_complete_through_graph_commit_epoch,
+        "foreground_admission_probe_ready": health.foreground_admission_probe_ready,
+        "foreground_admission_probe_admission": health.foreground_admission_probe_admission_name.as_deref(),
         "memory_pressure_ready": health.memory_pressure_ready,
         "memory_budget_bytes": health.memory_budget_bytes,
         "estimated_memory_bytes": health.estimated_memory_bytes,
@@ -75,6 +77,8 @@ pub fn nowledge_background_maintenance_evidence_json(
         "background_maintenance_executable_search_projection_graph_delta_operations": health.executable_search_projection_graph_delta_operations,
         "background_maintenance_admitted_search_projection_graph_delta_operations": health.admitted_search_projection_graph_delta_operations,
         "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch": health.max_search_projection_graph_delta_complete_through_graph_commit_epoch,
+        "background_maintenance_foreground_admission_probe_ready": health.foreground_admission_probe_ready,
+        "background_maintenance_foreground_admission_probe_admission": health.foreground_admission_probe_admission_name.as_deref(),
         "background_maintenance_memory_pressure_ready": health.memory_pressure_ready,
         "background_maintenance_memory_budget_bytes": health.memory_budget_bytes,
         "background_maintenance_estimated_memory_bytes": health.estimated_memory_bytes,
@@ -131,6 +135,8 @@ mod tests {
             evidence["background_maintenance_admitted_search_projection_graph_delta_operations"],
             3
         );
+        assert_eq!(evidence["foreground_admission_probe_ready"], true);
+        assert_eq!(evidence["foreground_admission_probe_admission"], "admit");
         assert_eq!(
             evidence["background_maintenance_blocker_codes"],
             serde_json::json!([])
@@ -189,6 +195,8 @@ mod tests {
         serde_json::json!({
             "protocol": "skein-background-maintenance-report",
             "total_candidates": 1,
+            "foreground_admission_probe_ready": true,
+            "foreground_admission_probe_admission": "admit",
             "ranked": [
                 {
                     "kind": "search_projection_graph_delta",

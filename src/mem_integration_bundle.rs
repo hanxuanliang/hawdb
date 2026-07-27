@@ -1663,6 +1663,8 @@ mod tests {
                 "background_maintenance_executable_search_projection_graph_delta_operations": 2,
                 "background_maintenance_admitted_search_projection_graph_delta_operations": 2,
                 "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch": 7,
+                "background_maintenance_foreground_admission_probe_ready": true,
+                "background_maintenance_foreground_admission_probe_admission": "admit",
                 "background_maintenance_blocker_codes": [],
                 "background_maintenance_blockers": []
             }

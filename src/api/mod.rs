@@ -670,6 +670,8 @@ pub struct BackgroundMaintenanceSummary {
     pub executable_search_projection_graph_delta_operations: usize,
     pub admitted_search_projection_graph_delta_operations: usize,
     pub max_search_projection_graph_delta_complete_through_graph_commit_epoch: Option<u64>,
+    pub foreground_admission_probe_ready: bool,
+    pub foreground_admission_probe_admission_name: Option<String>,
     pub top_admitted_kind: Option<BackgroundMaintenanceKind>,
     pub top_admitted_name: Option<String>,
     pub ranked: Vec<BackgroundMaintenanceSummaryItem>,
@@ -785,9 +787,21 @@ impl BackgroundMaintenanceCandidate {
 }
 
 impl BackgroundMaintenanceSummary {
-    fn from_ranked(ranked: Vec<RankedBackgroundMaintenance>) -> Self {
+    fn from_ranked(
+        ranked: Vec<RankedBackgroundMaintenance>,
+        policy: &LocalQosPolicy,
+        state: &LocalQosState,
+    ) -> Self {
+        let foreground_admission = policy.admit(
+            state,
+            &WorkRequest::foreground(WorkClass::Query, usize::MAX),
+        );
         let mut summary = Self {
             total_candidates: ranked.len(),
+            foreground_admission_probe_ready: foreground_admission == QosAdmission::Admit,
+            foreground_admission_probe_admission_name: Some(
+                qos_admission_name(&foreground_admission).to_string(),
+            ),
             ..Self::default()
         };
 
@@ -7071,7 +7085,7 @@ impl Database {
         options: BackgroundMaintenanceOptions,
     ) -> BackgroundMaintenanceSummary {
         let ranked = self.rank_background_maintenance(search_index, policy, state, options);
-        BackgroundMaintenanceSummary::from_ranked(ranked)
+        BackgroundMaintenanceSummary::from_ranked(ranked, policy, state)
     }
 
     pub fn build_search_projection_graph_delta(

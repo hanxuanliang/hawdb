@@ -436,6 +436,9 @@ contract.
     migration work must be deferrable under resource pressure.
   - Background work should be scheduled through resource classes and QoS limits;
     foreground user requests should not be throttled by internal maintenance.
+  - [x] Require background-maintenance cutover evidence to include a passing
+    foreground admission probe so user reads are not throttled by background
+    QoS limits.
 
 ## P0: Search Projection Replacement
 

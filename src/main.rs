@@ -1944,6 +1944,18 @@ fn add_cutover_evidence_report(
     );
     insert_json(
         &mut evidence,
+        "background_maintenance_foreground_admission_probe_ready",
+        background_maintenance_health.foreground_admission_probe_ready,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_foreground_admission_probe_admission",
+        background_maintenance_health
+            .foreground_admission_probe_admission_name
+            .as_deref(),
+    );
+    insert_json(
+        &mut evidence,
         "background_maintenance_foreground_ranked_count",
         background_maintenance_health.foreground_ranked_count,
     );
@@ -5466,6 +5478,8 @@ mod tests {
             },
             "background_maintenance": {
                 "total_candidates": 1,
+                "foreground_admission_probe_ready": true,
+                "foreground_admission_probe_admission": "admit",
                 "ranked": [
                     {
                         "kind": "schema_maintenance",

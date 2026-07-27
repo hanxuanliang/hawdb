@@ -334,6 +334,8 @@ pub fn nowledge_replacement_summary_json_with_options(
             "background_maintenance_executable_search_projection_graph_delta_operations": json_get_u64_path(bundle, &["cutover_evidence", "background_maintenance_executable_search_projection_graph_delta_operations"]),
             "background_maintenance_admitted_search_projection_graph_delta_operations": json_get_u64_path(bundle, &["cutover_evidence", "background_maintenance_admitted_search_projection_graph_delta_operations"]),
             "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch": json_get_u64_path(bundle, &["cutover_evidence", "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch"]),
+            "background_maintenance_foreground_admission_probe_ready": json_get_bool_path(bundle, &["cutover_evidence", "background_maintenance_foreground_admission_probe_ready"]),
+            "background_maintenance_foreground_admission_probe_admission": json_get_str_path(bundle, &["cutover_evidence", "background_maintenance_foreground_admission_probe_admission"]),
             "background_maintenance_blocker_codes": json_get_array_path(bundle, &["cutover_evidence", "background_maintenance_blocker_codes"]),
             "replacement_readiness_min_per_million": json_get_u64_path(bundle, &["cutover_evidence", "replacement_readiness_min_per_million"]),
         },
@@ -2703,7 +2705,7 @@ fn background_maintenance_graph_delta_evidence_missing(bundle: &serde_json::Valu
         return false;
     }
 
-    [
+    let missing_counter = [
         "background_maintenance_executable_search_projection_graph_delta_count",
         "background_maintenance_admitted_search_projection_graph_delta_count",
         "background_maintenance_deferred_search_projection_graph_delta_count",
@@ -2713,7 +2715,16 @@ fn background_maintenance_graph_delta_evidence_missing(bundle: &serde_json::Valu
         "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch",
     ]
     .into_iter()
-    .any(|field| json_get_u64_path_from_dynamic(bundle, &["cutover_evidence"], field).is_none())
+    .any(|field| json_get_u64_path_from_dynamic(bundle, &["cutover_evidence"], field).is_none());
+    missing_counter
+        || json_get_bool_path(
+            bundle,
+            &[
+                "cutover_evidence",
+                "background_maintenance_foreground_admission_probe_ready",
+            ],
+        )
+        .is_none()
 }
 
 fn nowledge_replacement_blockers(bundle: &serde_json::Value) -> Vec<String> {
@@ -5600,6 +5611,10 @@ mod tests {
         });
         bundle["search_projection_shadow_evidence"]["pushdown_evidence"]
             ["shadow_segment_document_pruning_ready"] = serde_json::json!(true);
+        bundle["cutover_evidence"]["background_maintenance_foreground_admission_probe_ready"] =
+            serde_json::json!(true);
+        bundle["cutover_evidence"]["background_maintenance_foreground_admission_probe_admission"] =
+            serde_json::json!("admit");
         bundle["search_projection_shadow_evidence"]["pushdown_evidence"]
             ["shadow_segment_pruning_candidate_document_count"] = serde_json::json!(4);
         bundle["search_projection_shadow_evidence"]["pushdown_evidence"]

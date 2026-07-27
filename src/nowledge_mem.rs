@@ -3150,6 +3150,8 @@ pub struct NowledgeMemBackgroundMaintenanceReport {
     pub executable_search_projection_graph_delta_operations: usize,
     pub admitted_search_projection_graph_delta_operations: usize,
     pub max_search_projection_graph_delta_complete_through_graph_commit_epoch: Option<u64>,
+    pub foreground_admission_probe_ready: Option<bool>,
+    pub foreground_admission_probe_admission_name: Option<String>,
     pub memory_pressure_ready: Option<bool>,
     pub memory_budget_bytes: Option<u64>,
     pub estimated_memory_bytes: Option<u64>,
@@ -3199,6 +3201,9 @@ impl NowledgeMemBackgroundMaintenanceReport {
                 .admitted_search_projection_graph_delta_operations,
             max_search_projection_graph_delta_complete_through_graph_commit_epoch: summary
                 .max_search_projection_graph_delta_complete_through_graph_commit_epoch,
+            foreground_admission_probe_ready: health.foreground_admission_probe_ready,
+            foreground_admission_probe_admission_name: health
+                .foreground_admission_probe_admission_name,
             memory_pressure_ready: health.memory_pressure_ready,
             memory_budget_bytes: health.memory_budget_bytes,
             estimated_memory_bytes: health.estimated_memory_bytes,

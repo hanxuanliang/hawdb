@@ -255,6 +255,7 @@ pub struct BackgroundMaintenanceCutoverReadiness {
     pub executable_search_projection_graph_delta_operations_present: bool,
     pub admitted_search_projection_graph_delta_operations_present: bool,
     pub max_search_projection_graph_delta_complete_through_graph_commit_epoch_present: bool,
+    pub foreground_admission_probe_ready: bool,
     pub blocker_codes: Vec<String>,
 }
 
@@ -853,6 +854,7 @@ impl BackgroundMaintenanceCutoverReadiness {
             && self.executable_search_projection_graph_delta_operations_present
             && self.admitted_search_projection_graph_delta_operations_present
             && self.max_search_projection_graph_delta_complete_through_graph_commit_epoch_present
+            && self.foreground_admission_probe_ready
     }
 }
 
@@ -4828,6 +4830,14 @@ pub fn background_maintenance_cutover_readiness(
             ],
         )
         .is_some(),
+        foreground_admission_probe_ready: bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "cutover_evidence",
+                "background_maintenance_foreground_admission_probe_ready",
+            ],
+        ) == Some(true),
         blocker_codes: blocker_codes(
             bundle,
             &[
@@ -4890,6 +4900,10 @@ fn background_maintenance_cutover_conditions(
             "replacement_summary.cutover_evidence.background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch",
             readiness
                 .max_search_projection_graph_delta_complete_through_graph_commit_epoch_present,
+        ),
+        (
+            "replacement_summary.cutover_evidence.background_maintenance_foreground_admission_probe_ready",
+            readiness.foreground_admission_probe_ready,
         ),
     ]
 }
@@ -8761,6 +8775,11 @@ mod tests {
                 }
             }
         });
+        bundle["replacement_summary"]["cutover_evidence"]
+            ["background_maintenance_foreground_admission_probe_ready"] = serde_json::json!(true);
+        bundle["replacement_summary"]["cutover_evidence"]
+            ["background_maintenance_foreground_admission_probe_admission"] =
+            serde_json::json!("admit");
         bundle["replacement_summary"]["query_runtime_preflight"] = ready_query_runtime_summary();
         bundle["replacement_summary_graph_route_alignment"] = serde_json::json!({
             "ready": true,

@@ -490,6 +490,13 @@ pub fn nowledge_previous_wrapper_preflight_check(
                     &replacement_summary,
                     &[
                         "cutover_evidence",
+                        "background_maintenance_foreground_admission_probe_ready",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &[
+                        "cutover_evidence",
                         "background_maintenance_memory_pressure_ready",
                     ],
                 ) == Some(true),
@@ -513,6 +520,7 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 "cutover_evidence.background_maintenance_ready",
                 "cutover_evidence.background_maintenance_protocol_matches",
                 "replacement_summary.cutover_evidence.background_maintenance_graph_delta_qos",
+                "replacement_summary.cutover_evidence.background_maintenance_foreground_admission_probe_ready",
                 "replacement_summary.cutover_evidence.background_maintenance_memory_pressure_ready",
                 "replacement_summary.cutover_evidence.background_maintenance_memory_budget_bytes",
                 "replacement_summary.cutover_evidence.background_maintenance_estimated_memory_bytes",
@@ -1524,6 +1532,17 @@ fn previous_wrapper_preflight_release_summary(
     }
     insert_json_value(
         &mut summary,
+        "background_maintenance_foreground_admission_probe_ready",
+        bool_path(
+            replacement_summary,
+            &[
+                "cutover_evidence",
+                "background_maintenance_foreground_admission_probe_ready",
+            ],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
         "background_maintenance_memory_pressure_ready",
         bool_path(
             replacement_summary,
@@ -2156,6 +2175,13 @@ fn replacement_summary_background_maintenance_graph_delta_ready(
     ]
     .iter()
     .all(|path| u64_path(replacement_summary, path).is_some())
+        && bool_path(
+            replacement_summary,
+            &[
+                "cutover_evidence",
+                "background_maintenance_foreground_admission_probe_ready",
+            ],
+        ) == Some(true)
 }
 
 fn library_readiness_area_ready(value: &serde_json::Value, area: &str) -> bool {
@@ -2911,6 +2937,7 @@ mod tests {
             check_by_name(&report, "background_maintenance")["failed_evidence_fields"],
             serde_json::json!([
                 "replacement_summary.cutover_evidence.background_maintenance_graph_delta_qos",
+                "replacement_summary.cutover_evidence.background_maintenance_foreground_admission_probe_ready",
                 "replacement_summary.cutover_evidence.background_maintenance_memory_pressure_ready",
                 "replacement_summary.cutover_evidence.background_maintenance_memory_budget_bytes",
                 "replacement_summary.cutover_evidence.background_maintenance_estimated_memory_bytes"
@@ -4020,6 +4047,8 @@ mod tests {
                     "background_maintenance_executable_search_projection_graph_delta_operations": 8,
                     "background_maintenance_admitted_search_projection_graph_delta_operations": 3,
                     "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch": 42,
+                    "background_maintenance_foreground_admission_probe_ready": true,
+                    "background_maintenance_foreground_admission_probe_admission": "admit",
                     "background_maintenance_memory_pressure_ready": true,
                     "background_maintenance_memory_budget_bytes": 4096,
                     "background_maintenance_estimated_memory_bytes": 1024
