@@ -127,6 +127,9 @@ contract.
   - [x] Require query-runtime preflight and graph-route readiness alignment to
     validate route catalog version and digest, so stale live evidence or stale
     replacement-summary evidence cannot pass integration readiness.
+  - [x] Require graph-route scan pruning evidence to carry the real typed
+    `target_kind` (`node` or `relationship`) and reject legacy-only
+    `record_kind` relationship pruning claims.
 - [ ] PR 2: Remove direct Kuzu reads from one low-risk graph read route.
   - Scope: move one existing read route to the embedded query runtime with
     `legacy`/`skein` selection controlled by configuration.

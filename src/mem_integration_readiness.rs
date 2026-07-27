@@ -2908,7 +2908,7 @@ fn graph_route_query_report_has_relationship_property_pruning(report: &serde_jso
         .flatten()
         .any(|scan_report| {
             query_runtime_scan_pruning_report_ready(scan_report)
-                && str_path(scan_report, &["record_kind"]) == Some("relationship")
+                && str_path(scan_report, &["target_kind"]) == Some("relationship")
                 && str_path(scan_report, &["strategy", "kind"]) == Some("relationship_property")
         })
 }
@@ -5405,6 +5405,50 @@ mod tests {
             .remove("scan_pruning_reports");
         bundle["graph_route_readiness"]["routes"][0]["query_reports"][0]
             ["scan_pruning_reports_present"] = serde_json::json!(true);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["graph_route_readiness"])
+        );
+        let route_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "graph_route_readiness")
+            .unwrap();
+        assert_eq!(
+            route_check["failed_evidence_fields"],
+            serde_json::json!(["graph_route_readiness.routes"])
+        );
+    }
+
+    #[test]
+    fn rejects_graph_route_relationship_pruning_with_legacy_record_kind_only() {
+        let mut bundle = ready_bundle();
+        bundle["graph_route_readiness"]["relationship_property_pruning_required_count"] =
+            serde_json::json!(1);
+        bundle["graph_route_readiness"]["relationship_property_pruning_report_count"] =
+            serde_json::json!(1);
+        bundle["graph_route_readiness"]["route_relationship_property_pruning_evidence_ready"] =
+            serde_json::json!(true);
+        bundle["graph_route_readiness"]["routes"][0]
+            ["relationship_property_pruning_required_count"] = serde_json::json!(1);
+        bundle["graph_route_readiness"]["routes"][0]
+            ["relationship_property_pruning_report_count"] = serde_json::json!(1);
+        bundle["graph_route_readiness"]["routes"][0]
+            ["relationship_property_pruning_evidence_ready"] = serde_json::json!(true);
+        bundle["graph_route_readiness"]["routes"][0]["query_reports"][0]["scan_pruning_reports"]
+            [0]["record_kind"] = serde_json::json!("relationship");
+        bundle["graph_route_readiness"]["routes"][0]["query_reports"][0]["scan_pruning_reports"]
+            [0]["target_kind"] = serde_json::json!("node");
+        bundle["graph_route_readiness"]["routes"][0]["query_reports"][0]["scan_pruning_reports"]
+            [0]["strategy"] = serde_json::json!({
+            "kind": "relationship_property",
+            "property": "type"
+        });
 
         let report = nowledge_mem_integration_readiness_json(&bundle);
 

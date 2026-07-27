@@ -791,12 +791,13 @@ impl QueryRuntimeReport {
 }
 
 fn scan_pruning_report_ready(report: &serde_json::Value) -> bool {
-    value_path(report, &["strategy"])
-        .filter(|strategy| {
-            strategy.is_object()
-                && str_path(strategy, &["kind"]).is_some_and(|kind| !kind.is_empty())
-        })
-        .is_some()
+    scan_pruning_target_kind_ready(report)
+        && value_path(report, &["strategy"])
+            .filter(|strategy| {
+                strategy.is_object()
+                    && str_path(strategy, &["kind"]).is_some_and(|kind| !kind.is_empty())
+            })
+            .is_some()
         && bool_path(report, &["pruned"]).is_some()
         && bool_path(report, &["exact_empty"]).is_some()
         && u64_path(report, &["candidate_count_before_pruning"]).is_some()
@@ -808,8 +809,15 @@ fn scan_pruning_report_ready(report: &serde_json::Value) -> bool {
 
 fn relationship_property_pruning_report_ready(report: &serde_json::Value) -> bool {
     scan_pruning_report_ready(report)
-        && str_path(report, &["record_kind"]) == Some("relationship")
+        && str_path(report, &["target_kind"]) == Some("relationship")
         && str_path(report, &["strategy", "kind"]) == Some("relationship_property")
+}
+
+fn scan_pruning_target_kind_ready(report: &serde_json::Value) -> bool {
+    matches!(
+        str_path(report, &["target_kind"]),
+        Some("node" | "relationship")
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1477,7 +1485,7 @@ mod tests {
         let mut routes = ready_routes();
         routes[0]["relationship_property_pruning_required_count"] = serde_json::json!(1);
         routes[0]["relationship_property_pruning_report_count"] = serde_json::json!(1);
-        routes[0]["query_reports"][0]["scan_pruning_reports"][0]["record_kind"] =
+        routes[0]["query_reports"][0]["scan_pruning_reports"][0]["target_kind"] =
             serde_json::json!("relationship");
         routes[0]["query_reports"][0]["scan_pruning_reports"][0]["strategy"] = serde_json::json!({
             "kind": "relationship_property",
@@ -1529,6 +1537,25 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("candidate_count_before_pruning");
+
+        let readiness = nowledge_graph_route_readiness_json(&ready_evidence(routes)).unwrap();
+
+        assert_eq!(readiness["route_primary_ready"], false);
+        assert_eq!(readiness["route_query_runtime_ready"], false);
+        assert!(readiness["route_primary_blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "query_report_scan_pruning_profile_missing"));
+    }
+
+    #[test]
+    fn route_readiness_fails_closed_without_scan_pruning_target_kind() {
+        let mut routes = ready_routes();
+        routes[0]["query_reports"][0]["scan_pruning_reports"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("target_kind");
 
         let readiness = nowledge_graph_route_readiness_json(&ready_evidence(routes)).unwrap();
 
@@ -1742,6 +1769,7 @@ mod tests {
             "scan_pruning_report_count": 1,
             "scan_pruning_reports": [
                 {
+                    "target_kind": "node",
                     "label_id": 1,
                     "strategy": {
                         "kind": "property_eq",
