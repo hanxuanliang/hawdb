@@ -229,6 +229,9 @@ contract.
   - [x] Expose and consume typed bounded-read cutover readiness so Mem can gate
     row caps, payload budgets, and route coverage without duplicating
     replacement-summary JSON-path checks.
+  - [x] Expose and consume typed bounded-read alignment readiness so Mem can
+    reject stale live bounded-read evidence without duplicating alignment
+    JSON-path checks.
   - [x] Expose and consume typed graph-route cutover readiness so Mem can gate
     Kuzu/Ladybug graph read route ownership without duplicating route-profile
     JSON-path checks.
@@ -456,6 +459,8 @@ contract.
   - [x] Expose typed search-candidate cutover readiness through Rust library
     APIs and consume the same result in integration readiness next actions.
   - [x] Expose typed bounded-read cutover readiness through Rust library APIs
+    and consume the same result in integration readiness next actions.
+  - [x] Expose typed bounded-read alignment readiness through Rust library APIs
     and consume the same result in integration readiness next actions.
   - [x] Expose typed graph-route cutover readiness through Rust library APIs and
     consume the same result in integration readiness next actions.

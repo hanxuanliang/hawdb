@@ -212,6 +212,30 @@ pub struct BoundedReadCutoverReadiness {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundedReadAlignmentCutoverReadiness {
+    pub evidence_ready: bool,
+    pub ready: bool,
+    pub alignment_evidence_ready: bool,
+    pub summary_ready: bool,
+    pub protocol_matches: bool,
+    pub readiness_matches: bool,
+    pub mode_matches: bool,
+    pub max_rows_matches: bool,
+    pub estimated_payload_bytes_matches: bool,
+    pub max_estimated_payload_bytes_matches: bool,
+    pub payload_budget_exceeded_matches: bool,
+    pub streaming_matches: bool,
+    pub covered_routes_matches: bool,
+    pub evidence_route_catalog_version_ready: bool,
+    pub summary_route_catalog_version_ready: bool,
+    pub evidence_route_catalog_digest_ready: bool,
+    pub summary_route_catalog_digest_ready: bool,
+    pub route_catalog_version_matches: bool,
+    pub route_catalog_digest_matches: bool,
+    pub blocker_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphRouteCutoverReadiness {
     pub protocol_matches: bool,
     pub evidence_protocol_matches: bool,
@@ -340,6 +364,30 @@ impl BoundedReadCutoverReadiness {
     }
 }
 
+impl BoundedReadAlignmentCutoverReadiness {
+    pub fn evidence_ready(&self) -> bool {
+        self.evidence_ready
+            && self.ready
+            && self.alignment_evidence_ready
+            && self.summary_ready
+            && self.protocol_matches
+            && self.readiness_matches
+            && self.mode_matches
+            && self.max_rows_matches
+            && self.estimated_payload_bytes_matches
+            && self.max_estimated_payload_bytes_matches
+            && self.payload_budget_exceeded_matches
+            && self.streaming_matches
+            && self.covered_routes_matches
+            && self.evidence_route_catalog_version_ready
+            && self.summary_route_catalog_version_ready
+            && self.evidence_route_catalog_digest_ready
+            && self.summary_route_catalog_digest_ready
+            && self.route_catalog_version_matches
+            && self.route_catalog_digest_matches
+    }
+}
+
 impl GraphRouteCutoverReadiness {
     pub fn evidence_ready(&self) -> bool {
         self.protocol_matches
@@ -455,6 +503,7 @@ pub fn nowledge_mem_integration_readiness(
     let search_projection_readiness = search_projection_cutover_readiness(bundle);
     let search_candidate_readiness = search_candidate_cutover_readiness(bundle);
     let bounded_read_readiness = bounded_read_cutover_readiness(bundle);
+    let bounded_read_alignment_readiness = bounded_read_alignment_cutover_readiness(bundle);
     let graph_route_readiness = graph_route_cutover_readiness(bundle);
     let query_runtime_readiness = query_runtime_preflight_cutover_readiness(bundle);
     let storage_recovery_readiness = storage_recovery_cutover_readiness(bundle);
@@ -627,141 +676,10 @@ pub fn nowledge_mem_integration_readiness(
             bounded_read_cutover_conditions(&bounded_read_readiness),
             bounded_read_readiness.blocker_codes.clone(),
         ),
-        check(
+        check_named_conditions(
             "bounded_read_evidence_alignment",
-            [
-                bool_path(bundle, &["bounded_read_evidence", "ready"]) == Some(true),
-                bool_path(
-                    bundle,
-                    &["replacement_summary_bounded_read_alignment", "ready"],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &["replacement_summary_bounded_read_alignment", "evidence_ready"],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &["replacement_summary_bounded_read_alignment", "summary_ready"],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &["replacement_summary_bounded_read_alignment", "protocol_matches"],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &["replacement_summary_bounded_read_alignment", "readiness_matches"],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &["replacement_summary_bounded_read_alignment", "mode_matches"],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &["replacement_summary_bounded_read_alignment", "max_rows_matches"],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_bounded_read_alignment",
-                        "estimated_payload_bytes_matches",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_bounded_read_alignment",
-                        "max_estimated_payload_bytes_matches",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_bounded_read_alignment",
-                        "payload_budget_exceeded_matches",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &["replacement_summary_bounded_read_alignment", "streaming_matches"],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_bounded_read_alignment",
-                        "covered_routes_matches",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_bounded_read_alignment",
-                        "evidence_route_catalog_version_ready",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_bounded_read_alignment",
-                        "summary_route_catalog_version_ready",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_bounded_read_alignment",
-                        "evidence_route_catalog_digest_ready",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_bounded_read_alignment",
-                        "summary_route_catalog_digest_ready",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_bounded_read_alignment",
-                        "route_catalog_version_matches",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_bounded_read_alignment",
-                        "route_catalog_digest_matches",
-                    ],
-                ) == Some(true),
-            ],
-            [
-                "bounded_read_evidence.ready",
-                "replacement_summary_bounded_read_alignment.ready",
-                "replacement_summary_bounded_read_alignment.evidence_ready",
-                "replacement_summary_bounded_read_alignment.summary_ready",
-                "replacement_summary_bounded_read_alignment.protocol_matches",
-                "replacement_summary_bounded_read_alignment.readiness_matches",
-                "replacement_summary_bounded_read_alignment.mode_matches",
-                "replacement_summary_bounded_read_alignment.max_rows_matches",
-                "replacement_summary_bounded_read_alignment.estimated_payload_bytes_matches",
-                "replacement_summary_bounded_read_alignment.max_estimated_payload_bytes_matches",
-                "replacement_summary_bounded_read_alignment.payload_budget_exceeded_matches",
-                "replacement_summary_bounded_read_alignment.streaming_matches",
-                "replacement_summary_bounded_read_alignment.covered_routes_matches",
-                "replacement_summary_bounded_read_alignment.evidence_route_catalog_version_ready",
-                "replacement_summary_bounded_read_alignment.summary_route_catalog_version_ready",
-                "replacement_summary_bounded_read_alignment.evidence_route_catalog_digest_ready",
-                "replacement_summary_bounded_read_alignment.summary_route_catalog_digest_ready",
-                "replacement_summary_bounded_read_alignment.route_catalog_version_matches",
-                "replacement_summary_bounded_read_alignment.route_catalog_digest_matches",
-            ],
-            blocker_codes(
-                bundle,
-                &[
-                    &["bounded_read_evidence", "blocker_codes"][..],
-                    &["replacement_summary_bounded_read_alignment", "blocker_codes"][..],
-                ],
-            ),
+            bounded_read_alignment_cutover_conditions(&bounded_read_alignment_readiness),
+            bounded_read_alignment_readiness.blocker_codes.clone(),
         ),
         check_named_conditions(
             "graph_route_readiness",
@@ -1318,6 +1236,7 @@ pub fn nowledge_mem_integration_readiness(
                 search_projection: &search_projection_readiness,
                 search_candidate: &search_candidate_readiness,
                 bounded_read: &bounded_read_readiness,
+                bounded_read_alignment: &bounded_read_alignment_readiness,
                 graph_route: &graph_route_readiness,
                 query_runtime: &query_runtime_readiness,
                 blackbox: &blackbox_readiness,
@@ -1381,6 +1300,7 @@ struct IntegrationGateReadiness<'a> {
     search_projection: &'a SearchProjectionCutoverReadiness,
     search_candidate: &'a SearchCandidateCutoverReadiness,
     bounded_read: &'a BoundedReadCutoverReadiness,
+    bounded_read_alignment: &'a BoundedReadAlignmentCutoverReadiness,
     graph_route: &'a GraphRouteCutoverReadiness,
     query_runtime: &'a QueryRuntimePreflightCutoverReadiness,
     blackbox: &'a BlackboxReadinessReport,
@@ -1571,7 +1491,7 @@ fn next_actions(
             ],
         ));
     }
-    if !bounded_read_alignment_ready(bundle) {
+    if !readiness.bounded_read_alignment.evidence_ready() {
         actions.push(next_action(
             "regenerate_bounded_read_alignment",
             "live bounded-read evidence must match the replacement summary before Mem cutover",
@@ -2491,54 +2411,222 @@ fn bounded_read_cutover_conditions(
     ]
 }
 
-fn bounded_read_alignment_ready(bundle: &serde_json::Value) -> bool {
-    bool_path(bundle, &["bounded_read_evidence", "ready"]) == Some(true)
-        && [
-            &["replacement_summary_bounded_read_alignment", "ready"][..],
+pub fn bounded_read_alignment_cutover_readiness(
+    bundle: &serde_json::Value,
+) -> BoundedReadAlignmentCutoverReadiness {
+    BoundedReadAlignmentCutoverReadiness {
+        evidence_ready: bool_path(bundle, &["bounded_read_evidence", "ready"]) == Some(true),
+        ready: bool_path(
+            bundle,
+            &["replacement_summary_bounded_read_alignment", "ready"],
+        ) == Some(true),
+        alignment_evidence_ready: bool_path(
+            bundle,
             &[
                 "replacement_summary_bounded_read_alignment",
                 "evidence_ready",
-            ][..],
+            ],
+        ) == Some(true),
+        summary_ready: bool_path(
+            bundle,
             &[
                 "replacement_summary_bounded_read_alignment",
                 "summary_ready",
-            ][..],
+            ],
+        ) == Some(true),
+        protocol_matches: bool_path(
+            bundle,
             &[
                 "replacement_summary_bounded_read_alignment",
                 "protocol_matches",
-            ][..],
+            ],
+        ) == Some(true),
+        readiness_matches: bool_path(
+            bundle,
             &[
                 "replacement_summary_bounded_read_alignment",
                 "readiness_matches",
-            ][..],
-            &["replacement_summary_bounded_read_alignment", "mode_matches"][..],
+            ],
+        ) == Some(true),
+        mode_matches: bool_path(
+            bundle,
+            &["replacement_summary_bounded_read_alignment", "mode_matches"],
+        ) == Some(true),
+        max_rows_matches: bool_path(
+            bundle,
             &[
                 "replacement_summary_bounded_read_alignment",
                 "max_rows_matches",
-            ][..],
+            ],
+        ) == Some(true),
+        estimated_payload_bytes_matches: bool_path(
+            bundle,
             &[
                 "replacement_summary_bounded_read_alignment",
                 "estimated_payload_bytes_matches",
-            ][..],
+            ],
+        ) == Some(true),
+        max_estimated_payload_bytes_matches: bool_path(
+            bundle,
             &[
                 "replacement_summary_bounded_read_alignment",
                 "max_estimated_payload_bytes_matches",
-            ][..],
+            ],
+        ) == Some(true),
+        payload_budget_exceeded_matches: bool_path(
+            bundle,
             &[
                 "replacement_summary_bounded_read_alignment",
                 "payload_budget_exceeded_matches",
-            ][..],
+            ],
+        ) == Some(true),
+        streaming_matches: bool_path(
+            bundle,
             &[
                 "replacement_summary_bounded_read_alignment",
                 "streaming_matches",
-            ][..],
+            ],
+        ) == Some(true),
+        covered_routes_matches: bool_path(
+            bundle,
             &[
                 "replacement_summary_bounded_read_alignment",
                 "covered_routes_matches",
-            ][..],
-        ]
-        .iter()
-        .all(|path| bool_path(bundle, path) == Some(true))
+            ],
+        ) == Some(true),
+        evidence_route_catalog_version_ready: bool_path(
+            bundle,
+            &[
+                "replacement_summary_bounded_read_alignment",
+                "evidence_route_catalog_version_ready",
+            ],
+        ) == Some(true),
+        summary_route_catalog_version_ready: bool_path(
+            bundle,
+            &[
+                "replacement_summary_bounded_read_alignment",
+                "summary_route_catalog_version_ready",
+            ],
+        ) == Some(true),
+        evidence_route_catalog_digest_ready: bool_path(
+            bundle,
+            &[
+                "replacement_summary_bounded_read_alignment",
+                "evidence_route_catalog_digest_ready",
+            ],
+        ) == Some(true),
+        summary_route_catalog_digest_ready: bool_path(
+            bundle,
+            &[
+                "replacement_summary_bounded_read_alignment",
+                "summary_route_catalog_digest_ready",
+            ],
+        ) == Some(true),
+        route_catalog_version_matches: bool_path(
+            bundle,
+            &[
+                "replacement_summary_bounded_read_alignment",
+                "route_catalog_version_matches",
+            ],
+        ) == Some(true),
+        route_catalog_digest_matches: bool_path(
+            bundle,
+            &[
+                "replacement_summary_bounded_read_alignment",
+                "route_catalog_digest_matches",
+            ],
+        ) == Some(true),
+        blocker_codes: blocker_codes(
+            bundle,
+            &[
+                &["bounded_read_evidence", "blocker_codes"][..],
+                &[
+                    "replacement_summary_bounded_read_alignment",
+                    "blocker_codes",
+                ][..],
+            ],
+        ),
+    }
+}
+
+fn bounded_read_alignment_cutover_conditions(
+    readiness: &BoundedReadAlignmentCutoverReadiness,
+) -> Vec<(&'static str, bool)> {
+    vec![
+        ("bounded_read_evidence.ready", readiness.evidence_ready),
+        (
+            "replacement_summary_bounded_read_alignment.ready",
+            readiness.ready,
+        ),
+        (
+            "replacement_summary_bounded_read_alignment.evidence_ready",
+            readiness.alignment_evidence_ready,
+        ),
+        (
+            "replacement_summary_bounded_read_alignment.summary_ready",
+            readiness.summary_ready,
+        ),
+        (
+            "replacement_summary_bounded_read_alignment.protocol_matches",
+            readiness.protocol_matches,
+        ),
+        (
+            "replacement_summary_bounded_read_alignment.readiness_matches",
+            readiness.readiness_matches,
+        ),
+        (
+            "replacement_summary_bounded_read_alignment.mode_matches",
+            readiness.mode_matches,
+        ),
+        (
+            "replacement_summary_bounded_read_alignment.max_rows_matches",
+            readiness.max_rows_matches,
+        ),
+        (
+            "replacement_summary_bounded_read_alignment.estimated_payload_bytes_matches",
+            readiness.estimated_payload_bytes_matches,
+        ),
+        (
+            "replacement_summary_bounded_read_alignment.max_estimated_payload_bytes_matches",
+            readiness.max_estimated_payload_bytes_matches,
+        ),
+        (
+            "replacement_summary_bounded_read_alignment.payload_budget_exceeded_matches",
+            readiness.payload_budget_exceeded_matches,
+        ),
+        (
+            "replacement_summary_bounded_read_alignment.streaming_matches",
+            readiness.streaming_matches,
+        ),
+        (
+            "replacement_summary_bounded_read_alignment.covered_routes_matches",
+            readiness.covered_routes_matches,
+        ),
+        (
+            "replacement_summary_bounded_read_alignment.evidence_route_catalog_version_ready",
+            readiness.evidence_route_catalog_version_ready,
+        ),
+        (
+            "replacement_summary_bounded_read_alignment.summary_route_catalog_version_ready",
+            readiness.summary_route_catalog_version_ready,
+        ),
+        (
+            "replacement_summary_bounded_read_alignment.evidence_route_catalog_digest_ready",
+            readiness.evidence_route_catalog_digest_ready,
+        ),
+        (
+            "replacement_summary_bounded_read_alignment.summary_route_catalog_digest_ready",
+            readiness.summary_route_catalog_digest_ready,
+        ),
+        (
+            "replacement_summary_bounded_read_alignment.route_catalog_version_matches",
+            readiness.route_catalog_version_matches,
+        ),
+        (
+            "replacement_summary_bounded_read_alignment.route_catalog_digest_matches",
+            readiness.route_catalog_digest_matches,
+        ),
+    ]
 }
 
 fn bounded_read_route_coverage_ready(bundle: &serde_json::Value) -> bool {
@@ -5050,6 +5138,54 @@ mod tests {
             .unwrap()
             .iter()
             .any(|action| action["action"] == "regenerate_bounded_read_alignment"));
+    }
+
+    #[test]
+    fn exposes_typed_bounded_read_alignment_cutover_readiness() {
+        let bundle = ready_bundle();
+
+        let typed = super::bounded_read_alignment_cutover_readiness(&bundle);
+
+        assert!(typed.evidence_ready());
+        assert!(typed.ready);
+        assert!(typed.alignment_evidence_ready);
+        assert!(typed.summary_ready);
+        assert!(typed.protocol_matches);
+        assert!(typed.readiness_matches);
+        assert!(typed.mode_matches);
+        assert!(typed.max_rows_matches);
+        assert!(typed.estimated_payload_bytes_matches);
+        assert!(typed.max_estimated_payload_bytes_matches);
+        assert!(typed.payload_budget_exceeded_matches);
+        assert!(typed.streaming_matches);
+        assert!(typed.covered_routes_matches);
+        assert!(typed.evidence_route_catalog_version_ready);
+        assert!(typed.summary_route_catalog_version_ready);
+        assert!(typed.evidence_route_catalog_digest_ready);
+        assert!(typed.summary_route_catalog_digest_ready);
+        assert!(typed.route_catalog_version_matches);
+        assert!(typed.route_catalog_digest_matches);
+        assert!(typed.blocker_codes.is_empty());
+    }
+
+    #[test]
+    fn typed_bounded_read_alignment_detects_stale_route_coverage() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary_bounded_read_alignment"]["ready"] = serde_json::json!(false);
+        bundle["replacement_summary_bounded_read_alignment"]["covered_routes_matches"] =
+            serde_json::json!(false);
+        bundle["replacement_summary_bounded_read_alignment"]["blocker_codes"] =
+            serde_json::json!(["replacement_summary_bounded_read_evidence_mismatch"]);
+
+        let typed = super::bounded_read_alignment_cutover_readiness(&bundle);
+
+        assert!(!typed.evidence_ready());
+        assert!(!typed.ready);
+        assert!(!typed.covered_routes_matches);
+        assert_eq!(
+            typed.blocker_codes,
+            vec!["replacement_summary_bounded_read_evidence_mismatch".to_string()]
+        );
     }
 
     #[test]
