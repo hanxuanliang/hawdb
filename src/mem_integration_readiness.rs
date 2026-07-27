@@ -340,6 +340,8 @@ pub struct SearchCandidateCutoverReadiness {
     pub primary_engine_matches: bool,
     pub candidate_count_parity: bool,
     pub row_count_parity: bool,
+    pub text_retriever_ready: bool,
+    pub vector_retriever_ready: bool,
     pub candidate_identity_ready: bool,
     pub filter_pushdown_ready: bool,
     pub filter_pushdown_field_summary_present: bool,
@@ -642,6 +644,8 @@ impl SearchCandidateCutoverReadiness {
             && self.primary_engine_matches
             && self.candidate_count_parity
             && self.row_count_parity
+            && self.text_retriever_ready
+            && self.vector_retriever_ready
             && self.candidate_identity_ready
             && self.filter_pushdown_ready
             && self.filter_pushdown_field_summary_present
@@ -1592,6 +1596,8 @@ fn next_actions(
                 "search_candidate_shadow_evidence.matched_candidate_count",
                 "search_candidate_shadow_evidence.primary_only_candidate_count",
                 "search_candidate_shadow_evidence.row_count_parity",
+                "search_candidate_shadow_evidence.text_retriever_ready",
+                "search_candidate_shadow_evidence.vector_retriever_ready",
                 "search_candidate_shadow_evidence.candidate_identity.ready",
                 "search_candidate_shadow_evidence.shadow_scan_filter_pushdown_ready",
                 "search_candidate_shadow_evidence.shadow_scan_field_pruning_ready",
@@ -2604,6 +2610,14 @@ pub fn search_candidate_cutover_readiness(
             bundle,
             &["search_candidate_shadow_evidence", "row_count_parity"],
         ) == Some(true),
+        text_retriever_ready: bool_path(
+            bundle,
+            &["search_candidate_shadow_evidence", "text_retriever_ready"],
+        ) == Some(true),
+        vector_retriever_ready: bool_path(
+            bundle,
+            &["search_candidate_shadow_evidence", "vector_retriever_ready"],
+        ) == Some(true),
         candidate_identity_ready: bool_path(
             bundle,
             &[
@@ -2688,6 +2702,14 @@ fn search_candidate_cutover_conditions(
         (
             "search_candidate_shadow_evidence.row_count_parity",
             readiness.row_count_parity,
+        ),
+        (
+            "search_candidate_shadow_evidence.text_retriever_ready",
+            readiness.text_retriever_ready,
+        ),
+        (
+            "search_candidate_shadow_evidence.vector_retriever_ready",
+            readiness.vector_retriever_ready,
         ),
         (
             "search_candidate_shadow_evidence.candidate_identity.ready",
@@ -5823,6 +5845,37 @@ mod tests {
     }
 
     #[test]
+    fn requires_search_candidate_retriever_leg_evidence() {
+        let mut bundle = ready_bundle();
+        bundle["search_candidate_shadow_evidence"]["ready"] = serde_json::json!(true);
+        bundle["search_candidate_shadow_evidence"]["text_retriever_ready"] =
+            serde_json::json!(false);
+        bundle["search_candidate_shadow_evidence"]["vector_retriever_ready"] =
+            serde_json::json!(false);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["search_candidate_primary_evidence"])
+        );
+        let candidate_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "search_candidate_primary_evidence")
+            .unwrap();
+        assert_eq!(
+            candidate_check["failed_evidence_fields"],
+            serde_json::json!([
+                "search_candidate_shadow_evidence.text_retriever_ready",
+                "search_candidate_shadow_evidence.vector_retriever_ready"
+            ])
+        );
+    }
+
+    #[test]
     fn rejects_search_candidate_trace_evidence_for_library_readiness() {
         let mut bundle = ready_bundle();
         bundle["search_candidate_shadow_evidence"] = ready_search_candidate_trace_evidence();
@@ -5846,6 +5899,8 @@ mod tests {
                 "search_candidate_shadow_evidence.evidence_source",
                 "search_candidate_shadow_evidence.candidate_primary_engine",
                 "search_candidate_shadow_evidence.candidate_counts",
+                "search_candidate_shadow_evidence.text_retriever_ready",
+                "search_candidate_shadow_evidence.vector_retriever_ready",
                 "search_candidate_shadow_evidence.candidate_identity.ready",
                 "search_candidate_shadow_evidence.filter_pushdown.ready",
                 "search_candidate_shadow_evidence.filter_pushdown.field_summary_count",
@@ -5866,6 +5921,9 @@ mod tests {
         assert!(typed.route_matches);
         assert!(typed.primary_engine_matches);
         assert!(typed.candidate_count_parity);
+        assert!(typed.row_count_parity);
+        assert!(typed.text_retriever_ready);
+        assert!(typed.vector_retriever_ready);
         assert!(typed.candidate_identity_ready);
         assert!(typed.filter_pushdown_ready);
         assert!(typed.filter_pushdown_field_summary_present);
@@ -5917,6 +5975,8 @@ mod tests {
                 "search_candidate_shadow_evidence.candidate_primary_engine",
                 "search_candidate_shadow_evidence.candidate_counts",
                 "search_candidate_shadow_evidence.row_count_parity",
+                "search_candidate_shadow_evidence.text_retriever_ready",
+                "search_candidate_shadow_evidence.vector_retriever_ready",
                 "search_candidate_shadow_evidence.candidate_identity.ready",
                 "search_candidate_shadow_evidence.filter_pushdown.ready",
                 "search_candidate_shadow_evidence.filter_pushdown.field_summary_count",
@@ -8687,6 +8747,14 @@ mod tests {
             nowledge_mem_search_candidate_shadow_evidence_json(
                 &search_candidate_evidence.evidence(),
             );
+        bundle["search_candidate_shadow_evidence"]["text_retriever_ready"] =
+            serde_json::json!(true);
+        bundle["search_candidate_shadow_evidence"]["vector_retriever_ready"] =
+            serde_json::json!(true);
+        bundle["search_candidate_shadow_evidence"]["retriever_leg_candidate_counts"] = serde_json::json!({
+            "text": 3,
+            "vector": 3,
+        });
         bundle["library_readiness"] = ready_library_readiness();
         bundle["blackbox_manifest"] = ready_blackbox_manifest();
         bundle

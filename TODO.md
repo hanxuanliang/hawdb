@@ -493,6 +493,8 @@ contract.
       replacement candidate reads.
     - [x] Require Rust-bridge search candidate evidence to expose and gate
       row-count parity plus compact shadow scan-pruning fields before cutover.
+    - [x] Require Rust-bridge search candidate evidence to prove text and
+      vector retriever legs are both observed before LanceDB read cutover.
   - Remove LanceDB from a route only after the matching search projection
     evidence is present in replacement summary.
 - [ ] Add retrieval projection options behind advisor gates.

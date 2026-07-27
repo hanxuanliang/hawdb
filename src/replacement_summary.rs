@@ -102,6 +102,8 @@ pub fn nowledge_replacement_summary_json_with_options(
     let search_projection_shadow_evidence_ready = search_projection_shadow_evidence.ready;
     let search_candidate_shadow_evidence = search_candidate_shadow_evidence_summary(bundle);
     let search_candidate_shadow_evidence_ready = search_candidate_shadow_evidence.ready;
+    let search_candidate_shadow_evidence_json =
+        search_candidate_shadow_evidence_summary_json(&search_candidate_shadow_evidence);
     let bounded_read_evidence = bounded_read_evidence_summary(bundle);
     let bounded_read_evidence_ready = bounded_read_evidence.ready;
     let graph_route_readiness = nowledge_graph_route_readiness_summary_from_bundle(bundle);
@@ -261,38 +263,7 @@ pub fn nowledge_replacement_summary_json_with_options(
             "shadow_engine": search_projection_shadow_evidence.shadow_engine,
             "blocker_codes": search_projection_shadow_evidence.blocker_codes,
         },
-        "search_candidate_shadow_evidence": {
-            "protocol": search_candidate_shadow_evidence.protocol,
-            "evidence_source": search_candidate_shadow_evidence.evidence_source,
-            "route": search_candidate_shadow_evidence.route,
-            "present": search_candidate_shadow_evidence.present,
-            "ready": search_candidate_shadow_evidence.ready,
-            "candidate_primary_engine": search_candidate_shadow_evidence.candidate_primary_engine,
-            "primary_engine": search_candidate_shadow_evidence.primary_engine,
-            "shadow_engine": search_candidate_shadow_evidence.shadow_engine,
-            "request_count": search_candidate_shadow_evidence.request_count,
-            "primary_candidate_count": search_candidate_shadow_evidence.primary_candidate_count,
-            "shadow_candidate_count": search_candidate_shadow_evidence.shadow_candidate_count,
-            "matched_candidate_count": search_candidate_shadow_evidence.matched_candidate_count,
-            "primary_only_candidate_count": search_candidate_shadow_evidence.primary_only_candidate_count,
-            "candidate_counts_ready": search_candidate_shadow_evidence.candidate_counts_ready,
-            "candidate_identity_ready": search_candidate_shadow_evidence.candidate_identity_ready,
-            "candidate_identity_parity": search_candidate_shadow_evidence.candidate_identity_parity,
-            "row_count_parity": search_candidate_shadow_evidence.row_count_parity,
-            "vector_top_k_overlap_ready": search_candidate_shadow_evidence.vector_top_k_overlap_ready,
-            "fts_top_k_overlap_ready": search_candidate_shadow_evidence.fts_top_k_overlap_ready,
-            "shadow_scan_filter_pushdown_ready": search_candidate_shadow_evidence.shadow_scan_filter_pushdown_ready,
-            "shadow_scan_field_pruning_ready": search_candidate_shadow_evidence.shadow_scan_field_pruning_ready,
-            "shadow_scan_field_summary_count": search_candidate_shadow_evidence.shadow_scan_field_summary_count,
-            "filter_pushdown_ready": search_candidate_shadow_evidence.filter_pushdown_ready,
-            "filter_pushdown_field_summary_count": search_candidate_shadow_evidence.filter_pushdown_field_summary_count,
-            "filter_pushdown_missing_required_fields": search_candidate_shadow_evidence.filter_pushdown_missing_required_fields,
-            "filter_pushdown_field_capabilities_ready": search_candidate_shadow_evidence.filter_pushdown_field_capabilities_ready,
-            "filter_pushdown_missing_value_summary_fields": search_candidate_shadow_evidence.filter_pushdown_missing_value_summary_fields,
-            "filter_pushdown_missing_numeric_range_fields": search_candidate_shadow_evidence.filter_pushdown_missing_numeric_range_fields,
-            "filter_pushdown_missing_timestamp_range_fields": search_candidate_shadow_evidence.filter_pushdown_missing_timestamp_range_fields,
-            "blocker_codes": search_candidate_shadow_evidence.blocker_codes,
-        },
+        "search_candidate_shadow_evidence": search_candidate_shadow_evidence_json,
         "bounded_read_evidence": {
             "protocol": bounded_read_evidence.protocol,
             "present": bounded_read_evidence.present,
@@ -637,6 +608,8 @@ struct SearchCandidateShadowEvidenceSummary {
     matched_candidate_count: Option<u64>,
     primary_only_candidate_count: Option<u64>,
     candidate_counts_ready: bool,
+    text_retriever_ready: Option<bool>,
+    vector_retriever_ready: Option<bool>,
     candidate_identity_ready: Option<bool>,
     candidate_identity_parity: Option<bool>,
     row_count_parity: Option<bool>,
@@ -1149,6 +1122,10 @@ fn search_candidate_shadow_evidence_summary(
         json_get_bool_path_from_dynamic(bundle, path, "shadow_scan_field_pruning_ready");
     let shadow_scan_field_summary_count =
         json_get_u64_path_from_dynamic(bundle, path, "shadow_scan_field_summary_count");
+    let text_retriever_ready =
+        json_get_bool_path_from_dynamic(bundle, path, "text_retriever_ready");
+    let vector_retriever_ready =
+        json_get_bool_path_from_dynamic(bundle, path, "vector_retriever_ready");
     let blocker_codes = json_get_array_path_from_dynamic(bundle, path, "blocker_codes");
 
     let bridge_ready = evidence_source.as_deref()
@@ -1168,6 +1145,8 @@ fn search_candidate_shadow_evidence_summary(
         && filter_pushdown_missing_numeric_range_fields.is_empty()
         && filter_pushdown_missing_timestamp_range_fields.is_empty()
         && row_count_parity == Some(true)
+        && text_retriever_ready == Some(true)
+        && vector_retriever_ready == Some(true)
         && shadow_scan_filter_pushdown_ready == Some(true)
         && shadow_scan_field_pruning_ready == Some(true)
         && shadow_scan_field_summary_count.is_some_and(|count| count > 0);
@@ -1190,6 +1169,8 @@ fn search_candidate_shadow_evidence_summary(
         matched_candidate_count,
         primary_only_candidate_count,
         candidate_counts_ready,
+        text_retriever_ready,
+        vector_retriever_ready,
         candidate_identity_ready,
         candidate_identity_parity,
         row_count_parity,
@@ -1207,6 +1188,45 @@ fn search_candidate_shadow_evidence_summary(
         filter_pushdown_missing_timestamp_range_fields,
         blocker_codes,
     }
+}
+
+fn search_candidate_shadow_evidence_summary_json(
+    evidence: &SearchCandidateShadowEvidenceSummary,
+) -> serde_json::Value {
+    serde_json::json!({
+        "protocol": evidence.protocol,
+        "evidence_source": evidence.evidence_source,
+        "route": evidence.route,
+        "present": evidence.present,
+        "ready": evidence.ready,
+        "candidate_primary_engine": evidence.candidate_primary_engine,
+        "primary_engine": evidence.primary_engine,
+        "shadow_engine": evidence.shadow_engine,
+        "request_count": evidence.request_count,
+        "primary_candidate_count": evidence.primary_candidate_count,
+        "shadow_candidate_count": evidence.shadow_candidate_count,
+        "matched_candidate_count": evidence.matched_candidate_count,
+        "primary_only_candidate_count": evidence.primary_only_candidate_count,
+        "candidate_counts_ready": evidence.candidate_counts_ready,
+        "text_retriever_ready": evidence.text_retriever_ready,
+        "vector_retriever_ready": evidence.vector_retriever_ready,
+        "candidate_identity_ready": evidence.candidate_identity_ready,
+        "candidate_identity_parity": evidence.candidate_identity_parity,
+        "row_count_parity": evidence.row_count_parity,
+        "vector_top_k_overlap_ready": evidence.vector_top_k_overlap_ready,
+        "fts_top_k_overlap_ready": evidence.fts_top_k_overlap_ready,
+        "shadow_scan_filter_pushdown_ready": evidence.shadow_scan_filter_pushdown_ready,
+        "shadow_scan_field_pruning_ready": evidence.shadow_scan_field_pruning_ready,
+        "shadow_scan_field_summary_count": evidence.shadow_scan_field_summary_count,
+        "filter_pushdown_ready": evidence.filter_pushdown_ready,
+        "filter_pushdown_field_summary_count": evidence.filter_pushdown_field_summary_count,
+        "filter_pushdown_missing_required_fields": evidence.filter_pushdown_missing_required_fields,
+        "filter_pushdown_field_capabilities_ready": evidence.filter_pushdown_field_capabilities_ready,
+        "filter_pushdown_missing_value_summary_fields": evidence.filter_pushdown_missing_value_summary_fields,
+        "filter_pushdown_missing_numeric_range_fields": evidence.filter_pushdown_missing_numeric_range_fields,
+        "filter_pushdown_missing_timestamp_range_fields": evidence.filter_pushdown_missing_timestamp_range_fields,
+        "blocker_codes": evidence.blocker_codes,
+    })
 }
 
 fn search_projection_shadow_pushdown_evidence_json(
@@ -2353,6 +2373,8 @@ fn nowledge_replacement_next_actions(
                 "search_candidate_shadow_evidence.matched_candidate_count",
                 "search_candidate_shadow_evidence.primary_only_candidate_count",
                 "search_candidate_shadow_evidence.row_count_parity",
+                "search_candidate_shadow_evidence.text_retriever_ready",
+                "search_candidate_shadow_evidence.vector_retriever_ready",
                 "search_candidate_shadow_evidence.candidate_identity.ready",
                 "search_candidate_shadow_evidence.shadow_scan_filter_pushdown_ready",
                 "search_candidate_shadow_evidence.shadow_scan_field_pruning_ready",
@@ -3201,6 +3223,34 @@ mod tests {
         );
         assert_eq!(
             summary["search_candidate_shadow_evidence"]["shadow_scan_field_pruning_ready"],
+            false
+        );
+        assert!(summary["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "search_candidate_shadow_evidence_ready"));
+    }
+
+    #[test]
+    fn replacement_summary_requires_search_candidate_retriever_leg_evidence() {
+        let mut bundle = production_ready_bundle();
+        bundle["search_candidate_shadow_evidence"]["text_retriever_ready"] =
+            serde_json::json!(false);
+        bundle["search_candidate_shadow_evidence"]["vector_retriever_ready"] =
+            serde_json::json!(false);
+        bundle["search_candidate_shadow_evidence"]["ready"] = serde_json::json!(true);
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["search_candidate_shadow_evidence"]["ready"], false);
+        assert_eq!(
+            summary["search_candidate_shadow_evidence"]["text_retriever_ready"],
+            false
+        );
+        assert_eq!(
+            summary["search_candidate_shadow_evidence"]["vector_retriever_ready"],
             false
         );
         assert!(summary["missing_evidence"]
@@ -5055,6 +5105,8 @@ mod tests {
                         "search_candidate_shadow_evidence.matched_candidate_count",
                         "search_candidate_shadow_evidence.primary_only_candidate_count",
                         "search_candidate_shadow_evidence.row_count_parity",
+                        "search_candidate_shadow_evidence.text_retriever_ready",
+                        "search_candidate_shadow_evidence.vector_retriever_ready",
                         "search_candidate_shadow_evidence.candidate_identity.ready",
                         "search_candidate_shadow_evidence.shadow_scan_filter_pushdown_ready",
                         "search_candidate_shadow_evidence.shadow_scan_field_pruning_ready",
@@ -5408,6 +5460,14 @@ mod tests {
         bundle["search_projection_shadow_evidence"]["pushdown_evidence"]
             ["shadow_segment_scanned_document_count"] = serde_json::json!(2);
         bundle["search_candidate_shadow_evidence"]["row_count_parity"] = serde_json::json!(true);
+        bundle["search_candidate_shadow_evidence"]["text_retriever_ready"] =
+            serde_json::json!(true);
+        bundle["search_candidate_shadow_evidence"]["vector_retriever_ready"] =
+            serde_json::json!(true);
+        bundle["search_candidate_shadow_evidence"]["retriever_leg_candidate_counts"] = serde_json::json!({
+            "text": 3,
+            "vector": 3,
+        });
         bundle["search_candidate_shadow_evidence"]["shadow_scan_present"] = serde_json::json!(true);
         bundle["search_candidate_shadow_evidence"]["shadow_scan_filter_pushdown_ready"] =
             serde_json::json!(true);

@@ -1988,7 +1988,15 @@ mod tests {
                 .iter()
                 .copied(),
         );
-        nowledge_mem_search_candidate_shadow_evidence_json(&accumulator.evidence())
+        let mut evidence =
+            nowledge_mem_search_candidate_shadow_evidence_json(&accumulator.evidence());
+        evidence["text_retriever_ready"] = serde_json::json!(true);
+        evidence["vector_retriever_ready"] = serde_json::json!(true);
+        evidence["retriever_leg_candidate_counts"] = serde_json::json!({
+            "text": 3,
+            "vector": 3,
+        });
+        evidence
     }
 
     fn ready_query_runtime_preflight() -> serde_json::Value {

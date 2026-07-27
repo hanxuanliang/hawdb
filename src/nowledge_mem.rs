@@ -1057,6 +1057,10 @@ pub struct NowledgeMemSearchCandidateShadowEvidence {
     pub shadow_candidate_count: u64,
     pub matched_candidate_count: u64,
     pub primary_only_candidate_count: u64,
+    pub text_retriever_available: bool,
+    pub vector_retriever_available: bool,
+    pub text_retriever_candidate_count: u64,
+    pub vector_retriever_candidate_count: u64,
     pub primary_candidate_identity_checksum: Option<u64>,
     pub shadow_candidate_identity_checksum: Option<u64>,
     pub matched_candidate_identity_checksum: Option<u64>,
@@ -1112,6 +1116,10 @@ pub struct NowledgeMemSearchCandidateShadowAccumulator {
     shadow_candidate_count: u64,
     matched_candidate_count: u64,
     primary_only_candidate_count: u64,
+    text_retriever_available: bool,
+    vector_retriever_available: bool,
+    text_retriever_candidate_count: u64,
+    vector_retriever_candidate_count: u64,
     primary_candidate_identity_checksum: Option<u64>,
     shadow_candidate_identity_checksum: Option<u64>,
     matched_candidate_identity_checksum: Option<u64>,
@@ -1315,7 +1323,33 @@ impl NowledgeMemSearchCandidateShadowAccumulator {
             .map(|hit| hit.id.clone())
             .collect::<Vec<_>>();
         self.record_compare_candidate_ids(&primary_candidate_ids, &shadow_candidate_ids);
+        self.record_retriever_leg_report(&shadow_output.report);
         self.record_filter_pushdown_report(&shadow_output.report);
+    }
+
+    fn record_retriever_leg_report(&mut self, report: &NowledgeMemSearchCandidateReport) {
+        if report
+            .retriever_available
+            .get("text")
+            .copied()
+            .unwrap_or(false)
+        {
+            self.text_retriever_available = true;
+        }
+        if report
+            .retriever_available
+            .get("vector")
+            .copied()
+            .unwrap_or(false)
+        {
+            self.vector_retriever_available = true;
+        }
+        self.text_retriever_candidate_count = self
+            .text_retriever_candidate_count
+            .saturating_add(retriever_candidate_count(report, "text"));
+        self.vector_retriever_candidate_count = self
+            .vector_retriever_candidate_count
+            .saturating_add(retriever_candidate_count(report, "vector"));
     }
 
     pub fn evidence(&self) -> NowledgeMemSearchCandidateShadowEvidence {
@@ -1325,6 +1359,10 @@ impl NowledgeMemSearchCandidateShadowAccumulator {
             shadow_candidate_count: self.shadow_candidate_count,
             matched_candidate_count: self.matched_candidate_count,
             primary_only_candidate_count: self.primary_only_candidate_count,
+            text_retriever_available: self.text_retriever_available,
+            vector_retriever_available: self.vector_retriever_available,
+            text_retriever_candidate_count: self.text_retriever_candidate_count,
+            vector_retriever_candidate_count: self.vector_retriever_candidate_count,
             primary_candidate_identity_checksum: self.primary_candidate_identity_checksum,
             shadow_candidate_identity_checksum: self.shadow_candidate_identity_checksum,
             matched_candidate_identity_checksum: self.matched_candidate_identity_checksum,
@@ -1351,6 +1389,10 @@ impl NowledgeMemSearchCandidateShadowEvidence {
             shadow_candidate_count,
             matched_candidate_count,
             primary_only_candidate_count: 0,
+            text_retriever_available: false,
+            vector_retriever_available: false,
+            text_retriever_candidate_count: 0,
+            vector_retriever_candidate_count: 0,
             primary_candidate_identity_checksum: None,
             shadow_candidate_identity_checksum: None,
             matched_candidate_identity_checksum: None,
@@ -1404,6 +1446,14 @@ pub fn nowledge_mem_search_candidate_shadow_evidence_json(
         "matched_candidate_count": evidence.matched_candidate_count,
         "primary_only_candidate_count": evidence.primary_only_candidate_count,
         "row_count_parity": row_count_parity,
+        "text_retriever_ready": evidence.text_retriever_available
+            && evidence.text_retriever_candidate_count > 0,
+        "vector_retriever_ready": evidence.vector_retriever_available
+            && evidence.vector_retriever_candidate_count > 0,
+        "retriever_leg_candidate_counts": {
+            "text": evidence.text_retriever_candidate_count,
+            "vector": evidence.vector_retriever_candidate_count,
+        },
         "candidate_identity": candidate_identity,
         "shadow_scan_present": evidence
             .filter_pushdown
@@ -1420,6 +1470,14 @@ pub fn nowledge_mem_search_candidate_shadow_evidence_json(
         "filter_pushdown": filter_pushdown,
         "blocker_codes": blocker_codes,
     })
+}
+
+fn retriever_candidate_count(report: &NowledgeMemSearchCandidateReport, name: &str) -> u64 {
+    report
+        .retriever_candidate_counts
+        .get(name)
+        .copied()
+        .unwrap_or_default() as u64
 }
 
 fn nowledge_mem_search_candidate_shadow_identity_json(
@@ -6371,6 +6429,12 @@ fn search_candidate_shadow_readiness_blocker_codes(evidence: &serde_json::Value)
     if !search_candidate_shadow_counts_ready(evidence) {
         blockers.insert("search_candidate_counts_not_ready".to_string());
     }
+    if evidence_bool(evidence, "text_retriever_ready") != Some(true) {
+        blockers.insert("search_candidate_text_retriever_not_ready".to_string());
+    }
+    if evidence_bool(evidence, "vector_retriever_ready") != Some(true) {
+        blockers.insert("search_candidate_vector_retriever_not_ready".to_string());
+    }
     if nested_bool(evidence, &["candidate_identity", "ready"]) != Some(true)
         || nested_bool(evidence, &["candidate_identity", "parity"]) != Some(true)
     {
@@ -8263,6 +8327,8 @@ mod tests {
         assert_eq!(evidence["matched_candidate_count"], 5);
         assert_eq!(evidence["primary_only_candidate_count"], 0);
         assert_eq!(evidence["row_count_parity"], true);
+        assert_eq!(evidence["text_retriever_ready"], false);
+        assert_eq!(evidence["vector_retriever_ready"], false);
         assert_eq!(evidence["candidate_identity"]["ready"], true);
         assert_eq!(evidence["candidate_identity"]["parity"], true);
         assert_eq!(evidence["shadow_scan_present"], true);
@@ -8317,6 +8383,10 @@ mod tests {
                 shadow_candidate_count: 2,
                 matched_candidate_count: 1,
                 primary_only_candidate_count: 1,
+                text_retriever_available: false,
+                vector_retriever_available: false,
+                text_retriever_candidate_count: 0,
+                vector_retriever_candidate_count: 0,
                 primary_candidate_identity_checksum: None,
                 shadow_candidate_identity_checksum: None,
                 matched_candidate_identity_checksum: None,
@@ -8360,6 +8430,8 @@ mod tests {
         assert_eq!(evidence["matched_candidate_count"], 3);
         assert_eq!(evidence["primary_only_candidate_count"], 0);
         assert_eq!(evidence["row_count_parity"], true);
+        assert_eq!(evidence["text_retriever_ready"], false);
+        assert_eq!(evidence["vector_retriever_ready"], false);
         assert_eq!(evidence["candidate_identity"]["ready"], true);
         assert_eq!(evidence["shadow_scan_filter_pushdown_ready"], true);
         assert_eq!(evidence["shadow_scan_field_pruning_ready"], true);
@@ -9867,6 +9939,73 @@ mod tests {
             2
         );
         assert!(!output.report.json().to_string().contains("[1.0,0.0]"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn search_candidate_shadow_bridge_aggregates_text_and_vector_leg_evidence() {
+        let root = unique_nowledge_mem_test_dir("search_candidate_bridge_retrievers");
+        {
+            let mut index = SearchIndex::open(&root).unwrap();
+            index
+                .apply_embedding_manifest(SearchEmbeddingManifest {
+                    model: "bge-m3".to_string(),
+                    version: None,
+                    dimension: 2,
+                })
+                .unwrap();
+            index
+                .apply_projection_delta(SearchProjectionDelta {
+                    upserts: vec![SearchProjectionRow {
+                        kind: SearchProjectionKind::Memory,
+                        external_id: "mem-leg".to_string(),
+                        title: "Retriever leg candidate".to_string(),
+                        body: "retriever leg candidate read".to_string(),
+                        embedding: Some(vec![1.0, 0.0]),
+                        source_id: Some("source-leg".to_string()),
+                        metadata: BTreeMap::from([
+                            ("space_id".to_string(), "default".to_string()),
+                            ("lifecycle_state".to_string(), "active".to_string()),
+                        ]),
+                    }],
+                    deletes: Vec::new(),
+                    max_operations: None,
+                    source_graph_commit_epoch: Some(31),
+                })
+                .unwrap();
+            index.checkpoint().unwrap();
+        }
+        let projection = NowledgeMemSearchProjection::open(&root).unwrap();
+        let text_request = NowledgeMemSearchCandidateRequest::text("retriever leg", 10)
+            .with_metadata_filters(BTreeMap::from([(
+                "lifecycle_state__not_in".to_string(),
+                r#"["deleted","forgotten"]"#.to_string(),
+            )]));
+        let vector_request = NowledgeMemSearchCandidateRequest::vector(vec![1.0, 0.0], 10)
+            .with_metadata_filters(BTreeMap::from([(
+                "lifecycle_state__not_in".to_string(),
+                r#"["deleted","forgotten"]"#.to_string(),
+            )]));
+        let text_output = projection.search_candidates_with_report(&text_request);
+        let vector_output = projection.search_candidates_with_report(&vector_request);
+        let mut accumulator = NowledgeMemSearchCandidateShadowAccumulator::new();
+
+        accumulator.record_search_candidate_output(["memory:mem-leg"], &text_output);
+        accumulator.record_search_candidate_output(["memory:mem-leg"], &vector_output);
+        let evidence = accumulator.json();
+
+        assert_eq!(evidence["ready"], true);
+        assert_eq!(evidence["request_count"], 2);
+        assert_eq!(evidence["text_retriever_ready"], true);
+        assert_eq!(evidence["vector_retriever_ready"], true);
+        assert_eq!(evidence["retriever_leg_candidate_counts"]["text"], 1);
+        assert_eq!(evidence["retriever_leg_candidate_counts"]["vector"], 1);
+        assert_eq!(
+            evidence["filter_pushdown"]["field_capabilities_ready"],
+            true
+        );
+        assert_eq!(evidence["blocker_codes"], serde_json::json!([]));
 
         std::fs::remove_dir_all(root).unwrap();
     }
