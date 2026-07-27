@@ -138,6 +138,8 @@ pub const NOWLEDGE_MEM_GRAPH_COMMUNITY_RECENT_MEMORIES_ROUTE_REPORT_PROTOCOL: &s
     "skein-nowledge-mem-graph-community-recent-memories-route-report-v1";
 pub const NOWLEDGE_MEM_GRAPH_COMMUNITY_SUBGRAPH_ROUTE_REPORT_PROTOCOL: &str =
     "skein-nowledge-mem-graph-community-subgraph-route-report-v1";
+pub const NOWLEDGE_MEM_GRAPH_AUGMENTATION_STATE_ROUTE_REPORT_PROTOCOL: &str =
+    "skein-nowledge-mem-graph-augmentation-state-route-report-v1";
 pub const NOWLEDGE_MEM_GRAPH_ORPHANS_ROUTE_REPORT_PROTOCOL: &str =
     "skein-nowledge-mem-graph-orphans-route-report-v1";
 pub const NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL: &str = "skein-nowledge-mem-retrieval-report";
@@ -325,6 +327,22 @@ id(r) AS relationship_id, \
 r.confidence AS confidence, \
 r.relation_type AS relation_type \
 LIMIT $max_edges";
+pub const NOWLEDGE_MEM_GRAPH_AUGMENTATION_STATE_ROUTE: &str = "/graph/augmentation/state";
+pub const NOWLEDGE_MEM_GRAPH_AUGMENTATION_STATE_QUERY: &str = "\
+MATCH (m:GraphMeta {meta_id: 'main'}) \
+RETURN m.community_detection_applied AS community_detection_applied, \
+m.pagerank_applied AS pagerank_applied, \
+m.community_algorithm AS community_algorithm, \
+m.community_resolution AS community_resolution, \
+m.community_count AS community_count, \
+m.pagerank_algorithm AS pagerank_algorithm, \
+m.pagerank_damping AS pagerank_damping, \
+m.pagerank_iterations AS pagerank_iterations, \
+m.last_augmentation_at AS last_augmentation_at, \
+m.schema_version AS schema_version, \
+m.community_detection_computed_at AS community_detection_computed_at, \
+m.pagerank_computed_at AS pagerank_computed_at \
+LIMIT 1";
 pub const NOWLEDGE_MEM_GRAPH_ORPHANS_ROUTE: &str = "/graph/orphans";
 pub const NOWLEDGE_MEM_GRAPH_ORPHAN_ENTITIES_QUERY: &str = "\
 MATCH (e:Entity) \
@@ -2161,6 +2179,86 @@ impl NowledgeMemGraphCommunitySubgraphOutput {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NowledgeMemGraphAugmentationStateOptions {
+    pub read_options: NowledgeMemReadOptions,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemGraphAugmentationStateRow {
+    pub community_detection_applied: Option<bool>,
+    pub pagerank_applied: Option<bool>,
+    pub community_algorithm: Option<String>,
+    pub community_resolution: Option<Value>,
+    pub community_count: Option<Value>,
+    pub pagerank_algorithm: Option<String>,
+    pub pagerank_damping: Option<Value>,
+    pub pagerank_iterations: Option<Value>,
+    pub last_augmentation_at: Option<Value>,
+    pub schema_version: Option<Value>,
+    pub community_detection_computed_at: Option<Value>,
+    pub pagerank_computed_at: Option<Value>,
+}
+
+impl NowledgeMemGraphAugmentationStateRow {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "community_detection_applied": self.community_detection_applied,
+            "pagerank_applied": self.pagerank_applied,
+            "community_algorithm": self.community_algorithm,
+            "community_resolution": self.community_resolution.as_ref().map(nowledge_value_json),
+            "community_count": self.community_count.as_ref().map(nowledge_value_json),
+            "pagerank_algorithm": self.pagerank_algorithm,
+            "pagerank_damping": self.pagerank_damping.as_ref().map(nowledge_value_json),
+            "pagerank_iterations": self.pagerank_iterations.as_ref().map(nowledge_value_json),
+            "last_augmentation_at": self.last_augmentation_at.as_ref().map(nowledge_value_json),
+            "schema_version": self.schema_version.as_ref().map(nowledge_value_json),
+            "community_detection_computed_at": self.community_detection_computed_at.as_ref().map(nowledge_value_json),
+            "pagerank_computed_at": self.pagerank_computed_at.as_ref().map(nowledge_value_json),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemGraphAugmentationStateRouteReport {
+    pub protocol: String,
+    pub route: String,
+    pub read_engine: crate::route_ownership::NowledgeMemRouteReadEngine,
+    pub route_catalog_version: String,
+    pub route_catalog_digest: String,
+    pub row_count: usize,
+    pub read_report: NowledgeMemReadReport,
+}
+
+impl NowledgeMemGraphAugmentationStateRouteReport {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": self.protocol,
+            "route": self.route,
+            "read_engine": self.read_engine.as_str(),
+            "route_catalog_version": self.route_catalog_version,
+            "route_catalog_digest": self.route_catalog_digest,
+            "row_count": self.row_count,
+            "read_report": self.read_report.json(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemGraphAugmentationStateOutput {
+    pub state: Option<NowledgeMemGraphAugmentationStateRow>,
+    pub report: NowledgeMemGraphAugmentationStateRouteReport,
+}
+
+impl NowledgeMemGraphAugmentationStateOutput {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "state": self.state.as_ref().map(NowledgeMemGraphAugmentationStateRow::json),
+            "report": self.report.json(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NowledgeMemGraphOrphansOptions {
     pub limit: usize,
@@ -3592,6 +3690,33 @@ impl NowledgeMemGraph {
         })
     }
 
+    pub fn read_graph_augmentation_state(
+        &mut self,
+        options: &NowledgeMemGraphAugmentationStateOptions,
+    ) -> Result<NowledgeMemGraphAugmentationStateOutput> {
+        let read = self.read_query_with_params(
+            NOWLEDGE_MEM_GRAPH_AUGMENTATION_STATE_QUERY,
+            &BTreeMap::new(),
+            &graph_augmentation_state_read_options(options),
+        )?;
+        let state = read
+            .output
+            .rows
+            .first()
+            .map(decode_graph_augmentation_state_row)
+            .transpose()?;
+        let report = NowledgeMemGraphAugmentationStateRouteReport {
+            protocol: NOWLEDGE_MEM_GRAPH_AUGMENTATION_STATE_ROUTE_REPORT_PROTOCOL.to_string(),
+            route: NOWLEDGE_MEM_GRAPH_AUGMENTATION_STATE_ROUTE.to_string(),
+            read_engine: crate::route_ownership::NowledgeMemRouteReadEngine::Skein,
+            route_catalog_version: NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION.to_string(),
+            route_catalog_digest: nowledge_mem_graph_read_route_catalog_digest(),
+            row_count: usize::from(state.is_some()),
+            read_report: read.report,
+        };
+        Ok(NowledgeMemGraphAugmentationStateOutput { state, report })
+    }
+
     pub fn read_graph_orphans(
         &mut self,
         options: &NowledgeMemGraphOrphansOptions,
@@ -3704,6 +3829,17 @@ fn graph_community_subgraph_edge_read_options(
     read_options
 }
 
+fn graph_augmentation_state_read_options(
+    options: &NowledgeMemGraphAugmentationStateOptions,
+) -> NowledgeMemReadOptions {
+    let mut read_options = options.read_options.clone();
+    read_options.max_rows = Some(match read_options.max_rows {
+        Some(max_rows) => max_rows.min(1),
+        None => 1,
+    });
+    read_options
+}
+
 fn graph_orphans_read_options(options: &NowledgeMemGraphOrphansOptions) -> NowledgeMemReadOptions {
     let mut read_options = options.read_options.clone();
     read_options.max_rows = Some(match read_options.max_rows {
@@ -3799,6 +3935,28 @@ fn decode_graph_community_subgraph_edge_row(
         relationship_id: required_u64_field(row, "relationship_id")?,
         confidence: optional_value_field(row, "confidence"),
         relation_type: optional_string_field(row, "relation_type")?,
+    })
+}
+
+fn decode_graph_augmentation_state_row(
+    row: &BTreeMap<String, Value>,
+) -> Result<NowledgeMemGraphAugmentationStateRow> {
+    Ok(NowledgeMemGraphAugmentationStateRow {
+        community_detection_applied: optional_bool_field(row, "community_detection_applied")?,
+        pagerank_applied: optional_bool_field(row, "pagerank_applied")?,
+        community_algorithm: optional_string_field(row, "community_algorithm")?,
+        community_resolution: optional_value_field(row, "community_resolution"),
+        community_count: optional_value_field(row, "community_count"),
+        pagerank_algorithm: optional_string_field(row, "pagerank_algorithm")?,
+        pagerank_damping: optional_value_field(row, "pagerank_damping"),
+        pagerank_iterations: optional_value_field(row, "pagerank_iterations"),
+        last_augmentation_at: optional_value_field(row, "last_augmentation_at"),
+        schema_version: optional_value_field(row, "schema_version"),
+        community_detection_computed_at: optional_value_field(
+            row,
+            "community_detection_computed_at",
+        ),
+        pagerank_computed_at: optional_value_field(row, "pagerank_computed_at"),
     })
 }
 
@@ -4119,6 +4277,13 @@ impl NowledgeMemEmbeddedStoreHandle {
         options: &NowledgeMemGraphCommunitySubgraphOptions,
     ) -> Result<NowledgeMemGraphCommunitySubgraphOutput> {
         self.lock_store()?.read_graph_community_subgraph(options)
+    }
+
+    pub fn read_graph_augmentation_state(
+        &self,
+        options: &NowledgeMemGraphAugmentationStateOptions,
+    ) -> Result<NowledgeMemGraphAugmentationStateOutput> {
+        self.lock_store()?.read_graph_augmentation_state(options)
     }
 
     pub fn read_graph_orphans(
@@ -4544,6 +4709,13 @@ impl NowledgeMemEmbeddedStore {
         options: &NowledgeMemGraphCommunitySubgraphOptions,
     ) -> Result<NowledgeMemGraphCommunitySubgraphOutput> {
         self.graph.read_graph_community_subgraph(options)
+    }
+
+    pub fn read_graph_augmentation_state(
+        &mut self,
+        options: &NowledgeMemGraphAugmentationStateOptions,
+    ) -> Result<NowledgeMemGraphAugmentationStateOutput> {
+        self.graph.read_graph_augmentation_state(options)
     }
 
     pub fn read_graph_orphans(
@@ -6406,9 +6578,9 @@ mod tests {
         nowledge_mem_graph_config_with_search_mode,
         nowledge_mem_search_candidate_shadow_evidence_json, required_u64_field,
         NowledgeMemEmbeddedStore, NowledgeMemEmbeddedStoreHandle, NowledgeMemGraph,
-        NowledgeMemGraphCommunityMembersOptions, NowledgeMemGraphCommunityRecentMemoriesOptions,
-        NowledgeMemGraphCommunitySubgraphOptions, NowledgeMemGraphMode,
-        NowledgeMemGraphNodeDetailsOptions, NowledgeMemGraphOrphansOptions,
+        NowledgeMemGraphAugmentationStateOptions, NowledgeMemGraphCommunityMembersOptions,
+        NowledgeMemGraphCommunityRecentMemoriesOptions, NowledgeMemGraphCommunitySubgraphOptions,
+        NowledgeMemGraphMode, NowledgeMemGraphNodeDetailsOptions, NowledgeMemGraphOrphansOptions,
         NowledgeMemGraphOverviewOptions, NowledgeMemGraphSampleOptions, NowledgeMemOpenOptions,
         NowledgeMemQueryExecutionPath, NowledgeMemQueryReportOptions, NowledgeMemReadOptions,
         NowledgeMemReadReport, NowledgeMemReadinessAreaSummary, NowledgeMemReadinessDashboard,
@@ -6417,6 +6589,8 @@ mod tests {
         NowledgeMemSearchCandidateShadowAccumulator, NowledgeMemSearchCandidateShadowEvidence,
         NowledgeMemSearchProjection, NowledgeMemStorageRecoveryReport,
         NowledgeQueryRuntimePreflightProbe, NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL,
+        NOWLEDGE_MEM_GRAPH_AUGMENTATION_STATE_ROUTE,
+        NOWLEDGE_MEM_GRAPH_AUGMENTATION_STATE_ROUTE_REPORT_PROTOCOL,
         NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ROUTE,
         NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ROUTE_REPORT_PROTOCOL,
         NOWLEDGE_MEM_GRAPH_COMMUNITY_RECENT_MEMORIES_ROUTE,
@@ -6940,6 +7114,57 @@ mod tests {
         assert!(missing.entities.is_empty());
         assert!(missing.edges.is_empty());
         assert!(missing.report.edge_read_report.is_none());
+    }
+
+    #[test]
+    fn graph_augmentation_state_route_runs_through_bounded_query_runtime() {
+        let db = Database::new();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        seed_graph_augmentation_state(&mut graph);
+
+        let output = graph
+            .read_graph_augmentation_state(&NowledgeMemGraphAugmentationStateOptions::default())
+            .unwrap();
+        let state = output.state.as_ref().expect("augmentation state row");
+
+        assert_eq!(state.community_detection_applied, Some(true));
+        assert_eq!(state.pagerank_applied, Some(true));
+        assert_eq!(state.community_algorithm.as_deref(), Some("louvain"));
+        assert_eq!(state.pagerank_algorithm.as_deref(), Some("pagerank"));
+        assert_eq!(state.community_count, Some(Value::Int(12)));
+        assert_eq!(state.pagerank_iterations, Some(Value::Int(20)));
+        assert_eq!(
+            output.report.protocol,
+            NOWLEDGE_MEM_GRAPH_AUGMENTATION_STATE_ROUTE_REPORT_PROTOCOL
+        );
+        assert_eq!(
+            output.report.route,
+            NOWLEDGE_MEM_GRAPH_AUGMENTATION_STATE_ROUTE
+        );
+        assert_eq!(output.report.row_count, 1);
+        assert_eq!(output.report.read_report.row_count, 1);
+        assert!(output.report.read_report.row_limit_enforced_before_output);
+        assert_eq!(output.json()["report"]["read_engine"], "skein");
+        assert_eq!(output.json()["state"]["pagerank_applied"], true);
+    }
+
+    #[test]
+    fn embedded_store_handle_exposes_graph_augmentation_state_route() {
+        let db = Database::new();
+        let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        let mut store = NowledgeMemEmbeddedStore::new(graph, None);
+        seed_graph_augmentation_state(store.graph_mut());
+        let handle = NowledgeMemEmbeddedStoreHandle::new(store);
+
+        let output = handle
+            .read_graph_augmentation_state(&NowledgeMemGraphAugmentationStateOptions::default())
+            .unwrap();
+
+        assert!(output.state.is_some());
+        assert_eq!(
+            output.report.route,
+            NOWLEDGE_MEM_GRAPH_AUGMENTATION_STATE_ROUTE
+        );
     }
 
     #[test]
@@ -9859,6 +10084,12 @@ mod tests {
             .unwrap();
         graph
             .query("MATCH (a:Entity {id: 'community-subgraph-alpha'}), (b:Entity {id: 'community-subgraph-outside'}) CREATE (a)-[:RELATES_TO {confidence: 0.99, relation_type: 'outside'}]->(b)")
+            .unwrap();
+    }
+
+    fn seed_graph_augmentation_state(graph: &mut NowledgeMemGraph) {
+        graph
+            .query("CREATE (:GraphMeta {meta_id: 'main', community_detection_applied: true, pagerank_applied: true, community_algorithm: 'louvain', community_resolution: 1.0, community_count: 12, pagerank_algorithm: 'pagerank', pagerank_damping: 0.85, pagerank_iterations: 20, last_augmentation_at: 1000, schema_version: 2, community_detection_computed_at: 900, pagerank_computed_at: 950})")
             .unwrap();
     }
 

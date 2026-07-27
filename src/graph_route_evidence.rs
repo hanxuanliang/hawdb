@@ -1,6 +1,7 @@
 use crate::{
     nowledge_mem_required_query_families_for_route, NowledgeMemGraph, NowledgeMemGraphMode,
     NowledgeMemQueryReportOptions, Result, SkeinError, Value,
+    NOWLEDGE_MEM_GRAPH_AUGMENTATION_STATE_QUERY, NOWLEDGE_MEM_GRAPH_AUGMENTATION_STATE_ROUTE,
     NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_MEMORY_QUERY, NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ROUTE,
     NOWLEDGE_MEM_GRAPH_COMMUNITY_RECENT_MEMORIES_QUERY,
     NOWLEDGE_MEM_GRAPH_COMMUNITY_RECENT_MEMORIES_ROUTE,
@@ -657,6 +658,24 @@ where
     })
 }
 
+pub fn nowledge_mem_graph_augmentation_state_route_query() -> RouteQuery {
+    RouteQuery {
+        route: NOWLEDGE_MEM_GRAPH_AUGMENTATION_STATE_ROUTE.to_string(),
+        shadow_compare_ready: false,
+        primary_read_routing_enabled: true,
+        primary_ready: false,
+        blocker_codes: Vec::new(),
+        queries: vec![RouteCypherQuery {
+            name: "augmentation-state-graph-meta".to_string(),
+            query_family: Some("projected_graph".to_string()),
+            require_scan_pruning: true,
+            require_pruned: false,
+            cypher: NOWLEDGE_MEM_GRAPH_AUGMENTATION_STATE_QUERY.to_string(),
+            parameters: BTreeMap::new(),
+        }],
+    }
+}
+
 pub fn nowledge_mem_graph_orphans_route_query(limit: usize) -> Result<RouteQuery> {
     let limit = i64::try_from(limit).map_err(|_| {
         SkeinError::Semantic(
@@ -1037,7 +1056,8 @@ fn error_class(error: &SkeinError) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        nowledge_graph_route_evidence_json, nowledge_mem_graph_community_members_route_query,
+        nowledge_graph_route_evidence_json, nowledge_mem_graph_augmentation_state_route_query,
+        nowledge_mem_graph_community_members_route_query,
         nowledge_mem_graph_community_recent_memories_route_query,
         nowledge_mem_graph_community_subgraph_route_query,
         nowledge_mem_graph_node_details_route_query, nowledge_mem_graph_orphans_route_query,
@@ -1484,6 +1504,55 @@ mod tests {
         assert_eq!(
             evidence["routes"][0]["query_reports"][1]["query_family"],
             "graph_traversal"
+        );
+        assert!(
+            evidence["routes"][0]["query_reports"][0]["scan_pruning_report_count"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0
+        );
+        assert_eq!(
+            evidence["routes"][0]["blocker_codes"],
+            serde_json::json!([])
+        );
+        let readiness = nowledge_graph_route_readiness_json(&evidence).unwrap();
+        assert_eq!(readiness["routes"][0]["query_runtime_ready"], true);
+        assert_eq!(readiness["routes"][0]["query_plan_evidence_ready"], true);
+        assert_eq!(readiness["routes"][0]["query_profile_evidence_ready"], true);
+    }
+
+    #[test]
+    fn augmentation_state_route_query_helper_feeds_route_execution_evidence() {
+        let mut db = Database::new();
+        db.query("CREATE (:GraphMeta {meta_id: 'main', community_detection_applied: true, pagerank_applied: true, community_algorithm: 'louvain', community_resolution: 1.0, community_count: 12, pagerank_algorithm: 'pagerank', pagerank_damping: 0.85, pagerank_iterations: 20, last_augmentation_at: 1000, schema_version: 2, community_detection_computed_at: 900, pagerank_computed_at: 950})")
+            .unwrap();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        let route_queries = vec![nowledge_mem_graph_augmentation_state_route_query()];
+        let route_parity = ready_route_parity_for(&["/graph/augmentation/state"]);
+
+        let evidence = nowledge_graph_route_evidence_json(
+            &mut graph,
+            &route_queries,
+            NowledgeMemQueryReportOptions {
+                capture_physical_plan: true,
+                slow_log_threshold_micros: None,
+            },
+            Some(&route_parity),
+        );
+
+        assert_eq!(evidence["routes"][0]["route"], "/graph/augmentation/state");
+        assert_eq!(evidence["routes"][0]["primary_ready"], true);
+        assert_eq!(
+            evidence["routes"][0]["required_query_families"],
+            serde_json::json!(["projected_graph"])
+        );
+        assert_eq!(
+            evidence["routes"][0]["query_reports"][0]["query_name"],
+            "augmentation-state-graph-meta"
+        );
+        assert_eq!(
+            evidence["routes"][0]["query_reports"][0]["query_family"],
+            "projected_graph"
         );
         assert!(
             evidence["routes"][0]["query_reports"][0]["scan_pruning_report_count"]

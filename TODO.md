@@ -179,6 +179,8 @@ contract.
   - [x] Add a library-first `/library/community/{community_id}/subgraph`
     runtime and route-query evidence helper for community Entity ranking and
     relation-edge reads.
+  - [x] Add a library-first `/graph/augmentation/state` runtime and route-query
+    evidence helper for the GraphMeta projected-graph state read.
 - [ ] PR 4: Add search projection scan-pruning evidence for production filters.
   - Scope: prove search projection segment descriptors prune `unit_type`,
     lifecycle state, metadata keys, `importance`, `confidence`, and timestamps
