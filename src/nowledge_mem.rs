@@ -22,6 +22,9 @@ use crate::{
         replacement_readiness_family_evidence_health, REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
     },
     store::{RecoveryMode, ScanPruningReport, ScanPruningStrategy, StorageRecoveryReport},
+    workload_fixtures::{
+        NowledgeGraphRouteWorkloadFixtureReport, NOWLEDGE_GRAPH_ROUTE_WORKLOAD_FIXTURE_PROTOCOL,
+    },
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -2893,6 +2896,7 @@ pub struct NowledgeMemReadinessOptions {
     pub primary_search_projection_probe: Option<serde_json::Value>,
     pub search_projection_shadow_evidence: Option<serde_json::Value>,
     pub search_candidate_shadow_evidence: Option<serde_json::Value>,
+    pub workload_fixture_evidence: Option<NowledgeGraphRouteWorkloadFixtureReport>,
     pub qos_policy: LocalQosPolicy,
     pub qos_state: LocalQosState,
     pub background_maintenance_options: BackgroundMaintenanceOptions,
@@ -2919,6 +2923,7 @@ pub struct NowledgeMemLibraryReadinessReport {
     pub search_projection_evidence: serde_json::Value,
     pub search_projection_shadow_evidence: serde_json::Value,
     pub search_candidate_shadow_evidence: serde_json::Value,
+    pub workload_fixture_evidence: serde_json::Value,
 }
 
 impl NowledgeMemLibraryReadinessReport {
@@ -2952,6 +2957,7 @@ impl NowledgeMemLibraryReadinessReport {
             "search_projection_evidence": self.search_projection_evidence,
             "search_projection_shadow_evidence": self.search_projection_shadow_evidence,
             "search_candidate_shadow_evidence": self.search_candidate_shadow_evidence,
+            "workload_fixture_evidence": self.workload_fixture_evidence,
         })
     }
 }
@@ -2988,6 +2994,7 @@ pub struct NowledgeMemReadinessAreaMap {
     pub search_projection: NowledgeMemReadinessAreaSummary,
     pub search_projection_shadow: NowledgeMemReadinessAreaSummary,
     pub search_candidate_shadow: NowledgeMemReadinessAreaSummary,
+    pub workload_fixture: NowledgeMemReadinessAreaSummary,
     pub background: NowledgeMemReadinessAreaSummary,
 }
 
@@ -3002,6 +3009,7 @@ impl NowledgeMemReadinessAreaMap {
             self.search_projection.clone(),
             self.search_projection_shadow.clone(),
             self.search_candidate_shadow.clone(),
+            self.workload_fixture.clone(),
             self.background.clone(),
         ]
     }
@@ -3017,6 +3025,7 @@ impl NowledgeMemReadinessAreaMap {
             "search_projection": self.search_projection.state_json(),
             "search_projection_shadow": self.search_projection_shadow.state_json(),
             "search_candidate_shadow": self.search_candidate_shadow.state_json(),
+            "workload_fixture": self.workload_fixture.state_json(),
         })
     }
 }
@@ -5495,6 +5504,11 @@ impl NowledgeMemEmbeddedStore {
             .search_candidate_shadow_evidence
             .clone()
             .unwrap_or_else(missing_search_candidate_shadow_evidence_json);
+        let workload_fixture_evidence = options
+            .workload_fixture_evidence
+            .as_ref()
+            .map(NowledgeGraphRouteWorkloadFixtureReport::json)
+            .unwrap_or_else(missing_workload_fixture_evidence_json);
         let evidence = LibraryReadinessEvidence {
             bounded_read_evidence: &bounded_read_evidence,
             storage_recovery: &storage_recovery,
@@ -5504,6 +5518,7 @@ impl NowledgeMemEmbeddedStore {
             search_projection_evidence: &search_projection_evidence,
             search_projection_shadow_evidence: &search_projection_shadow_evidence,
             search_candidate_shadow_evidence: &search_candidate_shadow_evidence,
+            workload_fixture_evidence: &workload_fixture_evidence,
         };
         let blocker_codes = library_readiness_blocker_codes(&evidence);
         let readiness_by_area = library_readiness_by_area(&evidence);
@@ -5536,6 +5551,7 @@ impl NowledgeMemEmbeddedStore {
             search_projection_evidence,
             search_projection_shadow_evidence,
             search_candidate_shadow_evidence,
+            workload_fixture_evidence,
         }
     }
 
@@ -6155,6 +6171,22 @@ fn missing_search_candidate_shadow_evidence_json() -> serde_json::Value {
     })
 }
 
+fn missing_workload_fixture_evidence_json() -> serde_json::Value {
+    serde_json::json!({
+        "protocol": NOWLEDGE_GRAPH_ROUTE_WORKLOAD_FIXTURE_PROTOCOL,
+        "present": false,
+        "ready": false,
+        "route_count": null,
+        "query_count": null,
+        "failed_query_count": null,
+        "bounded_expansion_probe_count": null,
+        "failed_bounded_expansion_probe_count": null,
+        "search_metadata_probe_count": null,
+        "failed_search_metadata_probe_count": null,
+        "blocker_codes": ["workload_fixture_evidence_missing"],
+    })
+}
+
 fn query_family_replacement_evidence_json(
     replacement_readiness_by_query_family: Option<&serde_json::Value>,
 ) -> serde_json::Value {
@@ -6289,6 +6321,7 @@ struct LibraryReadinessEvidence<'a> {
     search_projection_evidence: &'a serde_json::Value,
     search_projection_shadow_evidence: &'a serde_json::Value,
     search_candidate_shadow_evidence: &'a serde_json::Value,
+    workload_fixture_evidence: &'a serde_json::Value,
 }
 
 fn library_readiness_blocker_codes(evidence: &LibraryReadinessEvidence<'_>) -> Vec<&'static str> {
@@ -6332,6 +6365,9 @@ fn library_readiness_blocker_codes(evidence: &LibraryReadinessEvidence<'_>) -> V
     if !search_candidate_shadow_evidence_ready(evidence.search_candidate_shadow_evidence) {
         blockers.push("search_candidate_shadow_evidence_not_ready");
     }
+    if !workload_fixture_evidence_ready(evidence.workload_fixture_evidence) {
+        blockers.push("workload_fixture_evidence_not_ready");
+    }
     blockers
 }
 
@@ -6363,6 +6399,7 @@ fn library_readiness_by_area(
         search_candidate_shadow: search_candidate_shadow_readiness_area(
             evidence.search_candidate_shadow_evidence,
         ),
+        workload_fixture: workload_fixture_readiness_area(evidence.workload_fixture_evidence),
         background: background_maintenance_readiness_area(evidence.background_maintenance),
     }
 }
@@ -6641,6 +6678,55 @@ fn search_candidate_shadow_readiness_area(
 
 fn search_candidate_shadow_evidence_ready(evidence: &serde_json::Value) -> bool {
     search_candidate_shadow_readiness_blocker_codes(evidence).is_empty()
+}
+
+fn workload_fixture_readiness_area(
+    evidence: &serde_json::Value,
+) -> NowledgeMemReadinessAreaSummary {
+    let blocker_codes = workload_fixture_readiness_blocker_codes(evidence);
+    NowledgeMemReadinessAreaSummary::new(
+        "workload_fixture",
+        blocker_codes.is_empty(),
+        blocker_codes,
+    )
+}
+
+fn workload_fixture_evidence_ready(evidence: &serde_json::Value) -> bool {
+    workload_fixture_readiness_blocker_codes(evidence).is_empty()
+}
+
+fn workload_fixture_readiness_blocker_codes(evidence: &serde_json::Value) -> Vec<String> {
+    let mut blockers = evidence_blocker_codes(evidence);
+    if evidence.get("present").and_then(serde_json::Value::as_bool) == Some(false) {
+        if blockers.is_empty() {
+            blockers.insert("workload_fixture_evidence_missing".to_string());
+        }
+        return blockers.into_iter().collect();
+    }
+    if evidence_string(evidence, "protocol") != Some(NOWLEDGE_GRAPH_ROUTE_WORKLOAD_FIXTURE_PROTOCOL)
+    {
+        blockers.insert("workload_fixture_protocol_mismatch".to_string());
+    }
+    if evidence_bool(evidence, "ready") != Some(true) {
+        blockers.insert("workload_fixture_not_ready".to_string());
+    }
+    if !evidence_u64(evidence, "route_count").is_some_and(|count| count > 0)
+        || !evidence_u64(evidence, "query_count").is_some_and(|count| count > 0)
+        || evidence_u64(evidence, "failed_query_count") != Some(0)
+    {
+        blockers.insert("workload_fixture_route_queries_not_ready".to_string());
+    }
+    if !evidence_u64(evidence, "bounded_expansion_probe_count").is_some_and(|count| count > 0)
+        || evidence_u64(evidence, "failed_bounded_expansion_probe_count") != Some(0)
+    {
+        blockers.insert("workload_fixture_bounded_expansion_not_ready".to_string());
+    }
+    if !evidence_u64(evidence, "search_metadata_probe_count").is_some_and(|count| count > 0)
+        || evidence_u64(evidence, "failed_search_metadata_probe_count") != Some(0)
+    {
+        blockers.insert("workload_fixture_search_metadata_not_ready".to_string());
+    }
+    blockers.into_iter().collect()
 }
 
 fn search_candidate_shadow_readiness_blocker_codes(evidence: &serde_json::Value) -> Vec<String> {
@@ -7322,6 +7408,9 @@ mod tests {
     use crate::mem_integration_readiness::nowledge_mem_final_cutover_preflight;
     use crate::search::CompressedVectorSearchMode;
     use crate::search::SearchFusionWeights;
+    use crate::workload_fixtures::{
+        nowledge_graph_route_workload_fixture_report, NowledgeGraphRouteWorkloadFixtureOptions,
+    };
     use crate::Value;
     use crate::{
         BackgroundMaintenanceKind, BackgroundMaintenanceOptions, BackgroundWorkHint, Database,
@@ -9014,8 +9103,20 @@ mod tests {
             readiness["readiness_by_area"]["search_candidate_shadow"]["blocker_codes"],
             serde_json::json!(["search_candidate_shadow_evidence_missing"])
         );
+        assert_eq!(
+            readiness["workload_fixture_evidence"]["blocker_codes"],
+            serde_json::json!(["workload_fixture_evidence_missing"])
+        );
+        assert_eq!(
+            readiness["readiness_by_area"]["workload_fixture"]["ready"],
+            false
+        );
+        assert_eq!(
+            readiness["readiness_by_area"]["workload_fixture"]["blocker_codes"],
+            serde_json::json!(["workload_fixture_evidence_missing"])
+        );
         assert_eq!(readiness["ready_area_count"], 1);
-        assert_eq!(readiness["blocked_area_count"], 8);
+        assert_eq!(readiness["blocked_area_count"], 9);
         assert!(!readiness.to_string().contains("redacted"));
     }
 
@@ -9039,9 +9140,9 @@ mod tests {
         assert!(report.graph_open);
         assert!(!report.graph_read_only);
         let areas = report.areas();
-        assert_eq!(areas.len(), 9);
+        assert_eq!(areas.len(), 10);
         assert_eq!(report.ready_area_count, 1);
-        assert_eq!(report.blocked_area_count, 8);
+        assert_eq!(report.blocked_area_count, 9);
         assert!(report.readiness_by_area.graph.ready);
         assert!(!report.readiness_by_area.query.ready);
         assert_eq!(
@@ -9052,6 +9153,11 @@ mod tests {
         assert_eq!(
             report.readiness_by_area.graph_route.blocker_codes,
             vec!["graph_route_readiness_missing".to_string()]
+        );
+        assert!(!report.readiness_by_area.workload_fixture.ready);
+        assert_eq!(
+            report.readiness_by_area.workload_fixture.blocker_codes,
+            vec!["workload_fixture_evidence_missing".to_string()]
         );
         let graph_area = areas
             .iter()
@@ -9097,6 +9203,52 @@ mod tests {
         assert_eq!(
             json["bounded_read_evidence"]["blocker_codes"],
             serde_json::json!(["bounded_read_probe_missing"])
+        );
+    }
+
+    #[test]
+    fn embedded_store_library_readiness_accepts_typed_workload_fixture_evidence() {
+        let db = Database::new();
+        let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::ShadowReadOnly);
+        let mut store = NowledgeMemEmbeddedStore::new(graph, None);
+        let workload_fixture = nowledge_graph_route_workload_fixture_report(
+            NowledgeGraphRouteWorkloadFixtureOptions {
+                capture_physical_plan: true,
+                include_bounded_expansion_probes: true,
+                ..NowledgeGraphRouteWorkloadFixtureOptions::default()
+            },
+        )
+        .unwrap();
+
+        let report = store.library_readiness(&NowledgeMemReadinessOptions {
+            workload_fixture_evidence: Some(workload_fixture.clone()),
+            ..NowledgeMemReadinessOptions::default()
+        });
+        let json = report.json();
+
+        assert!(workload_fixture.ready);
+        assert!(report.readiness_by_area.workload_fixture.ready);
+        assert_eq!(
+            report.readiness_by_area.workload_fixture.blocker_codes,
+            Vec::<String>::new()
+        );
+        assert!(report
+            .blocker_codes
+            .iter()
+            .all(|code| code != "workload_fixture_evidence_not_ready"));
+        assert_eq!(json["workload_fixture_evidence"]["ready"], true);
+        assert_eq!(json["readiness_by_area"]["workload_fixture"]["ready"], true);
+        assert_eq!(
+            json["workload_fixture_evidence"]["failed_query_count"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
+            json["workload_fixture_evidence"]["failed_bounded_expansion_probe_count"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
+            json["workload_fixture_evidence"]["failed_search_metadata_probe_count"],
+            serde_json::json!(0)
         );
     }
 
@@ -9235,9 +9387,9 @@ mod tests {
         );
         assert_eq!(dashboard.mode, NowledgeMemGraphMode::ShadowReadOnly);
         assert!(!dashboard.ready);
-        assert_eq!(dashboard.area_count, 10);
+        assert_eq!(dashboard.area_count, 11);
         assert_eq!(dashboard.ready_area_count, 3);
-        assert_eq!(dashboard.blocked_area_count, 7);
+        assert_eq!(dashboard.blocked_area_count, 8);
         assert!(dashboard.slow_query_ready);
         assert_eq!(dashboard.slow_query_record_count, 1);
         assert!(readiness_dashboard_area(&dashboard, "graph").ready);
@@ -9273,6 +9425,10 @@ mod tests {
         assert_eq!(
             readiness_dashboard_area(&dashboard, "search_candidate_shadow").blocker_codes,
             vec!["search_candidate_shadow_evidence_missing".to_string()]
+        );
+        assert_eq!(
+            readiness_dashboard_area(&dashboard, "workload_fixture").blocker_codes,
+            vec!["workload_fixture_evidence_missing".to_string()]
         );
         assert!(readiness_dashboard_area(&dashboard, "slow_query").ready);
         assert_eq!(json["protocol"], NOWLEDGE_MEM_READINESS_DASHBOARD_PROTOCOL);

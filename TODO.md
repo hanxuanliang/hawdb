@@ -674,6 +674,10 @@ contract.
   - [x] Extend the workload fixture with metadata-filtered search projection
     probes for enum/in-list, lifecycle, numeric range, timestamp range, source,
     and space filters.
+  - [x] Feed the graph/search workload fixture into the typed Mem library
+    readiness area map so cutover gates can require real route, bounded
+    expansion, and metadata-filtered search evidence without production CLI
+    wrappers.
 
 ## P2: Deferred Capabilities
 
