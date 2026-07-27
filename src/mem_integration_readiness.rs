@@ -144,6 +144,25 @@ pub struct LibraryReadinessCutoverReadiness {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphReplacementCutoverReadiness {
+    pub production_cutover_ready: bool,
+    pub shadow_evidence_ready: bool,
+    pub dual_engine_evidence_present: bool,
+    pub dual_engine_evidence_ready: bool,
+    pub dual_engine_evidence_consistent: bool,
+    pub blocker_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryFamilyReplacementCutoverReadiness {
+    pub required_query_families_present: bool,
+    pub missing_required_query_families_empty: bool,
+    pub blocked_query_families_empty: bool,
+    pub min_replacement_readiness_full: bool,
+    pub blocker_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchProjectionCutoverReadiness {
     pub evidence_protocol_matches: bool,
     pub evidence_ready: bool,
@@ -356,6 +375,25 @@ impl LibraryReadinessCutoverReadiness {
             && self.search_projection_ready
             && self.search_projection_shadow_ready
             && self.search_candidate_shadow_ready
+    }
+}
+
+impl GraphReplacementCutoverReadiness {
+    pub fn evidence_ready(&self) -> bool {
+        self.production_cutover_ready
+            && self.shadow_evidence_ready
+            && self.dual_engine_evidence_present
+            && self.dual_engine_evidence_ready
+            && self.dual_engine_evidence_consistent
+    }
+}
+
+impl QueryFamilyReplacementCutoverReadiness {
+    pub fn evidence_ready(&self) -> bool {
+        self.required_query_families_present
+            && self.missing_required_query_families_empty
+            && self.blocked_query_families_empty
+            && self.min_replacement_readiness_full
     }
 }
 
@@ -626,6 +664,8 @@ pub fn nowledge_mem_integration_readiness(
         .unwrap_or(&serde_json::Value::Null);
     let blackbox_readiness = blackbox_readiness_from_manifest_json(blackbox_manifest);
     let library_readiness = library_readiness_cutover_readiness(bundle);
+    let graph_replacement_readiness = graph_replacement_cutover_readiness(bundle);
+    let query_family_readiness = query_family_replacement_cutover_readiness(bundle);
     let search_projection_readiness = search_projection_cutover_readiness(bundle);
     let search_candidate_readiness = search_candidate_cutover_readiness(bundle);
     let bounded_read_readiness = bounded_read_cutover_readiness(bundle);
@@ -642,7 +682,8 @@ pub fn nowledge_mem_integration_readiness(
     let checks = vec![
         check(
             "integration_bundle_protocol",
-            [str_path(bundle, &["protocol"]) == Some(NOWLEDGE_MEM_SKEIN_INTEGRATION_BUNDLE_PROTOCOL)],
+            [str_path(bundle, &["protocol"])
+                == Some(NOWLEDGE_MEM_SKEIN_INTEGRATION_BUNDLE_PROTOCOL)],
             ["protocol"],
             Vec::new(),
         ),
@@ -660,11 +701,7 @@ pub fn nowledge_mem_integration_readiness(
                 non_empty_str_path(bundle, &["submodule", "path"]),
                 non_empty_str_path(bundle, &["submodule", "commit"]),
             ],
-            [
-                "submodule.present",
-                "submodule.path",
-                "submodule.commit",
-            ],
+            ["submodule.present", "submodule.path", "submodule.commit"],
             blocker_codes(bundle, &[&["submodule", "blocker_codes"][..]]),
         ),
         check(
@@ -709,88 +746,15 @@ pub fn nowledge_mem_integration_readiness(
                 ],
             ),
         ),
-        check(
+        check_named_conditions(
             "graph_replacement_evidence",
-            [
-                bool_path(bundle, &["replacement_summary", "production_cutover_ready"])
-                    == Some(true),
-                bool_path(
-                    bundle,
-                    &["replacement_summary", "shadow_evidence", "ready"],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &["replacement_summary", "dual_engine_evidence", "present"],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &["replacement_summary", "dual_engine_evidence", "ready"],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &["replacement_summary", "dual_engine_evidence", "consistent"],
-                ) == Some(true),
-            ],
-            [
-                "replacement_summary.production_cutover_ready",
-                "replacement_summary.shadow_evidence.ready",
-                "replacement_summary.dual_engine_evidence.present",
-                "replacement_summary.dual_engine_evidence.ready",
-                "replacement_summary.dual_engine_evidence.consistent",
-            ],
-            blocker_codes(
-                bundle,
-                &[
-                    &["replacement_summary", "blocking_categories"][..],
-                    &["replacement_summary", "missing_evidence"][..],
-                    &["replacement_summary", "dual_engine_evidence", "blocker_codes"][..],
-                ],
-            ),
+            graph_replacement_cutover_conditions(&graph_replacement_readiness),
+            graph_replacement_readiness.blocker_codes.clone(),
         ),
-        check(
+        check_named_conditions(
             "query_family_replacement_evidence",
-            [
-                replacement_summary_required_query_families_present(bundle),
-                string_array_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "replacement_readiness_family_summary",
-                        "missing_required_query_families",
-                    ],
-                )
-                .is_empty(),
-                string_array_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "replacement_readiness_family_summary",
-                        "blocked_query_families",
-                    ],
-                )
-                .is_empty(),
-                u64_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "replacement_readiness_family_summary",
-                        "min_replacement_readiness_per_million",
-                    ],
-                ) == Some(1_000_000),
-            ],
-            [
-                "replacement_summary.replacement_readiness_family_summary.required_query_families",
-                "replacement_summary.replacement_readiness_family_summary.missing_required_query_families",
-                "replacement_summary.replacement_readiness_family_summary.blocked_query_families",
-                "replacement_summary.replacement_readiness_family_summary.min_replacement_readiness_per_million",
-            ],
-            blocker_codes(
-                bundle,
-                &[
-                    &["replacement_summary", "blocking_categories"][..],
-                    &["replacement_summary", "missing_evidence"][..],
-                ],
-            ),
+            query_family_replacement_cutover_conditions(&query_family_readiness),
+            query_family_readiness.blocker_codes.clone(),
         ),
         check_named_conditions(
             "search_projection_replacement_evidence",
@@ -890,6 +854,8 @@ pub fn nowledge_mem_integration_readiness(
             ready,
             IntegrationGateReadiness {
                 library: &library_readiness,
+                graph_replacement: &graph_replacement_readiness,
+                query_family: &query_family_readiness,
                 search_projection: &search_projection_readiness,
                 search_candidate: &search_candidate_readiness,
                 bounded_read: &bounded_read_readiness,
@@ -1013,6 +979,8 @@ fn blackbox_operational_cutover_conditions(
 
 struct IntegrationGateReadiness<'a> {
     library: &'a LibraryReadinessCutoverReadiness,
+    graph_replacement: &'a GraphReplacementCutoverReadiness,
+    query_family: &'a QueryFamilyReplacementCutoverReadiness,
     search_projection: &'a SearchProjectionCutoverReadiness,
     search_candidate: &'a SearchCandidateCutoverReadiness,
     bounded_read: &'a BoundedReadCutoverReadiness,
@@ -1083,7 +1051,7 @@ fn next_actions(
             ["previous_wrapper_preflight.ready"],
         ));
     }
-    if bool_path(bundle, &["replacement_summary", "production_cutover_ready"]) != Some(true) {
+    if !readiness.graph_replacement.evidence_ready() {
         actions.push(next_action(
             "produce_replacement_summary",
             "graph and search replacement evidence must be production-ready",
@@ -1103,34 +1071,7 @@ fn next_actions(
             ["replacement_summary.protocol"],
         ));
     }
-    if !replacement_summary_required_query_families_present(bundle)
-        || !string_array_path(
-            bundle,
-            &[
-                "replacement_summary",
-                "replacement_readiness_family_summary",
-                "missing_required_query_families",
-            ],
-        )
-        .is_empty()
-        || !string_array_path(
-            bundle,
-            &[
-                "replacement_summary",
-                "replacement_readiness_family_summary",
-                "blocked_query_families",
-            ],
-        )
-        .is_empty()
-        || u64_path(
-            bundle,
-            &[
-                "replacement_summary",
-                "replacement_readiness_family_summary",
-                "min_replacement_readiness_per_million",
-            ],
-        ) != Some(1_000_000)
-    {
+    if !readiness.query_family.evidence_ready() {
         actions.push(next_action(
             "close_required_query_families",
             "Nowledge Mem cutover requires explicit readiness for every required query family",
@@ -1453,6 +1394,138 @@ fn replacement_summary_required_query_families_present(bundle: &serde_json::Valu
     REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES
         .iter()
         .all(|required| families.iter().any(|family| family == required))
+}
+
+pub fn graph_replacement_cutover_readiness(
+    bundle: &serde_json::Value,
+) -> GraphReplacementCutoverReadiness {
+    GraphReplacementCutoverReadiness {
+        production_cutover_ready: bool_path(
+            bundle,
+            &["replacement_summary", "production_cutover_ready"],
+        ) == Some(true),
+        shadow_evidence_ready: bool_path(
+            bundle,
+            &["replacement_summary", "shadow_evidence", "ready"],
+        ) == Some(true),
+        dual_engine_evidence_present: bool_path(
+            bundle,
+            &["replacement_summary", "dual_engine_evidence", "present"],
+        ) == Some(true),
+        dual_engine_evidence_ready: bool_path(
+            bundle,
+            &["replacement_summary", "dual_engine_evidence", "ready"],
+        ) == Some(true),
+        dual_engine_evidence_consistent: bool_path(
+            bundle,
+            &["replacement_summary", "dual_engine_evidence", "consistent"],
+        ) == Some(true),
+        blocker_codes: blocker_codes(
+            bundle,
+            &[
+                &["replacement_summary", "blocking_categories"][..],
+                &["replacement_summary", "missing_evidence"][..],
+                &[
+                    "replacement_summary",
+                    "dual_engine_evidence",
+                    "blocker_codes",
+                ][..],
+            ],
+        ),
+    }
+}
+
+fn graph_replacement_cutover_conditions(
+    readiness: &GraphReplacementCutoverReadiness,
+) -> Vec<(&'static str, bool)> {
+    vec![
+        (
+            "replacement_summary.production_cutover_ready",
+            readiness.production_cutover_ready,
+        ),
+        (
+            "replacement_summary.shadow_evidence.ready",
+            readiness.shadow_evidence_ready,
+        ),
+        (
+            "replacement_summary.dual_engine_evidence.present",
+            readiness.dual_engine_evidence_present,
+        ),
+        (
+            "replacement_summary.dual_engine_evidence.ready",
+            readiness.dual_engine_evidence_ready,
+        ),
+        (
+            "replacement_summary.dual_engine_evidence.consistent",
+            readiness.dual_engine_evidence_consistent,
+        ),
+    ]
+}
+
+pub fn query_family_replacement_cutover_readiness(
+    bundle: &serde_json::Value,
+) -> QueryFamilyReplacementCutoverReadiness {
+    QueryFamilyReplacementCutoverReadiness {
+        required_query_families_present: replacement_summary_required_query_families_present(
+            bundle,
+        ),
+        missing_required_query_families_empty: string_array_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "replacement_readiness_family_summary",
+                "missing_required_query_families",
+            ],
+        )
+        .is_empty(),
+        blocked_query_families_empty: string_array_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "replacement_readiness_family_summary",
+                "blocked_query_families",
+            ],
+        )
+        .is_empty(),
+        min_replacement_readiness_full: u64_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "replacement_readiness_family_summary",
+                "min_replacement_readiness_per_million",
+            ],
+        ) == Some(1_000_000),
+        blocker_codes: blocker_codes(
+            bundle,
+            &[
+                &["replacement_summary", "blocking_categories"][..],
+                &["replacement_summary", "missing_evidence"][..],
+            ],
+        ),
+    }
+}
+
+fn query_family_replacement_cutover_conditions(
+    readiness: &QueryFamilyReplacementCutoverReadiness,
+) -> Vec<(&'static str, bool)> {
+    vec![
+        (
+            "replacement_summary.replacement_readiness_family_summary.required_query_families",
+            readiness.required_query_families_present,
+        ),
+        (
+            "replacement_summary.replacement_readiness_family_summary.missing_required_query_families",
+            readiness.missing_required_query_families_empty,
+        ),
+        (
+            "replacement_summary.replacement_readiness_family_summary.blocked_query_families",
+            readiness.blocked_query_families_empty,
+        ),
+        (
+            "replacement_summary.replacement_readiness_family_summary.min_replacement_readiness_per_million",
+            readiness.min_replacement_readiness_full,
+        ),
+    ]
 }
 
 pub fn search_projection_cutover_readiness(
@@ -5029,6 +5102,71 @@ mod tests {
                             field == "replacement_summary.search_projection_evidence.protocol"
                         })
             }));
+    }
+
+    #[test]
+    fn exposes_typed_graph_replacement_cutover_readiness() {
+        let bundle = ready_bundle();
+
+        let typed = super::graph_replacement_cutover_readiness(&bundle);
+
+        assert!(typed.evidence_ready());
+        assert!(typed.production_cutover_ready);
+        assert!(typed.shadow_evidence_ready);
+        assert!(typed.dual_engine_evidence_present);
+        assert!(typed.dual_engine_evidence_ready);
+        assert!(typed.dual_engine_evidence_consistent);
+        assert!(typed.blocker_codes.is_empty());
+    }
+
+    #[test]
+    fn typed_graph_replacement_cutover_readiness_rejects_inconsistent_dual_engine() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary"]["dual_engine_evidence"]["consistent"] =
+            serde_json::json!(false);
+        bundle["replacement_summary"]["dual_engine_evidence"]["blocker_codes"] =
+            serde_json::json!(["dual_engine_inconsistent"]);
+
+        let typed = super::graph_replacement_cutover_readiness(&bundle);
+
+        assert!(!typed.evidence_ready());
+        assert!(!typed.dual_engine_evidence_consistent);
+        assert_eq!(
+            typed.blocker_codes,
+            vec!["dual_engine_inconsistent".to_string()]
+        );
+    }
+
+    #[test]
+    fn exposes_typed_query_family_replacement_cutover_readiness() {
+        let bundle = ready_bundle();
+
+        let typed = super::query_family_replacement_cutover_readiness(&bundle);
+
+        assert!(typed.evidence_ready());
+        assert!(typed.required_query_families_present);
+        assert!(typed.missing_required_query_families_empty);
+        assert!(typed.blocked_query_families_empty);
+        assert!(typed.min_replacement_readiness_full);
+        assert!(typed.blocker_codes.is_empty());
+    }
+
+    #[test]
+    fn typed_query_family_replacement_cutover_readiness_rejects_missing_family() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary"]["replacement_readiness_family_summary"]
+            ["missing_required_query_families"] = serde_json::json!(["projected_graph"]);
+        bundle["replacement_summary"]["missing_evidence"] =
+            serde_json::json!(["query_family.projected_graph"]);
+
+        let typed = super::query_family_replacement_cutover_readiness(&bundle);
+
+        assert!(!typed.evidence_ready());
+        assert!(!typed.missing_required_query_families_empty);
+        assert_eq!(
+            typed.blocker_codes,
+            vec!["query_family.projected_graph".to_string()]
+        );
     }
 
     #[test]

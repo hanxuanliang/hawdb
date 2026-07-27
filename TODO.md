@@ -215,6 +215,12 @@ contract.
   - [x] Route blackbox redaction and operational integration checks through
     typed conditions so field-level diagnostics consume the same Rust readiness
     summary.
+  - [x] Expose and consume typed graph replacement readiness so Mem can gate
+    production cutover, shadow evidence, and dual-engine consistency without
+    duplicating replacement-summary JSON-path checks.
+  - [x] Expose and consume typed query-family replacement readiness so Mem can
+    gate required Nowledge query families without duplicating replacement-summary
+    JSON-path checks.
   - [x] Expose and consume typed storage-recovery cutover readiness so Mem can
     inspect durable recovery gates without reimplementing replacement-summary
     JSON-path checks.
@@ -464,6 +470,9 @@ contract.
     library APIs while preserving redacted JSON output.
   - [x] Expose replacement summary gate generation through Rust library APIs
     and keep the CLI as a thin wrapper.
+  - [x] Expose typed graph replacement and query-family replacement readiness
+    through Rust library APIs and consume the same results in integration
+    readiness next actions.
   - [x] Expose typed search candidate replacement readiness through Rust
     library APIs for route-level LanceDB replacement gates.
   - [x] Include search-candidate shadow evidence as a first-class
