@@ -76,10 +76,7 @@ pub use api::{
     GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION, GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION,
     SLOW_QUERY_LOG_EVENT_PROTOCOL,
 };
-pub use background_maintenance_evidence::{
-    nowledge_background_maintenance_evidence_json, nowledge_background_maintenance_evidence_usage,
-    run_nowledge_background_maintenance_evidence,
-};
+pub use background_maintenance_evidence::nowledge_background_maintenance_evidence_json;
 pub use blackbox::{
     blackbox_readiness_from_manifest_json, blackbox_report, blackbox_report_json,
     write_blackbox_report, write_blackbox_report_typed, BlackboxArtifactReport,
@@ -88,8 +85,7 @@ pub use blackbox::{
     BlackboxReportOptions, BlackboxRunStatus, BLACKBOX_EVENT_PROTOCOL, BLACKBOX_REPORT_PROTOCOL,
 };
 pub use bounded_read_evidence::{
-    nowledge_bounded_read_evidence_usage, parse_covered_routes_json,
-    parse_graph_route_readiness_json, parse_read_report_json, run_nowledge_bounded_read_evidence,
+    parse_covered_routes_json, parse_graph_route_readiness_json, parse_read_report_json,
 };
 pub use compat::{
     assess_compatibility_cutover, assess_compatibility_cypher_migration_gate_bundle,
@@ -125,26 +121,21 @@ pub use embedded::{SkeinEmbedded, SkeinEmbeddedOpenOptions};
 pub use error::{Result, SkeinError};
 pub use executor::ReadExecutionProfile;
 pub use graph_route_evidence::{
-    nowledge_graph_route_evidence_json, nowledge_graph_route_evidence_usage,
-    nowledge_mem_graph_augmentation_state_route_query,
+    nowledge_graph_route_evidence_json, nowledge_mem_graph_augmentation_state_route_query,
     nowledge_mem_graph_community_members_route_query,
     nowledge_mem_graph_community_recent_memories_route_query,
     nowledge_mem_graph_community_subgraph_route_query, nowledge_mem_graph_node_details_route_query,
     nowledge_mem_graph_orphans_route_query, nowledge_mem_graph_overview_route_query,
     nowledge_mem_graph_pagerank_plan_route_query, nowledge_mem_graph_sample_route_query,
-    parse_route_parity_evidence, parse_route_query_inventory, run_nowledge_graph_route_evidence,
-    RouteCypherQuery, RouteParityEvidence, RouteParityEvidenceRoute, RouteQuery,
+    parse_route_parity_evidence, parse_route_query_inventory, RouteCypherQuery,
+    RouteParityEvidence, RouteParityEvidenceRoute, RouteQuery,
     NMEM_GRAPH_ROUTE_PARITY_EVIDENCE_PROTOCOL,
 };
 pub use graph_route_readiness::{
-    nowledge_graph_route_readiness_json, nowledge_graph_route_readiness_usage,
-    run_nowledge_graph_route_readiness, NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL,
+    nowledge_graph_route_readiness_json, NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL,
     NMEM_GRAPH_ROUTE_READINESS_PROTOCOL,
 };
-pub use mem_integration_bundle::{
-    nowledge_mem_integration_bundle_json, nowledge_mem_integration_bundle_usage,
-    run_nowledge_mem_integration_bundle, IntegrationBundleInputs,
-};
+pub use mem_integration_bundle::{nowledge_mem_integration_bundle_json, IntegrationBundleInputs};
 pub use mem_integration_readiness::{
     background_maintenance_cutover_readiness, bounded_read_alignment_cutover_readiness,
     bounded_read_cutover_readiness, content_store_boundary_cutover_readiness,
@@ -153,34 +144,31 @@ pub use mem_integration_readiness::{
     integration_bundle_protocol_cutover_readiness, legacy_coexistence_cutover_readiness,
     library_readiness_cutover_readiness, nowledge_mem_final_cutover_preflight,
     nowledge_mem_final_cutover_preflight_json, nowledge_mem_integration_readiness,
-    nowledge_mem_integration_readiness_json, nowledge_mem_integration_readiness_usage,
-    previous_wrapper_preflight_cutover_readiness, query_family_replacement_cutover_readiness,
+    nowledge_mem_integration_readiness_json, previous_wrapper_preflight_cutover_readiness,
+    query_family_replacement_cutover_readiness,
     query_runtime_preflight_alignment_cutover_readiness, query_runtime_preflight_cutover_readiness,
     replacement_summary_protocol_cutover_readiness, route_ownership_cutover_readiness,
-    run_nowledge_mem_integration_readiness, search_candidate_cutover_readiness,
-    search_projection_cutover_readiness, skein_submodule_cutover_readiness,
-    storage_recovery_cutover_readiness, BackgroundMaintenanceCutoverReadiness,
-    BoundedReadAlignmentCutoverReadiness, BoundedReadCutoverReadiness,
-    ContentStoreBoundaryCutoverReadiness, GraphReplacementCutoverReadiness,
-    GraphRouteAlignmentCutoverReadiness, GraphRouteCutoverReadiness,
-    GraphRouteParityAlignmentCutoverReadiness, IntegrationBundleProtocolCutoverReadiness,
-    LegacyCoexistenceCutoverReadiness, LibraryReadinessCutoverReadiness,
-    NowledgeMemFinalCutoverPreflightReport, NowledgeMemIntegrationCheckReport,
-    NowledgeMemIntegrationNextAction, NowledgeMemIntegrationReadinessReport,
-    PreviousWrapperPreflightCutoverReadiness, QueryFamilyReplacementCutoverReadiness,
-    QueryRuntimePreflightAlignmentCutoverReadiness, QueryRuntimePreflightCutoverReadiness,
-    ReplacementSummaryProtocolCutoverReadiness, RouteOwnershipCutoverReadiness,
-    SearchCandidateCutoverReadiness, SearchProjectionCutoverReadiness,
-    SkeinSubmoduleCutoverReadiness, StorageRecoveryCutoverReadiness,
-    NOWLEDGE_MEM_FINAL_CUTOVER_PREFLIGHT_PROTOCOL, NOWLEDGE_MEM_INTEGRATION_READINESS_PROTOCOL,
-    NOWLEDGE_MEM_SKEIN_INTEGRATION_BUNDLE_PROTOCOL,
+    search_candidate_cutover_readiness, search_projection_cutover_readiness,
+    skein_submodule_cutover_readiness, storage_recovery_cutover_readiness,
+    BackgroundMaintenanceCutoverReadiness, BoundedReadAlignmentCutoverReadiness,
+    BoundedReadCutoverReadiness, ContentStoreBoundaryCutoverReadiness,
+    GraphReplacementCutoverReadiness, GraphRouteAlignmentCutoverReadiness,
+    GraphRouteCutoverReadiness, GraphRouteParityAlignmentCutoverReadiness,
+    IntegrationBundleProtocolCutoverReadiness, LegacyCoexistenceCutoverReadiness,
+    LibraryReadinessCutoverReadiness, NowledgeMemFinalCutoverPreflightReport,
+    NowledgeMemIntegrationCheckReport, NowledgeMemIntegrationNextAction,
+    NowledgeMemIntegrationReadinessReport, PreviousWrapperPreflightCutoverReadiness,
+    QueryFamilyReplacementCutoverReadiness, QueryRuntimePreflightAlignmentCutoverReadiness,
+    QueryRuntimePreflightCutoverReadiness, ReplacementSummaryProtocolCutoverReadiness,
+    RouteOwnershipCutoverReadiness, SearchCandidateCutoverReadiness,
+    SearchProjectionCutoverReadiness, SkeinSubmoduleCutoverReadiness,
+    StorageRecoveryCutoverReadiness, NOWLEDGE_MEM_FINAL_CUTOVER_PREFLIGHT_PROTOCOL,
+    NOWLEDGE_MEM_INTEGRATION_READINESS_PROTOCOL, NOWLEDGE_MEM_SKEIN_INTEGRATION_BUNDLE_PROTOCOL,
 };
 pub use mem_library_readiness::{
-    nowledge_mem_library_readiness_usage, parse_bounded_probe_json,
-    parse_mem_library_covered_routes_json, parse_mem_library_graph_route_readiness_json,
-    parse_mem_library_readiness_mode, parse_parameters_json, run_nowledge_mem_library_readiness,
-    run_nowledge_mem_library_readiness_report, value_from_json,
-    NowledgeMemLibraryReadinessRunReport,
+    parse_bounded_probe_json, parse_mem_library_covered_routes_json,
+    parse_mem_library_graph_route_readiness_json, parse_mem_library_readiness_mode,
+    parse_parameters_json, value_from_json, NowledgeMemLibraryReadinessRunReport,
 };
 pub use nowledge_fuzz::{
     nowledge_query_fuzz_harness, NowledgeQueryFuzzCaseReport, NowledgeQueryFuzzHarnessOptions,
@@ -297,19 +285,14 @@ pub use qos::{
     LocalQosState, QosAdmission, QosAdmissionCode, QosSnapshotBlockerCode, RankedBackgroundWork,
     WorkClass, WorkPriority, WorkRequest, WORK_CLASS_COUNT,
 };
-pub use query_family_evidence::{
-    nowledge_query_family_evidence_json, nowledge_query_family_evidence_usage,
-    run_nowledge_query_family_evidence,
-};
+pub use query_family_evidence::nowledge_query_family_evidence_json;
 pub use query_runtime_preflight::{
-    nowledge_query_runtime_preflight_usage, parse_query_runtime_preflight_probes,
-    query_runtime_preflight_json, run_nowledge_query_runtime_preflight,
+    parse_query_runtime_preflight_probes, query_runtime_preflight_json,
 };
 pub use replacement_summary::{
     nowledge_graph_route_readiness_summary, nowledge_graph_route_readiness_summary_from_bundle,
     nowledge_replacement_summary_json, nowledge_replacement_summary_json_with_options,
-    nowledge_replacement_summary_usage, GraphRouteReadinessSummary,
-    NowledgeReplacementSummaryOptions,
+    GraphRouteReadinessSummary, NowledgeReplacementSummaryOptions,
 };
 pub use route_ownership::{
     nowledge_mem_route_ownership_all_legacy, nowledge_mem_route_ownership_all_skein,
@@ -335,25 +318,15 @@ pub use search::{
     SearchResultSet, SearchRetrieverCandidateSetReport, SearchTruncationReasonCode,
     NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
 };
-pub use search_candidate_shadow_evidence::{
-    nowledge_search_candidate_shadow_evidence_usage, parse_search_candidate_shadow_probe,
-    run_nowledge_search_candidate_shadow_evidence,
-};
+pub use search_candidate_shadow_evidence::parse_search_candidate_shadow_probe;
 pub use search_projection_evidence::{
-    nowledge_search_projection_evidence_usage, nowledge_search_projection_probe_contract_json,
-    nowledge_search_projection_probe_contract_usage,
-    nowledge_search_projection_shadow_evidence_usage, run_nowledge_search_projection_evidence,
-    run_nowledge_search_projection_shadow_evidence, run_skein_search_projection_probe,
-    skein_search_projection_probe_usage, NowledgeSearchProjectionEvidenceReport,
+    nowledge_search_projection_probe_contract_json, NowledgeSearchProjectionEvidenceReport,
 };
 pub use skein_optimizer::{
     Distribution, GroupId, Memo as OptimizerMemo, MemoGroup as OptimizerMemoGroup,
     PhysicalProperties, RequiredProperties,
 };
-pub use storage_recovery_evidence::{
-    nowledge_storage_recovery_evidence_json, nowledge_storage_recovery_evidence_usage,
-    run_nowledge_storage_recovery_evidence,
-};
+pub use storage_recovery_evidence::nowledge_storage_recovery_evidence_json;
 pub use store::{
     AdjacencyConsistencyReport, AdjacencyDirection, AdjacencyGroupConsistencyMismatch,
     AdjacencyGroupKey, AdjacencyGroupStats, AdjacencyLayout, BasicStatisticsConsistencyReport,

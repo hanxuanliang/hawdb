@@ -415,6 +415,9 @@ contract.
   - [x] Update external shadow, replacement matrix, and architecture docs so CLI
     compatibility commands are described as isolated evidence generators, not
     production serving or cutover-decision paths.
+  - [x] Stop re-exporting CLI-style `run_nowledge_*` command adapters from the
+    crate root, so embedded Mem callers default to typed library APIs while
+    developer wrappers remain isolated in CLI modules.
 
 ## P0: Graph Kernel Compatibility
 
