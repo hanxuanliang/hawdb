@@ -846,61 +846,14 @@ pub fn nowledge_mem_integration_readiness(
             library_readiness_cutover_conditions(&library_readiness),
             library_readiness.blocker_codes.clone(),
         ),
-        check(
+        check_named_conditions(
             "background_maintenance_evidence",
-            [
-                background_maintenance_readiness.required,
-                background_maintenance_readiness.ready,
-                background_maintenance_readiness.protocol_matches,
-                background_maintenance_readiness
-                    .executable_search_projection_graph_delta_count_present,
-                background_maintenance_readiness
-                    .admitted_search_projection_graph_delta_count_present,
-                background_maintenance_readiness
-                    .deferred_search_projection_graph_delta_count_present,
-                background_maintenance_readiness
-                    .rejected_search_projection_graph_delta_count_present,
-                background_maintenance_readiness
-                    .executable_search_projection_graph_delta_operations_present,
-                background_maintenance_readiness
-                    .admitted_search_projection_graph_delta_operations_present,
-                background_maintenance_readiness
-                    .max_search_projection_graph_delta_complete_through_graph_commit_epoch_present,
-            ],
-            [
-                "replacement_summary.cutover_evidence.background_maintenance_required",
-                "replacement_summary.cutover_evidence.background_maintenance_ready",
-                "replacement_summary.cutover_evidence.background_maintenance_protocol_matches",
-                "replacement_summary.cutover_evidence.background_maintenance_executable_search_projection_graph_delta_count",
-                "replacement_summary.cutover_evidence.background_maintenance_admitted_search_projection_graph_delta_count",
-                "replacement_summary.cutover_evidence.background_maintenance_deferred_search_projection_graph_delta_count",
-                "replacement_summary.cutover_evidence.background_maintenance_rejected_search_projection_graph_delta_count",
-                "replacement_summary.cutover_evidence.background_maintenance_executable_search_projection_graph_delta_operations",
-                "replacement_summary.cutover_evidence.background_maintenance_admitted_search_projection_graph_delta_operations",
-                "replacement_summary.cutover_evidence.background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch",
-            ],
+            background_maintenance_cutover_conditions(&background_maintenance_readiness),
             background_maintenance_readiness.blocker_codes.clone(),
         ),
-        check(
+        check_named_conditions(
             "storage_recovery_evidence",
-            [
-                storage_recovery_readiness.required,
-                storage_recovery_readiness.ready,
-                storage_recovery_readiness.protocol_matches,
-                storage_recovery_readiness.durable,
-                storage_recovery_readiness.checkpoint_boundary_present,
-                storage_recovery_readiness.wal_replay_bounded,
-                storage_recovery_readiness.torn_tail_clean,
-            ],
-            [
-                "replacement_summary.cutover_evidence.storage_recovery_required",
-                "replacement_summary.cutover_evidence.storage_recovery_ready",
-                "replacement_summary.cutover_evidence.storage_recovery_protocol_matches",
-                "replacement_summary.cutover_evidence.storage_recovery_durable",
-                "replacement_summary.cutover_evidence.storage_recovery_checkpoint_boundary_present",
-                "replacement_summary.cutover_evidence.storage_recovery_wal_replay_bounded",
-                "replacement_summary.cutover_evidence.storage_recovery_torn_tail_clean",
-            ],
+            storage_recovery_cutover_conditions(&storage_recovery_readiness),
             storage_recovery_readiness.blocker_codes.clone(),
         ),
         check(
@@ -3767,6 +3720,41 @@ pub fn storage_recovery_cutover_readiness(
     }
 }
 
+fn storage_recovery_cutover_conditions(
+    readiness: &StorageRecoveryCutoverReadiness,
+) -> Vec<(&'static str, bool)> {
+    vec![
+        (
+            "replacement_summary.cutover_evidence.storage_recovery_required",
+            readiness.required,
+        ),
+        (
+            "replacement_summary.cutover_evidence.storage_recovery_ready",
+            readiness.ready,
+        ),
+        (
+            "replacement_summary.cutover_evidence.storage_recovery_protocol_matches",
+            readiness.protocol_matches,
+        ),
+        (
+            "replacement_summary.cutover_evidence.storage_recovery_durable",
+            readiness.durable,
+        ),
+        (
+            "replacement_summary.cutover_evidence.storage_recovery_checkpoint_boundary_present",
+            readiness.checkpoint_boundary_present,
+        ),
+        (
+            "replacement_summary.cutover_evidence.storage_recovery_wal_replay_bounded",
+            readiness.wal_replay_bounded,
+        ),
+        (
+            "replacement_summary.cutover_evidence.storage_recovery_torn_tail_clean",
+            readiness.torn_tail_clean,
+        ),
+    ]
+}
+
 fn bounded_read_execution_cap_matches(bundle: &serde_json::Value) -> bool {
     let max_rows = u64_path(
         bundle,
@@ -3890,6 +3878,54 @@ pub fn background_maintenance_cutover_readiness(
             ],
         ),
     }
+}
+
+fn background_maintenance_cutover_conditions(
+    readiness: &BackgroundMaintenanceCutoverReadiness,
+) -> Vec<(&'static str, bool)> {
+    vec![
+        (
+            "replacement_summary.cutover_evidence.background_maintenance_required",
+            readiness.required,
+        ),
+        (
+            "replacement_summary.cutover_evidence.background_maintenance_ready",
+            readiness.ready,
+        ),
+        (
+            "replacement_summary.cutover_evidence.background_maintenance_protocol_matches",
+            readiness.protocol_matches,
+        ),
+        (
+            "replacement_summary.cutover_evidence.background_maintenance_executable_search_projection_graph_delta_count",
+            readiness.executable_search_projection_graph_delta_count_present,
+        ),
+        (
+            "replacement_summary.cutover_evidence.background_maintenance_admitted_search_projection_graph_delta_count",
+            readiness.admitted_search_projection_graph_delta_count_present,
+        ),
+        (
+            "replacement_summary.cutover_evidence.background_maintenance_deferred_search_projection_graph_delta_count",
+            readiness.deferred_search_projection_graph_delta_count_present,
+        ),
+        (
+            "replacement_summary.cutover_evidence.background_maintenance_rejected_search_projection_graph_delta_count",
+            readiness.rejected_search_projection_graph_delta_count_present,
+        ),
+        (
+            "replacement_summary.cutover_evidence.background_maintenance_executable_search_projection_graph_delta_operations",
+            readiness.executable_search_projection_graph_delta_operations_present,
+        ),
+        (
+            "replacement_summary.cutover_evidence.background_maintenance_admitted_search_projection_graph_delta_operations",
+            readiness.admitted_search_projection_graph_delta_operations_present,
+        ),
+        (
+            "replacement_summary.cutover_evidence.background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch",
+            readiness
+                .max_search_projection_graph_delta_complete_through_graph_commit_epoch_present,
+        ),
+    ]
 }
 
 fn string_array_path(value: &serde_json::Value, path: &[&str]) -> Vec<String> {

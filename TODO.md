@@ -215,9 +215,14 @@ contract.
   - [x] Expose and consume typed storage-recovery cutover readiness so Mem can
     inspect durable recovery gates without reimplementing replacement-summary
     JSON-path checks.
+  - [x] Route storage-recovery integration checks through typed conditions so
+    field-level recovery failures and next actions consume the same Rust gate
+    summary.
   - [x] Expose and consume typed background-maintenance cutover readiness so Mem
     can inspect QoS and search-projection graph-delta gates without duplicating
     replacement-summary JSON-path checks.
+  - [x] Route background-maintenance integration checks through typed conditions
+    so QoS evidence failures and next actions consume the same Rust gate summary.
   - [x] Consume typed library-readiness cutover summaries in integration
     readiness so Mem can gate library startup and required areas without
     duplicating readiness JSON-path checks.
