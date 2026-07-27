@@ -344,6 +344,11 @@ pub struct SearchCandidateCutoverReadiness {
     pub vector_retriever_ready: bool,
     pub fts_top_k_overlap_ready: bool,
     pub vector_top_k_overlap_ready: bool,
+    pub source_chunk_identity_ready: bool,
+    pub fail_soft_observed: bool,
+    pub projection_marker_status_visible: bool,
+    pub projection_watermark_ready: bool,
+    pub embedding_identity_ready: bool,
     pub candidate_identity_ready: bool,
     pub filter_pushdown_ready: bool,
     pub filter_pushdown_field_summary_present: bool,
@@ -650,6 +655,11 @@ impl SearchCandidateCutoverReadiness {
             && self.vector_retriever_ready
             && self.fts_top_k_overlap_ready
             && self.vector_top_k_overlap_ready
+            && self.source_chunk_identity_ready
+            && self.fail_soft_observed
+            && self.projection_marker_status_visible
+            && self.projection_watermark_ready
+            && self.embedding_identity_ready
             && self.candidate_identity_ready
             && self.filter_pushdown_ready
             && self.filter_pushdown_field_summary_present
@@ -1604,6 +1614,11 @@ fn next_actions(
                 "search_candidate_shadow_evidence.vector_retriever_ready",
                 "search_candidate_shadow_evidence.fts_top_k_overlap_ready",
                 "search_candidate_shadow_evidence.vector_top_k_overlap_ready",
+                "search_candidate_shadow_evidence.candidate_readiness.source_chunk_identity_ready",
+                "search_candidate_shadow_evidence.candidate_readiness.fail_soft_observed",
+                "search_candidate_shadow_evidence.candidate_readiness.projection_marker_status_visible",
+                "search_candidate_shadow_evidence.candidate_readiness.projection_watermark_ready",
+                "search_candidate_shadow_evidence.candidate_readiness.embedding_identity_ready",
                 "search_candidate_shadow_evidence.candidate_identity.ready",
                 "search_candidate_shadow_evidence.shadow_scan_filter_pushdown_ready",
                 "search_candidate_shadow_evidence.shadow_scan_field_pruning_ready",
@@ -2638,6 +2653,46 @@ pub fn search_candidate_cutover_readiness(
                 "vector_top_k_overlap_ready",
             ],
         ) == Some(true),
+        source_chunk_identity_ready: bool_path(
+            bundle,
+            &[
+                "search_candidate_shadow_evidence",
+                "candidate_readiness",
+                "source_chunk_identity_ready",
+            ],
+        ) == Some(true),
+        fail_soft_observed: bool_path(
+            bundle,
+            &[
+                "search_candidate_shadow_evidence",
+                "candidate_readiness",
+                "fail_soft_observed",
+            ],
+        ) == Some(true),
+        projection_marker_status_visible: bool_path(
+            bundle,
+            &[
+                "search_candidate_shadow_evidence",
+                "candidate_readiness",
+                "projection_marker_status_visible",
+            ],
+        ) == Some(true),
+        projection_watermark_ready: bool_path(
+            bundle,
+            &[
+                "search_candidate_shadow_evidence",
+                "candidate_readiness",
+                "projection_watermark_ready",
+            ],
+        ) == Some(true),
+        embedding_identity_ready: bool_path(
+            bundle,
+            &[
+                "search_candidate_shadow_evidence",
+                "candidate_readiness",
+                "embedding_identity_ready",
+            ],
+        ) == Some(true),
         candidate_identity_ready: bool_path(
             bundle,
             &[
@@ -2738,6 +2793,26 @@ fn search_candidate_cutover_conditions(
         (
             "search_candidate_shadow_evidence.vector_top_k_overlap_ready",
             readiness.vector_top_k_overlap_ready,
+        ),
+        (
+            "search_candidate_shadow_evidence.candidate_readiness.source_chunk_identity_ready",
+            readiness.source_chunk_identity_ready,
+        ),
+        (
+            "search_candidate_shadow_evidence.candidate_readiness.fail_soft_observed",
+            readiness.fail_soft_observed,
+        ),
+        (
+            "search_candidate_shadow_evidence.candidate_readiness.projection_marker_status_visible",
+            readiness.projection_marker_status_visible,
+        ),
+        (
+            "search_candidate_shadow_evidence.candidate_readiness.projection_watermark_ready",
+            readiness.projection_watermark_ready,
+        ),
+        (
+            "search_candidate_shadow_evidence.candidate_readiness.embedding_identity_ready",
+            readiness.embedding_identity_ready,
         ),
         (
             "search_candidate_shadow_evidence.candidate_identity.ready",
@@ -5935,6 +6010,43 @@ mod tests {
     }
 
     #[test]
+    fn requires_search_candidate_readiness_evidence() {
+        let mut bundle = ready_bundle();
+        bundle["search_candidate_shadow_evidence"]["ready"] = serde_json::json!(true);
+        bundle["search_candidate_shadow_evidence"]["candidate_readiness"] = serde_json::json!({
+            "source_chunk_identity_ready": false,
+            "fail_soft_observed": false,
+            "projection_marker_status_visible": false,
+            "projection_watermark_ready": false,
+            "embedding_identity_ready": false,
+        });
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["search_candidate_primary_evidence"])
+        );
+        let candidate_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "search_candidate_primary_evidence")
+            .unwrap();
+        assert_eq!(
+            candidate_check["failed_evidence_fields"],
+            serde_json::json!([
+                "search_candidate_shadow_evidence.candidate_readiness.source_chunk_identity_ready",
+                "search_candidate_shadow_evidence.candidate_readiness.fail_soft_observed",
+                "search_candidate_shadow_evidence.candidate_readiness.projection_marker_status_visible",
+                "search_candidate_shadow_evidence.candidate_readiness.projection_watermark_ready",
+                "search_candidate_shadow_evidence.candidate_readiness.embedding_identity_ready"
+            ])
+        );
+    }
+
+    #[test]
     fn rejects_search_candidate_trace_evidence_for_library_readiness() {
         let mut bundle = ready_bundle();
         bundle["search_candidate_shadow_evidence"] = ready_search_candidate_trace_evidence();
@@ -5960,6 +6072,11 @@ mod tests {
                 "search_candidate_shadow_evidence.candidate_counts",
                 "search_candidate_shadow_evidence.text_retriever_ready",
                 "search_candidate_shadow_evidence.vector_retriever_ready",
+                "search_candidate_shadow_evidence.candidate_readiness.source_chunk_identity_ready",
+                "search_candidate_shadow_evidence.candidate_readiness.fail_soft_observed",
+                "search_candidate_shadow_evidence.candidate_readiness.projection_marker_status_visible",
+                "search_candidate_shadow_evidence.candidate_readiness.projection_watermark_ready",
+                "search_candidate_shadow_evidence.candidate_readiness.embedding_identity_ready",
                 "search_candidate_shadow_evidence.candidate_identity.ready",
                 "search_candidate_shadow_evidence.filter_pushdown.ready",
                 "search_candidate_shadow_evidence.filter_pushdown.field_summary_count",
@@ -5985,6 +6102,11 @@ mod tests {
         assert!(typed.vector_retriever_ready);
         assert!(typed.fts_top_k_overlap_ready);
         assert!(typed.vector_top_k_overlap_ready);
+        assert!(typed.source_chunk_identity_ready);
+        assert!(typed.fail_soft_observed);
+        assert!(typed.projection_marker_status_visible);
+        assert!(typed.projection_watermark_ready);
+        assert!(typed.embedding_identity_ready);
         assert!(typed.candidate_identity_ready);
         assert!(typed.filter_pushdown_ready);
         assert!(typed.filter_pushdown_field_summary_present);
@@ -6040,6 +6162,11 @@ mod tests {
                 "search_candidate_shadow_evidence.vector_retriever_ready",
                 "search_candidate_shadow_evidence.fts_top_k_overlap_ready",
                 "search_candidate_shadow_evidence.vector_top_k_overlap_ready",
+                "search_candidate_shadow_evidence.candidate_readiness.source_chunk_identity_ready",
+                "search_candidate_shadow_evidence.candidate_readiness.fail_soft_observed",
+                "search_candidate_shadow_evidence.candidate_readiness.projection_marker_status_visible",
+                "search_candidate_shadow_evidence.candidate_readiness.projection_watermark_ready",
+                "search_candidate_shadow_evidence.candidate_readiness.embedding_identity_ready",
                 "search_candidate_shadow_evidence.candidate_identity.ready",
                 "search_candidate_shadow_evidence.filter_pushdown.ready",
                 "search_candidate_shadow_evidence.filter_pushdown.field_summary_count",
@@ -8825,6 +8952,13 @@ mod tests {
         bundle["search_candidate_shadow_evidence"]["top_k_overlap_observed"] = serde_json::json!({
             "fts": true,
             "vector": true,
+        });
+        bundle["search_candidate_shadow_evidence"]["candidate_readiness"] = serde_json::json!({
+            "source_chunk_identity_ready": true,
+            "fail_soft_observed": true,
+            "projection_marker_status_visible": true,
+            "projection_watermark_ready": true,
+            "embedding_identity_ready": true,
         });
         bundle["library_readiness"] = ready_library_readiness();
         bundle["blackbox_manifest"] = ready_blackbox_manifest();

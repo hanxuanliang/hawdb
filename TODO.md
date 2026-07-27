@@ -221,6 +221,9 @@ contract.
   - [x] Carry compact candidate-readiness signals in Rust-bridge search
     candidate shadow evidence, including projection marker, watermark, and
     embedding identity readiness.
+  - [x] Require replacement summary, integration readiness, and final preflight
+    to fail closed on missing search-candidate readiness signals from
+    Rust-bridge shadow evidence.
 - [ ] PR 6: Prove WAL and checkpoint recovery with Mem-shaped mutations.
   - Scope: add fixtures for committed batch replay, torn WAL tail handling, and
     checkpoint replay boundaries that match Mem graph/search writes.

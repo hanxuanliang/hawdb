@@ -6576,6 +6576,37 @@ fn search_candidate_shadow_readiness_blocker_codes(evidence: &serde_json::Value)
     if evidence_bool(evidence, "vector_top_k_overlap_ready") != Some(true) {
         blockers.insert("search_candidate_vector_top_k_overlap_not_ready".to_string());
     }
+    if nested_bool(
+        evidence,
+        &["candidate_readiness", "source_chunk_identity_ready"],
+    ) != Some(true)
+    {
+        blockers.insert("search_candidate_source_chunk_identity_not_ready".to_string());
+    }
+    if nested_bool(evidence, &["candidate_readiness", "fail_soft_observed"]) != Some(true) {
+        blockers.insert("search_candidate_fail_soft_not_observed".to_string());
+    }
+    if nested_bool(
+        evidence,
+        &["candidate_readiness", "projection_marker_status_visible"],
+    ) != Some(true)
+    {
+        blockers.insert("search_candidate_projection_marker_status_missing".to_string());
+    }
+    if nested_bool(
+        evidence,
+        &["candidate_readiness", "projection_watermark_ready"],
+    ) != Some(true)
+    {
+        blockers.insert("search_candidate_projection_watermark_missing".to_string());
+    }
+    if nested_bool(
+        evidence,
+        &["candidate_readiness", "embedding_identity_ready"],
+    ) != Some(true)
+    {
+        blockers.insert("search_candidate_embedding_identity_not_ready".to_string());
+    }
     if nested_bool(evidence, &["candidate_identity", "ready"]) != Some(true)
         || nested_bool(evidence, &["candidate_identity", "parity"]) != Some(true)
     {

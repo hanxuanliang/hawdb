@@ -2002,6 +2002,13 @@ mod tests {
             "fts": true,
             "vector": true,
         });
+        evidence["candidate_readiness"] = serde_json::json!({
+            "source_chunk_identity_ready": true,
+            "fail_soft_observed": true,
+            "projection_marker_status_visible": true,
+            "projection_watermark_ready": true,
+            "embedding_identity_ready": true,
+        });
         evidence
     }
 
