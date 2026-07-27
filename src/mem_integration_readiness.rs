@@ -33,6 +33,8 @@ pub const NOWLEDGE_MEM_INTEGRATION_READINESS_PROTOCOL: &str =
     "skein-nowledge-mem-integration-readiness";
 pub const NOWLEDGE_MEM_SKEIN_INTEGRATION_BUNDLE_PROTOCOL: &str =
     "nowledge-mem-skein-integration-bundle";
+pub const NOWLEDGE_MEM_FINAL_CUTOVER_PREFLIGHT_PROTOCOL: &str =
+    "skein-nowledge-mem-final-cutover-preflight-v1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NowledgeMemIntegrationCheckReport {
@@ -91,6 +93,37 @@ impl NowledgeMemIntegrationReadinessReport {
             "checks": self.checks.iter().map(NowledgeMemIntegrationCheckReport::json).collect::<Vec<_>>(),
             "blocker_codes": self.blocker_codes,
             "next_actions": self.next_actions.iter().map(NowledgeMemIntegrationNextAction::json).collect::<Vec<_>>(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemFinalCutoverPreflightReport {
+    pub protocol: String,
+    pub production_cutover_ready: bool,
+    pub integration_ready: bool,
+    pub replacement_summary_production_cutover_ready: bool,
+    pub check_count: usize,
+    pub ready_check_count: usize,
+    pub failed_check_count: usize,
+    pub failed_checks: Vec<String>,
+    pub failed_evidence_fields: Vec<String>,
+    pub blocker_codes: Vec<String>,
+}
+
+impl NowledgeMemFinalCutoverPreflightReport {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": self.protocol,
+            "production_cutover_ready": self.production_cutover_ready,
+            "integration_ready": self.integration_ready,
+            "replacement_summary_production_cutover_ready": self.replacement_summary_production_cutover_ready,
+            "check_count": self.check_count,
+            "ready_check_count": self.ready_check_count,
+            "failed_check_count": self.failed_check_count,
+            "failed_checks": self.failed_checks,
+            "failed_evidence_fields": self.failed_evidence_fields,
+            "blocker_codes": self.blocker_codes,
         })
     }
 }
@@ -734,6 +767,44 @@ pub fn run_nowledge_mem_integration_readiness(
 
 pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> serde_json::Value {
     nowledge_mem_integration_readiness(bundle).json()
+}
+
+pub fn nowledge_mem_final_cutover_preflight_json(bundle: &serde_json::Value) -> serde_json::Value {
+    nowledge_mem_final_cutover_preflight(bundle).json()
+}
+
+pub fn nowledge_mem_final_cutover_preflight(
+    bundle: &serde_json::Value,
+) -> NowledgeMemFinalCutoverPreflightReport {
+    let integration = nowledge_mem_integration_readiness(bundle);
+    let graph_replacement = graph_replacement_cutover_readiness(bundle);
+    let failed_evidence_fields = integration
+        .checks
+        .iter()
+        .flat_map(|check| check.failed_evidence_fields.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let ready_check_count = integration
+        .checks
+        .iter()
+        .filter(|check| check.ready)
+        .count();
+    let check_count = integration.checks.len();
+    let replacement_summary_production_cutover_ready =
+        graph_replacement.production_cutover_ready && graph_replacement.evidence_ready();
+    NowledgeMemFinalCutoverPreflightReport {
+        protocol: NOWLEDGE_MEM_FINAL_CUTOVER_PREFLIGHT_PROTOCOL.to_string(),
+        production_cutover_ready: integration.ready && replacement_summary_production_cutover_ready,
+        integration_ready: integration.ready,
+        replacement_summary_production_cutover_ready,
+        check_count,
+        ready_check_count,
+        failed_check_count: check_count.saturating_sub(ready_check_count),
+        failed_checks: integration.failed_checks,
+        failed_evidence_fields,
+        blocker_codes: integration.blocker_codes,
+    }
 }
 
 pub fn nowledge_mem_integration_readiness(
@@ -4696,6 +4767,74 @@ mod tests {
             .unwrap()
             .iter()
             .any(|action| action["action"] == "run_previous_wrapper_preflight"));
+    }
+
+    #[test]
+    fn exposes_typed_final_cutover_preflight_report() {
+        let bundle = ready_bundle();
+
+        let report = super::nowledge_mem_final_cutover_preflight(&bundle);
+
+        assert_eq!(
+            report.protocol,
+            super::NOWLEDGE_MEM_FINAL_CUTOVER_PREFLIGHT_PROTOCOL
+        );
+        assert!(report.production_cutover_ready);
+        assert!(report.integration_ready);
+        assert!(report.replacement_summary_production_cutover_ready);
+        assert!(report.check_count > 0);
+        assert_eq!(report.ready_check_count, report.check_count);
+        assert_eq!(report.failed_check_count, 0);
+        assert!(report.failed_checks.is_empty());
+        assert!(report.failed_evidence_fields.is_empty());
+        assert!(report.blocker_codes.is_empty());
+
+        let json = report.json();
+        assert_eq!(json["production_cutover_ready"], true);
+        assert!(json.get("checks").is_none());
+        assert!(json.get("next_actions").is_none());
+    }
+
+    #[test]
+    fn final_cutover_preflight_fails_closed_on_missing_integration_evidence() {
+        let mut bundle = ready_bundle();
+        bundle["content_store"]["source_chunks_available"] = serde_json::json!(false);
+
+        let report = super::nowledge_mem_final_cutover_preflight(&bundle);
+
+        assert!(!report.production_cutover_ready);
+        assert!(!report.integration_ready);
+        assert!(report.replacement_summary_production_cutover_ready);
+        assert!(report
+            .failed_checks
+            .contains(&"content_store_boundary".to_string()));
+        assert!(report
+            .failed_evidence_fields
+            .contains(&"content_store.source_chunks_available".to_string()));
+        assert_eq!(report.failed_check_count, 1);
+    }
+
+    #[test]
+    fn final_cutover_preflight_fails_closed_on_replacement_summary_cutover() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary"]["production_cutover_ready"] = serde_json::json!(false);
+        bundle["replacement_summary"]["blocking_categories"] =
+            serde_json::json!(["graph_replacement"]);
+
+        let report = super::nowledge_mem_final_cutover_preflight(&bundle);
+
+        assert!(!report.production_cutover_ready);
+        assert!(!report.integration_ready);
+        assert!(!report.replacement_summary_production_cutover_ready);
+        assert!(report
+            .failed_checks
+            .contains(&"graph_replacement_evidence".to_string()));
+        assert!(report
+            .failed_evidence_fields
+            .contains(&"replacement_summary.production_cutover_ready".to_string()));
+        assert!(report
+            .blocker_codes
+            .contains(&"graph_replacement".to_string()));
     }
 
     #[test]

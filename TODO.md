@@ -293,6 +293,9 @@ contract.
   - [x] Require final previous-wrapper preflight to recompute bounded-read
     payload budget, row cap, streaming, blocking-operator, route-readiness, and
     pruning evidence from replacement summary instead of trusting `ready=true`.
+  - [x] Expose a typed final cutover preflight report through Rust library APIs
+    with compact redacted diagnostics over integration readiness and replacement
+    summary production cutover evidence.
 - [ ] PR 10: Remove or quarantine obsolete compatibility paths.
   - Scope: after gates are satisfied, remove unused CLI-only, Python-only, and
     request-time shadow compare code from the production path.
