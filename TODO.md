@@ -502,6 +502,8 @@ contract.
   - [x] Require blackbox background QoS readiness to include deferral and
     rejection counters, graph-delta operation counts, watermark evidence, and
     memory-pressure budget fields before operational evidence can pass.
+  - [x] Require Mem integration readiness to consume strict blackbox background
+    QoS evidence so missing memory-pressure budgets block production cutover.
   - [x] Redact background-maintenance evidence JSON parse failures by default
     so local artifact paths and QoS payload fragments are not copied into
     command errors.

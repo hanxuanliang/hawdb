@@ -5351,6 +5351,54 @@ mod tests {
     }
 
     #[test]
+    fn requires_blackbox_background_qos_memory_pressure_evidence() {
+        let mut bundle = ready_bundle();
+        let artifacts = bundle["blackbox_manifest"]["artifacts"]
+            .as_array_mut()
+            .unwrap();
+        let background_artifact = artifacts
+            .iter_mut()
+            .find(|artifact| artifact["name"] == "background-maintenance.json")
+            .unwrap();
+        let background_qos = background_artifact["background_qos"]
+            .as_object_mut()
+            .unwrap();
+        background_qos.remove("memory_pressure_ready");
+        background_qos.remove("memory_budget_bytes");
+        background_qos.remove("estimated_memory_bytes");
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["blackbox_operational_evidence"])
+        );
+        assert!(report["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "blackbox_background_qos_summary_missing"));
+        let blackbox_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "blackbox_operational_evidence")
+            .unwrap();
+        assert_eq!(
+            blackbox_check["failed_evidence_fields"],
+            serde_json::json!([
+                "blackbox_manifest.artifacts.background-maintenance.json.background_qos"
+            ])
+        );
+        assert!(report["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "attach_blackbox_operational_evidence"));
+    }
+
+    #[test]
     fn requires_versioned_integration_bundle_protocol() {
         let mut bundle = ready_bundle();
         bundle.as_object_mut().unwrap().remove("protocol");
