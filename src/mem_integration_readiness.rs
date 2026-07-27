@@ -28,6 +28,45 @@ const SKEIN_NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL: &str =
 const SKEIN_NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL: &str = "skein-nowledge-mem-query-report-v1";
 const ROUTE_PARITY_EVIDENCE_SOURCE: &str = "route_parity_evidence";
 const ROUTE_PARITY_FULL_MATCH_PER_MILLION: u64 = 1_000_000;
+const FINAL_CATEGORY_STARTUP: &str = "startup";
+const FINAL_CATEGORY_ROUTE_COVERAGE: &str = "route_coverage";
+const FINAL_CATEGORY_GRAPH_REPLACEMENT: &str = "graph_replacement";
+const FINAL_CATEGORY_SEARCH_PROJECTION: &str = "search_projection";
+const FINAL_CATEGORY_STORAGE_RECOVERY: &str = "storage_recovery";
+const FINAL_CATEGORY_BACKGROUND_QOS: &str = "background_qos";
+const FINAL_CATEGORY_BLACKBOX: &str = "blackbox";
+const FINAL_CATEGORY_LIBRARY_ONLY: &str = "library_only";
+const FINAL_CATEGORY_REPLACEMENT_SUMMARY_CUTOVER: &str = "replacement_summary_cutover";
+
+const STARTUP_CHECKS: &[&str] = &[
+    "integration_bundle_protocol",
+    "replacement_summary_protocol",
+    "skein_submodule",
+    "legacy_coexistence",
+    "content_store_boundary",
+    "previous_wrapper_preflight",
+];
+const ROUTE_COVERAGE_CHECKS: &[&str] = &[
+    "bounded_read_evidence",
+    "bounded_read_evidence_alignment",
+    "graph_route_readiness",
+    "graph_route_readiness_alignment",
+    "graph_route_parity_alignment",
+    "query_runtime_preflight",
+    "query_runtime_preflight_alignment",
+];
+const GRAPH_REPLACEMENT_CHECKS: &[&str] = &[
+    "graph_replacement_evidence",
+    "query_family_replacement_evidence",
+];
+const SEARCH_PROJECTION_CHECKS: &[&str] = &[
+    "search_projection_replacement_evidence",
+    "search_candidate_primary_evidence",
+];
+const STORAGE_RECOVERY_CHECKS: &[&str] = &["storage_recovery_evidence"];
+const BACKGROUND_QOS_CHECKS: &[&str] = &["background_maintenance_evidence"];
+const BLACKBOX_CHECKS: &[&str] = &["blackbox_redaction", "blackbox_operational_evidence"];
+const LIBRARY_ONLY_CHECKS: &[&str] = &["library_readiness"];
 
 pub const NOWLEDGE_MEM_INTEGRATION_READINESS_PROTOCOL: &str =
     "skein-nowledge-mem-integration-readiness";
@@ -103,9 +142,20 @@ pub struct NowledgeMemFinalCutoverPreflightReport {
     pub production_cutover_ready: bool,
     pub integration_ready: bool,
     pub replacement_summary_production_cutover_ready: bool,
+    pub startup_ready: bool,
+    pub route_coverage_ready: bool,
+    pub graph_replacement_ready: bool,
+    pub search_projection_ready: bool,
+    pub storage_recovery_ready: bool,
+    pub background_qos_ready: bool,
+    pub blackbox_ready: bool,
+    pub library_only_ready: bool,
     pub check_count: usize,
     pub ready_check_count: usize,
     pub failed_check_count: usize,
+    pub next_action_count: usize,
+    pub next_action_names: Vec<String>,
+    pub blocking_categories: Vec<String>,
     pub failed_checks: Vec<String>,
     pub failed_evidence_fields: Vec<String>,
     pub blocker_codes: Vec<String>,
@@ -118,9 +168,20 @@ impl NowledgeMemFinalCutoverPreflightReport {
             "production_cutover_ready": self.production_cutover_ready,
             "integration_ready": self.integration_ready,
             "replacement_summary_production_cutover_ready": self.replacement_summary_production_cutover_ready,
+            "startup_ready": self.startup_ready,
+            "route_coverage_ready": self.route_coverage_ready,
+            "graph_replacement_ready": self.graph_replacement_ready,
+            "search_projection_ready": self.search_projection_ready,
+            "storage_recovery_ready": self.storage_recovery_ready,
+            "background_qos_ready": self.background_qos_ready,
+            "blackbox_ready": self.blackbox_ready,
+            "library_only_ready": self.library_only_ready,
             "check_count": self.check_count,
             "ready_check_count": self.ready_check_count,
             "failed_check_count": self.failed_check_count,
+            "next_action_count": self.next_action_count,
+            "next_action_names": self.next_action_names,
+            "blocking_categories": self.blocking_categories,
             "failed_checks": self.failed_checks,
             "failed_evidence_fields": self.failed_evidence_fields,
             "blocker_codes": self.blocker_codes,
@@ -791,20 +852,124 @@ pub fn nowledge_mem_final_cutover_preflight(
         .filter(|check| check.ready)
         .count();
     let check_count = integration.checks.len();
+    let startup_ready = integration_check_group_ready(&integration, STARTUP_CHECKS);
+    let route_coverage_ready = integration_check_group_ready(&integration, ROUTE_COVERAGE_CHECKS);
+    let graph_replacement_ready =
+        integration_check_group_ready(&integration, GRAPH_REPLACEMENT_CHECKS);
+    let search_projection_ready =
+        integration_check_group_ready(&integration, SEARCH_PROJECTION_CHECKS);
+    let storage_recovery_ready =
+        integration_check_group_ready(&integration, STORAGE_RECOVERY_CHECKS);
+    let background_qos_ready = integration_check_group_ready(&integration, BACKGROUND_QOS_CHECKS);
+    let blackbox_ready = integration_check_group_ready(&integration, BLACKBOX_CHECKS);
+    let library_only_ready = integration_check_group_ready(&integration, LIBRARY_ONLY_CHECKS);
     let replacement_summary_production_cutover_ready =
         graph_replacement.production_cutover_ready && graph_replacement.evidence_ready();
+    let category_readiness = FinalCutoverCategoryReadiness {
+        startup_ready,
+        route_coverage_ready,
+        graph_replacement_ready,
+        search_projection_ready,
+        storage_recovery_ready,
+        background_qos_ready,
+        blackbox_ready,
+        library_only_ready,
+        replacement_summary_production_cutover_ready,
+    };
+    let blocking_categories = final_cutover_blocking_categories(&category_readiness);
+    let next_action_names = integration
+        .next_actions
+        .iter()
+        .map(|action| action.action.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let next_action_count = next_action_names.len();
     NowledgeMemFinalCutoverPreflightReport {
         protocol: NOWLEDGE_MEM_FINAL_CUTOVER_PREFLIGHT_PROTOCOL.to_string(),
-        production_cutover_ready: integration.ready && replacement_summary_production_cutover_ready,
+        production_cutover_ready: integration.ready
+            && replacement_summary_production_cutover_ready
+            && blocking_categories.is_empty(),
         integration_ready: integration.ready,
         replacement_summary_production_cutover_ready,
+        startup_ready: category_readiness.startup_ready,
+        route_coverage_ready: category_readiness.route_coverage_ready,
+        graph_replacement_ready: category_readiness.graph_replacement_ready,
+        search_projection_ready: category_readiness.search_projection_ready,
+        storage_recovery_ready: category_readiness.storage_recovery_ready,
+        background_qos_ready: category_readiness.background_qos_ready,
+        blackbox_ready: category_readiness.blackbox_ready,
+        library_only_ready: category_readiness.library_only_ready,
         check_count,
         ready_check_count,
         failed_check_count: check_count.saturating_sub(ready_check_count),
+        next_action_count,
+        next_action_names,
+        blocking_categories,
         failed_checks: integration.failed_checks,
         failed_evidence_fields,
         blocker_codes: integration.blocker_codes,
     }
+}
+
+struct FinalCutoverCategoryReadiness {
+    startup_ready: bool,
+    route_coverage_ready: bool,
+    graph_replacement_ready: bool,
+    search_projection_ready: bool,
+    storage_recovery_ready: bool,
+    background_qos_ready: bool,
+    blackbox_ready: bool,
+    library_only_ready: bool,
+    replacement_summary_production_cutover_ready: bool,
+}
+
+fn integration_check_group_ready(
+    report: &NowledgeMemIntegrationReadinessReport,
+    names: &[&str],
+) -> bool {
+    names.iter().all(|name| {
+        report
+            .checks
+            .iter()
+            .find(|check| check.name == *name)
+            .is_some_and(|check| check.ready)
+    })
+}
+
+fn final_cutover_blocking_categories(readiness: &FinalCutoverCategoryReadiness) -> Vec<String> {
+    [
+        (FINAL_CATEGORY_STARTUP, readiness.startup_ready),
+        (
+            FINAL_CATEGORY_ROUTE_COVERAGE,
+            readiness.route_coverage_ready,
+        ),
+        (
+            FINAL_CATEGORY_GRAPH_REPLACEMENT,
+            readiness.graph_replacement_ready,
+        ),
+        (
+            FINAL_CATEGORY_SEARCH_PROJECTION,
+            readiness.search_projection_ready,
+        ),
+        (
+            FINAL_CATEGORY_STORAGE_RECOVERY,
+            readiness.storage_recovery_ready,
+        ),
+        (
+            FINAL_CATEGORY_BACKGROUND_QOS,
+            readiness.background_qos_ready,
+        ),
+        (FINAL_CATEGORY_BLACKBOX, readiness.blackbox_ready),
+        (FINAL_CATEGORY_LIBRARY_ONLY, readiness.library_only_ready),
+        (
+            FINAL_CATEGORY_REPLACEMENT_SUMMARY_CUTOVER,
+            readiness.replacement_summary_production_cutover_ready,
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(category, ready)| (!ready).then_some(category.to_string()))
+    .collect()
 }
 
 pub fn nowledge_mem_integration_readiness(
@@ -4782,15 +4947,28 @@ mod tests {
         assert!(report.production_cutover_ready);
         assert!(report.integration_ready);
         assert!(report.replacement_summary_production_cutover_ready);
+        assert!(report.startup_ready);
+        assert!(report.route_coverage_ready);
+        assert!(report.graph_replacement_ready);
+        assert!(report.search_projection_ready);
+        assert!(report.storage_recovery_ready);
+        assert!(report.background_qos_ready);
+        assert!(report.blackbox_ready);
+        assert!(report.library_only_ready);
         assert!(report.check_count > 0);
         assert_eq!(report.ready_check_count, report.check_count);
         assert_eq!(report.failed_check_count, 0);
+        assert_eq!(report.next_action_count, 0);
+        assert!(report.next_action_names.is_empty());
+        assert!(report.blocking_categories.is_empty());
         assert!(report.failed_checks.is_empty());
         assert!(report.failed_evidence_fields.is_empty());
         assert!(report.blocker_codes.is_empty());
 
         let json = report.json();
         assert_eq!(json["production_cutover_ready"], true);
+        assert_eq!(json["route_coverage_ready"], true);
+        assert_eq!(json["blocking_categories"], serde_json::json!([]));
         assert!(json.get("checks").is_none());
         assert!(json.get("next_actions").is_none());
     }
@@ -4805,6 +4983,13 @@ mod tests {
         assert!(!report.production_cutover_ready);
         assert!(!report.integration_ready);
         assert!(report.replacement_summary_production_cutover_ready);
+        assert!(!report.startup_ready);
+        assert!(report.route_coverage_ready);
+        assert!(report.blocking_categories.contains(&"startup".to_string()));
+        assert_eq!(
+            report.next_action_names,
+            vec!["attach_content_store_evidence"]
+        );
         assert!(report
             .failed_checks
             .contains(&"content_store_boundary".to_string()));
@@ -4826,6 +5011,13 @@ mod tests {
         assert!(!report.production_cutover_ready);
         assert!(!report.integration_ready);
         assert!(!report.replacement_summary_production_cutover_ready);
+        assert!(!report.graph_replacement_ready);
+        assert!(report
+            .blocking_categories
+            .contains(&"graph_replacement".to_string()));
+        assert!(report
+            .blocking_categories
+            .contains(&"replacement_summary_cutover".to_string()));
         assert!(report
             .failed_checks
             .contains(&"graph_replacement_evidence".to_string()));

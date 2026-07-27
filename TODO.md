@@ -267,7 +267,7 @@ contract.
     content-store boundary, and previous-wrapper readiness gates so Mem can
     evaluate startup cutover prerequisites through Rust structs instead of
     JSON-path glue.
-- [ ] PR 9: Add the final cutover preflight bundle gate.
+- [x] PR 9: Add the final cutover preflight bundle gate.
   - Scope: combine route coverage, graph evidence, LanceDB projection evidence,
     storage recovery, background QoS, redaction, and library-only integration
     into one fail-closed integration readiness report.
