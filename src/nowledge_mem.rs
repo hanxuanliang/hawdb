@@ -2905,7 +2905,7 @@ pub struct NowledgeMemLibraryReadinessReport {
     pub ready: bool,
     pub mode: NowledgeMemGraphMode,
     pub blocker_codes: Vec<String>,
-    pub readiness_by_area: serde_json::Value,
+    pub readiness_by_area: NowledgeMemReadinessAreaMap,
     pub ready_area_count: usize,
     pub blocked_area_count: usize,
     pub graph_open: bool,
@@ -2922,7 +2922,7 @@ pub struct NowledgeMemLibraryReadinessReport {
 
 impl NowledgeMemLibraryReadinessReport {
     pub fn areas(&self) -> Vec<NowledgeMemReadinessAreaSummary> {
-        nowledge_mem_library_readiness_areas(&self.readiness_by_area)
+        self.readiness_by_area.areas()
     }
 
     pub fn json(&self) -> serde_json::Value {
@@ -2933,7 +2933,7 @@ impl NowledgeMemLibraryReadinessReport {
             "ready": self.ready,
             "mode": self.mode.as_str(),
             "blocker_codes": self.blocker_codes,
-            "readiness_by_area": self.readiness_by_area,
+            "readiness_by_area": self.readiness_by_area.json(),
             "areas": areas.iter().map(NowledgeMemReadinessAreaSummary::json).collect::<Vec<_>>(),
             "ready_area_count": self.ready_area_count,
             "blocked_area_count": self.blocked_area_count,
@@ -2955,6 +2955,49 @@ impl NowledgeMemLibraryReadinessReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemReadinessAreaMap {
+    pub graph: NowledgeMemReadinessAreaSummary,
+    pub query: NowledgeMemReadinessAreaSummary,
+    pub query_family: NowledgeMemReadinessAreaSummary,
+    pub graph_route: NowledgeMemReadinessAreaSummary,
+    pub storage: NowledgeMemReadinessAreaSummary,
+    pub search_projection: NowledgeMemReadinessAreaSummary,
+    pub search_projection_shadow: NowledgeMemReadinessAreaSummary,
+    pub search_candidate_shadow: NowledgeMemReadinessAreaSummary,
+    pub background: NowledgeMemReadinessAreaSummary,
+}
+
+impl NowledgeMemReadinessAreaMap {
+    pub fn areas(&self) -> Vec<NowledgeMemReadinessAreaSummary> {
+        vec![
+            self.graph.clone(),
+            self.query.clone(),
+            self.query_family.clone(),
+            self.graph_route.clone(),
+            self.storage.clone(),
+            self.search_projection.clone(),
+            self.search_projection_shadow.clone(),
+            self.search_candidate_shadow.clone(),
+            self.background.clone(),
+        ]
+    }
+
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "graph": self.graph.state_json(),
+            "query": self.query.state_json(),
+            "storage": self.storage.state_json(),
+            "background": self.background.state_json(),
+            "query_family": self.query_family.state_json(),
+            "graph_route": self.graph_route.state_json(),
+            "search_projection": self.search_projection.state_json(),
+            "search_projection_shadow": self.search_projection_shadow.state_json(),
+            "search_candidate_shadow": self.search_candidate_shadow.state_json(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NowledgeMemReadinessAreaSummary {
     pub name: String,
     pub ready: bool,
@@ -2962,9 +3005,24 @@ pub struct NowledgeMemReadinessAreaSummary {
 }
 
 impl NowledgeMemReadinessAreaSummary {
+    fn new(name: impl Into<String>, ready: bool, blocker_codes: impl Into<Vec<String>>) -> Self {
+        Self {
+            name: name.into(),
+            ready,
+            blocker_codes: blocker_codes.into(),
+        }
+    }
+
     fn json(&self) -> serde_json::Value {
         serde_json::json!({
             "name": self.name,
+            "ready": self.ready,
+            "blocker_codes": self.blocker_codes,
+        })
+    }
+
+    fn state_json(&self) -> serde_json::Value {
+        serde_json::json!({
             "ready": self.ready,
             "blocker_codes": self.blocker_codes,
         })
@@ -5424,8 +5482,8 @@ impl NowledgeMemEmbeddedStore {
             search_candidate_shadow_evidence: &search_candidate_shadow_evidence,
         };
         let blocker_codes = library_readiness_blocker_codes(&evidence);
-        let readiness_by_area = library_readiness_by_area_json(&evidence);
-        let areas = nowledge_mem_library_readiness_areas(&readiness_by_area);
+        let readiness_by_area = library_readiness_by_area(&evidence);
+        let areas = readiness_by_area.areas();
         let ready_area_count = areas.iter().filter(|area| area.ready).count();
         let blocked_area_count = areas.len().saturating_sub(ready_area_count);
         let blocker_codes = blocker_codes
@@ -6252,44 +6310,41 @@ fn library_readiness_blocker_codes(evidence: &LibraryReadinessEvidence<'_>) -> V
     blockers
 }
 
-fn library_readiness_by_area_json(evidence: &LibraryReadinessEvidence<'_>) -> serde_json::Value {
-    serde_json::json!({
-        "graph": {
-            "ready": true,
-            "blocker_codes": [],
-        },
-        "query": bounded_read_readiness_area_json(evidence.bounded_read_evidence),
-        "storage": readiness_area_json(
-            evidence.storage_recovery,
-            "storage_recovery_not_ready"
-        ),
-        "background": background_maintenance_readiness_area_json(evidence.background_maintenance),
-        "query_family": readiness_area_json(
+fn library_readiness_by_area(
+    evidence: &LibraryReadinessEvidence<'_>,
+) -> NowledgeMemReadinessAreaMap {
+    NowledgeMemReadinessAreaMap {
+        graph: NowledgeMemReadinessAreaSummary::new("graph", true, Vec::new()),
+        query: bounded_read_readiness_area(evidence.bounded_read_evidence),
+        query_family: readiness_area(
+            "query_family",
             evidence.query_family_evidence,
-            "query_family_evidence_not_ready"
+            "query_family_evidence_not_ready",
         ),
-        "graph_route": readiness_area_json(
+        graph_route: readiness_area(
+            "graph_route",
             evidence.graph_route_readiness,
-            "graph_route_readiness_not_ready"
+            "graph_route_readiness_not_ready",
         ),
-        "search_projection": search_projection_readiness_area_json(
-            evidence.search_projection_evidence,
+        storage: readiness_area(
+            "storage",
+            evidence.storage_recovery,
+            "storage_recovery_not_ready",
         ),
-        "search_projection_shadow": search_projection_shadow_readiness_area_json(
+        search_projection: search_projection_readiness_area(evidence.search_projection_evidence),
+        search_projection_shadow: search_projection_shadow_readiness_area(
             evidence.search_projection_shadow_evidence,
         ),
-        "search_candidate_shadow": search_candidate_shadow_readiness_area_json(
+        search_candidate_shadow: search_candidate_shadow_readiness_area(
             evidence.search_candidate_shadow_evidence,
         ),
-    })
+        background: background_maintenance_readiness_area(evidence.background_maintenance),
+    }
 }
 
-fn bounded_read_readiness_area_json(evidence: &serde_json::Value) -> serde_json::Value {
+fn bounded_read_readiness_area(evidence: &serde_json::Value) -> NowledgeMemReadinessAreaSummary {
     let blocker_codes = bounded_read_readiness_blocker_codes(evidence);
-    serde_json::json!({
-        "ready": blocker_codes.is_empty(),
-        "blocker_codes": blocker_codes,
-    })
+    NowledgeMemReadinessAreaSummary::new("query", blocker_codes.is_empty(), blocker_codes)
 }
 
 fn bounded_read_evidence_ready(evidence: &serde_json::Value) -> bool {
@@ -6380,20 +6435,26 @@ fn bounded_read_readiness_blocker_codes(evidence: &serde_json::Value) -> Vec<Str
     blockers.into_iter().collect()
 }
 
-fn search_projection_readiness_area_json(evidence: &serde_json::Value) -> serde_json::Value {
+fn search_projection_readiness_area(
+    evidence: &serde_json::Value,
+) -> NowledgeMemReadinessAreaSummary {
     let blocker_codes = search_projection_readiness_blocker_codes(evidence);
-    serde_json::json!({
-        "ready": blocker_codes.is_empty(),
-        "blocker_codes": blocker_codes,
-    })
+    NowledgeMemReadinessAreaSummary::new(
+        "search_projection",
+        blocker_codes.is_empty(),
+        blocker_codes,
+    )
 }
 
-fn search_projection_shadow_readiness_area_json(evidence: &serde_json::Value) -> serde_json::Value {
+fn search_projection_shadow_readiness_area(
+    evidence: &serde_json::Value,
+) -> NowledgeMemReadinessAreaSummary {
     let blocker_codes = search_projection_shadow_readiness_blocker_codes(evidence);
-    serde_json::json!({
-        "ready": blocker_codes.is_empty(),
-        "blocker_codes": blocker_codes,
-    })
+    NowledgeMemReadinessAreaSummary::new(
+        "search_projection_shadow",
+        blocker_codes.is_empty(),
+        blocker_codes,
+    )
 }
 
 fn search_projection_evidence_ready(evidence: &serde_json::Value) -> bool {
@@ -6542,12 +6603,15 @@ fn search_projection_shadow_readiness_blocker_codes(evidence: &serde_json::Value
     blockers.into_iter().collect()
 }
 
-fn search_candidate_shadow_readiness_area_json(evidence: &serde_json::Value) -> serde_json::Value {
+fn search_candidate_shadow_readiness_area(
+    evidence: &serde_json::Value,
+) -> NowledgeMemReadinessAreaSummary {
     let blocker_codes = search_candidate_shadow_readiness_blocker_codes(evidence);
-    serde_json::json!({
-        "ready": blocker_codes.is_empty(),
-        "blocker_codes": blocker_codes,
-    })
+    NowledgeMemReadinessAreaSummary::new(
+        "search_candidate_shadow",
+        blocker_codes.is_empty(),
+        blocker_codes,
+    )
 }
 
 fn search_candidate_shadow_evidence_ready(evidence: &serde_json::Value) -> bool {
@@ -6706,25 +6770,24 @@ fn search_candidate_shadow_counts_ready(evidence: &serde_json::Value) -> bool {
         && primary_only_candidate_count == Some(0)
 }
 
-fn readiness_area_json(
+fn readiness_area(
+    name: &'static str,
     evidence: &serde_json::Value,
     fallback_blocker_code: &'static str,
-) -> serde_json::Value {
+) -> NowledgeMemReadinessAreaSummary {
     let ready = evidence.get("ready").and_then(serde_json::Value::as_bool) == Some(true);
-    serde_json::json!({
-        "ready": ready,
-        "blocker_codes": readiness_blocker_codes(evidence, fallback_blocker_code, ready),
-    })
+    NowledgeMemReadinessAreaSummary::new(
+        name,
+        ready,
+        readiness_blocker_codes(evidence, fallback_blocker_code, ready),
+    )
 }
 
-fn background_maintenance_readiness_area_json(
+fn background_maintenance_readiness_area(
     background_maintenance: &serde_json::Value,
-) -> serde_json::Value {
+) -> NowledgeMemReadinessAreaSummary {
     let health = background_maintenance_evidence_health(Some(background_maintenance), true);
-    serde_json::json!({
-        "ready": health.ready,
-        "blocker_codes": health.blocker_codes,
-    })
+    NowledgeMemReadinessAreaSummary::new("background", health.ready, health.blocker_codes)
 }
 
 fn library_background_maintenance_ready(background_maintenance: &serde_json::Value) -> bool {
@@ -6757,50 +6820,6 @@ fn readiness_blocker_codes(
     }
 }
 
-fn nowledge_mem_library_readiness_areas(
-    readiness_by_area: &serde_json::Value,
-) -> Vec<NowledgeMemReadinessAreaSummary> {
-    vec![
-        readiness_area_from_json(readiness_by_area, "graph", "graph_not_ready"),
-        readiness_area_from_json(
-            readiness_by_area,
-            "query",
-            "bounded_read_evidence_not_ready",
-        ),
-        readiness_area_from_json(
-            readiness_by_area,
-            "query_family",
-            "query_family_evidence_not_ready",
-        ),
-        readiness_area_from_json(
-            readiness_by_area,
-            "graph_route",
-            "graph_route_readiness_not_ready",
-        ),
-        readiness_area_from_json(readiness_by_area, "storage", "storage_recovery_not_ready"),
-        readiness_area_from_json(
-            readiness_by_area,
-            "search_projection",
-            "search_projection_evidence_not_ready",
-        ),
-        readiness_area_from_json(
-            readiness_by_area,
-            "search_projection_shadow",
-            "search_projection_shadow_evidence_not_ready",
-        ),
-        readiness_area_from_json(
-            readiness_by_area,
-            "search_candidate_shadow",
-            "search_candidate_shadow_evidence_not_ready",
-        ),
-        readiness_area_from_json(
-            readiness_by_area,
-            "background",
-            "background_maintenance_not_ready",
-        ),
-    ]
-}
-
 fn nowledge_mem_readiness_dashboard_areas(
     library: &NowledgeMemLibraryReadinessReport,
     slow_query: &NowledgeMemSlowQueryReport,
@@ -6816,22 +6835,6 @@ fn nowledge_mem_readiness_dashboard_areas(
         },
     });
     areas
-}
-
-fn readiness_area_from_json(
-    readiness_by_area: &serde_json::Value,
-    name: &'static str,
-    fallback_blocker_code: &'static str,
-) -> NowledgeMemReadinessAreaSummary {
-    let area = readiness_by_area
-        .get(name)
-        .unwrap_or(&serde_json::Value::Null);
-    let ready = area.get("ready").and_then(serde_json::Value::as_bool) == Some(true);
-    NowledgeMemReadinessAreaSummary {
-        name: name.to_string(),
-        ready,
-        blocker_codes: readiness_blocker_codes(area, fallback_blocker_code, ready),
-    }
 }
 
 fn nowledge_mem_search_candidate_report(
@@ -9009,6 +9012,17 @@ mod tests {
         assert_eq!(areas.len(), 9);
         assert_eq!(report.ready_area_count, 1);
         assert_eq!(report.blocked_area_count, 8);
+        assert!(report.readiness_by_area.graph.ready);
+        assert!(!report.readiness_by_area.query.ready);
+        assert_eq!(
+            report.readiness_by_area.query.blocker_codes,
+            vec!["bounded_read_probe_missing".to_string()]
+        );
+        assert!(!report.readiness_by_area.graph_route.ready);
+        assert_eq!(
+            report.readiness_by_area.graph_route.blocker_codes,
+            vec!["graph_route_readiness_missing".to_string()]
+        );
         let graph_area = areas
             .iter()
             .find(|area| area.name == "graph")

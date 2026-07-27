@@ -558,6 +558,8 @@ contract.
     library APIs while preserving redacted JSON output.
   - [x] Expose replacement summary gate generation through Rust library APIs
     and keep the CLI as a thin wrapper.
+  - [x] Expose library readiness area gates as typed Rust structs so embedded
+    Mem callers do not need to parse `readiness_by_area` JSON.
   - [x] Expose typed graph replacement and query-family replacement readiness
     through Rust library APIs and consume the same results in integration
     readiness next actions.
