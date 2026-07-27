@@ -275,6 +275,31 @@ pub struct QueryRuntimePreflightCutoverReadiness {
     pub blocker_codes: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryRuntimePreflightAlignmentCutoverReadiness {
+    pub ready: bool,
+    pub evidence_ready: bool,
+    pub summary_ready: bool,
+    pub protocol_matches: bool,
+    pub readiness_matches: bool,
+    pub database_opened_matches: bool,
+    pub probe_count_matches: bool,
+    pub passed_probe_count_matches: bool,
+    pub failed_probe_count_matches: bool,
+    pub required_route_count_matches: bool,
+    pub covered_route_count_matches: bool,
+    pub covered_routes_matches: bool,
+    pub required_routes_covered_matches: bool,
+    pub route_coverage_ready_matches: bool,
+    pub evidence_route_catalog_version_ready: bool,
+    pub summary_route_catalog_version_ready: bool,
+    pub evidence_route_catalog_digest_ready: bool,
+    pub summary_route_catalog_digest_ready: bool,
+    pub route_catalog_version_matches: bool,
+    pub route_catalog_digest_matches: bool,
+    pub blocker_codes: Vec<String>,
+}
+
 impl LibraryReadinessCutoverReadiness {
     pub fn evidence_ready(&self) -> bool {
         self.protocol_matches
@@ -428,6 +453,31 @@ impl QueryRuntimePreflightCutoverReadiness {
     }
 }
 
+impl QueryRuntimePreflightAlignmentCutoverReadiness {
+    pub fn evidence_ready(&self) -> bool {
+        self.ready
+            && self.evidence_ready
+            && self.summary_ready
+            && self.protocol_matches
+            && self.readiness_matches
+            && self.database_opened_matches
+            && self.probe_count_matches
+            && self.passed_probe_count_matches
+            && self.failed_probe_count_matches
+            && self.required_route_count_matches
+            && self.covered_route_count_matches
+            && self.covered_routes_matches
+            && self.required_routes_covered_matches
+            && self.route_coverage_ready_matches
+            && self.evidence_route_catalog_version_ready
+            && self.summary_route_catalog_version_ready
+            && self.evidence_route_catalog_digest_ready
+            && self.summary_route_catalog_digest_ready
+            && self.route_catalog_version_matches
+            && self.route_catalog_digest_matches
+    }
+}
+
 impl BackgroundMaintenanceCutoverReadiness {
     pub fn evidence_ready(&self) -> bool {
         self.required
@@ -506,6 +556,8 @@ pub fn nowledge_mem_integration_readiness(
     let bounded_read_alignment_readiness = bounded_read_alignment_cutover_readiness(bundle);
     let graph_route_readiness = graph_route_cutover_readiness(bundle);
     let query_runtime_readiness = query_runtime_preflight_cutover_readiness(bundle);
+    let query_runtime_alignment_readiness =
+        query_runtime_preflight_alignment_cutover_readiness(bundle);
     let storage_recovery_readiness = storage_recovery_cutover_readiness(bundle);
     let background_maintenance_readiness = background_maintenance_cutover_readiness(bundle);
     let checks = vec![
@@ -899,178 +951,12 @@ pub fn nowledge_mem_integration_readiness(
             query_runtime_preflight_cutover_conditions(&query_runtime_readiness),
             query_runtime_readiness.blocker_codes.clone(),
         ),
-        check(
+        check_named_conditions(
             "query_runtime_preflight_alignment",
-            [
-                bool_path(
-                    bundle,
-                    &["replacement_summary_query_runtime_alignment", "ready"],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_query_runtime_alignment",
-                        "evidence_ready",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &["replacement_summary_query_runtime_alignment", "summary_ready"],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_query_runtime_alignment",
-                        "protocol_matches",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_query_runtime_alignment",
-                        "readiness_matches",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_query_runtime_alignment",
-                        "database_opened_matches",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_query_runtime_alignment",
-                        "probe_count_matches",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_query_runtime_alignment",
-                        "passed_probe_count_matches",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_query_runtime_alignment",
-                        "failed_probe_count_matches",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_query_runtime_alignment",
-                        "required_route_count_matches",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_query_runtime_alignment",
-                        "covered_route_count_matches",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_query_runtime_alignment",
-                        "covered_routes_matches",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_query_runtime_alignment",
-                        "required_routes_covered_matches",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_query_runtime_alignment",
-                        "route_coverage_ready_matches",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_query_runtime_alignment",
-                        "evidence_route_catalog_version_ready",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_query_runtime_alignment",
-                        "summary_route_catalog_version_ready",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_query_runtime_alignment",
-                        "evidence_route_catalog_digest_ready",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_query_runtime_alignment",
-                        "summary_route_catalog_digest_ready",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_query_runtime_alignment",
-                        "route_catalog_version_matches",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_query_runtime_alignment",
-                        "route_catalog_digest_matches",
-                    ],
-                ) == Some(true),
-            ],
-            [
-                "replacement_summary_query_runtime_alignment.ready",
-                "replacement_summary_query_runtime_alignment.evidence_ready",
-                "replacement_summary_query_runtime_alignment.summary_ready",
-                "replacement_summary_query_runtime_alignment.protocol_matches",
-                "replacement_summary_query_runtime_alignment.readiness_matches",
-                "replacement_summary_query_runtime_alignment.database_opened_matches",
-                "replacement_summary_query_runtime_alignment.probe_count_matches",
-                "replacement_summary_query_runtime_alignment.passed_probe_count_matches",
-                "replacement_summary_query_runtime_alignment.failed_probe_count_matches",
-                "replacement_summary_query_runtime_alignment.required_route_count_matches",
-                "replacement_summary_query_runtime_alignment.covered_route_count_matches",
-                "replacement_summary_query_runtime_alignment.covered_routes_matches",
-                "replacement_summary_query_runtime_alignment.required_routes_covered_matches",
-                "replacement_summary_query_runtime_alignment.route_coverage_ready_matches",
-                "replacement_summary_query_runtime_alignment.evidence_route_catalog_version_ready",
-                "replacement_summary_query_runtime_alignment.summary_route_catalog_version_ready",
-                "replacement_summary_query_runtime_alignment.evidence_route_catalog_digest_ready",
-                "replacement_summary_query_runtime_alignment.summary_route_catalog_digest_ready",
-                "replacement_summary_query_runtime_alignment.route_catalog_version_matches",
-                "replacement_summary_query_runtime_alignment.route_catalog_digest_matches",
-            ],
-            blocker_codes(
-                bundle,
-                &[
-                    &["query_runtime_preflight", "blocker_codes"][..],
-                    &[
-                        "replacement_summary",
-                        "query_runtime_preflight",
-                        "blocker_codes",
-                    ][..],
-                    &["replacement_summary_query_runtime_alignment", "blocker_codes"][..],
-                ],
+            query_runtime_preflight_alignment_cutover_conditions(
+                &query_runtime_alignment_readiness,
             ),
+            query_runtime_alignment_readiness.blocker_codes.clone(),
         ),
         check(
             "library_readiness",
@@ -1239,6 +1125,7 @@ pub fn nowledge_mem_integration_readiness(
                 bounded_read_alignment: &bounded_read_alignment_readiness,
                 graph_route: &graph_route_readiness,
                 query_runtime: &query_runtime_readiness,
+                query_runtime_alignment: &query_runtime_alignment_readiness,
                 blackbox: &blackbox_readiness,
                 storage_recovery: &storage_recovery_readiness,
                 background_maintenance: &background_maintenance_readiness,
@@ -1303,6 +1190,7 @@ struct IntegrationGateReadiness<'a> {
     bounded_read_alignment: &'a BoundedReadAlignmentCutoverReadiness,
     graph_route: &'a GraphRouteCutoverReadiness,
     query_runtime: &'a QueryRuntimePreflightCutoverReadiness,
+    query_runtime_alignment: &'a QueryRuntimePreflightAlignmentCutoverReadiness,
     blackbox: &'a BlackboxReadinessReport,
     storage_recovery: &'a StorageRecoveryCutoverReadiness,
     background_maintenance: &'a BackgroundMaintenanceCutoverReadiness,
@@ -1586,7 +1474,7 @@ fn next_actions(
             ],
         ));
     }
-    if !query_runtime_preflight_alignment_ready(bundle) {
+    if !readiness.query_runtime_alignment.evidence_ready() {
         actions.push(next_action(
             "regenerate_query_runtime_preflight_alignment",
             "live query runtime preflight evidence must match the replacement summary before Mem cutover",
@@ -3414,64 +3302,182 @@ fn query_runtime_preflight_probe_scan_pruning_ready(probe: &serde_json::Value) -
         && reports.iter().all(query_runtime_scan_pruning_report_ready)
 }
 
-fn query_runtime_preflight_alignment_ready(bundle: &serde_json::Value) -> bool {
-    [
-        &["replacement_summary_query_runtime_alignment", "ready"][..],
-        &[
-            "replacement_summary_query_runtime_alignment",
-            "evidence_ready",
-        ][..],
-        &[
-            "replacement_summary_query_runtime_alignment",
-            "summary_ready",
-        ][..],
-        &[
-            "replacement_summary_query_runtime_alignment",
-            "protocol_matches",
-        ][..],
-        &[
-            "replacement_summary_query_runtime_alignment",
-            "readiness_matches",
-        ][..],
-        &[
-            "replacement_summary_query_runtime_alignment",
+pub fn query_runtime_preflight_alignment_cutover_readiness(
+    bundle: &serde_json::Value,
+) -> QueryRuntimePreflightAlignmentCutoverReadiness {
+    QueryRuntimePreflightAlignmentCutoverReadiness {
+        ready: query_runtime_preflight_alignment_bool(bundle, "ready"),
+        evidence_ready: query_runtime_preflight_alignment_bool(bundle, "evidence_ready"),
+        summary_ready: query_runtime_preflight_alignment_bool(bundle, "summary_ready"),
+        protocol_matches: query_runtime_preflight_alignment_bool(bundle, "protocol_matches"),
+        readiness_matches: query_runtime_preflight_alignment_bool(bundle, "readiness_matches"),
+        database_opened_matches: query_runtime_preflight_alignment_bool(
+            bundle,
             "database_opened_matches",
-        ][..],
-        &[
-            "replacement_summary_query_runtime_alignment",
-            "probe_count_matches",
-        ][..],
-        &[
-            "replacement_summary_query_runtime_alignment",
+        ),
+        probe_count_matches: query_runtime_preflight_alignment_bool(bundle, "probe_count_matches"),
+        passed_probe_count_matches: query_runtime_preflight_alignment_bool(
+            bundle,
             "passed_probe_count_matches",
-        ][..],
-        &[
-            "replacement_summary_query_runtime_alignment",
+        ),
+        failed_probe_count_matches: query_runtime_preflight_alignment_bool(
+            bundle,
             "failed_probe_count_matches",
-        ][..],
-        &[
-            "replacement_summary_query_runtime_alignment",
+        ),
+        required_route_count_matches: query_runtime_preflight_alignment_bool(
+            bundle,
             "required_route_count_matches",
-        ][..],
-        &[
-            "replacement_summary_query_runtime_alignment",
+        ),
+        covered_route_count_matches: query_runtime_preflight_alignment_bool(
+            bundle,
             "covered_route_count_matches",
-        ][..],
-        &[
-            "replacement_summary_query_runtime_alignment",
+        ),
+        covered_routes_matches: query_runtime_preflight_alignment_bool(
+            bundle,
             "covered_routes_matches",
-        ][..],
-        &[
-            "replacement_summary_query_runtime_alignment",
+        ),
+        required_routes_covered_matches: query_runtime_preflight_alignment_bool(
+            bundle,
             "required_routes_covered_matches",
-        ][..],
-        &[
-            "replacement_summary_query_runtime_alignment",
+        ),
+        route_coverage_ready_matches: query_runtime_preflight_alignment_bool(
+            bundle,
             "route_coverage_ready_matches",
-        ][..],
+        ),
+        evidence_route_catalog_version_ready: query_runtime_preflight_alignment_bool(
+            bundle,
+            "evidence_route_catalog_version_ready",
+        ),
+        summary_route_catalog_version_ready: query_runtime_preflight_alignment_bool(
+            bundle,
+            "summary_route_catalog_version_ready",
+        ),
+        evidence_route_catalog_digest_ready: query_runtime_preflight_alignment_bool(
+            bundle,
+            "evidence_route_catalog_digest_ready",
+        ),
+        summary_route_catalog_digest_ready: query_runtime_preflight_alignment_bool(
+            bundle,
+            "summary_route_catalog_digest_ready",
+        ),
+        route_catalog_version_matches: query_runtime_preflight_alignment_bool(
+            bundle,
+            "route_catalog_version_matches",
+        ),
+        route_catalog_digest_matches: query_runtime_preflight_alignment_bool(
+            bundle,
+            "route_catalog_digest_matches",
+        ),
+        blocker_codes: blocker_codes(
+            bundle,
+            &[
+                &["query_runtime_preflight", "blocker_codes"][..],
+                &[
+                    "replacement_summary",
+                    "query_runtime_preflight",
+                    "blocker_codes",
+                ][..],
+                &[
+                    "replacement_summary_query_runtime_alignment",
+                    "blocker_codes",
+                ][..],
+            ],
+        ),
+    }
+}
+
+fn query_runtime_preflight_alignment_bool(bundle: &serde_json::Value, field: &str) -> bool {
+    bool_path(
+        bundle,
+        &["replacement_summary_query_runtime_alignment", field],
+    ) == Some(true)
+}
+
+fn query_runtime_preflight_alignment_cutover_conditions(
+    readiness: &QueryRuntimePreflightAlignmentCutoverReadiness,
+) -> Vec<(&'static str, bool)> {
+    vec![
+        (
+            "replacement_summary_query_runtime_alignment.ready",
+            readiness.ready,
+        ),
+        (
+            "replacement_summary_query_runtime_alignment.evidence_ready",
+            readiness.evidence_ready,
+        ),
+        (
+            "replacement_summary_query_runtime_alignment.summary_ready",
+            readiness.summary_ready,
+        ),
+        (
+            "replacement_summary_query_runtime_alignment.protocol_matches",
+            readiness.protocol_matches,
+        ),
+        (
+            "replacement_summary_query_runtime_alignment.readiness_matches",
+            readiness.readiness_matches,
+        ),
+        (
+            "replacement_summary_query_runtime_alignment.database_opened_matches",
+            readiness.database_opened_matches,
+        ),
+        (
+            "replacement_summary_query_runtime_alignment.probe_count_matches",
+            readiness.probe_count_matches,
+        ),
+        (
+            "replacement_summary_query_runtime_alignment.passed_probe_count_matches",
+            readiness.passed_probe_count_matches,
+        ),
+        (
+            "replacement_summary_query_runtime_alignment.failed_probe_count_matches",
+            readiness.failed_probe_count_matches,
+        ),
+        (
+            "replacement_summary_query_runtime_alignment.required_route_count_matches",
+            readiness.required_route_count_matches,
+        ),
+        (
+            "replacement_summary_query_runtime_alignment.covered_route_count_matches",
+            readiness.covered_route_count_matches,
+        ),
+        (
+            "replacement_summary_query_runtime_alignment.covered_routes_matches",
+            readiness.covered_routes_matches,
+        ),
+        (
+            "replacement_summary_query_runtime_alignment.required_routes_covered_matches",
+            readiness.required_routes_covered_matches,
+        ),
+        (
+            "replacement_summary_query_runtime_alignment.route_coverage_ready_matches",
+            readiness.route_coverage_ready_matches,
+        ),
+        (
+            "replacement_summary_query_runtime_alignment.evidence_route_catalog_version_ready",
+            readiness.evidence_route_catalog_version_ready,
+        ),
+        (
+            "replacement_summary_query_runtime_alignment.summary_route_catalog_version_ready",
+            readiness.summary_route_catalog_version_ready,
+        ),
+        (
+            "replacement_summary_query_runtime_alignment.evidence_route_catalog_digest_ready",
+            readiness.evidence_route_catalog_digest_ready,
+        ),
+        (
+            "replacement_summary_query_runtime_alignment.summary_route_catalog_digest_ready",
+            readiness.summary_route_catalog_digest_ready,
+        ),
+        (
+            "replacement_summary_query_runtime_alignment.route_catalog_version_matches",
+            readiness.route_catalog_version_matches,
+        ),
+        (
+            "replacement_summary_query_runtime_alignment.route_catalog_digest_matches",
+            readiness.route_catalog_digest_matches,
+        ),
     ]
-    .iter()
-    .all(|path| bool_path(bundle, path) == Some(true))
 }
 
 fn query_runtime_scan_pruning_report_ready(report: &serde_json::Value) -> bool {
@@ -5736,6 +5742,56 @@ mod tests {
             .unwrap()
             .iter()
             .any(|code| code == "query_runtime_duplicate_routes"));
+    }
+
+    #[test]
+    fn exposes_typed_query_runtime_preflight_alignment_cutover_readiness() {
+        let bundle = ready_bundle();
+
+        let typed = super::query_runtime_preflight_alignment_cutover_readiness(&bundle);
+
+        assert!(typed.evidence_ready());
+        assert!(typed.ready);
+        assert!(typed.evidence_ready);
+        assert!(typed.summary_ready);
+        assert!(typed.protocol_matches);
+        assert!(typed.readiness_matches);
+        assert!(typed.database_opened_matches);
+        assert!(typed.probe_count_matches);
+        assert!(typed.passed_probe_count_matches);
+        assert!(typed.failed_probe_count_matches);
+        assert!(typed.required_route_count_matches);
+        assert!(typed.covered_route_count_matches);
+        assert!(typed.covered_routes_matches);
+        assert!(typed.required_routes_covered_matches);
+        assert!(typed.route_coverage_ready_matches);
+        assert!(typed.evidence_route_catalog_version_ready);
+        assert!(typed.summary_route_catalog_version_ready);
+        assert!(typed.evidence_route_catalog_digest_ready);
+        assert!(typed.summary_route_catalog_digest_ready);
+        assert!(typed.route_catalog_version_matches);
+        assert!(typed.route_catalog_digest_matches);
+        assert!(typed.blocker_codes.is_empty());
+    }
+
+    #[test]
+    fn typed_query_runtime_preflight_alignment_detects_stale_route_coverage() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary_query_runtime_alignment"]["ready"] = serde_json::json!(false);
+        bundle["replacement_summary_query_runtime_alignment"]["covered_routes_matches"] =
+            serde_json::json!(false);
+        bundle["replacement_summary_query_runtime_alignment"]["blocker_codes"] =
+            serde_json::json!(["query_runtime_preflight_covered_routes_mismatch"]);
+
+        let typed = super::query_runtime_preflight_alignment_cutover_readiness(&bundle);
+
+        assert!(!typed.evidence_ready());
+        assert!(!typed.ready);
+        assert!(!typed.covered_routes_matches);
+        assert_eq!(
+            typed.blocker_codes,
+            vec!["query_runtime_preflight_covered_routes_mismatch".to_string()]
+        );
     }
 
     #[test]
