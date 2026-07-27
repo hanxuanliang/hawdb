@@ -254,7 +254,7 @@ contract.
     when reported internal background work exceeds its configured memory budget.
   - [x] Add compact blackbox background QoS events with redacted admission,
     search-projection delta, memory-pressure, and blocker-code evidence.
-- [ ] PR 8: Make Mem's Skein startup and readiness library-only.
+- [x] PR 8: Make Mem's Skein startup and readiness library-only.
   - Scope: ensure Mem starts Skein in-process and consumes typed readiness,
     route evidence, search projection evidence, slow log, blackbox, recovery,
     and maintenance APIs.
@@ -325,6 +325,9 @@ contract.
     content-store boundary, and previous-wrapper readiness gates so Mem can
     evaluate startup cutover prerequisites through Rust structs instead of
     JSON-path glue.
+  - [x] Add an in-process library integration test that initializes Skein,
+    produces typed library readiness, and feeds the final cutover preflight
+    without invoking CLI tools.
 - [x] PR 9: Add the final cutover preflight bundle gate.
   - Scope: combine route coverage, graph evidence, LanceDB projection evidence,
     storage recovery, background QoS, redaction, and library-only integration
@@ -545,7 +548,7 @@ contract.
     feature-gated Loom model in CI.
   - [x] Cover the embedded Mem library handle with a multi-threaded query,
     slow-query, and readiness-dashboard access test.
-- [ ] Add library readiness APIs for Mem integration.
+- [x] Add library readiness APIs for Mem integration.
   - Expose structured readiness, slow-query, blackbox, storage-recovery,
     background-maintenance, and search-projection reports through Rust APIs.
   - [x] Expose typed library readiness and search-projection evidence summaries
@@ -597,6 +600,8 @@ contract.
     actions.
   - [x] Include graph-route readiness as a first-class embedded-library
     readiness area so production callers fail closed before graph read cutover.
+  - [x] Cover the library-only readiness-to-final-preflight path with an
+    in-process Rust test so Mem startup gates do not depend on command output.
   - Keep reports compact and redacted by default so production can keep them on.
   - CLI tools may wrap library APIs for developer workflows, but must not be the
     only supported interface.

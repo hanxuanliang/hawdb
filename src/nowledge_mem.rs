@@ -7319,6 +7319,7 @@ mod tests {
         NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
         REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES, SEARCH_PROJECTION_SHADOW_PUSHDOWN_NOT_READY,
     };
+    use crate::mem_integration_readiness::nowledge_mem_final_cutover_preflight;
     use crate::search::CompressedVectorSearchMode;
     use crate::search::SearchFusionWeights;
     use crate::Value;
@@ -9456,6 +9457,65 @@ mod tests {
             readiness["query_family_evidence"]["min_replacement_readiness_per_million"],
             1_000_000
         );
+    }
+
+    #[test]
+    fn embedded_store_library_readiness_feeds_final_preflight_without_cli() {
+        let db = Database::new();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::ShadowReadOnly);
+        graph
+            .database_mut()
+            .query("CREATE (:Memory {id: 'mem-preflight', title: 'Preflight'})")
+            .unwrap();
+        let mut store = NowledgeMemEmbeddedStore::new(graph, None);
+
+        let library = store.library_readiness(&NowledgeMemReadinessOptions {
+            bounded_read_probe: Some(NowledgeGraphStatement {
+                cypher: "MATCH (m:Memory {id: 'mem-preflight'}) RETURN m.title AS title"
+                    .to_string(),
+                parameters: BTreeMap::new(),
+            }),
+            covered_routes: full_bounded_read_routes(),
+            graph_route_readiness: Some(ready_route_readiness_summary()),
+            replacement_readiness_by_query_family: Some(ready_query_family_replacement()),
+            ..NowledgeMemReadinessOptions::default()
+        });
+        let mut library_json = library.json();
+        library_json["open_report"] = serde_json::json!({
+            "protocol": NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL,
+            "mode": "shadow_read_only",
+            "graph_configured": true,
+            "search_projection_configured": false,
+            "compressed_vector_search_mode": "disabled",
+            "graph_opened": true,
+            "search_projection_opened": false,
+        });
+
+        let bundle = serde_json::json!({
+            "library_readiness": library_json,
+        });
+        let preflight = nowledge_mem_final_cutover_preflight(&bundle);
+
+        assert!(library.readiness_by_area.query.ready);
+        assert!(library.readiness_by_area.graph_route.ready);
+        assert!(library.readiness_by_area.query_family.ready);
+        assert!(library.readiness_by_area.background.ready);
+        assert!(!library.readiness_by_area.storage.ready);
+        assert!(!library.readiness_by_area.search_projection.ready);
+        assert!(!preflight.production_cutover_ready);
+        assert!(!preflight.library_only_ready);
+        assert!(preflight
+            .failed_checks
+            .iter()
+            .any(|check| check == "library_readiness"));
+        assert!(preflight
+            .failed_evidence_fields
+            .iter()
+            .any(|field| field == "library_readiness.open_report.search_projection_opened"));
+        assert!(preflight
+            .next_action_names
+            .iter()
+            .any(|action| action == "attach_library_readiness_evidence"));
     }
 
     #[test]
