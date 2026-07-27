@@ -409,7 +409,7 @@ impl BlackboxReport {
         };
         artifact.format == "json"
             && background_qos.protocol.as_deref() == Some("skein-background-maintenance-report")
-            && background_qos.ready.is_some()
+            && background_qos.ready == Some(true)
             && background_qos.total_candidates.is_some()
             && background_qos.admitted_count.is_some()
             && background_qos.deferred_count.is_some()
@@ -420,6 +420,25 @@ impl BlackboxReport {
             && background_qos
                 .admitted_search_projection_graph_delta_count
                 .is_some()
+            && background_qos
+                .deferred_search_projection_graph_delta_count
+                .is_some()
+            && background_qos
+                .rejected_search_projection_graph_delta_count
+                .is_some()
+            && background_qos
+                .executable_search_projection_graph_delta_operations
+                .is_some()
+            && background_qos
+                .admitted_search_projection_graph_delta_operations
+                .is_some()
+            && background_qos
+                .max_search_projection_graph_delta_complete_through_graph_commit_epoch
+                .is_some()
+            && background_qos.memory_pressure_ready == Some(true)
+            && background_qos.memory_budget_bytes.is_some()
+            && background_qos.estimated_memory_bytes.is_some()
+            && background_qos.blocker_codes.is_empty()
     }
 
     fn artifact(&self, name: &str) -> Option<&BlackboxArtifactReport> {
@@ -854,7 +873,7 @@ fn blackbox_json_background_qos_summary_ready(value: &serde_json::Value, name: &
     artifact.get("format").and_then(serde_json::Value::as_str) == Some("json")
         && blackbox_json_nested_str(artifact, &["background_qos", "protocol"])
             == Some("skein-background-maintenance-report")
-        && blackbox_json_nested_bool(artifact, &["background_qos", "ready"]).is_some()
+        && blackbox_json_nested_bool(artifact, &["background_qos", "ready"]) == Some(true)
         && blackbox_json_nested_u64(artifact, &["background_qos", "total_candidates"]).is_some()
         && blackbox_json_nested_u64(artifact, &["background_qos", "admitted_count"]).is_some()
         && blackbox_json_nested_u64(artifact, &["background_qos", "deferred_count"]).is_some()
@@ -875,9 +894,54 @@ fn blackbox_json_background_qos_summary_ready(value: &serde_json::Value, name: &
             ],
         )
         .is_some()
+        && blackbox_json_nested_u64(
+            artifact,
+            &[
+                "background_qos",
+                "deferred_search_projection_graph_delta_count",
+            ],
+        )
+        .is_some()
+        && blackbox_json_nested_u64(
+            artifact,
+            &[
+                "background_qos",
+                "rejected_search_projection_graph_delta_count",
+            ],
+        )
+        .is_some()
+        && blackbox_json_nested_u64(
+            artifact,
+            &[
+                "background_qos",
+                "executable_search_projection_graph_delta_operations",
+            ],
+        )
+        .is_some()
+        && blackbox_json_nested_u64(
+            artifact,
+            &[
+                "background_qos",
+                "admitted_search_projection_graph_delta_operations",
+            ],
+        )
+        .is_some()
+        && blackbox_json_nested_u64(
+            artifact,
+            &[
+                "background_qos",
+                "max_search_projection_graph_delta_complete_through_graph_commit_epoch",
+            ],
+        )
+        .is_some()
+        && blackbox_json_nested_bool(artifact, &["background_qos", "memory_pressure_ready"])
+            == Some(true)
+        && blackbox_json_nested_u64(artifact, &["background_qos", "memory_budget_bytes"]).is_some()
+        && blackbox_json_nested_u64(artifact, &["background_qos", "estimated_memory_bytes"])
+            .is_some()
         && blackbox_json_nested_value(artifact, &["background_qos", "blocker_codes"])
             .and_then(serde_json::Value::as_array)
-            .is_some()
+            .is_some_and(Vec::is_empty)
 }
 
 fn blackbox_json_artifact<'a>(
@@ -1170,6 +1234,16 @@ mod tests {
                 "rejected_count": 0,
                 "executable_search_projection_graph_delta_count": 1,
                 "admitted_search_projection_graph_delta_count": 1,
+                "deferred_search_projection_graph_delta_count": 0,
+                "rejected_search_projection_graph_delta_count": 0,
+                "executable_search_projection_graph_delta_operations": 2,
+                "admitted_search_projection_graph_delta_operations": 2,
+                "max_search_projection_graph_delta_complete_through_graph_commit_epoch": 7,
+                "memory_pressure": {
+                    "ready": true,
+                    "budget_bytes": 4096,
+                    "estimated_bytes": 1024
+                },
                 "blocker_codes": []
             }))
             .unwrap(),
@@ -1200,6 +1274,59 @@ mod tests {
         assert_eq!(json["ready"], true);
         assert_eq!(json["blocker_codes"], serde_json::json!([]));
 
+        let manifest_readiness = blackbox_readiness_from_manifest_json(&report.json());
+        assert_eq!(manifest_readiness, readiness);
+    }
+
+    #[test]
+    fn blackbox_readiness_report_requires_memory_pressure_qos_evidence() {
+        let root = unique_test_dir("blackbox-readiness-memory-pressure");
+        let artifact_dir = root.join("artifacts");
+        fs::create_dir_all(&artifact_dir).unwrap();
+        fs::write(
+            artifact_dir.join("slow-query-log.jsonl"),
+            "{\"event\":\"slow_query\",\"digest\":\"digest-1\"}\n",
+        )
+        .unwrap();
+        fs::write(
+            artifact_dir.join("background-maintenance.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "protocol": "skein-background-maintenance-report",
+                "ready": true,
+                "total_candidates": 1,
+                "admitted_count": 1,
+                "deferred_count": 0,
+                "rejected_count": 0,
+                "executable_search_projection_graph_delta_count": 1,
+                "admitted_search_projection_graph_delta_count": 1,
+                "deferred_search_projection_graph_delta_count": 0,
+                "rejected_search_projection_graph_delta_count": 0,
+                "executable_search_projection_graph_delta_operations": 2,
+                "admitted_search_projection_graph_delta_operations": 2,
+                "max_search_projection_graph_delta_complete_through_graph_commit_epoch": 7,
+                "blocker_codes": []
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let report = blackbox_report(&BlackboxReportOptions {
+            artifact_dir,
+            output_dir: root.join("blackbox"),
+            run_id: Some("run-memory-pressure".to_string()),
+            run_status: BlackboxRunStatus::Completed,
+            exit_code: Some(0),
+        })
+        .unwrap();
+        let readiness = report.readiness();
+
+        assert!(!readiness.ready);
+        assert!(!readiness.operational_evidence_ready);
+        assert!(!readiness.background_qos_summary_ready);
+        assert_eq!(
+            readiness.blocker_codes,
+            vec!["blackbox_background_qos_summary_missing".to_string()]
+        );
         let manifest_readiness = blackbox_readiness_from_manifest_json(&report.json());
         assert_eq!(manifest_readiness, readiness);
     }

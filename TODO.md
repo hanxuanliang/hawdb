@@ -499,6 +499,9 @@ contract.
   - [x] Require background-maintenance evidence to carry local QoS snapshot
     readiness so cutover gates fail closed when background work is unbounded or
     over budget.
+  - [x] Require blackbox background QoS readiness to include deferral and
+    rejection counters, graph-delta operation counts, watermark evidence, and
+    memory-pressure budget fields before operational evidence can pass.
   - [x] Redact background-maintenance evidence JSON parse failures by default
     so local artifact paths and QoS payload fragments are not copied into
     command errors.

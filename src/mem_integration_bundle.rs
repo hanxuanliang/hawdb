@@ -1304,6 +1304,11 @@ mod tests {
             .iter()
             .any(|artifact| artifact["background_qos"]["protocol"]
                 == "skein-background-maintenance-report"));
+        assert!(bundle["blackbox_manifest"]["artifacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|artifact| artifact["background_qos"]["memory_pressure_ready"] == true));
         assert_eq!(readiness["ready"], true);
         assert_eq!(readiness["failed_checks"], serde_json::json!([]));
     }
@@ -2210,6 +2215,14 @@ mod tests {
                         "rejected_count": 0,
                         "executable_search_projection_graph_delta_count": 1,
                         "admitted_search_projection_graph_delta_count": 1,
+                        "deferred_search_projection_graph_delta_count": 0,
+                        "rejected_search_projection_graph_delta_count": 0,
+                        "executable_search_projection_graph_delta_operations": 2,
+                        "admitted_search_projection_graph_delta_operations": 2,
+                        "max_search_projection_graph_delta_complete_through_graph_commit_epoch": 7,
+                        "memory_pressure_ready": true,
+                        "memory_budget_bytes": 4096,
+                        "estimated_memory_bytes": 1024,
                         "blocker_codes": []
                     }
                 }
