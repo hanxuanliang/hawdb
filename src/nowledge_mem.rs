@@ -2904,6 +2904,7 @@ pub struct NowledgeMemLibraryReadinessReport {
     pub present: bool,
     pub ready: bool,
     pub mode: NowledgeMemGraphMode,
+    pub redaction: NowledgeMemReadinessRedactionSummary,
     pub blocker_codes: Vec<String>,
     pub readiness_by_area: NowledgeMemReadinessAreaMap,
     pub ready_area_count: usize,
@@ -2932,6 +2933,7 @@ impl NowledgeMemLibraryReadinessReport {
             "present": self.present,
             "ready": self.ready,
             "mode": self.mode.as_str(),
+            "redaction": self.redaction.json(),
             "blocker_codes": self.blocker_codes,
             "readiness_by_area": self.readiness_by_area.json(),
             "areas": areas.iter().map(NowledgeMemReadinessAreaSummary::json).collect::<Vec<_>>(),
@@ -2950,6 +2952,28 @@ impl NowledgeMemLibraryReadinessReport {
             "search_projection_evidence": self.search_projection_evidence,
             "search_projection_shadow_evidence": self.search_projection_shadow_evidence,
             "search_candidate_shadow_evidence": self.search_candidate_shadow_evidence,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NowledgeMemReadinessRedactionSummary {
+    pub query_text_copied: bool,
+    pub parameters_copied: bool,
+    pub local_paths_copied: bool,
+}
+
+impl NowledgeMemReadinessRedactionSummary {
+    pub fn ready(&self) -> bool {
+        !self.query_text_copied && !self.parameters_copied && !self.local_paths_copied
+    }
+
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "ready": self.ready(),
+            "query_text_copied": self.query_text_copied,
+            "parameters_copied": self.parameters_copied,
+            "local_paths_copied": self.local_paths_copied,
         })
     }
 }
@@ -5497,6 +5521,7 @@ impl NowledgeMemEmbeddedStore {
             present: true,
             ready,
             mode: self.graph.mode(),
+            redaction: NowledgeMemReadinessRedactionSummary::default(),
             blocker_codes,
             readiness_by_area,
             ready_area_count,
@@ -9006,6 +9031,10 @@ mod tests {
         assert!(report.present);
         assert!(!report.ready);
         assert_eq!(report.mode, NowledgeMemGraphMode::ShadowReadOnly);
+        assert!(report.redaction.ready());
+        assert!(!report.redaction.query_text_copied);
+        assert!(!report.redaction.parameters_copied);
+        assert!(!report.redaction.local_paths_copied);
         assert!(report.graph_open);
         assert!(!report.graph_read_only);
         let areas = report.areas();
@@ -9046,6 +9075,10 @@ mod tests {
             .iter()
             .any(|code| code == "graph_route_readiness_not_ready"));
         assert_eq!(json["ready"], false);
+        assert_eq!(json["redaction"]["ready"], true);
+        assert_eq!(json["redaction"]["query_text_copied"], false);
+        assert_eq!(json["redaction"]["parameters_copied"], false);
+        assert_eq!(json["redaction"]["local_paths_copied"], false);
         assert_eq!(
             json["blocker_codes"],
             serde_json::json!(report.blocker_codes)

@@ -39,6 +39,8 @@ query family, or cutover gate requires them.
 - [ ] Keep sensitive paths and data out of readiness artifacts.
   - Default reports must redact local paths and raw parse or I/O errors.
   - Expose raw local diagnostics only behind explicit debug flags.
+  - [x] Expose a typed library-readiness redaction summary proving query text,
+    parameters, and local paths are not copied into the default report.
 
 ## P0: Concrete Cutover Blockers
 
