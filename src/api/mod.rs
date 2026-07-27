@@ -5676,6 +5676,10 @@ impl Database {
         }
     }
 
+    pub fn commit_epoch(&self) -> u64 {
+        self.store.commit_epoch()
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Self::open_with_durability(path, DurabilityPolicy::default())
     }

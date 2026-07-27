@@ -140,6 +140,8 @@ pub const NOWLEDGE_MEM_GRAPH_COMMUNITY_SUBGRAPH_ROUTE_REPORT_PROTOCOL: &str =
     "skein-nowledge-mem-graph-community-subgraph-route-report-v1";
 pub const NOWLEDGE_MEM_GRAPH_AUGMENTATION_STATE_ROUTE_REPORT_PROTOCOL: &str =
     "skein-nowledge-mem-graph-augmentation-state-route-report-v1";
+pub const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ROUTE_REPORT_PROTOCOL: &str =
+    "skein-nowledge-mem-graph-pagerank-plan-route-report-v1";
 pub const NOWLEDGE_MEM_GRAPH_ORPHANS_ROUTE_REPORT_PROTOCOL: &str =
     "skein-nowledge-mem-graph-orphans-route-report-v1";
 pub const NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL: &str = "skein-nowledge-mem-retrieval-report";
@@ -343,6 +345,32 @@ m.schema_version AS schema_version, \
 m.community_detection_computed_at AS community_detection_computed_at, \
 m.pagerank_computed_at AS pagerank_computed_at \
 LIMIT 1";
+pub const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ROUTE: &str = "/graph/augmentation/pagerank/plan";
+pub const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_GRAPH_META_QUERY: &str = "\
+MATCH (m:GraphMeta {meta_id: 'main'}) \
+RETURN m.pagerank_applied AS pagerank_applied, \
+m.pagerank_computed_at AS pagerank_computed_at \
+LIMIT 1";
+pub const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_MEMORY_COUNT_QUERY: &str =
+    "MATCH (m:Memory) RETURN count(m) AS total";
+pub const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ENTITY_COUNT_QUERY: &str =
+    "MATCH (e:Entity) RETURN count(e) AS total";
+pub const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ENTITY_RELATION_COUNT_QUERY: &str =
+    "MATCH (:Entity)-[r:RELATES_TO]->(:Entity) RETURN count(r) AS total";
+pub const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_MENTION_EDGE_COUNT_QUERY: &str =
+    "MATCH (:Memory)-[r:MENTIONS]->(:Entity) RETURN count(r) AS total";
+pub const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ACTIVE_MEMORY_RELATION_COUNT_QUERY: &str =
+    "MATCH (:Memory)-[r:MEMORY_RELATES_TO]->(:Memory) WHERE r.status = 'active' RETURN count(r) AS total";
+pub const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_MEMORY_COUNT_QUERY: &str =
+    "MATCH (m:Memory) WHERE m.created_at > $cutoff OR m.updated_at > $cutoff RETURN count(m) AS total";
+pub const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_ENTITY_COUNT_QUERY: &str =
+    "MATCH (e:Entity) WHERE e.created_at > $cutoff OR e.updated_at > $cutoff RETURN count(e) AS total";
+pub const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_MENTION_EDGE_COUNT_QUERY: &str =
+    "MATCH (:Memory)-[r:MENTIONS]->(:Entity) WHERE r.created_at > $cutoff OR r.updated_at > $cutoff RETURN count(r) AS total";
+pub const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_ENTITY_RELATION_COUNT_QUERY: &str =
+    "MATCH (:Entity)-[r:RELATES_TO]->(:Entity) WHERE r.created_at > $cutoff OR r.updated_at > $cutoff RETURN count(r) AS total";
+pub const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_MEMORY_RELATION_COUNT_QUERY: &str =
+    "MATCH (:Memory)-[r:MEMORY_RELATES_TO]->(:Memory) WHERE r.status = 'active' AND (r.created_at > $cutoff OR r.updated_at > $cutoff) RETURN count(r) AS total";
 pub const NOWLEDGE_MEM_GRAPH_ORPHANS_ROUTE: &str = "/graph/orphans";
 pub const NOWLEDGE_MEM_GRAPH_ORPHAN_ENTITIES_QUERY: &str = "\
 MATCH (e:Entity) \
@@ -2259,6 +2287,91 @@ impl NowledgeMemGraphAugmentationStateOutput {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NowledgeMemGraphPageRankPlanOptions {
+    pub changed_since_epoch_nanos: Option<i64>,
+    pub read_options: NowledgeMemReadOptions,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemGraphPageRankPlanMetaRow {
+    pub pagerank_applied: Option<bool>,
+    pub pagerank_computed_at: Option<Value>,
+}
+
+impl NowledgeMemGraphPageRankPlanMetaRow {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "pagerank_applied": self.pagerank_applied,
+            "pagerank_computed_at": self.pagerank_computed_at.as_ref().map(nowledge_value_json),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemGraphPageRankPlanRouteReport {
+    pub protocol: String,
+    pub route: String,
+    pub read_engine: crate::route_ownership::NowledgeMemRouteReadEngine,
+    pub route_catalog_version: String,
+    pub route_catalog_digest: String,
+    pub changed_since_epoch_nanos: Option<i64>,
+    pub query_count: usize,
+    pub read_reports: Vec<NowledgeMemReadReport>,
+}
+
+impl NowledgeMemGraphPageRankPlanRouteReport {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": self.protocol,
+            "route": self.route,
+            "read_engine": self.read_engine.as_str(),
+            "route_catalog_version": self.route_catalog_version,
+            "route_catalog_digest": self.route_catalog_digest,
+            "changed_since_epoch_nanos": self.changed_since_epoch_nanos,
+            "query_count": self.query_count,
+            "read_reports": self.read_reports.iter().map(NowledgeMemReadReport::json).collect::<Vec<_>>(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemGraphPageRankPlanOutput {
+    pub graph_commit_epoch: u64,
+    pub graph_meta: Option<NowledgeMemGraphPageRankPlanMetaRow>,
+    pub memory_node_count: usize,
+    pub entity_node_count: usize,
+    pub entity_relation_count: usize,
+    pub mention_edge_count: usize,
+    pub active_memory_relation_count: usize,
+    pub changed_memory_count: usize,
+    pub changed_entity_count: usize,
+    pub changed_mention_edge_count: usize,
+    pub changed_entity_relation_count: usize,
+    pub changed_memory_relation_count: usize,
+    pub report: NowledgeMemGraphPageRankPlanRouteReport,
+}
+
+impl NowledgeMemGraphPageRankPlanOutput {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "graph_commit_epoch": self.graph_commit_epoch,
+            "graph_meta": self.graph_meta.as_ref().map(NowledgeMemGraphPageRankPlanMetaRow::json),
+            "memory_node_count": self.memory_node_count,
+            "entity_node_count": self.entity_node_count,
+            "entity_relation_count": self.entity_relation_count,
+            "mention_edge_count": self.mention_edge_count,
+            "active_memory_relation_count": self.active_memory_relation_count,
+            "changed_memory_count": self.changed_memory_count,
+            "changed_entity_count": self.changed_entity_count,
+            "changed_mention_edge_count": self.changed_mention_edge_count,
+            "changed_entity_relation_count": self.changed_entity_relation_count,
+            "changed_memory_relation_count": self.changed_memory_relation_count,
+            "report": self.report.json(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NowledgeMemGraphOrphansOptions {
     pub limit: usize,
@@ -3717,6 +3830,157 @@ impl NowledgeMemGraph {
         Ok(NowledgeMemGraphAugmentationStateOutput { state, report })
     }
 
+    pub fn read_graph_pagerank_plan(
+        &mut self,
+        options: &NowledgeMemGraphPageRankPlanOptions,
+    ) -> Result<NowledgeMemGraphPageRankPlanOutput> {
+        let graph_commit_epoch = self.db.commit_epoch();
+        let mut read_reports = Vec::new();
+        let graph_meta = self.read_graph_pagerank_plan_meta(options, &mut read_reports)?;
+        let memory_node_count = self.read_graph_pagerank_plan_count(
+            NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_MEMORY_COUNT_QUERY,
+            &BTreeMap::new(),
+            options,
+            &mut read_reports,
+        )?;
+        let entity_node_count = self.read_graph_pagerank_plan_count(
+            NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ENTITY_COUNT_QUERY,
+            &BTreeMap::new(),
+            options,
+            &mut read_reports,
+        )?;
+        let entity_relation_count = self.read_graph_pagerank_plan_count(
+            NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ENTITY_RELATION_COUNT_QUERY,
+            &BTreeMap::new(),
+            options,
+            &mut read_reports,
+        )?;
+        let mention_edge_count = self.read_graph_pagerank_plan_count(
+            NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_MENTION_EDGE_COUNT_QUERY,
+            &BTreeMap::new(),
+            options,
+            &mut read_reports,
+        )?;
+        let active_memory_relation_count = self.read_graph_pagerank_plan_count(
+            NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ACTIVE_MEMORY_RELATION_COUNT_QUERY,
+            &BTreeMap::new(),
+            options,
+            &mut read_reports,
+        )?;
+        let (
+            changed_memory_count,
+            changed_entity_count,
+            changed_mention_edge_count,
+            changed_entity_relation_count,
+            changed_memory_relation_count,
+        ) = if let Some(cutoff) = options.changed_since_epoch_nanos {
+            let parameters = BTreeMap::from([("cutoff".to_string(), Value::Int(cutoff))]);
+            (
+                self.read_graph_pagerank_plan_count(
+                    NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_MEMORY_COUNT_QUERY,
+                    &parameters,
+                    options,
+                    &mut read_reports,
+                )?,
+                self.read_graph_pagerank_plan_count(
+                    NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_ENTITY_COUNT_QUERY,
+                    &parameters,
+                    options,
+                    &mut read_reports,
+                )?,
+                self.read_graph_pagerank_plan_count(
+                    NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_MENTION_EDGE_COUNT_QUERY,
+                    &parameters,
+                    options,
+                    &mut read_reports,
+                )?,
+                self.read_graph_pagerank_plan_count(
+                    NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_ENTITY_RELATION_COUNT_QUERY,
+                    &parameters,
+                    options,
+                    &mut read_reports,
+                )?,
+                self.read_graph_pagerank_plan_count(
+                    NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_MEMORY_RELATION_COUNT_QUERY,
+                    &parameters,
+                    options,
+                    &mut read_reports,
+                )?,
+            )
+        } else {
+            (0, 0, 0, 0, 0)
+        };
+        let query_count = read_reports.len();
+        let report = NowledgeMemGraphPageRankPlanRouteReport {
+            protocol: NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ROUTE_REPORT_PROTOCOL.to_string(),
+            route: NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ROUTE.to_string(),
+            read_engine: crate::route_ownership::NowledgeMemRouteReadEngine::Skein,
+            route_catalog_version: NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION.to_string(),
+            route_catalog_digest: nowledge_mem_graph_read_route_catalog_digest(),
+            changed_since_epoch_nanos: options.changed_since_epoch_nanos,
+            query_count,
+            read_reports,
+        };
+        Ok(NowledgeMemGraphPageRankPlanOutput {
+            graph_commit_epoch,
+            graph_meta,
+            memory_node_count,
+            entity_node_count,
+            entity_relation_count,
+            mention_edge_count,
+            active_memory_relation_count,
+            changed_memory_count,
+            changed_entity_count,
+            changed_mention_edge_count,
+            changed_entity_relation_count,
+            changed_memory_relation_count,
+            report,
+        })
+    }
+
+    fn read_graph_pagerank_plan_meta(
+        &mut self,
+        options: &NowledgeMemGraphPageRankPlanOptions,
+        read_reports: &mut Vec<NowledgeMemReadReport>,
+    ) -> Result<Option<NowledgeMemGraphPageRankPlanMetaRow>> {
+        let read = self.read_query_with_params(
+            NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_GRAPH_META_QUERY,
+            &BTreeMap::new(),
+            &graph_pagerank_plan_read_options(options),
+        )?;
+        let meta = read
+            .output
+            .rows
+            .first()
+            .map(decode_graph_pagerank_plan_meta_row)
+            .transpose()?;
+        read_reports.push(read.report);
+        Ok(meta)
+    }
+
+    fn read_graph_pagerank_plan_count(
+        &mut self,
+        query: &str,
+        parameters: &BTreeMap<String, Value>,
+        options: &NowledgeMemGraphPageRankPlanOptions,
+        read_reports: &mut Vec<NowledgeMemReadReport>,
+    ) -> Result<usize> {
+        let read = self.read_query_with_params(
+            query,
+            parameters,
+            &graph_pagerank_plan_read_options(options),
+        )?;
+        let count = read
+            .output
+            .rows
+            .first()
+            .map(|row| required_usize_field(row, "total"))
+            .transpose()?
+            .unwrap_or(0);
+        read_reports.push(read.report);
+        Ok(count)
+    }
+
     pub fn read_graph_orphans(
         &mut self,
         options: &NowledgeMemGraphOrphansOptions,
@@ -3831,6 +4095,17 @@ fn graph_community_subgraph_edge_read_options(
 
 fn graph_augmentation_state_read_options(
     options: &NowledgeMemGraphAugmentationStateOptions,
+) -> NowledgeMemReadOptions {
+    let mut read_options = options.read_options.clone();
+    read_options.max_rows = Some(match read_options.max_rows {
+        Some(max_rows) => max_rows.min(1),
+        None => 1,
+    });
+    read_options
+}
+
+fn graph_pagerank_plan_read_options(
+    options: &NowledgeMemGraphPageRankPlanOptions,
 ) -> NowledgeMemReadOptions {
     let mut read_options = options.read_options.clone();
     read_options.max_rows = Some(match read_options.max_rows {
@@ -3960,6 +4235,15 @@ fn decode_graph_augmentation_state_row(
     })
 }
 
+fn decode_graph_pagerank_plan_meta_row(
+    row: &BTreeMap<String, Value>,
+) -> Result<NowledgeMemGraphPageRankPlanMetaRow> {
+    Ok(NowledgeMemGraphPageRankPlanMetaRow {
+        pagerank_applied: optional_bool_field(row, "pagerank_applied")?,
+        pagerank_computed_at: optional_value_field(row, "pagerank_computed_at"),
+    })
+}
+
 fn decode_graph_orphan_entity_row(
     row: &BTreeMap<String, Value>,
 ) -> Result<NowledgeMemGraphOrphanEntityRow> {
@@ -4036,6 +4320,15 @@ fn required_u64_field(row: &BTreeMap<String, Value>, field: &str) -> Result<u64>
             "graph route field {field} is missing"
         ))),
     }
+}
+
+fn required_usize_field(row: &BTreeMap<String, Value>, field: &str) -> Result<usize> {
+    let value = required_u64_field(row, field)?;
+    usize::try_from(value).map_err(|_| {
+        SkeinError::Execution(format!(
+            "nowledge mem field '{field}' exceeds supported usize range"
+        ))
+    })
 }
 
 #[derive(Debug)]
@@ -4284,6 +4577,13 @@ impl NowledgeMemEmbeddedStoreHandle {
         options: &NowledgeMemGraphAugmentationStateOptions,
     ) -> Result<NowledgeMemGraphAugmentationStateOutput> {
         self.lock_store()?.read_graph_augmentation_state(options)
+    }
+
+    pub fn read_graph_pagerank_plan(
+        &self,
+        options: &NowledgeMemGraphPageRankPlanOptions,
+    ) -> Result<NowledgeMemGraphPageRankPlanOutput> {
+        self.lock_store()?.read_graph_pagerank_plan(options)
     }
 
     pub fn read_graph_orphans(
@@ -4716,6 +5016,13 @@ impl NowledgeMemEmbeddedStore {
         options: &NowledgeMemGraphAugmentationStateOptions,
     ) -> Result<NowledgeMemGraphAugmentationStateOutput> {
         self.graph.read_graph_augmentation_state(options)
+    }
+
+    pub fn read_graph_pagerank_plan(
+        &mut self,
+        options: &NowledgeMemGraphPageRankPlanOptions,
+    ) -> Result<NowledgeMemGraphPageRankPlanOutput> {
+        self.graph.read_graph_pagerank_plan(options)
     }
 
     pub fn read_graph_orphans(
@@ -6581,9 +6888,10 @@ mod tests {
         NowledgeMemGraphAugmentationStateOptions, NowledgeMemGraphCommunityMembersOptions,
         NowledgeMemGraphCommunityRecentMemoriesOptions, NowledgeMemGraphCommunitySubgraphOptions,
         NowledgeMemGraphMode, NowledgeMemGraphNodeDetailsOptions, NowledgeMemGraphOrphansOptions,
-        NowledgeMemGraphOverviewOptions, NowledgeMemGraphSampleOptions, NowledgeMemOpenOptions,
-        NowledgeMemQueryExecutionPath, NowledgeMemQueryReportOptions, NowledgeMemReadOptions,
-        NowledgeMemReadReport, NowledgeMemReadinessAreaSummary, NowledgeMemReadinessDashboard,
+        NowledgeMemGraphOverviewOptions, NowledgeMemGraphPageRankPlanOptions,
+        NowledgeMemGraphSampleOptions, NowledgeMemOpenOptions, NowledgeMemQueryExecutionPath,
+        NowledgeMemQueryReportOptions, NowledgeMemReadOptions, NowledgeMemReadReport,
+        NowledgeMemReadinessAreaSummary, NowledgeMemReadinessDashboard,
         NowledgeMemReadinessOptions, NowledgeMemRouteReadinessSummary,
         NowledgeMemSearchCandidateReadinessOptions, NowledgeMemSearchCandidateRequest,
         NowledgeMemSearchCandidateShadowAccumulator, NowledgeMemSearchCandidateShadowEvidence,
@@ -6600,7 +6908,8 @@ mod tests {
         NOWLEDGE_MEM_GRAPH_NODE_DETAILS_ROUTE,
         NOWLEDGE_MEM_GRAPH_NODE_DETAILS_ROUTE_REPORT_PROTOCOL, NOWLEDGE_MEM_GRAPH_ORPHANS_ROUTE,
         NOWLEDGE_MEM_GRAPH_ORPHANS_ROUTE_REPORT_PROTOCOL, NOWLEDGE_MEM_GRAPH_OVERVIEW_ROUTE,
-        NOWLEDGE_MEM_GRAPH_OVERVIEW_ROUTE_REPORT_PROTOCOL, NOWLEDGE_MEM_GRAPH_SAMPLE_ROUTE,
+        NOWLEDGE_MEM_GRAPH_OVERVIEW_ROUTE_REPORT_PROTOCOL, NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ROUTE,
+        NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ROUTE_REPORT_PROTOCOL, NOWLEDGE_MEM_GRAPH_SAMPLE_ROUTE,
         NOWLEDGE_MEM_GRAPH_SAMPLE_ROUTE_REPORT_PROTOCOL, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
         NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL, NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL,
         NOWLEDGE_MEM_READINESS_DASHBOARD_PROTOCOL, NOWLEDGE_MEM_READ_REPORT_PROTOCOL,
@@ -7165,6 +7474,67 @@ mod tests {
             output.report.route,
             NOWLEDGE_MEM_GRAPH_AUGMENTATION_STATE_ROUTE
         );
+    }
+
+    #[test]
+    fn graph_pagerank_plan_route_runs_through_bounded_query_runtime() {
+        let db = Database::new();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        seed_graph_pagerank_plan(graph.database_mut());
+        let graph_commit_epoch = graph.database().commit_epoch();
+
+        let output = graph
+            .read_graph_pagerank_plan(&NowledgeMemGraphPageRankPlanOptions {
+                changed_since_epoch_nanos: Some(100),
+                read_options: NowledgeMemReadOptions::default(),
+            })
+            .unwrap();
+
+        assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
+        assert_eq!(
+            output
+                .graph_meta
+                .as_ref()
+                .and_then(|meta| meta.pagerank_applied),
+            Some(true)
+        );
+        assert_eq!(output.memory_node_count, 2);
+        assert_eq!(output.entity_node_count, 2);
+        assert_eq!(output.entity_relation_count, 1);
+        assert_eq!(output.mention_edge_count, 2);
+        assert_eq!(output.active_memory_relation_count, 1);
+        assert_eq!(output.changed_memory_count, 1);
+        assert_eq!(output.changed_entity_count, 1);
+        assert_eq!(output.changed_mention_edge_count, 1);
+        assert_eq!(output.changed_entity_relation_count, 1);
+        assert_eq!(output.changed_memory_relation_count, 1);
+        assert_eq!(
+            output.report.protocol,
+            NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ROUTE_REPORT_PROTOCOL
+        );
+        assert_eq!(output.report.route, NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ROUTE);
+        assert_eq!(output.report.query_count, 11);
+        assert_eq!(output.report.read_reports.len(), 11);
+        assert_eq!(output.json()["report"]["read_engine"], "skein");
+        assert_eq!(output.json()["changed_memory_count"], 1);
+    }
+
+    #[test]
+    fn embedded_store_handle_exposes_graph_pagerank_plan_route() {
+        let db = Database::new();
+        let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        let mut store = NowledgeMemEmbeddedStore::new(graph, None);
+        seed_graph_pagerank_plan(store.graph_mut().database_mut());
+        let handle = NowledgeMemEmbeddedStoreHandle::new(store);
+
+        let output = handle
+            .read_graph_pagerank_plan(&NowledgeMemGraphPageRankPlanOptions::default())
+            .unwrap();
+
+        assert_eq!(output.memory_node_count, 2);
+        assert_eq!(output.changed_memory_count, 0);
+        assert_eq!(output.report.query_count, 6);
+        assert_eq!(output.report.route, NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ROUTE);
     }
 
     #[test]
@@ -10090,6 +10460,29 @@ mod tests {
     fn seed_graph_augmentation_state(graph: &mut NowledgeMemGraph) {
         graph
             .query("CREATE (:GraphMeta {meta_id: 'main', community_detection_applied: true, pagerank_applied: true, community_algorithm: 'louvain', community_resolution: 1.0, community_count: 12, pagerank_algorithm: 'pagerank', pagerank_damping: 0.85, pagerank_iterations: 20, last_augmentation_at: 1000, schema_version: 2, community_detection_computed_at: 900, pagerank_computed_at: 950})")
+            .unwrap();
+    }
+
+    fn seed_graph_pagerank_plan(db: &mut Database) {
+        db.query("CREATE (:GraphMeta {meta_id: 'main', pagerank_applied: true, pagerank_computed_at: 404})")
+            .unwrap();
+        db.query("CREATE (:Memory {id: 'pagerank-plan-m1', created_at: 10, updated_at: 20})")
+            .unwrap();
+        db.query("CREATE (:Memory {id: 'pagerank-plan-m2', created_at: 120, updated_at: 130})")
+            .unwrap();
+        db.query("CREATE (:Entity {id: 'pagerank-plan-e1', name: 'Entity One', created_at: 15, updated_at: 25})")
+            .unwrap();
+        db.query("CREATE (:Entity {id: 'pagerank-plan-e2', name: 'Entity Two', created_at: 140, updated_at: 150})")
+            .unwrap();
+        db.query("MATCH (m:Memory {id: 'pagerank-plan-m1'}), (e:Entity {id: 'pagerank-plan-e1'}) CREATE (m)-[:MENTIONS {created_at: 30}]->(e)")
+            .unwrap();
+        db.query("MATCH (m:Memory {id: 'pagerank-plan-m2'}), (e:Entity {id: 'pagerank-plan-e2'}) CREATE (m)-[:MENTIONS {created_at: 160}]->(e)")
+            .unwrap();
+        db.query("MATCH (a:Entity {id: 'pagerank-plan-e1'}), (b:Entity {id: 'pagerank-plan-e2'}) CREATE (a)-[:RELATES_TO {created_at: 170}]->(b)")
+            .unwrap();
+        db.query("MATCH (a:Memory {id: 'pagerank-plan-m1'}), (b:Memory {id: 'pagerank-plan-m2'}) CREATE (a)-[:MEMORY_RELATES_TO {status: 'active', created_at: 180}]->(b)")
+            .unwrap();
+        db.query("MATCH (a:Memory {id: 'pagerank-plan-m2'}), (b:Memory {id: 'pagerank-plan-m1'}) CREATE (a)-[:MEMORY_RELATES_TO {status: 'inactive', created_at: 190}]->(b)")
             .unwrap();
     }
 

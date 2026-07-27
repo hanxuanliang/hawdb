@@ -181,6 +181,8 @@ contract.
     relation-edge reads.
   - [x] Add a library-first `/graph/augmentation/state` runtime and route-query
     evidence helper for the GraphMeta projected-graph state read.
+  - [x] Add a library-first `/graph/augmentation/pagerank/plan` runtime and
+    route-query evidence helper for PageRank graph counts and changed-counts.
 - [ ] PR 4: Add search projection scan-pruning evidence for production filters.
   - Scope: prove search projection segment descriptors prune `unit_type`,
     lifecycle state, metadata keys, `importance`, `confidence`, and timestamps

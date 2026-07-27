@@ -10,7 +10,19 @@ use crate::{
     NOWLEDGE_MEM_GRAPH_COMMUNITY_SUBGRAPH_ROUTE, NOWLEDGE_MEM_GRAPH_NODE_DETAILS_MEMORY_QUERY,
     NOWLEDGE_MEM_GRAPH_NODE_DETAILS_ROUTE, NOWLEDGE_MEM_GRAPH_ORPHANS_ROUTE,
     NOWLEDGE_MEM_GRAPH_ORPHAN_ENTITIES_QUERY, NOWLEDGE_MEM_GRAPH_OVERVIEW_MEMORY_RANKING_QUERY,
-    NOWLEDGE_MEM_GRAPH_OVERVIEW_ROUTE, NOWLEDGE_MEM_GRAPH_SAMPLE_MEMORY_QUERY,
+    NOWLEDGE_MEM_GRAPH_OVERVIEW_ROUTE,
+    NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ACTIVE_MEMORY_RELATION_COUNT_QUERY,
+    NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_ENTITY_COUNT_QUERY,
+    NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_ENTITY_RELATION_COUNT_QUERY,
+    NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_MEMORY_COUNT_QUERY,
+    NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_MEMORY_RELATION_COUNT_QUERY,
+    NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_MENTION_EDGE_COUNT_QUERY,
+    NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ENTITY_COUNT_QUERY,
+    NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ENTITY_RELATION_COUNT_QUERY,
+    NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_GRAPH_META_QUERY,
+    NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_MEMORY_COUNT_QUERY,
+    NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_MENTION_EDGE_COUNT_QUERY,
+    NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ROUTE, NOWLEDGE_MEM_GRAPH_SAMPLE_MEMORY_QUERY,
     NOWLEDGE_MEM_GRAPH_SAMPLE_ROUTE, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
     REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
 };
@@ -676,6 +688,108 @@ pub fn nowledge_mem_graph_augmentation_state_route_query() -> RouteQuery {
     }
 }
 
+pub fn nowledge_mem_graph_pagerank_plan_route_query(
+    changed_since_epoch_nanos: Option<i64>,
+) -> RouteQuery {
+    let mut queries = vec![
+        pagerank_plan_route_query(
+            "pagerank-plan-graph-meta",
+            NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_GRAPH_META_QUERY,
+            BTreeMap::new(),
+            true,
+        ),
+        pagerank_plan_route_query(
+            "pagerank-plan-memory-count",
+            NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_MEMORY_COUNT_QUERY,
+            BTreeMap::new(),
+            false,
+        ),
+        pagerank_plan_route_query(
+            "pagerank-plan-entity-count",
+            NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ENTITY_COUNT_QUERY,
+            BTreeMap::new(),
+            false,
+        ),
+        pagerank_plan_route_query(
+            "pagerank-plan-entity-relation-count",
+            NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ENTITY_RELATION_COUNT_QUERY,
+            BTreeMap::new(),
+            false,
+        ),
+        pagerank_plan_route_query(
+            "pagerank-plan-mention-edge-count",
+            NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_MENTION_EDGE_COUNT_QUERY,
+            BTreeMap::new(),
+            false,
+        ),
+        pagerank_plan_route_query(
+            "pagerank-plan-active-memory-relation-count",
+            NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ACTIVE_MEMORY_RELATION_COUNT_QUERY,
+            BTreeMap::new(),
+            false,
+        ),
+    ];
+    if let Some(cutoff) = changed_since_epoch_nanos {
+        let parameters = BTreeMap::from([("cutoff".to_string(), Value::Int(cutoff))]);
+        queries.extend([
+            pagerank_plan_route_query(
+                "pagerank-plan-changed-memory-count",
+                NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_MEMORY_COUNT_QUERY,
+                parameters.clone(),
+                true,
+            ),
+            pagerank_plan_route_query(
+                "pagerank-plan-changed-entity-count",
+                NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_ENTITY_COUNT_QUERY,
+                parameters.clone(),
+                true,
+            ),
+            pagerank_plan_route_query(
+                "pagerank-plan-changed-mention-edge-count",
+                NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_MENTION_EDGE_COUNT_QUERY,
+                parameters.clone(),
+                false,
+            ),
+            pagerank_plan_route_query(
+                "pagerank-plan-changed-entity-relation-count",
+                NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_ENTITY_RELATION_COUNT_QUERY,
+                parameters.clone(),
+                false,
+            ),
+            pagerank_plan_route_query(
+                "pagerank-plan-changed-memory-relation-count",
+                NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_MEMORY_RELATION_COUNT_QUERY,
+                parameters,
+                false,
+            ),
+        ]);
+    }
+    RouteQuery {
+        route: NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ROUTE.to_string(),
+        shadow_compare_ready: false,
+        primary_read_routing_enabled: true,
+        primary_ready: false,
+        blocker_codes: Vec::new(),
+        queries,
+    }
+}
+
+fn pagerank_plan_route_query(
+    name: impl Into<String>,
+    cypher: impl Into<String>,
+    parameters: BTreeMap<String, Value>,
+    require_scan_pruning: bool,
+) -> RouteCypherQuery {
+    RouteCypherQuery {
+        name: name.into(),
+        query_family: Some("projected_graph".to_string()),
+        require_scan_pruning,
+        require_pruned: false,
+        cypher: cypher.into(),
+        parameters,
+    }
+}
+
 pub fn nowledge_mem_graph_orphans_route_query(limit: usize) -> Result<RouteQuery> {
     let limit = i64::try_from(limit).map_err(|_| {
         SkeinError::Semantic(
@@ -1061,9 +1175,9 @@ mod tests {
         nowledge_mem_graph_community_recent_memories_route_query,
         nowledge_mem_graph_community_subgraph_route_query,
         nowledge_mem_graph_node_details_route_query, nowledge_mem_graph_orphans_route_query,
-        nowledge_mem_graph_overview_route_query, nowledge_mem_graph_sample_route_query,
-        parse_route_parity_evidence, parse_route_query_inventory, query_requirement_blockers,
-        RouteCypherQuery,
+        nowledge_mem_graph_overview_route_query, nowledge_mem_graph_pagerank_plan_route_query,
+        nowledge_mem_graph_sample_route_query, parse_route_parity_evidence,
+        parse_route_query_inventory, query_requirement_blockers, RouteCypherQuery,
     };
     use crate::{
         nowledge_graph_route_readiness_json, Database, NowledgeMemGraph, NowledgeMemGraphMode,
@@ -1553,6 +1667,79 @@ mod tests {
         assert_eq!(
             evidence["routes"][0]["query_reports"][0]["query_family"],
             "projected_graph"
+        );
+        assert!(
+            evidence["routes"][0]["query_reports"][0]["scan_pruning_report_count"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0
+        );
+        assert_eq!(
+            evidence["routes"][0]["blocker_codes"],
+            serde_json::json!([])
+        );
+        let readiness = nowledge_graph_route_readiness_json(&evidence).unwrap();
+        assert_eq!(readiness["routes"][0]["query_runtime_ready"], true);
+        assert_eq!(readiness["routes"][0]["query_plan_evidence_ready"], true);
+        assert_eq!(readiness["routes"][0]["query_profile_evidence_ready"], true);
+    }
+
+    #[test]
+    fn pagerank_plan_route_query_helper_feeds_route_execution_evidence() {
+        let mut db = Database::new();
+        db.query("CREATE (:GraphMeta {meta_id: 'main', pagerank_applied: true, pagerank_computed_at: 404})")
+            .unwrap();
+        db.query("CREATE (:Memory {id: 'pagerank-route-m1', created_at: 10, updated_at: 20})")
+            .unwrap();
+        db.query("CREATE (:Memory {id: 'pagerank-route-m2', created_at: 120, updated_at: 130})")
+            .unwrap();
+        db.query("CREATE (:Entity {id: 'pagerank-route-e1', created_at: 15, updated_at: 25})")
+            .unwrap();
+        db.query("CREATE (:Entity {id: 'pagerank-route-e2', created_at: 140, updated_at: 150})")
+            .unwrap();
+        db.query("MATCH (m:Memory {id: 'pagerank-route-m1'}), (e:Entity {id: 'pagerank-route-e1'}) CREATE (m)-[:MENTIONS {created_at: 30}]->(e)")
+            .unwrap();
+        db.query("MATCH (a:Entity {id: 'pagerank-route-e1'}), (b:Entity {id: 'pagerank-route-e2'}) CREATE (a)-[:RELATES_TO {created_at: 170}]->(b)")
+            .unwrap();
+        db.query("MATCH (a:Memory {id: 'pagerank-route-m1'}), (b:Memory {id: 'pagerank-route-m2'}) CREATE (a)-[:MEMORY_RELATES_TO {status: 'active', created_at: 180}]->(b)")
+            .unwrap();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        let route_queries = vec![nowledge_mem_graph_pagerank_plan_route_query(Some(100))];
+        let route_parity = ready_route_parity_for(&["/graph/augmentation/pagerank/plan"]);
+
+        let evidence = nowledge_graph_route_evidence_json(
+            &mut graph,
+            &route_queries,
+            NowledgeMemQueryReportOptions {
+                capture_physical_plan: true,
+                slow_log_threshold_micros: None,
+            },
+            Some(&route_parity),
+        );
+
+        assert_eq!(
+            evidence["routes"][0]["route"],
+            "/graph/augmentation/pagerank/plan"
+        );
+        assert_eq!(evidence["routes"][0]["primary_ready"], true);
+        assert_eq!(
+            evidence["routes"][0]["required_query_families"],
+            serde_json::json!(["projected_graph"])
+        );
+        assert_eq!(
+            evidence["routes"][0]["query_reports"][0]["query_name"],
+            "pagerank-plan-graph-meta"
+        );
+        assert_eq!(
+            evidence["routes"][0]["query_reports"][0]["query_family"],
+            "projected_graph"
+        );
+        assert_eq!(
+            evidence["routes"][0]["query_reports"]
+                .as_array()
+                .unwrap()
+                .len(),
+            11
         );
         assert!(
             evidence["routes"][0]["query_reports"][0]["scan_pruning_report_count"]
