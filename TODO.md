@@ -218,6 +218,9 @@ contract.
   - [x] Expose and consume typed background-maintenance cutover readiness so Mem
     can inspect QoS and search-projection graph-delta gates without duplicating
     replacement-summary JSON-path checks.
+  - [x] Consume typed library-readiness cutover summaries in integration
+    readiness so Mem can gate library startup and required areas without
+    duplicating readiness JSON-path checks.
 - [ ] PR 9: Add the final cutover preflight bundle gate.
   - Scope: combine route coverage, graph evidence, LanceDB projection evidence,
     storage recovery, background QoS, redaction, and library-only integration

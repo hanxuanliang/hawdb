@@ -122,6 +122,48 @@ pub struct BackgroundMaintenanceCutoverReadiness {
     pub blocker_codes: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryReadinessCutoverReadiness {
+    pub protocol_matches: bool,
+    pub present: bool,
+    pub ready: bool,
+    pub ready_area_count_present: bool,
+    pub blocked_area_count_zero: bool,
+    pub graph_opened: bool,
+    pub search_projection_opened: bool,
+    pub graph_ready: bool,
+    pub query_ready: bool,
+    pub storage_ready: bool,
+    pub background_ready: bool,
+    pub query_family_ready: bool,
+    pub graph_route_ready: bool,
+    pub search_projection_ready: bool,
+    pub search_projection_shadow_ready: bool,
+    pub search_candidate_shadow_ready: bool,
+    pub blocker_codes: Vec<String>,
+}
+
+impl LibraryReadinessCutoverReadiness {
+    pub fn evidence_ready(&self) -> bool {
+        self.protocol_matches
+            && self.present
+            && self.ready
+            && self.ready_area_count_present
+            && self.blocked_area_count_zero
+            && self.graph_opened
+            && self.search_projection_opened
+            && self.graph_ready
+            && self.query_ready
+            && self.storage_ready
+            && self.background_ready
+            && self.query_family_ready
+            && self.graph_route_ready
+            && self.search_projection_ready
+            && self.search_projection_shadow_ready
+            && self.search_candidate_shadow_ready
+    }
+}
+
 impl BackgroundMaintenanceCutoverReadiness {
     pub fn evidence_ready(&self) -> bool {
         self.required
@@ -193,6 +235,7 @@ pub fn nowledge_mem_integration_readiness(
         .get("blackbox_manifest")
         .unwrap_or(&serde_json::Value::Null);
     let blackbox_readiness = blackbox_readiness_from_manifest_json(blackbox_manifest);
+    let library_readiness = library_readiness_cutover_readiness(bundle);
     let storage_recovery_readiness = storage_recovery_cutover_readiness(bundle);
     let background_maintenance_readiness = background_maintenance_cutover_readiness(bundle);
     let checks = vec![
@@ -1401,28 +1444,22 @@ pub fn nowledge_mem_integration_readiness(
         check(
             "library_readiness",
             [
-                str_path(bundle, &["library_readiness", "protocol"])
-                    == Some(NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL),
-                bool_path(bundle, &["library_readiness", "present"]) == Some(true),
-                bool_path(bundle, &["library_readiness", "ready"]) == Some(true),
-                u64_path(bundle, &["library_readiness", "ready_area_count"])
-                    .is_some_and(|value| value > 0),
-                u64_path(bundle, &["library_readiness", "blocked_area_count"]) == Some(0),
-                bool_path(bundle, &["library_readiness", "open_report", "graph_opened"])
-                    == Some(true),
-                bool_path(
-                    bundle,
-                    &["library_readiness", "open_report", "search_projection_opened"],
-                ) == Some(true),
-                library_readiness_area_ready(bundle, "graph"),
-                library_readiness_area_ready(bundle, "query"),
-                library_readiness_area_ready(bundle, "storage"),
-                library_readiness_area_ready(bundle, "background"),
-                library_readiness_area_ready(bundle, "query_family"),
-                library_readiness_area_ready(bundle, "graph_route"),
-                library_readiness_area_ready(bundle, "search_projection"),
-                library_readiness_area_ready(bundle, "search_projection_shadow"),
-                library_readiness_area_ready(bundle, "search_candidate_shadow"),
+                library_readiness.protocol_matches,
+                library_readiness.present,
+                library_readiness.ready,
+                library_readiness.ready_area_count_present,
+                library_readiness.blocked_area_count_zero,
+                library_readiness.graph_opened,
+                library_readiness.search_projection_opened,
+                library_readiness.graph_ready,
+                library_readiness.query_ready,
+                library_readiness.storage_ready,
+                library_readiness.background_ready,
+                library_readiness.query_family_ready,
+                library_readiness.graph_route_ready,
+                library_readiness.search_projection_ready,
+                library_readiness.search_projection_shadow_ready,
+                library_readiness.search_candidate_shadow_ready,
             ],
             [
                 "library_readiness.protocol",
@@ -1442,66 +1479,7 @@ pub fn nowledge_mem_integration_readiness(
                 "library_readiness.readiness_by_area.search_projection_shadow.ready",
                 "library_readiness.readiness_by_area.search_candidate_shadow.ready",
             ],
-            blocker_codes(
-                bundle,
-                &[
-                    &["library_readiness", "blocker_codes"][..],
-                    &[
-                        "library_readiness",
-                        "readiness_by_area",
-                        "graph",
-                        "blocker_codes",
-                    ][..],
-                    &[
-                        "library_readiness",
-                        "readiness_by_area",
-                        "query",
-                        "blocker_codes",
-                    ][..],
-                    &[
-                        "library_readiness",
-                        "readiness_by_area",
-                        "storage",
-                        "blocker_codes",
-                    ][..],
-                    &[
-                        "library_readiness",
-                        "readiness_by_area",
-                        "background",
-                        "blocker_codes",
-                    ][..],
-                    &[
-                        "library_readiness",
-                        "readiness_by_area",
-                        "query_family",
-                        "blocker_codes",
-                    ][..],
-                    &[
-                        "library_readiness",
-                        "readiness_by_area",
-                        "graph_route",
-                        "blocker_codes",
-                    ][..],
-                    &[
-                        "library_readiness",
-                        "readiness_by_area",
-                        "search_projection",
-                        "blocker_codes",
-                    ][..],
-                    &[
-                        "library_readiness",
-                        "readiness_by_area",
-                        "search_projection_shadow",
-                        "blocker_codes",
-                    ][..],
-                    &[
-                        "library_readiness",
-                        "readiness_by_area",
-                        "search_candidate_shadow",
-                        "blocker_codes",
-                    ][..],
-                ],
-            ),
+            library_readiness.blocker_codes.clone(),
         ),
         check(
             "background_maintenance_evidence",
@@ -1622,6 +1600,7 @@ pub fn nowledge_mem_integration_readiness(
         next_actions: next_actions(
             bundle,
             ready,
+            &library_readiness,
             &blackbox_readiness,
             &storage_recovery_readiness,
             &background_maintenance_readiness,
@@ -1657,6 +1636,7 @@ fn check(
 fn next_actions(
     bundle: &serde_json::Value,
     ready: bool,
+    library_readiness: &LibraryReadinessCutoverReadiness,
     blackbox_readiness: &BlackboxReadinessReport,
     storage_recovery_readiness: &StorageRecoveryCutoverReadiness,
     background_maintenance_readiness: &BackgroundMaintenanceCutoverReadiness,
@@ -1949,7 +1929,7 @@ fn next_actions(
             ],
         ));
     }
-    if !library_readiness_ready(bundle) {
+    if !library_readiness.evidence_ready() {
         actions.push(next_action(
             "attach_library_readiness_evidence",
             "Nowledge Mem cutover requires the Skein Rust library to open graph, search projection, and required evidence areas",
@@ -3133,39 +3113,106 @@ fn scan_pruning_target_kind_ready(report: &serde_json::Value) -> bool {
     )
 }
 
-fn library_readiness_ready(bundle: &serde_json::Value) -> bool {
-    str_path(bundle, &["library_readiness", "protocol"])
-        == Some(NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL)
-        && bool_path(bundle, &["library_readiness", "present"]) == Some(true)
-        && bool_path(bundle, &["library_readiness", "ready"]) == Some(true)
-        && u64_path(bundle, &["library_readiness", "ready_area_count"])
-            .is_some_and(|value| value > 0)
-        && u64_path(bundle, &["library_readiness", "blocked_area_count"]) == Some(0)
-        && bool_path(
+pub fn library_readiness_cutover_readiness(
+    bundle: &serde_json::Value,
+) -> LibraryReadinessCutoverReadiness {
+    LibraryReadinessCutoverReadiness {
+        protocol_matches: str_path(bundle, &["library_readiness", "protocol"])
+            == Some(NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL),
+        present: bool_path(bundle, &["library_readiness", "present"]) == Some(true),
+        ready: bool_path(bundle, &["library_readiness", "ready"]) == Some(true),
+        ready_area_count_present: u64_path(bundle, &["library_readiness", "ready_area_count"])
+            .is_some_and(|value| value > 0),
+        blocked_area_count_zero: u64_path(bundle, &["library_readiness", "blocked_area_count"])
+            == Some(0),
+        graph_opened: bool_path(
             bundle,
             &["library_readiness", "open_report", "graph_opened"],
-        ) == Some(true)
-        && bool_path(
+        ) == Some(true),
+        search_projection_opened: bool_path(
             bundle,
             &[
                 "library_readiness",
                 "open_report",
                 "search_projection_opened",
             ],
-        ) == Some(true)
-        && [
-            "graph",
-            "query",
-            "storage",
-            "background",
-            "query_family",
-            "graph_route",
-            "search_projection",
+        ) == Some(true),
+        graph_ready: library_readiness_area_ready(bundle, "graph"),
+        query_ready: library_readiness_area_ready(bundle, "query"),
+        storage_ready: library_readiness_area_ready(bundle, "storage"),
+        background_ready: library_readiness_area_ready(bundle, "background"),
+        query_family_ready: library_readiness_area_ready(bundle, "query_family"),
+        graph_route_ready: library_readiness_area_ready(bundle, "graph_route"),
+        search_projection_ready: library_readiness_area_ready(bundle, "search_projection"),
+        search_projection_shadow_ready: library_readiness_area_ready(
+            bundle,
             "search_projection_shadow",
+        ),
+        search_candidate_shadow_ready: library_readiness_area_ready(
+            bundle,
             "search_candidate_shadow",
-        ]
-        .into_iter()
-        .all(|area| library_readiness_area_ready(bundle, area))
+        ),
+        blocker_codes: blocker_codes(
+            bundle,
+            &[
+                &["library_readiness", "blocker_codes"][..],
+                &[
+                    "library_readiness",
+                    "readiness_by_area",
+                    "graph",
+                    "blocker_codes",
+                ][..],
+                &[
+                    "library_readiness",
+                    "readiness_by_area",
+                    "query",
+                    "blocker_codes",
+                ][..],
+                &[
+                    "library_readiness",
+                    "readiness_by_area",
+                    "storage",
+                    "blocker_codes",
+                ][..],
+                &[
+                    "library_readiness",
+                    "readiness_by_area",
+                    "background",
+                    "blocker_codes",
+                ][..],
+                &[
+                    "library_readiness",
+                    "readiness_by_area",
+                    "query_family",
+                    "blocker_codes",
+                ][..],
+                &[
+                    "library_readiness",
+                    "readiness_by_area",
+                    "graph_route",
+                    "blocker_codes",
+                ][..],
+                &[
+                    "library_readiness",
+                    "readiness_by_area",
+                    "search_projection",
+                    "blocker_codes",
+                ][..],
+                &[
+                    "library_readiness",
+                    "readiness_by_area",
+                    "search_projection_shadow",
+                    "blocker_codes",
+                ][..],
+                &[
+                    "library_readiness",
+                    "readiness_by_area",
+                    "search_candidate_shadow",
+                    "blocker_codes",
+                ][..],
+            ],
+        ),
+    }
 }
 
 fn library_readiness_area_ready(bundle: &serde_json::Value, area: &str) -> bool {
@@ -5763,6 +5810,14 @@ mod tests {
         let mut bundle = ready_bundle();
         bundle.as_object_mut().unwrap().remove("library_readiness");
 
+        let typed = super::library_readiness_cutover_readiness(&bundle);
+        assert!(!typed.evidence_ready());
+        assert!(!typed.protocol_matches);
+        assert!(!typed.present);
+        assert!(!typed.ready);
+        assert!(!typed.graph_ready);
+        assert!(typed.blocker_codes.is_empty());
+
         let report = nowledge_mem_integration_readiness_json(&bundle);
 
         assert_eq!(report["ready"], false);
@@ -5816,6 +5871,21 @@ mod tests {
         bundle["library_readiness"]["readiness_by_area"]["search_projection"]["blocker_codes"] =
             serde_json::json!(["search_projection_probe_missing"]);
 
+        let typed = super::library_readiness_cutover_readiness(&bundle);
+        assert!(!typed.evidence_ready());
+        assert!(typed.protocol_matches);
+        assert!(typed.present);
+        assert!(!typed.ready);
+        assert!(!typed.blocked_area_count_zero);
+        assert!(!typed.search_projection_ready);
+        assert_eq!(
+            typed.blocker_codes,
+            vec![
+                "search_projection_not_ready".to_string(),
+                "search_projection_probe_missing".to_string()
+            ]
+        );
+
         let report = nowledge_mem_integration_readiness_json(&bundle);
 
         assert_eq!(report["ready"], false);
@@ -5858,6 +5928,21 @@ mod tests {
             serde_json::json!(false);
         bundle["library_readiness"]["readiness_by_area"]["graph_route"]["blocker_codes"] =
             serde_json::json!(["graph_route_readiness_missing"]);
+
+        let typed = super::library_readiness_cutover_readiness(&bundle);
+        assert!(!typed.evidence_ready());
+        assert!(typed.protocol_matches);
+        assert!(typed.present);
+        assert!(!typed.ready);
+        assert!(!typed.blocked_area_count_zero);
+        assert!(!typed.graph_route_ready);
+        assert_eq!(
+            typed.blocker_codes,
+            vec![
+                "graph_route_readiness_missing".to_string(),
+                "graph_route_readiness_not_ready".to_string()
+            ]
+        );
 
         let report = nowledge_mem_integration_readiness_json(&bundle);
 
