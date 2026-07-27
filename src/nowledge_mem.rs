@@ -3435,6 +3435,7 @@ impl NowledgeMemSearchCandidateReadinessOptions {
             require_segment_descriptor: true,
             require_projection_marker_status: true,
             require_projection_watermark: true,
+            require_embedding_identity: true,
             ..Self::default()
         }
     }
@@ -6892,9 +6893,21 @@ fn search_candidate_embedding_identity_ready(
     if !options.require_embedding_identity {
         return true;
     }
-    candidate_report.projection_embedding_model.as_deref()
-        == options.active_embedding_model.as_deref()
-        && candidate_report.projection_embedding_dimension == options.active_embedding_dimension
+    let manifest_present = candidate_report.projection_embedding_model.is_some()
+        && candidate_report.projection_embedding_dimension.is_some();
+    if !manifest_present {
+        return false;
+    }
+    let model_matches = options
+        .active_embedding_model
+        .as_deref()
+        .is_none_or(|active| {
+            candidate_report.projection_embedding_model.as_deref() == Some(active)
+        });
+    let dimension_matches = options
+        .active_embedding_dimension
+        .is_none_or(|active| candidate_report.projection_embedding_dimension == Some(active));
+    model_matches && dimension_matches
 }
 
 fn search_candidate_returned_kind_counts(
@@ -10396,6 +10409,65 @@ mod tests {
             .json()
             .to_string()
             .contains("candidate watermark body"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn search_candidate_readiness_lancedb_default_requires_embedding_identity() {
+        let root = unique_nowledge_mem_test_dir("search_candidate_readiness_manifest_required");
+        {
+            let mut index = SearchIndex::open(&root).unwrap();
+            index
+                .apply_projection_delta(SearchProjectionDelta {
+                    upserts: vec![SearchProjectionRow {
+                        kind: SearchProjectionKind::SourceChunk,
+                        external_id: "chunk-no-manifest".to_string(),
+                        title: "No manifest source chunk".to_string(),
+                        body: "candidate manifest body".to_string(),
+                        embedding: Some(vec![1.0, 0.0]),
+                        source_id: Some("source-no-manifest".to_string()),
+                        metadata: BTreeMap::from([
+                            ("space_id".to_string(), "default".to_string()),
+                            ("lifecycle_state".to_string(), "active".to_string()),
+                        ]),
+                    }],
+                    deletes: Vec::new(),
+                    max_operations: None,
+                    source_graph_commit_epoch: Some(29),
+                })
+                .unwrap();
+            index.checkpoint().unwrap();
+        }
+        let projection = NowledgeMemSearchProjection::open(&root).unwrap();
+        let request = NowledgeMemSearchCandidateRequest::text("no manifest source chunk", 10)
+            .with_metadata_filters(BTreeMap::from([(
+                "kind__in".to_string(),
+                r#"["source_chunk"]"#.to_string(),
+            )]));
+        let options =
+            NowledgeMemSearchCandidateReadinessOptions::lancedb_replacement_candidate_read()
+                .with_text_retriever(true)
+                .with_source_chunk_identity(true);
+
+        let readiness = projection.search_candidate_readiness(&request, &options);
+
+        assert!(!readiness.ready);
+        assert!(readiness.projection_watermark_ready);
+        assert!(!readiness.embedding_identity_ready);
+        assert_eq!(readiness.candidate_report.projection_embedding_model, None);
+        assert_eq!(
+            readiness.candidate_report.projection_embedding_dimension,
+            Some(2)
+        );
+        assert!(readiness
+            .blocker_codes
+            .iter()
+            .any(|code| code == "search_candidate_embedding_identity_not_ready"));
+        assert!(!readiness
+            .json()
+            .to_string()
+            .contains("candidate manifest body"));
 
         std::fs::remove_dir_all(root).unwrap();
     }

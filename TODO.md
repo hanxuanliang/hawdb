@@ -497,6 +497,8 @@ contract.
     - [x] Require typed search candidate readiness to prove projection
       watermark visibility and embedding manifest identity for LanceDB
       replacement candidate reads.
+    - [x] Require LanceDB replacement candidate-read readiness options to fail
+      closed when projection embedding manifest identity is missing by default.
     - [x] Require Rust-bridge search candidate evidence to expose and gate
       row-count parity plus compact shadow scan-pruning fields before cutover.
     - [x] Require Rust-bridge search candidate evidence to prove text and
