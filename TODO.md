@@ -194,6 +194,8 @@ contract.
   - [x] Require search projection descriptor summaries to expose non-zero
     summary counts for declared value, numeric-range, and timestamp-range scan
     pruning capabilities.
+  - [x] Add typed production-filter pruning proof samples to the Skein search
+    projection probe and fail closed when the proof is missing or incomplete.
 - [ ] PR 5: Close LanceDB candidate read replacement.
   - Scope: run FTS, vector, source chunk identity, embedding identity,
     fail-soft, rebuild marker, repair marker, and incremental watermark evidence

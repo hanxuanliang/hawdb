@@ -57,6 +57,7 @@ pub struct NowledgeSearchProjectionEvidenceReport {
     pub source_chunk_ready: bool,
     pub predicate_pushdown_ready: bool,
     pub skein_predicate_pushdown_ready: bool,
+    pub production_filter_pruning_ready: bool,
     pub compressed_vector_projection_required: bool,
     pub compressed_vector_projection_ready: bool,
     pub blocker_codes: Vec<String>,
@@ -99,6 +100,11 @@ impl NowledgeSearchProjectionEvidenceReport {
                 &["skein_predicate_pushdown_ready"],
             )
             .unwrap_or(false),
+            production_filter_pruning_ready: bool_path(
+                &evidence,
+                &["production_filter_pruning_ready"],
+            )
+            .unwrap_or(false),
             compressed_vector_projection_required: bool_path(
                 &evidence,
                 &["compressed_vector_projection_required"],
@@ -136,7 +142,8 @@ pub fn nowledge_search_projection_probe_contract_json() -> serde_json::Value {
             "fail_soft",
             "lifecycle",
             "incremental_update",
-            "predicate_pushdown"
+            "predicate_pushdown",
+            "production_filter_pruning"
         ],
         "table_fields": [
             "name",
@@ -187,6 +194,16 @@ pub fn nowledge_search_projection_probe_contract_json() -> serde_json::Value {
             "scan_filter_fields",
             "segment_descriptor_field_count",
             "segment_descriptor_field_summaries"
+        ],
+        "production_filter_pruning_fields": [
+            "ready",
+            "persisted_segment_descriptor_used",
+            "payload_read_avoidance_ready",
+            "sample_count",
+            "ready_field_count",
+            "required_field_count",
+            "missing_fields",
+            "samples"
         ],
         "required_skein_scan_filter_fields": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
         "required_segment_descriptor_capabilities": {
@@ -404,6 +421,9 @@ pub fn nowledge_search_projection_evidence_json(probe: &serde_json::Value) -> se
                 &["segment_descriptor_capabilities_ready"],
             ) == Some(true)
             && bool_path(&predicate_pushdown, &["segment_document_pruning_ready"]) == Some(true);
+    let production_filter_pruning = production_filter_pruning_report(probe);
+    let production_filter_pruning_ready =
+        !skein_probe || bool_path(&production_filter_pruning, &["ready"]) == Some(true);
     let compressed_vector_projection = compressed_vector_projection_report(probe);
     let compressed_vector_projection_required = vector_ready && skein_probe;
     let compressed_vector_projection_ready = !compressed_vector_projection_required
@@ -453,6 +473,9 @@ pub fn nowledge_search_projection_evidence_json(probe: &serde_json::Value) -> se
     if !skein_predicate_pushdown_ready {
         blocker_codes.insert("skein_predicate_pushdown_descriptor_not_ready".to_string());
     }
+    if !production_filter_pruning_ready {
+        blocker_codes.insert("skein_production_filter_pruning_not_ready".to_string());
+    }
     if !compressed_vector_projection_ready {
         blocker_codes.insert("compressed_vector_projection_not_ready".to_string());
     }
@@ -477,6 +500,7 @@ pub fn nowledge_search_projection_evidence_json(probe: &serde_json::Value) -> se
         "source_chunk_ready": source_chunk_ready,
         "predicate_pushdown_ready": predicate_pushdown_ready,
         "skein_predicate_pushdown_ready": skein_predicate_pushdown_ready,
+        "production_filter_pruning_ready": production_filter_pruning_ready,
         "compressed_vector_projection_required": compressed_vector_projection_required,
         "compressed_vector_projection_ready": compressed_vector_projection_ready,
         "tables": table_reports,
@@ -486,6 +510,7 @@ pub fn nowledge_search_projection_evidence_json(probe: &serde_json::Value) -> se
         "lifecycle": lifecycle,
         "incremental_update": incremental_update,
         "predicate_pushdown": predicate_pushdown,
+        "production_filter_pruning": production_filter_pruning,
         "compressed_vector_projection": compressed_vector_projection,
         "blocker_codes": blocker_codes.into_iter().collect::<Vec<_>>(),
     })
@@ -798,6 +823,7 @@ fn ready_probe_template(engine: &str) -> serde_json::Value {
             "scan_filter_fields": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
             "segment_descriptor_field_summaries": ready_segment_descriptor_field_summaries_template()
         },
+        "production_filter_pruning": ready_production_filter_pruning_template(),
         "compressed_vector_projection": {
             "engine": "turbovec",
             "compiled": true,
@@ -811,6 +837,42 @@ fn ready_probe_template(engine: &str) -> serde_json::Value {
             "blocker_codes": []
         },
         "blocker_codes": []
+    })
+}
+
+fn ready_production_filter_pruning_template() -> serde_json::Value {
+    serde_json::json!({
+        "ready": true,
+        "persisted_segment_descriptor_used": true,
+        "payload_read_avoidance_ready": true,
+        "sample_count": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len(),
+        "ready_field_count": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len(),
+        "required_field_count": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len(),
+        "missing_fields": [],
+        "samples": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
+            .iter()
+            .map(|field| serde_json::json!({
+                "field": field,
+                "operation": if matches!(*field, "importance" | "confidence" | "created_at" | "updated_at" | "event_start" | "event_end") {
+                    "gte"
+                } else {
+                    "eq"
+                },
+                "ready": true,
+                "capability_ready": true,
+                "persisted_segment_descriptor_used": true,
+                "segment_count": 2,
+                "scanned_segment_count": 1,
+                "pruned_segment_count": 1,
+                "segment_pruning_candidate_document_count": 6,
+                "segment_scanned_document_count": 2,
+                "segment_pruned_document_count": 4,
+                "field_report_count": 1,
+                "value_summary_used": !matches!(*field, "importance" | "confidence" | "created_at" | "updated_at" | "event_start" | "event_end"),
+                "numeric_range_summary_used": matches!(*field, "importance" | "confidence"),
+                "timestamp_range_summary_used": matches!(*field, "created_at" | "updated_at" | "event_start" | "event_end"),
+            }))
+            .collect::<Vec<_>>(),
     })
 }
 
@@ -1083,6 +1145,43 @@ fn predicate_pushdown_report(probe: &serde_json::Value) -> serde_json::Value {
     })
 }
 
+fn production_filter_pruning_report(probe: &serde_json::Value) -> serde_json::Value {
+    let pruning =
+        value_path(probe, &["production_filter_pruning"]).unwrap_or(&serde_json::Value::Null);
+    let ready = bool_path(pruning, &["ready"]).unwrap_or(false);
+    let persisted_segment_descriptor_used =
+        bool_path(pruning, &["persisted_segment_descriptor_used"]).unwrap_or(false);
+    let payload_read_avoidance_ready =
+        bool_path(pruning, &["payload_read_avoidance_ready"]).unwrap_or(false);
+    let sample_count = u64_path(pruning, &["sample_count"]).unwrap_or(0);
+    let ready_field_count = u64_path(pruning, &["ready_field_count"]).unwrap_or(0);
+    let required_field_count = u64_path(pruning, &["required_field_count"])
+        .unwrap_or(NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len() as u64);
+    let missing_fields = array_path(pruning, &["missing_fields"]).unwrap_or_default();
+    let samples = value_path(pruning, &["samples"])
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    let required_fields_ready = sample_count == required_field_count
+        && ready_field_count == required_field_count
+        && required_field_count == NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len() as u64
+        && missing_fields.is_empty();
+    let ready = ready
+        && persisted_segment_descriptor_used
+        && payload_read_avoidance_ready
+        && required_fields_ready;
+    serde_json::json!({
+        "ready": ready,
+        "persisted_segment_descriptor_used": persisted_segment_descriptor_used,
+        "payload_read_avoidance_ready": payload_read_avoidance_ready,
+        "sample_count": sample_count,
+        "ready_field_count": ready_field_count,
+        "required_field_count": required_field_count,
+        "required_fields_ready": required_fields_ready,
+        "missing_fields": missing_fields,
+        "samples": samples,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SegmentDescriptorCapabilityReport {
     ready: bool,
@@ -1252,7 +1351,8 @@ fn array_path(value: &serde_json::Value, path: &[&str]) -> Option<Vec<String>> {
 mod tests {
     use super::{
         nowledge_search_projection_evidence_json, nowledge_search_projection_probe_contract_json,
-        nowledge_search_projection_shadow_evidence_json, NowledgeSearchProjectionEvidenceReport,
+        nowledge_search_projection_shadow_evidence_json, ready_production_filter_pruning_template,
+        NowledgeSearchProjectionEvidenceReport,
         SKEIN_SEARCH_PROJECTION_SEGMENT_DESCRIPTOR_FIELDS_MISSING,
     };
     use crate::{
@@ -1282,6 +1382,7 @@ mod tests {
         assert_eq!(report["incremental_update_ready"], true);
         assert_eq!(report["source_chunk_ready"], true);
         assert_eq!(report["predicate_pushdown_ready"], true);
+        assert_eq!(report["production_filter_pruning_ready"], true);
         assert_eq!(report["compressed_vector_projection_required"], true);
         assert_eq!(report["compressed_vector_projection_ready"], true);
         assert_eq!(report["blocker_codes"], serde_json::json!([]));
@@ -1308,6 +1409,7 @@ mod tests {
         assert!(report.source_chunk_ready);
         assert!(report.predicate_pushdown_ready);
         assert!(report.skein_predicate_pushdown_ready);
+        assert!(report.production_filter_pruning_ready);
         assert!(report.compressed_vector_projection_required);
         assert!(report.compressed_vector_projection_ready);
         assert!(report.blocker_codes.is_empty());
@@ -1498,6 +1600,52 @@ mod tests {
                 "predicate_pushdown_not_ready",
                 "skein_predicate_pushdown_descriptor_not_ready"
             ])
+        );
+    }
+
+    #[test]
+    fn skein_search_projection_evidence_requires_production_filter_pruning() {
+        let mut probe = ready_probe();
+        probe
+            .as_object_mut()
+            .unwrap()
+            .remove("production_filter_pruning");
+
+        let report = nowledge_search_projection_evidence_json(&probe);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(report["production_filter_pruning_ready"], false);
+        assert_eq!(
+            report["production_filter_pruning"]["required_fields_ready"],
+            false
+        );
+        assert_eq!(
+            report["blocker_codes"],
+            serde_json::json!(["skein_production_filter_pruning_not_ready"])
+        );
+    }
+
+    #[test]
+    fn skein_search_projection_evidence_rejects_incomplete_production_filter_pruning() {
+        let mut probe = ready_probe();
+        probe["production_filter_pruning"]["ready_field_count"] = serde_json::json!(12);
+        probe["production_filter_pruning"]["missing_fields"] = serde_json::json!(["event_end"]);
+
+        let report = nowledge_search_projection_evidence_json(&probe);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(report["production_filter_pruning_ready"], false);
+        assert_eq!(
+            report["production_filter_pruning"]["required_fields_ready"],
+            false
+        );
+        assert_eq!(
+            report["production_filter_pruning"]["missing_fields"],
+            serde_json::json!(["event_end"])
+        );
+        assert_eq!(
+            report["blocker_codes"],
+            serde_json::json!(["skein_production_filter_pruning_not_ready"])
         );
     }
 
@@ -1896,6 +2044,7 @@ mod tests {
                 ],
                 "segment_descriptor_field_summaries": ready_segment_descriptor_field_summaries()
             },
+            "production_filter_pruning": ready_production_filter_pruning_template(),
             "compressed_vector_projection": {
                 "engine": "turbovec",
                 "compiled": true,

@@ -922,6 +922,8 @@ impl SearchIndex {
             .values()
             .any(|document| document.embedding.is_some());
         let predicate_pushdown = search_projection_probe_predicate_pushdown_report(self);
+        let production_filter_pruning =
+            search_projection_probe_production_filter_pruning_report(self);
         let compressed_vector_projection =
             search_projection_probe_compressed_vector_projection_report(self);
 
@@ -963,6 +965,7 @@ impl SearchIndex {
             },
             "compressed_vector_projection": compressed_vector_projection,
             "predicate_pushdown": predicate_pushdown,
+            "production_filter_pruning": production_filter_pruning,
             "blocker_codes": search_projection_probe_blocker_codes(
                 has_documents,
                 has_text,
@@ -2162,6 +2165,220 @@ fn search_projection_probe_segment_document_pruning_report(
         candidate_document_count: descriptor.document_count,
         pruned_document_count,
         scanned_document_count,
+    }
+}
+
+fn search_projection_probe_production_filter_pruning_report(
+    index: &SearchIndex,
+) -> serde_json::Value {
+    let Some(descriptor) = index
+        .segment_descriptor
+        .as_ref()
+        .filter(|descriptor| descriptor.matches_documents(&index.documents))
+    else {
+        return serde_json::json!({
+            "ready": false,
+            "persisted_segment_descriptor_used": false,
+            "payload_read_avoidance_ready": false,
+            "sample_count": 0,
+            "ready_field_count": 0,
+            "required_field_count": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len(),
+            "missing_fields": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
+            "samples": [],
+        });
+    };
+
+    let samples = NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
+        .iter()
+        .map(|field| search_projection_probe_production_filter_sample(descriptor, field))
+        .collect::<Vec<_>>();
+    let missing_fields = samples
+        .iter()
+        .filter(|sample| !sample.ready)
+        .map(|sample| sample.field)
+        .collect::<Vec<_>>();
+    let payload_read_avoidance_ready = samples
+        .iter()
+        .any(|sample| sample.segment_pruned_document_count > 0);
+    let ready = missing_fields.is_empty() && payload_read_avoidance_ready;
+    serde_json::json!({
+        "ready": ready,
+        "persisted_segment_descriptor_used": true,
+        "payload_read_avoidance_ready": payload_read_avoidance_ready,
+        "sample_count": samples.len(),
+        "ready_field_count": samples.len().saturating_sub(missing_fields.len()),
+        "required_field_count": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len(),
+        "missing_fields": missing_fields,
+        "samples": samples
+            .into_iter()
+            .map(SearchProjectionProbeProductionFilterSample::json)
+            .collect::<Vec<_>>(),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SearchProjectionProbeProductionFilterSample<'a> {
+    field: &'a str,
+    operation: &'static str,
+    value_kind: &'static str,
+    ready: bool,
+    capability_ready: bool,
+    persisted_segment_descriptor_used: bool,
+    segment_count: usize,
+    scanned_segment_count: usize,
+    pruned_segment_count: usize,
+    segment_pruning_candidate_document_count: usize,
+    segment_scanned_document_count: usize,
+    segment_pruned_document_count: usize,
+    field_report_count: usize,
+    value_summary_used: bool,
+    numeric_range_summary_used: bool,
+    timestamp_range_summary_used: bool,
+}
+
+impl SearchProjectionProbeProductionFilterSample<'_> {
+    fn json(self) -> serde_json::Value {
+        serde_json::json!({
+            "field": self.field,
+            "operation": self.operation,
+            "value_kind": self.value_kind,
+            "ready": self.ready,
+            "capability_ready": self.capability_ready,
+            "persisted_segment_descriptor_used": self.persisted_segment_descriptor_used,
+            "segment_count": self.segment_count,
+            "scanned_segment_count": self.scanned_segment_count,
+            "pruned_segment_count": self.pruned_segment_count,
+            "segment_pruning_candidate_document_count": self.segment_pruning_candidate_document_count,
+            "segment_scanned_document_count": self.segment_scanned_document_count,
+            "segment_pruned_document_count": self.segment_pruned_document_count,
+            "field_report_count": self.field_report_count,
+            "value_summary_used": self.value_summary_used,
+            "numeric_range_summary_used": self.numeric_range_summary_used,
+            "timestamp_range_summary_used": self.timestamp_range_summary_used,
+        })
+    }
+}
+
+fn search_projection_probe_production_filter_sample<'a>(
+    descriptor: &SearchSegmentDescriptor,
+    field: &'a str,
+) -> SearchProjectionProbeProductionFilterSample<'a> {
+    let value_kind = search_projection_probe_production_filter_value_kind(field);
+    let (operation, predicate) =
+        search_projection_probe_production_filter_predicate(descriptor, field);
+    let predicates = SearchPredicateSet::new(vec![predicate]);
+    let pruning = explain_search_segments_with_persisted_descriptor(&predicates, descriptor);
+    let field_reports = pruning
+        .field_summaries
+        .iter()
+        .filter(|summary| summary.field == field)
+        .collect::<Vec<_>>();
+    let value_summary_used = field_reports
+        .iter()
+        .any(|summary| summary.value_summary_used);
+    let numeric_range_summary_used = field_reports
+        .iter()
+        .any(|summary| summary.numeric_range_summary_used);
+    let timestamp_range_summary_used = field_reports
+        .iter()
+        .any(|summary| summary.timestamp_range_summary_used);
+    let capability_ready = match value_kind {
+        "numeric_range" => numeric_range_summary_used,
+        "timestamp_range" => timestamp_range_summary_used || numeric_range_summary_used,
+        _ => value_summary_used,
+    };
+    let ready = pruning.persisted_segment_descriptor_used
+        && pruning.segment_count > 0
+        && pruning.segment_pruning_candidate_document_count == descriptor.document_count
+        && field_reports.len() == 1
+        && capability_ready;
+    SearchProjectionProbeProductionFilterSample {
+        field,
+        operation,
+        value_kind,
+        ready,
+        capability_ready,
+        persisted_segment_descriptor_used: pruning.persisted_segment_descriptor_used,
+        segment_count: pruning.segment_count,
+        scanned_segment_count: pruning.scanned_segment_count,
+        pruned_segment_count: pruning.pruned_segment_count,
+        segment_pruning_candidate_document_count: pruning.segment_pruning_candidate_document_count,
+        segment_scanned_document_count: pruning.segment_scanned_document_count,
+        segment_pruned_document_count: pruning.segment_pruned_document_count,
+        field_report_count: field_reports.len(),
+        value_summary_used,
+        numeric_range_summary_used,
+        timestamp_range_summary_used,
+    }
+}
+
+fn explain_search_segments_with_persisted_descriptor(
+    predicates: &SearchPredicateSet,
+    descriptor: &SearchSegmentDescriptor,
+) -> FilteredSearchDocuments<'static> {
+    let mut pruned_segment_count = 0;
+    let mut scanned_segment_count = 0;
+    let mut pruned_document_count = 0;
+    let mut scanned_document_count = 0;
+    let mut field_pruning = SearchFieldPruningAccumulator::new(predicates);
+
+    for segment in &descriptor.segments {
+        field_pruning.observe_persisted_segment(segment, predicates);
+        if !segment.may_match_predicates(predicates) {
+            pruned_segment_count += 1;
+            pruned_document_count += segment.document_count;
+            continue;
+        }
+        scanned_segment_count += 1;
+        scanned_document_count += segment.document_count;
+    }
+
+    FilteredSearchDocuments {
+        documents: Vec::new(),
+        segment_count: descriptor.segments.len(),
+        pruned_segment_count,
+        scanned_segment_count,
+        segment_pruning_candidate_document_count: descriptor.document_count,
+        segment_pruned_document_count: pruned_document_count,
+        segment_scanned_document_count: scanned_document_count,
+        persisted_segment_descriptor_used: true,
+        field_summaries: field_pruning.into_reports(),
+    }
+}
+
+fn search_projection_probe_production_filter_predicate(
+    descriptor: &SearchSegmentDescriptor,
+    field: &str,
+) -> (&'static str, SearchPredicate) {
+    let value = descriptor
+        .segments
+        .iter()
+        .filter_map(|segment| segment.metadata.get(field))
+        .find_map(|summary| {
+            summary
+                .values
+                .iter()
+                .next()
+                .cloned()
+                .or_else(|| summary.numeric_range.map(|range| range.min.to_string()))
+                .or_else(|| {
+                    summary
+                        .timestamp_range
+                        .map(|range| range.min_epoch_millis.to_string())
+                })
+        })
+        .unwrap_or_default();
+    match search_projection_probe_production_filter_value_kind(field) {
+        "numeric_range" | "timestamp_range" => ("gte", SearchPredicate::gte(field, value)),
+        _ => ("eq", SearchPredicate::eq(field, value)),
+    }
+}
+
+fn search_projection_probe_production_filter_value_kind(field: &str) -> &'static str {
+    match field {
+        "importance" | "confidence" => "numeric_range",
+        "created_at" | "updated_at" | "event_start" | "event_end" => "timestamp_range",
+        _ => "value",
     }
 }
 
@@ -7679,6 +7896,41 @@ mod tests {
                 "missing timestamp range summary for {field}"
             );
         }
+        let production_filter_pruning = &probe["production_filter_pruning"];
+        assert_eq!(production_filter_pruning["ready"], true);
+        assert_eq!(
+            production_filter_pruning["persisted_segment_descriptor_used"],
+            true
+        );
+        assert_eq!(
+            production_filter_pruning["payload_read_avoidance_ready"],
+            true
+        );
+        assert_eq!(
+            production_filter_pruning["sample_count"],
+            NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len()
+        );
+        assert_eq!(
+            production_filter_pruning["ready_field_count"],
+            NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len()
+        );
+        let samples = production_filter_pruning["samples"]
+            .as_array()
+            .expect("expected production filter pruning samples");
+        for field in NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS {
+            assert!(
+                samples
+                    .iter()
+                    .any(|sample| sample["field"] == *field && sample["ready"] == true),
+                "missing production filter pruning sample for {field}"
+            );
+        }
+        assert!(samples
+            .iter()
+            .any(|sample| sample["segment_pruned_document_count"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0));
         std::fs::remove_dir_all(path).unwrap();
     }
 
