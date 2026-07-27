@@ -97,6 +97,14 @@ struct Binding {
     relationships: BTreeMap<String, RelRecord>,
 }
 
+struct NodeColumnLookupSpec<'a> {
+    variable: &'a str,
+    label: &'a str,
+    property: &'a str,
+    column: &'a str,
+    optional: bool,
+}
+
 pub fn execute(
     plan: &PhysicalPlan,
     catalog: &mut Catalog,
@@ -1845,41 +1853,19 @@ fn execute_bindings_with_limit(
             input,
         } => {
             let input = execute_bindings(input, catalog, store)?;
-            let label_ids = label_ids_for_pattern(catalog, label);
-            let candidates = store
-                .scan_nodes(None)
-                .filter(|node| node_matches_label_pattern(node, label_ids.as_deref()))
-                .cloned()
-                .collect::<Vec<_>>();
-            let mut output = Vec::new();
-            for binding in input {
-                let expected = binding.values.get(column).ok_or_else(|| {
-                    SkeinError::Execution(format!(
-                        "missing column '{column}' during node column lookup"
-                    ))
-                })?;
-                let mut matched = false;
-                for node in &candidates {
-                    if node.properties.get(property) == Some(expected) {
-                        let mut next = binding.clone();
-                        next.nodes.insert(variable.clone(), node.clone());
-                        output.push(next);
-                        matched = true;
-                        if execution_limit.is_reached(output.len()) {
-                            return Ok(output);
-                        }
-                    }
-                }
-                if *optional && !matched {
-                    let mut next = binding;
-                    next.nodes.insert(variable.clone(), null_lookup_node());
-                    output.push(next);
-                    if execution_limit.is_reached(output.len()) {
-                        return Ok(output);
-                    }
-                }
-            }
-            Ok(output)
+            execute_node_column_lookup(
+                NodeColumnLookupSpec {
+                    variable,
+                    label,
+                    property,
+                    column,
+                    optional: *optional,
+                },
+                input,
+                catalog,
+                store,
+                execution_limit,
+            )
         }
         PhysicalPlan::IndexNodeSeek {
             variable,
@@ -2341,6 +2327,178 @@ fn exact_scan_label_id(catalog: &Catalog, label: &str) -> Option<Option<crate::s
         return None;
     }
     catalog.label_id(label).map(Some)
+}
+
+fn execute_node_column_lookup(
+    spec: NodeColumnLookupSpec<'_>,
+    input: Vec<Binding>,
+    catalog: &Catalog,
+    store: &GraphStore,
+    execution_limit: ExecutionLimit,
+) -> Result<Vec<Binding>> {
+    if let Some(Some(label_id)) = exact_scan_label_id(catalog, spec.label) {
+        return execute_indexed_node_column_lookup(&spec, input, label_id, store, execution_limit);
+    }
+
+    let label_ids = label_ids_for_pattern(catalog, spec.label);
+    let candidates = store
+        .scan_nodes(None)
+        .filter(|node| node_matches_label_pattern(node, label_ids.as_deref()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut output = Vec::new();
+    for binding in input {
+        let expected = binding.values.get(spec.column).ok_or_else(|| {
+            SkeinError::Execution(format!(
+                "missing column '{}' during node column lookup",
+                spec.column
+            ))
+        })?;
+        let mut matched = false;
+        for node in &candidates {
+            if node.properties.get(spec.property) == Some(expected) {
+                let mut next = binding.clone();
+                next.nodes.insert(spec.variable.to_string(), node.clone());
+                output.push(next);
+                matched = true;
+                if execution_limit.is_reached(output.len()) {
+                    return Ok(output);
+                }
+            }
+        }
+        if spec.optional && !matched {
+            let mut next = binding;
+            next.nodes
+                .insert(spec.variable.to_string(), null_lookup_node());
+            output.push(next);
+            if execution_limit.is_reached(output.len()) {
+                return Ok(output);
+            }
+        }
+    }
+    Ok(output)
+}
+
+fn execute_indexed_node_column_lookup(
+    spec: &NodeColumnLookupSpec<'_>,
+    input: Vec<Binding>,
+    label_id: crate::schema::LabelId,
+    store: &GraphStore,
+    execution_limit: ExecutionLimit,
+) -> Result<Vec<Binding>> {
+    let mut lookup_values = BTreeSet::new();
+    for binding in &input {
+        let expected = binding.values.get(spec.column).ok_or_else(|| {
+            SkeinError::Execution(format!(
+                "missing column '{}' during node column lookup",
+                spec.column
+            ))
+        })?;
+        lookup_values.insert(expected.clone());
+    }
+
+    let mut nodes_by_value = BTreeMap::<Value, Vec<NodeRecord>>::new();
+    let mut unique_candidate_ids = BTreeSet::new();
+    for value in &lookup_values {
+        let nodes = store
+            .seek_nodes_by_property(label_id, spec.property, value)
+            .cloned()
+            .collect::<Vec<_>>();
+        for node in &nodes {
+            unique_candidate_ids.insert(node.id);
+        }
+        nodes_by_value.insert(value.clone(), nodes);
+    }
+
+    let mut output = Vec::new();
+    for binding in input {
+        let expected = binding
+            .values
+            .get(spec.column)
+            .expect("lookup column was validated before index lookup");
+        let mut matched = false;
+        if let Some(nodes) = nodes_by_value.get(expected) {
+            for node in nodes {
+                let mut next = binding.clone();
+                next.nodes.insert(spec.variable.to_string(), node.clone());
+                output.push(next);
+                matched = true;
+                if execution_limit.is_reached(output.len()) {
+                    record_node_column_lookup_scan_pruning_report(
+                        label_id,
+                        spec.property,
+                        lookup_values.len(),
+                        unique_candidate_ids.len(),
+                        output.len(),
+                        store,
+                    );
+                    return Ok(output);
+                }
+            }
+        }
+        if spec.optional && !matched {
+            let mut next = binding;
+            next.nodes
+                .insert(spec.variable.to_string(), null_lookup_node());
+            output.push(next);
+            if execution_limit.is_reached(output.len()) {
+                record_node_column_lookup_scan_pruning_report(
+                    label_id,
+                    spec.property,
+                    lookup_values.len(),
+                    unique_candidate_ids.len(),
+                    output.len(),
+                    store,
+                );
+                return Ok(output);
+            }
+        }
+    }
+
+    record_node_column_lookup_scan_pruning_report(
+        label_id,
+        spec.property,
+        lookup_values.len(),
+        unique_candidate_ids.len(),
+        output.len(),
+        store,
+    );
+    Ok(output)
+}
+
+fn record_node_column_lookup_scan_pruning_report(
+    label_id: crate::schema::LabelId,
+    property: &str,
+    lookup_value_count: usize,
+    candidate_count_before_filter: usize,
+    output_count: usize,
+    store: &GraphStore,
+) {
+    let candidate_count_before_pruning = store.node_count_for_label(Some(label_id));
+    record_scan_pruning_report(ScanPruningReport {
+        target_kind: crate::store::ScanPruningTargetKind::Node,
+        label_id: Some(label_id),
+        rel_type_id: None,
+        strategy: if lookup_value_count == 0 {
+            ScanPruningStrategy::Empty
+        } else if lookup_value_count == 1 {
+            ScanPruningStrategy::PropertyEq {
+                property: property.to_string(),
+            }
+        } else {
+            ScanPruningStrategy::PropertyIn {
+                property: property.to_string(),
+            }
+        },
+        pruned: true,
+        exact_empty: candidate_count_before_filter == 0,
+        candidate_count_before_pruning,
+        pruned_candidate_count: candidate_count_before_pruning
+            .saturating_sub(candidate_count_before_filter),
+        candidate_count_before_filter,
+        output_count,
+        filtered_out_count: 0,
+    });
 }
 
 fn execute_adjacency_expand(
@@ -4422,5 +4580,138 @@ mod tests {
             .expect("nested projection expression should evaluate");
 
         assert_eq!(value, Value::String("ske".to_string()));
+    }
+
+    #[test]
+    fn node_column_lookup_uses_property_index_pruning_for_exact_label() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        store
+            .create_node(
+                &mut catalog,
+                "Memory",
+                properties([
+                    ("stable_id", Value::String("memory:1".to_string())),
+                    ("title", Value::String("Graph foundations".to_string())),
+                ]),
+            )
+            .unwrap();
+        store
+            .create_node(
+                &mut catalog,
+                "Memory",
+                properties([
+                    ("stable_id", Value::String("memory:2".to_string())),
+                    ("title", Value::String("Storage notes".to_string())),
+                ]),
+            )
+            .unwrap();
+        store
+            .create_node(
+                &mut catalog,
+                "Memory",
+                properties([
+                    ("stable_id", Value::String("memory:3".to_string())),
+                    ("title", Value::String("Runtime notes".to_string())),
+                ]),
+            )
+            .unwrap();
+        store
+            .create_node(
+                &mut catalog,
+                "Seed",
+                properties([("target_stable_id", Value::String("memory:2".to_string()))]),
+            )
+            .unwrap();
+        store
+            .create_node(
+                &mut catalog,
+                "Seed",
+                properties([("target_stable_id", Value::String("memory:4".to_string()))]),
+            )
+            .unwrap();
+
+        let plan = PhysicalPlan::ProjectExec {
+            items: vec![
+                Projection {
+                    expression: ProjectionExpression::Property {
+                        variable: "m".to_string(),
+                        property: "stable_id".to_string(),
+                    },
+                    name: "stable_id".to_string(),
+                },
+                Projection {
+                    expression: ProjectionExpression::Property {
+                        variable: "m".to_string(),
+                        property: "title".to_string(),
+                    },
+                    name: "title".to_string(),
+                },
+            ],
+            input: Box::new(PhysicalPlan::NodeColumnLookupExec {
+                variable: "m".to_string(),
+                label: "Memory".to_string(),
+                property: "stable_id".to_string(),
+                column: "lookup_id".to_string(),
+                optional: true,
+                input: Box::new(PhysicalPlan::ProjectExec {
+                    items: vec![Projection {
+                        expression: ProjectionExpression::Property {
+                            variable: "s".to_string(),
+                            property: "target_stable_id".to_string(),
+                        },
+                        name: "lookup_id".to_string(),
+                    }],
+                    input: Box::new(PhysicalPlan::SeqNodeScan {
+                        variable: "s".to_string(),
+                        label: "Seed".to_string(),
+                    }),
+                }),
+            }),
+        };
+
+        let output = execute_with_row_limit_profile(&plan, &mut catalog, &mut store, None).unwrap();
+
+        assert_eq!(output.rows.len(), 2);
+        assert_eq!(
+            output.rows[0].get("stable_id"),
+            Some(&Value::String("memory:2".to_string()))
+        );
+        assert_eq!(
+            output.rows[0].get("title"),
+            Some(&Value::String("Storage notes".to_string()))
+        );
+        assert_eq!(output.rows[1].get("stable_id"), Some(&Value::Null));
+        assert_eq!(output.rows[1].get("title"), Some(&Value::Null));
+        let lookup_scan = output
+            .profile
+            .scan_pruning_reports
+            .iter()
+            .find(|report| {
+                report.strategy
+                    == ScanPruningStrategy::PropertyIn {
+                        property: "stable_id".to_string(),
+                    }
+            })
+            .expect("node column lookup should emit property-in pruning evidence");
+        assert_eq!(
+            lookup_scan.target_kind,
+            crate::store::ScanPruningTargetKind::Node
+        );
+        assert!(lookup_scan.pruned);
+        assert!(!lookup_scan.exact_empty);
+        assert_eq!(lookup_scan.candidate_count_before_pruning, 3);
+        assert_eq!(lookup_scan.candidate_count_before_filter, 1);
+        assert_eq!(lookup_scan.pruned_candidate_count, 2);
+        assert_eq!(lookup_scan.output_count, 2);
+    }
+
+    fn properties(
+        items: impl IntoIterator<Item = (&'static str, Value)>,
+    ) -> BTreeMap<String, Value> {
+        items
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), value))
+            .collect()
     }
 }

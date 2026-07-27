@@ -443,6 +443,9 @@ contract.
   - [x] Cover Nowledge node graph-delta timestamp filters such as
     `created_at > $cutoff OR updated_at > $cutoff` with `EXPLAIN ANALYZE`
     scan-pruning evidence before row payload filtering.
+  - [x] Push exact `NodeColumnLookupExec` lookups for single-label graph reads
+    through the property index and emit compact scan-pruning evidence, so
+    column-driven node lookups avoid preloading all label payloads.
 - [ ] Keep memory use bounded by default.
   - User foreground reads are admitted first.
   - Internal background import, projection, compaction, analytics, and shadow
