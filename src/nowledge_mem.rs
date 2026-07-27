@@ -1371,6 +1371,26 @@ pub fn nowledge_mem_search_candidate_shadow_evidence_json(
     let candidate_identity = nowledge_mem_search_candidate_shadow_identity_json(evidence);
     let filter_pushdown = nowledge_mem_search_candidate_filter_pushdown_json(evidence);
     let ready = blocker_codes.is_empty();
+    let row_count_parity = evidence.request_count > 0
+        && evidence.primary_candidate_count == evidence.shadow_candidate_count
+        && evidence.matched_candidate_count == evidence.shadow_candidate_count
+        && evidence.primary_only_candidate_count == 0;
+    let shadow_scan_filter_pushdown_ready = filter_pushdown
+        .get("ready")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let shadow_scan_field_pruning_ready = filter_pushdown
+        .get("field_capabilities_ready")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+        && filter_pushdown
+            .get("missing_required_fields")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(Vec::is_empty);
+    let shadow_scan_field_summary_count = filter_pushdown
+        .get("field_summary_count")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
     serde_json::json!({
         "protocol": NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
         "route": NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
@@ -1383,7 +1403,16 @@ pub fn nowledge_mem_search_candidate_shadow_evidence_json(
         "shadow_candidate_count": evidence.shadow_candidate_count,
         "matched_candidate_count": evidence.matched_candidate_count,
         "primary_only_candidate_count": evidence.primary_only_candidate_count,
+        "row_count_parity": row_count_parity,
         "candidate_identity": candidate_identity,
+        "shadow_scan_present": evidence
+            .filter_pushdown
+            .as_ref()
+            .map(|filter| filter.shadow_scan_present)
+            .unwrap_or(false),
+        "shadow_scan_filter_pushdown_ready": shadow_scan_filter_pushdown_ready,
+        "shadow_scan_field_pruning_ready": shadow_scan_field_pruning_ready,
+        "shadow_scan_field_summary_count": shadow_scan_field_summary_count,
         "filter_pushdown_ready": filter_pushdown
             .get("ready")
             .and_then(serde_json::Value::as_bool)
@@ -8233,8 +8262,16 @@ mod tests {
         assert_eq!(evidence["shadow_candidate_count"], 5);
         assert_eq!(evidence["matched_candidate_count"], 5);
         assert_eq!(evidence["primary_only_candidate_count"], 0);
+        assert_eq!(evidence["row_count_parity"], true);
         assert_eq!(evidence["candidate_identity"]["ready"], true);
         assert_eq!(evidence["candidate_identity"]["parity"], true);
+        assert_eq!(evidence["shadow_scan_present"], true);
+        assert_eq!(evidence["shadow_scan_filter_pushdown_ready"], true);
+        assert_eq!(evidence["shadow_scan_field_pruning_ready"], true);
+        assert_eq!(
+            evidence["shadow_scan_field_summary_count"],
+            serde_json::json!(NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len())
+        );
         assert_eq!(evidence["filter_pushdown_ready"], true);
         assert_eq!(evidence["filter_pushdown"]["ready"], true);
         assert_eq!(evidence["filter_pushdown"]["pushed_predicate_count"], 2);
@@ -8322,7 +8359,10 @@ mod tests {
         assert_eq!(evidence["shadow_candidate_count"], 3);
         assert_eq!(evidence["matched_candidate_count"], 3);
         assert_eq!(evidence["primary_only_candidate_count"], 0);
+        assert_eq!(evidence["row_count_parity"], true);
         assert_eq!(evidence["candidate_identity"]["ready"], true);
+        assert_eq!(evidence["shadow_scan_filter_pushdown_ready"], true);
+        assert_eq!(evidence["shadow_scan_field_pruning_ready"], true);
         assert_eq!(evidence["filter_pushdown_ready"], true);
         assert_eq!(evidence["blocker_codes"], serde_json::json!([]));
     }

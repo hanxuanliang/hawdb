@@ -1166,7 +1166,11 @@ fn search_candidate_shadow_evidence_summary(
         && filter_pushdown_field_capabilities_ready == Some(true)
         && filter_pushdown_missing_value_summary_fields.is_empty()
         && filter_pushdown_missing_numeric_range_fields.is_empty()
-        && filter_pushdown_missing_timestamp_range_fields.is_empty();
+        && filter_pushdown_missing_timestamp_range_fields.is_empty()
+        && row_count_parity == Some(true)
+        && shadow_scan_filter_pushdown_ready == Some(true)
+        && shadow_scan_field_pruning_ready == Some(true)
+        && shadow_scan_field_summary_count.is_some_and(|count| count > 0);
     let ready = present
         && protocol.as_deref() == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL)
         && route.as_deref() == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE)
@@ -2348,7 +2352,11 @@ fn nowledge_replacement_next_actions(
                 "search_candidate_shadow_evidence.shadow_candidate_count",
                 "search_candidate_shadow_evidence.matched_candidate_count",
                 "search_candidate_shadow_evidence.primary_only_candidate_count",
+                "search_candidate_shadow_evidence.row_count_parity",
                 "search_candidate_shadow_evidence.candidate_identity.ready",
+                "search_candidate_shadow_evidence.shadow_scan_filter_pushdown_ready",
+                "search_candidate_shadow_evidence.shadow_scan_field_pruning_ready",
+                "search_candidate_shadow_evidence.shadow_scan_field_summary_count",
                 "search_candidate_shadow_evidence.filter_pushdown.ready",
                 "search_candidate_shadow_evidence.filter_pushdown.field_summary_count",
                 "search_candidate_shadow_evidence.filter_pushdown.missing_required_fields",
@@ -3159,6 +3167,41 @@ mod tests {
         assert_eq!(
             summary["search_candidate_shadow_evidence"]["shadow_scan_field_summary_count"],
             0
+        );
+        assert!(summary["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "search_candidate_shadow_evidence_ready"));
+    }
+
+    #[test]
+    fn replacement_summary_requires_search_candidate_bridge_scan_fields() {
+        let mut bundle = production_ready_bundle();
+        bundle["search_candidate_shadow_evidence"]["row_count_parity"] = serde_json::json!(false);
+        bundle["search_candidate_shadow_evidence"]["shadow_scan_filter_pushdown_ready"] =
+            serde_json::json!(false);
+        bundle["search_candidate_shadow_evidence"]["shadow_scan_field_pruning_ready"] =
+            serde_json::json!(false);
+        bundle["search_candidate_shadow_evidence"]["shadow_scan_field_summary_count"] =
+            serde_json::json!(0);
+        bundle["search_candidate_shadow_evidence"]["ready"] = serde_json::json!(true);
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["search_candidate_shadow_evidence"]["ready"], false);
+        assert_eq!(
+            summary["search_candidate_shadow_evidence"]["row_count_parity"],
+            false
+        );
+        assert_eq!(
+            summary["search_candidate_shadow_evidence"]["shadow_scan_filter_pushdown_ready"],
+            false
+        );
+        assert_eq!(
+            summary["search_candidate_shadow_evidence"]["shadow_scan_field_pruning_ready"],
+            false
         );
         assert!(summary["missing_evidence"]
             .as_array()
@@ -5011,7 +5054,11 @@ mod tests {
                         "search_candidate_shadow_evidence.shadow_candidate_count",
                         "search_candidate_shadow_evidence.matched_candidate_count",
                         "search_candidate_shadow_evidence.primary_only_candidate_count",
+                        "search_candidate_shadow_evidence.row_count_parity",
                         "search_candidate_shadow_evidence.candidate_identity.ready",
+                        "search_candidate_shadow_evidence.shadow_scan_filter_pushdown_ready",
+                        "search_candidate_shadow_evidence.shadow_scan_field_pruning_ready",
+                        "search_candidate_shadow_evidence.shadow_scan_field_summary_count",
                         "search_candidate_shadow_evidence.filter_pushdown.ready",
                         "search_candidate_shadow_evidence.filter_pushdown.field_summary_count",
                         "search_candidate_shadow_evidence.filter_pushdown.missing_required_fields",
@@ -5360,6 +5407,14 @@ mod tests {
             ["shadow_segment_pruned_document_count"] = serde_json::json!(2);
         bundle["search_projection_shadow_evidence"]["pushdown_evidence"]
             ["shadow_segment_scanned_document_count"] = serde_json::json!(2);
+        bundle["search_candidate_shadow_evidence"]["row_count_parity"] = serde_json::json!(true);
+        bundle["search_candidate_shadow_evidence"]["shadow_scan_present"] = serde_json::json!(true);
+        bundle["search_candidate_shadow_evidence"]["shadow_scan_filter_pushdown_ready"] =
+            serde_json::json!(true);
+        bundle["search_candidate_shadow_evidence"]["shadow_scan_field_pruning_ready"] =
+            serde_json::json!(true);
+        bundle["search_candidate_shadow_evidence"]["shadow_scan_field_summary_count"] =
+            serde_json::json!(NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len());
         bundle
     }
 

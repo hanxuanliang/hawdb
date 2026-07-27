@@ -491,6 +491,8 @@ contract.
     - [x] Require typed search candidate readiness to prove projection
       watermark visibility and embedding manifest identity for LanceDB
       replacement candidate reads.
+    - [x] Require Rust-bridge search candidate evidence to expose and gate
+      row-count parity plus compact shadow scan-pruning fields before cutover.
   - Remove LanceDB from a route only after the matching search projection
     evidence is present in replacement summary.
 - [ ] Add retrieval projection options behind advisor gates.
