@@ -164,6 +164,9 @@ contract.
   - [x] Add a library-first `/graph/node-details/{node_id}` Memory detail
     runtime and route-query evidence helper that reuse shared Cypher contracts
     and bounded query execution without request-time dual-read compare.
+  - [x] Add a library-first `/graph/community-members/{community_id}` Memory
+    member ranking runtime and route-query evidence helper with exact
+    `community_id` scan-pruning evidence.
 - [ ] PR 4: Add search projection scan-pruning evidence for production filters.
   - Scope: prove search projection segment descriptors prune `unit_type`,
     lifecycle state, metadata keys, `importance`, `confidence`, and timestamps

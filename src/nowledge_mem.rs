@@ -130,6 +130,8 @@ pub const NOWLEDGE_MEM_GRAPH_OVERVIEW_ROUTE_REPORT_PROTOCOL: &str =
     "skein-nowledge-mem-graph-overview-route-report-v1";
 pub const NOWLEDGE_MEM_GRAPH_NODE_DETAILS_ROUTE_REPORT_PROTOCOL: &str =
     "skein-nowledge-mem-graph-node-details-route-report-v1";
+pub const NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ROUTE_REPORT_PROTOCOL: &str =
+    "skein-nowledge-mem-graph-community-members-route-report-v1";
 pub const NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL: &str = "skein-nowledge-mem-retrieval-report";
 pub const NOWLEDGE_MEM_SEARCH_CANDIDATE_REPORT_PROTOCOL: &str =
     "skein-nowledge-mem-search-candidate-report-v1";
@@ -220,6 +222,27 @@ m.confidence AS confidence, \
 m.is_latest AS is_latest, \
 m.is_deleted AS is_deleted \
 LIMIT 1";
+pub const NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ROUTE: &str =
+    "/graph/community-members/{community_id}";
+pub const NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_MEMORY_QUERY: &str = "\
+MATCH (m:Memory) \
+WHERE m.community_id = $community_id \
+RETURN m.id AS memory_id, \
+id(m) AS node_id, \
+COALESCE(m.title, LEFT(m.content, 60)) AS label, \
+m.title AS title, \
+LEFT(COALESCE(m.content, ''), 200) AS content_preview, \
+COALESCE(m.pagerank_score, m.importance, 0.5) AS score, \
+m.community_id AS community_id, \
+m.space_id AS raw_space_id, \
+m.created_at AS created_at, \
+m.updated_at AS updated_at, \
+m.source AS source, \
+m.event_start AS event_start, \
+m.event_end AS event_end, \
+m.importance AS importance \
+ORDER BY COALESCE(m.pagerank_score, m.importance, 0.5) DESC \
+LIMIT $limit";
 pub const REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES: &[&str] = &[
     "/communities",
     "/communities/{community_id}",
@@ -1720,6 +1743,65 @@ impl NowledgeMemGraphNodeDetailsOutput {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemGraphCommunityMembersOptions {
+    pub community_id: i64,
+    pub limit: usize,
+    pub read_options: NowledgeMemReadOptions,
+}
+
+impl NowledgeMemGraphCommunityMembersOptions {
+    pub fn new(community_id: i64, limit: usize) -> Self {
+        Self {
+            community_id,
+            limit,
+            read_options: NowledgeMemReadOptions::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemGraphCommunityMembersRouteReport {
+    pub protocol: String,
+    pub route: String,
+    pub read_engine: crate::route_ownership::NowledgeMemRouteReadEngine,
+    pub route_catalog_version: String,
+    pub route_catalog_digest: String,
+    pub community_id: i64,
+    pub row_count: usize,
+    pub read_report: NowledgeMemReadReport,
+}
+
+impl NowledgeMemGraphCommunityMembersRouteReport {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": self.protocol,
+            "route": self.route,
+            "read_engine": self.read_engine.as_str(),
+            "route_catalog_version": self.route_catalog_version,
+            "route_catalog_digest": self.route_catalog_digest,
+            "community_id": self.community_id,
+            "row_count": self.row_count,
+            "read_report": self.read_report.json(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemGraphCommunityMembersOutput {
+    pub rows: Vec<NowledgeMemGraphOverviewRow>,
+    pub report: NowledgeMemGraphCommunityMembersRouteReport,
+}
+
+impl NowledgeMemGraphCommunityMembersOutput {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "rows": self.rows.iter().map(NowledgeMemGraphOverviewRow::json).collect::<Vec<_>>(),
+            "report": self.report.json(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NowledgeMemQueryExecutionPath {
     FastPath,
@@ -2863,6 +2945,47 @@ impl NowledgeMemGraph {
         };
         Ok(NowledgeMemGraphNodeDetailsOutput { node, report })
     }
+
+    pub fn read_graph_community_members(
+        &mut self,
+        options: &NowledgeMemGraphCommunityMembersOptions,
+    ) -> Result<NowledgeMemGraphCommunityMembersOutput> {
+        let limit = i64::try_from(options.limit).map_err(|_| {
+            SkeinError::Semantic(
+                "graph community members limit exceeds supported range".to_string(),
+            )
+        })?;
+        if limit <= 0 {
+            return Err(SkeinError::Semantic(
+                "graph community members limit must be greater than zero".to_string(),
+            ));
+        }
+        let mut parameters = BTreeMap::new();
+        parameters.insert("community_id".to_string(), Value::Int(options.community_id));
+        parameters.insert("limit".to_string(), Value::Int(limit));
+        let read = self.read_query_with_params(
+            NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_MEMORY_QUERY,
+            &parameters,
+            &graph_community_members_read_options(options),
+        )?;
+        let rows = read
+            .output
+            .rows
+            .iter()
+            .map(decode_graph_overview_row)
+            .collect::<Result<Vec<_>>>()?;
+        let report = NowledgeMemGraphCommunityMembersRouteReport {
+            protocol: NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ROUTE_REPORT_PROTOCOL.to_string(),
+            route: NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ROUTE.to_string(),
+            read_engine: crate::route_ownership::NowledgeMemRouteReadEngine::Skein,
+            route_catalog_version: NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION.to_string(),
+            route_catalog_digest: nowledge_mem_graph_read_route_catalog_digest(),
+            community_id: options.community_id,
+            row_count: rows.len(),
+            read_report: read.report,
+        };
+        Ok(NowledgeMemGraphCommunityMembersOutput { rows, report })
+    }
 }
 
 fn graph_overview_read_options(
@@ -2883,6 +3006,17 @@ fn graph_node_details_read_options(
     read_options.max_rows = Some(match read_options.max_rows {
         Some(max_rows) => max_rows.min(1),
         None => 1,
+    });
+    read_options
+}
+
+fn graph_community_members_read_options(
+    options: &NowledgeMemGraphCommunityMembersOptions,
+) -> NowledgeMemReadOptions {
+    let mut read_options = options.read_options.clone();
+    read_options.max_rows = Some(match read_options.max_rows {
+        Some(max_rows) => max_rows.min(options.limit),
+        None => options.limit,
     });
     read_options
 }
@@ -3204,6 +3338,13 @@ impl NowledgeMemEmbeddedStoreHandle {
         options: &NowledgeMemGraphNodeDetailsOptions,
     ) -> Result<NowledgeMemGraphNodeDetailsOutput> {
         self.lock_store()?.read_graph_node_details(options)
+    }
+
+    pub fn read_graph_community_members(
+        &self,
+        options: &NowledgeMemGraphCommunityMembersOptions,
+    ) -> Result<NowledgeMemGraphCommunityMembersOutput> {
+        self.lock_store()?.read_graph_community_members(options)
     }
 
     pub fn search_candidates(
@@ -3594,6 +3735,13 @@ impl NowledgeMemEmbeddedStore {
         options: &NowledgeMemGraphNodeDetailsOptions,
     ) -> Result<NowledgeMemGraphNodeDetailsOutput> {
         self.graph.read_graph_node_details(options)
+    }
+
+    pub fn read_graph_community_members(
+        &mut self,
+        options: &NowledgeMemGraphCommunityMembersOptions,
+    ) -> Result<NowledgeMemGraphCommunityMembersOutput> {
+        self.graph.read_graph_community_members(options)
     }
 
     pub fn background_maintenance_summary(
@@ -5449,7 +5597,8 @@ mod tests {
         nowledge_mem_graph_config_with_search_mode,
         nowledge_mem_search_candidate_shadow_evidence_json, required_u64_field,
         NowledgeMemEmbeddedStore, NowledgeMemEmbeddedStoreHandle, NowledgeMemGraph,
-        NowledgeMemGraphMode, NowledgeMemGraphNodeDetailsOptions, NowledgeMemGraphOverviewOptions,
+        NowledgeMemGraphCommunityMembersOptions, NowledgeMemGraphMode,
+        NowledgeMemGraphNodeDetailsOptions, NowledgeMemGraphOverviewOptions,
         NowledgeMemOpenOptions, NowledgeMemQueryExecutionPath, NowledgeMemQueryReportOptions,
         NowledgeMemReadOptions, NowledgeMemReadReport, NowledgeMemReadinessAreaSummary,
         NowledgeMemReadinessDashboard, NowledgeMemReadinessOptions,
@@ -5457,7 +5606,9 @@ mod tests {
         NowledgeMemSearchCandidateRequest, NowledgeMemSearchCandidateShadowAccumulator,
         NowledgeMemSearchCandidateShadowEvidence, NowledgeMemSearchProjection,
         NowledgeMemStorageRecoveryReport, NowledgeQueryRuntimePreflightProbe,
-        NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL, NOWLEDGE_MEM_GRAPH_NODE_DETAILS_ROUTE,
+        NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL, NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ROUTE,
+        NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ROUTE_REPORT_PROTOCOL,
+        NOWLEDGE_MEM_GRAPH_NODE_DETAILS_ROUTE,
         NOWLEDGE_MEM_GRAPH_NODE_DETAILS_ROUTE_REPORT_PROTOCOL, NOWLEDGE_MEM_GRAPH_OVERVIEW_ROUTE,
         NOWLEDGE_MEM_GRAPH_OVERVIEW_ROUTE_REPORT_PROTOCOL, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
         NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL, NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL,
@@ -5661,6 +5812,83 @@ mod tests {
             })
             .unwrap();
         assert!(missing.node.is_none());
+        assert_eq!(missing.report.row_count, 0);
+    }
+
+    #[test]
+    fn graph_community_members_route_runs_through_bounded_query_runtime() {
+        let db = Database::new();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        seed_graph_community_members_memories(&mut graph);
+
+        let output = graph
+            .read_graph_community_members(&NowledgeMemGraphCommunityMembersOptions {
+                community_id: 42,
+                limit: 2,
+                read_options: NowledgeMemReadOptions::default(),
+            })
+            .unwrap();
+
+        assert_eq!(output.rows.len(), 2);
+        assert_eq!(
+            output.rows[0].memory_id.as_deref(),
+            Some("community-memory-high")
+        );
+        assert_eq!(output.rows[0].score, Some(3.0));
+        assert_eq!(
+            output.rows[1].memory_id.as_deref(),
+            Some("community-memory-low")
+        );
+        assert_eq!(output.rows[1].score, Some(1.0));
+        assert!(output
+            .rows
+            .iter()
+            .all(|row| row.community_id.as_ref() == Some(&Value::Int(42))));
+        assert_eq!(
+            output.report.protocol,
+            NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ROUTE_REPORT_PROTOCOL
+        );
+        assert_eq!(
+            output.report.route,
+            NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ROUTE
+        );
+        assert_eq!(output.report.community_id, 42);
+        assert_eq!(output.report.row_count, 2);
+        assert_eq!(output.report.read_report.row_count, 2);
+        assert!(output.report.read_report.row_limit_enforced_before_output);
+        assert_eq!(output.json()["report"]["read_engine"], "skein");
+        assert_eq!(
+            output.json()["rows"][0]["memory_id"],
+            "community-memory-high"
+        );
+    }
+
+    #[test]
+    fn embedded_store_handle_exposes_graph_community_members_route() {
+        let db = Database::new();
+        let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        let mut store = NowledgeMemEmbeddedStore::new(graph, None);
+        seed_graph_community_members_memories(store.graph_mut());
+        let handle = NowledgeMemEmbeddedStoreHandle::new(store);
+
+        let output = handle
+            .read_graph_community_members(&NowledgeMemGraphCommunityMembersOptions::new(42, 1))
+            .unwrap();
+
+        assert_eq!(output.rows.len(), 1);
+        assert_eq!(
+            output.rows[0].memory_id.as_deref(),
+            Some("community-memory-high")
+        );
+        assert_eq!(
+            output.report.route,
+            NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ROUTE
+        );
+
+        let missing = handle
+            .read_graph_community_members(&NowledgeMemGraphCommunityMembersOptions::new(404, 10))
+            .unwrap();
+        assert!(missing.rows.is_empty());
         assert_eq!(missing.report.row_count, 0);
     }
 
@@ -8442,6 +8670,18 @@ mod tests {
             .unwrap();
         graph
             .query("CREATE (:Memory {id: 'overview-memory-3', title: 'Overview Three', pagerank_score: 1.0, importance: 0.3, community_id: 7003, space_id: 'default', created_at: 103, updated_at: 203, source: 'overview', event_start: 303, event_end: 403})")
+            .unwrap();
+    }
+
+    fn seed_graph_community_members_memories(graph: &mut NowledgeMemGraph) {
+        graph
+            .query("CREATE (:Memory {id: 'community-memory-high', title: 'Community High', content: 'high body', pagerank_score: 3.0, importance: 0.1, community_id: 42, space_id: 'default', created_at: 101, updated_at: 201, source: 'community'})")
+            .unwrap();
+        graph
+            .query("CREATE (:Memory {id: 'community-memory-low', title: 'Community Low', content: 'low body', importance: 1.0, community_id: 42, space_id: 'default', created_at: 102, updated_at: 202, source: 'community'})")
+            .unwrap();
+        graph
+            .query("CREATE (:Memory {id: 'community-memory-other', title: 'Community Other', content: 'other body', pagerank_score: 10.0, community_id: 7, space_id: 'default', created_at: 103, updated_at: 203, source: 'community'})")
             .unwrap();
     }
 

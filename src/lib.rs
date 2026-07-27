@@ -125,9 +125,10 @@ pub use error::{Result, SkeinError};
 pub use executor::ReadExecutionProfile;
 pub use graph_route_evidence::{
     nowledge_graph_route_evidence_json, nowledge_graph_route_evidence_usage,
-    nowledge_mem_graph_node_details_route_query, nowledge_mem_graph_overview_route_query,
-    parse_route_parity_evidence, parse_route_query_inventory, run_nowledge_graph_route_evidence,
-    RouteCypherQuery, RouteParityEvidence, RouteParityEvidenceRoute, RouteQuery,
+    nowledge_mem_graph_community_members_route_query, nowledge_mem_graph_node_details_route_query,
+    nowledge_mem_graph_overview_route_query, parse_route_parity_evidence,
+    parse_route_query_inventory, run_nowledge_graph_route_evidence, RouteCypherQuery,
+    RouteParityEvidence, RouteParityEvidenceRoute, RouteQuery,
     NMEM_GRAPH_ROUTE_PARITY_EVIDENCE_PROTOCOL,
 };
 pub use graph_route_readiness::{
@@ -202,7 +203,9 @@ pub use nowledge_mem::{
     nowledge_mem_graph_read_route_specs_json, nowledge_mem_required_query_families_for_route,
     nowledge_mem_search_candidate_shadow_evidence_json, NowledgeMemBackgroundMaintenanceReport,
     NowledgeMemEmbeddedStore, NowledgeMemEmbeddedStoreHandle, NowledgeMemGraph,
-    NowledgeMemGraphMode, NowledgeMemGraphNodeDetailsOptions, NowledgeMemGraphNodeDetailsOutput,
+    NowledgeMemGraphCommunityMembersOptions, NowledgeMemGraphCommunityMembersOutput,
+    NowledgeMemGraphCommunityMembersRouteReport, NowledgeMemGraphMode,
+    NowledgeMemGraphNodeDetailsOptions, NowledgeMemGraphNodeDetailsOutput,
     NowledgeMemGraphNodeDetailsRouteReport, NowledgeMemGraphNodeDetailsRow,
     NowledgeMemGraphOverviewOptions, NowledgeMemGraphOverviewOutput,
     NowledgeMemGraphOverviewRouteReport, NowledgeMemGraphOverviewRow,
@@ -221,6 +224,8 @@ pub use nowledge_mem::{
     NowledgeMemSlowQueryRecord, NowledgeMemSlowQueryReport, NowledgeMemStorageRecoveryReport,
     NowledgeQueryRuntimePreflightProbe, NowledgeQueryRuntimePreflightProbeReport,
     NowledgeQueryRuntimePreflightReport, NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL,
+    NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_MEMORY_QUERY, NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ROUTE,
+    NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ROUTE_REPORT_PROTOCOL,
     NOWLEDGE_MEM_GRAPH_NODE_DETAILS_MEMORY_QUERY, NOWLEDGE_MEM_GRAPH_NODE_DETAILS_ROUTE,
     NOWLEDGE_MEM_GRAPH_NODE_DETAILS_ROUTE_REPORT_PROTOCOL,
     NOWLEDGE_MEM_GRAPH_OVERVIEW_MEMORY_RANKING_QUERY, NOWLEDGE_MEM_GRAPH_OVERVIEW_ROUTE,
