@@ -196,6 +196,8 @@ contract.
   - [x] Require blackbox redaction evidence in the Mem integration readiness
     gate so retained diagnostics cannot copy raw query text, parameters,
     artifact payloads, or absolute artifact paths.
+  - [x] Require blackbox operational evidence for slow-query logs and compact
+    background QoS summaries before integration readiness can pass.
 - [ ] PR 10: Remove or quarantine obsolete compatibility paths.
   - Scope: after gates are satisfied, remove unused CLI-only, Python-only, and
     request-time shadow compare code from the production path.

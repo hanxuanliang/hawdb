@@ -1068,6 +1068,17 @@ mod tests {
             bundle["blackbox_manifest"]["redaction"]["raw_query_text_copied"],
             false
         );
+        assert!(bundle["blackbox_manifest"]["artifacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|artifact| artifact["name"] == "slow-query-log.jsonl"));
+        assert!(bundle["blackbox_manifest"]["artifacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|artifact| artifact["background_qos"]["protocol"]
+                == "skein-background-maintenance-report"));
         assert_eq!(readiness["ready"], true);
         assert_eq!(readiness["failed_checks"], serde_json::json!([]));
     }
@@ -1702,6 +1713,41 @@ mod tests {
             "artifact_dir_present": true,
             "artifact_count": 2,
             "events_path": "events.jsonl",
+            "artifacts": [
+                {
+                    "name": "slow-query-log.jsonl",
+                    "format": "jsonl",
+                    "byte_len": 0,
+                    "checksum": 0,
+                    "jsonl": {
+                        "line_count": 0,
+                        "nonempty_line_count": 0
+                    }
+                },
+                {
+                    "name": "background-maintenance.json",
+                    "format": "json",
+                    "byte_len": 256,
+                    "checksum": 2,
+                    "json": {
+                        "parse_ready": true,
+                        "protocol": "skein-background-maintenance-report",
+                        "ready": true,
+                        "blocker_codes": []
+                    },
+                    "background_qos": {
+                        "protocol": "skein-background-maintenance-report",
+                        "ready": true,
+                        "total_candidates": 1,
+                        "admitted_count": 1,
+                        "deferred_count": 0,
+                        "rejected_count": 0,
+                        "executable_search_projection_graph_delta_count": 1,
+                        "admitted_search_projection_graph_delta_count": 1,
+                        "blocker_codes": []
+                    }
+                }
+            ],
             "redaction": {
                 "raw_query_text_copied": false,
                 "raw_parameters_copied": false,

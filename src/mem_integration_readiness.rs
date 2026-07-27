@@ -1418,6 +1418,22 @@ pub fn nowledge_mem_integration_readiness(
             ],
             blocker_codes(bundle, &[&["blackbox_manifest", "blocker_codes"][..]]),
         ),
+        check(
+            "blackbox_operational_evidence",
+            [
+                blackbox_artifact_present(bundle, "slow-query-log.jsonl"),
+                blackbox_jsonl_artifact_summary_present(bundle, "slow-query-log.jsonl"),
+                blackbox_artifact_present(bundle, "background-maintenance.json"),
+                blackbox_background_qos_summary_ready(bundle),
+            ],
+            [
+                "blackbox_manifest.artifacts.slow-query-log.jsonl",
+                "blackbox_manifest.artifacts.slow-query-log.jsonl.jsonl",
+                "blackbox_manifest.artifacts.background-maintenance.json",
+                "blackbox_manifest.artifacts.background-maintenance.json.background_qos",
+            ],
+            blocker_codes(bundle, &[&["blackbox_manifest", "blocker_codes"][..]]),
+        ),
     ];
     let ready = checks.iter().all(|check| check.ready);
     let failed_checks = checks
@@ -1779,6 +1795,18 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<NowledgeMemInteg
                 "blackbox_manifest.redaction.raw_parameters_copied",
                 "blackbox_manifest.redaction.raw_artifact_payloads_copied",
                 "blackbox_manifest.redaction.artifact_paths_are_relative",
+            ],
+        ));
+    }
+    if !blackbox_operational_evidence_ready(bundle) {
+        actions.push(next_action(
+            "attach_blackbox_operational_evidence",
+            "Nowledge Mem cutover requires blackbox slow-query and background QoS operational evidence",
+            [
+                "blackbox_manifest.artifacts.slow-query-log.jsonl",
+                "blackbox_manifest.artifacts.slow-query-log.jsonl.jsonl",
+                "blackbox_manifest.artifacts.background-maintenance.json",
+                "blackbox_manifest.artifacts.background-maintenance.json.background_qos",
             ],
         ));
     }
@@ -2949,6 +2977,69 @@ fn blackbox_redaction_ready(bundle: &serde_json::Value) -> bool {
         ) == Some(true)
 }
 
+fn blackbox_operational_evidence_ready(bundle: &serde_json::Value) -> bool {
+    blackbox_artifact_present(bundle, "slow-query-log.jsonl")
+        && blackbox_jsonl_artifact_summary_present(bundle, "slow-query-log.jsonl")
+        && blackbox_artifact_present(bundle, "background-maintenance.json")
+        && blackbox_background_qos_summary_ready(bundle)
+}
+
+fn blackbox_artifact_present(bundle: &serde_json::Value, name: &str) -> bool {
+    blackbox_artifact(bundle, name).is_some()
+}
+
+fn blackbox_jsonl_artifact_summary_present(bundle: &serde_json::Value, name: &str) -> bool {
+    let Some(artifact) = blackbox_artifact(bundle, name) else {
+        return false;
+    };
+    str_path(artifact, &["format"]) == Some("jsonl")
+        && u64_path(artifact, &["jsonl", "line_count"]).is_some()
+        && u64_path(artifact, &["jsonl", "nonempty_line_count"]).is_some()
+}
+
+fn blackbox_background_qos_summary_ready(bundle: &serde_json::Value) -> bool {
+    let Some(artifact) = blackbox_artifact(bundle, "background-maintenance.json") else {
+        return false;
+    };
+    str_path(artifact, &["format"]) == Some("json")
+        && str_path(artifact, &["background_qos", "protocol"])
+            == Some("skein-background-maintenance-report")
+        && bool_path(artifact, &["background_qos", "ready"]).is_some()
+        && u64_path(artifact, &["background_qos", "total_candidates"]).is_some()
+        && u64_path(artifact, &["background_qos", "admitted_count"]).is_some()
+        && u64_path(artifact, &["background_qos", "deferred_count"]).is_some()
+        && u64_path(artifact, &["background_qos", "rejected_count"]).is_some()
+        && u64_path(
+            artifact,
+            &[
+                "background_qos",
+                "executable_search_projection_graph_delta_count",
+            ],
+        )
+        .is_some()
+        && u64_path(
+            artifact,
+            &[
+                "background_qos",
+                "admitted_search_projection_graph_delta_count",
+            ],
+        )
+        .is_some()
+        && json_get_path(artifact, &["background_qos", "blocker_codes"])
+            .and_then(serde_json::Value::as_array)
+            .is_some()
+}
+
+fn blackbox_artifact<'a>(
+    bundle: &'a serde_json::Value,
+    name: &str,
+) -> Option<&'a serde_json::Value> {
+    json_get_path(bundle, &["blackbox_manifest", "artifacts"])?
+        .as_array()?
+        .iter()
+        .find(|artifact| str_path(artifact, &["name"]) == Some(name))
+}
+
 fn replacement_summary_storage_recovery_ready(bundle: &serde_json::Value) -> bool {
     [
         &[
@@ -3194,6 +3285,10 @@ mod tests {
             .checks
             .iter()
             .any(|check| check.name == "blackbox_redaction"));
+        assert!(report
+            .checks
+            .iter()
+            .any(|check| check.name == "blackbox_operational_evidence"));
         assert_eq!(report.json()["ready"], true);
     }
 
@@ -3253,6 +3348,71 @@ mod tests {
         assert_eq!(
             blackbox_check["failed_evidence_fields"],
             serde_json::json!(["blackbox_manifest.redaction.raw_query_text_copied"])
+        );
+    }
+
+    #[test]
+    fn requires_blackbox_slow_query_artifact_summary() {
+        let mut bundle = ready_bundle();
+        bundle["blackbox_manifest"]["artifacts"] =
+            serde_json::json!([ready_blackbox_background_maintenance_artifact()]);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        let blackbox_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "blackbox_operational_evidence")
+            .unwrap();
+        assert_eq!(
+            blackbox_check["failed_evidence_fields"],
+            serde_json::json!([
+                "blackbox_manifest.artifacts.slow-query-log.jsonl",
+                "blackbox_manifest.artifacts.slow-query-log.jsonl.jsonl"
+            ])
+        );
+        assert!(report["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "attach_blackbox_operational_evidence"));
+    }
+
+    #[test]
+    fn requires_blackbox_background_qos_summary() {
+        let mut bundle = ready_bundle();
+        bundle["blackbox_manifest"]["artifacts"] = serde_json::json!([
+            ready_blackbox_slow_query_artifact(),
+            {
+                "name": "background-maintenance.json",
+                "format": "json",
+                "byte_len": 256,
+                "checksum": 3,
+                "json": {
+                    "parse_ready": true,
+                    "protocol": "skein-background-maintenance-report",
+                    "ready": true,
+                    "blocker_codes": []
+                }
+            }
+        ]);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        let blackbox_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "blackbox_operational_evidence")
+            .unwrap();
+        assert_eq!(
+            blackbox_check["failed_evidence_fields"],
+            serde_json::json!([
+                "blackbox_manifest.artifacts.background-maintenance.json.background_qos"
+            ])
         );
     }
 
@@ -6071,6 +6231,8 @@ mod tests {
             "artifact_count": 3,
             "events_path": "events.jsonl",
             "artifacts": [
+                ready_blackbox_slow_query_artifact(),
+                ready_blackbox_background_maintenance_artifact(),
                 {
                     "name": "replacement-summary.json",
                     "format": "json",
@@ -6094,6 +6256,53 @@ mod tests {
                 "raw_parameters_copied": false,
                 "raw_artifact_payloads_copied": false,
                 "artifact_paths_are_relative": true
+            }
+        })
+    }
+
+    fn ready_blackbox_slow_query_artifact() -> serde_json::Value {
+        serde_json::json!({
+            "name": "slow-query-log.jsonl",
+            "format": "jsonl",
+            "byte_len": 0,
+            "checksum": 0,
+            "jsonl": {
+                "line_count": 0,
+                "nonempty_line_count": 0
+            }
+        })
+    }
+
+    fn ready_blackbox_background_maintenance_artifact() -> serde_json::Value {
+        serde_json::json!({
+            "name": "background-maintenance.json",
+            "format": "json",
+            "byte_len": 256,
+            "checksum": 2,
+            "json": {
+                "parse_ready": true,
+                "protocol": "skein-background-maintenance-report",
+                "ready": true,
+                "blocker_codes": []
+            },
+            "background_qos": {
+                "protocol": "skein-background-maintenance-report",
+                "ready": true,
+                "total_candidates": 1,
+                "admitted_count": 1,
+                "deferred_count": 0,
+                "rejected_count": 0,
+                "executable_search_projection_graph_delta_count": 1,
+                "admitted_search_projection_graph_delta_count": 1,
+                "deferred_search_projection_graph_delta_count": 0,
+                "rejected_search_projection_graph_delta_count": 0,
+                "executable_search_projection_graph_delta_operations": 2,
+                "admitted_search_projection_graph_delta_operations": 2,
+                "max_search_projection_graph_delta_complete_through_graph_commit_epoch": 7,
+                "memory_pressure_ready": true,
+                "memory_budget_bytes": 4096,
+                "estimated_memory_bytes": 1024,
+                "blocker_codes": []
             }
         })
     }
