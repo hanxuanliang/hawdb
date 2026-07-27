@@ -27,6 +27,7 @@ pub mod search;
 pub mod search_candidate_shadow_evidence;
 pub mod storage_recovery_evidence;
 pub mod store;
+pub mod workload_fixtures;
 
 mod regex_cache;
 pub mod search_projection_evidence;
@@ -360,6 +361,12 @@ pub use store::{
     StorageRecoveryReport, WalReplayConfig, DENSE_ADJACENCY_DEGREE_THRESHOLD,
 };
 pub use value::Value;
+pub use workload_fixtures::{
+    nowledge_graph_route_workload_fixture_queries, nowledge_graph_route_workload_fixture_report,
+    NowledgeGraphRouteWorkloadFixtureOptions, NowledgeGraphRouteWorkloadFixtureReport,
+    NowledgeGraphRouteWorkloadQueryReport, NowledgeGraphRouteWorkloadRouteReport,
+    NOWLEDGE_GRAPH_ROUTE_WORKLOAD_FIXTURE_PROTOCOL,
+};
 
 #[cfg(test)]
 mod tests {

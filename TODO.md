@@ -666,6 +666,9 @@ contract.
   tuning.
   - Benchmark graph reads, bounded expansions, metadata-filtered search, and
     mixed foreground/background workloads.
+  - [x] Add a typed graph-route workload fixture that seeds Mem-shaped graph
+    data and runs the current graph-first route Cypher catalog through the
+    query runtime with plan/profile evidence.
 
 ## P2: Deferred Capabilities
 
