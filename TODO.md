@@ -671,6 +671,9 @@ contract.
     query runtime with plan/profile evidence.
   - [x] Extend the graph-route workload fixture with bounded expansion probes
     for two-hop traversal and dense-adjacency fanout diagnostics.
+  - [x] Extend the workload fixture with metadata-filtered search projection
+    probes for enum/in-list, lifecycle, numeric range, timestamp range, source,
+    and space filters.
 
 ## P2: Deferred Capabilities
 

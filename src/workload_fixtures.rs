@@ -8,7 +8,8 @@ use crate::{
     KnowledgeCandidateScoringPolicy, KnowledgeFanoutReasonCode, KnowledgeRetrievalRequest,
     NowledgeMemGraph, NowledgeMemGraphMode, NowledgeMemQueryExecutionPath,
     NowledgeMemQueryReportOptions, Result, RouteQuery, SearchFusionWeights, SearchIndex,
-    SearchMode, SearchRebuildOptions, DENSE_ADJACENCY_DEGREE_THRESHOLD,
+    SearchMode, SearchPredicatePushdownReport, SearchQueryOptions, SearchRebuildOptions,
+    DENSE_ADJACENCY_DEGREE_THRESHOLD,
 };
 use std::collections::BTreeMap;
 
@@ -50,6 +51,9 @@ pub struct NowledgeGraphRouteWorkloadFixtureReport {
     pub bounded_expansion_probe_count: usize,
     pub failed_bounded_expansion_probe_count: usize,
     pub bounded_expansion_reports: Vec<NowledgeGraphRouteWorkloadBoundedExpansionReport>,
+    pub search_metadata_probe_count: usize,
+    pub failed_search_metadata_probe_count: usize,
+    pub search_metadata_reports: Vec<NowledgeSearchMetadataWorkloadReport>,
     pub routes: Vec<NowledgeGraphRouteWorkloadRouteReport>,
 }
 
@@ -66,7 +70,49 @@ impl NowledgeGraphRouteWorkloadFixtureReport {
             "bounded_expansion_probe_count": self.bounded_expansion_probe_count,
             "failed_bounded_expansion_probe_count": self.failed_bounded_expansion_probe_count,
             "bounded_expansion_reports": self.bounded_expansion_reports.iter().map(NowledgeGraphRouteWorkloadBoundedExpansionReport::json).collect::<Vec<_>>(),
+            "search_metadata_probe_count": self.search_metadata_probe_count,
+            "failed_search_metadata_probe_count": self.failed_search_metadata_probe_count,
+            "search_metadata_reports": self.search_metadata_reports.iter().map(NowledgeSearchMetadataWorkloadReport::json).collect::<Vec<_>>(),
             "routes": self.routes.iter().map(NowledgeGraphRouteWorkloadRouteReport::json).collect::<Vec<_>>(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeSearchMetadataWorkloadReport {
+    pub name: String,
+    pub ready: bool,
+    pub total_hits: usize,
+    pub document_count: usize,
+    pub filtered_document_count: usize,
+    pub metadata_filters: BTreeMap<String, String>,
+    pub input_predicate_count: usize,
+    pub pushed_predicate_count: usize,
+    pub residual_predicate_count: usize,
+    pub pruned_segment_count: usize,
+    pub scanned_segment_count: usize,
+    pub field_summary_count: usize,
+    pub fields: Vec<String>,
+    pub error_class: Option<String>,
+}
+
+impl NowledgeSearchMetadataWorkloadReport {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "name": self.name,
+            "ready": self.ready,
+            "total_hits": self.total_hits,
+            "document_count": self.document_count,
+            "filtered_document_count": self.filtered_document_count,
+            "metadata_filters": self.metadata_filters,
+            "input_predicate_count": self.input_predicate_count,
+            "pushed_predicate_count": self.pushed_predicate_count,
+            "residual_predicate_count": self.residual_predicate_count,
+            "pruned_segment_count": self.pruned_segment_count,
+            "scanned_segment_count": self.scanned_segment_count,
+            "field_summary_count": self.field_summary_count,
+            "fields": self.fields,
+            "error_class": self.error_class,
         })
     }
 }
@@ -207,6 +253,7 @@ fn run_graph_route_workload_fixture(
     } else {
         Vec::new()
     };
+    let search_metadata_reports = run_search_metadata_workload_probes(graph);
     let query_count = routes.iter().map(|route| route.query_count).sum();
     let failed_query_count = routes.iter().map(|route| route.failed_query_count).sum();
     let total_rows = routes.iter().map(|route| route.total_rows).sum();
@@ -215,12 +262,17 @@ fn run_graph_route_workload_fixture(
         .iter()
         .filter(|report| !report.ready)
         .count();
+    let failed_search_metadata_probe_count = search_metadata_reports
+        .iter()
+        .filter(|report| !report.ready)
+        .count();
     Ok(NowledgeGraphRouteWorkloadFixtureReport {
         protocol: NOWLEDGE_GRAPH_ROUTE_WORKLOAD_FIXTURE_PROTOCOL,
         ready: !routes.is_empty()
             && failed_query_count == 0
             && routes.iter().all(|route| route.ready)
-            && failed_bounded_expansion_probe_count == 0,
+            && failed_bounded_expansion_probe_count == 0
+            && failed_search_metadata_probe_count == 0,
         route_count: routes.len(),
         query_count,
         failed_query_count,
@@ -229,6 +281,9 @@ fn run_graph_route_workload_fixture(
         bounded_expansion_probe_count: bounded_expansion_reports.len(),
         failed_bounded_expansion_probe_count,
         bounded_expansion_reports,
+        search_metadata_probe_count: search_metadata_reports.len(),
+        failed_search_metadata_probe_count,
+        search_metadata_reports,
         routes,
     })
 }
@@ -293,6 +348,7 @@ fn seed_graph_route_workload_fixture(graph: &mut NowledgeMemGraph) -> Result<()>
         graph.query(statement)?;
     }
     seed_bounded_expansion_workload_fixture(graph)?;
+    seed_search_metadata_workload_fixture(graph)?;
     Ok(())
 }
 
@@ -329,6 +385,129 @@ fn run_bounded_expansion_workload_probes(
             1,
         ),
     ]
+}
+
+fn run_search_metadata_workload_probes(
+    graph: &mut NowledgeMemGraph,
+) -> Vec<NowledgeSearchMetadataWorkloadReport> {
+    let mut search_index = SearchIndex::in_memory();
+    if let Err(error) = graph
+        .database_mut()
+        .rebuild_search_projection(&mut search_index, SearchRebuildOptions::default())
+    {
+        return vec![search_metadata_error_report(
+            "search-projection-rebuild",
+            BTreeMap::new(),
+            error_class(&error),
+        )];
+    }
+    [
+        (
+            "unit-type-lifecycle",
+            BTreeMap::from([
+                (
+                    "unit_type__in".to_string(),
+                    r#"["fact","learning"]"#.to_string(),
+                ),
+                (
+                    "lifecycle_state__not_in".to_string(),
+                    r#"["deleted","forgotten"]"#.to_string(),
+                ),
+            ]),
+        ),
+        (
+            "importance-confidence-created-at",
+            BTreeMap::from([
+                ("importance__gte".to_string(), "0.7".to_string()),
+                ("confidence__gte".to_string(), "0.8".to_string()),
+                ("created_at__gte".to_string(), "100".to_string()),
+            ]),
+        ),
+        (
+            "source-space",
+            BTreeMap::from([
+                ("source_id".to_string(), "workload-source-1".to_string()),
+                ("space_id".to_string(), "default".to_string()),
+            ]),
+        ),
+    ]
+    .into_iter()
+    .map(|(name, filters)| run_search_metadata_workload_probe(&search_index, name, filters))
+    .collect()
+}
+
+fn run_search_metadata_workload_probe(
+    search_index: &SearchIndex,
+    name: &str,
+    metadata_filters: BTreeMap<String, String>,
+) -> NowledgeSearchMetadataWorkloadReport {
+    let result = search_index.search_with_options(
+        "workload metadata retrieval",
+        None,
+        SearchMode::Text,
+        SearchQueryOptions {
+            limit: 10,
+            rank_window: None,
+            fusion_weights: SearchFusionWeights::default(),
+            metadata_filters: metadata_filters.clone(),
+            policy_epoch: None,
+        },
+    );
+    let pushdown = &result.candidate_set.metadata_predicate_pushdown;
+    let fields = search_metadata_pushdown_fields(pushdown);
+    NowledgeSearchMetadataWorkloadReport {
+        name: name.to_string(),
+        ready: result.total_hits > 0
+            && result.filtered_document_count < result.document_count
+            && pushdown.input_predicate_count > 0
+            && pushdown.input_predicate_count == pushdown.pushed_predicate_count
+            && pushdown.residual_predicate_count == 0
+            && pushdown.parse_error.is_none()
+            && !pushdown.field_summaries.is_empty(),
+        total_hits: result.total_hits,
+        document_count: result.document_count,
+        filtered_document_count: result.filtered_document_count,
+        metadata_filters,
+        input_predicate_count: pushdown.input_predicate_count,
+        pushed_predicate_count: pushdown.pushed_predicate_count,
+        residual_predicate_count: pushdown.residual_predicate_count,
+        pruned_segment_count: pushdown.pruned_segment_count,
+        scanned_segment_count: pushdown.scanned_segment_count,
+        field_summary_count: pushdown.field_summaries.len(),
+        fields,
+        error_class: None,
+    }
+}
+
+fn search_metadata_error_report(
+    name: &str,
+    metadata_filters: BTreeMap<String, String>,
+    error_class: String,
+) -> NowledgeSearchMetadataWorkloadReport {
+    NowledgeSearchMetadataWorkloadReport {
+        name: name.to_string(),
+        ready: false,
+        total_hits: 0,
+        document_count: 0,
+        filtered_document_count: 0,
+        metadata_filters,
+        input_predicate_count: 0,
+        pushed_predicate_count: 0,
+        residual_predicate_count: 0,
+        pruned_segment_count: 0,
+        scanned_segment_count: 0,
+        field_summary_count: 0,
+        fields: Vec::new(),
+        error_class: Some(error_class),
+    }
+}
+
+fn search_metadata_pushdown_fields(pushdown: &SearchPredicatePushdownReport) -> Vec<String> {
+    pushdown
+        .field_summaries
+        .iter()
+        .map(|summary| summary.field.clone())
+        .collect()
 }
 
 fn run_bounded_expansion_probe(
@@ -408,6 +587,13 @@ fn seed_bounded_expansion_workload_fixture(graph: &mut NowledgeMemGraph) -> Resu
     Ok(())
 }
 
+fn seed_search_metadata_workload_fixture(graph: &mut NowledgeMemGraph) -> Result<()> {
+    for statement in SEARCH_METADATA_WORKLOAD_FIXTURE_STATEMENTS {
+        graph.query(statement)?;
+    }
+    Ok(())
+}
+
 fn error_class(error: &crate::SkeinError) -> String {
     match error {
         crate::SkeinError::Parse(_) => "parse",
@@ -457,6 +643,13 @@ const GRAPH_ROUTE_WORKLOAD_FIXTURE_STATEMENTS: &[&str] = &[
     "MATCH (m:Memory {id: 'orphan-blocking-memory'}), (e:Entity {id: 'mentioned-entity'}) CREATE (m)-[:MENTIONS]->(e)",
 ];
 
+const SEARCH_METADATA_WORKLOAD_FIXTURE_STATEMENTS: &[&str] = &[
+    "CREATE (:Memory {id: 'metadata-fact-active', title: 'Workload metadata retrieval fact', content: 'workload metadata retrieval', unit_type: 'fact', lifecycle_state: 'active', importance: 0.9, confidence: 0.95, created_at: 120, updated_at: 160, source_id: 'workload-source-1', space_id: 'default'})",
+    "CREATE (:Memory {id: 'metadata-learning-active', title: 'Workload metadata retrieval learning', content: 'workload metadata retrieval', unit_type: 'learning', lifecycle_state: 'active', importance: 0.8, confidence: 0.85, created_at: 140, updated_at: 180, source_id: 'workload-source-1', space_id: 'default'})",
+    "CREATE (:Memory {id: 'metadata-task-active', title: 'Workload metadata retrieval task', content: 'workload metadata retrieval', unit_type: 'task', lifecycle_state: 'active', importance: 0.6, confidence: 0.7, created_at: 90, updated_at: 100, source_id: 'workload-source-2', space_id: 'default'})",
+    "CREATE (:Memory {id: 'metadata-fact-deleted', title: 'Workload metadata retrieval deleted', content: 'workload metadata retrieval', unit_type: 'fact', lifecycle_state: 'deleted', importance: 0.95, confidence: 0.99, created_at: 150, updated_at: 190, source_id: 'workload-source-1', space_id: 'archive'})",
+];
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -482,6 +675,8 @@ mod tests {
         assert_eq!(report.failed_query_count, 0);
         assert_eq!(report.bounded_expansion_probe_count, 2);
         assert_eq!(report.failed_bounded_expansion_probe_count, 0);
+        assert_eq!(report.search_metadata_probe_count, 3);
+        assert_eq!(report.failed_search_metadata_probe_count, 0);
         assert!(report.query_count >= report.route_count);
         assert!(report.total_rows > 0);
         assert!(report.routes.iter().all(|route| route.ready));
@@ -511,6 +706,29 @@ mod tests {
         assert!(dense
             .fanout_reason_codes
             .contains(&KnowledgeFanoutReasonCode::DenseAdjacency));
+        assert!(report
+            .search_metadata_reports
+            .iter()
+            .all(|report| report.ready));
+        let typed_filter = report
+            .search_metadata_reports
+            .iter()
+            .find(|report| report.name == "unit-type-lifecycle")
+            .unwrap();
+        assert_eq!(typed_filter.total_hits, 2);
+        assert_eq!(typed_filter.input_predicate_count, 2);
+        assert_eq!(typed_filter.pushed_predicate_count, 2);
+        assert_eq!(typed_filter.residual_predicate_count, 0);
+        assert!(typed_filter.fields.contains(&"unit_type".to_string()));
+        assert!(typed_filter.fields.contains(&"lifecycle_state".to_string()));
+        let range_filter = report
+            .search_metadata_reports
+            .iter()
+            .find(|report| report.name == "importance-confidence-created-at")
+            .unwrap();
+        assert!(range_filter.fields.contains(&"importance".to_string()));
+        assert!(range_filter.fields.contains(&"confidence".to_string()));
+        assert!(range_filter.fields.contains(&"created_at".to_string()));
     }
 
     #[test]
