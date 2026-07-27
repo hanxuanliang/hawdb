@@ -3157,6 +3157,9 @@ pub struct NowledgeMemSearchCandidateReport {
     pub projection_full_reindex_needed: bool,
     pub projection_metadata_repair_needed: bool,
     pub projection_source_graph_commit_epoch: Option<u64>,
+    pub projection_embedding_model: Option<String>,
+    pub projection_embedding_version: Option<String>,
+    pub projection_embedding_dimension: Option<usize>,
 }
 
 impl NowledgeMemSearchCandidateReport {
@@ -3197,6 +3200,9 @@ impl NowledgeMemSearchCandidateReport {
             "projection_full_reindex_needed": self.projection_full_reindex_needed,
             "projection_metadata_repair_needed": self.projection_metadata_repair_needed,
             "projection_source_graph_commit_epoch": self.projection_source_graph_commit_epoch,
+            "projection_embedding_model": self.projection_embedding_model,
+            "projection_embedding_version": self.projection_embedding_version,
+            "projection_embedding_dimension": self.projection_embedding_dimension,
         })
     }
 }
@@ -3217,6 +3223,10 @@ pub struct NowledgeMemSearchCandidateReadinessOptions {
     pub require_source_chunk_identity: bool,
     pub require_fail_soft_observation: bool,
     pub require_projection_marker_status: bool,
+    pub require_projection_watermark: bool,
+    pub require_embedding_identity: bool,
+    pub active_embedding_model: Option<String>,
+    pub active_embedding_dimension: Option<usize>,
 }
 
 impl Default for NowledgeMemSearchCandidateReadinessOptions {
@@ -3230,6 +3240,10 @@ impl Default for NowledgeMemSearchCandidateReadinessOptions {
             require_source_chunk_identity: false,
             require_fail_soft_observation: false,
             require_projection_marker_status: true,
+            require_projection_watermark: false,
+            require_embedding_identity: false,
+            active_embedding_model: None,
+            active_embedding_dimension: None,
         }
     }
 }
@@ -3240,6 +3254,7 @@ impl NowledgeMemSearchCandidateReadinessOptions {
             require_metadata_pushdown: true,
             require_segment_descriptor: true,
             require_projection_marker_status: true,
+            require_projection_watermark: true,
             ..Self::default()
         }
     }
@@ -3263,6 +3278,22 @@ impl NowledgeMemSearchCandidateReadinessOptions {
         self.require_fail_soft_observation = required;
         self
     }
+
+    pub fn with_projection_watermark(mut self, required: bool) -> Self {
+        self.require_projection_watermark = required;
+        self
+    }
+
+    pub fn with_embedding_identity(
+        mut self,
+        active_model: impl Into<String>,
+        active_dimension: usize,
+    ) -> Self {
+        self.require_embedding_identity = true;
+        self.active_embedding_model = Some(active_model.into());
+        self.active_embedding_dimension = Some(active_dimension);
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -3280,6 +3311,8 @@ pub struct NowledgeMemSearchCandidateReadinessReport {
     pub source_chunk_identity_ready: bool,
     pub fail_soft_observed: bool,
     pub projection_marker_status_visible: bool,
+    pub projection_watermark_ready: bool,
+    pub embedding_identity_ready: bool,
 }
 
 impl NowledgeMemSearchCandidateReadinessReport {
@@ -3313,6 +3346,11 @@ impl NowledgeMemSearchCandidateReadinessReport {
             && candidate_report.returned_hit_count > 0;
         let projection_marker_status_visible =
             candidate_report.protocol == NOWLEDGE_MEM_SEARCH_CANDIDATE_REPORT_PROTOCOL;
+        let projection_watermark_ready = candidate_report
+            .projection_source_graph_commit_epoch
+            .is_some();
+        let embedding_identity_ready =
+            search_candidate_embedding_identity_ready(&candidate_report, options);
         let blocker_codes = search_candidate_readiness_blocker_codes(
             &candidate_report,
             options,
@@ -3323,6 +3361,8 @@ impl NowledgeMemSearchCandidateReadinessReport {
             source_chunk_identity_ready,
             fail_soft_observed,
             projection_marker_status_visible,
+            projection_watermark_ready,
+            embedding_identity_ready,
         );
 
         Self {
@@ -3339,6 +3379,8 @@ impl NowledgeMemSearchCandidateReadinessReport {
             source_chunk_identity_ready,
             fail_soft_observed,
             projection_marker_status_visible,
+            projection_watermark_ready,
+            embedding_identity_ready,
         }
     }
 
@@ -3357,6 +3399,8 @@ impl NowledgeMemSearchCandidateReadinessReport {
             "source_chunk_identity_ready": self.source_chunk_identity_ready,
             "fail_soft_observed": self.fail_soft_observed,
             "projection_marker_status_visible": self.projection_marker_status_visible,
+            "projection_watermark_ready": self.projection_watermark_ready,
+            "embedding_identity_ready": self.embedding_identity_ready,
         })
     }
 }
@@ -6576,6 +6620,9 @@ fn nowledge_mem_search_candidate_report(
         projection_full_reindex_needed: result.projection_freshness.full_reindex_needed,
         projection_metadata_repair_needed: result.projection_freshness.metadata_repair_needed,
         projection_source_graph_commit_epoch: result.projection_freshness.source_graph_commit_epoch,
+        projection_embedding_model: result.projection_freshness.embedding_model.clone(),
+        projection_embedding_version: result.projection_freshness.embedding_version.clone(),
+        projection_embedding_dimension: result.projection_freshness.embedding_dimension,
     }
 }
 
@@ -6590,6 +6637,8 @@ fn search_candidate_readiness_blocker_codes(
     source_chunk_identity_ready: bool,
     fail_soft_observed: bool,
     projection_marker_status_visible: bool,
+    projection_watermark_ready: bool,
+    embedding_identity_ready: bool,
 ) -> Vec<String> {
     let mut blockers = BTreeSet::new();
 
@@ -6628,11 +6677,29 @@ fn search_candidate_readiness_blocker_codes(
     if options.require_projection_marker_status && !projection_marker_status_visible {
         blockers.insert("search_candidate_projection_marker_status_missing");
     }
+    if options.require_projection_watermark && !projection_watermark_ready {
+        blockers.insert("search_candidate_projection_watermark_missing");
+    }
+    if options.require_embedding_identity && !embedding_identity_ready {
+        blockers.insert("search_candidate_embedding_identity_not_ready");
+    }
 
     blockers
         .into_iter()
         .map(std::string::ToString::to_string)
         .collect()
+}
+
+fn search_candidate_embedding_identity_ready(
+    candidate_report: &NowledgeMemSearchCandidateReport,
+    options: &NowledgeMemSearchCandidateReadinessOptions,
+) -> bool {
+    if !options.require_embedding_identity {
+        return true;
+    }
+    candidate_report.projection_embedding_model.as_deref()
+        == options.active_embedding_model.as_deref()
+        && candidate_report.projection_embedding_dimension == options.active_embedding_dimension
 }
 
 fn search_candidate_returned_kind_counts(
@@ -9841,17 +9908,29 @@ mod tests {
         {
             let mut index = SearchIndex::open(&root).unwrap();
             index
-                .upsert_projection_row(SearchProjectionRow {
-                    kind: SearchProjectionKind::SourceChunk,
-                    external_id: "chunk-ready".to_string(),
-                    title: "Ready source chunk".to_string(),
-                    body: "ready candidate replacement body".to_string(),
-                    embedding: None,
-                    source_id: Some("source-ready".to_string()),
-                    metadata: BTreeMap::from([
-                        ("space_id".to_string(), "default".to_string()),
-                        ("lifecycle_state".to_string(), "active".to_string()),
-                    ]),
+                .apply_embedding_manifest(SearchEmbeddingManifest {
+                    model: "bge-m3".to_string(),
+                    version: None,
+                    dimension: 2,
+                })
+                .unwrap();
+            index
+                .apply_projection_delta(SearchProjectionDelta {
+                    upserts: vec![SearchProjectionRow {
+                        kind: SearchProjectionKind::SourceChunk,
+                        external_id: "chunk-ready".to_string(),
+                        title: "Ready source chunk".to_string(),
+                        body: "ready candidate replacement body".to_string(),
+                        embedding: Some(vec![1.0, 0.0]),
+                        source_id: Some("source-ready".to_string()),
+                        metadata: BTreeMap::from([
+                            ("space_id".to_string(), "default".to_string()),
+                            ("lifecycle_state".to_string(), "active".to_string()),
+                        ]),
+                    }],
+                    deletes: Vec::new(),
+                    max_operations: None,
+                    source_graph_commit_epoch: Some(19),
                 })
                 .unwrap();
             index.checkpoint().unwrap();
@@ -9871,7 +9950,8 @@ mod tests {
         let options =
             NowledgeMemSearchCandidateReadinessOptions::lancedb_replacement_candidate_read()
                 .with_text_retriever(true)
-                .with_source_chunk_identity(true);
+                .with_source_chunk_identity(true)
+                .with_embedding_identity("bge-m3", 2);
 
         let readiness = handle
             .search_candidate_readiness(&request, &options)
@@ -9888,7 +9968,26 @@ mod tests {
         assert!(readiness.text_retriever_ready);
         assert!(readiness.source_chunk_identity_ready);
         assert!(readiness.projection_marker_status_visible);
+        assert!(readiness.projection_watermark_ready);
+        assert!(readiness.embedding_identity_ready);
         assert!(readiness.blocker_codes.is_empty());
+        assert_eq!(
+            readiness
+                .candidate_report
+                .projection_source_graph_commit_epoch,
+            Some(19)
+        );
+        assert_eq!(
+            readiness
+                .candidate_report
+                .projection_embedding_model
+                .as_deref(),
+            Some("bge-m3")
+        );
+        assert_eq!(
+            readiness.candidate_report.projection_embedding_dimension,
+            Some(2)
+        );
         assert_eq!(
             readiness
                 .candidate_report
@@ -9896,6 +9995,8 @@ mod tests {
                 .get("source_chunk"),
             Some(&1)
         );
+        assert_eq!(readiness.json()["projection_watermark_ready"], true);
+        assert_eq!(readiness.json()["embedding_identity_ready"], true);
         assert!(!readiness
             .json()
             .to_string()
@@ -9943,6 +10044,132 @@ mod tests {
             .json()
             .to_string()
             .contains("memory only candidate replacement body"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn search_candidate_readiness_blocks_missing_projection_watermark() {
+        let root = unique_nowledge_mem_test_dir("search_candidate_readiness_watermark");
+        {
+            let mut index = SearchIndex::open(&root).unwrap();
+            index
+                .apply_embedding_manifest(SearchEmbeddingManifest {
+                    model: "bge-m3".to_string(),
+                    version: None,
+                    dimension: 2,
+                })
+                .unwrap();
+            index
+                .upsert_projection_row(SearchProjectionRow {
+                    kind: SearchProjectionKind::SourceChunk,
+                    external_id: "chunk-no-watermark".to_string(),
+                    title: "No watermark source chunk".to_string(),
+                    body: "candidate watermark body".to_string(),
+                    embedding: Some(vec![1.0, 0.0]),
+                    source_id: Some("source-no-watermark".to_string()),
+                    metadata: BTreeMap::from([
+                        ("space_id".to_string(), "default".to_string()),
+                        ("lifecycle_state".to_string(), "active".to_string()),
+                    ]),
+                })
+                .unwrap();
+            index.checkpoint().unwrap();
+        }
+        let projection = NowledgeMemSearchProjection::open(&root).unwrap();
+        let request = NowledgeMemSearchCandidateRequest::text("no watermark source chunk", 10)
+            .with_metadata_filters(BTreeMap::from([(
+                "kind__in".to_string(),
+                r#"["source_chunk"]"#.to_string(),
+            )]));
+        let options =
+            NowledgeMemSearchCandidateReadinessOptions::lancedb_replacement_candidate_read()
+                .with_text_retriever(true)
+                .with_source_chunk_identity(true)
+                .with_embedding_identity("bge-m3", 2);
+
+        let readiness = projection.search_candidate_readiness(&request, &options);
+
+        assert!(!readiness.ready);
+        assert!(readiness.text_retriever_ready);
+        assert!(readiness.source_chunk_identity_ready);
+        assert!(!readiness.projection_watermark_ready);
+        assert!(readiness.embedding_identity_ready);
+        assert!(readiness
+            .blocker_codes
+            .iter()
+            .any(|code| code == "search_candidate_projection_watermark_missing"));
+        assert!(!readiness
+            .json()
+            .to_string()
+            .contains("candidate watermark body"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn search_candidate_readiness_blocks_embedding_identity_mismatch() {
+        let root = unique_nowledge_mem_test_dir("search_candidate_readiness_embedding");
+        {
+            let mut index = SearchIndex::open(&root).unwrap();
+            index
+                .apply_embedding_manifest(SearchEmbeddingManifest {
+                    model: "bge-m3".to_string(),
+                    version: None,
+                    dimension: 2,
+                })
+                .unwrap();
+            index
+                .apply_projection_delta(SearchProjectionDelta {
+                    upserts: vec![SearchProjectionRow {
+                        kind: SearchProjectionKind::SourceChunk,
+                        external_id: "chunk-embedding".to_string(),
+                        title: "Embedding identity source chunk".to_string(),
+                        body: "candidate embedding body".to_string(),
+                        embedding: Some(vec![1.0, 0.0]),
+                        source_id: Some("source-embedding".to_string()),
+                        metadata: BTreeMap::from([
+                            ("space_id".to_string(), "default".to_string()),
+                            ("lifecycle_state".to_string(), "active".to_string()),
+                        ]),
+                    }],
+                    deletes: Vec::new(),
+                    max_operations: None,
+                    source_graph_commit_epoch: Some(23),
+                })
+                .unwrap();
+            index.checkpoint().unwrap();
+        }
+        let projection = NowledgeMemSearchProjection::open(&root).unwrap();
+        let request =
+            NowledgeMemSearchCandidateRequest::text("embedding identity source chunk", 10)
+                .with_metadata_filters(BTreeMap::from([(
+                    "kind__in".to_string(),
+                    r#"["source_chunk"]"#.to_string(),
+                )]));
+        let options =
+            NowledgeMemSearchCandidateReadinessOptions::lancedb_replacement_candidate_read()
+                .with_text_retriever(true)
+                .with_source_chunk_identity(true)
+                .with_embedding_identity("bge-m3", 3);
+
+        let readiness = projection.search_candidate_readiness(&request, &options);
+
+        assert!(!readiness.ready);
+        assert!(readiness.projection_watermark_ready);
+        assert!(!readiness.embedding_identity_ready);
+        assert_eq!(
+            readiness.candidate_report.projection_embedding_dimension,
+            Some(2)
+        );
+        assert!(readiness
+            .blocker_codes
+            .iter()
+            .any(|code| code == "search_candidate_embedding_identity_not_ready"));
+        assert!(!readiness
+            .json()
+            .to_string()
+            .contains("candidate embedding body"));
 
         std::fs::remove_dir_all(root).unwrap();
     }

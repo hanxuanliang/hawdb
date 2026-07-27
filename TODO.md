@@ -483,6 +483,9 @@ contract.
     - [x] Recompute search projection and search projection shadow raw fields
       in embedded-library readiness so forged `ready=true` evidence cannot
       bypass LanceDB replacement gates.
+    - [x] Require typed search candidate readiness to prove projection
+      watermark visibility and embedding manifest identity for LanceDB
+      replacement candidate reads.
   - Remove LanceDB from a route only after the matching search projection
     evidence is present in replacement summary.
 - [ ] Add retrieval projection options behind advisor gates.
