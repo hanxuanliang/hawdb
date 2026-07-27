@@ -140,7 +140,7 @@ must block default cutover.
   - Kuzu/Ladybug graph and LanceDB search projection are the replacement scope.
   - SQLite content store and large blob/value storage remain external unless a
     Nowledge graph/search route requires a narrower value-store API.
-  - Completion evidence: replacement summary distinguishes graph replacement,
+  - [x] Completion evidence: replacement summary distinguishes graph replacement,
     search projection replacement, and out-of-scope content storage.
 
 ## P0: PR-Sized Cutover Goals

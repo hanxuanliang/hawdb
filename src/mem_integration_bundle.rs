@@ -1622,7 +1622,7 @@ mod tests {
     }
 
     fn ready_replacement_summary() -> serde_json::Value {
-        serde_json::json!({
+        let mut summary = serde_json::json!({
             "protocol": "skein-nowledge-replacement-summary",
             "production_cutover_ready": true,
             "blocking_categories": [],
@@ -1712,7 +1712,30 @@ mod tests {
                 "background_maintenance_blocker_codes": [],
                 "background_maintenance_blockers": []
             }
-        })
+        });
+        summary["replacement_boundaries"] = serde_json::json!({
+            "graph_layer": {
+                "scope": "kuzu_ladybug_graph_layer",
+                "replacement_role": "primary_replacement",
+                "storage_owner": "skein"
+            },
+            "search_projection": {
+                "scope": "lancedb_search_projection",
+                "replacement_role": "rebuildable_projection",
+                "storage_owner": "skein"
+            },
+            "content_store": {
+                "scope": "sqlite_content_store",
+                "replacement_role": "external_out_of_scope",
+                "storage_owner": "nowledge_mem"
+            },
+            "large_blob_store": {
+                "scope": "large_blob_value_store",
+                "replacement_role": "external_out_of_scope",
+                "storage_owner": "nowledge_mem"
+            }
+        });
+        summary
     }
 
     fn scan_filter_fields_json() -> serde_json::Value {

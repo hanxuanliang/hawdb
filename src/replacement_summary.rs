@@ -40,6 +40,10 @@ const REQUIRED_SEARCH_VALUE_SUMMARY_FIELDS: &[&str] = &[
 const REQUIRED_SEARCH_NUMERIC_RANGE_FIELDS: &[&str] = &["importance", "confidence"];
 const REQUIRED_SEARCH_TIMESTAMP_RANGE_FIELDS: &[&str] =
     &["created_at", "updated_at", "event_start", "event_end"];
+const GRAPH_LAYER_REPLACEMENT_SCOPE: &str = "kuzu_ladybug_graph_layer";
+const SEARCH_PROJECTION_REPLACEMENT_SCOPE: &str = "lancedb_search_projection";
+const SQLITE_CONTENT_STORE_SCOPE: &str = "sqlite_content_store";
+const LARGE_BLOB_VALUE_STORE_SCOPE: &str = "large_blob_value_store";
 pub fn nowledge_replacement_summary_usage() -> String {
     "nowledge-replacement-summary requires [--require-production-ready] [--compact] [--max-family-items <n>] [--max-blockers <n>] [--search-projection-evidence-json <path>] [--search-projection-shadow-evidence-json <path>] [--search-candidate-shadow-evidence-json <path>] [--bounded-read-evidence-json <path>] [--query-runtime-preflight-json <path>] [--query-family-evidence-json <path>] <migration-gate-json>"
         .to_string()
@@ -396,11 +400,40 @@ pub fn nowledge_replacement_summary_json_with_options(
     });
     if let Some(object) = summary.as_object_mut() {
         object.insert(
+            "replacement_boundaries".to_string(),
+            replacement_boundaries_json(),
+        );
+        object.insert(
             "workload_fixture_evidence".to_string(),
             workload_fixture_evidence_json,
         );
     }
     summary
+}
+
+fn replacement_boundaries_json() -> serde_json::Value {
+    serde_json::json!({
+        "graph_layer": {
+            "scope": GRAPH_LAYER_REPLACEMENT_SCOPE,
+            "replacement_role": "primary_replacement",
+            "storage_owner": "skein",
+        },
+        "search_projection": {
+            "scope": SEARCH_PROJECTION_REPLACEMENT_SCOPE,
+            "replacement_role": "rebuildable_projection",
+            "storage_owner": "skein",
+        },
+        "content_store": {
+            "scope": SQLITE_CONTENT_STORE_SCOPE,
+            "replacement_role": "external_out_of_scope",
+            "storage_owner": "nowledge_mem",
+        },
+        "large_blob_store": {
+            "scope": LARGE_BLOB_VALUE_STORE_SCOPE,
+            "replacement_role": "external_out_of_scope",
+            "storage_owner": "nowledge_mem",
+        },
+    })
 }
 
 struct NowledgeReplacementBlockerDetails {
@@ -2997,13 +3030,15 @@ mod tests {
         nowledge_graph_route_readiness_summary, nowledge_graph_route_readiness_summary_from_bundle,
         nowledge_replacement_summary_json, nowledge_replacement_summary_json_with_options,
         nowledge_replacement_summary_usage, NowledgeReplacementSummaryOptions,
+        GRAPH_LAYER_REPLACEMENT_SCOPE, LARGE_BLOB_VALUE_STORE_SCOPE,
         NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL, NMEM_GRAPH_ROUTE_READINESS_PROTOCOL,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
         NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
-        REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES, SEARCH_PROJECTION_SHADOW_PUSHDOWN_NOT_READY,
+        REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES, SEARCH_PROJECTION_REPLACEMENT_SCOPE,
+        SEARCH_PROJECTION_SHADOW_PUSHDOWN_NOT_READY,
         SKEIN_SEARCH_PROJECTION_SEGMENT_DESCRIPTOR_FIELDS_MISSING,
-        SKEIN_SEARCH_PROJECTION_SEGMENT_DESCRIPTOR_MISSING,
+        SKEIN_SEARCH_PROJECTION_SEGMENT_DESCRIPTOR_MISSING, SQLITE_CONTENT_STORE_SCOPE,
     };
     use crate::{
         nowledge_mem_graph_read_route_spec, nowledge_mem_graph_read_route_specs_json,
@@ -3075,6 +3110,38 @@ mod tests {
 
         assert_eq!(summary["production_cutover_ready"], true);
         assert_eq!(summary["production_replacement_per_million"], 1_000_000);
+        assert_eq!(
+            summary["replacement_boundaries"]["graph_layer"],
+            serde_json::json!({
+                "scope": GRAPH_LAYER_REPLACEMENT_SCOPE,
+                "replacement_role": "primary_replacement",
+                "storage_owner": "skein",
+            })
+        );
+        assert_eq!(
+            summary["replacement_boundaries"]["search_projection"],
+            serde_json::json!({
+                "scope": SEARCH_PROJECTION_REPLACEMENT_SCOPE,
+                "replacement_role": "rebuildable_projection",
+                "storage_owner": "skein",
+            })
+        );
+        assert_eq!(
+            summary["replacement_boundaries"]["content_store"],
+            serde_json::json!({
+                "scope": SQLITE_CONTENT_STORE_SCOPE,
+                "replacement_role": "external_out_of_scope",
+                "storage_owner": "nowledge_mem",
+            })
+        );
+        assert_eq!(
+            summary["replacement_boundaries"]["large_blob_store"],
+            serde_json::json!({
+                "scope": LARGE_BLOB_VALUE_STORE_SCOPE,
+                "replacement_role": "external_out_of_scope",
+                "storage_owner": "nowledge_mem",
+            })
+        );
         assert_eq!(summary["blocking_categories"], serde_json::json!([]));
         assert_eq!(summary["missing_evidence"], serde_json::json!([]));
         assert_eq!(summary["next_actions"], serde_json::json!([]));

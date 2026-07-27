@@ -16,6 +16,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 const SKEIN_NOWLEDGE_REPLACEMENT_SUMMARY_PROTOCOL: &str = "skein-nowledge-replacement-summary";
+const GRAPH_LAYER_REPLACEMENT_SCOPE: &str = "kuzu_ladybug_graph_layer";
+const SEARCH_PROJECTION_REPLACEMENT_SCOPE: &str = "lancedb_search_projection";
+const SQLITE_CONTENT_STORE_SCOPE: &str = "sqlite_content_store";
+const LARGE_BLOB_VALUE_STORE_SCOPE: &str = "large_blob_value_store";
 const SKEIN_NOWLEDGE_SEARCH_PROJECTION_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-search-projection-evidence";
 const SKEIN_NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL: &str =
@@ -211,6 +215,10 @@ pub struct IntegrationBundleProtocolCutoverReadiness {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplacementSummaryProtocolCutoverReadiness {
     pub protocol_matches: bool,
+    pub graph_layer_replacement_scope_ready: bool,
+    pub search_projection_replacement_scope_ready: bool,
+    pub content_store_out_of_scope: bool,
+    pub large_blob_store_out_of_scope: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -552,6 +560,10 @@ impl IntegrationBundleProtocolCutoverReadiness {
 impl ReplacementSummaryProtocolCutoverReadiness {
     pub fn evidence_ready(&self) -> bool {
         self.protocol_matches
+            && self.graph_layer_replacement_scope_ready
+            && self.search_projection_replacement_scope_ready
+            && self.content_store_out_of_scope
+            && self.large_blob_store_out_of_scope
     }
 }
 
@@ -1308,7 +1320,25 @@ fn integration_bundle_protocol_cutover_conditions(
 fn replacement_summary_protocol_cutover_conditions(
     readiness: &ReplacementSummaryProtocolCutoverReadiness,
 ) -> Vec<(&'static str, bool)> {
-    vec![("replacement_summary.protocol", readiness.protocol_matches)]
+    vec![
+        ("replacement_summary.protocol", readiness.protocol_matches),
+        (
+            "replacement_summary.replacement_boundaries.graph_layer",
+            readiness.graph_layer_replacement_scope_ready,
+        ),
+        (
+            "replacement_summary.replacement_boundaries.search_projection",
+            readiness.search_projection_replacement_scope_ready,
+        ),
+        (
+            "replacement_summary.replacement_boundaries.content_store",
+            readiness.content_store_out_of_scope,
+        ),
+        (
+            "replacement_summary.replacement_boundaries.large_blob_store",
+            readiness.large_blob_store_out_of_scope,
+        ),
+    ]
 }
 
 fn skein_submodule_cutover_conditions(
@@ -1584,8 +1614,14 @@ fn next_actions(
     if !readiness.replacement_summary_protocol.evidence_ready() {
         actions.push(next_action(
             "produce_replacement_summary",
-            "replacement summary must use the Skein Nowledge replacement-summary protocol",
-            ["replacement_summary.protocol"],
+            "replacement summary must use the Skein protocol and explicit replacement boundaries",
+            [
+                "replacement_summary.protocol",
+                "replacement_summary.replacement_boundaries.graph_layer",
+                "replacement_summary.replacement_boundaries.search_projection",
+                "replacement_summary.replacement_boundaries.content_store",
+                "replacement_summary.replacement_boundaries.large_blob_store",
+            ],
         ));
     }
     if !readiness.query_family.evidence_ready() {
@@ -1944,7 +1980,57 @@ pub fn replacement_summary_protocol_cutover_readiness(
     ReplacementSummaryProtocolCutoverReadiness {
         protocol_matches: str_path(bundle, &["replacement_summary", "protocol"])
             == Some(SKEIN_NOWLEDGE_REPLACEMENT_SUMMARY_PROTOCOL),
+        graph_layer_replacement_scope_ready: replacement_boundary_matches(
+            bundle,
+            "graph_layer",
+            GRAPH_LAYER_REPLACEMENT_SCOPE,
+            "primary_replacement",
+        ),
+        search_projection_replacement_scope_ready: replacement_boundary_matches(
+            bundle,
+            "search_projection",
+            SEARCH_PROJECTION_REPLACEMENT_SCOPE,
+            "rebuildable_projection",
+        ),
+        content_store_out_of_scope: replacement_boundary_matches(
+            bundle,
+            "content_store",
+            SQLITE_CONTENT_STORE_SCOPE,
+            "external_out_of_scope",
+        ),
+        large_blob_store_out_of_scope: replacement_boundary_matches(
+            bundle,
+            "large_blob_store",
+            LARGE_BLOB_VALUE_STORE_SCOPE,
+            "external_out_of_scope",
+        ),
     }
+}
+
+fn replacement_boundary_matches(
+    bundle: &serde_json::Value,
+    boundary: &str,
+    scope: &str,
+    replacement_role: &str,
+) -> bool {
+    str_path(
+        bundle,
+        &[
+            "replacement_summary",
+            "replacement_boundaries",
+            boundary,
+            "scope",
+        ],
+    ) == Some(scope)
+        && str_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "replacement_boundaries",
+                boundary,
+                "replacement_role",
+            ],
+        ) == Some(replacement_role)
 }
 
 pub fn skein_submodule_cutover_readiness(
@@ -5559,13 +5645,61 @@ mod tests {
         assert!(integration.protocol_matches);
         assert!(replacement.evidence_ready());
         assert!(replacement.protocol_matches);
+        assert!(replacement.graph_layer_replacement_scope_ready);
+        assert!(replacement.search_projection_replacement_scope_ready);
+        assert!(replacement.content_store_out_of_scope);
+        assert!(replacement.large_blob_store_out_of_scope);
 
         bundle["protocol"] = serde_json::json!("legacy");
         bundle["replacement_summary"]["protocol"] = serde_json::json!("legacy");
+        bundle["replacement_summary"]["replacement_boundaries"]["content_store"]
+            ["replacement_role"] = serde_json::json!("primary_replacement");
         let integration = super::integration_bundle_protocol_cutover_readiness(&bundle);
         let replacement = super::replacement_summary_protocol_cutover_readiness(&bundle);
         assert!(!integration.evidence_ready());
         assert!(!replacement.evidence_ready());
+        assert!(!replacement.protocol_matches);
+        assert!(!replacement.content_store_out_of_scope);
+    }
+
+    #[test]
+    fn requires_replacement_summary_boundaries() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary"]
+            .as_object_mut()
+            .unwrap()
+            .remove("replacement_boundaries");
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["replacement_summary_protocol"])
+        );
+        let summary_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "replacement_summary_protocol")
+            .unwrap();
+        assert_eq!(
+            summary_check["failed_evidence_fields"],
+            serde_json::json!([
+                "replacement_summary.replacement_boundaries.graph_layer",
+                "replacement_summary.replacement_boundaries.search_projection",
+                "replacement_summary.replacement_boundaries.content_store",
+                "replacement_summary.replacement_boundaries.large_blob_store"
+            ])
+        );
+        assert!(report["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "produce_replacement_summary"
+                && action["evidence_fields"].as_array().unwrap().iter().any(
+                    |field| field == "replacement_summary.replacement_boundaries.content_store"
+                )));
     }
 
     #[test]
@@ -9249,6 +9383,28 @@ mod tests {
                     "background_maintenance_blocker_codes": [],
                     "background_maintenance_blockers": []
                 }
+            }
+        });
+        bundle["replacement_summary"]["replacement_boundaries"] = serde_json::json!({
+            "graph_layer": {
+                "scope": "kuzu_ladybug_graph_layer",
+                "replacement_role": "primary_replacement",
+                "storage_owner": "skein"
+            },
+            "search_projection": {
+                "scope": "lancedb_search_projection",
+                "replacement_role": "rebuildable_projection",
+                "storage_owner": "skein"
+            },
+            "content_store": {
+                "scope": "sqlite_content_store",
+                "replacement_role": "external_out_of_scope",
+                "storage_owner": "nowledge_mem"
+            },
+            "large_blob_store": {
+                "scope": "large_blob_value_store",
+                "replacement_role": "external_out_of_scope",
+                "storage_owner": "nowledge_mem"
             }
         });
         bundle["replacement_summary"]["cutover_evidence"]
