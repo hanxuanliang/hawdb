@@ -1103,6 +1103,14 @@ pub fn nowledge_previous_wrapper_preflight_check(
                     == Some(NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL),
                 bool_path(&query_runtime_preflight, &["ready"]) == Some(true),
                 bool_path(&query_runtime_preflight, &["database_opened"]) == Some(true),
+                bool_path(&query_runtime_preflight, &["redaction", "ready"]) == Some(true),
+                bool_path(&query_runtime_preflight, &["redaction", "rows_copied"]) == Some(false),
+                bool_path(&query_runtime_preflight, &["redaction", "parameters_copied"])
+                    == Some(false),
+                bool_path(&query_runtime_preflight, &["redaction", "local_paths_copied"])
+                    == Some(false),
+                bool_path(&query_runtime_preflight, &["redaction", "raw_errors_copied"])
+                    == Some(false),
                 u64_path(&query_runtime_preflight, &["probe_count"]).is_some_and(|value| value > 0),
                 query_runtime_preflight_counts_match(&query_runtime_preflight),
                 u64_path(&query_runtime_preflight, &["failed_probe_count"]) == Some(0),
@@ -1117,6 +1125,11 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 "query_runtime_preflight.protocol",
                 "query_runtime_preflight.ready",
                 "query_runtime_preflight.database_opened",
+                "query_runtime_preflight.redaction.ready",
+                "query_runtime_preflight.redaction.rows_copied",
+                "query_runtime_preflight.redaction.parameters_copied",
+                "query_runtime_preflight.redaction.local_paths_copied",
+                "query_runtime_preflight.redaction.raw_errors_copied",
                 "query_runtime_preflight.probe_count",
                 "query_runtime_preflight.passed_probe_count",
                 "query_runtime_preflight.failed_probe_count",
@@ -1143,6 +1156,13 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 bool_path(&library_readiness, &["ready"]) == Some(true),
                 u64_path(&library_readiness, &["ready_area_count"]).is_some_and(|value| value > 0),
                 u64_path(&library_readiness, &["blocked_area_count"]) == Some(0),
+                bool_path(&library_readiness, &["redaction", "ready"]) == Some(true),
+                bool_path(&library_readiness, &["redaction", "query_text_copied"])
+                    == Some(false),
+                bool_path(&library_readiness, &["redaction", "parameters_copied"])
+                    == Some(false),
+                bool_path(&library_readiness, &["redaction", "local_paths_copied"])
+                    == Some(false),
                 bool_path(&library_readiness, &["open_report", "graph_opened"]) == Some(true),
                 bool_path(
                     &library_readiness,
@@ -1165,6 +1185,10 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 "library_readiness.ready",
                 "library_readiness.ready_area_count",
                 "library_readiness.blocked_area_count",
+                "library_readiness.redaction.ready",
+                "library_readiness.redaction.query_text_copied",
+                "library_readiness.redaction.parameters_copied",
+                "library_readiness.redaction.local_paths_copied",
                 "library_readiness.open_report.graph_opened",
                 "library_readiness.open_report.search_projection_opened",
                 "library_readiness.readiness_by_area.graph.ready",
@@ -2086,6 +2110,34 @@ fn previous_wrapper_preflight_release_summary(
     );
     insert_json_value(
         &mut summary,
+        "query_runtime_preflight_redaction_ready",
+        bool_path(query_runtime_preflight, &["redaction", "ready"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "query_runtime_preflight_rows_copied",
+        bool_path(query_runtime_preflight, &["redaction", "rows_copied"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "query_runtime_preflight_parameters_copied",
+        bool_path(query_runtime_preflight, &["redaction", "parameters_copied"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "query_runtime_preflight_local_paths_copied",
+        bool_path(
+            query_runtime_preflight,
+            &["redaction", "local_paths_copied"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "query_runtime_preflight_raw_errors_copied",
+        bool_path(query_runtime_preflight, &["redaction", "raw_errors_copied"]),
+    );
+    insert_json_value(
+        &mut summary,
         "query_runtime_preflight_probe_count",
         u64_path(query_runtime_preflight, &["probe_count"]),
     );
@@ -2113,6 +2165,26 @@ fn previous_wrapper_preflight_release_summary(
         &mut summary,
         "library_readiness_blocked_area_count",
         u64_path(library_readiness, &["blocked_area_count"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "library_readiness_redaction_ready",
+        bool_path(library_readiness, &["redaction", "ready"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "library_readiness_query_text_copied",
+        bool_path(library_readiness, &["redaction", "query_text_copied"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "library_readiness_parameters_copied",
+        bool_path(library_readiness, &["redaction", "parameters_copied"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "library_readiness_local_paths_copied",
+        bool_path(library_readiness, &["redaction", "local_paths_copied"]),
     );
     insert_json_value(
         &mut summary,
@@ -2913,6 +2985,11 @@ mod tests {
         );
         assert_release_summary_field(summary, "query_runtime_preflight_ready", true);
         assert_release_summary_field(summary, "query_runtime_preflight_database_opened", true);
+        assert_release_summary_field(summary, "query_runtime_preflight_redaction_ready", true);
+        assert_release_summary_field(summary, "query_runtime_preflight_rows_copied", false);
+        assert_release_summary_field(summary, "query_runtime_preflight_parameters_copied", false);
+        assert_release_summary_field(summary, "query_runtime_preflight_local_paths_copied", false);
+        assert_release_summary_field(summary, "query_runtime_preflight_raw_errors_copied", false);
         assert_release_summary_field(
             summary,
             "query_runtime_preflight_probe_count",
@@ -2927,6 +3004,10 @@ mod tests {
         assert_release_summary_field(summary, "library_readiness_ready", true);
         assert_release_summary_field(summary, "library_readiness_ready_area_count", 10);
         assert_release_summary_field(summary, "library_readiness_blocked_area_count", 0);
+        assert_release_summary_field(summary, "library_readiness_redaction_ready", true);
+        assert_release_summary_field(summary, "library_readiness_query_text_copied", false);
+        assert_release_summary_field(summary, "library_readiness_parameters_copied", false);
+        assert_release_summary_field(summary, "library_readiness_local_paths_copied", false);
         assert_release_summary_field(summary, "library_readiness_graph_opened", true);
         assert_release_summary_field(summary, "library_readiness_search_projection_opened", true);
         assert!(report["checks"]
@@ -3579,6 +3660,82 @@ mod tests {
                 "search_projection_evidence_not_ready",
                 "search_projection_probe_missing"
             ])
+        );
+    }
+
+    #[test]
+    fn preflight_check_requires_query_runtime_preflight_redaction() {
+        let mut inputs = ready_inputs();
+        let query_runtime_preflight = inputs.query_runtime_preflight.as_mut().unwrap();
+        query_runtime_preflight["redaction"]["ready"] = serde_json::json!(false);
+        query_runtime_preflight["redaction"]["rows_copied"] = serde_json::json!(true);
+        query_runtime_preflight["redaction"]["parameters_copied"] = serde_json::json!(true);
+        query_runtime_preflight["redaction"]["local_paths_copied"] = serde_json::json!(true);
+        query_runtime_preflight["redaction"]["raw_errors_copied"] = serde_json::json!(true);
+
+        let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["query_runtime_preflight"])
+        );
+        assert_eq!(
+            check_by_name(&report, "query_runtime_preflight")["failed_evidence_fields"],
+            serde_json::json!([
+                "query_runtime_preflight.redaction.ready",
+                "query_runtime_preflight.redaction.rows_copied",
+                "query_runtime_preflight.redaction.parameters_copied",
+                "query_runtime_preflight.redaction.local_paths_copied",
+                "query_runtime_preflight.redaction.raw_errors_copied"
+            ])
+        );
+        assert_release_summary_field(
+            &report["release_summary"],
+            "query_runtime_preflight_redaction_ready",
+            false,
+        );
+        assert_release_summary_field(
+            &report["release_summary"],
+            "query_runtime_preflight_raw_errors_copied",
+            true,
+        );
+    }
+
+    #[test]
+    fn preflight_check_requires_library_readiness_redaction() {
+        let mut inputs = ready_inputs();
+        let library_readiness = inputs.library_readiness.as_mut().unwrap();
+        library_readiness["redaction"]["ready"] = serde_json::json!(false);
+        library_readiness["redaction"]["query_text_copied"] = serde_json::json!(true);
+        library_readiness["redaction"]["parameters_copied"] = serde_json::json!(true);
+        library_readiness["redaction"]["local_paths_copied"] = serde_json::json!(true);
+
+        let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["library_readiness"])
+        );
+        assert_eq!(
+            check_by_name(&report, "library_readiness")["failed_evidence_fields"],
+            serde_json::json!([
+                "library_readiness.redaction.ready",
+                "library_readiness.redaction.query_text_copied",
+                "library_readiness.redaction.parameters_copied",
+                "library_readiness.redaction.local_paths_copied"
+            ])
+        );
+        assert_release_summary_field(
+            &report["release_summary"],
+            "library_readiness_redaction_ready",
+            false,
+        );
+        assert_release_summary_field(
+            &report["release_summary"],
+            "library_readiness_query_text_copied",
+            true,
         );
     }
 
@@ -4278,6 +4435,13 @@ mod tests {
             "protocol": "skein-nowledge-query-runtime-preflight-v1",
             "ready": true,
             "database_opened": true,
+            "redaction": {
+                "ready": true,
+                "rows_copied": false,
+                "parameters_copied": false,
+                "local_paths_copied": false,
+                "raw_errors_copied": false
+            },
             "probe_count": probes.len(),
             "passed_probe_count": probes.len(),
             "failed_probe_count": 0,
@@ -4360,6 +4524,12 @@ mod tests {
             "ready_area_count": 10,
             "blocked_area_count": 0,
             "blocker_codes": [],
+            "redaction": {
+                "ready": true,
+                "query_text_copied": false,
+                "parameters_copied": false,
+                "local_paths_copied": false
+            },
             "open_report": {
                 "protocol": "skein-nowledge-mem-open-report",
                 "mode": "shadow_read_only",

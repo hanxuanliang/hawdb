@@ -45,6 +45,8 @@ query family, or cutover gate requires them.
     fields so copied query text, parameters, or local paths block cutover.
   - [x] Require query-runtime preflight redaction evidence so copied rows,
     parameters, local paths, or raw errors block cutover.
+  - [x] Require final previous-wrapper preflight to validate query-runtime and
+    library redaction evidence before release summaries can pass.
 
 ## P0: Concrete Cutover Blockers
 
