@@ -656,6 +656,9 @@ contract.
   - Optimize for bounded memory and predictable read amplification.
   - Keep row-oriented canonical records and add projection/index layouts only
     where route evidence proves value.
+  - [x] Expose a typed adjacency consistency report that validates maintained
+    incoming/outgoing relationship groups against a full relationship scan
+    before adding denser read-optimized layouts.
 - [ ] Add workload fixtures based on real Nowledge routes before low-level
   tuning.
   - Benchmark graph reads, bounded expansions, metadata-filtered search, and

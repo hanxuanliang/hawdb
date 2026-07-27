@@ -29,6 +29,7 @@ const MAX_BOUNDED_PATH_STAT_HOPS: usize = 3;
 const DURABLE_COMPRESSION_HEADER: &str = "SKEIN_COMPRESSED_V1";
 const DEFAULT_COMPRESSION_LEVEL: i32 = 3;
 pub const DENSE_ADJACENCY_DEGREE_THRESHOLD: usize = 64;
+const MAX_ADJACENCY_CONSISTENCY_SAMPLES: usize = 32;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum DurabilityPolicy {
@@ -78,13 +79,13 @@ pub struct RelRecord {
     pub properties: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AdjacencyDirection {
     Outgoing,
     Incoming,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AdjacencyLayout {
     Sparse,
     Dense,
@@ -103,6 +104,36 @@ pub struct AdjacencyGroupStats {
     pub direction: AdjacencyDirection,
     pub degree: usize,
     pub layout: AdjacencyLayout,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AdjacencyGroupKey {
+    pub node_id: NodeId,
+    pub rel_type: RelTypeId,
+    pub direction: AdjacencyDirection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdjacencyGroupConsistencyMismatch {
+    pub key: AdjacencyGroupKey,
+    pub maintained_relationship_ids: Vec<RelId>,
+    pub recomputed_relationship_ids: Vec<RelId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdjacencyConsistencyReport {
+    pub ready: bool,
+    pub computed_at_commit_epoch: u64,
+    pub relationship_count: usize,
+    pub maintained_group_count: usize,
+    pub recomputed_group_count: usize,
+    pub dense_group_count: usize,
+    pub missing_group_count: usize,
+    pub extra_group_count: usize,
+    pub mismatched_group_count: usize,
+    pub dangling_relationship_count: usize,
+    pub mismatches: Vec<AdjacencyGroupConsistencyMismatch>,
+    pub dangling_relationship_ids: Vec<RelId>,
 }
 
 type CompositePropertyKey = Vec<(String, Value)>;
@@ -609,6 +640,84 @@ impl BasicStatisticsConsistencyReport {
             incremental,
             recomputed,
             mismatched_fields,
+        }
+    }
+}
+
+type AdjacencyGroups = BTreeMap<AdjacencyGroupKey, BTreeSet<RelId>>;
+
+impl AdjacencyConsistencyReport {
+    fn new(
+        computed_at_commit_epoch: u64,
+        relationship_count: usize,
+        maintained: AdjacencyGroups,
+        recomputed: AdjacencyGroups,
+        relationships: &BTreeMap<RelId, RelRecord>,
+    ) -> Self {
+        let mut missing_group_count = 0;
+        let mut extra_group_count = 0;
+        let mut mismatched_group_count = 0;
+        let mut mismatches = Vec::new();
+        let keys = maintained
+            .keys()
+            .chain(recomputed.keys())
+            .copied()
+            .collect::<BTreeSet<_>>();
+        for key in keys {
+            let maintained_ids = maintained.get(&key);
+            let recomputed_ids = recomputed.get(&key);
+            if maintained_ids == recomputed_ids {
+                continue;
+            }
+            match (maintained_ids, recomputed_ids) {
+                (None, Some(_)) => missing_group_count += 1,
+                (Some(_), None) => extra_group_count += 1,
+                (Some(_), Some(_)) => mismatched_group_count += 1,
+                (None, None) => {}
+            }
+            if mismatches.len() < MAX_ADJACENCY_CONSISTENCY_SAMPLES {
+                mismatches.push(AdjacencyGroupConsistencyMismatch {
+                    key,
+                    maintained_relationship_ids: maintained_ids
+                        .map(sample_relationship_ids)
+                        .unwrap_or_default(),
+                    recomputed_relationship_ids: recomputed_ids
+                        .map(sample_relationship_ids)
+                        .unwrap_or_default(),
+                });
+            }
+        }
+        let dangling_relationships = maintained
+            .values()
+            .flat_map(|rel_ids| rel_ids.iter().copied())
+            .filter(|rel_id| !relationships.contains_key(rel_id))
+            .collect::<BTreeSet<_>>();
+        let dangling_relationship_ids = dangling_relationships
+            .iter()
+            .copied()
+            .take(MAX_ADJACENCY_CONSISTENCY_SAMPLES)
+            .collect::<Vec<_>>();
+        let dangling_relationship_count = dangling_relationships.len();
+        let ready = missing_group_count == 0
+            && extra_group_count == 0
+            && mismatched_group_count == 0
+            && dangling_relationship_count == 0;
+        Self {
+            ready,
+            computed_at_commit_epoch,
+            relationship_count,
+            maintained_group_count: maintained.len(),
+            recomputed_group_count: recomputed.len(),
+            dense_group_count: maintained
+                .values()
+                .filter(|rel_ids| rel_ids.len() >= DENSE_ADJACENCY_DEGREE_THRESHOLD)
+                .count(),
+            missing_group_count,
+            extra_group_count,
+            mismatched_group_count,
+            dangling_relationship_count,
+            mismatches,
+            dangling_relationship_ids,
         }
     }
 }
@@ -4482,6 +4591,16 @@ impl GraphStore {
         BasicStatisticsConsistencyReport::new(
             self.basic_statistics(),
             compute_basic_statistics(&self.nodes, &self.relationships, self.commit_epoch),
+        )
+    }
+
+    pub fn adjacency_consistency_report(&self) -> AdjacencyConsistencyReport {
+        AdjacencyConsistencyReport::new(
+            self.commit_epoch,
+            self.relationships.len(),
+            maintained_adjacency_groups(&self.outgoing, &self.incoming),
+            recompute_adjacency_groups(&self.relationships),
+            &self.relationships,
         )
     }
 
@@ -9728,6 +9847,65 @@ fn adjacency_layout_for_degree(degree: usize) -> AdjacencyLayout {
     }
 }
 
+fn maintained_adjacency_groups(
+    outgoing: &BTreeMap<(NodeId, RelTypeId), BTreeSet<RelId>>,
+    incoming: &BTreeMap<(NodeId, RelTypeId), BTreeSet<RelId>>,
+) -> AdjacencyGroups {
+    let mut groups = AdjacencyGroups::new();
+    for ((node_id, rel_type), rel_ids) in outgoing {
+        groups.insert(
+            AdjacencyGroupKey {
+                node_id: *node_id,
+                rel_type: *rel_type,
+                direction: AdjacencyDirection::Outgoing,
+            },
+            rel_ids.clone(),
+        );
+    }
+    for ((node_id, rel_type), rel_ids) in incoming {
+        groups.insert(
+            AdjacencyGroupKey {
+                node_id: *node_id,
+                rel_type: *rel_type,
+                direction: AdjacencyDirection::Incoming,
+            },
+            rel_ids.clone(),
+        );
+    }
+    groups
+}
+
+fn recompute_adjacency_groups(relationships: &BTreeMap<RelId, RelRecord>) -> AdjacencyGroups {
+    let mut groups = AdjacencyGroups::new();
+    for relationship in relationships.values() {
+        groups
+            .entry(AdjacencyGroupKey {
+                node_id: relationship.source,
+                rel_type: relationship.rel_type,
+                direction: AdjacencyDirection::Outgoing,
+            })
+            .or_default()
+            .insert(relationship.id);
+        groups
+            .entry(AdjacencyGroupKey {
+                node_id: relationship.target,
+                rel_type: relationship.rel_type,
+                direction: AdjacencyDirection::Incoming,
+            })
+            .or_default()
+            .insert(relationship.id);
+    }
+    groups
+}
+
+fn sample_relationship_ids(rel_ids: &BTreeSet<RelId>) -> Vec<RelId> {
+    rel_ids
+        .iter()
+        .copied()
+        .take(MAX_ADJACENCY_CONSISTENCY_SAMPLES)
+        .collect()
+}
+
 fn adjacency_direction_sort_key(direction: AdjacencyDirection) -> u8 {
     match direction {
         AdjacencyDirection::Outgoing => 0,
@@ -10550,8 +10728,9 @@ mod tests {
         checksum_bytes, compute_statistics, encode_durable_text, read_durable_text,
         AdjacencyDirection, AdjacencyGroupStats, AdjacencyLayout, ConnectedNodesCreate,
         DurableCompression, GraphStore, NodeId, NodeRecord, OrderedAdjacencyEntry,
-        ProjectedGraphDefinition, PropertyFilter, RelId, RelRecord, RelTypeId, ScanPruningStrategy,
-        ScanPruningTargetKind, DENSE_ADJACENCY_DEGREE_THRESHOLD, DURABLE_COMPRESSION_HEADER,
+        ProjectedGraphDefinition, PropertyFilter, RelId, RelRecord, RelTypeId,
+        RelationshipDeleteRequest, ScanPruningStrategy, ScanPruningTargetKind,
+        DENSE_ADJACENCY_DEGREE_THRESHOLD, DURABLE_COMPRESSION_HEADER,
     };
     use crate::schema::{Catalog, LabelId};
     use crate::value::Value;
@@ -10819,6 +10998,110 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn adjacency_consistency_report_matches_full_recompute_after_relationship_mutations() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        let source = store
+            .create_node(&mut catalog, "Memory", properties([("id", Value::Int(0))]))
+            .unwrap();
+        let target_one = store
+            .create_node(&mut catalog, "Entity", properties([("id", Value::Int(1))]))
+            .unwrap();
+        let target_two = store
+            .create_node(&mut catalog, "Entity", properties([("id", Value::Int(2))]))
+            .unwrap();
+        store
+            .create_relationship(
+                &mut catalog,
+                source,
+                target_one,
+                "MENTIONS",
+                properties([("confidence", Value::Float(0.8))]),
+            )
+            .unwrap();
+        store
+            .create_relationship(
+                &mut catalog,
+                source,
+                target_two,
+                "MENTIONS",
+                properties([("confidence", Value::Float(0.9))]),
+            )
+            .unwrap();
+
+        let report = store.adjacency_consistency_report();
+        assert!(report.ready);
+        assert_eq!(report.relationship_count, 2);
+        assert_eq!(report.maintained_group_count, 3);
+        assert_eq!(report.recomputed_group_count, 3);
+        assert_eq!(report.missing_group_count, 0);
+        assert_eq!(report.extra_group_count, 0);
+        assert_eq!(report.mismatched_group_count, 0);
+        assert_eq!(report.dangling_relationship_count, 0);
+        assert!(report.mismatches.is_empty());
+
+        store
+            .delete_relationships(
+                &mut catalog,
+                RelationshipDeleteRequest {
+                    source_label: "Memory".to_string(),
+                    filter: Some(PropertyFilter::Eq {
+                        property: "id".to_string(),
+                        value: Value::Int(0),
+                    }),
+                    rel_type: "MENTIONS".to_string(),
+                    target_label: "Entity".to_string(),
+                    target_filter: Some(PropertyFilter::Eq {
+                        property: "id".to_string(),
+                        value: Value::Int(1),
+                    }),
+                    rel_filter: None,
+                },
+            )
+            .unwrap();
+        let report = store.adjacency_consistency_report();
+        assert!(report.ready);
+        assert_eq!(report.relationship_count, 1);
+        assert_eq!(report.maintained_group_count, 2);
+        assert_eq!(report.recomputed_group_count, 2);
+        assert!(report.mismatches.is_empty());
+    }
+
+    #[test]
+    fn adjacency_consistency_report_matches_full_recompute_after_detach_delete() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        let source = store
+            .create_node(&mut catalog, "Memory", properties([("id", Value::Int(0))]))
+            .unwrap();
+        let target = store
+            .create_node(&mut catalog, "Entity", properties([("id", Value::Int(1))]))
+            .unwrap();
+        store
+            .create_relationship(&mut catalog, source, target, "MENTIONS", BTreeMap::new())
+            .unwrap();
+
+        store
+            .delete_nodes(
+                &mut catalog,
+                "Memory",
+                Some(&PropertyFilter::Eq {
+                    property: "id".to_string(),
+                    value: Value::Int(0),
+                }),
+                true,
+            )
+            .unwrap();
+        let report = store.adjacency_consistency_report();
+        assert!(report.ready);
+        assert_eq!(report.relationship_count, 0);
+        assert_eq!(report.maintained_group_count, 0);
+        assert_eq!(report.recomputed_group_count, 0);
+        assert_eq!(report.dangling_relationship_count, 0);
+        assert!(report.mismatches.is_empty());
     }
 
     #[test]

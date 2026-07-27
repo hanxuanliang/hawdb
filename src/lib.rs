@@ -353,7 +353,8 @@ pub use storage_recovery_evidence::{
     run_nowledge_storage_recovery_evidence,
 };
 pub use store::{
-    AdjacencyDirection, AdjacencyGroupStats, AdjacencyLayout, BasicStatisticsConsistencyReport,
+    AdjacencyConsistencyReport, AdjacencyDirection, AdjacencyGroupConsistencyMismatch,
+    AdjacencyGroupKey, AdjacencyGroupStats, AdjacencyLayout, BasicStatisticsConsistencyReport,
     DurabilityPolicy, OrderedAdjacencyEntry, RecoveryMode, StorageReclamationWatermark,
     StorageRecoveryReport, WalReplayConfig, DENSE_ADJACENCY_DEGREE_THRESHOLD,
 };
