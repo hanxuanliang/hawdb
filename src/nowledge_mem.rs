@@ -6214,6 +6214,9 @@ fn search_projection_readiness_blocker_codes(evidence: &serde_json::Value) -> Ve
     if evidence_bool(evidence, "predicate_pushdown_ready") != Some(true) {
         blockers.insert("search_projection_predicate_pushdown_not_ready".to_string());
     }
+    if evidence_bool(evidence, "production_filter_pruning_ready") != Some(true) {
+        blockers.insert("search_projection_production_filter_pruning_not_ready".to_string());
+    }
     if evidence_bool(evidence, "compressed_vector_projection_ready") == Some(false) {
         blockers.insert("search_projection_compressed_vector_not_ready".to_string());
     }

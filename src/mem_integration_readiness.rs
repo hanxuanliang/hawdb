@@ -307,6 +307,7 @@ pub struct SearchProjectionCutoverReadiness {
     pub document_identity_ready: bool,
     pub incremental_update_ready: bool,
     pub predicate_pushdown_ready: bool,
+    pub production_filter_pruning_ready: bool,
     pub compressed_vector_projection_required: bool,
     pub compressed_vector_projection_ready: bool,
     pub shadow_present: bool,
@@ -604,6 +605,7 @@ impl SearchProjectionCutoverReadiness {
             && self.document_identity_ready
             && self.incremental_update_ready
             && self.predicate_pushdown_ready
+            && self.production_filter_pruning_ready
             && self.compressed_vector_projection_required
             && self.compressed_vector_projection_ready
             && self.shadow_present
@@ -1554,6 +1556,7 @@ fn next_actions(
                 "replacement_summary.search_projection_evidence.document_identity_ready",
                 "replacement_summary.search_projection_evidence.incremental_update_ready",
                 "replacement_summary.search_projection_evidence.predicate_pushdown_ready",
+                "replacement_summary.search_projection_evidence.production_filter_pruning_ready",
                 "replacement_summary.search_projection_evidence.compressed_vector_projection_required",
                 "replacement_summary.search_projection_evidence.compressed_vector_projection_ready",
                 "replacement_summary.search_projection_shadow_evidence.protocol",
@@ -2262,6 +2265,14 @@ pub fn search_projection_cutover_readiness(
                 "predicate_pushdown_ready",
             ],
         ) == Some(true),
+        production_filter_pruning_ready: bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "search_projection_evidence",
+                "production_filter_pruning_ready",
+            ],
+        ) == Some(true),
         compressed_vector_projection_required: bool_path(
             bundle,
             &[
@@ -2468,6 +2479,10 @@ fn search_projection_cutover_conditions(
         (
             "replacement_summary.search_projection_evidence.predicate_pushdown_ready",
             readiness.predicate_pushdown_ready,
+        ),
+        (
+            "replacement_summary.search_projection_evidence.production_filter_pruning_ready",
+            readiness.production_filter_pruning_ready,
         ),
         (
             "replacement_summary.search_projection_evidence.compressed_vector_projection_required",
@@ -5485,6 +5500,26 @@ mod tests {
     }
 
     #[test]
+    fn typed_search_projection_cutover_requires_production_filter_pruning() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary"]["search_projection_evidence"]["ready"] =
+            serde_json::json!(true);
+        bundle["replacement_summary"]["search_projection_evidence"]
+            ["production_filter_pruning_ready"] = serde_json::json!(false);
+
+        let typed = super::search_projection_cutover_readiness(&bundle);
+        let conditions = super::search_projection_cutover_conditions(&typed);
+
+        assert!(!typed.evidence_ready());
+        assert!(!typed.production_filter_pruning_ready);
+        assert!(conditions.iter().any(|(field, ready)| {
+            *field
+                == "replacement_summary.search_projection_evidence.production_filter_pruning_ready"
+                && !*ready
+        }));
+    }
+
+    #[test]
     fn requires_search_projection_document_identity() {
         let mut bundle = ready_bundle();
         bundle["replacement_summary"]["search_projection_evidence"]["ready"] =
@@ -8309,6 +8344,7 @@ mod tests {
                     "document_identity_ready": true,
                     "incremental_update_ready": true,
                     "predicate_pushdown_ready": true,
+                    "production_filter_pruning_ready": true,
                     "compressed_vector_projection_required": true,
                     "compressed_vector_projection_ready": true,
                     "blocker_codes": []

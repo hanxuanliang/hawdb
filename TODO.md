@@ -196,6 +196,9 @@ contract.
     pruning capabilities.
   - [x] Add typed production-filter pruning proof samples to the Skein search
     projection probe and fail closed when the proof is missing or incomplete.
+  - [x] Consume production-filter pruning proof in replacement summary and
+    integration cutover readiness so forged projection `ready=true` cannot
+    bypass the PR4 gate.
 - [ ] PR 5: Close LanceDB candidate read replacement.
   - Scope: run FTS, vector, source chunk identity, embedding identity,
     fail-soft, rebuild marker, repair marker, and incremental watermark evidence

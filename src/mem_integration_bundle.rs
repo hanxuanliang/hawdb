@@ -1612,6 +1612,7 @@ mod tests {
                 "document_identity_ready": true,
                 "incremental_update_ready": true,
                 "predicate_pushdown_ready": true,
+                "production_filter_pruning_ready": true,
                 "compressed_vector_projection_required": true,
                 "compressed_vector_projection_ready": true,
                 "blocker_codes": []

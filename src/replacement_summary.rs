@@ -237,6 +237,7 @@ pub fn nowledge_replacement_summary_json_with_options(
             "incremental_update_ready": search_projection_evidence.incremental_update_ready,
             "source_chunk_ready": search_projection_evidence.source_chunk_ready,
             "predicate_pushdown_ready": search_projection_evidence.predicate_pushdown_ready,
+            "production_filter_pruning_ready": search_projection_evidence.production_filter_pruning_ready,
             "compressed_vector_projection_required": search_projection_evidence.compressed_vector_projection_required,
             "compressed_vector_projection_ready": search_projection_evidence.compressed_vector_projection_ready,
             "blocker_codes": search_projection_evidence.blocker_codes,
@@ -595,6 +596,7 @@ struct SearchProjectionEvidenceSummary {
     incremental_update_ready: Option<bool>,
     source_chunk_ready: Option<bool>,
     predicate_pushdown_ready: Option<bool>,
+    production_filter_pruning_ready: Option<bool>,
     compressed_vector_projection_required: Option<bool>,
     compressed_vector_projection_ready: Option<bool>,
     blocker_codes: serde_json::Value,
@@ -885,6 +887,8 @@ fn search_projection_evidence_summary(
     let source_chunk_ready = json_get_bool_path_from_dynamic(bundle, path, "source_chunk_ready");
     let predicate_pushdown_ready =
         json_get_bool_path_from_dynamic(bundle, path, "predicate_pushdown_ready");
+    let production_filter_pruning_ready =
+        json_get_bool_path_from_dynamic(bundle, path, "production_filter_pruning_ready");
     let compressed_vector_projection_required =
         json_get_bool_path_from_dynamic(bundle, path, "compressed_vector_projection_required");
     let compressed_vector_projection_ready =
@@ -905,6 +909,7 @@ fn search_projection_evidence_summary(
         && incremental_update_ready == Some(true)
         && source_chunk_ready == Some(true)
         && predicate_pushdown_ready == Some(true)
+        && production_filter_pruning_ready == Some(true)
         && compressed_vector_projection_ready.unwrap_or(true);
     SearchProjectionEvidenceSummary {
         protocol,
@@ -924,6 +929,7 @@ fn search_projection_evidence_summary(
         incremental_update_ready,
         source_chunk_ready,
         predicate_pushdown_ready,
+        production_filter_pruning_ready,
         compressed_vector_projection_required,
         compressed_vector_projection_ready,
         blocker_codes: json_get_array_path_from_dynamic(bundle, path, "blocker_codes"),
@@ -2298,6 +2304,7 @@ fn nowledge_replacement_next_actions(
                 "search_projection_evidence.incremental_update_ready",
                 "search_projection_evidence.source_chunk_ready",
                 "search_projection_evidence.predicate_pushdown_ready",
+                "search_projection_evidence.production_filter_pruning_ready",
                 "search_projection_evidence.compressed_vector_projection_required",
                 "search_projection_evidence.compressed_vector_projection_ready",
                 "search_projection_evidence.blocker_codes",
@@ -3291,6 +3298,36 @@ mod tests {
         assert_eq!(summary["search_projection_evidence"]["ready"], false);
         assert_eq!(
             summary["search_projection_evidence"]["document_identity_ready"],
+            false
+        );
+        assert!(summary["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "search_projection_evidence_ready"));
+        assert!(summary["blocking_categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "search_projection_evidence"));
+    }
+
+    #[test]
+    fn replacement_summary_requires_search_projection_production_filter_pruning() {
+        let mut bundle = production_ready_bundle();
+        bundle["search_projection_evidence"]["ready"] = serde_json::json!(true);
+        bundle["search_projection_evidence"]["production_filter_pruning_ready"] =
+            serde_json::json!(false);
+        bundle["search_projection_evidence"]["blocker_codes"] =
+            serde_json::json!(["skein_production_filter_pruning_not_ready"]);
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["production_replacement_per_million"], 0);
+        assert_eq!(summary["search_projection_evidence"]["ready"], false);
+        assert_eq!(
+            summary["search_projection_evidence"]["production_filter_pruning_ready"],
             false
         );
         assert!(summary["missing_evidence"]
@@ -4934,6 +4971,7 @@ mod tests {
                         "search_projection_evidence.incremental_update_ready",
                         "search_projection_evidence.source_chunk_ready",
                         "search_projection_evidence.predicate_pushdown_ready",
+                        "search_projection_evidence.production_filter_pruning_ready",
                         "search_projection_evidence.compressed_vector_projection_required",
                         "search_projection_evidence.compressed_vector_projection_ready",
                         "search_projection_evidence.blocker_codes"
@@ -5185,6 +5223,7 @@ mod tests {
                 "incremental_update_ready": true,
                 "source_chunk_ready": true,
                 "predicate_pushdown_ready": true,
+                "production_filter_pruning_ready": true,
                 "compressed_vector_projection_required": true,
                 "compressed_vector_projection_ready": true,
                 "blocker_codes": []
