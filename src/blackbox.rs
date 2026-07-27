@@ -162,6 +162,39 @@ pub struct BlackboxBackgroundQosSummary {
     pub blocker_codes: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlackboxReadinessReport {
+    pub protocol: String,
+    pub present: bool,
+    pub ready: bool,
+    pub redaction_ready: bool,
+    pub operational_evidence_ready: bool,
+    pub artifact_count: usize,
+    pub slow_query_log_present: bool,
+    pub slow_query_log_jsonl_summary_present: bool,
+    pub background_maintenance_present: bool,
+    pub background_qos_summary_ready: bool,
+    pub blocker_codes: Vec<String>,
+}
+
+impl BlackboxReadinessReport {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": self.protocol,
+            "present": self.present,
+            "ready": self.ready,
+            "redaction_ready": self.redaction_ready,
+            "operational_evidence_ready": self.operational_evidence_ready,
+            "artifact_count": self.artifact_count,
+            "slow_query_log_present": self.slow_query_log_present,
+            "slow_query_log_jsonl_summary_present": self.slow_query_log_jsonl_summary_present,
+            "background_maintenance_present": self.background_maintenance_present,
+            "background_qos_summary_ready": self.background_qos_summary_ready,
+            "blocker_codes": self.blocker_codes,
+        })
+    }
+}
+
 impl BlackboxBackgroundQosSummary {
     pub fn json(&self) -> serde_json::Value {
         serde_json::json!({
@@ -261,6 +294,50 @@ pub struct BlackboxReport {
 }
 
 impl BlackboxReport {
+    pub fn readiness(&self) -> BlackboxReadinessReport {
+        let slow_query_log_present = self.artifact("slow-query-log.jsonl").is_some();
+        let slow_query_log_jsonl_summary_present =
+            self.jsonl_artifact_summary_present("slow-query-log.jsonl");
+        let background_maintenance_present = self.artifact("background-maintenance.json").is_some();
+        let background_qos_summary_ready =
+            self.background_qos_summary_ready("background-maintenance.json");
+        let redaction_ready = self.redaction_ready();
+        let operational_evidence_ready = slow_query_log_present
+            && slow_query_log_jsonl_summary_present
+            && background_maintenance_present
+            && background_qos_summary_ready;
+        let mut blocker_codes = Vec::new();
+        if !redaction_ready {
+            blocker_codes.push("blackbox_redaction_not_ready".to_string());
+        }
+        if !slow_query_log_present {
+            blocker_codes.push("blackbox_slow_query_log_missing".to_string());
+        }
+        if !slow_query_log_jsonl_summary_present {
+            blocker_codes.push("blackbox_slow_query_log_summary_missing".to_string());
+        }
+        if !background_maintenance_present {
+            blocker_codes.push("blackbox_background_maintenance_missing".to_string());
+        }
+        if !background_qos_summary_ready {
+            blocker_codes.push("blackbox_background_qos_summary_missing".to_string());
+        }
+
+        BlackboxReadinessReport {
+            protocol: BLACKBOX_REPORT_PROTOCOL.to_string(),
+            present: true,
+            ready: blocker_codes.is_empty(),
+            redaction_ready,
+            operational_evidence_ready,
+            artifact_count: self.artifact_count,
+            slow_query_log_present,
+            slow_query_log_jsonl_summary_present,
+            background_maintenance_present,
+            background_qos_summary_ready,
+            blocker_codes,
+        }
+    }
+
     pub fn json(&self) -> serde_json::Value {
         serde_json::json!({
             "protocol": self.protocol,
@@ -275,6 +352,50 @@ impl BlackboxReport {
             "artifacts": self.artifacts.iter().map(BlackboxArtifactReport::json).collect::<Vec<_>>(),
             "redaction": self.redaction.json(),
         })
+    }
+
+    fn redaction_ready(&self) -> bool {
+        self.protocol == BLACKBOX_REPORT_PROTOCOL
+            && self.artifact_dir_present
+            && self.artifact_count > 0
+            && self.events_path == "events.jsonl"
+            && !self.redaction.raw_query_text_copied
+            && !self.redaction.raw_parameters_copied
+            && !self.redaction.raw_artifact_payloads_copied
+            && self.redaction.artifact_paths_are_relative
+    }
+
+    fn jsonl_artifact_summary_present(&self, name: &str) -> bool {
+        self.artifact(name)
+            .filter(|artifact| artifact.format == "jsonl")
+            .and_then(|artifact| artifact.jsonl.as_ref())
+            .is_some()
+    }
+
+    fn background_qos_summary_ready(&self, name: &str) -> bool {
+        let Some(artifact) = self.artifact(name) else {
+            return false;
+        };
+        let Some(background_qos) = artifact.background_qos.as_ref() else {
+            return false;
+        };
+        artifact.format == "json"
+            && background_qos.protocol.as_deref() == Some("skein-background-maintenance-report")
+            && background_qos.ready.is_some()
+            && background_qos.total_candidates.is_some()
+            && background_qos.admitted_count.is_some()
+            && background_qos.deferred_count.is_some()
+            && background_qos.rejected_count.is_some()
+            && background_qos
+                .executable_search_projection_graph_delta_count
+                .is_some()
+            && background_qos
+                .admitted_search_projection_graph_delta_count
+                .is_some()
+    }
+
+    fn artifact(&self, name: &str) -> Option<&BlackboxArtifactReport> {
+        self.artifacts.iter().find(|artifact| artifact.name == name)
     }
 
     pub fn events(&self) -> Vec<BlackboxEventReport> {
@@ -836,6 +957,105 @@ mod tests {
         assert!(!rendered_events.contains("MATCH"));
         assert!(!rendered_events.contains("secret-token"));
         assert!(!rendered_events.contains(root.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn blackbox_readiness_report_uses_typed_manifest_fields() {
+        let root = unique_test_dir("blackbox-readiness");
+        let artifact_dir = root.join("artifacts");
+        fs::create_dir_all(&artifact_dir).unwrap();
+        fs::write(
+            artifact_dir.join("slow-query-log.jsonl"),
+            "{\"event\":\"slow_query\",\"digest\":\"digest-1\"}\n",
+        )
+        .unwrap();
+        fs::write(
+            artifact_dir.join("background-maintenance.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "protocol": "skein-background-maintenance-report",
+                "ready": true,
+                "total_candidates": 1,
+                "admitted_count": 1,
+                "deferred_count": 0,
+                "rejected_count": 0,
+                "executable_search_projection_graph_delta_count": 1,
+                "admitted_search_projection_graph_delta_count": 1,
+                "blocker_codes": []
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let report = blackbox_report(&BlackboxReportOptions {
+            artifact_dir,
+            output_dir: root.join("blackbox"),
+            run_id: Some("run-readiness".to_string()),
+            run_status: BlackboxRunStatus::Completed,
+            exit_code: Some(0),
+        })
+        .unwrap();
+        let readiness = report.readiness();
+        let json = readiness.json();
+
+        assert_eq!(readiness.protocol, BLACKBOX_REPORT_PROTOCOL);
+        assert!(readiness.present);
+        assert!(readiness.ready);
+        assert!(readiness.redaction_ready);
+        assert!(readiness.operational_evidence_ready);
+        assert!(readiness.slow_query_log_present);
+        assert!(readiness.slow_query_log_jsonl_summary_present);
+        assert!(readiness.background_maintenance_present);
+        assert!(readiness.background_qos_summary_ready);
+        assert!(readiness.blocker_codes.is_empty());
+        assert_eq!(json["ready"], true);
+        assert_eq!(json["blocker_codes"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn blackbox_readiness_report_fails_closed_without_operational_evidence() {
+        let root = unique_test_dir("blackbox-readiness-missing");
+        let artifact_dir = root.join("artifacts");
+        fs::create_dir_all(&artifact_dir).unwrap();
+        fs::write(
+            artifact_dir.join("background-maintenance.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "protocol": "skein-background-maintenance-report",
+                "ready": true,
+                "total_candidates": 1,
+                "admitted_count": 1,
+                "deferred_count": 0,
+                "rejected_count": 0,
+                "blocker_codes": []
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let report = blackbox_report(&BlackboxReportOptions {
+            artifact_dir,
+            output_dir: root.join("blackbox"),
+            run_id: Some("run-readiness-missing".to_string()),
+            run_status: BlackboxRunStatus::Completed,
+            exit_code: Some(0),
+        })
+        .unwrap();
+        let readiness = report.readiness();
+
+        assert!(!readiness.ready);
+        assert!(readiness.redaction_ready);
+        assert!(!readiness.operational_evidence_ready);
+        assert!(!readiness.slow_query_log_present);
+        assert!(!readiness.slow_query_log_jsonl_summary_present);
+        assert!(readiness.background_maintenance_present);
+        assert!(!readiness.background_qos_summary_ready);
+        assert_eq!(
+            readiness.blocker_codes,
+            vec![
+                "blackbox_slow_query_log_missing".to_string(),
+                "blackbox_slow_query_log_summary_missing".to_string(),
+                "blackbox_background_qos_summary_missing".to_string()
+            ]
+        );
     }
 
     fn unique_test_dir(prefix: &str) -> PathBuf {
