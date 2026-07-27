@@ -228,7 +228,7 @@ contract.
     Rust-bridge shadow evidence.
   - [x] Require search-candidate shadow probe inputs to carry typed
     candidate-readiness signals before producing cutover evidence.
-- [ ] PR 6: Prove WAL and checkpoint recovery with Mem-shaped mutations.
+- [x] PR 6: Prove WAL and checkpoint recovery with Mem-shaped mutations.
   - Scope: add fixtures for committed batch replay, torn WAL tail handling, and
     checkpoint replay boundaries that match Mem graph/search writes.
   - Deliverables: typed storage recovery readiness and negative fixtures.
@@ -624,7 +624,7 @@ contract.
     only supported interface.
 - [x] Add explain output that includes semantic checks, selected fast path,
   optimizer budget, chosen indexes, scan-pruning decisions, and resource class.
-- [ ] Add typed preflight or harness APIs for all replacement artifacts
+- [x] Add typed preflight or harness APIs for all replacement artifacts
   so Python-only validation scripts can be retired from the critical path.
   - `nowledge-query-runtime-preflight` runs JSON-defined probes through the
     read-only query runtime with `EXPLAIN ANALYZE` and emits plan/profile
