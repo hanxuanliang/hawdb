@@ -12,6 +12,7 @@ pub mod graph_route_readiness;
 pub mod mem_integration_bundle;
 pub mod mem_integration_readiness;
 pub mod mem_library_readiness;
+pub mod nowledge_fuzz;
 pub mod nowledge_inventory;
 pub mod nowledge_mem;
 pub mod optimizer;
@@ -148,6 +149,10 @@ pub use mem_library_readiness::{
     parse_mem_library_covered_routes_json, parse_mem_library_graph_route_readiness_json,
     parse_mem_library_readiness_mode, parse_parameters_json, run_nowledge_mem_library_readiness,
     value_from_json,
+};
+pub use nowledge_fuzz::{
+    nowledge_query_fuzz_harness, NowledgeQueryFuzzCaseReport, NowledgeQueryFuzzHarnessOptions,
+    NowledgeQueryFuzzHarnessReport, NOWLEDGE_QUERY_FUZZ_HARNESS_PROTOCOL,
 };
 pub use nowledge_inventory::{
     background_maintenance_evidence_health, background_maintenance_evidence_health_from_bundle,

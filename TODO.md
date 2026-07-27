@@ -134,6 +134,9 @@ contract.
     dedicated offline fuzz/parity harness.
   - Acceptance: the route can run with `skein` selected through the library
     runtime and legacy remains available as configured fallback.
+  - [x] Expose a deterministic library-only query fuzz harness for Nowledge
+    graph-read shapes so CI can exercise parser, query runtime, scan pruning,
+    plan-cache reporting, and system hints without production dual-read compare.
 - [ ] PR 3: Repeat route runtime migration for the remaining graph-first reads.
   - Scope: migrate overview, node details, expansion, shortest path,
     communities, PageRank plan, augmentation state, orphans, and related
