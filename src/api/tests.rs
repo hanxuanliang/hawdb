@@ -27897,6 +27897,62 @@ fn explain_analyze_pushes_nowledge_status_timestamp_relationship_filter_to_scan_
 }
 
 #[test]
+fn explain_analyze_pushes_nowledge_timestamp_node_delta_filter_to_scan_pruning() {
+    let mut db = Database::new();
+    for (id, created_at, updated_at) in [
+        ("stale", 1, 1),
+        ("created", 10, 1),
+        ("updated", 1, 11),
+        ("both", 12, 13),
+    ] {
+        db.query(&format!(
+            "CREATE (:Memory {{id: '{id}', created_at: {created_at}, updated_at: {updated_at}}})"
+        ))
+        .unwrap();
+    }
+
+    let output = db
+        .explain_analyze_query(
+            "MATCH (m:Memory) \
+             WHERE m.created_at > 8 OR m.updated_at > 8 \
+             RETURN m.id AS id ORDER BY id ASC",
+        )
+        .unwrap();
+
+    assert_eq!(output.output.rows.len(), 3);
+    assert_eq!(
+        output
+            .output
+            .rows
+            .iter()
+            .map(|row| row.get("id").cloned().unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            Value::String("both".to_string()),
+            Value::String("created".to_string()),
+            Value::String("updated".to_string()),
+        ]
+    );
+    let node_scan = output
+        .execution_profile
+        .scan_pruning_reports
+        .iter()
+        .find(|scan| scan.strategy == crate::store::ScanPruningStrategy::OrUnion)
+        .expect("timestamp node delta scan pruning report");
+    assert!(node_scan.pruned);
+    assert_eq!(
+        node_scan.target_kind,
+        crate::store::ScanPruningTargetKind::Node
+    );
+    assert!(node_scan.label_id.is_some());
+    assert_eq!(node_scan.rel_type_id, None);
+    assert_eq!(node_scan.candidate_count_before_pruning, 4);
+    assert_eq!(node_scan.candidate_count_before_filter, 3);
+    assert_eq!(node_scan.pruned_candidate_count, 1);
+    assert_eq!(node_scan.output_count, 3);
+}
+
+#[test]
 fn cypher_explain_returns_structured_plan_row() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 1, title: 'Explain row'})")

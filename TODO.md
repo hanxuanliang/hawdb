@@ -427,6 +427,9 @@ contract.
     pruning while preserving the original residual predicate evaluation.
   - [x] Expose scan-pruning target kind and relationship type id in execution
     profile reports, and require target kind in query-runtime preflight gates.
+  - [x] Cover Nowledge node graph-delta timestamp filters such as
+    `created_at > $cutoff OR updated_at > $cutoff` with `EXPLAIN ANALYZE`
+    scan-pruning evidence before row payload filtering.
 - [ ] Keep memory use bounded by default.
   - User foreground reads are admitted first.
   - Internal background import, projection, compaction, analytics, and shadow
