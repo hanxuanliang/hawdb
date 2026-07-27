@@ -286,6 +286,19 @@ pub struct GraphRouteAlignmentCutoverReadiness {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphRouteParityAlignmentCutoverReadiness {
+    pub ready: bool,
+    pub required_route_count_present: bool,
+    pub ready_route_count_matches: bool,
+    pub missing_routes_empty: bool,
+    pub not_ready_routes_empty: bool,
+    pub route_mismatch_routes_empty: bool,
+    pub protocol_mismatch_routes_empty: bool,
+    pub blocker_routes_empty: bool,
+    pub blocker_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryRuntimePreflightCutoverReadiness {
     pub protocol_matches: bool,
     pub ready: bool,
@@ -488,6 +501,19 @@ impl GraphRouteAlignmentCutoverReadiness {
     }
 }
 
+impl GraphRouteParityAlignmentCutoverReadiness {
+    pub fn evidence_ready(&self) -> bool {
+        self.ready
+            && self.required_route_count_present
+            && self.ready_route_count_matches
+            && self.missing_routes_empty
+            && self.not_ready_routes_empty
+            && self.route_mismatch_routes_empty
+            && self.protocol_mismatch_routes_empty
+            && self.blocker_routes_empty
+    }
+}
+
 impl QueryRuntimePreflightCutoverReadiness {
     pub fn evidence_ready(&self) -> bool {
         self.protocol_matches
@@ -606,6 +632,8 @@ pub fn nowledge_mem_integration_readiness(
     let bounded_read_alignment_readiness = bounded_read_alignment_cutover_readiness(bundle);
     let graph_route_readiness = graph_route_cutover_readiness(bundle);
     let graph_route_alignment_readiness = graph_route_alignment_cutover_readiness(bundle);
+    let graph_route_parity_alignment_readiness =
+        graph_route_parity_alignment_cutover_readiness(bundle);
     let query_runtime_readiness = query_runtime_preflight_cutover_readiness(bundle);
     let query_runtime_alignment_readiness =
         query_runtime_preflight_alignment_cutover_readiness(bundle);
@@ -794,45 +822,12 @@ pub fn nowledge_mem_integration_readiness(
             graph_route_alignment_cutover_conditions(&graph_route_alignment_readiness),
             graph_route_alignment_readiness.blocker_codes.clone(),
         ),
-        check(
+        check_named_conditions(
             "graph_route_parity_alignment",
-            [
-                bool_path(bundle, &["graph_route_parity_alignment", "ready"]) == Some(true),
-                u64_path(bundle, &["graph_route_parity_alignment", "required_route_count"])
-                    .is_some_and(|value| value > 0),
-                u64_path(bundle, &["graph_route_parity_alignment", "ready_route_count"])
-                    == u64_path(bundle, &["graph_route_parity_alignment", "required_route_count"]),
-                string_array_path(bundle, &["graph_route_parity_alignment", "missing_routes"])
-                    .is_empty(),
-                string_array_path(bundle, &["graph_route_parity_alignment", "not_ready_routes"])
-                    .is_empty(),
-                string_array_path(
-                    bundle,
-                    &["graph_route_parity_alignment", "route_mismatch_routes"],
-                )
-                .is_empty(),
-                string_array_path(
-                    bundle,
-                    &["graph_route_parity_alignment", "protocol_mismatch_routes"],
-                )
-                .is_empty(),
-                string_array_path(bundle, &["graph_route_parity_alignment", "blocker_routes"])
-                    .is_empty(),
-            ],
-            [
-                "graph_route_parity_alignment.ready",
-                "graph_route_parity_alignment.required_route_count",
-                "graph_route_parity_alignment.ready_route_count",
-                "graph_route_parity_alignment.missing_routes",
-                "graph_route_parity_alignment.not_ready_routes",
-                "graph_route_parity_alignment.route_mismatch_routes",
-                "graph_route_parity_alignment.protocol_mismatch_routes",
-                "graph_route_parity_alignment.blocker_routes",
-            ],
-            blocker_codes(
-                bundle,
-                &[&["graph_route_parity_alignment", "blocker_codes"][..]],
+            graph_route_parity_alignment_cutover_conditions(
+                &graph_route_parity_alignment_readiness,
             ),
+            graph_route_parity_alignment_readiness.blocker_codes.clone(),
         ),
         check_named_conditions(
             "query_runtime_preflight",
@@ -1013,6 +1008,7 @@ pub fn nowledge_mem_integration_readiness(
                 bounded_read_alignment: &bounded_read_alignment_readiness,
                 graph_route: &graph_route_readiness,
                 graph_route_alignment: &graph_route_alignment_readiness,
+                graph_route_parity_alignment: &graph_route_parity_alignment_readiness,
                 query_runtime: &query_runtime_readiness,
                 query_runtime_alignment: &query_runtime_alignment_readiness,
                 blackbox: &blackbox_readiness,
@@ -1079,6 +1075,7 @@ struct IntegrationGateReadiness<'a> {
     bounded_read_alignment: &'a BoundedReadAlignmentCutoverReadiness,
     graph_route: &'a GraphRouteCutoverReadiness,
     graph_route_alignment: &'a GraphRouteAlignmentCutoverReadiness,
+    graph_route_parity_alignment: &'a GraphRouteParityAlignmentCutoverReadiness,
     query_runtime: &'a QueryRuntimePreflightCutoverReadiness,
     query_runtime_alignment: &'a QueryRuntimePreflightAlignmentCutoverReadiness,
     blackbox: &'a BlackboxReadinessReport,
@@ -1331,7 +1328,7 @@ fn next_actions(
             ],
         ));
     }
-    if !graph_route_parity_alignment_ready(bundle) {
+    if !readiness.graph_route_parity_alignment.evidence_ready() {
         actions.push(next_action(
             "attach_graph_route_parity_evidence",
             "Nowledge Mem graph cutover requires route-level shadow parity evidence for graph reads",
@@ -3075,37 +3072,86 @@ fn graph_route_alignment_cutover_conditions(
     ]
 }
 
-fn graph_route_parity_alignment_ready(bundle: &serde_json::Value) -> bool {
-    bool_path(bundle, &["graph_route_parity_alignment", "ready"]) == Some(true)
-        && u64_path(
-            bundle,
-            &["graph_route_parity_alignment", "required_route_count"],
-        )
-        .is_some_and(|value| value > 0)
-        && u64_path(
+pub fn graph_route_parity_alignment_cutover_readiness(
+    bundle: &serde_json::Value,
+) -> GraphRouteParityAlignmentCutoverReadiness {
+    let required_route_count = u64_path(
+        bundle,
+        &["graph_route_parity_alignment", "required_route_count"],
+    );
+    GraphRouteParityAlignmentCutoverReadiness {
+        ready: bool_path(bundle, &["graph_route_parity_alignment", "ready"]) == Some(true),
+        required_route_count_present: required_route_count.is_some_and(|value| value > 0),
+        ready_route_count_matches: u64_path(
             bundle,
             &["graph_route_parity_alignment", "ready_route_count"],
-        ) == u64_path(
+        ) == required_route_count,
+        missing_routes_empty: string_array_path(
             bundle,
-            &["graph_route_parity_alignment", "required_route_count"],
+            &["graph_route_parity_alignment", "missing_routes"],
         )
-        && string_array_path(bundle, &["graph_route_parity_alignment", "missing_routes"]).is_empty()
-        && string_array_path(
+        .is_empty(),
+        not_ready_routes_empty: string_array_path(
             bundle,
             &["graph_route_parity_alignment", "not_ready_routes"],
         )
-        .is_empty()
-        && string_array_path(
+        .is_empty(),
+        route_mismatch_routes_empty: string_array_path(
             bundle,
             &["graph_route_parity_alignment", "route_mismatch_routes"],
         )
-        .is_empty()
-        && string_array_path(
+        .is_empty(),
+        protocol_mismatch_routes_empty: string_array_path(
             bundle,
             &["graph_route_parity_alignment", "protocol_mismatch_routes"],
         )
-        .is_empty()
-        && string_array_path(bundle, &["graph_route_parity_alignment", "blocker_routes"]).is_empty()
+        .is_empty(),
+        blocker_routes_empty: string_array_path(
+            bundle,
+            &["graph_route_parity_alignment", "blocker_routes"],
+        )
+        .is_empty(),
+        blocker_codes: blocker_codes(
+            bundle,
+            &[&["graph_route_parity_alignment", "blocker_codes"][..]],
+        ),
+    }
+}
+
+fn graph_route_parity_alignment_cutover_conditions(
+    readiness: &GraphRouteParityAlignmentCutoverReadiness,
+) -> Vec<(&'static str, bool)> {
+    vec![
+        ("graph_route_parity_alignment.ready", readiness.ready),
+        (
+            "graph_route_parity_alignment.required_route_count",
+            readiness.required_route_count_present,
+        ),
+        (
+            "graph_route_parity_alignment.ready_route_count",
+            readiness.ready_route_count_matches,
+        ),
+        (
+            "graph_route_parity_alignment.missing_routes",
+            readiness.missing_routes_empty,
+        ),
+        (
+            "graph_route_parity_alignment.not_ready_routes",
+            readiness.not_ready_routes_empty,
+        ),
+        (
+            "graph_route_parity_alignment.route_mismatch_routes",
+            readiness.route_mismatch_routes_empty,
+        ),
+        (
+            "graph_route_parity_alignment.protocol_mismatch_routes",
+            readiness.protocol_mismatch_routes_empty,
+        ),
+        (
+            "graph_route_parity_alignment.blocker_routes",
+            readiness.blocker_routes_empty,
+        ),
+    ]
 }
 
 pub fn query_runtime_preflight_cutover_readiness(
@@ -6527,6 +6573,46 @@ mod tests {
             .unwrap()
             .iter()
             .any(|action| action["action"] == "attach_graph_route_parity_evidence"));
+    }
+
+    #[test]
+    fn exposes_typed_graph_route_parity_alignment_cutover_readiness() {
+        let bundle = ready_bundle();
+
+        let typed = super::graph_route_parity_alignment_cutover_readiness(&bundle);
+
+        assert!(typed.evidence_ready());
+        assert!(typed.ready);
+        assert!(typed.required_route_count_present);
+        assert!(typed.ready_route_count_matches);
+        assert!(typed.missing_routes_empty);
+        assert!(typed.not_ready_routes_empty);
+        assert!(typed.route_mismatch_routes_empty);
+        assert!(typed.protocol_mismatch_routes_empty);
+        assert!(typed.blocker_routes_empty);
+        assert!(typed.blocker_codes.is_empty());
+    }
+
+    #[test]
+    fn typed_graph_route_parity_alignment_detects_missing_routes() {
+        let mut bundle = ready_bundle();
+        bundle["graph_route_parity_alignment"]["ready"] = serde_json::json!(false);
+        bundle["graph_route_parity_alignment"]["ready_route_count"] = serde_json::json!(17);
+        bundle["graph_route_parity_alignment"]["missing_routes"] =
+            serde_json::json!(["agent_evolves"]);
+        bundle["graph_route_parity_alignment"]["blocker_codes"] =
+            serde_json::json!(["graph_route_parity_evidence_missing"]);
+
+        let typed = super::graph_route_parity_alignment_cutover_readiness(&bundle);
+
+        assert!(!typed.evidence_ready());
+        assert!(!typed.ready);
+        assert!(!typed.ready_route_count_matches);
+        assert!(!typed.missing_routes_empty);
+        assert_eq!(
+            typed.blocker_codes,
+            vec!["graph_route_parity_evidence_missing".to_string()]
+        );
     }
 
     #[test]
