@@ -31371,6 +31371,81 @@ fn mem_shaped_graph_mutations_recover_across_checkpoint_and_wal() {
 }
 
 #[test]
+fn mem_shaped_post_checkpoint_batch_replays_before_torn_tail() {
+    let path = unique_test_dir("mem_shaped_recovery_torn_tail");
+    let live_snapshot = {
+        let mut db = Database::open(&path).unwrap();
+        db.query(
+            "CREATE (:Source {id: 'source:one', space_id: 'default', kind: 'thread', metadata: '{}', memory_count: 1})",
+        )
+        .unwrap();
+        db.query(
+            "CREATE (:Thread {id: 'thread:one', thread_id: 'thread:one', source_id: 'source:one', space_id: 'default', message_count: 2})",
+        )
+        .unwrap();
+        db.query(
+            "CREATE (:Memory {id: 'mem:checkpointed', title: 'Checkpointed memory', source_id: 'source:one', thread_id: 'thread:one', space_id: 'default'})",
+        )
+        .unwrap();
+        db.checkpoint().unwrap();
+
+        let mut tx = db.begin_transaction();
+        tx.query(
+            "CREATE (:Memory {id: 'mem:replayed', title: 'Replayed memory', source_id: 'source:one', thread_id: 'thread:one', space_id: 'default'})-[:MENTIONS {thread_id: 'thread:one', message_index: 1, confidence: 0.7}]->(:Entity {id: 'entity:rust', name: 'Rust', space_id: 'default', unit_type: 'entity'})",
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        let snapshot = db.export_canonical_graph_snapshot();
+        assert!(snapshot.validate().is_valid);
+        snapshot
+    };
+
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(path.join("wal.skein"))
+        .unwrap()
+        .write_all(b"torn-entry-without-checksum")
+        .unwrap();
+
+    {
+        let db = Database::open_with_config(
+            &path,
+            DatabaseConfig {
+                max_wal_replay_entries: Some(8),
+                ..DatabaseConfig::default()
+            },
+        )
+        .unwrap();
+        let recovered = db.export_canonical_graph_snapshot();
+        assert_eq!(recovered, live_snapshot);
+        assert!(recovered.validate().is_valid);
+
+        let recovery = db.storage_recovery_report();
+        assert_eq!(recovery.checkpoint_epoch, Some(1));
+        assert_eq!(recovery.checkpoint_commit_epoch, Some(3));
+        assert_eq!(recovery.replayed_wal_entries, 1);
+        assert_eq!(recovery.max_wal_replay_entries, Some(8));
+        assert_eq!(recovery.recovered_commit_epoch, 4);
+        assert!(recovery.torn_tail_ignored);
+        assert!(recovery.torn_tail_reason.is_some());
+
+        let mem_recovery = NowledgeMemStorageRecoveryReport::from_storage_report(&recovery);
+        assert!(!mem_recovery.ready);
+        assert!(mem_recovery.durable_recovery_observed);
+        assert!(mem_recovery.checkpoint_boundary_present);
+        assert!(mem_recovery.wal_replay_bounded);
+        assert!(!mem_recovery.torn_tail_clean);
+        assert_eq!(
+            mem_recovery.blocker_codes,
+            vec!["torn_tail_observed".to_string()]
+        );
+    }
+
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
 fn in_memory_storage_recovery_report_is_non_durable() {
     let db = Database::new();
     let report = db.storage_recovery_report();
