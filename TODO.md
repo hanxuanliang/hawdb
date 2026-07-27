@@ -218,6 +218,9 @@ contract.
     vector retriever-leg evidence instead of producing weak ready probes.
   - [x] Require Rust-bridge search candidate evidence to prove FTS and vector
     top-k overlap from typed single-leg candidate reads before cutover.
+  - [x] Carry compact candidate-readiness signals in Rust-bridge search
+    candidate shadow evidence, including projection marker, watermark, and
+    embedding identity readiness.
 - [ ] PR 6: Prove WAL and checkpoint recovery with Mem-shaped mutations.
   - Scope: add fixtures for committed batch replay, torn WAL tail handling, and
     checkpoint replay boundaries that match Mem graph/search writes.

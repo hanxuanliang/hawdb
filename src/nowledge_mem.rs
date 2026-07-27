@@ -1065,6 +1065,11 @@ pub struct NowledgeMemSearchCandidateShadowEvidence {
     pub fts_top_k_overlap_ready: bool,
     pub vector_top_k_overlap_observed: bool,
     pub vector_top_k_overlap_ready: bool,
+    pub source_chunk_identity_ready: bool,
+    pub fail_soft_observed: bool,
+    pub projection_marker_status_visible: bool,
+    pub projection_watermark_ready: bool,
+    pub embedding_identity_ready: bool,
     pub primary_candidate_identity_checksum: Option<u64>,
     pub shadow_candidate_identity_checksum: Option<u64>,
     pub matched_candidate_identity_checksum: Option<u64>,
@@ -1128,6 +1133,11 @@ pub struct NowledgeMemSearchCandidateShadowAccumulator {
     fts_top_k_overlap_ready: bool,
     vector_top_k_overlap_observed: bool,
     vector_top_k_overlap_ready: bool,
+    source_chunk_identity_ready: bool,
+    fail_soft_observed: bool,
+    projection_marker_status_visible: bool,
+    projection_watermark_ready: bool,
+    embedding_identity_ready: bool,
     primary_candidate_identity_checksum: Option<u64>,
     shadow_candidate_identity_checksum: Option<u64>,
     matched_candidate_identity_checksum: Option<u64>,
@@ -1364,6 +1374,20 @@ impl NowledgeMemSearchCandidateShadowAccumulator {
         );
         self.record_retriever_leg_report(&shadow_output.report);
         self.record_filter_pushdown_report(&shadow_output.report);
+        self.record_candidate_readiness_report(&shadow_output.readiness_report(
+            &NowledgeMemSearchCandidateReadinessOptions::lancedb_replacement_candidate_read(),
+        ));
+    }
+
+    pub fn record_candidate_readiness_report(
+        &mut self,
+        report: &NowledgeMemSearchCandidateReadinessReport,
+    ) {
+        self.source_chunk_identity_ready |= report.source_chunk_identity_ready;
+        self.fail_soft_observed |= report.fail_soft_observed;
+        self.projection_marker_status_visible |= report.projection_marker_status_visible;
+        self.projection_watermark_ready |= report.projection_watermark_ready;
+        self.embedding_identity_ready |= report.embedding_identity_ready;
     }
 
     pub fn record_top_k_overlap_candidate_ids(
@@ -1446,6 +1470,11 @@ impl NowledgeMemSearchCandidateShadowAccumulator {
             vector_top_k_overlap_observed: self.vector_top_k_overlap_observed,
             vector_top_k_overlap_ready: self.vector_top_k_overlap_observed
                 && self.vector_top_k_overlap_ready,
+            source_chunk_identity_ready: self.source_chunk_identity_ready,
+            fail_soft_observed: self.fail_soft_observed,
+            projection_marker_status_visible: self.projection_marker_status_visible,
+            projection_watermark_ready: self.projection_watermark_ready,
+            embedding_identity_ready: self.embedding_identity_ready,
             primary_candidate_identity_checksum: self.primary_candidate_identity_checksum,
             shadow_candidate_identity_checksum: self.shadow_candidate_identity_checksum,
             matched_candidate_identity_checksum: self.matched_candidate_identity_checksum,
@@ -1480,6 +1509,11 @@ impl NowledgeMemSearchCandidateShadowEvidence {
             fts_top_k_overlap_ready: false,
             vector_top_k_overlap_observed: false,
             vector_top_k_overlap_ready: false,
+            source_chunk_identity_ready: false,
+            fail_soft_observed: false,
+            projection_marker_status_visible: false,
+            projection_watermark_ready: false,
+            embedding_identity_ready: false,
             primary_candidate_identity_checksum: None,
             shadow_candidate_identity_checksum: None,
             matched_candidate_identity_checksum: None,
@@ -1542,6 +1576,13 @@ pub fn nowledge_mem_search_candidate_shadow_evidence_json(
         "top_k_overlap_observed": {
             "fts": evidence.fts_top_k_overlap_observed,
             "vector": evidence.vector_top_k_overlap_observed,
+        },
+        "candidate_readiness": {
+            "source_chunk_identity_ready": evidence.source_chunk_identity_ready,
+            "fail_soft_observed": evidence.fail_soft_observed,
+            "projection_marker_status_visible": evidence.projection_marker_status_visible,
+            "projection_watermark_ready": evidence.projection_watermark_ready,
+            "embedding_identity_ready": evidence.embedding_identity_ready,
         },
         "retriever_leg_candidate_counts": {
             "text": evidence.text_retriever_candidate_count,
@@ -8443,6 +8484,23 @@ mod tests {
         assert_eq!(evidence["vector_retriever_ready"], false);
         assert_eq!(evidence["fts_top_k_overlap_ready"], false);
         assert_eq!(evidence["vector_top_k_overlap_ready"], false);
+        assert_eq!(
+            evidence["candidate_readiness"]["source_chunk_identity_ready"],
+            false
+        );
+        assert_eq!(evidence["candidate_readiness"]["fail_soft_observed"], false);
+        assert_eq!(
+            evidence["candidate_readiness"]["projection_marker_status_visible"],
+            false
+        );
+        assert_eq!(
+            evidence["candidate_readiness"]["projection_watermark_ready"],
+            false
+        );
+        assert_eq!(
+            evidence["candidate_readiness"]["embedding_identity_ready"],
+            false
+        );
         assert_eq!(evidence["candidate_identity"]["ready"], true);
         assert_eq!(evidence["candidate_identity"]["parity"], true);
         assert_eq!(evidence["shadow_scan_present"], true);
@@ -8505,6 +8563,11 @@ mod tests {
                 fts_top_k_overlap_ready: false,
                 vector_top_k_overlap_observed: false,
                 vector_top_k_overlap_ready: false,
+                source_chunk_identity_ready: false,
+                fail_soft_observed: false,
+                projection_marker_status_visible: false,
+                projection_watermark_ready: false,
+                embedding_identity_ready: false,
                 primary_candidate_identity_checksum: None,
                 shadow_candidate_identity_checksum: None,
                 matched_candidate_identity_checksum: None,
@@ -8552,6 +8615,18 @@ mod tests {
         assert_eq!(evidence["vector_retriever_ready"], false);
         assert_eq!(evidence["fts_top_k_overlap_ready"], false);
         assert_eq!(evidence["vector_top_k_overlap_ready"], false);
+        assert_eq!(
+            evidence["candidate_readiness"]["source_chunk_identity_ready"],
+            false
+        );
+        assert_eq!(
+            evidence["candidate_readiness"]["projection_watermark_ready"],
+            false
+        );
+        assert_eq!(
+            evidence["candidate_readiness"]["embedding_identity_ready"],
+            false
+        );
         assert_eq!(evidence["candidate_identity"]["ready"], true);
         assert_eq!(evidence["shadow_scan_filter_pushdown_ready"], true);
         assert_eq!(evidence["shadow_scan_field_pruning_ready"], true);
@@ -10123,6 +10198,23 @@ mod tests {
         assert_eq!(evidence["vector_top_k_overlap_ready"], true);
         assert_eq!(evidence["top_k_overlap_observed"]["fts"], true);
         assert_eq!(evidence["top_k_overlap_observed"]["vector"], true);
+        assert_eq!(
+            evidence["candidate_readiness"]["source_chunk_identity_ready"],
+            false
+        );
+        assert_eq!(evidence["candidate_readiness"]["fail_soft_observed"], false);
+        assert_eq!(
+            evidence["candidate_readiness"]["projection_marker_status_visible"],
+            true
+        );
+        assert_eq!(
+            evidence["candidate_readiness"]["projection_watermark_ready"],
+            true
+        );
+        assert_eq!(
+            evidence["candidate_readiness"]["embedding_identity_ready"],
+            true
+        );
         assert_eq!(evidence["retriever_leg_candidate_counts"]["text"], 1);
         assert_eq!(evidence["retriever_leg_candidate_counts"]["vector"], 1);
         assert_eq!(
