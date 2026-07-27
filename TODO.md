@@ -538,6 +538,9 @@ contract.
     `ready=true`.
   - [x] Carry segment-pruned document counts from real search projection probes
     through shadow evidence and final preflight reports.
+  - [x] Require search projection descriptor evidence to expose `document_id`
+    unique-key summaries, and make replacement/integration readiness fail
+    closed when unique-key scan-pruning capability is missing.
   - [x] Redact search-projection evidence JSON read and parse failures by
     default so local paths and document identity payload fragments are not
     copied into command errors.

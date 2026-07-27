@@ -5069,6 +5069,12 @@ fn search_projection_segment_descriptor_summaries_cover_required(
                         && bool_path(summary, &["timestamp_range_summary_used"]) == Some(true)
                 })
             })
+        && summaries.iter().any(|summary| {
+            str_path(summary, &["field"]) == Some("document_id")
+                && bool_path(summary, &["unique_key_summary_used"]) == Some(true)
+                && u64_path(summary, &["unique_key_summary_segment_count"])
+                    .is_some_and(|count| count > 0)
+        })
 }
 
 fn search_projection_segment_pruning_candidate_count_ready(
@@ -6523,6 +6529,40 @@ mod tests {
                 summary["timestamp_range_summary_used"] = serde_json::json!(false);
             }
         }
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["search_projection_replacement_evidence"])
+        );
+        let search_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "search_projection_replacement_evidence")
+            .unwrap();
+        assert_eq!(
+            search_check["failed_evidence_fields"],
+            serde_json::json!([
+                "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_segment_descriptor_field_summaries"
+            ])
+        );
+    }
+
+    #[test]
+    fn recomputes_search_projection_shadow_descriptor_unique_key_capability() {
+        let mut bundle = ready_bundle();
+        let summaries = bundle["replacement_summary"]["search_projection_shadow_evidence"]
+            ["pushdown_evidence"]["shadow_segment_descriptor_field_summaries"]
+            .as_array_mut()
+            .unwrap();
+        let document_id = summaries
+            .iter_mut()
+            .find(|summary| summary["field"] == "document_id")
+            .unwrap();
+        document_id["unique_key_summary_used"] = serde_json::json!(false);
 
         let report = nowledge_mem_integration_readiness_json(&bundle);
 
@@ -9383,6 +9423,8 @@ mod tests {
     fn scan_filter_field_summaries_json() -> serde_json::Value {
         serde_json::json!(NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
             .iter()
+            .copied()
+            .chain(std::iter::once("document_id"))
             .map(|field| {
                 serde_json::json!({
                     "field": field,
@@ -9390,19 +9432,21 @@ mod tests {
                     "present_document_count": 1,
                     "value_summary_used": true,
                     "value_summary_segment_count": 1,
-                    "numeric_range_summary_used": matches!(*field, "importance" | "confidence"),
+                    "numeric_range_summary_used": matches!(field, "importance" | "confidence"),
                     "numeric_range_segment_count": usize::from(matches!(
-                        *field,
+                        field,
                         "importance" | "confidence"
                     )),
                     "timestamp_range_summary_used": matches!(
-                        *field,
+                        field,
                         "created_at" | "updated_at" | "event_start" | "event_end"
                     ),
                     "timestamp_range_segment_count": usize::from(matches!(
-                        *field,
+                        field,
                         "created_at" | "updated_at" | "event_start" | "event_end"
                     )),
+                    "unique_key_summary_used": field == "document_id",
+                    "unique_key_summary_segment_count": usize::from(field == "document_id"),
                 })
             })
             .collect::<Vec<_>>())

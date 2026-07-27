@@ -2420,6 +2420,12 @@ fn search_projection_probe_segment_descriptor_field_summaries(
             if summary.timestamp_range.is_some() {
                 entry.timestamp_range_segment_count += 1;
             }
+            if field == SEARCH_DOCUMENT_ID_FIELD
+                && summary.present_count == segment.document_count
+                && summary.values.len() == segment.document_count
+            {
+                entry.unique_key_summary_segment_count += 1;
+            }
         }
     }
     fields
@@ -2435,6 +2441,8 @@ fn search_projection_probe_segment_descriptor_field_summaries(
                 "numeric_range_segment_count": summary.numeric_range_segment_count,
                 "timestamp_range_summary_used": summary.timestamp_range_segment_count > 0,
                 "timestamp_range_segment_count": summary.timestamp_range_segment_count,
+                "unique_key_summary_used": summary.unique_key_summary_segment_count > 0,
+                "unique_key_summary_segment_count": summary.unique_key_summary_segment_count,
             })
         })
         .collect()
@@ -2447,6 +2455,7 @@ struct SearchProjectionProbeFieldSummary {
     value_summary_segment_count: usize,
     numeric_range_segment_count: usize,
     timestamp_range_segment_count: usize,
+    unique_key_summary_segment_count: usize,
 }
 
 #[cfg(feature = "turbovec")]
@@ -7902,6 +7911,7 @@ mod tests {
         for field in NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS {
             assert!(fields.contains(field), "missing descriptor field {field}");
         }
+        assert!(fields.contains(SEARCH_DOCUMENT_ID_FIELD));
         for field in ["importance", "confidence"] {
             assert!(
                 summaries.iter().any(|summary| summary["field"] == field
@@ -7916,6 +7926,11 @@ mod tests {
                 "missing timestamp range summary for {field}"
             );
         }
+        assert!(summaries
+            .iter()
+            .any(|summary| summary["field"] == SEARCH_DOCUMENT_ID_FIELD
+                && summary["unique_key_summary_used"] == true
+                && summary["unique_key_summary_segment_count"] == 3));
         let production_filter_pruning = &probe["production_filter_pruning"];
         assert_eq!(production_filter_pruning["ready"], true);
         assert_eq!(

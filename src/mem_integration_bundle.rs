@@ -1721,6 +1721,8 @@ mod tests {
     fn scan_filter_field_summaries_json() -> serde_json::Value {
         serde_json::json!(NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
             .iter()
+            .copied()
+            .chain(std::iter::once("document_id"))
             .map(|field| {
                 serde_json::json!({
                     "field": field,
@@ -1728,19 +1730,21 @@ mod tests {
                     "present_document_count": 1,
                     "value_summary_used": true,
                     "value_summary_segment_count": 1,
-                    "numeric_range_summary_used": matches!(*field, "importance" | "confidence"),
+                    "numeric_range_summary_used": matches!(field, "importance" | "confidence"),
                     "numeric_range_segment_count": usize::from(matches!(
-                        *field,
+                        field,
                         "importance" | "confidence"
                     )),
                     "timestamp_range_summary_used": matches!(
-                        *field,
+                        field,
                         "created_at" | "updated_at" | "event_start" | "event_end"
                     ),
                     "timestamp_range_segment_count": usize::from(matches!(
-                        *field,
+                        field,
                         "created_at" | "updated_at" | "event_start" | "event_end"
                     )),
+                    "unique_key_summary_used": field == "document_id",
+                    "unique_key_summary_segment_count": usize::from(field == "document_id"),
                 })
             })
             .collect::<Vec<_>>())

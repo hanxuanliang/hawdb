@@ -37,6 +37,7 @@ const REQUIRED_VALUE_SUMMARY_FIELDS: &[&str] = &[
 const REQUIRED_NUMERIC_RANGE_FIELDS: &[&str] = &["importance", "confidence"];
 const REQUIRED_TIMESTAMP_RANGE_FIELDS: &[&str] =
     &["created_at", "updated_at", "event_start", "event_end"];
+const REQUIRED_UNIQUE_KEY_SUMMARY_FIELDS: &[&str] = &["document_id"];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct NowledgeSearchProjectionEvidenceReport {
@@ -210,14 +211,16 @@ pub fn nowledge_search_projection_probe_contract_json() -> serde_json::Value {
         "required_segment_descriptor_capabilities": {
             "value_summary_fields": REQUIRED_VALUE_SUMMARY_FIELDS,
             "numeric_range_fields": REQUIRED_NUMERIC_RANGE_FIELDS,
-            "timestamp_range_fields": REQUIRED_TIMESTAMP_RANGE_FIELDS
+            "timestamp_range_fields": REQUIRED_TIMESTAMP_RANGE_FIELDS,
+            "unique_key_fields": REQUIRED_UNIQUE_KEY_SUMMARY_FIELDS
         },
         "segment_descriptor_field_summary_fields": [
             "field",
             "segment_count",
             "value_summary_used",
             "numeric_range_summary_used",
-            "timestamp_range_summary_used"
+            "timestamp_range_summary_used",
+            "unique_key_summary_used"
         ],
         "document_identity_fields": [
             "ready",
@@ -903,7 +906,8 @@ fn ready_segment_descriptor_field_summaries_template() -> serde_json::Value {
         ready_segment_descriptor_field_summary_template("updated_at", true, false, true),
         ready_segment_descriptor_field_summary_template("event_start", true, false, true),
         ready_segment_descriptor_field_summary_template("event_end", true, false, true),
-        ready_segment_descriptor_field_summary_template("is_latest", true, false, false)
+        ready_segment_descriptor_field_summary_template("is_latest", true, false, false),
+        ready_segment_descriptor_field_summary_template("document_id", true, false, false)
     ])
 }
 
@@ -923,6 +927,8 @@ fn ready_segment_descriptor_field_summary_template(
         "numeric_range_segment_count": usize::from(numeric_range_summary_used),
         "timestamp_range_summary_used": timestamp_range_summary_used,
         "timestamp_range_segment_count": usize::from(timestamp_range_summary_used),
+        "unique_key_summary_used": field == "document_id",
+        "unique_key_summary_segment_count": usize::from(field == "document_id"),
     })
 }
 
@@ -1154,6 +1160,7 @@ fn predicate_pushdown_report(probe: &serde_json::Value) -> serde_json::Value {
         "missing_value_summary_fields": segment_descriptor_capabilities.missing_value_summary_fields,
         "missing_numeric_range_fields": segment_descriptor_capabilities.missing_numeric_range_fields,
         "missing_timestamp_range_fields": segment_descriptor_capabilities.missing_timestamp_range_fields,
+        "missing_unique_key_summary_fields": segment_descriptor_capabilities.missing_unique_key_summary_fields,
         "segment_descriptor_field_summaries": segment_descriptor_field_summaries,
     })
 }
@@ -1204,6 +1211,7 @@ struct SegmentDescriptorCapabilityReport {
     missing_value_summary_fields: Vec<&'static str>,
     missing_numeric_range_fields: Vec<&'static str>,
     missing_timestamp_range_fields: Vec<&'static str>,
+    missing_unique_key_summary_fields: Vec<&'static str>,
 }
 
 fn segment_descriptor_fields_cover_scan_filters(
@@ -1254,13 +1262,21 @@ fn segment_descriptor_capability_report(
         "timestamp_range_summary_used",
         Some("numeric_range_summary_used"),
     );
+    let missing_unique_key_summary_fields = required_capability_missing_fields(
+        summaries,
+        REQUIRED_UNIQUE_KEY_SUMMARY_FIELDS,
+        "unique_key_summary_used",
+        None,
+    );
     SegmentDescriptorCapabilityReport {
         ready: missing_value_summary_fields.is_empty()
             && missing_numeric_range_fields.is_empty()
-            && missing_timestamp_range_fields.is_empty(),
+            && missing_timestamp_range_fields.is_empty()
+            && missing_unique_key_summary_fields.is_empty(),
         missing_value_summary_fields,
         missing_numeric_range_fields,
         missing_timestamp_range_fields,
+        missing_unique_key_summary_fields,
     }
 }
 
@@ -1308,6 +1324,7 @@ fn segment_descriptor_summary_capability_count(
         "value_summary_used" => u64_path(summary, &["value_summary_segment_count"]),
         "numeric_range_summary_used" => u64_path(summary, &["numeric_range_segment_count"]),
         "timestamp_range_summary_used" => u64_path(summary, &["timestamp_range_segment_count"]),
+        "unique_key_summary_used" => u64_path(summary, &["unique_key_summary_segment_count"]),
         _ => None,
     }
 }
@@ -1815,6 +1832,38 @@ mod tests {
     }
 
     #[test]
+    fn skein_search_projection_evidence_requires_unique_key_descriptor_summary() {
+        let mut probe = ready_probe();
+        let summaries = probe["predicate_pushdown"]["segment_descriptor_field_summaries"]
+            .as_array_mut()
+            .unwrap();
+        let document_id = summaries
+            .iter_mut()
+            .find(|summary| summary["field"] == "document_id")
+            .unwrap();
+        document_id["unique_key_summary_used"] = serde_json::json!(false);
+
+        let report = nowledge_search_projection_evidence_json(&probe);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(report["predicate_pushdown_ready"], true);
+        assert_eq!(report["skein_predicate_pushdown_ready"], false);
+        assert_eq!(
+            report["predicate_pushdown"]["segment_descriptor_capabilities_ready"],
+            false
+        );
+        assert_eq!(
+            report["predicate_pushdown"]["missing_unique_key_summary_fields"],
+            serde_json::json!(["document_id"])
+        );
+        assert!(report["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "skein_predicate_pushdown_descriptor_not_ready"));
+    }
+
+    #[test]
     fn skein_probe_output_feeds_search_projection_evidence() {
         let path = unique_test_dir("search_projection_probe_command");
         {
@@ -2208,7 +2257,8 @@ mod tests {
             descriptor_field("updated_at", true, false, true),
             descriptor_field("event_start", true, false, true),
             descriptor_field("event_end", true, false, true),
-            descriptor_field("is_latest", true, false, false)
+            descriptor_field("is_latest", true, false, false),
+            descriptor_field("document_id", true, false, false)
         ])
     }
 
@@ -2228,6 +2278,8 @@ mod tests {
             "numeric_range_segment_count": usize::from(numeric_range_summary_used),
             "timestamp_range_summary_used": timestamp_range_summary_used,
             "timestamp_range_segment_count": usize::from(timestamp_range_summary_used),
+            "unique_key_summary_used": field == "document_id",
+            "unique_key_summary_segment_count": usize::from(field == "document_id"),
         })
     }
 }
