@@ -14,8 +14,8 @@ query family, or cutover gate requires them.
   - Route handlers should issue Cypher through the query runtime and select
     `legacy` or `skein` reads through configuration.
   - Do not keep request-time old/new read comparison in production paths.
-    Equivalence evidence should come from offline fixtures, preflight bundles,
-    and migration reports.
+    Equivalence evidence should come from offline fuzz harnesses, fixtures, and
+    preflight bundles.
 - [ ] Move graph read traffic through the query runtime boundary.
   - Mem should dual-write to Kuzu/Ladybug and Skein from the start of the
     migration window, then choose the read engine through configuration.
@@ -131,7 +131,7 @@ contract.
   - Scope: move one existing read route to the embedded query runtime with
     `legacy`/`skein` selection controlled by configuration.
   - Deliverables: typed route result, no request-time dual-read compare, and a
-    dedicated parity evidence endpoint.
+    dedicated offline fuzz/parity harness.
   - Acceptance: the route can run with `skein` selected through the library
     runtime and legacy remains available as configured fallback.
 - [ ] PR 3: Repeat route runtime migration for the remaining graph-first reads.
@@ -215,6 +215,9 @@ contract.
   - [x] Require final previous-wrapper preflight to validate replacement
     summary route catalog metadata for bounded-read, graph-route, and
     query-runtime evidence.
+  - [x] Require final previous-wrapper preflight to recompute bounded-read
+    payload budget, row cap, streaming, blocking-operator, route-readiness, and
+    pruning evidence from replacement summary instead of trusting `ready=true`.
 - [ ] PR 10: Remove or quarantine obsolete compatibility paths.
   - Scope: after gates are satisfied, remove unused CLI-only, Python-only, and
     request-time shadow compare code from the production path.

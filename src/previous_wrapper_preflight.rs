@@ -1,8 +1,8 @@
 use crate::{
     nowledge_mem_graph_read_route_catalog_digest, Result, SkeinError,
-    NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
-    NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE,
-    NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE,
+    NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL, NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
+    NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
+    NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE, NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE,
     NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
     NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
 };
@@ -867,6 +867,101 @@ pub fn nowledge_previous_wrapper_preflight_check(
             ),
         ),
         preflight_check(
+            "replacement_summary_bounded_read",
+            [
+                str_path(&replacement_summary, &["bounded_read_evidence", "protocol"])
+                    == Some(NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL),
+                bool_path(&replacement_summary, &["bounded_read_evidence", "present"])
+                    == Some(true),
+                bool_path(&replacement_summary, &["bounded_read_evidence", "ready"])
+                    == Some(true),
+                str_path(&replacement_summary, &["bounded_read_evidence", "mode"])
+                    == Some("shadow_read_only"),
+                bounded_read_execution_row_cap_ready(&replacement_summary),
+                u64_path(
+                    &replacement_summary,
+                    &["bounded_read_evidence", "estimated_payload_bytes"],
+                )
+                .is_some(),
+                u64_path(
+                    &replacement_summary,
+                    &["bounded_read_evidence", "max_estimated_payload_bytes"],
+                )
+                .is_some_and(|value| value > 0),
+                bool_path(
+                    &replacement_summary,
+                    &["bounded_read_evidence", "payload_budget_exceeded"],
+                ) == Some(false),
+                bool_path(
+                    &replacement_summary,
+                    &["bounded_read_evidence", "row_limit_enforced_before_output"],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &["bounded_read_evidence", "operator_row_cap_enabled"],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &["bounded_read_evidence", "row_budget_exceeded"],
+                ) == Some(false),
+                bool_path(&replacement_summary, &["bounded_read_evidence", "streaming"])
+                    == Some(false),
+                u64_path(
+                    &replacement_summary,
+                    &["bounded_read_evidence", "blocking_operator_count"],
+                ) == Some(0),
+                empty_array_path(
+                    &replacement_summary,
+                    &["bounded_read_evidence", "missing_covered_routes"],
+                ),
+                bool_path(
+                    &replacement_summary,
+                    &["bounded_read_evidence", "route_primary_ready"],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &["bounded_read_evidence", "route_query_plan_evidence_ready"],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &["bounded_read_evidence", "route_query_profile_evidence_ready"],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &[
+                        "bounded_read_evidence",
+                        "route_relationship_property_pruning_evidence_ready",
+                    ],
+                ) == Some(true),
+                bounded_read_relationship_property_pruning_ready(&replacement_summary),
+            ],
+            [
+                "replacement_summary.bounded_read_evidence.protocol",
+                "replacement_summary.bounded_read_evidence.present",
+                "replacement_summary.bounded_read_evidence.ready",
+                "replacement_summary.bounded_read_evidence.mode",
+                "replacement_summary.bounded_read_evidence.execution_row_cap",
+                "replacement_summary.bounded_read_evidence.estimated_payload_bytes",
+                "replacement_summary.bounded_read_evidence.max_estimated_payload_bytes",
+                "replacement_summary.bounded_read_evidence.payload_budget_exceeded",
+                "replacement_summary.bounded_read_evidence.row_limit_enforced_before_output",
+                "replacement_summary.bounded_read_evidence.operator_row_cap_enabled",
+                "replacement_summary.bounded_read_evidence.row_budget_exceeded",
+                "replacement_summary.bounded_read_evidence.streaming",
+                "replacement_summary.bounded_read_evidence.blocking_operator_count",
+                "replacement_summary.bounded_read_evidence.missing_covered_routes",
+                "replacement_summary.bounded_read_evidence.route_primary_ready",
+                "replacement_summary.bounded_read_evidence.route_query_plan_evidence_ready",
+                "replacement_summary.bounded_read_evidence.route_query_profile_evidence_ready",
+                "replacement_summary.bounded_read_evidence.route_relationship_property_pruning_evidence_ready",
+                "replacement_summary.bounded_read_evidence.relationship_property_pruning",
+            ],
+            blocker_codes(
+                &replacement_summary,
+                &[&["bounded_read_evidence", "blocker_codes"][..]],
+            ),
+        ),
+        preflight_check(
             "query_runtime_preflight",
             [
                 str_path(&query_runtime_preflight, &["protocol"])
@@ -1161,6 +1256,98 @@ fn previous_wrapper_preflight_release_summary(
         str_path(
             replacement_summary,
             &["shadow_evidence", "cutover_ready_wrapper_identity"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "bounded_read_evidence_ready",
+        bool_path(replacement_summary, &["bounded_read_evidence", "ready"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "bounded_read_evidence_mode",
+        str_path(replacement_summary, &["bounded_read_evidence", "mode"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "bounded_read_max_rows",
+        u64_path(replacement_summary, &["bounded_read_evidence", "max_rows"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "bounded_read_execution_row_cap",
+        u64_path(
+            replacement_summary,
+            &["bounded_read_evidence", "execution_row_cap"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "bounded_read_estimated_payload_bytes",
+        u64_path(
+            replacement_summary,
+            &["bounded_read_evidence", "estimated_payload_bytes"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "bounded_read_max_estimated_payload_bytes",
+        u64_path(
+            replacement_summary,
+            &["bounded_read_evidence", "max_estimated_payload_bytes"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "bounded_read_payload_budget_exceeded",
+        bool_path(
+            replacement_summary,
+            &["bounded_read_evidence", "payload_budget_exceeded"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "bounded_read_row_limit_enforced_before_output",
+        bool_path(
+            replacement_summary,
+            &["bounded_read_evidence", "row_limit_enforced_before_output"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "bounded_read_operator_row_cap_enabled",
+        bool_path(
+            replacement_summary,
+            &["bounded_read_evidence", "operator_row_cap_enabled"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "bounded_read_streaming",
+        bool_path(replacement_summary, &["bounded_read_evidence", "streaming"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "bounded_read_blocking_operator_count",
+        u64_path(
+            replacement_summary,
+            &["bounded_read_evidence", "blocking_operator_count"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "bounded_read_route_catalog_version",
+        str_path(
+            replacement_summary,
+            &["bounded_read_evidence", "route_catalog_version"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "bounded_read_route_catalog_digest",
+        str_path(
+            replacement_summary,
+            &["bounded_read_evidence", "route_catalog_digest"],
         ),
     );
     insert_json_value(
@@ -1910,6 +2097,37 @@ fn route_catalog_metadata_ready(value: &serde_json::Value, path: &[&str]) -> boo
             == Some(nowledge_mem_graph_read_route_catalog_digest().as_str())
 }
 
+fn bounded_read_execution_row_cap_ready(value: &serde_json::Value) -> bool {
+    let Some(max_rows) = u64_path(value, &["bounded_read_evidence", "max_rows"]) else {
+        return false;
+    };
+    max_rows > 0
+        && max_rows.checked_add(1).is_some_and(|expected| {
+            u64_path(value, &["bounded_read_evidence", "execution_row_cap"]) == Some(expected)
+        })
+}
+
+fn bounded_read_relationship_property_pruning_ready(value: &serde_json::Value) -> bool {
+    let Some(required_count) = u64_path(
+        value,
+        &[
+            "bounded_read_evidence",
+            "relationship_property_pruning_required_count",
+        ],
+    ) else {
+        return false;
+    };
+    required_count
+        == u64_path(
+            value,
+            &[
+                "bounded_read_evidence",
+                "relationship_property_pruning_report_count",
+            ],
+        )
+        .unwrap_or_default()
+}
+
 fn query_runtime_preflight_probe_details_ready(value: &serde_json::Value) -> bool {
     let Some(probes) = value
         .get("probes")
@@ -2085,7 +2303,7 @@ mod tests {
         run_nowledge_previous_wrapper_preflight_check, PreviousWrapperPreflightCheckInputs,
     };
     use crate::{
-        nowledge_mem_graph_read_route_catalog_digest,
+        nowledge_mem_graph_read_route_catalog_digest, NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL,
         NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE,
@@ -2141,6 +2359,31 @@ mod tests {
             summary,
             "shadow_evidence_cutover_ready_wrapper_identity",
             "nowledge-previous-wrapper:test",
+        );
+        assert_release_summary_field(summary, "bounded_read_evidence_ready", true);
+        assert_release_summary_field(summary, "bounded_read_evidence_mode", "shadow_read_only");
+        assert_release_summary_field(summary, "bounded_read_max_rows", 512);
+        assert_release_summary_field(summary, "bounded_read_execution_row_cap", 513);
+        assert_release_summary_field(summary, "bounded_read_estimated_payload_bytes", 2048);
+        assert_release_summary_field(summary, "bounded_read_max_estimated_payload_bytes", 4096);
+        assert_release_summary_field(summary, "bounded_read_payload_budget_exceeded", false);
+        assert_release_summary_field(
+            summary,
+            "bounded_read_row_limit_enforced_before_output",
+            true,
+        );
+        assert_release_summary_field(summary, "bounded_read_operator_row_cap_enabled", true);
+        assert_release_summary_field(summary, "bounded_read_streaming", false);
+        assert_release_summary_field(summary, "bounded_read_blocking_operator_count", 0);
+        assert_release_summary_field(
+            summary,
+            "bounded_read_route_catalog_version",
+            NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
+        );
+        assert_release_summary_field(
+            summary,
+            "bounded_read_route_catalog_digest",
+            nowledge_mem_graph_read_route_catalog_digest(),
         );
         assert_release_summary_field(summary, "storage_recovery_ready", true);
         assert_release_summary_field(summary, "storage_recovery_durable", true);
@@ -2333,7 +2576,8 @@ mod tests {
             serde_json::json!([
                 "background_maintenance",
                 "replacement_summary",
-                "replacement_summary_route_catalog"
+                "replacement_summary_route_catalog",
+                "replacement_summary_bounded_read"
             ])
         );
         assert_eq!(
@@ -2410,6 +2654,30 @@ mod tests {
                 "search_candidate_shadow_evidence.filter_pushdown_missing_value_summary_fields",
                 "search_candidate_shadow_evidence.filter_pushdown_missing_numeric_range_fields",
                 "search_candidate_shadow_evidence.filter_pushdown_missing_timestamp_range_fields"
+            ])
+        );
+        assert_eq!(
+            check_by_name(&report, "replacement_summary_bounded_read")["failed_evidence_fields"],
+            serde_json::json!([
+                "replacement_summary.bounded_read_evidence.protocol",
+                "replacement_summary.bounded_read_evidence.present",
+                "replacement_summary.bounded_read_evidence.ready",
+                "replacement_summary.bounded_read_evidence.mode",
+                "replacement_summary.bounded_read_evidence.execution_row_cap",
+                "replacement_summary.bounded_read_evidence.estimated_payload_bytes",
+                "replacement_summary.bounded_read_evidence.max_estimated_payload_bytes",
+                "replacement_summary.bounded_read_evidence.payload_budget_exceeded",
+                "replacement_summary.bounded_read_evidence.row_limit_enforced_before_output",
+                "replacement_summary.bounded_read_evidence.operator_row_cap_enabled",
+                "replacement_summary.bounded_read_evidence.row_budget_exceeded",
+                "replacement_summary.bounded_read_evidence.streaming",
+                "replacement_summary.bounded_read_evidence.blocking_operator_count",
+                "replacement_summary.bounded_read_evidence.missing_covered_routes",
+                "replacement_summary.bounded_read_evidence.route_primary_ready",
+                "replacement_summary.bounded_read_evidence.route_query_plan_evidence_ready",
+                "replacement_summary.bounded_read_evidence.route_query_profile_evidence_ready",
+                "replacement_summary.bounded_read_evidence.route_relationship_property_pruning_evidence_ready",
+                "replacement_summary.bounded_read_evidence.relationship_property_pruning"
             ])
         );
     }
@@ -3025,6 +3293,38 @@ mod tests {
     }
 
     #[test]
+    fn preflight_check_rejects_bounded_read_payload_budget_overrun() {
+        let mut inputs = ready_inputs();
+        let replacement_summary = inputs.replacement_summary.as_mut().unwrap();
+        replacement_summary["bounded_read_evidence"]["payload_budget_exceeded"] =
+            serde_json::json!(true);
+        replacement_summary["bounded_read_evidence"]["blocker_codes"] =
+            serde_json::json!(["bounded_read_payload_budget_exceeded"]);
+
+        let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["replacement_summary_bounded_read"])
+        );
+        assert_eq!(
+            check_by_name(&report, "replacement_summary_bounded_read")["failed_evidence_fields"],
+            serde_json::json!([
+                "replacement_summary.bounded_read_evidence.payload_budget_exceeded"
+            ])
+        );
+        assert_eq!(
+            check_by_name(&report, "replacement_summary_bounded_read")["blocker_codes"],
+            serde_json::json!(["bounded_read_payload_budget_exceeded"])
+        );
+        assert_eq!(
+            report["release_summary"]["bounded_read_payload_budget_exceeded"],
+            serde_json::json!(true)
+        );
+    }
+
+    #[test]
     fn preflight_check_rejects_query_runtime_preflight_with_unknown_route() {
         let mut inputs = ready_inputs();
         let preflight = inputs.query_runtime_preflight.as_mut().unwrap();
@@ -3310,7 +3610,7 @@ mod tests {
                 "search_projection_evidence": ready_search_projection_evidence(),
                 "search_projection_shadow_evidence": ready_search_projection_shadow_evidence(),
                 "search_candidate_shadow_evidence": ready_search_candidate_shadow_evidence(),
-                "bounded_read_evidence": ready_route_catalog_metadata(),
+                "bounded_read_evidence": ready_bounded_read_evidence(),
                 "graph_route_readiness": ready_route_catalog_metadata(),
                 "query_runtime_preflight": ready_route_catalog_metadata()
             })),
@@ -3323,6 +3623,39 @@ mod tests {
         serde_json::json!({
             "route_catalog_version": NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
             "route_catalog_digest": nowledge_mem_graph_read_route_catalog_digest(),
+            "blocker_codes": []
+        })
+    }
+
+    fn ready_bounded_read_evidence() -> serde_json::Value {
+        serde_json::json!({
+            "protocol": NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL,
+            "present": true,
+            "ready": true,
+            "mode": "shadow_read_only",
+            "max_rows": 512,
+            "execution_row_cap": 513,
+            "estimated_payload_bytes": 2048,
+            "max_estimated_payload_bytes": 4096,
+            "payload_budget_exceeded": false,
+            "row_limit_enforced_before_output": true,
+            "operator_row_cap_enabled": true,
+            "row_budget_exceeded": false,
+            "streaming": false,
+            "blocking_operator_count": 0,
+            "blocking_operator_kinds": [],
+            "covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+            "required_covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+            "missing_covered_routes": [],
+            "route_catalog_version": NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
+            "route_catalog_digest": nowledge_mem_graph_read_route_catalog_digest(),
+            "route_primary_ready": true,
+            "primary_ready_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+            "route_query_plan_evidence_ready": true,
+            "route_query_profile_evidence_ready": true,
+            "route_relationship_property_pruning_evidence_ready": true,
+            "relationship_property_pruning_required_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+            "relationship_property_pruning_report_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
             "blocker_codes": []
         })
     }
