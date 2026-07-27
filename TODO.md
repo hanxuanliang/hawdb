@@ -495,6 +495,8 @@ contract.
       row-count parity plus compact shadow scan-pruning fields before cutover.
     - [x] Require Rust-bridge search candidate evidence to prove text and
       vector retriever legs are both observed before LanceDB read cutover.
+    - [x] Require search-candidate shadow probe inputs to carry typed text and
+      vector retriever-leg evidence instead of producing weak ready probes.
   - Remove LanceDB from a route only after the matching search projection
     evidence is present in replacement summary.
 - [ ] Add retrieval projection options behind advisor gates.

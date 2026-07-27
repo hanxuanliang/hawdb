@@ -1163,6 +1163,32 @@ impl NowledgeMemSearchCandidateShadowAccumulator {
         self.blocker_codes.insert(code.into());
     }
 
+    pub fn record_retriever_leg(
+        &mut self,
+        name: impl AsRef<str>,
+        available: bool,
+        candidate_count: u64,
+    ) {
+        match name.as_ref() {
+            "text" => {
+                self.text_retriever_available |= available;
+                self.text_retriever_candidate_count = self
+                    .text_retriever_candidate_count
+                    .saturating_add(candidate_count);
+            }
+            "vector" => {
+                self.vector_retriever_available |= available;
+                self.vector_retriever_candidate_count = self
+                    .vector_retriever_candidate_count
+                    .saturating_add(candidate_count);
+            }
+            _ => {
+                self.blocker_codes
+                    .insert("search_candidate_unknown_retriever_leg".to_string());
+            }
+        }
+    }
+
     pub fn record_filter_pushdown_fields<I, S>(&mut self, pushed_predicate_count: u64, fields: I)
     where
         I: IntoIterator<Item = S>,
@@ -1328,28 +1354,24 @@ impl NowledgeMemSearchCandidateShadowAccumulator {
     }
 
     fn record_retriever_leg_report(&mut self, report: &NowledgeMemSearchCandidateReport) {
-        if report
-            .retriever_available
-            .get("text")
-            .copied()
-            .unwrap_or(false)
-        {
-            self.text_retriever_available = true;
-        }
-        if report
-            .retriever_available
-            .get("vector")
-            .copied()
-            .unwrap_or(false)
-        {
-            self.vector_retriever_available = true;
-        }
-        self.text_retriever_candidate_count = self
-            .text_retriever_candidate_count
-            .saturating_add(retriever_candidate_count(report, "text"));
-        self.vector_retriever_candidate_count = self
-            .vector_retriever_candidate_count
-            .saturating_add(retriever_candidate_count(report, "vector"));
+        self.record_retriever_leg(
+            "text",
+            report
+                .retriever_available
+                .get("text")
+                .copied()
+                .unwrap_or(false),
+            retriever_candidate_count(report, "text"),
+        );
+        self.record_retriever_leg(
+            "vector",
+            report
+                .retriever_available
+                .get("vector")
+                .copied()
+                .unwrap_or(false),
+            retriever_candidate_count(report, "vector"),
+        );
     }
 
     pub fn evidence(&self) -> NowledgeMemSearchCandidateShadowEvidence {

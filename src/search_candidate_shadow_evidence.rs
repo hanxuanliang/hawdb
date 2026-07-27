@@ -70,10 +70,29 @@ pub fn parse_search_candidate_shadow_probe(
             required_string_array(filter_pushdown, "fields")?,
         );
     }
+    let retriever_legs = required_object(value, "retriever_legs")?;
+    parse_retriever_leg(retriever_legs, "text", &mut accumulator)?;
+    parse_retriever_leg(retriever_legs, "vector", &mut accumulator)?;
     for blocker in optional_string_array(value, "blocker_codes")? {
         accumulator.add_blocker_code(blocker);
     }
     Ok(accumulator)
+}
+
+fn parse_retriever_leg(
+    value: &serde_json::Value,
+    name: &'static str,
+    accumulator: &mut NowledgeMemSearchCandidateShadowAccumulator,
+) -> Result<()> {
+    let leg = required_object(value, name)?;
+    let available = required_bool(leg, "available")?;
+    let candidate_count = required_u64(leg, "candidate_count")?;
+    accumulator.record_retriever_leg(name, available, candidate_count);
+    if available && candidate_count > 0 {
+        return Ok(());
+    }
+    accumulator.add_blocker_code(format!("search_candidate_{name}_retriever_unavailable"));
+    Ok(())
 }
 
 fn optional_field_summaries(
@@ -161,6 +180,20 @@ fn required_u64(value: &serde_json::Value, field: &str) -> Result<u64> {
         .ok_or_else(|| invalid_field(field, "integer"))
 }
 
+fn required_bool(value: &serde_json::Value, field: &str) -> Result<bool> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| invalid_field(field, "boolean"))
+}
+
+fn required_object<'a>(value: &'a serde_json::Value, field: &str) -> Result<&'a serde_json::Value> {
+    value
+        .get(field)
+        .filter(|raw| raw.is_object())
+        .ok_or_else(|| invalid_field(field, "object"))
+}
+
 fn optional_bool(value: &serde_json::Value, field: &str) -> Result<Option<bool>> {
     let Some(raw) = value.get(field) else {
         return Ok(None);
@@ -241,6 +274,10 @@ mod tests {
         assert_eq!(evidence["shadow_candidate_count"], 3);
         assert_eq!(evidence["matched_candidate_count"], 3);
         assert_eq!(evidence["primary_only_candidate_count"], 0);
+        assert_eq!(evidence["text_retriever_ready"], true);
+        assert_eq!(evidence["vector_retriever_ready"], true);
+        assert_eq!(evidence["retriever_leg_candidate_counts"]["text"], 3);
+        assert_eq!(evidence["retriever_leg_candidate_counts"]["vector"], 3);
         assert_eq!(evidence["candidate_identity"]["ready"], true);
         assert_eq!(evidence["filter_pushdown"]["ready"], true);
         assert_eq!(
@@ -258,6 +295,8 @@ mod tests {
 
         assert_eq!(evidence["ready"], true);
         assert_eq!(evidence["request_count"], 2);
+        assert_eq!(evidence["text_retriever_ready"], true);
+        assert_eq!(evidence["vector_retriever_ready"], true);
         assert_eq!(evidence["filter_pushdown"]["ready"], true);
     }
 
@@ -313,6 +352,38 @@ mod tests {
     }
 
     #[test]
+    fn search_candidate_shadow_probe_requires_retriever_leg_evidence() {
+        let mut probe = ready_probe();
+        probe.as_object_mut().unwrap().remove("retriever_legs");
+
+        let error = parse_search_candidate_shadow_probe(&probe).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "semantic error: search candidate shadow probe field 'retriever_legs' must be a object"
+        );
+    }
+
+    #[test]
+    fn search_candidate_shadow_probe_fails_closed_for_unavailable_retriever_leg() {
+        let mut probe = ready_probe();
+        probe["retriever_legs"]["vector"]["available"] = serde_json::json!(false);
+        probe["retriever_legs"]["vector"]["candidate_count"] = serde_json::json!(0);
+
+        let accumulator = parse_search_candidate_shadow_probe(&probe).unwrap();
+        let evidence = nowledge_mem_search_candidate_shadow_evidence_json(&accumulator.evidence());
+
+        assert_eq!(evidence["ready"], false);
+        assert_eq!(evidence["text_retriever_ready"], true);
+        assert_eq!(evidence["vector_retriever_ready"], false);
+        assert!(evidence["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "search_candidate_vector_retriever_unavailable"));
+    }
+
+    #[test]
     fn search_candidate_shadow_evidence_command_fails_closed_for_mismatch() {
         let path = unique_test_file("search_candidate_shadow_probe_mismatch");
         let mut probe = ready_probe();
@@ -345,6 +416,16 @@ mod tests {
             "filter_pushdown": {
                 "pushed_predicate_count": 1,
                 "fields": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
+            },
+            "retriever_legs": {
+                "text": {
+                    "available": true,
+                    "candidate_count": 3
+                },
+                "vector": {
+                    "available": true,
+                    "candidate_count": 3
+                }
             }
         })
     }
