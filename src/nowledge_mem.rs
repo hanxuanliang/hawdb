@@ -6727,6 +6727,106 @@ mod tests {
     }
 
     #[test]
+    fn embedded_store_reopens_search_projection_with_descriptor_pruning() {
+        let root = unique_nowledge_mem_test_dir("search_candidate_library_reopen_pruning");
+        let graph_path = root.join("graph");
+        let search_path = root.join("search");
+        {
+            let mut db = Database::open(&graph_path).unwrap();
+            db.query(
+                "CREATE (:Memory {id: 'active', title: 'Active candidate', space_id: 'default'})",
+            )
+            .unwrap();
+            db.checkpoint().unwrap();
+        }
+        {
+            let mut index = SearchIndex::open(&search_path).unwrap();
+            for (external_id, lifecycle_state, importance) in [
+                ("deleted", "deleted", "0.95"),
+                ("forgotten", "forgotten", "0.90"),
+                ("active", "active", "0.80"),
+            ] {
+                index
+                    .upsert_projection_row(SearchProjectionRow {
+                        kind: SearchProjectionKind::Memory,
+                        external_id: external_id.to_string(),
+                        title: format!("{external_id} candidate"),
+                        body: "checkpointed candidate read".to_string(),
+                        embedding: None,
+                        source_id: Some("source-1".to_string()),
+                        metadata: BTreeMap::from([
+                            ("space_id".to_string(), "default".to_string()),
+                            ("unit_type".to_string(), "memory".to_string()),
+                            ("lifecycle_state".to_string(), lifecycle_state.to_string()),
+                            ("importance".to_string(), importance.to_string()),
+                        ]),
+                    })
+                    .unwrap();
+            }
+            index.checkpoint().unwrap();
+        }
+
+        let options = NowledgeMemOpenOptions::with_search_projection(
+            graph_path,
+            search_path,
+            NowledgeMemGraphMode::ShadowReadOnly,
+        );
+        let (store, open_report) = NowledgeMemEmbeddedStore::open_with_options(options).unwrap();
+        let request = NowledgeMemSearchCandidateRequest::text("candidate read", 10)
+            .with_metadata_filters(BTreeMap::from([
+                (
+                    "lifecycle_state__not_in".to_string(),
+                    r#"["deleted","forgotten"]"#.to_string(),
+                ),
+                ("importance__gte".to_string(), "0.8".to_string()),
+            ]));
+
+        let output = store.search_candidates(&request).unwrap();
+
+        assert!(open_report.graph_opened);
+        assert!(open_report.search_projection_opened);
+        assert_eq!(output.result.total_hits, 1);
+        assert_eq!(output.result.hits[0].id, "memory:active");
+        assert_eq!(output.report.metadata_filter_count, 2);
+        assert_eq!(output.report.pushed_predicate_count, 2);
+        assert_eq!(output.report.residual_predicate_count, 0);
+        assert!(output.report.persisted_segment_descriptor_used);
+        assert_eq!(output.report.segment_count, 2);
+        assert_eq!(output.report.pruned_segment_count, 1);
+        assert_eq!(output.report.scanned_segment_count, 1);
+        assert_eq!(output.report.filtered_out_count, 2);
+        assert!(output
+            .report
+            .candidate_set
+            .metadata_predicate_pushdown
+            .field_summaries
+            .iter()
+            .any(|summary| summary.field == "lifecycle_state" && summary.value_summary_used));
+        assert!(output
+            .report
+            .candidate_set
+            .metadata_predicate_pushdown
+            .field_summaries
+            .iter()
+            .any(|summary| summary.field == "importance" && summary.numeric_range_summary_used));
+
+        let direct_evidence = store
+            .search_candidate_shadow_evidence_json(&request, ["memory:active"])
+            .unwrap();
+        assert_eq!(direct_evidence["ready"], true);
+        assert_eq!(
+            direct_evidence["filter_pushdown"]["field_capabilities_ready"],
+            true
+        );
+        assert_eq!(
+            direct_evidence["filter_pushdown"]["missing_numeric_range_fields"],
+            serde_json::json!([])
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn search_projection_candidate_api_reports_vector_generation_inputs() {
         let root = unique_nowledge_mem_test_dir("search_candidate_api_vector");
         {

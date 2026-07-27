@@ -160,6 +160,9 @@ contract.
   - [x] Add a Mem-shaped graph recovery fixture that checkpoints Source,
     Thread, and Memory state, replays a post-checkpoint Memory-to-Entity
     relationship WAL batch, and verifies typed storage recovery readiness.
+  - [x] Add a Mem-shaped search projection recovery fixture that reopens graph
+    and search paths through the embedded library and verifies checkpointed
+    segment descriptors still prune lifecycle and numeric candidate filters.
 - [ ] PR 7: Make background QoS a readiness gate.
   - Scope: connect resource classes for import, projection, compaction,
     analytics, and migration work to typed background-maintenance readiness.
