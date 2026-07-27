@@ -1,3 +1,4 @@
+use crate::workload_fixtures::NOWLEDGE_GRAPH_ROUTE_WORKLOAD_FIXTURE_PROTOCOL;
 use crate::{
     graph_route_readiness::{
         NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL, NMEM_GRAPH_ROUTE_READINESS_PROTOCOL,
@@ -110,6 +111,8 @@ pub fn nowledge_replacement_summary_json_with_options(
     let graph_route_readiness_ready = graph_route_readiness.ready;
     let query_runtime_preflight = query_runtime_preflight_summary(bundle);
     let query_runtime_preflight_ready = query_runtime_preflight.ready;
+    let workload_fixture_evidence = workload_fixture_evidence_summary(bundle);
+    let workload_fixture_evidence_ready = workload_fixture_evidence.ready;
     let background_graph_delta_evidence_missing =
         background_maintenance_graph_delta_evidence_missing(bundle);
     let family_health = replacement_readiness_family_evidence_health_from_bundle(bundle);
@@ -129,6 +132,7 @@ pub fn nowledge_replacement_summary_json_with_options(
         && bounded_read_evidence_ready
         && graph_route_readiness_ready
         && query_runtime_preflight_ready
+        && workload_fixture_evidence_ready
         && !background_graph_delta_evidence_missing
         && family_evidence_ready
         && replacement_readiness_per_million == Some(1_000_000);
@@ -158,6 +162,7 @@ pub fn nowledge_replacement_summary_json_with_options(
             bounded_read_evidence_ready,
             graph_route_readiness_ready,
             query_runtime_preflight_ready,
+            workload_fixture_evidence_ready,
             background_graph_delta_evidence_missing,
             family_evidence_ready,
         },
@@ -188,13 +193,28 @@ pub fn nowledge_replacement_summary_json_with_options(
             bounded_read_evidence_ready,
             graph_route_readiness_ready,
             query_runtime_preflight_ready,
+            workload_fixture_evidence_ready,
             background_graph_delta_evidence_missing,
             family_evidence_ready,
             production_cutover_ready,
         },
     );
 
-    serde_json::json!({
+    let workload_fixture_evidence_json = serde_json::json!({
+        "protocol": workload_fixture_evidence.protocol,
+        "present": workload_fixture_evidence.present,
+        "ready": workload_fixture_evidence.ready,
+        "route_count": workload_fixture_evidence.route_count,
+        "query_count": workload_fixture_evidence.query_count,
+        "failed_query_count": workload_fixture_evidence.failed_query_count,
+        "bounded_expansion_probe_count": workload_fixture_evidence.bounded_expansion_probe_count,
+        "failed_bounded_expansion_probe_count": workload_fixture_evidence.failed_bounded_expansion_probe_count,
+        "search_metadata_probe_count": workload_fixture_evidence.search_metadata_probe_count,
+        "failed_search_metadata_probe_count": workload_fixture_evidence.failed_search_metadata_probe_count,
+        "blocker_codes": workload_fixture_evidence.blocker_codes,
+    });
+
+    let mut summary = serde_json::json!({
         "protocol": "skein-nowledge-replacement-summary",
         "business_surface": {
             "covered_per_million": covered_business_surface_per_million,
@@ -373,7 +393,14 @@ pub fn nowledge_replacement_summary_json_with_options(
         "next_actions": next_actions,
         "replacement_readiness_family_summary": family_summary,
         "replacement_readiness_by_query_family": family_details.families,
-    })
+    });
+    if let Some(object) = summary.as_object_mut() {
+        object.insert(
+            "workload_fixture_evidence".to_string(),
+            workload_fixture_evidence_json,
+        );
+    }
+    summary
 }
 
 struct NowledgeReplacementBlockerDetails {
@@ -501,6 +528,7 @@ struct ReplacementReadinessInputs<'a> {
     bounded_read_evidence_ready: bool,
     graph_route_readiness_ready: bool,
     query_runtime_preflight_ready: bool,
+    workload_fixture_evidence_ready: bool,
     background_graph_delta_evidence_missing: bool,
     family_evidence_ready: bool,
 }
@@ -524,6 +552,7 @@ struct NextActionInputs<'a> {
     bounded_read_evidence_ready: bool,
     graph_route_readiness_ready: bool,
     query_runtime_preflight_ready: bool,
+    workload_fixture_evidence_ready: bool,
     background_graph_delta_evidence_missing: bool,
     family_evidence_ready: bool,
     production_cutover_ready: bool,
@@ -743,6 +772,20 @@ struct QueryRuntimePreflightSummary {
     required_routes_covered: Option<bool>,
     route_coverage_ready: bool,
     probe_details_ready: bool,
+    blocker_codes: serde_json::Value,
+}
+
+struct WorkloadFixtureEvidenceSummary {
+    protocol: Option<String>,
+    present: bool,
+    ready: bool,
+    route_count: Option<u64>,
+    query_count: Option<u64>,
+    failed_query_count: Option<u64>,
+    bounded_expansion_probe_count: Option<u64>,
+    failed_bounded_expansion_probe_count: Option<u64>,
+    search_metadata_probe_count: Option<u64>,
+    failed_search_metadata_probe_count: Option<u64>,
     blocker_codes: serde_json::Value,
 }
 
@@ -2084,6 +2127,50 @@ fn query_runtime_preflight_summary(bundle: &serde_json::Value) -> QueryRuntimePr
     }
 }
 
+fn workload_fixture_evidence_summary(bundle: &serde_json::Value) -> WorkloadFixtureEvidenceSummary {
+    let path = if json_get_path(bundle, &["workload_fixture_evidence"]).is_some() {
+        &["workload_fixture_evidence"][..]
+    } else {
+        &["cutover_evidence", "workload_fixture_evidence"][..]
+    };
+    let present = json_get_path(bundle, path).is_some();
+    let protocol = json_get_str_path_from_dynamic(bundle, path, "protocol").map(str::to_string);
+    let route_count = json_get_u64_path_from_dynamic(bundle, path, "route_count");
+    let query_count = json_get_u64_path_from_dynamic(bundle, path, "query_count");
+    let failed_query_count = json_get_u64_path_from_dynamic(bundle, path, "failed_query_count");
+    let bounded_expansion_probe_count =
+        json_get_u64_path_from_dynamic(bundle, path, "bounded_expansion_probe_count");
+    let failed_bounded_expansion_probe_count =
+        json_get_u64_path_from_dynamic(bundle, path, "failed_bounded_expansion_probe_count");
+    let search_metadata_probe_count =
+        json_get_u64_path_from_dynamic(bundle, path, "search_metadata_probe_count");
+    let failed_search_metadata_probe_count =
+        json_get_u64_path_from_dynamic(bundle, path, "failed_search_metadata_probe_count");
+    let ready = present
+        && protocol.as_deref() == Some(NOWLEDGE_GRAPH_ROUTE_WORKLOAD_FIXTURE_PROTOCOL)
+        && json_get_bool_path_from_dynamic(bundle, path, "ready") == Some(true)
+        && route_count.is_some_and(|count| count > 0)
+        && query_count.is_some_and(|count| count > 0)
+        && failed_query_count == Some(0)
+        && bounded_expansion_probe_count.is_some_and(|count| count > 0)
+        && failed_bounded_expansion_probe_count == Some(0)
+        && search_metadata_probe_count.is_some_and(|count| count > 0)
+        && failed_search_metadata_probe_count == Some(0);
+    WorkloadFixtureEvidenceSummary {
+        protocol,
+        present,
+        ready,
+        route_count,
+        query_count,
+        failed_query_count,
+        bounded_expansion_probe_count,
+        failed_bounded_expansion_probe_count,
+        search_metadata_probe_count,
+        failed_search_metadata_probe_count,
+        blocker_codes: json_get_array_path_from_dynamic(bundle, path, "blocker_codes"),
+    }
+}
+
 fn duplicate_strings(values: &[String]) -> Vec<String> {
     let mut counts = BTreeMap::<&str, usize>::new();
     for value in values {
@@ -2240,6 +2327,9 @@ fn nowledge_replacement_blocking_categories(
     }
     if !inputs.query_runtime_preflight_ready {
         categories.insert("query_runtime_preflight".to_string());
+    }
+    if !inputs.workload_fixture_evidence_ready {
+        categories.insert("workload_fixture_evidence".to_string());
     }
     if json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_required"]) == Some(true)
         && json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_ready"]) != Some(true)
@@ -2538,6 +2628,25 @@ fn nowledge_replacement_next_actions(
             ],
         ));
     }
+    if !inputs.workload_fixture_evidence_ready {
+        actions.push(next_action(
+            "run_workload_fixture_evidence",
+            "graph route, bounded expansion, or metadata-filtered search workload fixture evidence is missing or not ready",
+            [
+                "workload_fixture_evidence.protocol",
+                "workload_fixture_evidence.present",
+                "workload_fixture_evidence.ready",
+                "workload_fixture_evidence.route_count",
+                "workload_fixture_evidence.query_count",
+                "workload_fixture_evidence.failed_query_count",
+                "workload_fixture_evidence.bounded_expansion_probe_count",
+                "workload_fixture_evidence.failed_bounded_expansion_probe_count",
+                "workload_fixture_evidence.search_metadata_probe_count",
+                "workload_fixture_evidence.failed_search_metadata_probe_count",
+                "workload_fixture_evidence.blocker_codes",
+            ],
+        ));
+    }
     if json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_required"]) == Some(true)
         && json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_ready"]) != Some(true)
     {
@@ -2683,6 +2792,13 @@ fn nowledge_replacement_missing_evidence(bundle: &serde_json::Value) -> Vec<Stri
     } else if !query_runtime_preflight_summary(bundle).ready {
         missing.push("query_runtime_preflight_ready".to_string());
     }
+    if bundle.get("workload_fixture_evidence").is_none()
+        && json_get_path(bundle, &["cutover_evidence", "workload_fixture_evidence"]).is_none()
+    {
+        missing.push("workload_fixture_evidence".to_string());
+    } else if !workload_fixture_evidence_summary(bundle).ready {
+        missing.push("workload_fixture_evidence_ready".to_string());
+    }
     if bundle.get("shadow_run").is_none() {
         missing.push("shadow_run".to_string());
     }
@@ -2789,6 +2905,12 @@ fn nowledge_replacement_blockers(bundle: &serde_json::Value) -> Vec<String> {
             "query_runtime_preflight",
             "failed_checks",
         ][..],
+        &["workload_fixture_evidence", "blocker_codes"][..],
+        &[
+            "cutover_evidence",
+            "workload_fixture_evidence",
+            "blocker_codes",
+        ][..],
     ] {
         for blocker in json_get_string_array_path(bundle, path) {
             blockers.insert(blocker);
@@ -2885,6 +3007,7 @@ mod tests {
     };
     use crate::{
         nowledge_mem_graph_read_route_spec, nowledge_mem_graph_read_route_specs_json,
+        NOWLEDGE_GRAPH_ROUTE_WORKLOAD_FIXTURE_PROTOCOL,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_ENGINE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_EVIDENCE_SOURCE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_PRIMARY_ENGINE,
@@ -2933,7 +3056,8 @@ mod tests {
                 "search_candidate_shadow_evidence",
                 "search_projection_evidence",
                 "search_projection_shadow_evidence",
-                "shadow_parity"
+                "shadow_parity",
+                "workload_fixture_evidence"
             ])
         );
         assert!(summary["missing_evidence"]
@@ -2997,6 +3121,20 @@ mod tests {
         assert_eq!(
             summary["query_runtime_preflight"]["probe_details_ready"],
             true
+        );
+        assert_eq!(summary["workload_fixture_evidence"]["present"], true);
+        assert_eq!(summary["workload_fixture_evidence"]["ready"], true);
+        assert_eq!(
+            summary["workload_fixture_evidence"]["failed_query_count"],
+            0
+        );
+        assert_eq!(
+            summary["workload_fixture_evidence"]["failed_bounded_expansion_probe_count"],
+            0
+        );
+        assert_eq!(
+            summary["workload_fixture_evidence"]["failed_search_metadata_probe_count"],
+            0
         );
         assert_eq!(
             summary["cutover_evidence"]["storage_recovery_protocol_matches"],
@@ -4648,6 +4786,68 @@ mod tests {
     }
 
     #[test]
+    fn replacement_summary_requires_workload_fixture_evidence() {
+        let mut bundle = production_ready_bundle();
+        bundle
+            .as_object_mut()
+            .unwrap()
+            .remove("workload_fixture_evidence");
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["workload_fixture_evidence"]["ready"], false);
+        assert!(summary["blocking_categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "workload_fixture_evidence"));
+        assert!(summary["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "workload_fixture_evidence"));
+        assert!(summary["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "run_workload_fixture_evidence"));
+    }
+
+    #[test]
+    fn replacement_summary_rejects_failed_workload_fixture_probe_counts() {
+        let mut bundle = production_ready_bundle();
+        bundle["workload_fixture_evidence"]["ready"] = serde_json::json!(false);
+        bundle["workload_fixture_evidence"]["failed_search_metadata_probe_count"] =
+            serde_json::json!(1);
+        bundle["workload_fixture_evidence"]["blocker_codes"] =
+            serde_json::json!(["workload_fixture_search_metadata_not_ready"]);
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(
+            summary["workload_fixture_evidence"]["failed_search_metadata_probe_count"],
+            1
+        );
+        assert!(summary["blocking_categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "workload_fixture_evidence"));
+        assert!(summary["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "workload_fixture_evidence_ready"));
+        assert!(summary["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "workload_fixture_search_metadata_not_ready"));
+    }
+
+    #[test]
     fn replacement_summary_blocks_production_without_graph_delta_aggregate_evidence() {
         let mut bundle = production_ready_bundle();
         bundle["cutover_evidence"]
@@ -5096,7 +5296,8 @@ mod tests {
                 "search_projection_evidence",
                 "search_projection_shadow_evidence",
                 "shadow_parity",
-                "storage_recovery"
+                "storage_recovery",
+                "workload_fixture_evidence"
             ])
         );
         assert_eq!(
@@ -5114,6 +5315,7 @@ mod tests {
                 "bounded_read_evidence",
                 "graph_route_readiness",
                 "query_runtime_preflight",
+                "workload_fixture_evidence",
                 "shadow_run",
                 "shadow_ready"
             ])
@@ -5351,6 +5553,23 @@ mod tests {
                     ]
                 },
                 {
+                    "action": "run_workload_fixture_evidence",
+                    "reason": "graph route, bounded expansion, or metadata-filtered search workload fixture evidence is missing or not ready",
+                    "evidence_fields": [
+                        "workload_fixture_evidence.protocol",
+                        "workload_fixture_evidence.present",
+                        "workload_fixture_evidence.ready",
+                        "workload_fixture_evidence.route_count",
+                        "workload_fixture_evidence.query_count",
+                        "workload_fixture_evidence.failed_query_count",
+                        "workload_fixture_evidence.bounded_expansion_probe_count",
+                        "workload_fixture_evidence.failed_bounded_expansion_probe_count",
+                        "workload_fixture_evidence.search_metadata_probe_count",
+                        "workload_fixture_evidence.failed_search_metadata_probe_count",
+                        "workload_fixture_evidence.blocker_codes"
+                    ]
+                },
+                {
                     "action": "attach_storage_recovery_report",
                     "reason": "required storage recovery evidence is missing or blocked",
                     "evidence_fields": [
@@ -5574,6 +5793,7 @@ mod tests {
                 "covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
                 "blocker_codes": []
             },
+            "workload_fixture_evidence": ready_workload_fixture_evidence(),
             "graph_route_readiness": ready_graph_route_readiness(),
             "query_runtime_preflight": query_runtime_preflight,
             "previous_wrapper_contract_evidence": {
@@ -5749,6 +5969,22 @@ mod tests {
             "route_coverage_blocker_codes": [],
             "blocker_codes": [],
             "probes": probes,
+        })
+    }
+
+    fn ready_workload_fixture_evidence() -> serde_json::Value {
+        serde_json::json!({
+            "protocol": NOWLEDGE_GRAPH_ROUTE_WORKLOAD_FIXTURE_PROTOCOL,
+            "present": true,
+            "ready": true,
+            "route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+            "query_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+            "failed_query_count": 0,
+            "bounded_expansion_probe_count": 2,
+            "failed_bounded_expansion_probe_count": 0,
+            "search_metadata_probe_count": 3,
+            "failed_search_metadata_probe_count": 0,
+            "blocker_codes": []
         })
     }
 

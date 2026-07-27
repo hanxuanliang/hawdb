@@ -332,6 +332,10 @@ contract.
     the typed workload-fixture library readiness area, so graph route, bounded
     expansion, and metadata-filtered search workload evidence cannot be omitted
     from cutover gates.
+  - [x] Require replacement summary and final previous-wrapper preflight to
+    validate workload-fixture evidence fields directly, so a forged
+    `production_cutover_ready=true` summary cannot omit graph route, bounded
+    expansion, or metadata-filtered search fixture coverage.
 - [x] PR 9: Add the final cutover preflight bundle gate.
   - Scope: combine route coverage, graph evidence, LanceDB projection evidence,
     storage recovery, background QoS, redaction, and library-only integration

@@ -1,8 +1,9 @@
 use crate::{
     nowledge_mem_graph_read_route_catalog_digest, Result, SkeinError,
-    NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL, NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
-    NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
-    NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE, NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE,
+    NOWLEDGE_GRAPH_ROUTE_WORKLOAD_FIXTURE_PROTOCOL, NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL,
+    NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
+    NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE,
+    NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE,
     NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
     NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
 };
@@ -843,6 +844,44 @@ pub fn nowledge_previous_wrapper_preflight_check(
                     &replacement_summary,
                     "filter_pushdown_missing_timestamp_range_fields",
                 ),
+                str_path(&replacement_summary, &["workload_fixture_evidence", "protocol"])
+                    == Some(NOWLEDGE_GRAPH_ROUTE_WORKLOAD_FIXTURE_PROTOCOL),
+                bool_path(&replacement_summary, &["workload_fixture_evidence", "present"])
+                    == Some(true),
+                bool_path(&replacement_summary, &["workload_fixture_evidence", "ready"])
+                    == Some(true),
+                u64_path(&replacement_summary, &["workload_fixture_evidence", "route_count"])
+                    .is_some_and(|count| count > 0),
+                u64_path(&replacement_summary, &["workload_fixture_evidence", "query_count"])
+                    .is_some_and(|count| count > 0),
+                u64_path(
+                    &replacement_summary,
+                    &["workload_fixture_evidence", "failed_query_count"],
+                ) == Some(0),
+                u64_path(
+                    &replacement_summary,
+                    &["workload_fixture_evidence", "bounded_expansion_probe_count"],
+                )
+                .is_some_and(|count| count > 0),
+                u64_path(
+                    &replacement_summary,
+                    &[
+                        "workload_fixture_evidence",
+                        "failed_bounded_expansion_probe_count",
+                    ],
+                ) == Some(0),
+                u64_path(
+                    &replacement_summary,
+                    &["workload_fixture_evidence", "search_metadata_probe_count"],
+                )
+                .is_some_and(|count| count > 0),
+                u64_path(
+                    &replacement_summary,
+                    &[
+                        "workload_fixture_evidence",
+                        "failed_search_metadata_probe_count",
+                    ],
+                ) == Some(0),
             ],
             [
                 "production_cutover_ready",
@@ -917,6 +956,16 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 "search_candidate_shadow_evidence.filter_pushdown_missing_value_summary_fields",
                 "search_candidate_shadow_evidence.filter_pushdown_missing_numeric_range_fields",
                 "search_candidate_shadow_evidence.filter_pushdown_missing_timestamp_range_fields",
+                "workload_fixture_evidence.protocol",
+                "workload_fixture_evidence.present",
+                "workload_fixture_evidence.ready",
+                "workload_fixture_evidence.route_count",
+                "workload_fixture_evidence.query_count",
+                "workload_fixture_evidence.failed_query_count",
+                "workload_fixture_evidence.bounded_expansion_probe_count",
+                "workload_fixture_evidence.failed_bounded_expansion_probe_count",
+                "workload_fixture_evidence.search_metadata_probe_count",
+                "workload_fixture_evidence.failed_search_metadata_probe_count",
             ],
             blocker_codes(
                 &replacement_summary,
@@ -927,6 +976,7 @@ pub fn nowledge_previous_wrapper_preflight_check(
                     &["search_projection_evidence", "blocker_codes"][..],
                     &["search_projection_shadow_evidence", "blocker_codes"][..],
                     &["search_candidate_shadow_evidence", "blocker_codes"][..],
+                    &["workload_fixture_evidence", "blocker_codes"][..],
                 ],
             ),
         ),
@@ -2602,8 +2652,9 @@ mod tests {
         run_nowledge_previous_wrapper_preflight_check, PreviousWrapperPreflightCheckInputs,
     };
     use crate::{
-        nowledge_mem_graph_read_route_catalog_digest, NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL,
-        NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
+        nowledge_mem_graph_read_route_catalog_digest,
+        NOWLEDGE_GRAPH_ROUTE_WORKLOAD_FIXTURE_PROTOCOL,
+        NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL, NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE,
@@ -3027,7 +3078,17 @@ mod tests {
                 "search_candidate_shadow_evidence.filter_pushdown_field_capabilities_ready",
                 "search_candidate_shadow_evidence.filter_pushdown_missing_value_summary_fields",
                 "search_candidate_shadow_evidence.filter_pushdown_missing_numeric_range_fields",
-                "search_candidate_shadow_evidence.filter_pushdown_missing_timestamp_range_fields"
+                "search_candidate_shadow_evidence.filter_pushdown_missing_timestamp_range_fields",
+                "workload_fixture_evidence.protocol",
+                "workload_fixture_evidence.present",
+                "workload_fixture_evidence.ready",
+                "workload_fixture_evidence.route_count",
+                "workload_fixture_evidence.query_count",
+                "workload_fixture_evidence.failed_query_count",
+                "workload_fixture_evidence.bounded_expansion_probe_count",
+                "workload_fixture_evidence.failed_bounded_expansion_probe_count",
+                "workload_fixture_evidence.search_metadata_probe_count",
+                "workload_fixture_evidence.failed_search_metadata_probe_count"
             ])
         );
         assert_eq!(
@@ -3313,6 +3374,36 @@ mod tests {
                 "search_candidate_shadow_evidence.projection_watermark_ready",
                 "search_candidate_shadow_evidence.embedding_identity_ready"
             ])
+        );
+    }
+
+    #[test]
+    fn preflight_check_requires_summary_workload_fixture_evidence() {
+        let mut inputs = ready_inputs();
+        let replacement_summary = inputs.replacement_summary.as_mut().unwrap();
+        replacement_summary["workload_fixture_evidence"]["ready"] = serde_json::json!(false);
+        replacement_summary["workload_fixture_evidence"]["failed_query_count"] =
+            serde_json::json!(1);
+        replacement_summary["workload_fixture_evidence"]["blocker_codes"] =
+            serde_json::json!(["workload_fixture_route_queries_not_ready"]);
+
+        let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["replacement_summary"])
+        );
+        assert_eq!(
+            check_by_name(&report, "replacement_summary")["failed_evidence_fields"],
+            serde_json::json!([
+                "workload_fixture_evidence.ready",
+                "workload_fixture_evidence.failed_query_count"
+            ])
+        );
+        assert_eq!(
+            check_by_name(&report, "replacement_summary")["blocker_codes"],
+            serde_json::json!(["workload_fixture_route_queries_not_ready"])
         );
     }
 
@@ -4112,6 +4203,7 @@ mod tests {
                 "search_projection_shadow_evidence": ready_search_projection_shadow_evidence(),
                 "search_candidate_shadow_evidence": ready_search_candidate_shadow_evidence(),
                 "bounded_read_evidence": ready_bounded_read_evidence(),
+                "workload_fixture_evidence": ready_workload_fixture_evidence(),
                 "graph_route_readiness": ready_route_catalog_metadata(),
                 "query_runtime_preflight": ready_route_catalog_metadata()
             })),
@@ -4124,6 +4216,22 @@ mod tests {
         serde_json::json!({
             "route_catalog_version": NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
             "route_catalog_digest": nowledge_mem_graph_read_route_catalog_digest(),
+            "blocker_codes": []
+        })
+    }
+
+    fn ready_workload_fixture_evidence() -> serde_json::Value {
+        serde_json::json!({
+            "protocol": NOWLEDGE_GRAPH_ROUTE_WORKLOAD_FIXTURE_PROTOCOL,
+            "present": true,
+            "ready": true,
+            "route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+            "query_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+            "failed_query_count": 0,
+            "bounded_expansion_probe_count": 2,
+            "failed_bounded_expansion_probe_count": 0,
+            "search_metadata_probe_count": 3,
+            "failed_search_metadata_probe_count": 0,
             "blocker_codes": []
         })
     }
