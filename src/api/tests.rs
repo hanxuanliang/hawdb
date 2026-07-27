@@ -34291,6 +34291,12 @@ fn exposes_property_index_descriptors_and_statistics() {
         .property_histograms
         .values()
         .any(|values| { values == &vec![Value::Int(1), Value::Int(2), Value::Int(3)] }));
+    let distinct_report = db.distinct_value_statistics_consistency_report();
+    assert!(distinct_report.ready);
+    assert_eq!(
+        distinct_report.maintained_property_distinct_counts,
+        distinct_report.recomputed_property_distinct_counts
+    );
 
     let read_tx = db.begin_read_transaction();
     db.query("CREATE (:Memory {id: 4, kind: 'note'})").unwrap();

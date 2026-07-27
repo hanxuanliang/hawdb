@@ -161,6 +161,18 @@ pub struct DegreeStatisticsConsistencyReport {
     pub mismatched_keys: Vec<DegreeStatisticsKey>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DistinctValueStatisticsConsistencyReport {
+    pub ready: bool,
+    pub computed_at_commit_epoch: u64,
+    pub maintained_property_distinct_counts: BTreeMap<(LabelId, String), u64>,
+    pub recomputed_property_distinct_counts: BTreeMap<(LabelId, String), u64>,
+    pub maintained_rel_property_distinct_counts: BTreeMap<(RelTypeId, String), u64>,
+    pub recomputed_rel_property_distinct_counts: BTreeMap<(RelTypeId, String), u64>,
+    pub mismatched_property_keys: Vec<(LabelId, String)>,
+    pub mismatched_rel_property_keys: Vec<(RelTypeId, String)>,
+}
+
 type CompositePropertyKey = Vec<(String, Value)>;
 type CompositePropertyIndex = BTreeMap<(LabelId, CompositePropertyKey), BTreeSet<NodeId>>;
 type FullTextPropertyIndex = BTreeMap<(LabelId, String, String), BTreeSet<NodeId>>;
@@ -768,6 +780,51 @@ impl DegreeStatisticsConsistencyReport {
             maintained,
             recomputed,
             mismatched_keys,
+        }
+    }
+}
+
+impl DistinctValueStatisticsConsistencyReport {
+    fn new(
+        computed_at_commit_epoch: u64,
+        maintained_property_distinct_counts: BTreeMap<(LabelId, String), u64>,
+        recomputed_property_distinct_counts: BTreeMap<(LabelId, String), u64>,
+        maintained_rel_property_distinct_counts: BTreeMap<(RelTypeId, String), u64>,
+        recomputed_rel_property_distinct_counts: BTreeMap<(RelTypeId, String), u64>,
+    ) -> Self {
+        let mismatched_property_keys = maintained_property_distinct_counts
+            .keys()
+            .chain(recomputed_property_distinct_counts.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter(|key| {
+                maintained_property_distinct_counts.get(key)
+                    != recomputed_property_distinct_counts.get(key)
+            })
+            .take(MAX_ADJACENCY_CONSISTENCY_SAMPLES)
+            .collect::<Vec<_>>();
+        let mismatched_rel_property_keys = maintained_rel_property_distinct_counts
+            .keys()
+            .chain(recomputed_rel_property_distinct_counts.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter(|key| {
+                maintained_rel_property_distinct_counts.get(key)
+                    != recomputed_rel_property_distinct_counts.get(key)
+            })
+            .take(MAX_ADJACENCY_CONSISTENCY_SAMPLES)
+            .collect::<Vec<_>>();
+        Self {
+            ready: mismatched_property_keys.is_empty() && mismatched_rel_property_keys.is_empty(),
+            computed_at_commit_epoch,
+            maintained_property_distinct_counts,
+            recomputed_property_distinct_counts,
+            maintained_rel_property_distinct_counts,
+            recomputed_rel_property_distinct_counts,
+            mismatched_property_keys,
+            mismatched_rel_property_keys,
         }
     }
 }
@@ -4659,6 +4716,21 @@ impl GraphStore {
             self.commit_epoch,
             compute_degree_statistics_from_adjacency(&self.nodes, &self.outgoing, &self.incoming),
             compute_degree_statistics_from_relationships(&self.nodes, &self.relationships),
+        )
+    }
+
+    pub fn distinct_value_statistics_consistency_report(
+        &self,
+    ) -> DistinctValueStatisticsConsistencyReport {
+        let recomputed = compute_statistics(&self.nodes, &self.relationships, self.commit_epoch);
+        DistinctValueStatisticsConsistencyReport::new(
+            self.commit_epoch,
+            compute_node_property_distinct_counts_from_index(&self.property_index),
+            recomputed.property_distinct_counts,
+            compute_relationship_property_distinct_counts_from_index(
+                &self.relationship_property_index,
+            ),
+            recomputed.rel_property_distinct_counts,
         )
     }
 
@@ -9608,6 +9680,26 @@ fn compute_statistics_with_basic(
     statistics
 }
 
+fn compute_node_property_distinct_counts_from_index(
+    property_index: &BTreeMap<(LabelId, String, Value), BTreeSet<NodeId>>,
+) -> BTreeMap<(LabelId, String), u64> {
+    let mut counts = BTreeMap::new();
+    for (label_id, property, _) in property_index.keys() {
+        *counts.entry((*label_id, property.clone())).or_default() += 1;
+    }
+    counts
+}
+
+fn compute_relationship_property_distinct_counts_from_index(
+    relationship_property_index: &RelationshipPropertyIndex,
+) -> BTreeMap<(RelTypeId, String), u64> {
+    let mut counts = BTreeMap::new();
+    for (rel_type, property, _) in relationship_property_index.keys() {
+        *counts.entry((*rel_type, property.clone())).or_default() += 1;
+    }
+    counts
+}
+
 fn compute_basic_statistics(
     nodes: &BTreeMap<NodeId, NodeRecord>,
     relationships: &BTreeMap<RelId, RelRecord>,
@@ -12669,6 +12761,131 @@ mod tests {
                 })
                 .map(|entry| (entry.max_degree, entry.dense_node_count)),
             Some((DENSE_ADJACENCY_DEGREE_THRESHOLD as u64, 1))
+        );
+    }
+
+    #[test]
+    fn distinct_value_statistics_consistency_report_matches_index_after_mutations() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        let source = store
+            .create_node(
+                &mut catalog,
+                "Memory",
+                properties([
+                    ("id", Value::String("memory:1".to_string())),
+                    ("unit_type", Value::String("note".to_string())),
+                    ("importance", Value::Float(0.2)),
+                ]),
+            )
+            .unwrap();
+        store
+            .create_node(
+                &mut catalog,
+                "Memory",
+                properties([
+                    ("id", Value::String("memory:2".to_string())),
+                    ("unit_type", Value::String("task".to_string())),
+                    ("importance", Value::Float(0.7)),
+                ]),
+            )
+            .unwrap();
+        let target = store
+            .create_node(
+                &mut catalog,
+                "Entity",
+                properties([("id", Value::String("entity:1".to_string()))]),
+            )
+            .unwrap();
+        let weak = store
+            .create_relationship(
+                &mut catalog,
+                source,
+                target,
+                "MENTIONS",
+                properties([("confidence", Value::Float(0.2))]),
+            )
+            .unwrap();
+        store
+            .create_relationship(
+                &mut catalog,
+                source,
+                target,
+                "MENTIONS",
+                properties([("confidence", Value::Float(0.7))]),
+            )
+            .unwrap();
+
+        let report = store.distinct_value_statistics_consistency_report();
+        let memory_label = catalog.label_id("Memory").unwrap();
+        let rel_type = catalog.rel_type_id("MENTIONS").unwrap();
+        assert!(report.ready);
+        assert_eq!(
+            report
+                .maintained_property_distinct_counts
+                .get(&(memory_label, "unit_type".to_string())),
+            Some(&2)
+        );
+        assert_eq!(
+            report
+                .maintained_property_distinct_counts
+                .get(&(memory_label, "importance".to_string())),
+            Some(&2)
+        );
+        assert_eq!(
+            report
+                .maintained_rel_property_distinct_counts
+                .get(&(rel_type, "confidence".to_string())),
+            Some(&2)
+        );
+
+        store
+            .set_node_property(
+                &mut catalog,
+                "Memory",
+                Some(&PropertyFilter::Eq {
+                    property: "id".to_string(),
+                    value: Value::String("memory:2".to_string()),
+                }),
+                "unit_type",
+                Value::String("note".to_string()),
+            )
+            .unwrap();
+        store.apply_set_relationship_property(weak, "confidence".to_string(), Value::Float(0.7));
+
+        let report = store.distinct_value_statistics_consistency_report();
+        assert!(report.ready);
+        assert!(report.mismatched_property_keys.is_empty());
+        assert!(report.mismatched_rel_property_keys.is_empty());
+        assert_eq!(
+            report.maintained_property_distinct_counts,
+            report.recomputed_property_distinct_counts
+        );
+        assert_eq!(
+            report.maintained_rel_property_distinct_counts,
+            report.recomputed_rel_property_distinct_counts
+        );
+        assert_eq!(
+            report
+                .maintained_property_distinct_counts
+                .get(&(memory_label, "unit_type".to_string())),
+            Some(&1)
+        );
+        assert_eq!(
+            report
+                .maintained_rel_property_distinct_counts
+                .get(&(rel_type, "confidence".to_string())),
+            Some(&1)
+        );
+
+        store.apply_delete_relationship(weak);
+        let report = store.distinct_value_statistics_consistency_report();
+        assert!(report.ready);
+        assert_eq!(
+            report
+                .maintained_rel_property_distinct_counts
+                .get(&(rel_type, "confidence".to_string())),
+            Some(&1)
         );
     }
 

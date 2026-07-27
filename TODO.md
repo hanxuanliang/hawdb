@@ -666,6 +666,9 @@ contract.
   - [x] Expose compact degree-statistics consistency evidence grouped by label,
     relationship type, and direction for bounded expansion and dense-adjacency
     planning.
+  - [x] Expose a typed distinct-value statistics consistency report that
+    compares incrementally maintained property indexes against full recompute
+    counts for node and relationship property filters.
 - [ ] Improve adjacency and index layout for read-heavy local workloads.
   - Optimize for bounded memory and predictable read amplification.
   - Keep row-oriented canonical records and add projection/index layouts only

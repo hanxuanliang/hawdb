@@ -28,11 +28,11 @@ use crate::search::{
 };
 use crate::store::{
     AdjacencyConsistencyReport, AdjacencyDirection, AdjacencyLayout,
-    BasicStatisticsConsistencyReport, DegreeStatisticsConsistencyReport, DurabilityPolicy,
-    GraphMutation, GraphStore, NodeId, NodeRecord, ProjectedGraphStatus,
-    PropertyIndexProjectionRebuildAction, RecoveryMode, RelRecord, ScanPruningReport,
-    ScanPruningStrategy, SchemaMaintenanceAction, StorageReclamationWatermark,
-    StorageRecoveryReport, StoreStableIdMapping, WalReplayConfig,
+    BasicStatisticsConsistencyReport, DegreeStatisticsConsistencyReport,
+    DistinctValueStatisticsConsistencyReport, DurabilityPolicy, GraphMutation, GraphStore, NodeId,
+    NodeRecord, ProjectedGraphStatus, PropertyIndexProjectionRebuildAction, RecoveryMode,
+    RelRecord, ScanPruningReport, ScanPruningStrategy, SchemaMaintenanceAction,
+    StorageReclamationWatermark, StorageRecoveryReport, StoreStableIdMapping, WalReplayConfig,
 };
 use crate::value::Value;
 use plan_cache::{CachedPlan, PlanCache, PlanCacheKey, DEFAULT_PLAN_CACHE_MAX_ENTRIES};
@@ -6353,6 +6353,12 @@ impl Database {
 
     pub fn degree_statistics_consistency_report(&self) -> DegreeStatisticsConsistencyReport {
         self.store.degree_statistics_consistency_report()
+    }
+
+    pub fn distinct_value_statistics_consistency_report(
+        &self,
+    ) -> DistinctValueStatisticsConsistencyReport {
+        self.store.distinct_value_statistics_consistency_report()
     }
 
     pub fn property_indexes(&self) -> Vec<IndexDescriptor> {
