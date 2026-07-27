@@ -652,6 +652,9 @@ contract.
   - [x] Expose a typed basic-statistics consistency report that compares
     incrementally maintained node, label, relationship, and relationship-type
     counts against a full recompute after mutations.
+  - [x] Expose compact degree-statistics consistency evidence grouped by label,
+    relationship type, and direction for bounded expansion and dense-adjacency
+    planning.
 - [ ] Improve adjacency and index layout for read-heavy local workloads.
   - Optimize for bounded memory and predictable read amplification.
   - Keep row-oriented canonical records and add projection/index layouts only

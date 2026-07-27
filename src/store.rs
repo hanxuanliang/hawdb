@@ -136,6 +136,31 @@ pub struct AdjacencyConsistencyReport {
     pub dangling_relationship_ids: Vec<RelId>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DegreeStatisticsKey {
+    pub label_id: LabelId,
+    pub rel_type: RelTypeId,
+    pub direction: AdjacencyDirection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DegreeStatisticsEntry {
+    pub node_count: u64,
+    pub non_zero_node_count: u64,
+    pub relationship_count: u64,
+    pub max_degree: u64,
+    pub dense_node_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DegreeStatisticsConsistencyReport {
+    pub ready: bool,
+    pub computed_at_commit_epoch: u64,
+    pub maintained: BTreeMap<DegreeStatisticsKey, DegreeStatisticsEntry>,
+    pub recomputed: BTreeMap<DegreeStatisticsKey, DegreeStatisticsEntry>,
+    pub mismatched_keys: Vec<DegreeStatisticsKey>,
+}
+
 type CompositePropertyKey = Vec<(String, Value)>;
 type CompositePropertyIndex = BTreeMap<(LabelId, CompositePropertyKey), BTreeSet<NodeId>>;
 type FullTextPropertyIndex = BTreeMap<(LabelId, String, String), BTreeSet<NodeId>>;
@@ -718,6 +743,31 @@ impl AdjacencyConsistencyReport {
             dangling_relationship_count,
             mismatches,
             dangling_relationship_ids,
+        }
+    }
+}
+
+impl DegreeStatisticsConsistencyReport {
+    fn new(
+        computed_at_commit_epoch: u64,
+        maintained: BTreeMap<DegreeStatisticsKey, DegreeStatisticsEntry>,
+        recomputed: BTreeMap<DegreeStatisticsKey, DegreeStatisticsEntry>,
+    ) -> Self {
+        let mismatched_keys = maintained
+            .keys()
+            .chain(recomputed.keys())
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter(|key| maintained.get(key) != recomputed.get(key))
+            .take(MAX_ADJACENCY_CONSISTENCY_SAMPLES)
+            .collect::<Vec<_>>();
+        Self {
+            ready: mismatched_keys.is_empty(),
+            computed_at_commit_epoch,
+            maintained,
+            recomputed,
+            mismatched_keys,
         }
     }
 }
@@ -4601,6 +4651,14 @@ impl GraphStore {
             maintained_adjacency_groups(&self.outgoing, &self.incoming),
             recompute_adjacency_groups(&self.relationships),
             &self.relationships,
+        )
+    }
+
+    pub fn degree_statistics_consistency_report(&self) -> DegreeStatisticsConsistencyReport {
+        DegreeStatisticsConsistencyReport::new(
+            self.commit_epoch,
+            compute_degree_statistics_from_adjacency(&self.nodes, &self.outgoing, &self.incoming),
+            compute_degree_statistics_from_relationships(&self.nodes, &self.relationships),
         )
     }
 
@@ -9898,6 +9956,93 @@ fn recompute_adjacency_groups(relationships: &BTreeMap<RelId, RelRecord>) -> Adj
     groups
 }
 
+fn compute_degree_statistics_from_adjacency(
+    nodes: &BTreeMap<NodeId, NodeRecord>,
+    outgoing: &BTreeMap<(NodeId, RelTypeId), BTreeSet<RelId>>,
+    incoming: &BTreeMap<(NodeId, RelTypeId), BTreeSet<RelId>>,
+) -> BTreeMap<DegreeStatisticsKey, DegreeStatisticsEntry> {
+    compute_degree_statistics_from_groups(nodes, maintained_adjacency_groups(outgoing, incoming))
+}
+
+fn compute_degree_statistics_from_relationships(
+    nodes: &BTreeMap<NodeId, NodeRecord>,
+    relationships: &BTreeMap<RelId, RelRecord>,
+) -> BTreeMap<DegreeStatisticsKey, DegreeStatisticsEntry> {
+    compute_degree_statistics_from_groups(nodes, recompute_adjacency_groups(relationships))
+}
+
+fn compute_degree_statistics_from_groups(
+    nodes: &BTreeMap<NodeId, NodeRecord>,
+    groups: AdjacencyGroups,
+) -> BTreeMap<DegreeStatisticsKey, DegreeStatisticsEntry> {
+    let rel_types = groups
+        .keys()
+        .map(|key| key.rel_type)
+        .collect::<BTreeSet<_>>();
+    let label_counts = label_counts_for_degree_statistics(nodes);
+    let mut statistics = BTreeMap::<DegreeStatisticsKey, DegreeStatisticsEntry>::new();
+    for (label_id, node_count) in &label_counts {
+        for rel_type in &rel_types {
+            for direction in [AdjacencyDirection::Outgoing, AdjacencyDirection::Incoming] {
+                statistics.insert(
+                    DegreeStatisticsKey {
+                        label_id: *label_id,
+                        rel_type: *rel_type,
+                        direction,
+                    },
+                    DegreeStatisticsEntry {
+                        node_count: *node_count,
+                        non_zero_node_count: 0,
+                        relationship_count: 0,
+                        max_degree: 0,
+                        dense_node_count: 0,
+                    },
+                );
+            }
+        }
+    }
+    for (group, rel_ids) in groups {
+        let Some(node) = nodes.get(&group.node_id) else {
+            continue;
+        };
+        let degree = rel_ids.len() as u64;
+        for label_id in &node.labels {
+            let entry = statistics
+                .entry(DegreeStatisticsKey {
+                    label_id: *label_id,
+                    rel_type: group.rel_type,
+                    direction: group.direction,
+                })
+                .or_insert(DegreeStatisticsEntry {
+                    node_count: label_counts.get(label_id).copied().unwrap_or_default(),
+                    non_zero_node_count: 0,
+                    relationship_count: 0,
+                    max_degree: 0,
+                    dense_node_count: 0,
+                });
+            entry.non_zero_node_count += 1;
+            entry.relationship_count += degree;
+            entry.max_degree = entry.max_degree.max(degree);
+            if rel_ids.len() >= DENSE_ADJACENCY_DEGREE_THRESHOLD {
+                entry.dense_node_count += 1;
+            }
+        }
+    }
+    statistics
+}
+
+fn label_counts_for_degree_statistics(
+    nodes: &BTreeMap<NodeId, NodeRecord>,
+) -> BTreeMap<LabelId, u64> {
+    let mut label_counts = BTreeMap::new();
+    for node in nodes.values() {
+        for label_id in &node.labels {
+            *label_counts.entry(*label_id).or_default() += 1;
+        }
+    }
+    label_counts
+}
+
 fn sample_relationship_ids(rel_ids: &BTreeSet<RelId>) -> Vec<RelId> {
     rel_ids
         .iter()
@@ -10727,10 +10872,10 @@ mod tests {
     use super::{
         checksum_bytes, compute_statistics, encode_durable_text, read_durable_text,
         AdjacencyDirection, AdjacencyGroupStats, AdjacencyLayout, ConnectedNodesCreate,
-        DurableCompression, GraphStore, NodeId, NodeRecord, OrderedAdjacencyEntry,
-        ProjectedGraphDefinition, PropertyFilter, RelId, RelRecord, RelTypeId,
-        RelationshipDeleteRequest, ScanPruningStrategy, ScanPruningTargetKind,
-        DENSE_ADJACENCY_DEGREE_THRESHOLD, DURABLE_COMPRESSION_HEADER,
+        DegreeStatisticsEntry, DegreeStatisticsKey, DurableCompression, GraphStore, NodeId,
+        NodeRecord, OrderedAdjacencyEntry, ProjectedGraphDefinition, PropertyFilter, RelId,
+        RelRecord, RelTypeId, RelationshipDeleteRequest, ScanPruningStrategy,
+        ScanPruningTargetKind, DENSE_ADJACENCY_DEGREE_THRESHOLD, DURABLE_COMPRESSION_HEADER,
     };
     use crate::schema::{Catalog, LabelId};
     use crate::value::Value;
@@ -12382,6 +12527,149 @@ mod tests {
             .incremental
             .rel_type_counts
             .contains_key(&catalog.rel_type_id("MENTIONS").unwrap()));
+    }
+
+    #[test]
+    fn degree_statistics_consistency_report_matches_full_recompute_after_mutations() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        let source = store
+            .create_node(&mut catalog, "Memory", properties([("id", Value::Int(0))]))
+            .unwrap();
+        let target_one = store
+            .create_node(&mut catalog, "Entity", properties([("id", Value::Int(1))]))
+            .unwrap();
+        let target_two = store
+            .create_node(&mut catalog, "Entity", properties([("id", Value::Int(2))]))
+            .unwrap();
+        store
+            .create_relationship(
+                &mut catalog,
+                source,
+                target_one,
+                "MENTIONS",
+                BTreeMap::new(),
+            )
+            .unwrap();
+        store
+            .create_relationship(
+                &mut catalog,
+                source,
+                target_two,
+                "MENTIONS",
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let memory_label = catalog.label_id("Memory").unwrap();
+        let entity_label = catalog.label_id("Entity").unwrap();
+        let rel_type = catalog.rel_type_id("MENTIONS").unwrap();
+
+        let report = store.degree_statistics_consistency_report();
+        assert!(report.ready);
+        assert!(report.mismatched_keys.is_empty());
+        assert_eq!(report.maintained, report.recomputed);
+        assert_eq!(
+            report
+                .maintained
+                .get(&DegreeStatisticsKey {
+                    label_id: memory_label,
+                    rel_type,
+                    direction: AdjacencyDirection::Outgoing,
+                })
+                .copied(),
+            Some(DegreeStatisticsEntry {
+                node_count: 1,
+                non_zero_node_count: 1,
+                relationship_count: 2,
+                max_degree: 2,
+                dense_node_count: 0,
+            })
+        );
+        assert_eq!(
+            report
+                .maintained
+                .get(&DegreeStatisticsKey {
+                    label_id: entity_label,
+                    rel_type,
+                    direction: AdjacencyDirection::Incoming,
+                })
+                .copied(),
+            Some(DegreeStatisticsEntry {
+                node_count: 2,
+                non_zero_node_count: 2,
+                relationship_count: 2,
+                max_degree: 1,
+                dense_node_count: 0,
+            })
+        );
+
+        store
+            .delete_relationships(
+                &mut catalog,
+                RelationshipDeleteRequest {
+                    source_label: "Memory".to_string(),
+                    filter: None,
+                    rel_type: "MENTIONS".to_string(),
+                    target_label: "Entity".to_string(),
+                    target_filter: Some(PropertyFilter::Eq {
+                        property: "id".to_string(),
+                        value: Value::Int(1),
+                    }),
+                    rel_filter: None,
+                },
+            )
+            .unwrap();
+        let report = store.degree_statistics_consistency_report();
+        assert!(report.ready);
+        assert_eq!(report.maintained, report.recomputed);
+        assert_eq!(
+            report
+                .maintained
+                .get(&DegreeStatisticsKey {
+                    label_id: memory_label,
+                    rel_type,
+                    direction: AdjacencyDirection::Outgoing,
+                })
+                .map(|entry| entry.relationship_count),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn degree_statistics_consistency_report_counts_dense_groups() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        let source = store
+            .create_node(&mut catalog, "Memory", properties([("id", Value::Int(0))]))
+            .unwrap();
+        for id in 0..DENSE_ADJACENCY_DEGREE_THRESHOLD {
+            let target = store
+                .create_node(
+                    &mut catalog,
+                    "Entity",
+                    properties([("id", Value::Int(id as i64))]),
+                )
+                .unwrap();
+            store
+                .create_relationship(&mut catalog, source, target, "MENTIONS", BTreeMap::new())
+                .unwrap();
+        }
+        let report = store.degree_statistics_consistency_report();
+        let memory_label = catalog.label_id("Memory").unwrap();
+        let rel_type = catalog.rel_type_id("MENTIONS").unwrap();
+
+        assert!(report.ready);
+        assert_eq!(
+            report
+                .maintained
+                .get(&DegreeStatisticsKey {
+                    label_id: memory_label,
+                    rel_type,
+                    direction: AdjacencyDirection::Outgoing,
+                })
+                .map(|entry| (entry.max_degree, entry.dense_node_count)),
+            Some((DENSE_ADJACENCY_DEGREE_THRESHOLD as u64, 1))
+        );
     }
 
     #[test]

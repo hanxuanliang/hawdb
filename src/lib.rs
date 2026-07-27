@@ -355,6 +355,7 @@ pub use storage_recovery_evidence::{
 pub use store::{
     AdjacencyConsistencyReport, AdjacencyDirection, AdjacencyGroupConsistencyMismatch,
     AdjacencyGroupKey, AdjacencyGroupStats, AdjacencyLayout, BasicStatisticsConsistencyReport,
+    DegreeStatisticsConsistencyReport, DegreeStatisticsEntry, DegreeStatisticsKey,
     DurabilityPolicy, OrderedAdjacencyEntry, RecoveryMode, StorageReclamationWatermark,
     StorageRecoveryReport, WalReplayConfig, DENSE_ADJACENCY_DEGREE_THRESHOLD,
 };
