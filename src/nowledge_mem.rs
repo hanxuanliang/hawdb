@@ -727,6 +727,8 @@ pub fn nowledge_mem_bounded_read_evidence_json_with_route_readiness(
         "mode": report.mode.as_str(),
         "max_rows": report.max_rows,
         "execution_row_cap": report.execution_row_cap,
+        "estimated_payload_bytes": report.estimated_payload_bytes,
+        "max_estimated_payload_bytes": report.max_estimated_payload_bytes,
         "row_limit_enforced_before_output": report.row_limit_enforced_before_output,
         "operator_row_cap_enabled": report.operator_row_cap_enabled,
         "streaming": report.streaming,
@@ -3923,12 +3925,7 @@ struct LibraryReadinessEvidence<'a> {
 
 fn library_readiness_blocker_codes(evidence: &LibraryReadinessEvidence<'_>) -> Vec<&'static str> {
     let mut blockers = Vec::new();
-    if evidence
-        .bounded_read_evidence
-        .get("ready")
-        .and_then(serde_json::Value::as_bool)
-        != Some(true)
-    {
+    if !bounded_read_evidence_ready(evidence.bounded_read_evidence) {
         blockers.push("bounded_read_evidence_not_ready");
     }
     if evidence
@@ -3976,10 +3973,7 @@ fn library_readiness_by_area_json(evidence: &LibraryReadinessEvidence<'_>) -> se
             "ready": true,
             "blocker_codes": [],
         },
-        "query": readiness_area_json(
-            evidence.bounded_read_evidence,
-            "bounded_read_evidence_not_ready"
-        ),
+        "query": bounded_read_readiness_area_json(evidence.bounded_read_evidence),
         "storage": readiness_area_json(
             evidence.storage_recovery,
             "storage_recovery_not_ready"
@@ -4003,6 +3997,95 @@ fn library_readiness_by_area_json(evidence: &LibraryReadinessEvidence<'_>) -> se
             evidence.search_candidate_shadow_evidence,
         ),
     })
+}
+
+fn bounded_read_readiness_area_json(evidence: &serde_json::Value) -> serde_json::Value {
+    let blocker_codes = bounded_read_readiness_blocker_codes(evidence);
+    serde_json::json!({
+        "ready": blocker_codes.is_empty(),
+        "blocker_codes": blocker_codes,
+    })
+}
+
+fn bounded_read_evidence_ready(evidence: &serde_json::Value) -> bool {
+    bounded_read_readiness_blocker_codes(evidence).is_empty()
+}
+
+fn bounded_read_readiness_blocker_codes(evidence: &serde_json::Value) -> Vec<String> {
+    let mut blockers = evidence_blocker_codes(evidence);
+    if evidence.get("present").and_then(serde_json::Value::as_bool) == Some(false) {
+        if blockers.is_empty() {
+            blockers.insert("bounded_read_evidence_missing".to_string());
+        }
+        return blockers.into_iter().collect();
+    }
+    if evidence_string(evidence, "protocol") != Some(NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL) {
+        blockers.insert("bounded_read_protocol_mismatch".to_string());
+    }
+    if evidence_bool(evidence, "ready") != Some(true) {
+        blockers.insert("bounded_read_not_ready".to_string());
+    }
+    if evidence_string(evidence, "mode") != Some(NowledgeMemGraphMode::ShadowReadOnly.as_str()) {
+        blockers.insert("bounded_read_not_shadow_read_only".to_string());
+    }
+    let max_rows = evidence_u64(evidence, "max_rows");
+    if !max_rows.is_some_and(|value| value > 0) {
+        blockers.insert("bounded_read_missing_max_rows".to_string());
+    }
+    let expected_execution_row_cap = max_rows.and_then(|value| value.checked_add(1));
+    if expected_execution_row_cap.is_none()
+        || evidence_u64(evidence, "execution_row_cap") != expected_execution_row_cap
+    {
+        blockers.insert("bounded_read_execution_row_cap_mismatch".to_string());
+    }
+    if evidence_u64(evidence, "estimated_payload_bytes").is_none() {
+        blockers.insert("bounded_read_estimated_payload_bytes_missing".to_string());
+    }
+    if !evidence_u64(evidence, "max_estimated_payload_bytes").is_some_and(|value| value > 0) {
+        blockers.insert("bounded_read_max_estimated_payload_bytes_missing".to_string());
+    }
+    if evidence_bool(evidence, "payload_budget_exceeded") != Some(false) {
+        blockers.insert("bounded_read_payload_budget_exceeded".to_string());
+    }
+    if evidence_bool(evidence, "row_limit_enforced_before_output") != Some(true) {
+        blockers.insert("bounded_read_row_limit_not_enforced_before_output".to_string());
+    }
+    if evidence_bool(evidence, "operator_row_cap_enabled") != Some(true) {
+        blockers.insert("bounded_read_operator_row_cap_disabled".to_string());
+    }
+    if evidence_bool(evidence, "row_budget_exceeded") == Some(true) {
+        blockers.insert("bounded_read_row_budget_exceeded".to_string());
+    }
+    if evidence_bool(evidence, "streaming") != Some(false) {
+        blockers.insert("bounded_read_streaming_enabled".to_string());
+    }
+    if evidence_u64(evidence, "blocking_operator_count") != Some(0) {
+        blockers.insert("bounded_read_blocking_operator_present".to_string());
+    }
+    if !string_array_at(evidence, &["missing_covered_routes"])
+        .is_some_and(|routes| routes.is_empty())
+    {
+        blockers.insert("bounded_read_missing_covered_routes".to_string());
+    }
+    if evidence_bool(evidence, "route_primary_ready") != Some(true)
+        || evidence_bool(evidence, "route_query_plan_evidence_ready") != Some(true)
+        || evidence_bool(evidence, "route_query_profile_evidence_ready") != Some(true)
+        || evidence_bool(
+            evidence,
+            "route_relationship_property_pruning_evidence_ready",
+        ) != Some(true)
+    {
+        blockers.insert("bounded_read_graph_route_readiness_not_ready".to_string());
+    }
+    let required_pruning_count =
+        evidence_u64(evidence, "relationship_property_pruning_required_count");
+    if required_pruning_count.is_none()
+        || required_pruning_count
+            != evidence_u64(evidence, "relationship_property_pruning_report_count")
+    {
+        blockers.insert("bounded_read_relationship_property_pruning_missing".to_string());
+    }
+    blockers.into_iter().collect()
 }
 
 fn search_projection_readiness_area_json(evidence: &serde_json::Value) -> serde_json::Value {
@@ -6158,6 +6241,19 @@ mod tests {
             "shadow_read_only"
         );
         assert_eq!(readiness["bounded_read_evidence"]["execution_row_cap"], 513);
+        assert!(
+            readiness["bounded_read_evidence"]["estimated_payload_bytes"]
+                .as_u64()
+                .is_some()
+        );
+        assert_eq!(
+            readiness["bounded_read_evidence"]["max_estimated_payload_bytes"],
+            serde_json::json!(4 * 1024 * 1024)
+        );
+        assert_eq!(
+            readiness["bounded_read_evidence"]["payload_budget_exceeded"],
+            false
+        );
         assert_eq!(
             readiness["bounded_read_evidence"]["missing_covered_routes"],
             serde_json::json!([])
@@ -6194,6 +6290,56 @@ mod tests {
             readiness["query_family_evidence"]["min_replacement_readiness_per_million"],
             1_000_000
         );
+    }
+
+    #[test]
+    fn embedded_store_library_readiness_recomputes_bounded_read_payload_budget() {
+        let db = Database::new();
+        let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::ShadowReadOnly);
+        let mut store = NowledgeMemEmbeddedStore::new(graph, None);
+
+        let readiness = store.library_readiness_json(&NowledgeMemReadinessOptions {
+            bounded_read_evidence: Some(serde_json::json!({
+                "protocol": NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL,
+                "present": true,
+                "ready": true,
+                "mode": "shadow_read_only",
+                "max_rows": 512,
+                "execution_row_cap": 513,
+                "row_limit_enforced_before_output": true,
+                "operator_row_cap_enabled": true,
+                "streaming": false,
+                "blocking_operator_count": 0,
+                "row_budget_exceeded": false,
+                "payload_budget_exceeded": false,
+                "missing_covered_routes": [],
+                "route_primary_ready": true,
+                "route_query_plan_evidence_ready": true,
+                "route_query_profile_evidence_ready": true,
+                "relationship_property_pruning_required_count": 0,
+                "relationship_property_pruning_report_count": 0,
+                "route_relationship_property_pruning_evidence_ready": true,
+                "blocker_codes": [],
+            })),
+            ..NowledgeMemReadinessOptions::default()
+        });
+
+        assert_eq!(readiness["bounded_read_evidence"]["ready"], true);
+        assert_eq!(readiness["readiness_by_area"]["query"]["ready"], false);
+        assert!(readiness["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "bounded_read_evidence_not_ready"));
+        let query_blockers = readiness["readiness_by_area"]["query"]["blocker_codes"]
+            .as_array()
+            .unwrap();
+        assert!(query_blockers
+            .iter()
+            .any(|code| code == "bounded_read_estimated_payload_bytes_missing"));
+        assert!(query_blockers
+            .iter()
+            .any(|code| code == "bounded_read_max_estimated_payload_bytes_missing"));
     }
 
     #[test]
