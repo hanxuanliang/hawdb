@@ -5,8 +5,10 @@ use crate::{
     nowledge_mem_graph_community_subgraph_route_query, nowledge_mem_graph_node_details_route_query,
     nowledge_mem_graph_orphans_route_query, nowledge_mem_graph_overview_route_query,
     nowledge_mem_graph_pagerank_plan_route_query, nowledge_mem_graph_sample_route_query, Database,
+    KnowledgeCandidateScoringPolicy, KnowledgeFanoutReasonCode, KnowledgeRetrievalRequest,
     NowledgeMemGraph, NowledgeMemGraphMode, NowledgeMemQueryExecutionPath,
-    NowledgeMemQueryReportOptions, Result, RouteQuery,
+    NowledgeMemQueryReportOptions, Result, RouteQuery, SearchFusionWeights, SearchIndex,
+    SearchMode, SearchRebuildOptions, DENSE_ADJACENCY_DEGREE_THRESHOLD,
 };
 use std::collections::BTreeMap;
 
@@ -20,6 +22,7 @@ pub struct NowledgeGraphRouteWorkloadFixtureOptions {
     pub max_edges: usize,
     pub changed_since_epoch_nanos: Option<i64>,
     pub capture_physical_plan: bool,
+    pub include_bounded_expansion_probes: bool,
 }
 
 impl Default for NowledgeGraphRouteWorkloadFixtureOptions {
@@ -30,6 +33,7 @@ impl Default for NowledgeGraphRouteWorkloadFixtureOptions {
             max_edges: 16,
             changed_since_epoch_nanos: Some(100),
             capture_physical_plan: true,
+            include_bounded_expansion_probes: true,
         }
     }
 }
@@ -43,6 +47,9 @@ pub struct NowledgeGraphRouteWorkloadFixtureReport {
     pub failed_query_count: usize,
     pub total_rows: usize,
     pub total_elapsed_micros: u128,
+    pub bounded_expansion_probe_count: usize,
+    pub failed_bounded_expansion_probe_count: usize,
+    pub bounded_expansion_reports: Vec<NowledgeGraphRouteWorkloadBoundedExpansionReport>,
     pub routes: Vec<NowledgeGraphRouteWorkloadRouteReport>,
 }
 
@@ -56,7 +63,41 @@ impl NowledgeGraphRouteWorkloadFixtureReport {
             "failed_query_count": self.failed_query_count,
             "total_rows": self.total_rows,
             "total_elapsed_micros": self.total_elapsed_micros,
+            "bounded_expansion_probe_count": self.bounded_expansion_probe_count,
+            "failed_bounded_expansion_probe_count": self.failed_bounded_expansion_probe_count,
+            "bounded_expansion_reports": self.bounded_expansion_reports.iter().map(NowledgeGraphRouteWorkloadBoundedExpansionReport::json).collect::<Vec<_>>(),
             "routes": self.routes.iter().map(NowledgeGraphRouteWorkloadRouteReport::json).collect::<Vec<_>>(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeGraphRouteWorkloadBoundedExpansionReport {
+    pub name: String,
+    pub ready: bool,
+    pub graph_context_limit: usize,
+    pub graph_context_max_hops: usize,
+    pub path_count: usize,
+    pub node_count: usize,
+    pub relationship_count: usize,
+    pub truncated: bool,
+    pub fanout_reason_codes: Vec<KnowledgeFanoutReasonCode>,
+    pub error_class: Option<String>,
+}
+
+impl NowledgeGraphRouteWorkloadBoundedExpansionReport {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "name": self.name,
+            "ready": self.ready,
+            "graph_context_limit": self.graph_context_limit,
+            "graph_context_max_hops": self.graph_context_max_hops,
+            "path_count": self.path_count,
+            "node_count": self.node_count,
+            "relationship_count": self.relationship_count,
+            "truncated": self.truncated,
+            "fanout_reason_codes": self.fanout_reason_codes.iter().map(|code| code.as_str()).collect::<Vec<_>>(),
+            "error_class": self.error_class,
         })
     }
 }
@@ -161,20 +202,33 @@ fn run_graph_route_workload_fixture(
         .iter()
         .map(|route| run_graph_route_workload_route(graph, route, query_options))
         .collect::<Vec<_>>();
+    let bounded_expansion_reports = if options.include_bounded_expansion_probes {
+        run_bounded_expansion_workload_probes(graph)
+    } else {
+        Vec::new()
+    };
     let query_count = routes.iter().map(|route| route.query_count).sum();
     let failed_query_count = routes.iter().map(|route| route.failed_query_count).sum();
     let total_rows = routes.iter().map(|route| route.total_rows).sum();
     let total_elapsed_micros = routes.iter().map(|route| route.total_elapsed_micros).sum();
+    let failed_bounded_expansion_probe_count = bounded_expansion_reports
+        .iter()
+        .filter(|report| !report.ready)
+        .count();
     Ok(NowledgeGraphRouteWorkloadFixtureReport {
         protocol: NOWLEDGE_GRAPH_ROUTE_WORKLOAD_FIXTURE_PROTOCOL,
         ready: !routes.is_empty()
             && failed_query_count == 0
-            && routes.iter().all(|route| route.ready),
+            && routes.iter().all(|route| route.ready)
+            && failed_bounded_expansion_probe_count == 0,
         route_count: routes.len(),
         query_count,
         failed_query_count,
         total_rows,
         total_elapsed_micros,
+        bounded_expansion_probe_count: bounded_expansion_reports.len(),
+        failed_bounded_expansion_probe_count,
+        bounded_expansion_reports,
         routes,
     })
 }
@@ -238,6 +292,119 @@ fn seed_graph_route_workload_fixture(graph: &mut NowledgeMemGraph) -> Result<()>
     for statement in GRAPH_ROUTE_WORKLOAD_FIXTURE_STATEMENTS {
         graph.query(statement)?;
     }
+    seed_bounded_expansion_workload_fixture(graph)?;
+    Ok(())
+}
+
+fn run_bounded_expansion_workload_probes(
+    graph: &mut NowledgeMemGraph,
+) -> Vec<NowledgeGraphRouteWorkloadBoundedExpansionReport> {
+    let mut search_index = SearchIndex::in_memory();
+    if let Err(error) = graph
+        .database_mut()
+        .rebuild_search_projection(&mut search_index, SearchRebuildOptions::default())
+    {
+        return vec![bounded_expansion_error_report(
+            "search-projection-rebuild",
+            0,
+            0,
+            error_class(&error),
+        )];
+    }
+    vec![
+        run_bounded_expansion_probe(
+            graph.database(),
+            &search_index,
+            "two-hop-context",
+            "workload root traversal",
+            4,
+            2,
+        ),
+        run_bounded_expansion_probe(
+            graph.database(),
+            &search_index,
+            "dense-context",
+            "workload dense retrieval",
+            DENSE_ADJACENCY_DEGREE_THRESHOLD,
+            1,
+        ),
+    ]
+}
+
+fn run_bounded_expansion_probe(
+    db: &Database,
+    search_index: &SearchIndex,
+    name: &str,
+    query_text: &str,
+    graph_context_limit: usize,
+    graph_context_max_hops: usize,
+) -> NowledgeGraphRouteWorkloadBoundedExpansionReport {
+    let output = db.retrieve_knowledge(
+        search_index,
+        &KnowledgeRetrievalRequest {
+            query_text: query_text.to_string(),
+            query_embedding: None,
+            mode: SearchMode::Text,
+            limit: 1,
+            rank_window: None,
+            search_fusion_weights: SearchFusionWeights::default(),
+            metadata_filters: BTreeMap::new(),
+            candidate_limit: None,
+            candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
+            graph_seed_limit: 0,
+            graph_context_limit,
+            graph_context_max_hops,
+        },
+    );
+    NowledgeGraphRouteWorkloadBoundedExpansionReport {
+        name: name.to_string(),
+        ready: output.search.total_hits > 0
+            && output.diagnostics.graph_context_path_count > 0
+            && output.diagnostics.graph_context_path_count <= graph_context_limit,
+        graph_context_limit,
+        graph_context_max_hops,
+        path_count: output.diagnostics.graph_context_path_count,
+        node_count: output.diagnostics.graph_context_node_count,
+        relationship_count: output.diagnostics.graph_context_relationship_count,
+        truncated: output.diagnostics.graph_context_truncated,
+        fanout_reason_codes: output.diagnostics.fanout_reason_codes,
+        error_class: None,
+    }
+}
+
+fn bounded_expansion_error_report(
+    name: &str,
+    graph_context_limit: usize,
+    graph_context_max_hops: usize,
+    error_class: String,
+) -> NowledgeGraphRouteWorkloadBoundedExpansionReport {
+    NowledgeGraphRouteWorkloadBoundedExpansionReport {
+        name: name.to_string(),
+        ready: false,
+        graph_context_limit,
+        graph_context_max_hops,
+        path_count: 0,
+        node_count: 0,
+        relationship_count: 0,
+        truncated: false,
+        fanout_reason_codes: Vec::new(),
+        error_class: Some(error_class),
+    }
+}
+
+fn seed_bounded_expansion_workload_fixture(graph: &mut NowledgeMemGraph) -> Result<()> {
+    graph.query("CREATE (:Memory {id: 'workload-root', title: 'Workload root traversal', content: 'workload root traversal'})-[:LINKS]->(:Entity {id: 'workload-mid', name: 'Workload Mid'})")?;
+    graph.query("CREATE (:Entity {id: 'workload-leaf', name: 'Workload Leaf'})")?;
+    graph.query("MATCH (e:Entity {id: 'workload-mid'}), (leaf:Entity {id: 'workload-leaf'}) CREATE (e)-[:LINKS {weight: 2}]->(leaf)")?;
+    graph.query("CREATE (:Memory {id: 'workload-dense-root', title: 'Workload dense retrieval', content: 'workload dense retrieval'})")?;
+    for index in 0..DENSE_ADJACENCY_DEGREE_THRESHOLD {
+        graph.query(&format!(
+            "CREATE (:Entity {{id: 'workload-dense-entity-{index}', name: 'Dense Entity {index}'}})"
+        ))?;
+        graph.query(&format!(
+            "MATCH (m:Memory {{id: 'workload-dense-root'}}), (e:Entity {{id: 'workload-dense-entity-{index}'}}) CREATE (m)-[:MENTIONS]->(e)"
+        ))?;
+    }
     Ok(())
 }
 
@@ -297,6 +464,7 @@ mod tests {
         nowledge_graph_route_workload_fixture_report, NowledgeGraphRouteWorkloadFixtureOptions,
         NOWLEDGE_GRAPH_ROUTE_WORKLOAD_FIXTURE_PROTOCOL,
     };
+    use crate::{KnowledgeFanoutReasonCode, DENSE_ADJACENCY_DEGREE_THRESHOLD};
 
     #[test]
     fn graph_route_workload_fixture_runs_real_route_queries() {
@@ -312,6 +480,8 @@ mod tests {
         assert!(report.ready);
         assert_eq!(report.route_count, 9);
         assert_eq!(report.failed_query_count, 0);
+        assert_eq!(report.bounded_expansion_probe_count, 2);
+        assert_eq!(report.failed_bounded_expansion_probe_count, 0);
         assert!(report.query_count >= report.route_count);
         assert!(report.total_rows > 0);
         assert!(report.routes.iter().all(|route| route.ready));
@@ -325,6 +495,22 @@ mod tests {
             .iter()
             .flat_map(|route| route.queries.iter())
             .any(|query| query.scan_pruning_report_count > 0));
+        let two_hop = report
+            .bounded_expansion_reports
+            .iter()
+            .find(|report| report.name == "two-hop-context")
+            .unwrap();
+        assert_eq!(two_hop.path_count, 2);
+        assert!(!two_hop.truncated);
+        let dense = report
+            .bounded_expansion_reports
+            .iter()
+            .find(|report| report.name == "dense-context")
+            .unwrap();
+        assert_eq!(dense.path_count, DENSE_ADJACENCY_DEGREE_THRESHOLD);
+        assert!(dense
+            .fanout_reason_codes
+            .contains(&KnowledgeFanoutReasonCode::DenseAdjacency));
     }
 
     #[test]

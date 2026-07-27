@@ -363,9 +363,9 @@ pub use store::{
 pub use value::Value;
 pub use workload_fixtures::{
     nowledge_graph_route_workload_fixture_queries, nowledge_graph_route_workload_fixture_report,
-    NowledgeGraphRouteWorkloadFixtureOptions, NowledgeGraphRouteWorkloadFixtureReport,
-    NowledgeGraphRouteWorkloadQueryReport, NowledgeGraphRouteWorkloadRouteReport,
-    NOWLEDGE_GRAPH_ROUTE_WORKLOAD_FIXTURE_PROTOCOL,
+    NowledgeGraphRouteWorkloadBoundedExpansionReport, NowledgeGraphRouteWorkloadFixtureOptions,
+    NowledgeGraphRouteWorkloadFixtureReport, NowledgeGraphRouteWorkloadQueryReport,
+    NowledgeGraphRouteWorkloadRouteReport, NOWLEDGE_GRAPH_ROUTE_WORKLOAD_FIXTURE_PROTOCOL,
 };
 
 #[cfg(test)]

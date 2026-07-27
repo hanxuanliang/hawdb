@@ -669,6 +669,8 @@ contract.
   - [x] Add a typed graph-route workload fixture that seeds Mem-shaped graph
     data and runs the current graph-first route Cypher catalog through the
     query runtime with plan/profile evidence.
+  - [x] Extend the graph-route workload fixture with bounded expansion probes
+    for two-hop traversal and dense-adjacency fanout diagnostics.
 
 ## P2: Deferred Capabilities
 
