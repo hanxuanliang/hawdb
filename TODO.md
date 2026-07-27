@@ -511,6 +511,9 @@ contract.
     `ready=true`.
   - [x] Carry segment-pruned document counts from real search projection probes
     through shadow evidence and final preflight reports.
+  - [x] Redact search-projection evidence JSON read and parse failures by
+    default so local paths and document identity payload fragments are not
+    copied into command errors.
 - [ ] Replace LanceDB search reads in stages.
   - First cover metadata-filtered search projection reads that do not require
     Kuzu joins.

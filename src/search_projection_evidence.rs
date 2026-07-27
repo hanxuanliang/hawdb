@@ -350,15 +350,15 @@ pub fn run_nowledge_search_projection_shadow_evidence(
 }
 
 fn read_json_file(path: &Path) -> Result<serde_json::Value> {
-    let content = std::fs::read_to_string(path).map_err(|error| {
-        SkeinError::Execution(format!(
-            "failed to read search projection evidence JSON: {error}"
-        ))
+    let content = std::fs::read_to_string(path).map_err(|_| {
+        SkeinError::Execution(
+            "failed to read search projection evidence JSON: io_error".to_string(),
+        )
     })?;
-    serde_json::from_str(&content).map_err(|error| {
-        SkeinError::Semantic(format!(
-            "failed to parse search projection evidence JSON: {error}"
-        ))
+    serde_json::from_str(&content).map_err(|_| {
+        SkeinError::Semantic(
+            "failed to parse search projection evidence JSON: invalid_json".to_string(),
+        )
     })
 }
 
@@ -1402,6 +1402,43 @@ mod tests {
         assert_eq!(report["compressed_vector_projection_required"], true);
         assert_eq!(report["compressed_vector_projection_ready"], true);
         assert_eq!(report["blocker_codes"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn search_projection_evidence_read_errors_are_redacted_by_default() {
+        let secret_path =
+            unique_test_dir("search_projection_secret_path_do_not_emit").join("missing-probe.json");
+
+        let error = super::read_json_file(&secret_path).unwrap_err().to_string();
+
+        assert_eq!(
+            error,
+            "execution error: failed to read search projection evidence JSON: io_error"
+        );
+        assert!(!error.contains("search_projection_secret_path_do_not_emit"));
+        assert!(!error.contains("missing-probe"));
+    }
+
+    #[test]
+    fn search_projection_evidence_parse_errors_are_redacted_by_default() {
+        let root = unique_test_dir("search_projection_parse_redaction");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("secret-projection-path-do-not-emit.json");
+        std::fs::write(
+            &path,
+            "{ \"external_id\": \"secret-projection-doc-do-not-emit\", \"unterminated\": ",
+        )
+        .unwrap();
+
+        let error = super::read_json_file(&path).unwrap_err().to_string();
+
+        assert_eq!(
+            error,
+            "semantic error: failed to parse search projection evidence JSON: invalid_json"
+        );
+        assert!(!error.contains("secret-projection-path-do-not-emit"));
+        assert!(!error.contains("secret-projection-doc-do-not-emit"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
