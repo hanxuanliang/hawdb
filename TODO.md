@@ -185,7 +185,7 @@ contract.
     evidence helper for the GraphMeta projected-graph state read.
   - [x] Add a library-first `/graph/augmentation/pagerank/plan` runtime and
     route-query evidence helper for PageRank graph counts and changed-counts.
-- [ ] PR 4: Add search projection scan-pruning evidence for production filters.
+- [x] PR 4: Add search projection scan-pruning evidence for production filters.
   - Scope: prove search projection segment descriptors prune `unit_type`,
     lifecycle state, metadata keys, `importance`, `confidence`, and timestamps
     before returning rows to Mem.
@@ -203,7 +203,7 @@ contract.
     bypass the PR4 gate.
   - [x] Attach compact `EXPLAIN ANALYZE`-style segment scan counters to
     production-filter pruning proof and reject evidence without them.
-- [ ] PR 5: Close LanceDB candidate read replacement.
+- [x] PR 5: Close LanceDB candidate read replacement.
   - Scope: run FTS, vector, source chunk identity, embedding identity,
     fail-soft, rebuild marker, repair marker, and incremental watermark evidence
     through typed Rust APIs.
@@ -409,7 +409,7 @@ contract.
   - Mutations must recover as whole committed batches or not at all.
   - Torn WAL tails must be detected and bounded.
   - Checkpoint manifests must include replay boundaries.
-- [ ] Add storage-level scan pruning where semantics are exact.
+- [x] Add storage-level scan pruning where semantics are exact.
   - Equality, numeric range, date/time range, enum/in-list, and unique-key
     summaries should decide whether a segment needs to be read.
   - Bloom or cuckoo filters should be used only for fields where false positives
