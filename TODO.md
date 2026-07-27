@@ -482,6 +482,9 @@ contract.
   - [x] Require background-maintenance evidence to carry local QoS snapshot
     readiness so cutover gates fail closed when background work is unbounded or
     over budget.
+  - [x] Redact background-maintenance evidence JSON parse failures by default
+    so local artifact paths and QoS payload fragments are not copied into
+    command errors.
 
 ## P0: Search Projection Replacement
 
