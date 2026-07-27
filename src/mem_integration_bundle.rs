@@ -1619,7 +1619,9 @@ mod tests {
             "scan_pruning_reports_present": true,
             "scan_pruning_reports": [
                 {
+                    "target_kind": "node",
                     "label_id": 1,
+                    "rel_type_id": null,
                     "strategy": {
                         "kind": "property_eq",
                         "property": "id"
@@ -1719,7 +1721,9 @@ mod tests {
                 "pruned_scan_count": 1,
                 "scan_pruning_reports": [
                     {
+                        "target_kind": "node",
                         "label_id": 1,
+                        "rel_type_id": null,
                         "strategy": {
                             "kind": "property_eq",
                             "property": "id"

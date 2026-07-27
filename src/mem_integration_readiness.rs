@@ -2986,7 +2986,8 @@ fn query_runtime_preflight_alignment_ready(bundle: &serde_json::Value) -> bool {
 }
 
 fn query_runtime_scan_pruning_report_ready(report: &serde_json::Value) -> bool {
-    json_get_path(report, &["strategy"]).is_some_and(serde_json::Value::is_object)
+    scan_pruning_target_kind_ready(report)
+        && json_get_path(report, &["strategy"]).is_some_and(serde_json::Value::is_object)
         && bool_path(report, &["pruned"]).is_some()
         && bool_path(report, &["exact_empty"]).is_some()
         && u64_path(report, &["candidate_count_before_pruning"]).is_some()
@@ -2994,6 +2995,13 @@ fn query_runtime_scan_pruning_report_ready(report: &serde_json::Value) -> bool {
         && u64_path(report, &["candidate_count_before_filter"]).is_some()
         && u64_path(report, &["output_count"]).is_some()
         && u64_path(report, &["filtered_out_count"]).is_some()
+}
+
+fn scan_pruning_target_kind_ready(report: &serde_json::Value) -> bool {
+    matches!(
+        str_path(report, &["target_kind"]),
+        Some("node" | "relationship")
+    )
 }
 
 fn library_readiness_ready(bundle: &serde_json::Value) -> bool {
@@ -6221,7 +6229,9 @@ mod tests {
                         "pruned_scan_count": 1,
                         "scan_pruning_reports": [
                             {
+                                "target_kind": "node",
                                 "label_id": 1,
+                                "rel_type_id": null,
                                 "strategy": {
                                     "kind": "property_eq",
                                     "property": "id"
@@ -6284,7 +6294,9 @@ mod tests {
             "scan_pruning_reports_present": true,
             "scan_pruning_reports": [
                 {
+                    "target_kind": "node",
                     "label_id": 1,
+                    "rel_type_id": null,
                     "strategy": {
                         "kind": "property_eq",
                         "property": "id"

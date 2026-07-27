@@ -27710,7 +27710,12 @@ fn explain_analyze_reports_relationship_property_scan_pruning_profile() {
         })
         .expect("relationship property pruning report");
     assert!(relationship_scan.pruned);
+    assert_eq!(
+        relationship_scan.target_kind,
+        crate::store::ScanPruningTargetKind::Relationship
+    );
     assert_eq!(relationship_scan.label_id, None);
+    assert!(relationship_scan.rel_type_id.is_some());
     assert_eq!(relationship_scan.candidate_count_before_pruning, 2);
     assert_eq!(relationship_scan.candidate_count_before_filter, 1);
     assert_eq!(relationship_scan.pruned_candidate_count, 1);
@@ -27764,7 +27769,12 @@ fn explain_analyze_pushes_relationship_where_predicate_to_scan_pruning() {
         })
         .expect("relationship where predicate scan pruning report");
     assert!(relationship_scan.pruned);
+    assert_eq!(
+        relationship_scan.target_kind,
+        crate::store::ScanPruningTargetKind::Relationship
+    );
     assert_eq!(relationship_scan.label_id, None);
+    assert!(relationship_scan.rel_type_id.is_some());
     assert_eq!(relationship_scan.candidate_count_before_pruning, 3);
     assert_eq!(relationship_scan.candidate_count_before_filter, 2);
     assert_eq!(relationship_scan.pruned_candidate_count, 1);

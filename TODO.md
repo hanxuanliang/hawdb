@@ -267,6 +267,8 @@ contract.
   - [x] Push single-relationship-variable `WHERE` predicates that can be
     represented as exact relationship `PropertyFilter`s into relationship scan
     pruning while preserving the original residual predicate evaluation.
+  - [x] Expose scan-pruning target kind and relationship type id in execution
+    profile reports, and require target kind in query-runtime preflight gates.
 - [ ] Keep memory use bounded by default.
   - User foreground reads are admitted first.
   - Internal background import, projection, compaction, analytics, and shadow

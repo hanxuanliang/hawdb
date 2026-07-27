@@ -36958,10 +36958,21 @@ fn explain_analyze_output_row(
 fn scan_pruning_report_value(report: &ScanPruningReport) -> Value {
     Value::Map(BTreeMap::from([
         (
+            "target_kind".to_string(),
+            Value::String(report.target_kind.as_str().to_string()),
+        ),
+        (
             "label_id".to_string(),
             report
                 .label_id
                 .map(|label_id| Value::Int(i64::from(label_id.0)))
+                .unwrap_or(Value::Null),
+        ),
+        (
+            "rel_type_id".to_string(),
+            report
+                .rel_type_id
+                .map(|rel_type_id| Value::Int(i64::from(rel_type_id.0)))
                 .unwrap_or(Value::Null),
         ),
         (

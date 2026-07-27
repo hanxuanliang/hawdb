@@ -1898,7 +1898,8 @@ fn query_runtime_preflight_probe_scan_pruning_ready(probe: &serde_json::Value) -
 }
 
 fn query_runtime_scan_pruning_report_ready(report: &serde_json::Value) -> bool {
-    value_path(report, &["strategy"]).is_some_and(serde_json::Value::is_object)
+    scan_pruning_target_kind_ready(report)
+        && value_path(report, &["strategy"]).is_some_and(serde_json::Value::is_object)
         && bool_path(report, &["pruned"]).is_some()
         && bool_path(report, &["exact_empty"]).is_some()
         && u64_path(report, &["candidate_count_before_pruning"]).is_some()
@@ -1906,6 +1907,13 @@ fn query_runtime_scan_pruning_report_ready(report: &serde_json::Value) -> bool {
         && u64_path(report, &["candidate_count_before_filter"]).is_some()
         && u64_path(report, &["output_count"]).is_some()
         && u64_path(report, &["filtered_out_count"]).is_some()
+}
+
+fn scan_pruning_target_kind_ready(report: &serde_json::Value) -> bool {
+    matches!(
+        str_path(report, &["target_kind"]),
+        Some("node" | "relationship")
+    )
 }
 
 fn dual_engine_u64_path(value: &serde_json::Value, path: &[&str], field: &str) -> Option<u64> {
@@ -3180,18 +3188,20 @@ mod tests {
                 "pruned_scan_count": 1,
                 "scan_pruning_reports": [
                     {
+                        "target_kind": "node",
                         "label_id": 1,
+                        "rel_type_id": null,
                         "strategy": {
                             "kind": "property_eq",
                             "property": "id"
-                                },
-                                "pruned": true,
-                                "exact_empty": false,
-                                "candidate_count_before_pruning": 2,
-                                "pruned_candidate_count": 1,
-                                "candidate_count_before_filter": 1,
-                                "output_count": 1,
-                                "filtered_out_count": 0
+                        },
+                        "pruned": true,
+                        "exact_empty": false,
+                        "candidate_count_before_pruning": 2,
+                        "pruned_candidate_count": 1,
+                        "candidate_count_before_filter": 1,
+                        "output_count": 1,
+                        "filtered_out_count": 0
                     }
                 ]
             },

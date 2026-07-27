@@ -3286,7 +3286,9 @@ fn nowledge_mem_query_report(
 
 fn scan_pruning_report_json(report: &ScanPruningReport) -> serde_json::Value {
     serde_json::json!({
+        "target_kind": report.target_kind.as_str(),
         "label_id": report.label_id.map(|label_id| label_id.0),
+        "rel_type_id": report.rel_type_id.map(|rel_type_id| rel_type_id.0),
         "strategy": scan_pruning_strategy_json(&report.strategy),
         "pruned": report.pruned,
         "exact_empty": report.exact_empty,

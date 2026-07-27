@@ -1895,7 +1895,9 @@ fn execute_bindings_with_limit(
                 .collect::<Vec<_>>();
             let candidate_count_before_pruning = store.node_count_for_label(Some(label_id));
             record_scan_pruning_report(ScanPruningReport {
+                target_kind: crate::store::ScanPruningTargetKind::Node,
                 label_id: Some(label_id),
+                rel_type_id: None,
                 strategy: ScanPruningStrategy::PropertyEq {
                     property: property.clone(),
                 },
@@ -1940,7 +1942,9 @@ fn execute_bindings_with_limit(
             }
             let candidate_count_before_pruning = store.node_count_for_label(Some(label_id));
             record_scan_pruning_report(ScanPruningReport {
+                target_kind: crate::store::ScanPruningTargetKind::Node,
                 label_id: Some(label_id),
+                rel_type_id: None,
                 strategy: ScanPruningStrategy::PropertyIn {
                     property: property.clone(),
                 },
@@ -2001,7 +2005,9 @@ fn execute_bindings_with_limit(
                 .collect::<Vec<_>>();
             let candidate_count_before_pruning = store.node_count_for_label(Some(label_id));
             record_scan_pruning_report(ScanPruningReport {
+                target_kind: crate::store::ScanPruningTargetKind::Node,
                 label_id: Some(label_id),
+                rel_type_id: None,
                 strategy: ScanPruningStrategy::PropertyRange {
                     property: property.clone(),
                 },

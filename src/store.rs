@@ -477,9 +477,26 @@ pub enum ScanPruningStrategy {
     OrUnion,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanPruningTargetKind {
+    Node,
+    Relationship,
+}
+
+impl ScanPruningTargetKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ScanPruningTargetKind::Node => "node",
+            ScanPruningTargetKind::Relationship => "relationship",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanPruningReport {
+    pub target_kind: ScanPruningTargetKind,
     pub label_id: Option<LabelId>,
+    pub rel_type_id: Option<RelTypeId>,
     pub strategy: ScanPruningStrategy,
     pub pruned: bool,
     pub exact_empty: bool,
@@ -4919,7 +4936,9 @@ impl GraphStore {
             return ScanPrunedNodeScan {
                 nodes,
                 report: ScanPruningReport {
+                    target_kind: ScanPruningTargetKind::Node,
                     label_id,
+                    rel_type_id: None,
                     strategy: ScanPruningStrategy::FullLabelScan,
                     pruned: false,
                     exact_empty: false,
@@ -4949,7 +4968,9 @@ impl GraphStore {
         ScanPrunedNodeScan {
             nodes,
             report: ScanPruningReport {
+                target_kind: ScanPruningTargetKind::Node,
                 label_id,
+                rel_type_id: None,
                 strategy: candidate.strategy,
                 pruned: true,
                 exact_empty: candidate.exact_empty,
@@ -5577,7 +5598,9 @@ impl GraphStore {
             return ScanPrunedRelationshipScan {
                 relationships,
                 report: ScanPruningReport {
+                    target_kind: ScanPruningTargetKind::Relationship,
                     label_id: None,
+                    rel_type_id: rel_type,
                     strategy: ScanPruningStrategy::FullLabelScan,
                     pruned: false,
                     exact_empty: false,
@@ -5609,7 +5632,9 @@ impl GraphStore {
         ScanPrunedRelationshipScan {
             relationships,
             report: ScanPruningReport {
+                target_kind: ScanPruningTargetKind::Relationship,
                 label_id: None,
+                rel_type_id: rel_type,
                 strategy: candidate.strategy,
                 pruned: true,
                 exact_empty: candidate.exact_empty,
@@ -10482,7 +10507,7 @@ mod tests {
         AdjacencyDirection, AdjacencyGroupStats, AdjacencyLayout, ConnectedNodesCreate,
         DurableCompression, GraphStore, NodeId, NodeRecord, OrderedAdjacencyEntry,
         ProjectedGraphDefinition, PropertyFilter, RelId, RelRecord, RelTypeId, ScanPruningStrategy,
-        DENSE_ADJACENCY_DEGREE_THRESHOLD, DURABLE_COMPRESSION_HEADER,
+        ScanPruningTargetKind, DENSE_ADJACENCY_DEGREE_THRESHOLD, DURABLE_COMPRESSION_HEADER,
     };
     use crate::schema::{Catalog, LabelId};
     use crate::value::Value;
@@ -11073,6 +11098,9 @@ mod tests {
                 property: "stable_id".to_string()
             }
         );
+        assert_eq!(scan.report.target_kind, ScanPruningTargetKind::Node);
+        assert_eq!(scan.report.label_id, Some(label));
+        assert_eq!(scan.report.rel_type_id, None);
         assert!(scan.report.pruned);
         assert_eq!(scan.report.candidate_count_before_filter, 1);
         assert_eq!(scan.report.candidate_count_before_pruning, 2);
@@ -11572,6 +11600,12 @@ mod tests {
                 property: "lifecycle_state".to_string()
             }
         );
+        assert_eq!(
+            eq_scan.report.target_kind,
+            ScanPruningTargetKind::Relationship
+        );
+        assert_eq!(eq_scan.report.label_id, None);
+        assert_eq!(eq_scan.report.rel_type_id, Some(rel_type));
         assert_eq!(eq_scan.report.candidate_count_before_pruning, 3);
         assert_eq!(eq_scan.report.candidate_count_before_filter, 1);
         assert_eq!(eq_scan.report.pruned_candidate_count, 2);
