@@ -2,6 +2,8 @@ use crate::{
     nowledge_mem_required_query_families_for_route, NowledgeMemGraph, NowledgeMemGraphMode,
     NowledgeMemQueryReportOptions, Result, SkeinError, Value,
     NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_MEMORY_QUERY, NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ROUTE,
+    NOWLEDGE_MEM_GRAPH_COMMUNITY_RECENT_MEMORIES_QUERY,
+    NOWLEDGE_MEM_GRAPH_COMMUNITY_RECENT_MEMORIES_ROUTE,
     NOWLEDGE_MEM_GRAPH_NODE_DETAILS_MEMORY_QUERY, NOWLEDGE_MEM_GRAPH_NODE_DETAILS_ROUTE,
     NOWLEDGE_MEM_GRAPH_ORPHANS_ROUTE, NOWLEDGE_MEM_GRAPH_ORPHAN_ENTITIES_QUERY,
     NOWLEDGE_MEM_GRAPH_OVERVIEW_MEMORY_RANKING_QUERY, NOWLEDGE_MEM_GRAPH_OVERVIEW_ROUTE,
@@ -547,6 +549,42 @@ pub fn nowledge_mem_graph_community_members_route_query(
     })
 }
 
+pub fn nowledge_mem_graph_community_recent_memories_route_query(
+    community_id: i64,
+    limit: usize,
+) -> Result<RouteQuery> {
+    let limit = i64::try_from(limit).map_err(|_| {
+        SkeinError::Semantic(
+            "graph community recent memories route evidence limit exceeds supported range"
+                .to_string(),
+        )
+    })?;
+    if limit <= 0 {
+        return Err(SkeinError::Semantic(
+            "graph community recent memories route evidence limit must be greater than zero"
+                .to_string(),
+        ));
+    }
+    Ok(RouteQuery {
+        route: NOWLEDGE_MEM_GRAPH_COMMUNITY_RECENT_MEMORIES_ROUTE.to_string(),
+        shadow_compare_ready: false,
+        primary_read_routing_enabled: true,
+        primary_ready: false,
+        blocker_codes: Vec::new(),
+        queries: vec![RouteCypherQuery {
+            name: "community-recent-memories-lookup".to_string(),
+            query_family: Some("memory_lookup".to_string()),
+            require_scan_pruning: true,
+            require_pruned: false,
+            cypher: NOWLEDGE_MEM_GRAPH_COMMUNITY_RECENT_MEMORIES_QUERY.to_string(),
+            parameters: BTreeMap::from([
+                ("community_id".to_string(), Value::Int(community_id)),
+                ("limit".to_string(), Value::Int(limit)),
+            ]),
+        }],
+    })
+}
+
 pub fn nowledge_mem_graph_orphans_route_query(limit: usize) -> Result<RouteQuery> {
     let limit = i64::try_from(limit).map_err(|_| {
         SkeinError::Semantic(
@@ -928,6 +966,7 @@ fn error_class(error: &SkeinError) -> &'static str {
 mod tests {
     use super::{
         nowledge_graph_route_evidence_json, nowledge_mem_graph_community_members_route_query,
+        nowledge_mem_graph_community_recent_memories_route_query,
         nowledge_mem_graph_node_details_route_query, nowledge_mem_graph_orphans_route_query,
         nowledge_mem_graph_overview_route_query, nowledge_mem_graph_sample_route_query,
         parse_route_parity_evidence, parse_route_query_inventory, query_requirement_blockers,
@@ -1229,6 +1268,64 @@ mod tests {
         assert_eq!(
             evidence["routes"][0]["query_reports"][0]["query_name"],
             "community-members-memory-lookup"
+        );
+        assert_eq!(
+            evidence["routes"][0]["query_reports"][0]["query_family"],
+            "memory_lookup"
+        );
+        assert!(
+            evidence["routes"][0]["query_reports"][0]["scan_pruning_report_count"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0
+        );
+        assert_eq!(
+            evidence["routes"][0]["blocker_codes"],
+            serde_json::json!([])
+        );
+        let readiness = nowledge_graph_route_readiness_json(&evidence).unwrap();
+        assert_eq!(readiness["routes"][0]["query_runtime_ready"], true);
+        assert_eq!(readiness["routes"][0]["query_plan_evidence_ready"], true);
+        assert_eq!(readiness["routes"][0]["query_profile_evidence_ready"], true);
+        assert_eq!(
+            readiness["routes"][0]["query_reports"][0]["scan_pruning_reports_present"],
+            true
+        );
+    }
+
+    #[test]
+    fn community_recent_memories_route_query_helper_feeds_route_execution_evidence() {
+        let mut db = Database::new();
+        db.query("CREATE (:Memory {id: 'community-recent-route-memory', title: 'Community Recent Route', content: 'recent route body', importance: 0.9, created_at: 1700000001, updated_at: 1700000002, is_crystal: false})")
+            .unwrap();
+        db.query("CREATE (:Entity {id: 'community-recent-route-entity', community_id: 3676})")
+            .unwrap();
+        db.query("MATCH (m:Memory {id: 'community-recent-route-memory'}), (e:Entity {id: 'community-recent-route-entity'}) CREATE (m)-[:MENTIONS]->(e)")
+            .unwrap();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        let route_queries =
+            vec![nowledge_mem_graph_community_recent_memories_route_query(3676, 5).unwrap()];
+        let route_parity =
+            ready_route_parity_for(&["/library/community/{community_id}/recent-memories"]);
+
+        let evidence = nowledge_graph_route_evidence_json(
+            &mut graph,
+            &route_queries,
+            NowledgeMemQueryReportOptions {
+                capture_physical_plan: true,
+                slow_log_threshold_micros: None,
+            },
+            Some(&route_parity),
+        );
+
+        assert_eq!(
+            evidence["routes"][0]["route"],
+            "/library/community/{community_id}/recent-memories"
+        );
+        assert_eq!(evidence["routes"][0]["primary_ready"], true);
+        assert_eq!(
+            evidence["routes"][0]["query_reports"][0]["query_name"],
+            "community-recent-memories-lookup"
         );
         assert_eq!(
             evidence["routes"][0]["query_reports"][0]["query_family"],
