@@ -163,6 +163,9 @@ contract.
   - [x] Add a Mem-shaped search projection recovery fixture that reopens graph
     and search paths through the embedded library and verifies checkpointed
     segment descriptors still prune lifecycle and numeric candidate filters.
+  - [x] Add a storage recovery evidence negative fixture that rejects reports
+    whose raw checkpoint, WAL replay, or torn-tail fields contradict claimed
+    readiness.
 - [ ] PR 7: Make background QoS a readiness gate.
   - Scope: connect resource classes for import, projection, compaction,
     analytics, and migration work to typed background-maintenance readiness.

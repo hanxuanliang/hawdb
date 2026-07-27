@@ -144,6 +144,38 @@ mod tests {
     }
 
     #[test]
+    fn storage_recovery_evidence_command_recomputes_contradictory_raw_fields() {
+        let path = unique_test_file("storage_recovery_contradictory");
+        let mut report = ready_report();
+        report["checkpoint_commit_epoch"] = serde_json::json!(null);
+        report["replayed_wal_entries"] = serde_json::json!(2048);
+        report["max_wal_replay_entries"] = serde_json::json!(1024);
+        report["torn_tail_ignored"] = serde_json::json!(true);
+        report["torn_tail_reason"] = serde_json::json!("partial wal entry");
+        std::fs::write(&path, report.to_string()).unwrap();
+
+        let (evidence, _) = run_nowledge_storage_recovery_evidence(
+            [path.to_str().unwrap()].into_iter().map(str::to_string),
+        )
+        .unwrap();
+
+        assert_eq!(evidence["ready"], false);
+        assert_eq!(evidence["storage_recovery_ready"], false);
+        assert_eq!(evidence["checkpoint_boundary_present"], false);
+        assert_eq!(evidence["wal_replay_bounded"], false);
+        assert_eq!(evidence["torn_tail_clean"], false);
+        assert_eq!(
+            evidence["storage_recovery_blocker_codes"],
+            serde_json::json!([
+                "checkpoint_boundary_missing",
+                "wal_replay_unbounded",
+                "torn_tail_observed"
+            ])
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn storage_recovery_evidence_optional_missing_file_still_reports_read_error() {
         let result = run_nowledge_storage_recovery_evidence(
             ["--optional", "/path/that/does/not/exist.json"]
