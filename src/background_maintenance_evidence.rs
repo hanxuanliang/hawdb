@@ -42,49 +42,234 @@ pub fn nowledge_background_maintenance_evidence_json(
     required: bool,
 ) -> serde_json::Value {
     let health = background_maintenance_evidence_health(Some(summary), required);
-    serde_json::json!({
-        "protocol": "skein-nowledge-background-maintenance-evidence-v1",
-        "required": health.required,
-        "present": health.present,
-        "ready": health.ready,
-        "protocol_matches": health.protocol_matches,
-        "total_candidates": health.total_candidates,
-        "ranked_count": health.ranked_count,
-        "executable_search_projection_graph_delta_count": health.executable_search_projection_graph_delta_count,
-        "admitted_search_projection_graph_delta_count": health.admitted_search_projection_graph_delta_count,
-        "deferred_search_projection_graph_delta_count": health.deferred_search_projection_graph_delta_count,
-        "rejected_search_projection_graph_delta_count": health.rejected_search_projection_graph_delta_count,
-        "executable_search_projection_graph_delta_operations": health.executable_search_projection_graph_delta_operations,
-        "admitted_search_projection_graph_delta_operations": health.admitted_search_projection_graph_delta_operations,
-        "max_search_projection_graph_delta_complete_through_graph_commit_epoch": health.max_search_projection_graph_delta_complete_through_graph_commit_epoch,
-        "foreground_admission_probe_ready": health.foreground_admission_probe_ready,
-        "foreground_admission_probe_admission": health.foreground_admission_probe_admission_name.as_deref(),
-        "memory_pressure_ready": health.memory_pressure_ready,
-        "memory_budget_bytes": health.memory_budget_bytes,
-        "estimated_memory_bytes": health.estimated_memory_bytes,
-        "foreground_ranked_count": health.foreground_ranked_count,
-        "unknown_admission_count": health.unknown_admission_count,
-        "blocker_codes": health.blocker_codes,
-        "blockers": health.blockers,
-        "background_maintenance_required": health.required,
-        "background_maintenance_present": health.present,
-        "background_maintenance_ready": health.ready,
-        "background_maintenance_protocol_matches": health.protocol_matches,
-        "background_maintenance_executable_search_projection_graph_delta_count": health.executable_search_projection_graph_delta_count,
-        "background_maintenance_admitted_search_projection_graph_delta_count": health.admitted_search_projection_graph_delta_count,
-        "background_maintenance_deferred_search_projection_graph_delta_count": health.deferred_search_projection_graph_delta_count,
-        "background_maintenance_rejected_search_projection_graph_delta_count": health.rejected_search_projection_graph_delta_count,
-        "background_maintenance_executable_search_projection_graph_delta_operations": health.executable_search_projection_graph_delta_operations,
-        "background_maintenance_admitted_search_projection_graph_delta_operations": health.admitted_search_projection_graph_delta_operations,
-        "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch": health.max_search_projection_graph_delta_complete_through_graph_commit_epoch,
-        "background_maintenance_foreground_admission_probe_ready": health.foreground_admission_probe_ready,
-        "background_maintenance_foreground_admission_probe_admission": health.foreground_admission_probe_admission_name.as_deref(),
-        "background_maintenance_memory_pressure_ready": health.memory_pressure_ready,
-        "background_maintenance_memory_budget_bytes": health.memory_budget_bytes,
-        "background_maintenance_estimated_memory_bytes": health.estimated_memory_bytes,
-        "background_maintenance_blocker_codes": health.blocker_codes,
-        "background_maintenance_blockers": health.blockers,
-    })
+    let mut object = serde_json::Map::new();
+    insert_json(
+        &mut object,
+        "protocol",
+        "skein-nowledge-background-maintenance-evidence-v1",
+    );
+    insert_json(&mut object, "required", health.required);
+    insert_json(&mut object, "present", health.present);
+    insert_json(&mut object, "ready", health.ready);
+    insert_json(&mut object, "protocol_matches", health.protocol_matches);
+    insert_json(&mut object, "total_candidates", health.total_candidates);
+    insert_json(&mut object, "ranked_count", health.ranked_count);
+    insert_json(
+        &mut object,
+        "executable_search_projection_graph_delta_count",
+        health.executable_search_projection_graph_delta_count,
+    );
+    insert_json(
+        &mut object,
+        "admitted_search_projection_graph_delta_count",
+        health.admitted_search_projection_graph_delta_count,
+    );
+    insert_json(
+        &mut object,
+        "deferred_search_projection_graph_delta_count",
+        health.deferred_search_projection_graph_delta_count,
+    );
+    insert_json(
+        &mut object,
+        "rejected_search_projection_graph_delta_count",
+        health.rejected_search_projection_graph_delta_count,
+    );
+    insert_json(
+        &mut object,
+        "executable_search_projection_graph_delta_operations",
+        health.executable_search_projection_graph_delta_operations,
+    );
+    insert_json(
+        &mut object,
+        "admitted_search_projection_graph_delta_operations",
+        health.admitted_search_projection_graph_delta_operations,
+    );
+    insert_json(
+        &mut object,
+        "max_search_projection_graph_delta_complete_through_graph_commit_epoch",
+        health.max_search_projection_graph_delta_complete_through_graph_commit_epoch,
+    );
+    insert_json(
+        &mut object,
+        "foreground_admission_probe_ready",
+        health.foreground_admission_probe_ready,
+    );
+    insert_json(
+        &mut object,
+        "foreground_admission_probe_admission",
+        health.foreground_admission_probe_admission_name.as_deref(),
+    );
+    insert_json(
+        &mut object,
+        "memory_pressure_ready",
+        health.memory_pressure_ready,
+    );
+    insert_json(
+        &mut object,
+        "memory_budget_bytes",
+        health.memory_budget_bytes,
+    );
+    insert_json(
+        &mut object,
+        "estimated_memory_bytes",
+        health.estimated_memory_bytes,
+    );
+    insert_json(&mut object, "qos_snapshot_ready", health.qos_snapshot_ready);
+    insert_json(
+        &mut object,
+        "qos_snapshot_foreground_admitted",
+        health.qos_snapshot_foreground_admitted,
+    );
+    insert_json(
+        &mut object,
+        "qos_snapshot_background_bounded",
+        health.qos_snapshot_background_bounded,
+    );
+    insert_json(
+        &mut object,
+        "qos_snapshot_total_background_over_budget",
+        health.qos_snapshot_total_background_over_budget,
+    );
+    insert_json(
+        &mut object,
+        "qos_snapshot_blocker_codes",
+        &health.qos_snapshot_blocker_codes,
+    );
+    insert_json(
+        &mut object,
+        "foreground_ranked_count",
+        health.foreground_ranked_count,
+    );
+    insert_json(
+        &mut object,
+        "unknown_admission_count",
+        health.unknown_admission_count,
+    );
+    insert_json(&mut object, "blocker_codes", &health.blocker_codes);
+    insert_json(&mut object, "blockers", &health.blockers);
+    insert_json(
+        &mut object,
+        "background_maintenance_required",
+        health.required,
+    );
+    insert_json(
+        &mut object,
+        "background_maintenance_present",
+        health.present,
+    );
+    insert_json(&mut object, "background_maintenance_ready", health.ready);
+    insert_json(
+        &mut object,
+        "background_maintenance_protocol_matches",
+        health.protocol_matches,
+    );
+    insert_json(
+        &mut object,
+        "background_maintenance_executable_search_projection_graph_delta_count",
+        health.executable_search_projection_graph_delta_count,
+    );
+    insert_json(
+        &mut object,
+        "background_maintenance_admitted_search_projection_graph_delta_count",
+        health.admitted_search_projection_graph_delta_count,
+    );
+    insert_json(
+        &mut object,
+        "background_maintenance_deferred_search_projection_graph_delta_count",
+        health.deferred_search_projection_graph_delta_count,
+    );
+    insert_json(
+        &mut object,
+        "background_maintenance_rejected_search_projection_graph_delta_count",
+        health.rejected_search_projection_graph_delta_count,
+    );
+    insert_json(
+        &mut object,
+        "background_maintenance_executable_search_projection_graph_delta_operations",
+        health.executable_search_projection_graph_delta_operations,
+    );
+    insert_json(
+        &mut object,
+        "background_maintenance_admitted_search_projection_graph_delta_operations",
+        health.admitted_search_projection_graph_delta_operations,
+    );
+    insert_json(
+        &mut object,
+        "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch",
+        health.max_search_projection_graph_delta_complete_through_graph_commit_epoch,
+    );
+    insert_json(
+        &mut object,
+        "background_maintenance_foreground_admission_probe_ready",
+        health.foreground_admission_probe_ready,
+    );
+    insert_json(
+        &mut object,
+        "background_maintenance_foreground_admission_probe_admission",
+        health.foreground_admission_probe_admission_name.as_deref(),
+    );
+    insert_json(
+        &mut object,
+        "background_maintenance_memory_pressure_ready",
+        health.memory_pressure_ready,
+    );
+    insert_json(
+        &mut object,
+        "background_maintenance_memory_budget_bytes",
+        health.memory_budget_bytes,
+    );
+    insert_json(
+        &mut object,
+        "background_maintenance_estimated_memory_bytes",
+        health.estimated_memory_bytes,
+    );
+    insert_json(
+        &mut object,
+        "background_maintenance_qos_snapshot_ready",
+        health.qos_snapshot_ready,
+    );
+    insert_json(
+        &mut object,
+        "background_maintenance_qos_snapshot_foreground_admitted",
+        health.qos_snapshot_foreground_admitted,
+    );
+    insert_json(
+        &mut object,
+        "background_maintenance_qos_snapshot_background_bounded",
+        health.qos_snapshot_background_bounded,
+    );
+    insert_json(
+        &mut object,
+        "background_maintenance_qos_snapshot_total_background_over_budget",
+        health.qos_snapshot_total_background_over_budget,
+    );
+    insert_json(
+        &mut object,
+        "background_maintenance_qos_snapshot_blocker_codes",
+        &health.qos_snapshot_blocker_codes,
+    );
+    insert_json(
+        &mut object,
+        "background_maintenance_blocker_codes",
+        &health.blocker_codes,
+    );
+    insert_json(
+        &mut object,
+        "background_maintenance_blockers",
+        &health.blockers,
+    );
+    serde_json::Value::Object(object)
+}
+
+fn insert_json<T: serde::Serialize>(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    value: T,
+) {
+    object.insert(
+        key.to_string(),
+        serde_json::to_value(value).expect("background maintenance evidence must serialize"),
+    );
 }
 
 fn read_json_file(path: &Path) -> Result<serde_json::Value> {
@@ -137,6 +322,12 @@ mod tests {
         );
         assert_eq!(evidence["foreground_admission_probe_ready"], true);
         assert_eq!(evidence["foreground_admission_probe_admission"], "admit");
+        assert_eq!(evidence["qos_snapshot_ready"], true);
+        assert_eq!(evidence["qos_snapshot_background_bounded"], true);
+        assert_eq!(
+            evidence["background_maintenance_qos_snapshot_blocker_codes"],
+            serde_json::json!([])
+        );
         assert_eq!(
             evidence["background_maintenance_blocker_codes"],
             serde_json::json!([])
@@ -197,6 +388,17 @@ mod tests {
             "total_candidates": 1,
             "foreground_admission_probe_ready": true,
             "foreground_admission_probe_admission": "admit",
+            "qos_snapshot": {
+                "ready": true,
+                "foreground_admitted": true,
+                "background_enabled": true,
+                "background_bounded": true,
+                "running_background_operations": 0,
+                "max_total_background_operations": 4096,
+                "remaining_total_background_operations": 4096,
+                "total_background_over_budget": false,
+                "blocker_codes": []
+            },
             "ranked": [
                 {
                     "kind": "search_projection_graph_delta",

@@ -11,7 +11,7 @@ use crate::compat::{
     REQUIRED_EXTERNAL_SHADOW_CAPABILITIES,
 };
 use crate::error::{Result, SkeinError};
-use crate::qos::{LocalQosPolicy, LocalQosState};
+use crate::qos::{LocalQosClassSnapshot, LocalQosPolicy, LocalQosSnapshot, LocalQosState};
 use crate::search::SearchIndex;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -75,6 +75,11 @@ pub struct BackgroundMaintenanceEvidenceHealth {
     pub memory_pressure_ready: Option<bool>,
     pub memory_budget_bytes: Option<u64>,
     pub estimated_memory_bytes: Option<u64>,
+    pub qos_snapshot_ready: Option<bool>,
+    pub qos_snapshot_foreground_admitted: Option<bool>,
+    pub qos_snapshot_background_bounded: Option<bool>,
+    pub qos_snapshot_total_background_over_budget: Option<bool>,
+    pub qos_snapshot_blocker_codes: Vec<String>,
     pub foreground_ranked_count: u64,
     pub unknown_admission_count: u64,
     pub blocker_codes: Vec<String>,
@@ -692,6 +697,31 @@ fn insert_cutover_evidence_json(
     );
     insert_json(
         &mut evidence,
+        "background_maintenance_qos_snapshot_ready",
+        background_maintenance_health.qos_snapshot_ready,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_qos_snapshot_foreground_admitted",
+        background_maintenance_health.qos_snapshot_foreground_admitted,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_qos_snapshot_background_bounded",
+        background_maintenance_health.qos_snapshot_background_bounded,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_qos_snapshot_total_background_over_budget",
+        background_maintenance_health.qos_snapshot_total_background_over_budget,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_qos_snapshot_blocker_codes",
+        background_maintenance_health.qos_snapshot_blocker_codes,
+    );
+    insert_json(
+        &mut evidence,
         "background_maintenance_foreground_ranked_count",
         background_maintenance_health.foreground_ranked_count,
     );
@@ -889,6 +919,11 @@ pub fn background_maintenance_evidence_health(
             memory_pressure_ready: None,
             memory_budget_bytes: None,
             estimated_memory_bytes: None,
+            qos_snapshot_ready: None,
+            qos_snapshot_foreground_admitted: None,
+            qos_snapshot_background_bounded: None,
+            qos_snapshot_total_background_over_budget: None,
+            qos_snapshot_blocker_codes: Vec::new(),
             foreground_ranked_count: 0,
             unknown_admission_count: 0,
             blocker_codes: if required {
@@ -1011,6 +1046,32 @@ pub fn background_maintenance_evidence_health(
     } else {
         None
     };
+    let qos_snapshot = background_maintenance.get("qos_snapshot");
+    let qos_snapshot_ready = qos_snapshot
+        .and_then(|snapshot| snapshot.get("ready"))
+        .or_else(|| background_maintenance.get("qos_snapshot_ready"))
+        .and_then(serde_json::Value::as_bool);
+    let qos_snapshot_foreground_admitted = qos_snapshot
+        .and_then(|snapshot| snapshot.get("foreground_admitted"))
+        .or_else(|| background_maintenance.get("qos_snapshot_foreground_admitted"))
+        .and_then(serde_json::Value::as_bool);
+    let qos_snapshot_background_bounded = qos_snapshot
+        .and_then(|snapshot| snapshot.get("background_bounded"))
+        .or_else(|| background_maintenance.get("qos_snapshot_background_bounded"))
+        .and_then(serde_json::Value::as_bool);
+    let qos_snapshot_total_background_over_budget = qos_snapshot
+        .and_then(|snapshot| snapshot.get("total_background_over_budget"))
+        .or_else(|| background_maintenance.get("qos_snapshot_total_background_over_budget"))
+        .and_then(serde_json::Value::as_bool);
+    let qos_snapshot_blocker_codes = qos_snapshot
+        .and_then(|snapshot| snapshot.get("blocker_codes"))
+        .or_else(|| background_maintenance.get("qos_snapshot_blocker_codes"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
     let foreground_ranked_count = ranked
         .into_iter()
         .flatten()
@@ -1064,6 +1125,23 @@ pub fn background_maintenance_evidence_health(
         blockers
             .push("background maintenance evidence exceeds configured memory budget".to_string());
     }
+    if required && qos_snapshot_ready.is_none() {
+        blocker_codes.push("qos_snapshot_missing".to_string());
+        blockers.push("background maintenance evidence lacks a local QoS snapshot".to_string());
+    }
+    if qos_snapshot_ready == Some(false) {
+        blocker_codes.push("qos_snapshot_not_ready".to_string());
+        blockers.push("background maintenance local QoS snapshot is not ready".to_string());
+    }
+    if qos_snapshot_background_bounded == Some(false) {
+        blocker_codes.push("qos_snapshot_background_unbounded".to_string());
+        blockers.push("background maintenance local QoS snapshot is unbounded".to_string());
+    }
+    if qos_snapshot_total_background_over_budget == Some(true) {
+        blocker_codes.push("qos_snapshot_background_over_budget".to_string());
+        blockers.push("background maintenance local QoS snapshot is over budget".to_string());
+    }
+    blocker_codes.extend(qos_snapshot_blocker_codes.iter().cloned());
     BackgroundMaintenanceEvidenceHealth {
         required,
         present: true,
@@ -1083,6 +1161,11 @@ pub fn background_maintenance_evidence_health(
         memory_pressure_ready,
         memory_budget_bytes,
         estimated_memory_bytes,
+        qos_snapshot_ready,
+        qos_snapshot_foreground_admitted,
+        qos_snapshot_background_bounded,
+        qos_snapshot_total_background_over_budget,
+        qos_snapshot_blocker_codes,
         foreground_ranked_count,
         unknown_admission_count,
         blocker_codes,
@@ -1371,6 +1454,58 @@ pub fn background_maintenance_summary_to_json(
         "foreground_admission_probe_admission",
         summary.foreground_admission_probe_admission_name.as_deref(),
     );
+    if let Some(qos_snapshot) = summary.qos_snapshot.as_ref() {
+        insert_json(
+            &mut object,
+            "qos_snapshot",
+            background_maintenance_qos_snapshot_to_json(qos_snapshot),
+        );
+        insert_json(&mut object, "qos_snapshot_ready", qos_snapshot.ready);
+        insert_json(
+            &mut object,
+            "qos_snapshot_foreground_admitted",
+            qos_snapshot.foreground_admitted,
+        );
+        insert_json(
+            &mut object,
+            "qos_snapshot_background_enabled",
+            qos_snapshot.background_enabled,
+        );
+        insert_json(
+            &mut object,
+            "qos_snapshot_background_bounded",
+            qos_snapshot.background_bounded,
+        );
+        insert_json(
+            &mut object,
+            "qos_snapshot_running_background_operations",
+            qos_snapshot.running_background_operations,
+        );
+        insert_json(
+            &mut object,
+            "qos_snapshot_max_total_background_operations",
+            qos_snapshot.max_total_background_operations,
+        );
+        insert_json(
+            &mut object,
+            "qos_snapshot_remaining_total_background_operations",
+            qos_snapshot.remaining_total_background_operations,
+        );
+        insert_json(
+            &mut object,
+            "qos_snapshot_total_background_over_budget",
+            qos_snapshot.total_background_over_budget,
+        );
+        insert_json(
+            &mut object,
+            "qos_snapshot_blocker_codes",
+            qos_snapshot
+                .blocker_codes
+                .iter()
+                .map(|code| code.as_str())
+                .collect::<Vec<_>>(),
+        );
+    }
     insert_json(
         &mut object,
         "top_admitted_kind",
@@ -1390,6 +1525,89 @@ pub fn background_maintenance_summary_to_json(
             .map(background_maintenance_summary_item_to_json)
             .collect::<Vec<_>>(),
     );
+    serde_json::Value::Object(object)
+}
+
+fn background_maintenance_qos_snapshot_to_json(snapshot: &LocalQosSnapshot) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    insert_json(&mut object, "ready", snapshot.ready);
+    insert_json(
+        &mut object,
+        "foreground_admitted",
+        snapshot.foreground_admitted,
+    );
+    insert_json(
+        &mut object,
+        "background_enabled",
+        snapshot.background_enabled,
+    );
+    insert_json(
+        &mut object,
+        "background_bounded",
+        snapshot.background_bounded,
+    );
+    insert_json(
+        &mut object,
+        "running_background_operations",
+        snapshot.running_background_operations,
+    );
+    insert_json(
+        &mut object,
+        "max_total_background_operations",
+        snapshot.max_total_background_operations,
+    );
+    insert_json(
+        &mut object,
+        "remaining_total_background_operations",
+        snapshot.remaining_total_background_operations,
+    );
+    insert_json(
+        &mut object,
+        "total_background_over_budget",
+        snapshot.total_background_over_budget,
+    );
+    insert_json(
+        &mut object,
+        "blocker_codes",
+        snapshot
+            .blocker_codes
+            .iter()
+            .map(|code| code.as_str())
+            .collect::<Vec<_>>(),
+    );
+    insert_json(
+        &mut object,
+        "classes",
+        snapshot
+            .class_snapshots
+            .iter()
+            .map(background_maintenance_qos_class_snapshot_to_json)
+            .collect::<Vec<_>>(),
+    );
+    serde_json::Value::Object(object)
+}
+
+fn background_maintenance_qos_class_snapshot_to_json(
+    snapshot: &LocalQosClassSnapshot,
+) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    insert_json(&mut object, "class", snapshot.class.as_str());
+    insert_json(
+        &mut object,
+        "running_background_operations",
+        snapshot.running_background_operations,
+    );
+    insert_json(
+        &mut object,
+        "max_background_operations",
+        snapshot.max_background_operations,
+    );
+    insert_json(
+        &mut object,
+        "remaining_background_operations",
+        snapshot.remaining_background_operations,
+    );
+    insert_json(&mut object, "over_budget", snapshot.over_budget);
     serde_json::Value::Object(object)
 }
 
@@ -2459,6 +2677,18 @@ mod tests {
             .as_u64()
             .is_some());
         assert_eq!(
+            bundle["background_maintenance"]["qos_snapshot"]["ready"],
+            true
+        );
+        assert_eq!(
+            bundle["background_maintenance"]["qos_snapshot"]["background_bounded"],
+            true
+        );
+        assert_eq!(
+            bundle["background_maintenance"]["qos_snapshot"]["blocker_codes"],
+            serde_json::json!([])
+        );
+        assert_eq!(
             bundle["migration_gate"]["blockers"]
                 .as_array()
                 .unwrap()
@@ -2890,6 +3120,7 @@ mod tests {
                     "total_candidates": 0,
                     "foreground_admission_probe_ready": true,
                     "foreground_admission_probe_admission": "admit",
+                    "qos_snapshot": ready_qos_snapshot(),
                     "ranked": []
                 })),
                 ..NowledgeCypherMigrationGateJsonOptions::default()
@@ -2926,6 +3157,7 @@ mod tests {
             "total_candidates": 1,
             "foreground_admission_probe_ready": true,
             "foreground_admission_probe_admission": "admit",
+            "qos_snapshot": ready_qos_snapshot(),
             "ranked": [
                 {
                     "kind": "schema_maintenance",
@@ -3057,6 +3289,20 @@ mod tests {
         ])
     }
 
+    fn ready_qos_snapshot() -> serde_json::Value {
+        serde_json::json!({
+            "ready": true,
+            "foreground_admitted": true,
+            "background_enabled": true,
+            "background_bounded": true,
+            "running_background_operations": 0,
+            "max_total_background_operations": 4096,
+            "remaining_total_background_operations": 4096,
+            "total_background_over_budget": false,
+            "blocker_codes": []
+        })
+    }
+
     #[test]
     fn replacement_readiness_family_evidence_health_requires_nowledge_families() {
         let families = ready_replacement_readiness_by_query_family();
@@ -3090,6 +3336,7 @@ mod tests {
             "total_candidates": 1,
             "foreground_admission_probe_ready": true,
             "foreground_admission_probe_admission": "admit",
+            "qos_snapshot": ready_qos_snapshot(),
             "ranked": [
                 {
                     "kind": "schema_maintenance",
@@ -3124,6 +3371,7 @@ mod tests {
             "total_candidates": 1,
             "foreground_admission_probe_ready": true,
             "foreground_admission_probe_admission": "admit",
+            "qos_snapshot": ready_qos_snapshot(),
             "memory_pressure": {
                 "ready": true,
                 "budget_bytes": 4096,
@@ -3157,10 +3405,91 @@ mod tests {
     }
 
     #[test]
+    fn background_maintenance_evidence_health_requires_qos_snapshot() {
+        let summary = serde_json::json!({
+            "protocol": "skein-background-maintenance-report",
+            "total_candidates": 1,
+            "foreground_admission_probe_ready": true,
+            "foreground_admission_probe_admission": "admit",
+            "ranked": [
+                {
+                    "kind": "search_projection_graph_delta",
+                    "work_class": "projection",
+                    "priority": "background",
+                    "admission": "admit"
+                }
+            ]
+        });
+
+        let health = super::background_maintenance_evidence_health(Some(&summary), true);
+
+        assert!(health.present);
+        assert!(!health.ready);
+        assert_eq!(health.qos_snapshot_ready, None);
+        assert_eq!(
+            health.blocker_codes,
+            vec!["qos_snapshot_missing".to_string()]
+        );
+        assert_eq!(
+            health.blockers,
+            vec!["background maintenance evidence lacks a local QoS snapshot".to_string()]
+        );
+    }
+
+    #[test]
+    fn background_maintenance_evidence_health_rejects_unbounded_qos_snapshot() {
+        let summary = serde_json::json!({
+            "protocol": "skein-background-maintenance-report",
+            "total_candidates": 1,
+            "foreground_admission_probe_ready": true,
+            "foreground_admission_probe_admission": "admit",
+            "qos_snapshot": {
+                "ready": false,
+                "foreground_admitted": true,
+                "background_enabled": true,
+                "background_bounded": false,
+                "running_background_operations": 0,
+                "max_total_background_operations": null,
+                "remaining_total_background_operations": null,
+                "total_background_over_budget": false,
+                "blocker_codes": ["background_unbounded"]
+            },
+            "ranked": [
+                {
+                    "kind": "search_projection_graph_delta",
+                    "work_class": "projection",
+                    "priority": "background",
+                    "admission": "admit"
+                }
+            ]
+        });
+
+        let health = super::background_maintenance_evidence_health(Some(&summary), true);
+
+        assert!(health.present);
+        assert!(!health.ready);
+        assert_eq!(health.qos_snapshot_ready, Some(false));
+        assert_eq!(health.qos_snapshot_background_bounded, Some(false));
+        assert_eq!(
+            health.qos_snapshot_blocker_codes,
+            vec!["background_unbounded".to_string()]
+        );
+        assert_eq!(
+            health.blocker_codes,
+            vec![
+                "qos_snapshot_not_ready".to_string(),
+                "qos_snapshot_background_unbounded".to_string(),
+                "background_unbounded".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn background_maintenance_evidence_health_requires_foreground_admission_probe() {
         let summary = serde_json::json!({
             "protocol": "skein-background-maintenance-report",
             "total_candidates": 1,
+            "qos_snapshot": ready_qos_snapshot(),
             "ranked": [
                 {
                     "kind": "search_projection_graph_delta",

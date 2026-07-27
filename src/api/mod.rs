@@ -9,8 +9,8 @@ use crate::optimizer::{
 use crate::planner;
 use crate::qos::{
     BackgroundWorkDecision, BackgroundWorkHint, BackgroundWorkPlan, LocalQosPolicy,
-    LocalQosScheduler, LocalQosState, QosAdmission, QosAdmissionCode, WorkClass, WorkPriority,
-    WorkRequest,
+    LocalQosScheduler, LocalQosSnapshot, LocalQosState, QosAdmission, QosAdmissionCode, WorkClass,
+    WorkPriority, WorkRequest,
 };
 use crate::schema::{
     BasicGraphStatistics, Catalog, CompositeIndexDescriptor, ConstraintDescriptor, GraphStatistics,
@@ -675,6 +675,7 @@ pub struct BackgroundMaintenanceSummary {
     pub max_search_projection_graph_delta_complete_through_graph_commit_epoch: Option<u64>,
     pub foreground_admission_probe_ready: bool,
     pub foreground_admission_probe_admission_name: Option<String>,
+    pub qos_snapshot: Option<LocalQosSnapshot>,
     pub top_admitted_kind: Option<BackgroundMaintenanceKind>,
     pub top_admitted_name: Option<String>,
     pub ranked: Vec<BackgroundMaintenanceSummaryItem>,
@@ -799,12 +800,14 @@ impl BackgroundMaintenanceSummary {
             state,
             &WorkRequest::foreground(WorkClass::Query, usize::MAX),
         );
+        let qos_snapshot = policy.snapshot(state);
         let mut summary = Self {
             total_candidates: ranked.len(),
-            foreground_admission_probe_ready: foreground_admission == QosAdmission::Admit,
+            foreground_admission_probe_ready: qos_snapshot.foreground_admitted,
             foreground_admission_probe_admission_name: Some(
                 qos_admission_name(&foreground_admission).to_string(),
             ),
+            qos_snapshot: Some(qos_snapshot),
             ..Self::default()
         };
 

@@ -458,6 +458,9 @@ contract.
   - [x] Expose a compact typed local QoS snapshot that proves foreground
     admission stays open while background work is enabled, bounded, and within
     total and per-class operation budgets.
+  - [x] Require background-maintenance evidence to carry local QoS snapshot
+    readiness so cutover gates fail closed when background work is unbounded or
+    over budget.
 
 ## P0: Search Projection Replacement
 
