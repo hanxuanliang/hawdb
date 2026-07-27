@@ -82,6 +82,14 @@ pub fn parse_search_candidate_shadow_probe(
         SearchMode::Vector,
         &mut accumulator,
     )?;
+    let candidate_readiness = required_object(value, "candidate_readiness")?;
+    accumulator.record_candidate_readiness_signals(
+        required_bool(candidate_readiness, "source_chunk_identity_ready")?,
+        required_bool(candidate_readiness, "fail_soft_observed")?,
+        required_bool(candidate_readiness, "projection_marker_status_visible")?,
+        required_bool(candidate_readiness, "projection_watermark_ready")?,
+        required_bool(candidate_readiness, "embedding_identity_ready")?,
+    );
     for blocker in optional_string_array(value, "blocker_codes")? {
         accumulator.add_blocker_code(blocker);
     }
@@ -325,6 +333,23 @@ mod tests {
         assert_eq!(evidence["vector_retriever_ready"], true);
         assert_eq!(evidence["fts_top_k_overlap_ready"], true);
         assert_eq!(evidence["vector_top_k_overlap_ready"], true);
+        assert_eq!(
+            evidence["candidate_readiness"]["source_chunk_identity_ready"],
+            true
+        );
+        assert_eq!(evidence["candidate_readiness"]["fail_soft_observed"], true);
+        assert_eq!(
+            evidence["candidate_readiness"]["projection_marker_status_visible"],
+            true
+        );
+        assert_eq!(
+            evidence["candidate_readiness"]["projection_watermark_ready"],
+            true
+        );
+        assert_eq!(
+            evidence["candidate_readiness"]["embedding_identity_ready"],
+            true
+        );
         assert_eq!(evidence["filter_pushdown"]["ready"], true);
     }
 
@@ -406,6 +431,35 @@ mod tests {
     }
 
     #[test]
+    fn search_candidate_shadow_probe_requires_candidate_readiness_evidence() {
+        let mut probe = ready_probe();
+        probe.as_object_mut().unwrap().remove("candidate_readiness");
+
+        let error = parse_search_candidate_shadow_probe(&probe).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "semantic error: search candidate shadow probe field 'candidate_readiness' must be a object"
+        );
+    }
+
+    #[test]
+    fn search_candidate_shadow_probe_requires_typed_candidate_readiness_signals() {
+        let mut probe = ready_probe();
+        probe["candidate_readiness"]
+            .as_object_mut()
+            .unwrap()
+            .remove("embedding_identity_ready");
+
+        let error = parse_search_candidate_shadow_probe(&probe).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "semantic error: search candidate shadow probe field 'embedding_identity_ready' must be a boolean"
+        );
+    }
+
+    #[test]
     fn search_candidate_shadow_probe_fails_closed_for_unavailable_retriever_leg() {
         let mut probe = ready_probe();
         probe["retriever_legs"]["vector"]["available"] = serde_json::json!(false);
@@ -477,6 +531,13 @@ mod tests {
                     "primary_candidate_ids": ["mem_3"],
                     "shadow_candidate_ids": ["mem_3"]
                 }
+            },
+            "candidate_readiness": {
+                "source_chunk_identity_ready": true,
+                "fail_soft_observed": true,
+                "projection_marker_status_visible": true,
+                "projection_watermark_ready": true,
+                "embedding_identity_ready": true
             }
         })
     }

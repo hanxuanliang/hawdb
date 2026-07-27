@@ -1383,11 +1383,28 @@ impl NowledgeMemSearchCandidateShadowAccumulator {
         &mut self,
         report: &NowledgeMemSearchCandidateReadinessReport,
     ) {
-        self.source_chunk_identity_ready |= report.source_chunk_identity_ready;
-        self.fail_soft_observed |= report.fail_soft_observed;
-        self.projection_marker_status_visible |= report.projection_marker_status_visible;
-        self.projection_watermark_ready |= report.projection_watermark_ready;
-        self.embedding_identity_ready |= report.embedding_identity_ready;
+        self.record_candidate_readiness_signals(
+            report.source_chunk_identity_ready,
+            report.fail_soft_observed,
+            report.projection_marker_status_visible,
+            report.projection_watermark_ready,
+            report.embedding_identity_ready,
+        );
+    }
+
+    pub fn record_candidate_readiness_signals(
+        &mut self,
+        source_chunk_identity_ready: bool,
+        fail_soft_observed: bool,
+        projection_marker_status_visible: bool,
+        projection_watermark_ready: bool,
+        embedding_identity_ready: bool,
+    ) {
+        self.source_chunk_identity_ready |= source_chunk_identity_ready;
+        self.fail_soft_observed |= fail_soft_observed;
+        self.projection_marker_status_visible |= projection_marker_status_visible;
+        self.projection_watermark_ready |= projection_watermark_ready;
+        self.embedding_identity_ready |= embedding_identity_ready;
     }
 
     pub fn record_top_k_overlap_candidate_ids(

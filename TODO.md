@@ -224,6 +224,8 @@ contract.
   - [x] Require replacement summary, integration readiness, and final preflight
     to fail closed on missing search-candidate readiness signals from
     Rust-bridge shadow evidence.
+  - [x] Require search-candidate shadow probe inputs to carry typed
+    candidate-readiness signals before producing cutover evidence.
 - [ ] PR 6: Prove WAL and checkpoint recovery with Mem-shaped mutations.
   - Scope: add fixtures for committed batch replay, torn WAL tail handling, and
     checkpoint replay boundaries that match Mem graph/search writes.
