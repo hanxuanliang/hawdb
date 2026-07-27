@@ -560,6 +560,8 @@ contract.
     and keep the CLI as a thin wrapper.
   - [x] Expose library readiness area gates as typed Rust structs so embedded
     Mem callers do not need to parse `readiness_by_area` JSON.
+  - [x] Expose a typed Nowledge Mem library-readiness runner and keep the CLI
+    function as a JSON-only wrapper over the Rust report.
   - [x] Expose typed graph replacement and query-family replacement readiness
     through Rust library APIs and consume the same results in integration
     readiness next actions.

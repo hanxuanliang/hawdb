@@ -178,7 +178,8 @@ pub use mem_library_readiness::{
     nowledge_mem_library_readiness_usage, parse_bounded_probe_json,
     parse_mem_library_covered_routes_json, parse_mem_library_graph_route_readiness_json,
     parse_mem_library_readiness_mode, parse_parameters_json, run_nowledge_mem_library_readiness,
-    value_from_json,
+    run_nowledge_mem_library_readiness_report, value_from_json,
+    NowledgeMemLibraryReadinessRunReport,
 };
 pub use nowledge_fuzz::{
     nowledge_query_fuzz_harness, NowledgeQueryFuzzCaseReport, NowledgeQueryFuzzHarnessOptions,

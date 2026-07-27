@@ -1,5 +1,6 @@
 use crate::{
-    NowledgeGraphStatement, NowledgeMemEmbeddedStore, NowledgeMemGraphMode, NowledgeMemOpenOptions,
+    NowledgeGraphStatement, NowledgeMemEmbeddedStore, NowledgeMemGraphMode,
+    NowledgeMemLibraryReadinessReport, NowledgeMemOpenOptions, NowledgeMemOpenReport,
     NowledgeMemReadinessOptions, NowledgeMemRouteReadinessSummary, Result,
     SearchProjectionProbeOptions, SkeinError, Value,
 };
@@ -14,6 +15,34 @@ pub fn nowledge_mem_library_readiness_usage() -> String {
 pub fn run_nowledge_mem_library_readiness(
     mut args: impl Iterator<Item = String>,
 ) -> Result<(serde_json::Value, bool)> {
+    let report = run_nowledge_mem_library_readiness_report(&mut args)?;
+    let mut readiness = report.readiness.json();
+    if let Some(object) = readiness.as_object_mut() {
+        object.insert("open_report".to_string(), report.open_report.json());
+    }
+    Ok((readiness, report.require_ready))
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemLibraryReadinessRunReport {
+    pub readiness: NowledgeMemLibraryReadinessReport,
+    pub open_report: NowledgeMemOpenReport,
+    pub require_ready: bool,
+}
+
+impl NowledgeMemLibraryReadinessRunReport {
+    pub fn json(&self) -> serde_json::Value {
+        let mut readiness = self.readiness.json();
+        if let Some(object) = readiness.as_object_mut() {
+            object.insert("open_report".to_string(), self.open_report.json());
+        }
+        readiness
+    }
+}
+
+pub fn run_nowledge_mem_library_readiness_report(
+    mut args: impl Iterator<Item = String>,
+) -> Result<NowledgeMemLibraryReadinessRunReport> {
     let mut require_ready = false;
     let mut mode = NowledgeMemGraphMode::ShadowReadOnly;
     let mut search_projection_path = None;
@@ -150,11 +179,12 @@ pub fn run_nowledge_mem_library_readiness(
         search_candidate_shadow_evidence,
         ..NowledgeMemReadinessOptions::default()
     };
-    let mut readiness = store.library_readiness_json(&options);
-    if let Some(object) = readiness.as_object_mut() {
-        object.insert("open_report".to_string(), open_report.json());
-    }
-    Ok((readiness, require_ready))
+    let readiness = store.library_readiness(&options);
+    Ok(NowledgeMemLibraryReadinessRunReport {
+        readiness,
+        open_report,
+        require_ready,
+    })
 }
 
 pub fn parse_mem_library_readiness_mode(raw: &str) -> Result<NowledgeMemGraphMode> {
@@ -338,8 +368,8 @@ fn read_json_file(path: &Path) -> Result<serde_json::Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::run_nowledge_mem_library_readiness;
-    use crate::{Database, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES};
+    use super::{run_nowledge_mem_library_readiness, run_nowledge_mem_library_readiness_report};
+    use crate::{Database, NowledgeMemGraphMode, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES};
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -422,6 +452,29 @@ mod tests {
         assert_eq!(readiness["open_report"]["search_projection_opened"], false);
         assert!(readiness.get("graph_path").is_none());
         assert!(!readiness.to_string().contains(graph_path.to_str().unwrap()));
+
+        let typed = run_nowledge_mem_library_readiness_report(
+            [
+                "--bounded-probe-json",
+                bounded_probe_path.to_str().unwrap(),
+                "--covered-routes-json",
+                covered_routes_path.to_str().unwrap(),
+                "--graph-route-readiness-json",
+                graph_route_readiness_path.to_str().unwrap(),
+                graph_path.to_str().unwrap(),
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap();
+        assert!(!typed.require_ready);
+        assert_eq!(typed.readiness.mode, NowledgeMemGraphMode::ShadowReadOnly);
+        assert!(typed.readiness.readiness_by_area.query.ready);
+        assert!(typed.readiness.readiness_by_area.graph_route.ready);
+        assert!(!typed.readiness.readiness_by_area.query_family.ready);
+        assert!(typed.open_report.graph_opened);
+        assert!(!typed.open_report.search_projection_opened);
+        assert_eq!(typed.json(), readiness);
         std::fs::remove_dir_all(root).unwrap();
     }
 
