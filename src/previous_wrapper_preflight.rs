@@ -1,5 +1,6 @@
 use crate::{
-    Result, SkeinError, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
+    nowledge_mem_graph_read_route_catalog_digest, Result, SkeinError,
+    NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
     NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE,
     NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE,
     NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
@@ -855,6 +856,10 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 query_runtime_preflight_counts_match(&query_runtime_preflight),
                 u64_path(&query_runtime_preflight, &["failed_probe_count"]) == Some(0),
                 query_runtime_preflight_route_coverage_ready(&query_runtime_preflight),
+                str_path(&query_runtime_preflight, &["route_catalog_version"])
+                    == Some(NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION),
+                str_path(&query_runtime_preflight, &["route_catalog_digest"])
+                    == Some(nowledge_mem_graph_read_route_catalog_digest().as_str()),
                 query_runtime_preflight_probe_details_ready(&query_runtime_preflight),
             ],
             [
@@ -865,6 +870,8 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 "query_runtime_preflight.passed_probe_count",
                 "query_runtime_preflight.failed_probe_count",
                 "query_runtime_preflight.route_coverage",
+                "query_runtime_preflight.route_catalog_version",
+                "query_runtime_preflight.route_catalog_digest",
                 "query_runtime_preflight.probes",
             ],
             blocker_codes(
@@ -1909,6 +1916,10 @@ fn query_runtime_preflight_route_coverage_ready(value: &serde_json::Value) -> bo
         && empty_array_path(value, &["missing_required_routes"])
         && empty_array_path(value, &["unknown_routes"])
         && empty_array_path(value, &["duplicate_routes"])
+        && str_path(value, &["route_catalog_version"])
+            == Some(NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION)
+        && str_path(value, &["route_catalog_digest"])
+            == Some(nowledge_mem_graph_read_route_catalog_digest().as_str())
         && bool_path(value, &["route_coverage_ready"]) == Some(true)
         && empty_array_path(value, &["route_coverage_blocker_codes"])
         && unknown_routes == 0
@@ -2043,6 +2054,8 @@ mod tests {
         run_nowledge_previous_wrapper_preflight_check, PreviousWrapperPreflightCheckInputs,
     };
     use crate::{
+        nowledge_mem_graph_read_route_catalog_digest,
+        NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE,
@@ -2935,6 +2948,28 @@ mod tests {
     }
 
     #[test]
+    fn preflight_check_rejects_stale_query_runtime_route_catalog() {
+        let mut inputs = ready_inputs();
+        let preflight = inputs.query_runtime_preflight.as_mut().unwrap();
+        preflight["route_catalog_digest"] = serde_json::json!("fnv1a64:stale");
+
+        let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["query_runtime_preflight"])
+        );
+        assert_eq!(
+            check_by_name(&report, "query_runtime_preflight")["failed_evidence_fields"],
+            serde_json::json!([
+                "query_runtime_preflight.route_coverage",
+                "query_runtime_preflight.route_catalog_digest"
+            ])
+        );
+    }
+
+    #[test]
     fn preflight_check_rejects_query_runtime_preflight_with_unknown_route() {
         let mut inputs = ready_inputs();
         let preflight = inputs.query_runtime_preflight.as_mut().unwrap();
@@ -3245,6 +3280,8 @@ mod tests {
             "required_routes_covered": true,
             "unknown_routes": [],
             "duplicate_routes": [],
+            "route_catalog_version": NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
+            "route_catalog_digest": nowledge_mem_graph_read_route_catalog_digest(),
             "route_coverage_ready": true,
             "route_coverage_blocker_codes": [],
             "blocker_codes": [],

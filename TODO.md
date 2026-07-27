@@ -209,6 +209,9 @@ contract.
     integration bundle alignment, and integration readiness.
   - [x] Require final previous-wrapper preflight to validate background graph
     delta QoS counts and memory-pressure evidence from replacement summary.
+  - [x] Require final previous-wrapper preflight to validate query-runtime
+    route catalog version and digest so stale route coverage cannot pass the
+    final cutover gate.
 - [ ] PR 10: Remove or quarantine obsolete compatibility paths.
   - Scope: after gates are satisfied, remove unused CLI-only, Python-only, and
     request-time shadow compare code from the production path.
