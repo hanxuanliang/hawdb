@@ -138,11 +138,12 @@ pub use mem_integration_bundle::{
     run_nowledge_mem_integration_bundle, IntegrationBundleInputs,
 };
 pub use mem_integration_readiness::{
-    background_maintenance_cutover_readiness, library_readiness_cutover_readiness,
-    nowledge_mem_integration_readiness, nowledge_mem_integration_readiness_json,
-    nowledge_mem_integration_readiness_usage, run_nowledge_mem_integration_readiness,
-    search_candidate_cutover_readiness, search_projection_cutover_readiness,
-    storage_recovery_cutover_readiness, BackgroundMaintenanceCutoverReadiness,
+    background_maintenance_cutover_readiness, bounded_read_cutover_readiness,
+    library_readiness_cutover_readiness, nowledge_mem_integration_readiness,
+    nowledge_mem_integration_readiness_json, nowledge_mem_integration_readiness_usage,
+    run_nowledge_mem_integration_readiness, search_candidate_cutover_readiness,
+    search_projection_cutover_readiness, storage_recovery_cutover_readiness,
+    BackgroundMaintenanceCutoverReadiness, BoundedReadCutoverReadiness,
     LibraryReadinessCutoverReadiness, NowledgeMemIntegrationCheckReport,
     NowledgeMemIntegrationNextAction, NowledgeMemIntegrationReadinessReport,
     SearchCandidateCutoverReadiness, SearchProjectionCutoverReadiness,

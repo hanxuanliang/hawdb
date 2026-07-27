@@ -226,6 +226,9 @@ contract.
     JSON-path checks.
   - [x] Expose and consume typed search-candidate cutover readiness so Mem can
     gate Rust-bridge candidate reads without accepting trace-only evidence.
+  - [x] Expose and consume typed bounded-read cutover readiness so Mem can gate
+    row caps, payload budgets, and route coverage without duplicating
+    replacement-summary JSON-path checks.
 - [ ] PR 9: Add the final cutover preflight bundle gate.
   - Scope: combine route coverage, graph evidence, LanceDB projection evidence,
     storage recovery, background QoS, redaction, and library-only integration
@@ -446,6 +449,8 @@ contract.
     APIs and consume the same result in integration readiness next actions.
   - [x] Expose typed search-candidate cutover readiness through Rust library
     APIs and consume the same result in integration readiness next actions.
+  - [x] Expose typed bounded-read cutover readiness through Rust library APIs
+    and consume the same result in integration readiness next actions.
   - [x] Include graph-route readiness as a first-class embedded-library
     readiness area so production callers fail closed before graph read cutover.
   - Keep reports compact and redacted by default so production can keep them on.

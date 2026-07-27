@@ -190,6 +190,27 @@ pub struct SearchCandidateCutoverReadiness {
     pub blocker_codes: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundedReadCutoverReadiness {
+    pub present: bool,
+    pub protocol_matches: bool,
+    pub ready: bool,
+    pub max_rows_present: bool,
+    pub mode_matches: bool,
+    pub execution_cap_matches: bool,
+    pub estimated_payload_bytes_present: bool,
+    pub max_estimated_payload_bytes_present: bool,
+    pub payload_budget_not_exceeded: bool,
+    pub row_limit_enforced_before_output: bool,
+    pub operator_row_cap_enabled: bool,
+    pub blocking_operator_count_zero: bool,
+    pub streaming_disabled: bool,
+    pub route_catalog_version_matches: bool,
+    pub route_catalog_digest_present: bool,
+    pub route_coverage_ready: bool,
+    pub blocker_codes: Vec<String>,
+}
+
 impl LibraryReadinessCutoverReadiness {
     pub fn evidence_ready(&self) -> bool {
         self.protocol_matches
@@ -255,6 +276,27 @@ impl SearchCandidateCutoverReadiness {
             && self.filter_pushdown_ready
             && self.filter_pushdown_field_summary_present
             && self.filter_pushdown_required_fields_ready
+    }
+}
+
+impl BoundedReadCutoverReadiness {
+    pub fn evidence_ready(&self) -> bool {
+        self.present
+            && self.protocol_matches
+            && self.ready
+            && self.max_rows_present
+            && self.mode_matches
+            && self.execution_cap_matches
+            && self.estimated_payload_bytes_present
+            && self.max_estimated_payload_bytes_present
+            && self.payload_budget_not_exceeded
+            && self.row_limit_enforced_before_output
+            && self.operator_row_cap_enabled
+            && self.blocking_operator_count_zero
+            && self.streaming_disabled
+            && self.route_catalog_version_matches
+            && self.route_catalog_digest_present
+            && self.route_coverage_ready
     }
 }
 
@@ -332,6 +374,7 @@ pub fn nowledge_mem_integration_readiness(
     let library_readiness = library_readiness_cutover_readiness(bundle);
     let search_projection_readiness = search_projection_cutover_readiness(bundle);
     let search_candidate_readiness = search_candidate_cutover_readiness(bundle);
+    let bounded_read_readiness = bounded_read_cutover_readiness(bundle);
     let storage_recovery_readiness = storage_recovery_cutover_readiness(bundle);
     let background_maintenance_readiness = background_maintenance_cutover_readiness(bundle);
     let checks = vec![
@@ -497,130 +540,10 @@ pub fn nowledge_mem_integration_readiness(
             search_candidate_cutover_conditions(&search_candidate_readiness),
             search_candidate_readiness.blocker_codes.clone(),
         ),
-        check(
+        check_named_conditions(
             "bounded_read_evidence",
-            [
-                bool_path(
-                    bundle,
-                    &["replacement_summary", "bounded_read_evidence", "present"],
-                ) == Some(true),
-                str_path(
-                    bundle,
-                    &["replacement_summary", "bounded_read_evidence", "protocol"],
-                ) == Some(SKEIN_NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL),
-                bool_path(
-                    bundle,
-                    &["replacement_summary", "bounded_read_evidence", "ready"],
-                ) == Some(true),
-                u64_path(
-                    bundle,
-                    &["replacement_summary", "bounded_read_evidence", "max_rows"],
-                )
-                .is_some_and(|value| value > 0),
-                str_path(
-                    bundle,
-                    &["replacement_summary", "bounded_read_evidence", "mode"],
-                ) == Some("shadow_read_only"),
-                bounded_read_execution_cap_matches(bundle),
-                u64_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "bounded_read_evidence",
-                        "estimated_payload_bytes",
-                    ],
-                )
-                .is_some(),
-                u64_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "bounded_read_evidence",
-                        "max_estimated_payload_bytes",
-                    ],
-                )
-                .is_some_and(|value| value > 0),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "bounded_read_evidence",
-                        "payload_budget_exceeded",
-                    ],
-                ) == Some(false),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "bounded_read_evidence",
-                        "row_limit_enforced_before_output",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "bounded_read_evidence",
-                        "operator_row_cap_enabled",
-                    ],
-                ) == Some(true),
-                u64_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "bounded_read_evidence",
-                        "blocking_operator_count",
-                    ],
-                ) == Some(0),
-                bool_path(
-                    bundle,
-                    &["replacement_summary", "bounded_read_evidence", "streaming"],
-                ) == Some(false),
-                str_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "bounded_read_evidence",
-                        "route_catalog_version",
-                    ],
-                ) == Some(NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION),
-                str_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "bounded_read_evidence",
-                        "route_catalog_digest",
-                    ],
-                )
-                .is_some(),
-                bounded_read_route_coverage_ready(bundle),
-            ],
-            [
-                "replacement_summary.bounded_read_evidence.present",
-                "replacement_summary.bounded_read_evidence.protocol",
-                "replacement_summary.bounded_read_evidence.ready",
-                "replacement_summary.bounded_read_evidence.max_rows",
-                "replacement_summary.bounded_read_evidence.mode",
-                "replacement_summary.bounded_read_evidence.execution_row_cap",
-                "replacement_summary.bounded_read_evidence.estimated_payload_bytes",
-                "replacement_summary.bounded_read_evidence.max_estimated_payload_bytes",
-                "replacement_summary.bounded_read_evidence.payload_budget_exceeded",
-                "replacement_summary.bounded_read_evidence.row_limit_enforced_before_output",
-                "replacement_summary.bounded_read_evidence.operator_row_cap_enabled",
-                "replacement_summary.bounded_read_evidence.blocking_operator_count",
-                "replacement_summary.bounded_read_evidence.streaming",
-                "replacement_summary.bounded_read_evidence.route_catalog_version",
-                "replacement_summary.bounded_read_evidence.route_catalog_digest",
-                "replacement_summary.bounded_read_evidence.covered_routes",
-            ],
-            blocker_codes(
-                bundle,
-                &[&[
-                    "replacement_summary",
-                    "bounded_read_evidence",
-                    "blocker_codes",
-                ][..]],
-            ),
+            bounded_read_cutover_conditions(&bounded_read_readiness),
+            bounded_read_readiness.blocker_codes.clone(),
         ),
         check(
             "bounded_read_evidence_alignment",
@@ -1412,6 +1335,7 @@ pub fn nowledge_mem_integration_readiness(
                 library: &library_readiness,
                 search_projection: &search_projection_readiness,
                 search_candidate: &search_candidate_readiness,
+                bounded_read: &bounded_read_readiness,
                 blackbox: &blackbox_readiness,
                 storage_recovery: &storage_recovery_readiness,
                 background_maintenance: &background_maintenance_readiness,
@@ -1472,6 +1396,7 @@ struct IntegrationGateReadiness<'a> {
     library: &'a LibraryReadinessCutoverReadiness,
     search_projection: &'a SearchProjectionCutoverReadiness,
     search_candidate: &'a SearchCandidateCutoverReadiness,
+    bounded_read: &'a BoundedReadCutoverReadiness,
     blackbox: &'a BlackboxReadinessReport,
     storage_recovery: &'a StorageRecoveryCutoverReadiness,
     background_maintenance: &'a BackgroundMaintenanceCutoverReadiness,
@@ -1638,7 +1563,7 @@ fn next_actions(
             ],
         ));
     }
-    if !replacement_summary_bounded_read_ready(bundle) {
+    if !readiness.bounded_read.evidence_ready() {
         actions.push(next_action(
             "attach_bounded_read_profile",
             "Skein read replacement must prove bounded execution before Mem cutover",
@@ -2402,30 +2327,31 @@ fn search_candidate_shadow_counts_ready(bundle: &serde_json::Value) -> bool {
         && primary_only_candidate_count == Some(0)
 }
 
-fn replacement_summary_bounded_read_ready(bundle: &serde_json::Value) -> bool {
-    bool_path(
-        bundle,
-        &["replacement_summary", "bounded_read_evidence", "present"],
-    ) == Some(true)
-        && str_path(
+pub fn bounded_read_cutover_readiness(bundle: &serde_json::Value) -> BoundedReadCutoverReadiness {
+    BoundedReadCutoverReadiness {
+        present: bool_path(
+            bundle,
+            &["replacement_summary", "bounded_read_evidence", "present"],
+        ) == Some(true),
+        protocol_matches: str_path(
             bundle,
             &["replacement_summary", "bounded_read_evidence", "protocol"],
-        ) == Some(SKEIN_NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL)
-        && bool_path(
+        ) == Some(SKEIN_NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL),
+        ready: bool_path(
             bundle,
             &["replacement_summary", "bounded_read_evidence", "ready"],
-        ) == Some(true)
-        && u64_path(
+        ) == Some(true),
+        max_rows_present: u64_path(
             bundle,
             &["replacement_summary", "bounded_read_evidence", "max_rows"],
         )
-        .is_some_and(|value| value > 0)
-        && str_path(
+        .is_some_and(|value| value > 0),
+        mode_matches: str_path(
             bundle,
             &["replacement_summary", "bounded_read_evidence", "mode"],
-        ) == Some("shadow_read_only")
-        && bounded_read_execution_cap_matches(bundle)
-        && u64_path(
+        ) == Some("shadow_read_only"),
+        execution_cap_matches: bounded_read_execution_cap_matches(bundle),
+        estimated_payload_bytes_present: u64_path(
             bundle,
             &[
                 "replacement_summary",
@@ -2433,8 +2359,8 @@ fn replacement_summary_bounded_read_ready(bundle: &serde_json::Value) -> bool {
                 "estimated_payload_bytes",
             ],
         )
-        .is_some()
-        && u64_path(
+        .is_some(),
+        max_estimated_payload_bytes_present: u64_path(
             bundle,
             &[
                 "replacement_summary",
@@ -2442,44 +2368,141 @@ fn replacement_summary_bounded_read_ready(bundle: &serde_json::Value) -> bool {
                 "max_estimated_payload_bytes",
             ],
         )
-        .is_some_and(|value| value > 0)
-        && bool_path(
+        .is_some_and(|value| value > 0),
+        payload_budget_not_exceeded: bool_path(
             bundle,
             &[
                 "replacement_summary",
                 "bounded_read_evidence",
                 "payload_budget_exceeded",
             ],
-        ) == Some(false)
-        && bool_path(
+        ) == Some(false),
+        row_limit_enforced_before_output: bool_path(
             bundle,
             &[
                 "replacement_summary",
                 "bounded_read_evidence",
                 "row_limit_enforced_before_output",
             ],
-        ) == Some(true)
-        && bool_path(
+        ) == Some(true),
+        operator_row_cap_enabled: bool_path(
             bundle,
             &[
                 "replacement_summary",
                 "bounded_read_evidence",
                 "operator_row_cap_enabled",
             ],
-        ) == Some(true)
-        && u64_path(
+        ) == Some(true),
+        blocking_operator_count_zero: u64_path(
             bundle,
             &[
                 "replacement_summary",
                 "bounded_read_evidence",
                 "blocking_operator_count",
             ],
-        ) == Some(0)
-        && bool_path(
+        ) == Some(0),
+        streaming_disabled: bool_path(
             bundle,
             &["replacement_summary", "bounded_read_evidence", "streaming"],
-        ) == Some(false)
-        && bounded_read_route_coverage_ready(bundle)
+        ) == Some(false),
+        route_catalog_version_matches: str_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "bounded_read_evidence",
+                "route_catalog_version",
+            ],
+        ) == Some(NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION),
+        route_catalog_digest_present: str_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "bounded_read_evidence",
+                "route_catalog_digest",
+            ],
+        )
+        .is_some(),
+        route_coverage_ready: bounded_read_route_coverage_ready(bundle),
+        blocker_codes: blocker_codes(
+            bundle,
+            &[&[
+                "replacement_summary",
+                "bounded_read_evidence",
+                "blocker_codes",
+            ][..]],
+        ),
+    }
+}
+
+fn bounded_read_cutover_conditions(
+    readiness: &BoundedReadCutoverReadiness,
+) -> Vec<(&'static str, bool)> {
+    vec![
+        (
+            "replacement_summary.bounded_read_evidence.present",
+            readiness.present,
+        ),
+        (
+            "replacement_summary.bounded_read_evidence.protocol",
+            readiness.protocol_matches,
+        ),
+        (
+            "replacement_summary.bounded_read_evidence.ready",
+            readiness.ready,
+        ),
+        (
+            "replacement_summary.bounded_read_evidence.max_rows",
+            readiness.max_rows_present,
+        ),
+        (
+            "replacement_summary.bounded_read_evidence.mode",
+            readiness.mode_matches,
+        ),
+        (
+            "replacement_summary.bounded_read_evidence.execution_row_cap",
+            readiness.execution_cap_matches,
+        ),
+        (
+            "replacement_summary.bounded_read_evidence.estimated_payload_bytes",
+            readiness.estimated_payload_bytes_present,
+        ),
+        (
+            "replacement_summary.bounded_read_evidence.max_estimated_payload_bytes",
+            readiness.max_estimated_payload_bytes_present,
+        ),
+        (
+            "replacement_summary.bounded_read_evidence.payload_budget_exceeded",
+            readiness.payload_budget_not_exceeded,
+        ),
+        (
+            "replacement_summary.bounded_read_evidence.row_limit_enforced_before_output",
+            readiness.row_limit_enforced_before_output,
+        ),
+        (
+            "replacement_summary.bounded_read_evidence.operator_row_cap_enabled",
+            readiness.operator_row_cap_enabled,
+        ),
+        (
+            "replacement_summary.bounded_read_evidence.blocking_operator_count",
+            readiness.blocking_operator_count_zero,
+        ),
+        (
+            "replacement_summary.bounded_read_evidence.streaming",
+            readiness.streaming_disabled,
+        ),
+        (
+            "replacement_summary.bounded_read_evidence.route_catalog_version",
+            readiness.route_catalog_version_matches,
+        ),
+        (
+            "replacement_summary.bounded_read_evidence.route_catalog_digest",
+            readiness.route_catalog_digest_present,
+        ),
+        (
+            "replacement_summary.bounded_read_evidence.covered_routes",
+            readiness.route_coverage_ready,
+        ),
+    ]
 }
 
 fn bounded_read_alignment_ready(bundle: &serde_json::Value) -> bool {
@@ -4718,6 +4741,44 @@ mod tests {
             .unwrap()
             .iter()
             .any(|action| action["action"] == "attach_bounded_read_profile"));
+    }
+
+    #[test]
+    fn exposes_typed_bounded_read_cutover_readiness() {
+        let bundle = ready_bundle();
+
+        let typed = super::bounded_read_cutover_readiness(&bundle);
+
+        assert!(typed.evidence_ready());
+        assert!(typed.present);
+        assert!(typed.protocol_matches);
+        assert!(typed.max_rows_present);
+        assert!(typed.execution_cap_matches);
+        assert!(typed.estimated_payload_bytes_present);
+        assert!(typed.max_estimated_payload_bytes_present);
+        assert!(typed.payload_budget_not_exceeded);
+        assert!(typed.row_limit_enforced_before_output);
+        assert!(typed.operator_row_cap_enabled);
+        assert!(typed.blocking_operator_count_zero);
+        assert!(typed.streaming_disabled);
+        assert!(typed.route_catalog_version_matches);
+        assert!(typed.route_catalog_digest_present);
+        assert!(typed.route_coverage_ready);
+        assert!(typed.blocker_codes.is_empty());
+    }
+
+    #[test]
+    fn typed_bounded_read_cutover_requires_route_coverage() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary"]["bounded_read_evidence"]["covered_routes"] =
+            serde_json::json!(["/graph/overview"]);
+        bundle["replacement_summary"]["bounded_read_evidence"]["missing_covered_routes"] =
+            serde_json::json!(["/graph/explore"]);
+
+        let typed = super::bounded_read_cutover_readiness(&bundle);
+
+        assert!(!typed.evidence_ready());
+        assert!(!typed.route_coverage_ready);
     }
 
     #[test]
