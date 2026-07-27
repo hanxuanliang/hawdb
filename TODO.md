@@ -124,6 +124,9 @@ contract.
     query-runtime preflight, graph-route readiness, bounded-read evidence, and
     integration bundle alignment so stale route evidence fails closed after a
     catalog change.
+  - [x] Require query-runtime preflight and graph-route readiness alignment to
+    validate route catalog version and digest, so stale live evidence or stale
+    replacement-summary evidence cannot pass integration readiness.
 - [ ] PR 2: Remove direct Kuzu reads from one low-risk graph read route.
   - Scope: move one existing read route to the embedded query runtime with
     `legacy`/`skein` selection controlled by configuration.
