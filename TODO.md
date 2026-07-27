@@ -317,6 +317,9 @@ contract.
   - [x] Require `lifecycle_state` in the search projection scan-filter
     descriptor contract so deleted/forgotten filters are covered by readiness
     evidence.
+  - [x] Require search projection segment descriptor evidence to include
+    numeric min/max summaries for `importance` and `confidence`, plus timestamp
+    min/max summaries for Nowledge history/latest time filters.
 - [ ] Replace LanceDB search reads in stages.
   - First cover metadata-filtered search projection reads that do not require
     Kuzu joins.

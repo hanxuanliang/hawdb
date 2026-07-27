@@ -3482,6 +3482,20 @@ fn search_projection_segment_descriptor_summaries_cover_required(
     NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
         .iter()
         .all(|required| fields.contains(required))
+        && ["importance", "confidence"].iter().all(|field| {
+            summaries.iter().any(|summary| {
+                str_path(summary, &["field"]) == Some(*field)
+                    && bool_path(summary, &["numeric_range_summary_used"]) == Some(true)
+            })
+        })
+        && ["created_at", "updated_at", "event_start", "event_end"]
+            .iter()
+            .all(|field| {
+                summaries.iter().any(|summary| {
+                    str_path(summary, &["field"]) == Some(*field)
+                        && bool_path(summary, &["timestamp_range_summary_used"]) == Some(true)
+                })
+            })
 }
 
 fn non_empty_str_path(value: &serde_json::Value, path: &[&str]) -> bool {
@@ -4222,6 +4236,43 @@ mod tests {
             serde_json::json!([
                 "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.primary_scan_filter_fields",
                 "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_scan_filter_fields",
+                "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_segment_descriptor_field_summaries"
+            ])
+        );
+    }
+
+    #[test]
+    fn recomputes_search_projection_shadow_descriptor_range_capabilities() {
+        let mut bundle = ready_bundle();
+        let summaries = bundle["replacement_summary"]["search_projection_shadow_evidence"]
+            ["pushdown_evidence"]["shadow_segment_descriptor_field_summaries"]
+            .as_array_mut()
+            .unwrap();
+        for summary in summaries {
+            if summary["field"] == "importance" {
+                summary["numeric_range_summary_used"] = serde_json::json!(false);
+            }
+            if summary["field"] == "created_at" {
+                summary["timestamp_range_summary_used"] = serde_json::json!(false);
+            }
+        }
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["search_projection_replacement_evidence"])
+        );
+        let search_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "search_projection_replacement_evidence")
+            .unwrap();
+        assert_eq!(
+            search_check["failed_evidence_fields"],
+            serde_json::json!([
                 "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_segment_descriptor_field_summaries"
             ])
         );
@@ -6347,7 +6398,17 @@ mod tests {
     fn scan_filter_field_summaries_json() -> serde_json::Value {
         serde_json::json!(NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
             .iter()
-            .map(|field| serde_json::json!({ "field": field }))
+            .map(|field| {
+                serde_json::json!({
+                    "field": field,
+                    "value_summary_used": true,
+                    "numeric_range_summary_used": matches!(*field, "importance" | "confidence"),
+                    "timestamp_range_summary_used": matches!(
+                        *field,
+                        "created_at" | "updated_at" | "event_start" | "event_end"
+                    )
+                })
+            })
             .collect::<Vec<_>>())
     }
 

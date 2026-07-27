@@ -7499,6 +7499,20 @@ mod tests {
         for field in NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS {
             assert!(fields.contains(field), "missing descriptor field {field}");
         }
+        for field in ["importance", "confidence"] {
+            assert!(
+                summaries.iter().any(|summary| summary["field"] == field
+                    && summary["numeric_range_summary_used"] == true),
+                "missing numeric range summary for {field}"
+            );
+        }
+        for field in ["created_at", "updated_at", "event_start", "event_end"] {
+            assert!(
+                summaries.iter().any(|summary| summary["field"] == field
+                    && summary["timestamp_range_summary_used"] == true),
+                "missing timestamp range summary for {field}"
+            );
+        }
         std::fs::remove_dir_all(path).unwrap();
     }
 
@@ -8062,7 +8076,18 @@ mod tests {
             source_id: Some("source_1".to_string()),
             metadata: BTreeMap::from([
                 ("space_id".to_string(), "default".to_string()),
+                ("unit_type".to_string(), "memory".to_string()),
                 ("lifecycle_state".to_string(), "active".to_string()),
+                ("importance".to_string(), "0.8".to_string()),
+                ("confidence".to_string(), "0.9".to_string()),
+                ("created_at".to_string(), "2026-07-01T00:00:00Z".to_string()),
+                ("updated_at".to_string(), "2026-07-02T00:00:00Z".to_string()),
+                (
+                    "event_start".to_string(),
+                    "2026-07-01T12:00:00Z".to_string(),
+                ),
+                ("event_end".to_string(), "2026-07-01T13:00:00Z".to_string()),
+                ("is_latest".to_string(), "true".to_string()),
             ]),
         }
     }

@@ -1662,7 +1662,17 @@ mod tests {
     fn scan_filter_field_summaries_json() -> serde_json::Value {
         serde_json::json!(NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
             .iter()
-            .map(|field| serde_json::json!({ "field": field }))
+            .map(|field| {
+                serde_json::json!({
+                    "field": field,
+                    "value_summary_used": true,
+                    "numeric_range_summary_used": matches!(*field, "importance" | "confidence"),
+                    "timestamp_range_summary_used": matches!(
+                        *field,
+                        "created_at" | "updated_at" | "event_start" | "event_end"
+                    )
+                })
+            })
             .collect::<Vec<_>>())
     }
 
