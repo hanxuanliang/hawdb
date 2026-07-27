@@ -143,6 +143,38 @@ pub struct LibraryReadinessCutoverReadiness {
     pub blocker_codes: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchProjectionCutoverReadiness {
+    pub evidence_protocol_matches: bool,
+    pub evidence_ready: bool,
+    pub fts_ready: bool,
+    pub vector_ready: bool,
+    pub document_identity_ready: bool,
+    pub incremental_update_ready: bool,
+    pub predicate_pushdown_ready: bool,
+    pub compressed_vector_projection_required: bool,
+    pub compressed_vector_projection_ready: bool,
+    pub shadow_present: bool,
+    pub shadow_protocol_matches: bool,
+    pub shadow_evidence_source_matches: bool,
+    pub shadow_ready: bool,
+    pub shadow_document_count_parity: bool,
+    pub shadow_document_identity_parity: bool,
+    pub shadow_table_parity_ready: bool,
+    pub shadow_embedding_identity_parity: bool,
+    pub shadow_incremental_watermark_parity: bool,
+    pub shadow_pushdown_ready: bool,
+    pub shadow_descriptor_scan_filter_fields_ready: bool,
+    pub shadow_document_pruning_ready: bool,
+    pub shadow_pruning_candidate_count_ready: bool,
+    pub shadow_pruned_document_count_positive: bool,
+    pub shadow_scanned_document_count_positive: bool,
+    pub primary_scan_filter_fields_ready: bool,
+    pub shadow_scan_filter_fields_ready: bool,
+    pub shadow_descriptor_field_summaries_ready: bool,
+    pub blocker_codes: Vec<String>,
+}
+
 impl LibraryReadinessCutoverReadiness {
     pub fn evidence_ready(&self) -> bool {
         self.protocol_matches
@@ -161,6 +193,38 @@ impl LibraryReadinessCutoverReadiness {
             && self.search_projection_ready
             && self.search_projection_shadow_ready
             && self.search_candidate_shadow_ready
+    }
+}
+
+impl SearchProjectionCutoverReadiness {
+    pub fn evidence_ready(&self) -> bool {
+        self.evidence_protocol_matches
+            && self.evidence_ready
+            && self.fts_ready
+            && self.vector_ready
+            && self.document_identity_ready
+            && self.incremental_update_ready
+            && self.predicate_pushdown_ready
+            && self.compressed_vector_projection_required
+            && self.compressed_vector_projection_ready
+            && self.shadow_present
+            && self.shadow_protocol_matches
+            && self.shadow_evidence_source_matches
+            && self.shadow_ready
+            && self.shadow_document_count_parity
+            && self.shadow_document_identity_parity
+            && self.shadow_table_parity_ready
+            && self.shadow_embedding_identity_parity
+            && self.shadow_incremental_watermark_parity
+            && self.shadow_pushdown_ready
+            && self.shadow_descriptor_scan_filter_fields_ready
+            && self.shadow_document_pruning_ready
+            && self.shadow_pruning_candidate_count_ready
+            && self.shadow_pruned_document_count_positive
+            && self.shadow_scanned_document_count_positive
+            && self.primary_scan_filter_fields_ready
+            && self.shadow_scan_filter_fields_ready
+            && self.shadow_descriptor_field_summaries_ready
     }
 }
 
@@ -236,6 +300,7 @@ pub fn nowledge_mem_integration_readiness(
         .unwrap_or(&serde_json::Value::Null);
     let blackbox_readiness = blackbox_readiness_from_manifest_json(blackbox_manifest);
     let library_readiness = library_readiness_cutover_readiness(bundle);
+    let search_projection_readiness = search_projection_cutover_readiness(bundle);
     let storage_recovery_readiness = storage_recovery_cutover_readiness(bundle);
     let background_maintenance_readiness = background_maintenance_cutover_readiness(bundle);
     let checks = vec![
@@ -391,270 +456,10 @@ pub fn nowledge_mem_integration_readiness(
                 ],
             ),
         ),
-        check(
+        check_named_conditions(
             "search_projection_replacement_evidence",
-            [
-                bool_path(
-                    bundle,
-                    &["replacement_summary", "search_projection_evidence", "ready"],
-                ) == Some(true),
-                str_path(
-                    bundle,
-                    &["replacement_summary", "search_projection_evidence", "protocol"],
-                ) == Some(SKEIN_NOWLEDGE_SEARCH_PROJECTION_EVIDENCE_PROTOCOL),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "search_projection_evidence",
-                        "fts_ready",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "search_projection_evidence",
-                        "vector_ready",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "search_projection_evidence",
-                        "document_identity_ready",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "search_projection_evidence",
-                        "incremental_update_ready",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "search_projection_evidence",
-                        "predicate_pushdown_ready",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "search_projection_evidence",
-                        "compressed_vector_projection_required",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "search_projection_evidence",
-                        "compressed_vector_projection_ready",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "search_projection_shadow_evidence",
-                        "present",
-                    ],
-                ) == Some(true),
-                str_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "search_projection_shadow_evidence",
-                        "protocol",
-                    ],
-                ) == Some(SKEIN_NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL),
-                str_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "search_projection_shadow_evidence",
-                        "evidence_source",
-                    ],
-                ) == Some(SKEIN_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "search_projection_shadow_evidence",
-                        "ready",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "search_projection_shadow_evidence",
-                        "document_count_parity",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "search_projection_shadow_evidence",
-                        "document_identity_parity",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "search_projection_shadow_evidence",
-                        "table_parity_ready",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "search_projection_shadow_evidence",
-                        "embedding_identity_parity",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "search_projection_shadow_evidence",
-                        "incremental_watermark_parity",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "search_projection_shadow_evidence",
-                        "pushdown_evidence",
-                        "ready",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "search_projection_shadow_evidence",
-                        "pushdown_evidence",
-                        "shadow_segment_descriptor_scan_filter_fields_ready",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "search_projection_shadow_evidence",
-                        "pushdown_evidence",
-                        "shadow_segment_document_pruning_ready",
-                    ],
-                ) == Some(true),
-                search_projection_segment_pruning_candidate_count_ready(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "search_projection_shadow_evidence",
-                        "pushdown_evidence",
-                    ],
-                ),
-                search_projection_segment_pruning_count_is_positive(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "search_projection_shadow_evidence",
-                        "pushdown_evidence",
-                    ],
-                    "shadow_segment_pruned_document_count",
-                ),
-                search_projection_segment_pruning_count_is_positive(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "search_projection_shadow_evidence",
-                        "pushdown_evidence",
-                    ],
-                    "shadow_segment_scanned_document_count",
-                ),
-                search_projection_scan_filter_fields_cover_required(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "search_projection_shadow_evidence",
-                        "pushdown_evidence",
-                        "primary_scan_filter_fields",
-                    ],
-                ),
-                search_projection_scan_filter_fields_cover_required(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "search_projection_shadow_evidence",
-                        "pushdown_evidence",
-                        "shadow_scan_filter_fields",
-                    ],
-                ),
-                search_projection_segment_descriptor_summaries_cover_required(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "search_projection_shadow_evidence",
-                        "pushdown_evidence",
-                        "shadow_segment_descriptor_field_summaries",
-                    ],
-                ),
-            ],
-            [
-                "replacement_summary.search_projection_evidence.ready",
-                "replacement_summary.search_projection_evidence.protocol",
-                "replacement_summary.search_projection_evidence.fts_ready",
-                "replacement_summary.search_projection_evidence.vector_ready",
-                "replacement_summary.search_projection_evidence.document_identity_ready",
-                "replacement_summary.search_projection_evidence.incremental_update_ready",
-                "replacement_summary.search_projection_evidence.predicate_pushdown_ready",
-                "replacement_summary.search_projection_evidence.compressed_vector_projection_required",
-                "replacement_summary.search_projection_evidence.compressed_vector_projection_ready",
-                "replacement_summary.search_projection_shadow_evidence.present",
-                "replacement_summary.search_projection_shadow_evidence.protocol",
-                "replacement_summary.search_projection_shadow_evidence.evidence_source",
-                "replacement_summary.search_projection_shadow_evidence.ready",
-                "replacement_summary.search_projection_shadow_evidence.document_count_parity",
-                "replacement_summary.search_projection_shadow_evidence.document_identity_parity",
-                "replacement_summary.search_projection_shadow_evidence.table_parity_ready",
-                "replacement_summary.search_projection_shadow_evidence.embedding_identity_parity",
-                "replacement_summary.search_projection_shadow_evidence.incremental_watermark_parity",
-                "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.ready",
-                "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_segment_descriptor_scan_filter_fields_ready",
-                "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_segment_document_pruning_ready",
-                "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_segment_pruning_candidate_document_count",
-                "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_segment_pruned_document_count",
-                "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_segment_scanned_document_count",
-                "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.primary_scan_filter_fields",
-                "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_scan_filter_fields",
-                "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_segment_descriptor_field_summaries",
-            ],
-            blocker_codes(
-                bundle,
-                &[
-                    &[
-                        "replacement_summary",
-                        "search_projection_evidence",
-                        "blocker_codes",
-                    ][..],
-                    &[
-                        "replacement_summary",
-                        "search_projection_shadow_evidence",
-                        "blocker_codes",
-                    ][..],
-                ],
-            ),
+            search_projection_cutover_conditions(&search_projection_readiness),
+            search_projection_readiness.blocker_codes.clone(),
         ),
         check(
             "search_candidate_primary_evidence",
@@ -1601,6 +1406,7 @@ pub fn nowledge_mem_integration_readiness(
             bundle,
             ready,
             &library_readiness,
+            &search_projection_readiness,
             &blackbox_readiness,
             &storage_recovery_readiness,
             &background_maintenance_readiness,
@@ -1633,10 +1439,34 @@ fn check(
     }
 }
 
+fn check_named_conditions(
+    name: &'static str,
+    conditions: impl IntoIterator<Item = (&'static str, bool)>,
+    blocker_codes: Vec<String>,
+) -> NowledgeMemIntegrationCheckReport {
+    let conditions = conditions.into_iter().collect::<Vec<_>>();
+    let evidence_fields = conditions
+        .iter()
+        .map(|(field, _)| (*field).to_string())
+        .collect::<Vec<_>>();
+    let failed_evidence_fields = conditions
+        .iter()
+        .filter_map(|(field, ready)| (!*ready).then_some((*field).to_string()))
+        .collect::<Vec<_>>();
+    NowledgeMemIntegrationCheckReport {
+        name: name.to_string(),
+        ready: failed_evidence_fields.is_empty(),
+        evidence_fields,
+        failed_evidence_fields,
+        blocker_codes,
+    }
+}
+
 fn next_actions(
     bundle: &serde_json::Value,
     ready: bool,
     library_readiness: &LibraryReadinessCutoverReadiness,
+    search_projection_readiness: &SearchProjectionCutoverReadiness,
     blackbox_readiness: &BlackboxReadinessReport,
     storage_recovery_readiness: &StorageRecoveryCutoverReadiness,
     background_maintenance_readiness: &BackgroundMaintenanceCutoverReadiness,
@@ -1751,7 +1581,7 @@ fn next_actions(
             ],
         ));
     }
-    if !replacement_summary_search_projection_ready(bundle) {
+    if !search_projection_readiness.evidence_ready() {
         actions.push(next_action(
             "attach_search_projection_replacement_evidence",
             "LanceDB replacement evidence must prove FTS, vector, incremental, predicate pushdown, compressed projection, and shadow parity",
@@ -2064,74 +1894,355 @@ fn replacement_summary_required_query_families_present(bundle: &serde_json::Valu
         .all(|required| families.iter().any(|family| family == required))
 }
 
-fn replacement_summary_search_projection_ready(bundle: &serde_json::Value) -> bool {
-    if str_path(
-        bundle,
-        &[
-            "replacement_summary",
-            "search_projection_evidence",
-            "protocol",
-        ],
-    ) != Some(SKEIN_NOWLEDGE_SEARCH_PROJECTION_EVIDENCE_PROTOCOL)
-        || str_path(
+pub fn search_projection_cutover_readiness(
+    bundle: &serde_json::Value,
+) -> SearchProjectionCutoverReadiness {
+    let pushdown_path = &[
+        "replacement_summary",
+        "search_projection_shadow_evidence",
+        "pushdown_evidence",
+    ];
+    SearchProjectionCutoverReadiness {
+        evidence_protocol_matches: str_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "search_projection_evidence",
+                "protocol",
+            ],
+        ) == Some(SKEIN_NOWLEDGE_SEARCH_PROJECTION_EVIDENCE_PROTOCOL),
+        evidence_ready: bool_path(
+            bundle,
+            &["replacement_summary", "search_projection_evidence", "ready"],
+        ) == Some(true),
+        fts_ready: bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "search_projection_evidence",
+                "fts_ready",
+            ],
+        ) == Some(true),
+        vector_ready: bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "search_projection_evidence",
+                "vector_ready",
+            ],
+        ) == Some(true),
+        document_identity_ready: bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "search_projection_evidence",
+                "document_identity_ready",
+            ],
+        ) == Some(true),
+        incremental_update_ready: bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "search_projection_evidence",
+                "incremental_update_ready",
+            ],
+        ) == Some(true),
+        predicate_pushdown_ready: bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "search_projection_evidence",
+                "predicate_pushdown_ready",
+            ],
+        ) == Some(true),
+        compressed_vector_projection_required: bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "search_projection_evidence",
+                "compressed_vector_projection_required",
+            ],
+        ) == Some(true),
+        compressed_vector_projection_ready: bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "search_projection_evidence",
+                "compressed_vector_projection_ready",
+            ],
+        ) == Some(true),
+        shadow_present: bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "search_projection_shadow_evidence",
+                "present",
+            ],
+        ) == Some(true),
+        shadow_protocol_matches: str_path(
             bundle,
             &[
                 "replacement_summary",
                 "search_projection_shadow_evidence",
                 "protocol",
             ],
-        ) != Some(SKEIN_NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL)
-        || str_path(
+        ) == Some(
+            SKEIN_NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL,
+        ),
+        shadow_evidence_source_matches: str_path(
             bundle,
             &[
                 "replacement_summary",
                 "search_projection_shadow_evidence",
                 "evidence_source",
             ],
-        ) != Some(SKEIN_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE)
-    {
-        return false;
+        ) == Some(SKEIN_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE),
+        shadow_ready: bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "search_projection_shadow_evidence",
+                "ready",
+            ],
+        ) == Some(true),
+        shadow_document_count_parity: bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "search_projection_shadow_evidence",
+                "document_count_parity",
+            ],
+        ) == Some(true),
+        shadow_document_identity_parity: bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "search_projection_shadow_evidence",
+                "document_identity_parity",
+            ],
+        ) == Some(true),
+        shadow_table_parity_ready: bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "search_projection_shadow_evidence",
+                "table_parity_ready",
+            ],
+        ) == Some(true),
+        shadow_embedding_identity_parity: bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "search_projection_shadow_evidence",
+                "embedding_identity_parity",
+            ],
+        ) == Some(true),
+        shadow_incremental_watermark_parity: bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "search_projection_shadow_evidence",
+                "incremental_watermark_parity",
+            ],
+        ) == Some(true),
+        shadow_pushdown_ready: bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "search_projection_shadow_evidence",
+                "pushdown_evidence",
+                "ready",
+            ],
+        ) == Some(true),
+        shadow_descriptor_scan_filter_fields_ready: bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "search_projection_shadow_evidence",
+                "pushdown_evidence",
+                "shadow_segment_descriptor_scan_filter_fields_ready",
+            ],
+        ) == Some(true),
+        shadow_document_pruning_ready: bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "search_projection_shadow_evidence",
+                "pushdown_evidence",
+                "shadow_segment_document_pruning_ready",
+            ],
+        ) == Some(true),
+        shadow_pruning_candidate_count_ready:
+            search_projection_segment_pruning_candidate_count_ready(bundle, pushdown_path),
+        shadow_pruned_document_count_positive: search_projection_segment_pruning_count_is_positive(
+            bundle,
+            pushdown_path,
+            "shadow_segment_pruned_document_count",
+        ),
+        shadow_scanned_document_count_positive: search_projection_segment_pruning_count_is_positive(
+            bundle,
+            pushdown_path,
+            "shadow_segment_scanned_document_count",
+        ),
+        primary_scan_filter_fields_ready: search_projection_scan_filter_fields_cover_required(
+            bundle,
+            &[
+                "replacement_summary",
+                "search_projection_shadow_evidence",
+                "pushdown_evidence",
+                "primary_scan_filter_fields",
+            ],
+        ),
+        shadow_scan_filter_fields_ready: search_projection_scan_filter_fields_cover_required(
+            bundle,
+            &[
+                "replacement_summary",
+                "search_projection_shadow_evidence",
+                "pushdown_evidence",
+                "shadow_scan_filter_fields",
+            ],
+        ),
+        shadow_descriptor_field_summaries_ready:
+            search_projection_segment_descriptor_summaries_cover_required(
+                bundle,
+                &[
+                    "replacement_summary",
+                    "search_projection_shadow_evidence",
+                    "pushdown_evidence",
+                    "shadow_segment_descriptor_field_summaries",
+                ],
+            ),
+        blocker_codes: blocker_codes(
+            bundle,
+            &[
+                &[
+                    "replacement_summary",
+                    "search_projection_evidence",
+                    "blocker_codes",
+                ][..],
+                &[
+                    "replacement_summary",
+                    "search_projection_shadow_evidence",
+                    "blocker_codes",
+                ][..],
+            ],
+        ),
     }
-    [
-        &["replacement_summary", "search_projection_evidence", "ready"][..],
-        &[
-            "replacement_summary",
-            "search_projection_evidence",
-            "fts_ready",
-        ][..],
-        &[
-            "replacement_summary",
-            "search_projection_evidence",
-            "vector_ready",
-        ][..],
-        &[
-            "replacement_summary",
-            "search_projection_evidence",
-            "incremental_update_ready",
-        ][..],
-        &[
-            "replacement_summary",
-            "search_projection_evidence",
-            "predicate_pushdown_ready",
-        ][..],
-        &[
-            "replacement_summary",
-            "search_projection_evidence",
-            "compressed_vector_projection_required",
-        ][..],
-        &[
-            "replacement_summary",
-            "search_projection_evidence",
-            "compressed_vector_projection_ready",
-        ][..],
-        &[
-            "replacement_summary",
-            "search_projection_shadow_evidence",
-            "ready",
-        ][..],
+}
+
+fn search_projection_cutover_conditions(
+    readiness: &SearchProjectionCutoverReadiness,
+) -> Vec<(&'static str, bool)> {
+    vec![
+        (
+            "replacement_summary.search_projection_evidence.ready",
+            readiness.evidence_ready,
+        ),
+        (
+            "replacement_summary.search_projection_evidence.protocol",
+            readiness.evidence_protocol_matches,
+        ),
+        (
+            "replacement_summary.search_projection_evidence.fts_ready",
+            readiness.fts_ready,
+        ),
+        (
+            "replacement_summary.search_projection_evidence.vector_ready",
+            readiness.vector_ready,
+        ),
+        (
+            "replacement_summary.search_projection_evidence.document_identity_ready",
+            readiness.document_identity_ready,
+        ),
+        (
+            "replacement_summary.search_projection_evidence.incremental_update_ready",
+            readiness.incremental_update_ready,
+        ),
+        (
+            "replacement_summary.search_projection_evidence.predicate_pushdown_ready",
+            readiness.predicate_pushdown_ready,
+        ),
+        (
+            "replacement_summary.search_projection_evidence.compressed_vector_projection_required",
+            readiness.compressed_vector_projection_required,
+        ),
+        (
+            "replacement_summary.search_projection_evidence.compressed_vector_projection_ready",
+            readiness.compressed_vector_projection_ready,
+        ),
+        (
+            "replacement_summary.search_projection_shadow_evidence.present",
+            readiness.shadow_present,
+        ),
+        (
+            "replacement_summary.search_projection_shadow_evidence.protocol",
+            readiness.shadow_protocol_matches,
+        ),
+        (
+            "replacement_summary.search_projection_shadow_evidence.evidence_source",
+            readiness.shadow_evidence_source_matches,
+        ),
+        (
+            "replacement_summary.search_projection_shadow_evidence.ready",
+            readiness.shadow_ready,
+        ),
+        (
+            "replacement_summary.search_projection_shadow_evidence.document_count_parity",
+            readiness.shadow_document_count_parity,
+        ),
+        (
+            "replacement_summary.search_projection_shadow_evidence.document_identity_parity",
+            readiness.shadow_document_identity_parity,
+        ),
+        (
+            "replacement_summary.search_projection_shadow_evidence.table_parity_ready",
+            readiness.shadow_table_parity_ready,
+        ),
+        (
+            "replacement_summary.search_projection_shadow_evidence.embedding_identity_parity",
+            readiness.shadow_embedding_identity_parity,
+        ),
+        (
+            "replacement_summary.search_projection_shadow_evidence.incremental_watermark_parity",
+            readiness.shadow_incremental_watermark_parity,
+        ),
+        (
+            "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.ready",
+            readiness.shadow_pushdown_ready,
+        ),
+        (
+            "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_segment_descriptor_scan_filter_fields_ready",
+            readiness.shadow_descriptor_scan_filter_fields_ready,
+        ),
+        (
+            "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_segment_document_pruning_ready",
+            readiness.shadow_document_pruning_ready,
+        ),
+        (
+            "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_segment_pruning_candidate_document_count",
+            readiness.shadow_pruning_candidate_count_ready,
+        ),
+        (
+            "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_segment_pruned_document_count",
+            readiness.shadow_pruned_document_count_positive,
+        ),
+        (
+            "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_segment_scanned_document_count",
+            readiness.shadow_scanned_document_count_positive,
+        ),
+        (
+            "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.primary_scan_filter_fields",
+            readiness.primary_scan_filter_fields_ready,
+        ),
+        (
+            "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_scan_filter_fields",
+            readiness.shadow_scan_filter_fields_ready,
+        ),
+        (
+            "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_segment_descriptor_field_summaries",
+            readiness.shadow_descriptor_field_summaries_ready,
+        ),
     ]
-    .iter()
-    .all(|path| bool_path(bundle, path) == Some(true))
 }
 
 fn search_candidate_primary_evidence_ready(bundle: &serde_json::Value) -> bool {
@@ -3858,6 +3969,39 @@ mod tests {
             .unwrap()
             .iter()
             .any(|action| action["action"] == "attach_search_projection_replacement_evidence"));
+    }
+
+    #[test]
+    fn exposes_typed_search_projection_cutover_readiness() {
+        let bundle = ready_bundle();
+
+        let typed = super::search_projection_cutover_readiness(&bundle);
+
+        assert!(typed.evidence_ready());
+        assert!(typed.evidence_protocol_matches);
+        assert!(typed.shadow_protocol_matches);
+        assert!(typed.shadow_evidence_source_matches);
+        assert!(typed.shadow_pruning_candidate_count_ready);
+        assert!(typed.primary_scan_filter_fields_ready);
+        assert!(typed.shadow_scan_filter_fields_ready);
+        assert!(typed.shadow_descriptor_field_summaries_ready);
+        assert!(typed.blocker_codes.is_empty());
+    }
+
+    #[test]
+    fn typed_search_projection_cutover_recomputes_pushdown_fields() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary"]["search_projection_shadow_evidence"]["ready"] =
+            serde_json::json!(true);
+        bundle["replacement_summary"]["search_projection_shadow_evidence"]["pushdown_evidence"]
+            ["ready"] = serde_json::json!(true);
+        bundle["replacement_summary"]["search_projection_shadow_evidence"]["pushdown_evidence"]
+            ["primary_scan_filter_fields"] = serde_json::json!(["unit_type", "importance"]);
+
+        let typed = super::search_projection_cutover_readiness(&bundle);
+
+        assert!(!typed.evidence_ready());
+        assert!(!typed.primary_scan_filter_fields_ready);
     }
 
     #[test]
