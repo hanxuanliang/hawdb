@@ -108,6 +108,47 @@ pub struct StorageRecoveryCutoverReadiness {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntegrationBundleProtocolCutoverReadiness {
+    pub protocol_matches: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplacementSummaryProtocolCutoverReadiness {
+    pub protocol_matches: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkeinSubmoduleCutoverReadiness {
+    pub present: bool,
+    pub path_present: bool,
+    pub commit_present: bool,
+    pub blocker_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegacyCoexistenceCutoverReadiness {
+    pub old_database_retained: bool,
+    pub mode_safe: bool,
+    pub old_database_not_deleted: bool,
+    pub blocker_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentStoreBoundaryCutoverReadiness {
+    pub present: bool,
+    pub engine_sqlite: bool,
+    pub messages_available: bool,
+    pub source_chunks_available: bool,
+    pub blocker_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviousWrapperPreflightCutoverReadiness {
+    pub ready: bool,
+    pub blocker_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackgroundMaintenanceCutoverReadiness {
     pub required: bool,
     pub ready: bool,
@@ -355,6 +396,45 @@ pub struct QueryRuntimePreflightAlignmentCutoverReadiness {
     pub route_catalog_version_matches: bool,
     pub route_catalog_digest_matches: bool,
     pub blocker_codes: Vec<String>,
+}
+
+impl IntegrationBundleProtocolCutoverReadiness {
+    pub fn evidence_ready(&self) -> bool {
+        self.protocol_matches
+    }
+}
+
+impl ReplacementSummaryProtocolCutoverReadiness {
+    pub fn evidence_ready(&self) -> bool {
+        self.protocol_matches
+    }
+}
+
+impl SkeinSubmoduleCutoverReadiness {
+    pub fn evidence_ready(&self) -> bool {
+        self.present && self.path_present && self.commit_present
+    }
+}
+
+impl LegacyCoexistenceCutoverReadiness {
+    pub fn evidence_ready(&self) -> bool {
+        self.old_database_retained && self.mode_safe && self.old_database_not_deleted
+    }
+}
+
+impl ContentStoreBoundaryCutoverReadiness {
+    pub fn evidence_ready(&self) -> bool {
+        self.present
+            && self.engine_sqlite
+            && self.messages_available
+            && self.source_chunks_available
+    }
+}
+
+impl PreviousWrapperPreflightCutoverReadiness {
+    pub fn evidence_ready(&self) -> bool {
+        self.ready
+    }
 }
 
 impl LibraryReadinessCutoverReadiness {
@@ -663,6 +743,14 @@ pub fn nowledge_mem_integration_readiness(
         .get("blackbox_manifest")
         .unwrap_or(&serde_json::Value::Null);
     let blackbox_readiness = blackbox_readiness_from_manifest_json(blackbox_manifest);
+    let integration_bundle_protocol_readiness =
+        integration_bundle_protocol_cutover_readiness(bundle);
+    let replacement_summary_protocol_readiness =
+        replacement_summary_protocol_cutover_readiness(bundle);
+    let skein_submodule_readiness = skein_submodule_cutover_readiness(bundle);
+    let legacy_coexistence_readiness = legacy_coexistence_cutover_readiness(bundle);
+    let content_store_readiness = content_store_boundary_cutover_readiness(bundle);
+    let previous_wrapper_readiness = previous_wrapper_preflight_cutover_readiness(bundle);
     let library_readiness = library_readiness_cutover_readiness(bundle);
     let graph_replacement_readiness = graph_replacement_cutover_readiness(bundle);
     let query_family_readiness = query_family_replacement_cutover_readiness(bundle);
@@ -680,71 +768,37 @@ pub fn nowledge_mem_integration_readiness(
     let storage_recovery_readiness = storage_recovery_cutover_readiness(bundle);
     let background_maintenance_readiness = background_maintenance_cutover_readiness(bundle);
     let checks = vec![
-        check(
+        check_named_conditions(
             "integration_bundle_protocol",
-            [str_path(bundle, &["protocol"])
-                == Some(NOWLEDGE_MEM_SKEIN_INTEGRATION_BUNDLE_PROTOCOL)],
-            ["protocol"],
+            integration_bundle_protocol_cutover_conditions(&integration_bundle_protocol_readiness),
             Vec::new(),
         ),
-        check(
+        check_named_conditions(
             "replacement_summary_protocol",
-            [str_path(bundle, &["replacement_summary", "protocol"])
-                == Some(SKEIN_NOWLEDGE_REPLACEMENT_SUMMARY_PROTOCOL)],
-            ["replacement_summary.protocol"],
+            replacement_summary_protocol_cutover_conditions(
+                &replacement_summary_protocol_readiness,
+            ),
             Vec::new(),
         ),
-        check(
+        check_named_conditions(
             "skein_submodule",
-            [
-                bool_path(bundle, &["submodule", "present"]) == Some(true),
-                non_empty_str_path(bundle, &["submodule", "path"]),
-                non_empty_str_path(bundle, &["submodule", "commit"]),
-            ],
-            ["submodule.present", "submodule.path", "submodule.commit"],
-            blocker_codes(bundle, &[&["submodule", "blocker_codes"][..]]),
+            skein_submodule_cutover_conditions(&skein_submodule_readiness),
+            skein_submodule_readiness.blocker_codes.clone(),
         ),
-        check(
+        check_named_conditions(
             "legacy_coexistence",
-            [
-                bool_path(bundle, &["coexistence", "old_database_retained"]) == Some(true),
-                coexistence_mode_is_safe(bundle),
-                bool_path(bundle, &["coexistence", "old_database_deleted"]) != Some(true),
-            ],
-            [
-                "coexistence.old_database_retained",
-                "coexistence.mode",
-                "coexistence.old_database_deleted",
-            ],
-            blocker_codes(bundle, &[&["coexistence", "blocker_codes"][..]]),
+            legacy_coexistence_cutover_conditions(&legacy_coexistence_readiness),
+            legacy_coexistence_readiness.blocker_codes.clone(),
         ),
-        check(
+        check_named_conditions(
             "content_store_boundary",
-            [
-                bool_path(bundle, &["content_store", "present"]) == Some(true),
-                str_path(bundle, &["content_store", "engine"]) == Some("sqlite"),
-                bool_path(bundle, &["content_store", "messages_available"]) == Some(true),
-                bool_path(bundle, &["content_store", "source_chunks_available"]) == Some(true),
-            ],
-            [
-                "content_store.present",
-                "content_store.engine",
-                "content_store.messages_available",
-                "content_store.source_chunks_available",
-            ],
-            blocker_codes(bundle, &[&["content_store", "blocker_codes"][..]]),
+            content_store_boundary_cutover_conditions(&content_store_readiness),
+            content_store_readiness.blocker_codes.clone(),
         ),
-        check(
+        check_named_conditions(
             "previous_wrapper_preflight",
-            [bool_path(bundle, &["previous_wrapper_preflight", "ready"]) == Some(true)],
-            ["previous_wrapper_preflight.ready"],
-            blocker_codes(
-                bundle,
-                &[
-                    &["previous_wrapper_preflight", "blocker_codes"][..],
-                    &["previous_wrapper_preflight", "failed_checks"][..],
-                ],
-            ),
+            previous_wrapper_preflight_cutover_conditions(&previous_wrapper_readiness),
+            previous_wrapper_readiness.blocker_codes.clone(),
         ),
         check_named_conditions(
             "graph_replacement_evidence",
@@ -850,9 +904,14 @@ pub fn nowledge_mem_integration_readiness(
         checks,
         blocker_codes,
         next_actions: next_actions(
-            bundle,
             ready,
             IntegrationGateReadiness {
+                integration_bundle: &integration_bundle_protocol_readiness,
+                replacement_summary_protocol: &replacement_summary_protocol_readiness,
+                submodule: &skein_submodule_readiness,
+                legacy_coexistence: &legacy_coexistence_readiness,
+                content_store: &content_store_readiness,
+                previous_wrapper: &previous_wrapper_readiness,
                 library: &library_readiness,
                 graph_replacement: &graph_replacement_readiness,
                 query_family: &query_family_readiness,
@@ -870,31 +929,6 @@ pub fn nowledge_mem_integration_readiness(
                 background_maintenance: &background_maintenance_readiness,
             },
         ),
-    }
-}
-
-fn check(
-    name: &'static str,
-    conditions: impl IntoIterator<Item = bool>,
-    evidence_fields: impl IntoIterator<Item = &'static str>,
-    blocker_codes: Vec<String>,
-) -> NowledgeMemIntegrationCheckReport {
-    let conditions = conditions.into_iter().collect::<Vec<_>>();
-    let evidence_fields = evidence_fields
-        .into_iter()
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    let failed_evidence_fields = conditions
-        .iter()
-        .zip(evidence_fields.iter())
-        .filter_map(|(condition, field)| (!*condition).then_some(field.clone()))
-        .collect::<Vec<_>>();
-    NowledgeMemIntegrationCheckReport {
-        name: name.to_string(),
-        ready: failed_evidence_fields.is_empty(),
-        evidence_fields,
-        failed_evidence_fields,
-        blocker_codes,
     }
 }
 
@@ -919,6 +953,67 @@ fn check_named_conditions(
         failed_evidence_fields,
         blocker_codes,
     }
+}
+
+fn integration_bundle_protocol_cutover_conditions(
+    readiness: &IntegrationBundleProtocolCutoverReadiness,
+) -> Vec<(&'static str, bool)> {
+    vec![("protocol", readiness.protocol_matches)]
+}
+
+fn replacement_summary_protocol_cutover_conditions(
+    readiness: &ReplacementSummaryProtocolCutoverReadiness,
+) -> Vec<(&'static str, bool)> {
+    vec![("replacement_summary.protocol", readiness.protocol_matches)]
+}
+
+fn skein_submodule_cutover_conditions(
+    readiness: &SkeinSubmoduleCutoverReadiness,
+) -> Vec<(&'static str, bool)> {
+    vec![
+        ("submodule.present", readiness.present),
+        ("submodule.path", readiness.path_present),
+        ("submodule.commit", readiness.commit_present),
+    ]
+}
+
+fn legacy_coexistence_cutover_conditions(
+    readiness: &LegacyCoexistenceCutoverReadiness,
+) -> Vec<(&'static str, bool)> {
+    vec![
+        (
+            "coexistence.old_database_retained",
+            readiness.old_database_retained,
+        ),
+        ("coexistence.mode", readiness.mode_safe),
+        (
+            "coexistence.old_database_deleted",
+            readiness.old_database_not_deleted,
+        ),
+    ]
+}
+
+fn content_store_boundary_cutover_conditions(
+    readiness: &ContentStoreBoundaryCutoverReadiness,
+) -> Vec<(&'static str, bool)> {
+    vec![
+        ("content_store.present", readiness.present),
+        ("content_store.engine", readiness.engine_sqlite),
+        (
+            "content_store.messages_available",
+            readiness.messages_available,
+        ),
+        (
+            "content_store.source_chunks_available",
+            readiness.source_chunks_available,
+        ),
+    ]
+}
+
+fn previous_wrapper_preflight_cutover_conditions(
+    readiness: &PreviousWrapperPreflightCutoverReadiness,
+) -> Vec<(&'static str, bool)> {
+    vec![("previous_wrapper_preflight.ready", readiness.ready)]
 }
 
 fn blackbox_redaction_cutover_conditions(
@@ -978,6 +1073,12 @@ fn blackbox_operational_cutover_conditions(
 }
 
 struct IntegrationGateReadiness<'a> {
+    integration_bundle: &'a IntegrationBundleProtocolCutoverReadiness,
+    replacement_summary_protocol: &'a ReplacementSummaryProtocolCutoverReadiness,
+    submodule: &'a SkeinSubmoduleCutoverReadiness,
+    legacy_coexistence: &'a LegacyCoexistenceCutoverReadiness,
+    content_store: &'a ContentStoreBoundaryCutoverReadiness,
+    previous_wrapper: &'a PreviousWrapperPreflightCutoverReadiness,
     library: &'a LibraryReadinessCutoverReadiness,
     graph_replacement: &'a GraphReplacementCutoverReadiness,
     query_family: &'a QueryFamilyReplacementCutoverReadiness,
@@ -996,7 +1097,6 @@ struct IntegrationGateReadiness<'a> {
 }
 
 fn next_actions(
-    bundle: &serde_json::Value,
     ready: bool,
     readiness: IntegrationGateReadiness<'_>,
 ) -> Vec<NowledgeMemIntegrationNextAction> {
@@ -1004,24 +1104,21 @@ fn next_actions(
         return Vec::new();
     }
     let mut actions = Vec::new();
-    if str_path(bundle, &["protocol"]) != Some(NOWLEDGE_MEM_SKEIN_INTEGRATION_BUNDLE_PROTOCOL) {
+    if !readiness.integration_bundle.evidence_ready() {
         actions.push(next_action(
             "regenerate_skein_integration_bundle",
             "Nowledge Mem integration readiness requires the versioned integration bundle protocol",
             ["protocol"],
         ));
     }
-    if bool_path(bundle, &["submodule", "present"]) != Some(true) {
+    if !readiness.submodule.evidence_ready() {
         actions.push(next_action(
             "add_skein_submodule",
             "Nowledge Mem must depend on Skein as a submodule instead of copying sources",
             ["submodule.present", "submodule.path", "submodule.commit"],
         ));
     }
-    if bool_path(bundle, &["coexistence", "old_database_retained"]) != Some(true)
-        || !coexistence_mode_is_safe(bundle)
-        || bool_path(bundle, &["coexistence", "old_database_deleted"]) == Some(true)
-    {
+    if !readiness.legacy_coexistence.evidence_ready() {
         actions.push(next_action(
             "enable_side_by_side_coexistence",
             "Kuzu/Ladybug and LanceDB must remain available while Skein runs in shadow",
@@ -1032,7 +1129,7 @@ fn next_actions(
             ],
         ));
     }
-    if bool_path(bundle, &["content_store", "present"]) != Some(true) {
+    if !readiness.content_store.evidence_ready() {
         actions.push(next_action(
             "attach_content_store_evidence",
             "messages and source chunks still come from content.db during replacement validation",
@@ -1044,7 +1141,7 @@ fn next_actions(
             ],
         ));
     }
-    if bool_path(bundle, &["previous_wrapper_preflight", "ready"]) != Some(true) {
+    if !readiness.previous_wrapper.evidence_ready() {
         actions.push(next_action(
             "run_previous_wrapper_preflight",
             "the previous-wrapper release bundle must pass before Mem cutover",
@@ -1062,9 +1159,7 @@ fn next_actions(
             ],
         ));
     }
-    if str_path(bundle, &["replacement_summary", "protocol"])
-        != Some(SKEIN_NOWLEDGE_REPLACEMENT_SUMMARY_PROTOCOL)
-    {
+    if !readiness.replacement_summary_protocol.evidence_ready() {
         actions.push(next_action(
             "produce_replacement_summary",
             "replacement summary must use the Skein Nowledge replacement-summary protocol",
@@ -1364,6 +1459,77 @@ fn read_json_file(path: &Path) -> Result<serde_json::Value> {
             "failed to parse Nowledge Mem integration bundle: {error}",
         ))
     })
+}
+
+pub fn integration_bundle_protocol_cutover_readiness(
+    bundle: &serde_json::Value,
+) -> IntegrationBundleProtocolCutoverReadiness {
+    IntegrationBundleProtocolCutoverReadiness {
+        protocol_matches: str_path(bundle, &["protocol"])
+            == Some(NOWLEDGE_MEM_SKEIN_INTEGRATION_BUNDLE_PROTOCOL),
+    }
+}
+
+pub fn replacement_summary_protocol_cutover_readiness(
+    bundle: &serde_json::Value,
+) -> ReplacementSummaryProtocolCutoverReadiness {
+    ReplacementSummaryProtocolCutoverReadiness {
+        protocol_matches: str_path(bundle, &["replacement_summary", "protocol"])
+            == Some(SKEIN_NOWLEDGE_REPLACEMENT_SUMMARY_PROTOCOL),
+    }
+}
+
+pub fn skein_submodule_cutover_readiness(
+    bundle: &serde_json::Value,
+) -> SkeinSubmoduleCutoverReadiness {
+    SkeinSubmoduleCutoverReadiness {
+        present: bool_path(bundle, &["submodule", "present"]) == Some(true),
+        path_present: non_empty_str_path(bundle, &["submodule", "path"]),
+        commit_present: non_empty_str_path(bundle, &["submodule", "commit"]),
+        blocker_codes: blocker_codes(bundle, &[&["submodule", "blocker_codes"][..]]),
+    }
+}
+
+pub fn legacy_coexistence_cutover_readiness(
+    bundle: &serde_json::Value,
+) -> LegacyCoexistenceCutoverReadiness {
+    LegacyCoexistenceCutoverReadiness {
+        old_database_retained: bool_path(bundle, &["coexistence", "old_database_retained"])
+            == Some(true),
+        mode_safe: coexistence_mode_is_safe(bundle),
+        old_database_not_deleted: bool_path(bundle, &["coexistence", "old_database_deleted"])
+            != Some(true),
+        blocker_codes: blocker_codes(bundle, &[&["coexistence", "blocker_codes"][..]]),
+    }
+}
+
+pub fn content_store_boundary_cutover_readiness(
+    bundle: &serde_json::Value,
+) -> ContentStoreBoundaryCutoverReadiness {
+    ContentStoreBoundaryCutoverReadiness {
+        present: bool_path(bundle, &["content_store", "present"]) == Some(true),
+        engine_sqlite: str_path(bundle, &["content_store", "engine"]) == Some("sqlite"),
+        messages_available: bool_path(bundle, &["content_store", "messages_available"])
+            == Some(true),
+        source_chunks_available: bool_path(bundle, &["content_store", "source_chunks_available"])
+            == Some(true),
+        blocker_codes: blocker_codes(bundle, &[&["content_store", "blocker_codes"][..]]),
+    }
+}
+
+pub fn previous_wrapper_preflight_cutover_readiness(
+    bundle: &serde_json::Value,
+) -> PreviousWrapperPreflightCutoverReadiness {
+    PreviousWrapperPreflightCutoverReadiness {
+        ready: bool_path(bundle, &["previous_wrapper_preflight", "ready"]) == Some(true),
+        blocker_codes: blocker_codes(
+            bundle,
+            &[
+                &["previous_wrapper_preflight", "blocker_codes"][..],
+                &["previous_wrapper_preflight", "failed_checks"][..],
+            ],
+        ),
+    }
 }
 
 fn coexistence_mode_is_safe(bundle: &serde_json::Value) -> bool {
@@ -4417,6 +4583,119 @@ mod tests {
             .unwrap()
             .iter()
             .any(|action| action["action"] == "enable_side_by_side_coexistence"));
+    }
+
+    #[test]
+    fn exposes_typed_protocol_cutover_readiness() {
+        let mut bundle = ready_bundle();
+
+        let integration = super::integration_bundle_protocol_cutover_readiness(&bundle);
+        let replacement = super::replacement_summary_protocol_cutover_readiness(&bundle);
+        assert!(integration.evidence_ready());
+        assert!(integration.protocol_matches);
+        assert!(replacement.evidence_ready());
+        assert!(replacement.protocol_matches);
+
+        bundle["protocol"] = serde_json::json!("legacy");
+        bundle["replacement_summary"]["protocol"] = serde_json::json!("legacy");
+        let integration = super::integration_bundle_protocol_cutover_readiness(&bundle);
+        let replacement = super::replacement_summary_protocol_cutover_readiness(&bundle);
+        assert!(!integration.evidence_ready());
+        assert!(!replacement.evidence_ready());
+    }
+
+    #[test]
+    fn exposes_typed_submodule_and_coexistence_cutover_readiness() {
+        let mut bundle = ready_bundle();
+        let submodule = super::skein_submodule_cutover_readiness(&bundle);
+        let coexistence = super::legacy_coexistence_cutover_readiness(&bundle);
+        assert!(submodule.evidence_ready());
+        assert!(submodule.present);
+        assert!(submodule.path_present);
+        assert!(submodule.commit_present);
+        assert!(coexistence.evidence_ready());
+        assert!(coexistence.old_database_retained);
+        assert!(coexistence.mode_safe);
+        assert!(coexistence.old_database_not_deleted);
+
+        bundle["submodule"]["commit"] = serde_json::json!("");
+        bundle["coexistence"]["mode"] = serde_json::json!("replace_in_place");
+        bundle["coexistence"]["old_database_deleted"] = serde_json::json!(true);
+        let submodule = super::skein_submodule_cutover_readiness(&bundle);
+        let coexistence = super::legacy_coexistence_cutover_readiness(&bundle);
+        assert!(!submodule.evidence_ready());
+        assert!(submodule.present);
+        assert!(submodule.path_present);
+        assert!(!submodule.commit_present);
+        assert!(!coexistence.evidence_ready());
+        assert!(!coexistence.mode_safe);
+        assert!(!coexistence.old_database_not_deleted);
+    }
+
+    #[test]
+    fn typed_content_store_boundary_rejects_missing_source_chunks() {
+        let mut bundle = ready_bundle();
+        let typed = super::content_store_boundary_cutover_readiness(&bundle);
+        assert!(typed.evidence_ready());
+        assert!(typed.present);
+        assert!(typed.engine_sqlite);
+        assert!(typed.messages_available);
+        assert!(typed.source_chunks_available);
+
+        bundle["content_store"]["source_chunks_available"] = serde_json::json!(false);
+        let typed = super::content_store_boundary_cutover_readiness(&bundle);
+        assert!(!typed.evidence_ready());
+        assert!(!typed.source_chunks_available);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+        let check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "content_store_boundary")
+            .unwrap();
+        assert_eq!(
+            check["failed_evidence_fields"],
+            serde_json::json!(["content_store.source_chunks_available"])
+        );
+        assert!(report["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "attach_content_store_evidence"));
+    }
+
+    #[test]
+    fn typed_previous_wrapper_preflight_collects_failed_checks_as_blockers() {
+        let mut bundle = ready_bundle();
+        bundle["previous_wrapper_preflight"]["ready"] = serde_json::json!(false);
+        bundle["previous_wrapper_preflight"]["failed_checks"] =
+            serde_json::json!(["route_inventory_missing"]);
+
+        let typed = super::previous_wrapper_preflight_cutover_readiness(&bundle);
+        assert!(!typed.evidence_ready());
+        assert_eq!(typed.blocker_codes, vec!["route_inventory_missing"]);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+        let check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "previous_wrapper_preflight")
+            .unwrap();
+        assert_eq!(
+            check["failed_evidence_fields"],
+            serde_json::json!(["previous_wrapper_preflight.ready"])
+        );
+        assert_eq!(
+            check["blocker_codes"],
+            serde_json::json!(["route_inventory_missing"])
+        );
+        assert!(report["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "run_previous_wrapper_preflight"));
     }
 
     #[test]
