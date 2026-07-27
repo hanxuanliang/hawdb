@@ -1011,10 +1011,10 @@ fn read_json_file(path: &Path) -> Result<serde_json::Value> {
             error.kind()
         ))
     })?;
-    serde_json::from_str(&raw).map_err(|error| {
-        SkeinError::Semantic(format!(
-            "failed to parse graph route readiness evidence: {error}"
-        ))
+    serde_json::from_str(&raw).map_err(|_| {
+        SkeinError::Semantic(
+            "failed to parse graph route readiness evidence: invalid_json".to_string(),
+        )
     })
 }
 
@@ -1050,11 +1050,12 @@ fn value_path<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a ser
 
 #[cfg(test)]
 mod tests {
-    use super::nowledge_graph_route_readiness_json;
+    use super::{nowledge_graph_route_readiness_json, run_nowledge_graph_route_readiness};
     use crate::{
         nowledge_mem_graph_read_route_catalog_digest, nowledge_mem_graph_read_route_specs_json,
         NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
     };
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn route_readiness_reports_ready_for_all_required_routes() {
@@ -1143,6 +1144,25 @@ mod tests {
             readiness["evidence_route_coverage_blocker_codes"],
             serde_json::json!([])
         );
+    }
+
+    #[test]
+    fn route_readiness_parse_error_redacts_json_details() {
+        let evidence_path = unique_test_file("secret_graph_route_readiness");
+        std::fs::write(&evidence_path, "{\"secret_route_id\":").unwrap();
+
+        let error = run_nowledge_graph_route_readiness(
+            [evidence_path.to_str().unwrap().to_string()].into_iter(),
+        )
+        .unwrap_err();
+        let message = error.to_string();
+
+        assert_eq!(
+            message,
+            "semantic error: failed to parse graph route readiness evidence: invalid_json"
+        );
+        assert!(!message.contains(evidence_path.to_str().unwrap()));
+        assert!(!message.contains("secret_route_id"));
     }
 
     #[test]
@@ -1617,6 +1637,14 @@ mod tests {
             object.insert(key, value);
         }
         evidence
+    }
+
+    fn unique_test_file(name: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("skein_{name}_{}_{nanos}.json", std::process::id()))
     }
 
     fn test_route_coverage(routes: &[serde_json::Value]) -> Vec<(String, serde_json::Value)> {

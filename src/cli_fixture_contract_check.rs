@@ -141,13 +141,11 @@ pub fn run_nowledge_fixture_contract_command_check(
 }
 
 fn read_contract(path: &str) -> Result<serde_json::Value> {
-    let raw = std::fs::read_to_string(path).map_err(|error| {
-        SkeinError::Execution(format!("failed to read fixture contract '{path}': {error}"))
+    let raw = std::fs::read_to_string(path).map_err(|_| {
+        SkeinError::Execution("failed to read fixture contract: io_error".to_string())
     })?;
-    serde_json::from_str(&raw).map_err(|error| {
-        SkeinError::Execution(format!(
-            "failed to parse fixture contract '{path}': {error}"
-        ))
+    serde_json::from_str(&raw).map_err(|_| {
+        SkeinError::Execution("failed to parse fixture contract: invalid_json".to_string())
     })
 }
 
@@ -711,10 +709,10 @@ impl PersistentFixtureCommand {
             ))
         })?;
         let mut line = String::new();
-        let bytes = self.stdout.read_line(&mut line).map_err(|error| {
-            SkeinError::Execution(format!(
-                "failed to read persistent fixture contract command response: {error}"
-            ))
+        let bytes = self.stdout.read_line(&mut line).map_err(|_| {
+            SkeinError::Execution(
+                "failed to read persistent fixture contract command response: io_error".to_string(),
+            )
         })?;
         if bytes == 0 {
             return Err(SkeinError::Execution(format!(
@@ -722,11 +720,11 @@ impl PersistentFixtureCommand {
                 self.program
             )));
         }
-        serde_json::from_str(&line).map_err(|error| {
-            SkeinError::Execution(format!(
-                "persistent fixture contract command returned invalid JSON: {error}; stdout: {}",
-                line.trim()
-            ))
+        serde_json::from_str(&line).map_err(|_| {
+            SkeinError::Execution(
+                "persistent fixture contract command returned invalid JSON: invalid_json"
+                    .to_string(),
+            )
         })
     }
 }
@@ -1071,8 +1069,8 @@ fn json_debug(value: Option<&serde_json::Value>) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_contract_command, run_nowledge_fixture_contract_command_check, FixtureCommandMode,
-        FixtureContractCommandCheckOptions,
+        check_contract_command, read_contract, run_nowledge_fixture_contract_command_check,
+        FixtureCommandMode, FixtureContractCommandCheckOptions,
     };
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1117,6 +1115,36 @@ mod tests {
             report["failure_summary"]["failed_code_counts"]["row_count_mismatch"],
             1
         );
+    }
+
+    #[test]
+    fn fixture_contract_read_error_redacts_path_and_io_details() {
+        let contract_path = unique_test_file("secret_fixture_contract_path");
+        let error = read_contract(contract_path.to_str().unwrap()).unwrap_err();
+        let message = error.to_string();
+
+        assert_eq!(
+            message,
+            "execution error: failed to read fixture contract: io_error"
+        );
+        assert!(!message.contains(contract_path.to_str().unwrap()));
+        assert!(!message.contains("secret_fixture_contract_path"));
+    }
+
+    #[test]
+    fn fixture_contract_parse_error_redacts_path_and_json_details() {
+        let contract_path = unique_test_file("secret_fixture_contract_json");
+        std::fs::write(&contract_path, "{\"secret_unit_id\":").unwrap();
+
+        let error = read_contract(contract_path.to_str().unwrap()).unwrap_err();
+        let message = error.to_string();
+
+        assert_eq!(
+            message,
+            "execution error: failed to parse fixture contract: invalid_json"
+        );
+        assert!(!message.contains(contract_path.to_str().unwrap()));
+        assert!(!message.contains("secret_unit_id"));
     }
 
     #[test]
@@ -1383,6 +1411,35 @@ mod tests {
             report["previous_wrapper_contract_evidence"]["blocker_codes"],
             serde_json::json!(["missing_wrapper_identity"])
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persistent_contract_command_invalid_json_redacts_stdout() {
+        let contract = mini_contract();
+        let options = FixtureContractCommandCheckOptions {
+            command_mode: FixtureCommandMode::Persistent,
+            stop_after_first_failure: true,
+            ..FixtureContractCommandCheckOptions::default()
+        };
+        let report = check_contract_command(
+            &contract,
+            "/bin/sh",
+            &[
+                "-c".to_string(),
+                "while IFS= read -r line; do printf 'not-json-with-secret-token\\n'; done"
+                    .to_string(),
+            ],
+            &options,
+        )
+        .unwrap();
+        let message = report["failures"][0]["message"].as_str().unwrap();
+
+        assert_eq!(
+            message,
+            "execution error: persistent fixture contract command returned invalid JSON: invalid_json"
+        );
+        assert!(!message.contains("not-json-with-secret-token"));
     }
 
     #[test]

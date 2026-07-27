@@ -65,6 +65,9 @@ query family, or cutover gate requires them.
   - [x] Redact graph-route query evidence and query-family evidence JSON parse
     failures by default so Cypher and replacement-readiness payload fragments
     are not copied into command errors.
+  - [x] Redact fixture-contract input and graph-route readiness evidence parse
+    failures by default so local paths, command stdout, and payload fragments
+    are not copied into command errors.
 
 ## P0: Concrete Cutover Blockers
 
