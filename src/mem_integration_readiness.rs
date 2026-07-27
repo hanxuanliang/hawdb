@@ -107,6 +107,36 @@ pub struct StorageRecoveryCutoverReadiness {
     pub blocker_codes: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackgroundMaintenanceCutoverReadiness {
+    pub required: bool,
+    pub ready: bool,
+    pub protocol_matches: bool,
+    pub executable_search_projection_graph_delta_count_present: bool,
+    pub admitted_search_projection_graph_delta_count_present: bool,
+    pub deferred_search_projection_graph_delta_count_present: bool,
+    pub rejected_search_projection_graph_delta_count_present: bool,
+    pub executable_search_projection_graph_delta_operations_present: bool,
+    pub admitted_search_projection_graph_delta_operations_present: bool,
+    pub max_search_projection_graph_delta_complete_through_graph_commit_epoch_present: bool,
+    pub blocker_codes: Vec<String>,
+}
+
+impl BackgroundMaintenanceCutoverReadiness {
+    pub fn evidence_ready(&self) -> bool {
+        self.required
+            && self.ready
+            && self.protocol_matches
+            && self.executable_search_projection_graph_delta_count_present
+            && self.admitted_search_projection_graph_delta_count_present
+            && self.deferred_search_projection_graph_delta_count_present
+            && self.rejected_search_projection_graph_delta_count_present
+            && self.executable_search_projection_graph_delta_operations_present
+            && self.admitted_search_projection_graph_delta_operations_present
+            && self.max_search_projection_graph_delta_complete_through_graph_commit_epoch_present
+    }
+}
+
 impl StorageRecoveryCutoverReadiness {
     pub fn evidence_ready(&self) -> bool {
         self.required
@@ -164,6 +194,7 @@ pub fn nowledge_mem_integration_readiness(
         .unwrap_or(&serde_json::Value::Null);
     let blackbox_readiness = blackbox_readiness_from_manifest_json(blackbox_manifest);
     let storage_recovery_readiness = storage_recovery_cutover_readiness(bundle);
+    let background_maintenance_readiness = background_maintenance_cutover_readiness(bundle);
     let checks = vec![
         check(
             "integration_bundle_protocol",
@@ -1475,93 +1506,23 @@ pub fn nowledge_mem_integration_readiness(
         check(
             "background_maintenance_evidence",
             [
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "cutover_evidence",
-                        "background_maintenance_required",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "cutover_evidence",
-                        "background_maintenance_ready",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "cutover_evidence",
-                        "background_maintenance_protocol_matches",
-                    ],
-                ) == Some(true),
-                u64_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "cutover_evidence",
-                        "background_maintenance_executable_search_projection_graph_delta_count",
-                    ],
-                )
-                .is_some(),
-                u64_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "cutover_evidence",
-                        "background_maintenance_admitted_search_projection_graph_delta_count",
-                    ],
-                )
-                .is_some(),
-                u64_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "cutover_evidence",
-                        "background_maintenance_deferred_search_projection_graph_delta_count",
-                    ],
-                )
-                .is_some(),
-                u64_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "cutover_evidence",
-                        "background_maintenance_rejected_search_projection_graph_delta_count",
-                    ],
-                )
-                .is_some(),
-                u64_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "cutover_evidence",
-                        "background_maintenance_executable_search_projection_graph_delta_operations",
-                    ],
-                )
-                .is_some(),
-                u64_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "cutover_evidence",
-                        "background_maintenance_admitted_search_projection_graph_delta_operations",
-                    ],
-                )
-                .is_some(),
-                u64_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "cutover_evidence",
-                        "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch",
-                    ],
-                )
-                .is_some(),
+                background_maintenance_readiness.required,
+                background_maintenance_readiness.ready,
+                background_maintenance_readiness.protocol_matches,
+                background_maintenance_readiness
+                    .executable_search_projection_graph_delta_count_present,
+                background_maintenance_readiness
+                    .admitted_search_projection_graph_delta_count_present,
+                background_maintenance_readiness
+                    .deferred_search_projection_graph_delta_count_present,
+                background_maintenance_readiness
+                    .rejected_search_projection_graph_delta_count_present,
+                background_maintenance_readiness
+                    .executable_search_projection_graph_delta_operations_present,
+                background_maintenance_readiness
+                    .admitted_search_projection_graph_delta_operations_present,
+                background_maintenance_readiness
+                    .max_search_projection_graph_delta_complete_through_graph_commit_epoch_present,
             ],
             [
                 "replacement_summary.cutover_evidence.background_maintenance_required",
@@ -1575,21 +1536,7 @@ pub fn nowledge_mem_integration_readiness(
                 "replacement_summary.cutover_evidence.background_maintenance_admitted_search_projection_graph_delta_operations",
                 "replacement_summary.cutover_evidence.background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch",
             ],
-            blocker_codes(
-                bundle,
-                &[
-                    &[
-                        "replacement_summary",
-                        "cutover_evidence",
-                        "background_maintenance_blocker_codes",
-                    ][..],
-                    &[
-                        "replacement_summary",
-                        "cutover_evidence",
-                        "background_maintenance_blockers",
-                    ][..],
-                ],
-            ),
+            background_maintenance_readiness.blocker_codes.clone(),
         ),
         check(
             "storage_recovery_evidence",
@@ -1677,6 +1624,7 @@ pub fn nowledge_mem_integration_readiness(
             ready,
             &blackbox_readiness,
             &storage_recovery_readiness,
+            &background_maintenance_readiness,
         ),
     }
 }
@@ -1711,6 +1659,7 @@ fn next_actions(
     ready: bool,
     blackbox_readiness: &BlackboxReadinessReport,
     storage_recovery_readiness: &StorageRecoveryCutoverReadiness,
+    background_maintenance_readiness: &BackgroundMaintenanceCutoverReadiness,
 ) -> Vec<NowledgeMemIntegrationNextAction> {
     if ready {
         return Vec::new();
@@ -2058,7 +2007,7 @@ fn next_actions(
             ],
         ));
     }
-    if !replacement_summary_background_maintenance_ready(bundle) {
+    if !background_maintenance_readiness.evidence_ready() {
         actions.push(next_action(
             "attach_background_maintenance_report",
             "background maintenance QoS and search-projection graph-delta evidence must be ready before Mem cutover",
@@ -3322,70 +3271,113 @@ fn bounded_read_execution_cap_matches(bundle: &serde_json::Value) -> bool {
     max_rows.and_then(|value| value.checked_add(1)) == execution_row_cap
 }
 
-fn replacement_summary_background_maintenance_ready(bundle: &serde_json::Value) -> bool {
-    bool_path(
-        bundle,
-        &[
-            "replacement_summary",
-            "cutover_evidence",
-            "background_maintenance_required",
-        ],
-    ) == Some(true)
-        && bool_path(
+pub fn background_maintenance_cutover_readiness(
+    bundle: &serde_json::Value,
+) -> BackgroundMaintenanceCutoverReadiness {
+    BackgroundMaintenanceCutoverReadiness {
+        required: bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "cutover_evidence",
+                "background_maintenance_required",
+            ],
+        ) == Some(true),
+        ready: bool_path(
             bundle,
             &[
                 "replacement_summary",
                 "cutover_evidence",
                 "background_maintenance_ready",
             ],
-        ) == Some(true)
-        && bool_path(
+        ) == Some(true),
+        protocol_matches: bool_path(
             bundle,
             &[
                 "replacement_summary",
                 "cutover_evidence",
                 "background_maintenance_protocol_matches",
             ],
-        ) == Some(true)
-        && [
+        ) == Some(true),
+        executable_search_projection_graph_delta_count_present: u64_path(
+            bundle,
             &[
                 "replacement_summary",
                 "cutover_evidence",
                 "background_maintenance_executable_search_projection_graph_delta_count",
-            ][..],
+            ],
+        )
+        .is_some(),
+        admitted_search_projection_graph_delta_count_present: u64_path(
+            bundle,
             &[
                 "replacement_summary",
                 "cutover_evidence",
                 "background_maintenance_admitted_search_projection_graph_delta_count",
-            ][..],
+            ],
+        )
+        .is_some(),
+        deferred_search_projection_graph_delta_count_present: u64_path(
+            bundle,
             &[
                 "replacement_summary",
                 "cutover_evidence",
                 "background_maintenance_deferred_search_projection_graph_delta_count",
-            ][..],
+            ],
+        )
+        .is_some(),
+        rejected_search_projection_graph_delta_count_present: u64_path(
+            bundle,
             &[
                 "replacement_summary",
                 "cutover_evidence",
                 "background_maintenance_rejected_search_projection_graph_delta_count",
-            ][..],
+            ],
+        )
+        .is_some(),
+        executable_search_projection_graph_delta_operations_present: u64_path(
+            bundle,
             &[
                 "replacement_summary",
                 "cutover_evidence",
                 "background_maintenance_executable_search_projection_graph_delta_operations",
-            ][..],
+            ],
+        )
+        .is_some(),
+        admitted_search_projection_graph_delta_operations_present: u64_path(
+            bundle,
             &[
                 "replacement_summary",
                 "cutover_evidence",
                 "background_maintenance_admitted_search_projection_graph_delta_operations",
-            ][..],
+            ],
+        )
+        .is_some(),
+        max_search_projection_graph_delta_complete_through_graph_commit_epoch_present: u64_path(
+            bundle,
             &[
                 "replacement_summary",
                 "cutover_evidence",
                 "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch",
-            ][..],
-        ]
-        .iter()
-        .all(|path| u64_path(bundle, path).is_some())
+            ],
+        )
+        .is_some(),
+        blocker_codes: blocker_codes(
+            bundle,
+            &[
+                &[
+                    "replacement_summary",
+                    "cutover_evidence",
+                    "background_maintenance_blocker_codes",
+                ][..],
+                &[
+                    "replacement_summary",
+                    "cutover_evidence",
+                    "background_maintenance_blockers",
+                ][..],
+            ],
+        ),
+    }
 }
 
 fn string_array_path(value: &serde_json::Value, path: &[&str]) -> Vec<String> {
@@ -5910,6 +5902,15 @@ mod tests {
         bundle["replacement_summary"]["cutover_evidence"]["background_maintenance_blocker_codes"] =
             serde_json::json!(["background_disabled"]);
 
+        let typed = super::background_maintenance_cutover_readiness(&bundle);
+        assert!(!typed.evidence_ready());
+        assert!(typed.required);
+        assert!(!typed.ready);
+        assert!(!typed.protocol_matches);
+        assert!(typed.executable_search_projection_graph_delta_count_present);
+        assert!(!typed.admitted_search_projection_graph_delta_count_present);
+        assert_eq!(typed.blocker_codes, vec!["background_disabled".to_string()]);
+
         let report = nowledge_mem_integration_readiness_json(&bundle);
 
         assert_eq!(report["ready"], false);
@@ -5954,6 +5955,17 @@ mod tests {
         bundle["replacement_summary"]["cutover_evidence"]
             ["background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch"] =
             serde_json::Value::Null;
+
+        let typed = super::background_maintenance_cutover_readiness(&bundle);
+        assert!(!typed.evidence_ready());
+        assert!(typed.required);
+        assert!(typed.ready);
+        assert!(typed.protocol_matches);
+        assert!(!typed.deferred_search_projection_graph_delta_count_present);
+        assert!(!typed.rejected_search_projection_graph_delta_count_present);
+        assert!(
+            !typed.max_search_projection_graph_delta_complete_through_graph_commit_epoch_present
+        );
 
         let report = nowledge_mem_integration_readiness_json(&bundle);
 
