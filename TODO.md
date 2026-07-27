@@ -212,6 +212,12 @@ contract.
   - [x] Allow search-candidate shadow probes to carry structured scan-pruning
     field summaries and reject declared summary capabilities whose segment
     counts are zero.
+  - [x] Require Rust-bridge search candidate evidence to prove text and
+    vector retriever legs are both observed before LanceDB read cutover.
+  - [x] Require search-candidate shadow probe inputs to carry typed text and
+    vector retriever-leg evidence instead of producing weak ready probes.
+  - [x] Require Rust-bridge search candidate evidence to prove FTS and vector
+    top-k overlap from typed single-leg candidate reads before cutover.
 - [ ] PR 6: Prove WAL and checkpoint recovery with Mem-shaped mutations.
   - Scope: add fixtures for committed batch replay, torn WAL tail handling, and
     checkpoint replay boundaries that match Mem graph/search writes.

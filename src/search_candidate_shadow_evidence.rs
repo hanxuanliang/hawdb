@@ -1,3 +1,4 @@
+use crate::search::SearchMode;
 use crate::{
     nowledge_mem_search_candidate_shadow_evidence_json, NowledgeMemSearchCandidateFieldSummary,
     NowledgeMemSearchCandidateShadowAccumulator, Result, SkeinError,
@@ -73,10 +74,33 @@ pub fn parse_search_candidate_shadow_probe(
     let retriever_legs = required_object(value, "retriever_legs")?;
     parse_retriever_leg(retriever_legs, "text", &mut accumulator)?;
     parse_retriever_leg(retriever_legs, "vector", &mut accumulator)?;
+    let top_k_overlap = required_object(value, "top_k_overlap")?;
+    parse_top_k_overlap(top_k_overlap, "fts", SearchMode::Text, &mut accumulator)?;
+    parse_top_k_overlap(
+        top_k_overlap,
+        "vector",
+        SearchMode::Vector,
+        &mut accumulator,
+    )?;
     for blocker in optional_string_array(value, "blocker_codes")? {
         accumulator.add_blocker_code(blocker);
     }
     Ok(accumulator)
+}
+
+fn parse_top_k_overlap(
+    value: &serde_json::Value,
+    name: &'static str,
+    mode: SearchMode,
+    accumulator: &mut NowledgeMemSearchCandidateShadowAccumulator,
+) -> Result<()> {
+    let top_k = required_object(value, name)?;
+    accumulator.record_top_k_overlap_candidate_ids(
+        mode,
+        &required_string_array(top_k, "primary_candidate_ids")?,
+        &required_string_array(top_k, "shadow_candidate_ids")?,
+    );
+    Ok(())
 }
 
 fn parse_retriever_leg(
@@ -278,6 +302,8 @@ mod tests {
         assert_eq!(evidence["vector_retriever_ready"], true);
         assert_eq!(evidence["retriever_leg_candidate_counts"]["text"], 3);
         assert_eq!(evidence["retriever_leg_candidate_counts"]["vector"], 3);
+        assert_eq!(evidence["fts_top_k_overlap_ready"], true);
+        assert_eq!(evidence["vector_top_k_overlap_ready"], true);
         assert_eq!(evidence["candidate_identity"]["ready"], true);
         assert_eq!(evidence["filter_pushdown"]["ready"], true);
         assert_eq!(
@@ -297,6 +323,8 @@ mod tests {
         assert_eq!(evidence["request_count"], 2);
         assert_eq!(evidence["text_retriever_ready"], true);
         assert_eq!(evidence["vector_retriever_ready"], true);
+        assert_eq!(evidence["fts_top_k_overlap_ready"], true);
+        assert_eq!(evidence["vector_top_k_overlap_ready"], true);
         assert_eq!(evidence["filter_pushdown"]["ready"], true);
     }
 
@@ -365,6 +393,19 @@ mod tests {
     }
 
     #[test]
+    fn search_candidate_shadow_probe_requires_top_k_overlap_evidence() {
+        let mut probe = ready_probe();
+        probe.as_object_mut().unwrap().remove("top_k_overlap");
+
+        let error = parse_search_candidate_shadow_probe(&probe).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "semantic error: search candidate shadow probe field 'top_k_overlap' must be a object"
+        );
+    }
+
+    #[test]
     fn search_candidate_shadow_probe_fails_closed_for_unavailable_retriever_leg() {
         let mut probe = ready_probe();
         probe["retriever_legs"]["vector"]["available"] = serde_json::json!(false);
@@ -425,6 +466,16 @@ mod tests {
                 "vector": {
                     "available": true,
                     "candidate_count": 3
+                }
+            },
+            "top_k_overlap": {
+                "fts": {
+                    "primary_candidate_ids": ["mem_1", "mem_2"],
+                    "shadow_candidate_ids": ["mem_1", "mem_2"]
+                },
+                "vector": {
+                    "primary_candidate_ids": ["mem_3"],
+                    "shadow_candidate_ids": ["mem_3"]
                 }
             }
         })

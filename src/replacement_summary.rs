@@ -1147,6 +1147,8 @@ fn search_candidate_shadow_evidence_summary(
         && row_count_parity == Some(true)
         && text_retriever_ready == Some(true)
         && vector_retriever_ready == Some(true)
+        && fts_top_k_overlap_ready == Some(true)
+        && vector_top_k_overlap_ready == Some(true)
         && shadow_scan_filter_pushdown_ready == Some(true)
         && shadow_scan_field_pruning_ready == Some(true)
         && shadow_scan_field_summary_count.is_some_and(|count| count > 0);
@@ -2375,6 +2377,8 @@ fn nowledge_replacement_next_actions(
                 "search_candidate_shadow_evidence.row_count_parity",
                 "search_candidate_shadow_evidence.text_retriever_ready",
                 "search_candidate_shadow_evidence.vector_retriever_ready",
+                "search_candidate_shadow_evidence.fts_top_k_overlap_ready",
+                "search_candidate_shadow_evidence.vector_top_k_overlap_ready",
                 "search_candidate_shadow_evidence.candidate_identity.ready",
                 "search_candidate_shadow_evidence.shadow_scan_filter_pushdown_ready",
                 "search_candidate_shadow_evidence.shadow_scan_field_pruning_ready",
@@ -3251,6 +3255,34 @@ mod tests {
         );
         assert_eq!(
             summary["search_candidate_shadow_evidence"]["vector_retriever_ready"],
+            false
+        );
+        assert!(summary["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "search_candidate_shadow_evidence_ready"));
+    }
+
+    #[test]
+    fn replacement_summary_requires_search_candidate_top_k_overlap_evidence() {
+        let mut bundle = production_ready_bundle();
+        bundle["search_candidate_shadow_evidence"]["fts_top_k_overlap_ready"] =
+            serde_json::json!(false);
+        bundle["search_candidate_shadow_evidence"]["vector_top_k_overlap_ready"] =
+            serde_json::json!(false);
+        bundle["search_candidate_shadow_evidence"]["ready"] = serde_json::json!(true);
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["search_candidate_shadow_evidence"]["ready"], false);
+        assert_eq!(
+            summary["search_candidate_shadow_evidence"]["fts_top_k_overlap_ready"],
+            false
+        );
+        assert_eq!(
+            summary["search_candidate_shadow_evidence"]["vector_top_k_overlap_ready"],
             false
         );
         assert!(summary["missing_evidence"]
@@ -5107,6 +5139,8 @@ mod tests {
                         "search_candidate_shadow_evidence.row_count_parity",
                         "search_candidate_shadow_evidence.text_retriever_ready",
                         "search_candidate_shadow_evidence.vector_retriever_ready",
+                        "search_candidate_shadow_evidence.fts_top_k_overlap_ready",
+                        "search_candidate_shadow_evidence.vector_top_k_overlap_ready",
                         "search_candidate_shadow_evidence.candidate_identity.ready",
                         "search_candidate_shadow_evidence.shadow_scan_filter_pushdown_ready",
                         "search_candidate_shadow_evidence.shadow_scan_field_pruning_ready",
@@ -5467,6 +5501,14 @@ mod tests {
         bundle["search_candidate_shadow_evidence"]["retriever_leg_candidate_counts"] = serde_json::json!({
             "text": 3,
             "vector": 3,
+        });
+        bundle["search_candidate_shadow_evidence"]["fts_top_k_overlap_ready"] =
+            serde_json::json!(true);
+        bundle["search_candidate_shadow_evidence"]["vector_top_k_overlap_ready"] =
+            serde_json::json!(true);
+        bundle["search_candidate_shadow_evidence"]["top_k_overlap_observed"] = serde_json::json!({
+            "fts": true,
+            "vector": true,
         });
         bundle["search_candidate_shadow_evidence"]["shadow_scan_present"] = serde_json::json!(true);
         bundle["search_candidate_shadow_evidence"]["shadow_scan_filter_pushdown_ready"] =

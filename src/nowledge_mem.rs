@@ -1061,6 +1061,10 @@ pub struct NowledgeMemSearchCandidateShadowEvidence {
     pub vector_retriever_available: bool,
     pub text_retriever_candidate_count: u64,
     pub vector_retriever_candidate_count: u64,
+    pub fts_top_k_overlap_observed: bool,
+    pub fts_top_k_overlap_ready: bool,
+    pub vector_top_k_overlap_observed: bool,
+    pub vector_top_k_overlap_ready: bool,
     pub primary_candidate_identity_checksum: Option<u64>,
     pub shadow_candidate_identity_checksum: Option<u64>,
     pub matched_candidate_identity_checksum: Option<u64>,
@@ -1120,6 +1124,10 @@ pub struct NowledgeMemSearchCandidateShadowAccumulator {
     vector_retriever_available: bool,
     text_retriever_candidate_count: u64,
     vector_retriever_candidate_count: u64,
+    fts_top_k_overlap_observed: bool,
+    fts_top_k_overlap_ready: bool,
+    vector_top_k_overlap_observed: bool,
+    vector_top_k_overlap_ready: bool,
     primary_candidate_identity_checksum: Option<u64>,
     shadow_candidate_identity_checksum: Option<u64>,
     matched_candidate_identity_checksum: Option<u64>,
@@ -1349,8 +1357,55 @@ impl NowledgeMemSearchCandidateShadowAccumulator {
             .map(|hit| hit.id.clone())
             .collect::<Vec<_>>();
         self.record_compare_candidate_ids(&primary_candidate_ids, &shadow_candidate_ids);
+        self.record_top_k_overlap_candidate_ids(
+            shadow_output.report.mode,
+            &primary_candidate_ids,
+            &shadow_candidate_ids,
+        );
         self.record_retriever_leg_report(&shadow_output.report);
         self.record_filter_pushdown_report(&shadow_output.report);
+    }
+
+    pub fn record_top_k_overlap_candidate_ids(
+        &mut self,
+        mode: SearchMode,
+        primary_candidate_ids: &[impl AsRef<str>],
+        shadow_candidate_ids: &[impl AsRef<str>],
+    ) {
+        let primary_candidate_ids = primary_candidate_ids
+            .iter()
+            .map(|id| id.as_ref().to_string())
+            .collect::<Vec<_>>();
+        let shadow_candidate_ids = shadow_candidate_ids
+            .iter()
+            .map(|id| id.as_ref().to_string())
+            .collect::<Vec<_>>();
+        self.record_top_k_overlap(mode, &primary_candidate_ids, &shadow_candidate_ids);
+    }
+
+    fn record_top_k_overlap(
+        &mut self,
+        mode: SearchMode,
+        primary_candidate_ids: &[String],
+        shadow_candidate_ids: &[String],
+    ) {
+        let ready = !primary_candidate_ids.is_empty()
+            && primary_candidate_ids.len() == shadow_candidate_ids.len()
+            && primary_candidate_ids
+                .iter()
+                .zip(shadow_candidate_ids)
+                .all(|(primary, shadow)| primary == shadow);
+        match mode {
+            SearchMode::Text => {
+                self.fts_top_k_overlap_observed = true;
+                self.fts_top_k_overlap_ready |= ready;
+            }
+            SearchMode::Vector => {
+                self.vector_top_k_overlap_observed = true;
+                self.vector_top_k_overlap_ready |= ready;
+            }
+            SearchMode::Hybrid => {}
+        }
     }
 
     fn record_retriever_leg_report(&mut self, report: &NowledgeMemSearchCandidateReport) {
@@ -1385,6 +1440,12 @@ impl NowledgeMemSearchCandidateShadowAccumulator {
             vector_retriever_available: self.vector_retriever_available,
             text_retriever_candidate_count: self.text_retriever_candidate_count,
             vector_retriever_candidate_count: self.vector_retriever_candidate_count,
+            fts_top_k_overlap_observed: self.fts_top_k_overlap_observed,
+            fts_top_k_overlap_ready: self.fts_top_k_overlap_observed
+                && self.fts_top_k_overlap_ready,
+            vector_top_k_overlap_observed: self.vector_top_k_overlap_observed,
+            vector_top_k_overlap_ready: self.vector_top_k_overlap_observed
+                && self.vector_top_k_overlap_ready,
             primary_candidate_identity_checksum: self.primary_candidate_identity_checksum,
             shadow_candidate_identity_checksum: self.shadow_candidate_identity_checksum,
             matched_candidate_identity_checksum: self.matched_candidate_identity_checksum,
@@ -1415,6 +1476,10 @@ impl NowledgeMemSearchCandidateShadowEvidence {
             vector_retriever_available: false,
             text_retriever_candidate_count: 0,
             vector_retriever_candidate_count: 0,
+            fts_top_k_overlap_observed: false,
+            fts_top_k_overlap_ready: false,
+            vector_top_k_overlap_observed: false,
+            vector_top_k_overlap_ready: false,
             primary_candidate_identity_checksum: None,
             shadow_candidate_identity_checksum: None,
             matched_candidate_identity_checksum: None,
@@ -1472,6 +1537,12 @@ pub fn nowledge_mem_search_candidate_shadow_evidence_json(
             && evidence.text_retriever_candidate_count > 0,
         "vector_retriever_ready": evidence.vector_retriever_available
             && evidence.vector_retriever_candidate_count > 0,
+        "fts_top_k_overlap_ready": evidence.fts_top_k_overlap_ready,
+        "vector_top_k_overlap_ready": evidence.vector_top_k_overlap_ready,
+        "top_k_overlap_observed": {
+            "fts": evidence.fts_top_k_overlap_observed,
+            "vector": evidence.vector_top_k_overlap_observed,
+        },
         "retriever_leg_candidate_counts": {
             "text": evidence.text_retriever_candidate_count,
             "vector": evidence.vector_retriever_candidate_count,
@@ -6457,6 +6528,12 @@ fn search_candidate_shadow_readiness_blocker_codes(evidence: &serde_json::Value)
     if evidence_bool(evidence, "vector_retriever_ready") != Some(true) {
         blockers.insert("search_candidate_vector_retriever_not_ready".to_string());
     }
+    if evidence_bool(evidence, "fts_top_k_overlap_ready") != Some(true) {
+        blockers.insert("search_candidate_fts_top_k_overlap_not_ready".to_string());
+    }
+    if evidence_bool(evidence, "vector_top_k_overlap_ready") != Some(true) {
+        blockers.insert("search_candidate_vector_top_k_overlap_not_ready".to_string());
+    }
     if nested_bool(evidence, &["candidate_identity", "ready"]) != Some(true)
         || nested_bool(evidence, &["candidate_identity", "parity"]) != Some(true)
     {
@@ -8351,6 +8428,8 @@ mod tests {
         assert_eq!(evidence["row_count_parity"], true);
         assert_eq!(evidence["text_retriever_ready"], false);
         assert_eq!(evidence["vector_retriever_ready"], false);
+        assert_eq!(evidence["fts_top_k_overlap_ready"], false);
+        assert_eq!(evidence["vector_top_k_overlap_ready"], false);
         assert_eq!(evidence["candidate_identity"]["ready"], true);
         assert_eq!(evidence["candidate_identity"]["parity"], true);
         assert_eq!(evidence["shadow_scan_present"], true);
@@ -8409,6 +8488,10 @@ mod tests {
                 vector_retriever_available: false,
                 text_retriever_candidate_count: 0,
                 vector_retriever_candidate_count: 0,
+                fts_top_k_overlap_observed: false,
+                fts_top_k_overlap_ready: false,
+                vector_top_k_overlap_observed: false,
+                vector_top_k_overlap_ready: false,
                 primary_candidate_identity_checksum: None,
                 shadow_candidate_identity_checksum: None,
                 matched_candidate_identity_checksum: None,
@@ -8454,6 +8537,8 @@ mod tests {
         assert_eq!(evidence["row_count_parity"], true);
         assert_eq!(evidence["text_retriever_ready"], false);
         assert_eq!(evidence["vector_retriever_ready"], false);
+        assert_eq!(evidence["fts_top_k_overlap_ready"], false);
+        assert_eq!(evidence["vector_top_k_overlap_ready"], false);
         assert_eq!(evidence["candidate_identity"]["ready"], true);
         assert_eq!(evidence["shadow_scan_filter_pushdown_ready"], true);
         assert_eq!(evidence["shadow_scan_field_pruning_ready"], true);
@@ -10021,6 +10106,10 @@ mod tests {
         assert_eq!(evidence["request_count"], 2);
         assert_eq!(evidence["text_retriever_ready"], true);
         assert_eq!(evidence["vector_retriever_ready"], true);
+        assert_eq!(evidence["fts_top_k_overlap_ready"], true);
+        assert_eq!(evidence["vector_top_k_overlap_ready"], true);
+        assert_eq!(evidence["top_k_overlap_observed"]["fts"], true);
+        assert_eq!(evidence["top_k_overlap_observed"]["vector"], true);
         assert_eq!(evidence["retriever_leg_candidate_counts"]["text"], 1);
         assert_eq!(evidence["retriever_leg_candidate_counts"]["vector"], 1);
         assert_eq!(

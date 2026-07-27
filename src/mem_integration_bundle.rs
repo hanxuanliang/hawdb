@@ -1996,6 +1996,12 @@ mod tests {
             "text": 3,
             "vector": 3,
         });
+        evidence["fts_top_k_overlap_ready"] = serde_json::json!(true);
+        evidence["vector_top_k_overlap_ready"] = serde_json::json!(true);
+        evidence["top_k_overlap_observed"] = serde_json::json!({
+            "fts": true,
+            "vector": true,
+        });
         evidence
     }
 
