@@ -856,44 +856,14 @@ pub fn nowledge_mem_integration_readiness(
             storage_recovery_cutover_conditions(&storage_recovery_readiness),
             storage_recovery_readiness.blocker_codes.clone(),
         ),
-        check(
+        check_named_conditions(
             "blackbox_redaction",
-            [
-                blackbox_readiness.protocol_ready,
-                blackbox_readiness.artifact_dir_present,
-                blackbox_readiness.artifact_count_present,
-                blackbox_readiness.events_path_ready,
-                blackbox_readiness.raw_query_text_redacted,
-                blackbox_readiness.raw_parameters_redacted,
-                blackbox_readiness.raw_artifact_payloads_redacted,
-                blackbox_readiness.artifact_paths_relative,
-            ],
-            [
-                "blackbox_manifest.protocol",
-                "blackbox_manifest.artifact_dir_present",
-                "blackbox_manifest.artifact_count",
-                "blackbox_manifest.events_path",
-                "blackbox_manifest.redaction.raw_query_text_copied",
-                "blackbox_manifest.redaction.raw_parameters_copied",
-                "blackbox_manifest.redaction.raw_artifact_payloads_copied",
-                "blackbox_manifest.redaction.artifact_paths_are_relative",
-            ],
+            blackbox_redaction_cutover_conditions(&blackbox_readiness),
             blackbox_readiness.blocker_codes.clone(),
         ),
-        check(
+        check_named_conditions(
             "blackbox_operational_evidence",
-            [
-                blackbox_readiness.slow_query_log_present,
-                blackbox_readiness.slow_query_log_jsonl_summary_present,
-                blackbox_readiness.background_maintenance_present,
-                blackbox_readiness.background_qos_summary_ready,
-            ],
-            [
-                "blackbox_manifest.artifacts.slow-query-log.jsonl",
-                "blackbox_manifest.artifacts.slow-query-log.jsonl.jsonl",
-                "blackbox_manifest.artifacts.background-maintenance.json",
-                "blackbox_manifest.artifacts.background-maintenance.json.background_qos",
-            ],
+            blackbox_operational_cutover_conditions(&blackbox_readiness),
             blackbox_readiness.blocker_codes.clone(),
         ),
     ];
@@ -983,6 +953,62 @@ fn check_named_conditions(
         failed_evidence_fields,
         blocker_codes,
     }
+}
+
+fn blackbox_redaction_cutover_conditions(
+    readiness: &BlackboxReadinessReport,
+) -> Vec<(&'static str, bool)> {
+    vec![
+        ("blackbox_manifest.protocol", readiness.protocol_ready),
+        (
+            "blackbox_manifest.artifact_dir_present",
+            readiness.artifact_dir_present,
+        ),
+        (
+            "blackbox_manifest.artifact_count",
+            readiness.artifact_count_present,
+        ),
+        ("blackbox_manifest.events_path", readiness.events_path_ready),
+        (
+            "blackbox_manifest.redaction.raw_query_text_copied",
+            readiness.raw_query_text_redacted,
+        ),
+        (
+            "blackbox_manifest.redaction.raw_parameters_copied",
+            readiness.raw_parameters_redacted,
+        ),
+        (
+            "blackbox_manifest.redaction.raw_artifact_payloads_copied",
+            readiness.raw_artifact_payloads_redacted,
+        ),
+        (
+            "blackbox_manifest.redaction.artifact_paths_are_relative",
+            readiness.artifact_paths_relative,
+        ),
+    ]
+}
+
+fn blackbox_operational_cutover_conditions(
+    readiness: &BlackboxReadinessReport,
+) -> Vec<(&'static str, bool)> {
+    vec![
+        (
+            "blackbox_manifest.artifacts.slow-query-log.jsonl",
+            readiness.slow_query_log_present,
+        ),
+        (
+            "blackbox_manifest.artifacts.slow-query-log.jsonl.jsonl",
+            readiness.slow_query_log_jsonl_summary_present,
+        ),
+        (
+            "blackbox_manifest.artifacts.background-maintenance.json",
+            readiness.background_maintenance_present,
+        ),
+        (
+            "blackbox_manifest.artifacts.background-maintenance.json.background_qos",
+            readiness.background_qos_summary_ready,
+        ),
+    ]
 }
 
 struct IntegrationGateReadiness<'a> {

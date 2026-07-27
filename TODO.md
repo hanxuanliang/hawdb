@@ -212,6 +212,9 @@ contract.
   - [x] Consume typed blackbox readiness in integration readiness so blackbox
     redaction and operational evidence gates no longer duplicate JSON-path
     rules.
+  - [x] Route blackbox redaction and operational integration checks through
+    typed conditions so field-level diagnostics consume the same Rust readiness
+    summary.
   - [x] Expose and consume typed storage-recovery cutover readiness so Mem can
     inspect durable recovery gates without reimplementing replacement-summary
     JSON-path checks.
