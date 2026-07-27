@@ -70,6 +70,9 @@ pub struct BackgroundMaintenanceEvidenceHealth {
     pub executable_search_projection_graph_delta_operations: Option<u64>,
     pub admitted_search_projection_graph_delta_operations: Option<u64>,
     pub max_search_projection_graph_delta_complete_through_graph_commit_epoch: Option<u64>,
+    pub memory_pressure_ready: Option<bool>,
+    pub memory_budget_bytes: Option<u64>,
+    pub estimated_memory_bytes: Option<u64>,
     pub foreground_ranked_count: u64,
     pub unknown_admission_count: u64,
     pub blocker_codes: Vec<String>,
@@ -660,6 +663,21 @@ fn insert_cutover_evidence_json(
     );
     insert_json(
         &mut evidence,
+        "background_maintenance_memory_pressure_ready",
+        background_maintenance_health.memory_pressure_ready,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_memory_budget_bytes",
+        background_maintenance_health.memory_budget_bytes,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_estimated_memory_bytes",
+        background_maintenance_health.estimated_memory_bytes,
+    );
+    insert_json(
+        &mut evidence,
         "background_maintenance_foreground_ranked_count",
         background_maintenance_health.foreground_ranked_count,
     );
@@ -852,6 +870,9 @@ pub fn background_maintenance_evidence_health(
             executable_search_projection_graph_delta_operations: None,
             admitted_search_projection_graph_delta_operations: None,
             max_search_projection_graph_delta_complete_through_graph_commit_epoch: None,
+            memory_pressure_ready: None,
+            memory_budget_bytes: None,
+            estimated_memory_bytes: None,
             foreground_ranked_count: 0,
             unknown_admission_count: 0,
             blocker_codes: if required {
@@ -941,6 +962,32 @@ pub fn background_maintenance_evidence_health(
             background_maintenance,
         )
     });
+    let memory_pressure = background_maintenance.get("memory_pressure");
+    let raw_memory_pressure_ready = memory_pressure
+        .and_then(|memory_pressure| memory_pressure.get("ready"))
+        .or_else(|| background_maintenance.get("memory_pressure_ready"))
+        .and_then(serde_json::Value::as_bool);
+    let memory_budget_bytes = memory_pressure
+        .and_then(|memory_pressure| memory_pressure.get("budget_bytes"))
+        .or_else(|| background_maintenance.get("memory_budget_bytes"))
+        .and_then(serde_json::Value::as_u64);
+    let estimated_memory_bytes = memory_pressure
+        .and_then(|memory_pressure| memory_pressure.get("estimated_bytes"))
+        .or_else(|| background_maintenance.get("estimated_memory_bytes"))
+        .and_then(serde_json::Value::as_u64);
+    let memory_pressure_ready = if raw_memory_pressure_ready.is_some()
+        || memory_budget_bytes.is_some()
+        || estimated_memory_bytes.is_some()
+    {
+        Some(
+            raw_memory_pressure_ready == Some(true)
+                && estimated_memory_bytes
+                    .zip(memory_budget_bytes)
+                    .is_some_and(|(estimated, budget)| estimated <= budget),
+        )
+    } else {
+        None
+    };
     let foreground_ranked_count = ranked
         .into_iter()
         .flatten()
@@ -982,6 +1029,11 @@ pub fn background_maintenance_evidence_health(
         blocker_codes.push("unknown_admission".to_string());
         blockers.push("background maintenance evidence has unknown admission values".to_string());
     }
+    if memory_pressure_ready == Some(false) {
+        blocker_codes.push("memory_budget_exceeded".to_string());
+        blockers
+            .push("background maintenance evidence exceeds configured memory budget".to_string());
+    }
     BackgroundMaintenanceEvidenceHealth {
         required,
         present: true,
@@ -996,6 +1048,9 @@ pub fn background_maintenance_evidence_health(
         executable_search_projection_graph_delta_operations,
         admitted_search_projection_graph_delta_operations,
         max_search_projection_graph_delta_complete_through_graph_commit_epoch,
+        memory_pressure_ready,
+        memory_budget_bytes,
+        estimated_memory_bytes,
         foreground_ranked_count,
         unknown_admission_count,
         blocker_codes,
@@ -3011,6 +3066,43 @@ mod tests {
         assert_eq!(
             health.blocker_codes,
             vec!["foreground_ranked_work".to_string()]
+        );
+    }
+
+    #[test]
+    fn background_maintenance_evidence_health_rejects_memory_pressure() {
+        let summary = serde_json::json!({
+            "protocol": "skein-background-maintenance-report",
+            "total_candidates": 1,
+            "memory_pressure": {
+                "ready": true,
+                "budget_bytes": 4096,
+                "estimated_bytes": 8192
+            },
+            "ranked": [
+                {
+                    "kind": "search_projection_graph_delta",
+                    "work_class": "projection",
+                    "priority": "background",
+                    "admission": "defer"
+                }
+            ]
+        });
+
+        let health = super::background_maintenance_evidence_health(Some(&summary), true);
+
+        assert!(health.present);
+        assert!(!health.ready);
+        assert_eq!(health.memory_pressure_ready, Some(false));
+        assert_eq!(health.memory_budget_bytes, Some(4096));
+        assert_eq!(health.estimated_memory_bytes, Some(8192));
+        assert_eq!(
+            health.blockers,
+            vec!["background maintenance evidence exceeds configured memory budget".to_string()]
+        );
+        assert_eq!(
+            health.blocker_codes,
+            vec!["memory_budget_exceeded".to_string()]
         );
     }
 

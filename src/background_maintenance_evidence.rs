@@ -57,6 +57,9 @@ pub fn nowledge_background_maintenance_evidence_json(
         "executable_search_projection_graph_delta_operations": health.executable_search_projection_graph_delta_operations,
         "admitted_search_projection_graph_delta_operations": health.admitted_search_projection_graph_delta_operations,
         "max_search_projection_graph_delta_complete_through_graph_commit_epoch": health.max_search_projection_graph_delta_complete_through_graph_commit_epoch,
+        "memory_pressure_ready": health.memory_pressure_ready,
+        "memory_budget_bytes": health.memory_budget_bytes,
+        "estimated_memory_bytes": health.estimated_memory_bytes,
         "foreground_ranked_count": health.foreground_ranked_count,
         "unknown_admission_count": health.unknown_admission_count,
         "blocker_codes": health.blocker_codes,
@@ -72,6 +75,9 @@ pub fn nowledge_background_maintenance_evidence_json(
         "background_maintenance_executable_search_projection_graph_delta_operations": health.executable_search_projection_graph_delta_operations,
         "background_maintenance_admitted_search_projection_graph_delta_operations": health.admitted_search_projection_graph_delta_operations,
         "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch": health.max_search_projection_graph_delta_complete_through_graph_commit_epoch,
+        "background_maintenance_memory_pressure_ready": health.memory_pressure_ready,
+        "background_maintenance_memory_budget_bytes": health.memory_budget_bytes,
+        "background_maintenance_estimated_memory_bytes": health.estimated_memory_bytes,
         "background_maintenance_blocker_codes": health.blocker_codes,
         "background_maintenance_blockers": health.blockers,
     })
@@ -148,6 +154,33 @@ mod tests {
         assert_eq!(
             evidence["background_maintenance_blocker_codes"],
             serde_json::json!(["protocol_mismatch"])
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn background_maintenance_evidence_command_fails_closed_for_memory_pressure() {
+        let path = unique_test_file("background_maintenance_memory_pressure");
+        let mut summary = ready_summary();
+        summary["memory_pressure"] = serde_json::json!({
+            "ready": false,
+            "budget_bytes": 4096,
+            "estimated_bytes": 8192
+        });
+        std::fs::write(&path, summary.to_string()).unwrap();
+
+        let (evidence, _) = run_nowledge_background_maintenance_evidence(
+            [path.to_str().unwrap()].into_iter().map(str::to_string),
+        )
+        .unwrap();
+
+        assert_eq!(evidence["ready"], false);
+        assert_eq!(evidence["memory_pressure_ready"], false);
+        assert_eq!(evidence["memory_budget_bytes"], 4096);
+        assert_eq!(evidence["estimated_memory_bytes"], 8192);
+        assert_eq!(
+            evidence["background_maintenance_blocker_codes"],
+            serde_json::json!(["memory_budget_exceeded"])
         );
         std::fs::remove_file(path).unwrap();
     }

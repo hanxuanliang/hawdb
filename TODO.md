@@ -173,6 +173,8 @@ contract.
     counters, memory-pressure behavior, and compact blackbox events.
   - Acceptance: production readiness blocks when background tasks can starve
     foreground user reads or exceed configured memory budgets.
+  - [x] Add a background-maintenance memory-pressure gate that fails closed
+    when reported internal background work exceeds its configured memory budget.
 - [ ] PR 8: Make Mem's Skein startup and readiness library-only.
   - Scope: ensure Mem starts Skein in-process and consumes typed readiness,
     route evidence, search projection evidence, slow log, blackbox, recovery,

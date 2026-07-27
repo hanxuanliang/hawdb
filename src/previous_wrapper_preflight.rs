@@ -1181,6 +1181,14 @@ fn previous_wrapper_preflight_release_summary(
             "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch",
             "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch",
         ),
+        (
+            "background_maintenance_memory_budget_bytes",
+            "background_maintenance_memory_budget_bytes",
+        ),
+        (
+            "background_maintenance_estimated_memory_bytes",
+            "background_maintenance_estimated_memory_bytes",
+        ),
     ] {
         insert_json_value(
             &mut summary,
@@ -1188,6 +1196,17 @@ fn previous_wrapper_preflight_release_summary(
             u64_path(replacement_summary, &["cutover_evidence", path]),
         );
     }
+    insert_json_value(
+        &mut summary,
+        "background_maintenance_memory_pressure_ready",
+        bool_path(
+            replacement_summary,
+            &[
+                "cutover_evidence",
+                "background_maintenance_memory_pressure_ready",
+            ],
+        ),
+    );
     insert_json_value(
         &mut summary,
         "dual_engine_evidence_present",
