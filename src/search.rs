@@ -340,6 +340,9 @@ pub struct SearchPredicatePushdownReport {
     pub segment_count: usize,
     pub pruned_segment_count: usize,
     pub scanned_segment_count: usize,
+    pub segment_pruning_candidate_document_count: usize,
+    pub segment_pruned_document_count: usize,
+    pub segment_scanned_document_count: usize,
     pub persisted_segment_descriptor_used: bool,
     pub field_summaries: Vec<SearchPredicateFieldPruningReport>,
 }
@@ -1497,6 +1500,14 @@ impl SearchIndex {
         predicate_pushdown.report.segment_count = filtered.segment_count;
         predicate_pushdown.report.pruned_segment_count = filtered.pruned_segment_count;
         predicate_pushdown.report.scanned_segment_count = filtered.scanned_segment_count;
+        predicate_pushdown
+            .report
+            .segment_pruning_candidate_document_count =
+            filtered.segment_pruning_candidate_document_count;
+        predicate_pushdown.report.segment_pruned_document_count =
+            filtered.segment_pruned_document_count;
+        predicate_pushdown.report.segment_scanned_document_count =
+            filtered.segment_scanned_document_count;
         predicate_pushdown.report.persisted_segment_descriptor_used =
             filtered.persisted_segment_descriptor_used;
         predicate_pushdown.report.field_summaries = filtered.field_summaries;
@@ -2610,6 +2621,9 @@ pub(crate) fn search_metadata_predicate_pushdown(
         segment_count: 0,
         pruned_segment_count: 0,
         scanned_segment_count: 0,
+        segment_pruning_candidate_document_count: 0,
+        segment_pruned_document_count: 0,
+        segment_scanned_document_count: 0,
         persisted_segment_descriptor_used: false,
         field_summaries: Vec::new(),
     };
@@ -2637,6 +2651,9 @@ struct FilteredSearchDocuments<'a> {
     segment_count: usize,
     pruned_segment_count: usize,
     scanned_segment_count: usize,
+    segment_pruning_candidate_document_count: usize,
+    segment_pruned_document_count: usize,
+    segment_scanned_document_count: usize,
     persisted_segment_descriptor_used: bool,
     field_summaries: Vec<SearchPredicateFieldPruningReport>,
 }
@@ -2696,6 +2713,9 @@ fn filter_search_documents_with_segment_pruning<'a>(
             segment_count: 0,
             pruned_segment_count: 0,
             scanned_segment_count: 0,
+            segment_pruning_candidate_document_count: 0,
+            segment_pruned_document_count: 0,
+            segment_scanned_document_count: 0,
             persisted_segment_descriptor_used: false,
             field_summaries: Vec::new(),
         };
@@ -2741,6 +2761,9 @@ fn filter_search_documents_with_segment_pruning<'a>(
         segment_count: pruning.segment_count,
         pruned_segment_count: pruning.pruned_segment_count,
         scanned_segment_count: pruning.scanned_segment_count,
+        segment_pruning_candidate_document_count: pruning.segment_pruning_candidate_document_count,
+        segment_pruned_document_count: pruning.segment_pruned_document_count,
+        segment_scanned_document_count: pruning.segment_scanned_document_count,
         persisted_segment_descriptor_used: false,
         field_summaries: pruning.field_pruning.into_reports(),
     }
@@ -2754,15 +2777,19 @@ fn filter_search_documents_with_persisted_segments<'a>(
     let mut filtered_documents = Vec::new();
     let mut pruned_segment_count = 0;
     let mut scanned_segment_count = 0;
+    let mut pruned_document_count = 0;
+    let mut scanned_document_count = 0;
     let mut field_pruning = SearchFieldPruningAccumulator::new(predicates);
 
     for segment in &descriptor.segments {
         field_pruning.observe_persisted_segment(segment, predicates);
         if !segment.may_match_predicates(predicates) {
             pruned_segment_count += 1;
+            pruned_document_count += segment.document_count;
             continue;
         }
         scanned_segment_count += 1;
+        scanned_document_count += segment.document_count;
         filtered_documents.extend(
             documents
                 .range(segment.first_document_id.clone()..=segment.last_document_id.clone())
@@ -2776,6 +2803,9 @@ fn filter_search_documents_with_persisted_segments<'a>(
         segment_count: descriptor.segments.len(),
         pruned_segment_count,
         scanned_segment_count,
+        segment_pruning_candidate_document_count: descriptor.document_count,
+        segment_pruned_document_count: pruned_document_count,
+        segment_scanned_document_count: scanned_document_count,
         persisted_segment_descriptor_used: true,
         field_summaries: field_pruning.into_reports(),
     }
@@ -2790,14 +2820,17 @@ fn filter_search_document_segment<'a>(
 ) {
     pruning.segment_count += 1;
     let summary = SearchFilterSegmentSummary::from_documents(segment_documents, predicate_fields);
+    pruning.segment_pruning_candidate_document_count += summary.document_count;
     pruning
         .field_pruning
         .observe_in_memory_segment(&summary, predicates);
     if !summary.may_match_predicates(predicates) {
         pruning.pruned_segment_count += 1;
+        pruning.segment_pruned_document_count += summary.document_count;
         return;
     }
     pruning.scanned_segment_count += 1;
+    pruning.segment_scanned_document_count += summary.document_count;
     output.extend(
         segment_documents
             .iter()
@@ -2819,6 +2852,9 @@ struct SearchSegmentPruningState {
     segment_count: usize,
     pruned_segment_count: usize,
     scanned_segment_count: usize,
+    segment_pruning_candidate_document_count: usize,
+    segment_pruned_document_count: usize,
+    segment_scanned_document_count: usize,
     field_pruning: SearchFieldPruningAccumulator,
 }
 
@@ -2828,6 +2864,9 @@ impl SearchSegmentPruningState {
             segment_count: 0,
             pruned_segment_count: 0,
             scanned_segment_count: 0,
+            segment_pruning_candidate_document_count: 0,
+            segment_pruned_document_count: 0,
+            segment_scanned_document_count: 0,
             field_pruning: SearchFieldPruningAccumulator::new(predicates),
         }
     }
@@ -5268,6 +5307,27 @@ mod tests {
             result
                 .candidate_set
                 .metadata_predicate_pushdown
+                .segment_pruning_candidate_document_count,
+            3
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .segment_pruned_document_count,
+            2
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .segment_scanned_document_count,
+            1
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
                 .field_summaries,
             vec![SearchPredicateFieldPruningReport {
                 field: "created_at".to_string(),
@@ -7183,6 +7243,27 @@ mod tests {
                 .candidate_set
                 .metadata_predicate_pushdown
                 .scanned_segment_count,
+            1
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .segment_pruning_candidate_document_count,
+            3
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .segment_pruned_document_count,
+            2
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .segment_scanned_document_count,
             1
         );
         assert_eq!(

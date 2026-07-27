@@ -320,6 +320,8 @@ contract.
   - [x] Require search projection segment descriptor evidence to include
     numeric min/max summaries for `importance` and `confidence`, plus timestamp
     min/max summaries for Nowledge history/latest time filters.
+  - [x] Expose typed segment-pruning document counts so search projection
+    reports can prove row-payload avoidance for numeric and timestamp filters.
 - [ ] Replace LanceDB search reads in stages.
   - First cover metadata-filtered search projection reads that do not require
     Kuzu joins.
