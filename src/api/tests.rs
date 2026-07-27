@@ -124,6 +124,7 @@ use crate::search::{
     SearchRebuildOptions, SearchTruncationReasonCode,
 };
 use crate::store::{NodeId, DENSE_ADJACENCY_DEGREE_THRESHOLD};
+use crate::NowledgeMemStorageRecoveryReport;
 use crate::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Write};
@@ -31227,6 +31228,78 @@ fn storage_recovery_report_tracks_wal_replay_boundary() {
     assert!(!report.torn_tail_ignored);
     assert_eq!(report.torn_tail_reason, None);
     assert_eq!(report.recovered_commit_epoch, 2);
+
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn mem_shaped_graph_mutations_recover_across_checkpoint_and_wal() {
+    let path = unique_test_dir("mem_shaped_recovery");
+    let live_snapshot = {
+        let mut db = Database::open(&path).unwrap();
+        db.query(
+            "CREATE (:Source {id: 'source:one', space_id: 'default', kind: 'thread', metadata: '{}', memory_count: 1})",
+        )
+        .unwrap();
+        db.query(
+            "CREATE (:Thread {id: 'thread:one', thread_id: 'thread:one', source_id: 'source:one', space_id: 'default', message_count: 2})",
+        )
+        .unwrap();
+        db.query(
+            "CREATE (:Memory {id: 'mem:checkpointed', title: 'Checkpointed memory', source_id: 'source:one', thread_id: 'thread:one', space_id: 'default', importance: 0.4, confidence: 0.8, is_latest: true})",
+        )
+        .unwrap();
+        db.checkpoint().unwrap();
+
+        {
+            let mut tx = db.begin_transaction();
+            tx.query(
+                "CREATE (:Memory {id: 'mem:replayed', title: 'Replayed memory', source_id: 'source:one', thread_id: 'thread:one', space_id: 'default', importance: 0.9, confidence: 0.7, lifecycle_state: 'active', is_latest: true})-[:MENTIONS {thread_id: 'thread:one', message_index: 1, confidence: 0.7}]->(:Entity {id: 'entity:rust', name: 'Rust', space_id: 'default', unit_type: 'entity'})",
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+
+        let snapshot = db.export_canonical_graph_snapshot();
+        assert!(snapshot.validate().is_valid);
+        snapshot
+    };
+
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert_eq!(wal.lines().count(), 1);
+    assert!(wal.contains("\tbatch\t"));
+    assert!(wal.contains("create_node"));
+    assert!(wal.contains("create_rel"));
+
+    {
+        let db = Database::open_with_config(
+            &path,
+            DatabaseConfig {
+                max_wal_replay_entries: Some(8),
+                ..DatabaseConfig::default()
+            },
+        )
+        .unwrap();
+        let recovered = db.export_canonical_graph_snapshot();
+        assert_eq!(recovered, live_snapshot);
+        assert!(recovered.validate().is_valid);
+
+        let recovery = db.storage_recovery_report();
+        assert_eq!(recovery.checkpoint_epoch, Some(1));
+        assert_eq!(recovery.checkpoint_commit_epoch, Some(3));
+        assert_eq!(recovery.replayed_wal_entries, 1);
+        assert_eq!(recovery.max_wal_replay_entries, Some(8));
+        assert_eq!(recovery.recovered_commit_epoch, 4);
+
+        let mem_recovery = NowledgeMemStorageRecoveryReport::from_storage_report(&recovery);
+        assert!(mem_recovery.ready);
+        assert!(mem_recovery.durable_recovery_observed);
+        assert!(mem_recovery.checkpoint_boundary_present);
+        assert!(mem_recovery.wal_replay_bounded);
+        assert!(mem_recovery.torn_tail_clean);
+        assert!(mem_recovery.blocker_codes.is_empty());
+        assert_eq!(mem_recovery.json()["readiness"]["wal_replay_bounded"], true);
+    }
 
     std::fs::remove_dir_all(path).unwrap();
 }
