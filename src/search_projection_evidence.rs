@@ -25,6 +25,18 @@ const VECTOR_TABLES: &[&str] = &[
 const SKEIN_SEARCH_PROJECTION_SEGMENT_DESCRIPTOR_FIELDS_MISSING: &str =
     "skein_search_projection_segment_descriptor_fields_missing";
 const SKEIN_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE: &str = "skein-rust-library";
+const REQUIRED_VALUE_SUMMARY_FIELDS: &[&str] = &[
+    "kind",
+    "external_id",
+    "source_id",
+    "space_id",
+    "unit_type",
+    "lifecycle_state",
+    "is_latest",
+];
+const REQUIRED_NUMERIC_RANGE_FIELDS: &[&str] = &["importance", "confidence"];
+const REQUIRED_TIMESTAMP_RANGE_FIELDS: &[&str] =
+    &["created_at", "updated_at", "event_start", "event_end"];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct NowledgeSearchProjectionEvidenceReport {
@@ -173,6 +185,11 @@ pub fn nowledge_search_projection_probe_contract_json() -> serde_json::Value {
             "segment_descriptor_field_summaries"
         ],
         "required_skein_scan_filter_fields": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
+        "required_segment_descriptor_capabilities": {
+            "value_summary_fields": REQUIRED_VALUE_SUMMARY_FIELDS,
+            "numeric_range_fields": REQUIRED_NUMERIC_RANGE_FIELDS,
+            "timestamp_range_fields": REQUIRED_TIMESTAMP_RANGE_FIELDS
+        },
         "segment_descriptor_field_summary_fields": [
             "field",
             "segment_count",
@@ -377,6 +394,10 @@ pub fn nowledge_search_projection_evidence_json(probe: &serde_json::Value) -> se
             && bool_path(
                 &predicate_pushdown,
                 &["segment_descriptor_scan_filter_fields_ready"],
+            ) == Some(true)
+            && bool_path(
+                &predicate_pushdown,
+                &["segment_descriptor_capabilities_ready"],
             ) == Some(true);
     let compressed_vector_projection = compressed_vector_projection_report(probe);
     let compressed_vector_projection_required = vector_ready && skein_probe;
@@ -992,6 +1013,8 @@ fn predicate_pushdown_report(probe: &serde_json::Value) -> serde_json::Value {
         &scan_filter_fields,
         &segment_descriptor_field_summaries,
     );
+    let segment_descriptor_capabilities =
+        segment_descriptor_capability_report(&segment_descriptor_field_summaries);
     let ready = equality_ready
         && in_list_ready
         && not_in_list_ready
@@ -1019,8 +1042,20 @@ fn predicate_pushdown_report(probe: &serde_json::Value) -> serde_json::Value {
         "required_scan_filter_fields": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
         "segment_descriptor_field_count": segment_descriptor_field_count,
         "segment_descriptor_scan_filter_fields_ready": segment_descriptor_scan_filter_fields_ready,
+        "segment_descriptor_capabilities_ready": segment_descriptor_capabilities.ready,
+        "missing_value_summary_fields": segment_descriptor_capabilities.missing_value_summary_fields,
+        "missing_numeric_range_fields": segment_descriptor_capabilities.missing_numeric_range_fields,
+        "missing_timestamp_range_fields": segment_descriptor_capabilities.missing_timestamp_range_fields,
         "segment_descriptor_field_summaries": segment_descriptor_field_summaries,
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SegmentDescriptorCapabilityReport {
+    ready: bool,
+    missing_value_summary_fields: Vec<&'static str>,
+    missing_numeric_range_fields: Vec<&'static str>,
+    missing_timestamp_range_fields: Vec<&'static str>,
 }
 
 fn segment_descriptor_fields_cover_scan_filters(
@@ -1043,6 +1078,63 @@ fn segment_descriptor_fields_cover_scan_filters(
         && NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
             .iter()
             .all(|required| summary_fields.contains(required))
+        && segment_descriptor_capability_report(segment_descriptor_field_summaries).ready
+}
+
+fn segment_descriptor_capability_report(
+    segment_descriptor_field_summaries: &serde_json::Value,
+) -> SegmentDescriptorCapabilityReport {
+    let summaries = segment_descriptor_field_summaries
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let missing_value_summary_fields = required_capability_missing_fields(
+        summaries,
+        REQUIRED_VALUE_SUMMARY_FIELDS,
+        "value_summary_used",
+        None,
+    );
+    let missing_numeric_range_fields = required_capability_missing_fields(
+        summaries,
+        REQUIRED_NUMERIC_RANGE_FIELDS,
+        "numeric_range_summary_used",
+        None,
+    );
+    let missing_timestamp_range_fields = required_capability_missing_fields(
+        summaries,
+        REQUIRED_TIMESTAMP_RANGE_FIELDS,
+        "timestamp_range_summary_used",
+        Some("numeric_range_summary_used"),
+    );
+    SegmentDescriptorCapabilityReport {
+        ready: missing_value_summary_fields.is_empty()
+            && missing_numeric_range_fields.is_empty()
+            && missing_timestamp_range_fields.is_empty(),
+        missing_value_summary_fields,
+        missing_numeric_range_fields,
+        missing_timestamp_range_fields,
+    }
+}
+
+fn required_capability_missing_fields(
+    summaries: &[serde_json::Value],
+    required_fields: &'static [&'static str],
+    capability: &str,
+    alternative_capability: Option<&str>,
+) -> Vec<&'static str> {
+    required_fields
+        .iter()
+        .copied()
+        .filter(|field| {
+            !summaries.iter().any(|summary| {
+                str_path(summary, &["field"]) == Some(*field)
+                    && (bool_path(summary, &[capability]) == Some(true)
+                        || alternative_capability.is_some_and(|capability| {
+                            bool_path(summary, &[capability]) == Some(true)
+                        }))
+            })
+        })
+        .collect()
 }
 
 fn collect_probe_blockers(probe: &serde_json::Value, blockers: &mut BTreeSet<String>) {
@@ -1365,6 +1457,42 @@ mod tests {
         assert_eq!(
             report["predicate_pushdown"]["segment_descriptor_scan_filter_fields_ready"],
             false
+        );
+        assert!(report["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "skein_predicate_pushdown_descriptor_not_ready"));
+    }
+
+    #[test]
+    fn skein_search_projection_evidence_requires_descriptor_field_capabilities() {
+        let mut probe = ready_probe();
+        let summaries = probe["predicate_pushdown"]["segment_descriptor_field_summaries"]
+            .as_array_mut()
+            .unwrap();
+        let importance = summaries
+            .iter_mut()
+            .find(|summary| summary["field"] == "importance")
+            .unwrap();
+        importance["numeric_range_summary_used"] = serde_json::json!(false);
+
+        let report = nowledge_search_projection_evidence_json(&probe);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(report["predicate_pushdown_ready"], true);
+        assert_eq!(report["skein_predicate_pushdown_ready"], false);
+        assert_eq!(
+            report["predicate_pushdown"]["segment_descriptor_scan_filter_fields_ready"],
+            false
+        );
+        assert_eq!(
+            report["predicate_pushdown"]["segment_descriptor_capabilities_ready"],
+            false
+        );
+        assert_eq!(
+            report["predicate_pushdown"]["missing_numeric_range_fields"],
+            serde_json::json!(["importance"])
         );
         assert!(report["blocker_codes"]
             .as_array()

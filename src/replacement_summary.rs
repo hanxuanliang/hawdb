@@ -27,6 +27,18 @@ const SKEIN_SEARCH_PROJECTION_SEGMENT_DESCRIPTOR_MISSING: &str =
     "skein_search_projection_segment_descriptor_missing";
 const SKEIN_SEARCH_PROJECTION_SEGMENT_DESCRIPTOR_FIELDS_MISSING: &str =
     "skein_search_projection_segment_descriptor_fields_missing";
+const REQUIRED_SEARCH_VALUE_SUMMARY_FIELDS: &[&str] = &[
+    "kind",
+    "external_id",
+    "source_id",
+    "space_id",
+    "unit_type",
+    "lifecycle_state",
+    "is_latest",
+];
+const REQUIRED_SEARCH_NUMERIC_RANGE_FIELDS: &[&str] = &["importance", "confidence"];
+const REQUIRED_SEARCH_TIMESTAMP_RANGE_FIELDS: &[&str] =
+    &["created_at", "updated_at", "event_start", "event_end"];
 pub fn nowledge_replacement_summary_usage() -> String {
     "nowledge-replacement-summary requires [--require-production-ready] [--compact] [--max-family-items <n>] [--max-blockers <n>] [--search-projection-evidence-json <path>] [--search-projection-shadow-evidence-json <path>] [--search-candidate-shadow-evidence-json <path>] [--bounded-read-evidence-json <path>] [--query-runtime-preflight-json <path>] [--query-family-evidence-json <path>] <migration-gate-json>"
         .to_string()
@@ -1195,6 +1207,8 @@ fn search_projection_shadow_pushdown_evidence_json(
             && segment_descriptor_summaries_cover_required(
                 &shadow_segment_descriptor_field_summaries,
             );
+    let shadow_segment_descriptor_capabilities =
+        segment_descriptor_capability_report(&shadow_segment_descriptor_field_summaries);
     let ready = predicate_pushdown_parity
         && primary_predicate_pushdown_ready
         && shadow_predicate_pushdown_ready
@@ -1207,6 +1221,10 @@ fn search_projection_shadow_pushdown_evidence_json(
         "shadow_predicate_pushdown_ready": shadow_predicate_pushdown_ready,
         "shadow_persisted_segment_descriptor_ready": shadow_persisted_segment_descriptor_ready,
         "shadow_segment_descriptor_scan_filter_fields_ready": shadow_segment_descriptor_scan_filter_fields_ready,
+        "shadow_segment_descriptor_capabilities_ready": shadow_segment_descriptor_capabilities.ready,
+        "missing_value_summary_fields": shadow_segment_descriptor_capabilities.missing_value_summary_fields,
+        "missing_numeric_range_fields": shadow_segment_descriptor_capabilities.missing_numeric_range_fields,
+        "missing_timestamp_range_fields": shadow_segment_descriptor_capabilities.missing_timestamp_range_fields,
         "primary_scan_filter_fields": primary_scan_filter_fields,
         "shadow_scan_filter_fields": shadow_scan_filter_fields,
         "shadow_segment_descriptor_field_summaries": shadow_segment_descriptor_field_summaries,
@@ -1232,6 +1250,8 @@ fn search_projection_shadow_pushdown_evidence_with_recomputed_scan_fields(
         &["shadow_segment_descriptor_scan_filter_fields_ready"],
     ) == Some(true);
     let descriptor_fields_ready = reported_descriptor_fields_ready && scan_filter_fields_ready;
+    let descriptor_capabilities =
+        segment_descriptor_capability_report(&shadow_segment_descriptor_field_summaries);
     let ready = json_get_bool_path(&pushdown, &["ready"]) == Some(true) && descriptor_fields_ready;
 
     let mut object = pushdown.as_object().cloned().unwrap_or_default();
@@ -1247,6 +1267,22 @@ fn search_projection_shadow_pushdown_evidence_with_recomputed_scan_fields(
     object.insert(
         "scan_filter_fields_ready".to_string(),
         serde_json::json!(scan_filter_fields_ready),
+    );
+    object.insert(
+        "shadow_segment_descriptor_capabilities_ready".to_string(),
+        serde_json::json!(descriptor_capabilities.ready),
+    );
+    object.insert(
+        "missing_value_summary_fields".to_string(),
+        serde_json::json!(descriptor_capabilities.missing_value_summary_fields),
+    );
+    object.insert(
+        "missing_numeric_range_fields".to_string(),
+        serde_json::json!(descriptor_capabilities.missing_numeric_range_fields),
+    );
+    object.insert(
+        "missing_timestamp_range_fields".to_string(),
+        serde_json::json!(descriptor_capabilities.missing_timestamp_range_fields),
     );
     serde_json::Value::Object(object)
 }
@@ -1273,6 +1309,71 @@ fn segment_descriptor_summaries_cover_required(
     NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
         .iter()
         .all(|required| fields.contains(required))
+        && segment_descriptor_capability_report(segment_descriptor_field_summaries).ready
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SegmentDescriptorCapabilityReport {
+    ready: bool,
+    missing_value_summary_fields: Vec<&'static str>,
+    missing_numeric_range_fields: Vec<&'static str>,
+    missing_timestamp_range_fields: Vec<&'static str>,
+}
+
+fn segment_descriptor_capability_report(
+    segment_descriptor_field_summaries: &serde_json::Value,
+) -> SegmentDescriptorCapabilityReport {
+    let summaries = segment_descriptor_field_summaries
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let missing_value_summary_fields = required_capability_missing_fields(
+        summaries,
+        REQUIRED_SEARCH_VALUE_SUMMARY_FIELDS,
+        "value_summary_used",
+        None,
+    );
+    let missing_numeric_range_fields = required_capability_missing_fields(
+        summaries,
+        REQUIRED_SEARCH_NUMERIC_RANGE_FIELDS,
+        "numeric_range_summary_used",
+        None,
+    );
+    let missing_timestamp_range_fields = required_capability_missing_fields(
+        summaries,
+        REQUIRED_SEARCH_TIMESTAMP_RANGE_FIELDS,
+        "timestamp_range_summary_used",
+        Some("numeric_range_summary_used"),
+    );
+    SegmentDescriptorCapabilityReport {
+        ready: missing_value_summary_fields.is_empty()
+            && missing_numeric_range_fields.is_empty()
+            && missing_timestamp_range_fields.is_empty(),
+        missing_value_summary_fields,
+        missing_numeric_range_fields,
+        missing_timestamp_range_fields,
+    }
+}
+
+fn required_capability_missing_fields(
+    summaries: &[serde_json::Value],
+    required_fields: &'static [&'static str],
+    capability: &str,
+    alternative_capability: Option<&str>,
+) -> Vec<&'static str> {
+    required_fields
+        .iter()
+        .copied()
+        .filter(|field| {
+            !summaries.iter().any(|summary| {
+                json_get_str_path(summary, &["field"]) == Some(*field)
+                    && (json_get_bool_path(summary, &[capability]) == Some(true)
+                        || alternative_capability.is_some_and(|capability| {
+                            json_get_bool_path(summary, &[capability]) == Some(true)
+                        }))
+            })
+        })
+        .collect()
 }
 
 fn search_projection_shadow_blocker_codes_with_pushdown(
@@ -3254,6 +3355,52 @@ mod tests {
     }
 
     #[test]
+    fn replacement_summary_recomputes_search_projection_shadow_descriptor_capabilities() {
+        let mut bundle = production_ready_bundle();
+        bundle["search_projection_shadow_evidence"]["ready"] = serde_json::json!(true);
+        bundle["search_projection_shadow_evidence"]["pushdown_evidence"]["ready"] =
+            serde_json::json!(true);
+        bundle["search_projection_shadow_evidence"]["pushdown_evidence"]
+            ["shadow_segment_descriptor_scan_filter_fields_ready"] = serde_json::json!(true);
+        let summaries = bundle["search_projection_shadow_evidence"]["pushdown_evidence"]
+            ["shadow_segment_descriptor_field_summaries"]
+            .as_array_mut()
+            .unwrap();
+        let confidence = summaries
+            .iter_mut()
+            .find(|summary| summary["field"] == "confidence")
+            .unwrap();
+        confidence["numeric_range_summary_used"] = serde_json::json!(false);
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["production_replacement_per_million"], 0);
+        assert_eq!(summary["search_projection_shadow_evidence"]["ready"], false);
+        assert_eq!(
+            summary["search_projection_shadow_evidence"]["pushdown_evidence"]["ready"],
+            false
+        );
+        assert_eq!(
+            summary["search_projection_shadow_evidence"]["pushdown_evidence"]
+                ["shadow_segment_descriptor_capabilities_ready"],
+            false
+        );
+        assert_eq!(
+            summary["search_projection_shadow_evidence"]["pushdown_evidence"]
+                ["missing_numeric_range_fields"],
+            serde_json::json!(["confidence"])
+        );
+        assert!(
+            summary["search_projection_shadow_evidence"]["blocker_codes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|code| code == SKEIN_SEARCH_PROJECTION_SEGMENT_DESCRIPTOR_FIELDS_MISSING)
+        );
+    }
+
+    #[test]
     fn replacement_summary_requires_search_projection_shadow_evidence_protocol() {
         let mut bundle = production_ready_bundle();
         bundle["search_projection_shadow_evidence"]["protocol"] = serde_json::json!("handwritten");
@@ -4808,10 +4955,36 @@ mod tests {
     }
 
     fn scan_filter_field_summaries_json() -> serde_json::Value {
-        serde_json::json!(NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
-            .iter()
-            .map(|field| serde_json::json!({ "field": field }))
-            .collect::<Vec<_>>())
+        serde_json::json!([
+            descriptor_field("kind", true, false, false),
+            descriptor_field("external_id", true, false, false),
+            descriptor_field("source_id", true, false, false),
+            descriptor_field("space_id", true, false, false),
+            descriptor_field("unit_type", true, false, false),
+            descriptor_field("lifecycle_state", true, false, false),
+            descriptor_field("importance", true, true, false),
+            descriptor_field("confidence", true, true, false),
+            descriptor_field("created_at", true, false, true),
+            descriptor_field("updated_at", true, false, true),
+            descriptor_field("event_start", true, false, true),
+            descriptor_field("event_end", true, false, true),
+            descriptor_field("is_latest", true, false, false)
+        ])
+    }
+
+    fn descriptor_field(
+        field: &str,
+        value_summary_used: bool,
+        numeric_range_summary_used: bool,
+        timestamp_range_summary_used: bool,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "field": field,
+            "segment_count": 1,
+            "value_summary_used": value_summary_used,
+            "numeric_range_summary_used": numeric_range_summary_used,
+            "timestamp_range_summary_used": timestamp_range_summary_used,
+        })
     }
 
     fn ready_query_runtime_preflight() -> serde_json::Value {
