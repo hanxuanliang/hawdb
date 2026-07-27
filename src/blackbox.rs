@@ -142,6 +142,51 @@ impl BlackboxJsonlArtifactSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlackboxBackgroundQosSummary {
+    pub protocol: Option<String>,
+    pub ready: Option<bool>,
+    pub total_candidates: Option<u64>,
+    pub admitted_count: Option<u64>,
+    pub deferred_count: Option<u64>,
+    pub rejected_count: Option<u64>,
+    pub executable_search_projection_graph_delta_count: Option<u64>,
+    pub admitted_search_projection_graph_delta_count: Option<u64>,
+    pub deferred_search_projection_graph_delta_count: Option<u64>,
+    pub rejected_search_projection_graph_delta_count: Option<u64>,
+    pub executable_search_projection_graph_delta_operations: Option<u64>,
+    pub admitted_search_projection_graph_delta_operations: Option<u64>,
+    pub max_search_projection_graph_delta_complete_through_graph_commit_epoch: Option<u64>,
+    pub memory_pressure_ready: Option<bool>,
+    pub memory_budget_bytes: Option<u64>,
+    pub estimated_memory_bytes: Option<u64>,
+    pub blocker_codes: Vec<String>,
+}
+
+impl BlackboxBackgroundQosSummary {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": self.protocol,
+            "ready": self.ready,
+            "total_candidates": self.total_candidates,
+            "admitted_count": self.admitted_count,
+            "deferred_count": self.deferred_count,
+            "rejected_count": self.rejected_count,
+            "executable_search_projection_graph_delta_count": self.executable_search_projection_graph_delta_count,
+            "admitted_search_projection_graph_delta_count": self.admitted_search_projection_graph_delta_count,
+            "deferred_search_projection_graph_delta_count": self.deferred_search_projection_graph_delta_count,
+            "rejected_search_projection_graph_delta_count": self.rejected_search_projection_graph_delta_count,
+            "executable_search_projection_graph_delta_operations": self.executable_search_projection_graph_delta_operations,
+            "admitted_search_projection_graph_delta_operations": self.admitted_search_projection_graph_delta_operations,
+            "max_search_projection_graph_delta_complete_through_graph_commit_epoch": self.max_search_projection_graph_delta_complete_through_graph_commit_epoch,
+            "memory_pressure_ready": self.memory_pressure_ready,
+            "memory_budget_bytes": self.memory_budget_bytes,
+            "estimated_memory_bytes": self.estimated_memory_bytes,
+            "blocker_codes": self.blocker_codes,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlackboxArtifactReport {
     pub name: String,
     pub format: String,
@@ -149,6 +194,7 @@ pub struct BlackboxArtifactReport {
     pub checksum: u64,
     pub json: Option<BlackboxJsonArtifactSummary>,
     pub jsonl: Option<BlackboxJsonlArtifactSummary>,
+    pub background_qos: Option<BlackboxBackgroundQosSummary>,
 }
 
 impl BlackboxArtifactReport {
@@ -164,6 +210,9 @@ impl BlackboxArtifactReport {
         if let Some(summary) = self.jsonl.as_ref() {
             artifact.insert("jsonl".to_string(), summary.json());
         }
+        if let Some(summary) = self.background_qos.as_ref() {
+            artifact.insert("background_qos".to_string(), summary.json());
+        }
         serde_json::Value::Object(artifact)
     }
 }
@@ -176,18 +225,23 @@ pub struct BlackboxEventReport {
     pub sequence: usize,
     pub event: String,
     pub artifact: BlackboxArtifactReport,
+    pub background_qos: Option<BlackboxBackgroundQosSummary>,
 }
 
 impl BlackboxEventReport {
     pub fn json(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut event = serde_json::json!({
             "protocol": self.protocol,
             "protocol_version": self.protocol_version,
             "run_id": self.run_id,
             "sequence": self.sequence,
             "event": self.event,
             "artifact": self.artifact.json(),
-        })
+        });
+        if let Some(background_qos) = self.background_qos.as_ref() {
+            event["background_qos"] = background_qos.json();
+        }
+        event
     }
 }
 
@@ -224,18 +278,32 @@ impl BlackboxReport {
     }
 
     pub fn events(&self) -> Vec<BlackboxEventReport> {
-        self.artifacts
-            .iter()
-            .enumerate()
-            .map(|(index, artifact)| BlackboxEventReport {
+        let mut events = Vec::new();
+        for artifact in &self.artifacts {
+            let sequence = events.len() + 1;
+            events.push(BlackboxEventReport {
                 protocol: BLACKBOX_EVENT_PROTOCOL.to_string(),
                 protocol_version: 1,
                 run_id: self.run_id.clone(),
-                sequence: index + 1,
+                sequence,
                 event: "artifact_observed".to_string(),
                 artifact: artifact.clone(),
-            })
-            .collect()
+                background_qos: None,
+            });
+            if let Some(background_qos) = artifact.background_qos.as_ref() {
+                let sequence = events.len() + 1;
+                events.push(BlackboxEventReport {
+                    protocol: BLACKBOX_EVENT_PROTOCOL.to_string(),
+                    protocol_version: 1,
+                    run_id: self.run_id.clone(),
+                    sequence,
+                    event: "background_qos_summary".to_string(),
+                    artifact: artifact.clone(),
+                    background_qos: Some(background_qos.clone()),
+                });
+            }
+        }
+        events
     }
 }
 
@@ -324,9 +392,119 @@ fn collect_blackbox_artifacts(artifact_dir: &Path) -> Result<Vec<BlackboxArtifac
             checksum: checksum_bytes(&bytes),
             json,
             jsonl,
+            background_qos: background_qos_summary_for_artifact(artifact_name, &bytes),
         });
     }
     Ok(artifacts)
+}
+
+fn background_qos_summary_for_artifact(
+    artifact_name: &str,
+    bytes: &[u8],
+) -> Option<BlackboxBackgroundQosSummary> {
+    if artifact_name != "background-maintenance.json"
+        && artifact_name != "background-maintenance-evidence.json"
+    {
+        return None;
+    }
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .map(|value| background_qos_summary_from_json(&value))
+}
+
+fn background_qos_summary_from_json(value: &serde_json::Value) -> BlackboxBackgroundQosSummary {
+    let memory_pressure = value.get("memory_pressure");
+    BlackboxBackgroundQosSummary {
+        protocol: string_field(value, "protocol"),
+        ready: first_bool_field(value, &["ready", "background_maintenance_ready"]),
+        total_candidates: first_u64_field(
+            value,
+            &["total_candidates", "background_maintenance_total_candidates"],
+        ),
+        admitted_count: first_u64_field(value, &["admitted_count"]),
+        deferred_count: first_u64_field(value, &["deferred_count"]),
+        rejected_count: first_u64_field(value, &["rejected_count"]),
+        executable_search_projection_graph_delta_count: first_u64_field(
+            value,
+            &[
+                "executable_search_projection_graph_delta_count",
+                "background_maintenance_executable_search_projection_graph_delta_count",
+            ],
+        ),
+        admitted_search_projection_graph_delta_count: first_u64_field(
+            value,
+            &[
+                "admitted_search_projection_graph_delta_count",
+                "background_maintenance_admitted_search_projection_graph_delta_count",
+            ],
+        ),
+        deferred_search_projection_graph_delta_count: first_u64_field(
+            value,
+            &[
+                "deferred_search_projection_graph_delta_count",
+                "background_maintenance_deferred_search_projection_graph_delta_count",
+            ],
+        ),
+        rejected_search_projection_graph_delta_count: first_u64_field(
+            value,
+            &[
+                "rejected_search_projection_graph_delta_count",
+                "background_maintenance_rejected_search_projection_graph_delta_count",
+            ],
+        ),
+        executable_search_projection_graph_delta_operations: first_u64_field(
+            value,
+            &[
+                "executable_search_projection_graph_delta_operations",
+                "background_maintenance_executable_search_projection_graph_delta_operations",
+            ],
+        ),
+        admitted_search_projection_graph_delta_operations: first_u64_field(
+            value,
+            &[
+                "admitted_search_projection_graph_delta_operations",
+                "background_maintenance_admitted_search_projection_graph_delta_operations",
+            ],
+        ),
+        max_search_projection_graph_delta_complete_through_graph_commit_epoch: first_u64_field(
+            value,
+            &[
+                "max_search_projection_graph_delta_complete_through_graph_commit_epoch",
+                "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch",
+            ],
+        ),
+        memory_pressure_ready: memory_pressure
+            .and_then(|memory_pressure| memory_pressure.get("ready"))
+            .and_then(serde_json::Value::as_bool)
+            .or_else(|| {
+                value
+                    .get("memory_pressure_ready")
+                    .or_else(|| value.get("background_maintenance_memory_pressure_ready"))
+                    .and_then(serde_json::Value::as_bool)
+            }),
+        memory_budget_bytes: memory_pressure
+            .and_then(|memory_pressure| memory_pressure.get("budget_bytes"))
+            .and_then(serde_json::Value::as_u64)
+            .or_else(|| {
+                value
+                    .get("memory_budget_bytes")
+                    .or_else(|| value.get("background_maintenance_memory_budget_bytes"))
+                    .and_then(serde_json::Value::as_u64)
+            }),
+        estimated_memory_bytes: memory_pressure
+            .and_then(|memory_pressure| memory_pressure.get("estimated_bytes"))
+            .and_then(serde_json::Value::as_u64)
+            .or_else(|| {
+                value
+                    .get("estimated_memory_bytes")
+                    .or_else(|| value.get("background_maintenance_estimated_memory_bytes"))
+                    .and_then(serde_json::Value::as_u64)
+            }),
+        blocker_codes: string_array_field(value, "blocker_codes")
+            .into_iter()
+            .chain(string_array_field(value, "background_maintenance_blocker_codes"))
+            .collect(),
+    }
 }
 
 fn artifact_format(name: &str) -> &'static str {
@@ -404,6 +582,11 @@ fn string_field(value: &serde_json::Value, key: &str) -> Option<String> {
 fn first_bool_field(value: &serde_json::Value, keys: &[&str]) -> Option<bool> {
     keys.iter()
         .find_map(|key| value.get(*key).and_then(serde_json::Value::as_bool))
+}
+
+fn first_u64_field(value: &serde_json::Value, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(serde_json::Value::as_u64))
 }
 
 fn string_array_field(value: &serde_json::Value, key: &str) -> Vec<String> {
@@ -570,6 +753,89 @@ mod tests {
         assert!(!rendered.contains("MATCH"));
         assert!(!rendered.contains("secret-token"));
         assert!(!rendered.contains(root.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn blackbox_report_records_compact_background_qos_event() {
+        let root = unique_test_dir("blackbox-background-qos");
+        let artifact_dir = root.join("artifacts");
+        let output_dir = root.join("blackbox");
+        fs::create_dir_all(&artifact_dir).unwrap();
+        fs::write(
+            artifact_dir.join("background-maintenance.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "protocol": "skein-background-maintenance-report",
+                "ready": false,
+                "total_candidates": 7,
+                "admitted_count": 3,
+                "deferred_count": 4,
+                "rejected_count": 0,
+                "executable_search_projection_graph_delta_count": 5,
+                "admitted_search_projection_graph_delta_count": 2,
+                "deferred_search_projection_graph_delta_count": 3,
+                "rejected_search_projection_graph_delta_count": 0,
+                "executable_search_projection_graph_delta_operations": 13,
+                "admitted_search_projection_graph_delta_operations": 8,
+                "max_search_projection_graph_delta_complete_through_graph_commit_epoch": 42,
+                "memory_pressure": {
+                    "ready": false,
+                    "budget_bytes": 4096,
+                    "estimated_bytes": 8192
+                },
+                "blocker_codes": ["memory_budget_exceeded"],
+                "query": "MATCH (secret {token: $token}) RETURN secret",
+                "parameters": {"token": "secret-token"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let report = write_blackbox_report_typed(&BlackboxReportOptions {
+            artifact_dir,
+            output_dir: output_dir.clone(),
+            run_id: Some("run-background-qos".to_string()),
+            run_status: BlackboxRunStatus::Completed,
+            exit_code: Some(0),
+        })
+        .unwrap();
+
+        let background = report
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.name == "background-maintenance.json")
+            .and_then(|artifact| artifact.background_qos.as_ref())
+            .unwrap();
+        assert_eq!(background.ready, Some(false));
+        assert_eq!(background.total_candidates, Some(7));
+        assert_eq!(background.admitted_count, Some(3));
+        assert_eq!(background.deferred_count, Some(4));
+        assert_eq!(
+            background.executable_search_projection_graph_delta_count,
+            Some(5)
+        );
+        assert_eq!(
+            background.max_search_projection_graph_delta_complete_through_graph_commit_epoch,
+            Some(42)
+        );
+        assert_eq!(background.memory_pressure_ready, Some(false));
+        assert_eq!(background.memory_budget_bytes, Some(4096));
+        assert_eq!(background.estimated_memory_bytes, Some(8192));
+        assert_eq!(
+            background.blocker_codes,
+            vec!["memory_budget_exceeded".to_string()]
+        );
+
+        let events = report.events();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event, "artifact_observed");
+        assert_eq!(events[1].event, "background_qos_summary");
+        assert_eq!(events[1].background_qos.as_ref().unwrap(), background);
+        let rendered_events = fs::read_to_string(output_dir.join("events.jsonl")).unwrap();
+        assert!(rendered_events.contains("background_qos_summary"));
+        assert!(rendered_events.contains("memory_budget_exceeded"));
+        assert!(!rendered_events.contains("MATCH"));
+        assert!(!rendered_events.contains("secret-token"));
+        assert!(!rendered_events.contains(root.to_string_lossy().as_ref()));
     }
 
     fn unique_test_dir(prefix: &str) -> PathBuf {

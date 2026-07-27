@@ -175,6 +175,8 @@ contract.
     foreground user reads or exceed configured memory budgets.
   - [x] Add a background-maintenance memory-pressure gate that fails closed
     when reported internal background work exceeds its configured memory budget.
+  - [x] Add compact blackbox background QoS events with redacted admission,
+    search-projection delta, memory-pressure, and blocker-code evidence.
 - [ ] PR 8: Make Mem's Skein startup and readiness library-only.
   - Scope: ensure Mem starts Skein in-process and consumes typed readiness,
     route evidence, search projection evidence, slow log, blackbox, recovery,

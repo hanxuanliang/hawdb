@@ -79,9 +79,10 @@ pub use background_maintenance_evidence::{
 };
 pub use blackbox::{
     blackbox_report, blackbox_report_json, write_blackbox_report, write_blackbox_report_typed,
-    BlackboxArtifactReport, BlackboxEventReport, BlackboxJsonArtifactSummary,
-    BlackboxJsonlArtifactSummary, BlackboxRedactionReport, BlackboxReport, BlackboxReportOptions,
-    BlackboxRunStatus, BLACKBOX_EVENT_PROTOCOL, BLACKBOX_REPORT_PROTOCOL,
+    BlackboxArtifactReport, BlackboxBackgroundQosSummary, BlackboxEventReport,
+    BlackboxJsonArtifactSummary, BlackboxJsonlArtifactSummary, BlackboxRedactionReport,
+    BlackboxReport, BlackboxReportOptions, BlackboxRunStatus, BLACKBOX_EVENT_PROTOCOL,
+    BLACKBOX_REPORT_PROTOCOL,
 };
 pub use bounded_read_evidence::{
     nowledge_bounded_read_evidence_usage, parse_covered_routes_json,
