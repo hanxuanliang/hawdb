@@ -113,7 +113,7 @@ complete than before. Avoid bundling Mem route changes, Skein kernel changes,
 and readiness gate changes unless the PR explicitly proves the end-to-end
 contract.
 
-- [ ] PR 1: Define the active Mem route cutover inventory.
+- [x] PR 1: Define the active Mem route cutover inventory.
   - Scope: generate or update the shared route catalog for active graph/search
     read routes, including REST and MCP surfaces.
   - Deliverables: route list, legacy/Skein ownership field, required evidence
@@ -134,6 +134,9 @@ contract.
     active graph/search read route as `legacy` or `skein`; production cutover
     fails closed when required routes are missing, duplicated, conflicting,
     still legacy-owned, or Skein-owned without route readiness evidence.
+  - [x] Wire route ownership evidence into the integration bundle and final
+    cutover preflight so route coverage is not ready until every required route
+    is explicitly Skein-owned through the embedded library runtime.
 - [ ] PR 2: Remove direct Kuzu reads from one low-risk graph read route.
   - Scope: move one existing read route to the embedded query runtime with
     `legacy`/`skein` selection controlled by configuration.

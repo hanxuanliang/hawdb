@@ -6,8 +6,8 @@ use crate::{
     nowledge_graph_route_readiness_summary, nowledge_mem_graph_read_route_catalog_digest,
     nowledge_mem_required_query_families_for_route, Result, SkeinError,
     NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
-    NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE,
-    NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE,
+    NOWLEDGE_MEM_ROUTE_OWNERSHIP_PROTOCOL, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
+    NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE, NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE,
     NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
     NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
     REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
@@ -52,6 +52,7 @@ const ROUTE_COVERAGE_CHECKS: &[&str] = &[
     "graph_route_readiness",
     "graph_route_readiness_alignment",
     "graph_route_parity_alignment",
+    "route_ownership",
     "query_runtime_preflight",
     "query_runtime_preflight_alignment",
 ];
@@ -453,6 +454,29 @@ pub struct GraphRouteParityAlignmentCutoverReadiness {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteOwnershipCutoverReadiness {
+    pub protocol_matches: bool,
+    pub ready: bool,
+    pub production_cutover_ready: bool,
+    pub require_all_skein: bool,
+    pub required_route_count_matches: bool,
+    pub explicit_route_count_matches: bool,
+    pub skein_route_count_matches: bool,
+    pub legacy_route_count_zero: bool,
+    pub missing_required_routes_empty: bool,
+    pub unknown_routes_empty: bool,
+    pub duplicate_routes_empty: bool,
+    pub conflicting_routes_empty: bool,
+    pub skein_not_ready_routes_empty: bool,
+    pub route_readiness_present: bool,
+    pub route_readiness_ready: bool,
+    pub route_catalog_version_matches: bool,
+    pub route_catalog_digest_matches: bool,
+    pub blocker_codes_empty: bool,
+    pub blocker_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryRuntimePreflightCutoverReadiness {
     pub protocol_matches: bool,
     pub ready: bool,
@@ -723,6 +747,29 @@ impl GraphRouteParityAlignmentCutoverReadiness {
             && self.route_mismatch_routes_empty
             && self.protocol_mismatch_routes_empty
             && self.blocker_routes_empty
+    }
+}
+
+impl RouteOwnershipCutoverReadiness {
+    pub fn evidence_ready(&self) -> bool {
+        self.protocol_matches
+            && self.ready
+            && self.production_cutover_ready
+            && self.require_all_skein
+            && self.required_route_count_matches
+            && self.explicit_route_count_matches
+            && self.skein_route_count_matches
+            && self.legacy_route_count_zero
+            && self.missing_required_routes_empty
+            && self.unknown_routes_empty
+            && self.duplicate_routes_empty
+            && self.conflicting_routes_empty
+            && self.skein_not_ready_routes_empty
+            && self.route_readiness_present
+            && self.route_readiness_ready
+            && self.route_catalog_version_matches
+            && self.route_catalog_digest_matches
+            && self.blocker_codes_empty
     }
 }
 
@@ -998,6 +1045,7 @@ pub fn nowledge_mem_integration_readiness(
     let graph_route_alignment_readiness = graph_route_alignment_cutover_readiness(bundle);
     let graph_route_parity_alignment_readiness =
         graph_route_parity_alignment_cutover_readiness(bundle);
+    let route_ownership_readiness = route_ownership_cutover_readiness(bundle);
     let query_runtime_readiness = query_runtime_preflight_cutover_readiness(bundle);
     let query_runtime_alignment_readiness =
         query_runtime_preflight_alignment_cutover_readiness(bundle);
@@ -1084,6 +1132,11 @@ pub fn nowledge_mem_integration_readiness(
             graph_route_parity_alignment_readiness.blocker_codes.clone(),
         ),
         check_named_conditions(
+            "route_ownership",
+            route_ownership_cutover_conditions(&route_ownership_readiness),
+            route_ownership_readiness.blocker_codes.clone(),
+        ),
+        check_named_conditions(
             "query_runtime_preflight",
             query_runtime_preflight_cutover_conditions(&query_runtime_readiness),
             query_runtime_readiness.blocker_codes.clone(),
@@ -1158,6 +1211,7 @@ pub fn nowledge_mem_integration_readiness(
                 graph_route: &graph_route_readiness,
                 graph_route_alignment: &graph_route_alignment_readiness,
                 graph_route_parity_alignment: &graph_route_parity_alignment_readiness,
+                route_ownership: &route_ownership_readiness,
                 query_runtime: &query_runtime_readiness,
                 query_runtime_alignment: &query_runtime_alignment_readiness,
                 blackbox: &blackbox_readiness,
@@ -1252,6 +1306,79 @@ fn previous_wrapper_preflight_cutover_conditions(
     vec![("previous_wrapper_preflight.ready", readiness.ready)]
 }
 
+fn route_ownership_cutover_conditions(
+    readiness: &RouteOwnershipCutoverReadiness,
+) -> Vec<(&'static str, bool)> {
+    vec![
+        ("route_ownership.protocol", readiness.protocol_matches),
+        ("route_ownership.ready", readiness.ready),
+        (
+            "route_ownership.production_cutover_ready",
+            readiness.production_cutover_ready,
+        ),
+        (
+            "route_ownership.require_all_skein",
+            readiness.require_all_skein,
+        ),
+        (
+            "route_ownership.required_route_count",
+            readiness.required_route_count_matches,
+        ),
+        (
+            "route_ownership.explicit_route_count",
+            readiness.explicit_route_count_matches,
+        ),
+        (
+            "route_ownership.skein_route_count",
+            readiness.skein_route_count_matches,
+        ),
+        (
+            "route_ownership.legacy_route_count",
+            readiness.legacy_route_count_zero,
+        ),
+        (
+            "route_ownership.missing_required_routes",
+            readiness.missing_required_routes_empty,
+        ),
+        (
+            "route_ownership.unknown_routes",
+            readiness.unknown_routes_empty,
+        ),
+        (
+            "route_ownership.duplicate_routes",
+            readiness.duplicate_routes_empty,
+        ),
+        (
+            "route_ownership.conflicting_routes",
+            readiness.conflicting_routes_empty,
+        ),
+        (
+            "route_ownership.skein_not_ready_routes",
+            readiness.skein_not_ready_routes_empty,
+        ),
+        (
+            "route_ownership.route_readiness_present",
+            readiness.route_readiness_present,
+        ),
+        (
+            "route_ownership.route_readiness_ready",
+            readiness.route_readiness_ready,
+        ),
+        (
+            "route_ownership.route_catalog_version",
+            readiness.route_catalog_version_matches,
+        ),
+        (
+            "route_ownership.route_catalog_digest",
+            readiness.route_catalog_digest_matches,
+        ),
+        (
+            "route_ownership.blocker_codes",
+            readiness.blocker_codes_empty,
+        ),
+    ]
+}
+
 fn blackbox_redaction_cutover_conditions(
     readiness: &BlackboxReadinessReport,
 ) -> Vec<(&'static str, bool)> {
@@ -1325,6 +1452,7 @@ struct IntegrationGateReadiness<'a> {
     graph_route: &'a GraphRouteCutoverReadiness,
     graph_route_alignment: &'a GraphRouteAlignmentCutoverReadiness,
     graph_route_parity_alignment: &'a GraphRouteParityAlignmentCutoverReadiness,
+    route_ownership: &'a RouteOwnershipCutoverReadiness,
     query_runtime: &'a QueryRuntimePreflightCutoverReadiness,
     query_runtime_alignment: &'a QueryRuntimePreflightAlignmentCutoverReadiness,
     blackbox: &'a BlackboxReadinessReport,
@@ -1560,6 +1688,32 @@ fn next_actions(
             ],
         ));
     }
+    if !readiness.route_ownership.evidence_ready() {
+        actions.push(next_action(
+            "attach_route_ownership_evidence",
+            "Nowledge Mem cutover requires every active read route to be owned by Skein through the embedded library runtime",
+            [
+                "route_ownership.protocol",
+                "route_ownership.ready",
+                "route_ownership.production_cutover_ready",
+                "route_ownership.require_all_skein",
+                "route_ownership.required_route_count",
+                "route_ownership.explicit_route_count",
+                "route_ownership.skein_route_count",
+                "route_ownership.legacy_route_count",
+                "route_ownership.missing_required_routes",
+                "route_ownership.unknown_routes",
+                "route_ownership.duplicate_routes",
+                "route_ownership.conflicting_routes",
+                "route_ownership.skein_not_ready_routes",
+                "route_ownership.route_readiness_present",
+                "route_ownership.route_readiness_ready",
+                "route_ownership.route_catalog_version",
+                "route_ownership.route_catalog_digest",
+                "route_ownership.blocker_codes",
+            ],
+        ));
+    }
     if !readiness.query_runtime.evidence_ready() {
         actions.push(next_action(
             "attach_query_runtime_preflight_evidence",
@@ -1765,6 +1919,123 @@ pub fn previous_wrapper_preflight_cutover_readiness(
                 &["previous_wrapper_preflight", "failed_checks"][..],
             ],
         ),
+    }
+}
+
+pub fn route_ownership_cutover_readiness(
+    bundle: &serde_json::Value,
+) -> RouteOwnershipCutoverReadiness {
+    let route_ownership =
+        json_get_path(bundle, &["route_ownership"]).unwrap_or(&serde_json::Value::Null);
+    let route_count_summary = route_ownership_count_summary(route_ownership);
+    RouteOwnershipCutoverReadiness {
+        protocol_matches: str_path(bundle, &["route_ownership", "protocol"])
+            == Some(NOWLEDGE_MEM_ROUTE_OWNERSHIP_PROTOCOL),
+        ready: bool_path(bundle, &["route_ownership", "ready"]) == Some(true),
+        production_cutover_ready: bool_path(
+            bundle,
+            &["route_ownership", "production_cutover_ready"],
+        ) == Some(true),
+        require_all_skein: bool_path(bundle, &["route_ownership", "require_all_skein"])
+            == Some(true),
+        required_route_count_matches: u64_path(
+            bundle,
+            &["route_ownership", "required_route_count"],
+        ) == Some(
+            REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64
+        ),
+        explicit_route_count_matches: u64_path(
+            bundle,
+            &["route_ownership", "explicit_route_count"],
+        ) == Some(
+            REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64
+        ) && route_count_summary.explicit_required_route_count
+            == REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+        skein_route_count_matches: u64_path(bundle, &["route_ownership", "skein_route_count"])
+            == Some(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64)
+            && route_count_summary.skein_route_count
+                == REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+        legacy_route_count_zero: u64_path(bundle, &["route_ownership", "legacy_route_count"])
+            == Some(0)
+            && route_count_summary.legacy_route_count == 0,
+        missing_required_routes_empty: string_array_path(
+            bundle,
+            &["route_ownership", "missing_required_routes"],
+        )
+        .is_empty(),
+        unknown_routes_empty: string_array_path(bundle, &["route_ownership", "unknown_routes"])
+            .is_empty(),
+        duplicate_routes_empty: string_array_path(bundle, &["route_ownership", "duplicate_routes"])
+            .is_empty(),
+        conflicting_routes_empty: string_array_path(
+            bundle,
+            &["route_ownership", "conflicting_routes"],
+        )
+        .is_empty(),
+        skein_not_ready_routes_empty: string_array_path(
+            bundle,
+            &["route_ownership", "skein_not_ready_routes"],
+        )
+        .is_empty(),
+        route_readiness_present: bool_path(bundle, &["route_ownership", "route_readiness_present"])
+            == Some(true),
+        route_readiness_ready: bool_path(bundle, &["route_ownership", "route_readiness_ready"])
+            == Some(true),
+        route_catalog_version_matches: str_path(
+            bundle,
+            &["route_ownership", "route_catalog_version"],
+        ) == Some(NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION),
+        route_catalog_digest_matches: str_path(
+            bundle,
+            &["route_ownership", "route_catalog_digest"],
+        ) == Some(
+            nowledge_mem_graph_read_route_catalog_digest().as_str(),
+        ),
+        blocker_codes_empty: string_array_path(bundle, &["route_ownership", "blocker_codes"])
+            .is_empty(),
+        blocker_codes: blocker_codes(bundle, &[&["route_ownership", "blocker_codes"][..]]),
+    }
+}
+
+#[derive(Debug, Default)]
+struct RouteOwnershipCountSummary {
+    explicit_required_route_count: usize,
+    skein_route_count: usize,
+    legacy_route_count: usize,
+}
+
+fn route_ownership_count_summary(value: &serde_json::Value) -> RouteOwnershipCountSummary {
+    let Some(routes) = value.get("routes").and_then(serde_json::Value::as_array) else {
+        return RouteOwnershipCountSummary::default();
+    };
+    let required_routes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let mut explicit_required_routes = BTreeSet::new();
+    let mut skein_routes = BTreeSet::new();
+    let mut legacy_routes = BTreeSet::new();
+    for route in routes {
+        let Some(route_name) = str_path(route, &["route"]) else {
+            continue;
+        };
+        if required_routes.contains(route_name) {
+            explicit_required_routes.insert(route_name);
+        }
+        match str_path(route, &["read_engine"]) {
+            Some("skein") if required_routes.contains(route_name) => {
+                skein_routes.insert(route_name);
+            }
+            Some("legacy") if required_routes.contains(route_name) => {
+                legacy_routes.insert(route_name);
+            }
+            _ => {}
+        }
+    }
+    RouteOwnershipCountSummary {
+        explicit_required_route_count: explicit_required_routes.len(),
+        skein_route_count: skein_routes.len(),
+        legacy_route_count: legacy_routes.len(),
     }
 }
 
@@ -4554,8 +4825,9 @@ mod tests {
     use super::nowledge_mem_integration_readiness_json;
     use crate::{
         nowledge_mem_graph_read_route_catalog_digest, nowledge_mem_graph_read_route_spec,
-        nowledge_mem_graph_read_route_specs_json,
-        nowledge_mem_search_candidate_shadow_evidence_json,
+        nowledge_mem_graph_read_route_specs_json, nowledge_mem_route_ownership_all_skein,
+        nowledge_mem_route_ownership_readiness, nowledge_mem_search_candidate_shadow_evidence_json,
+        NowledgeMemRouteOwnershipPolicy, NowledgeMemRouteReadinessSummary,
         NowledgeMemSearchCandidateShadowAccumulator, NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE, NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_ENGINE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
@@ -4932,6 +5204,115 @@ mod tests {
             .unwrap()
             .iter()
             .any(|action| action["action"] == "run_previous_wrapper_preflight"));
+    }
+
+    #[test]
+    fn typed_route_ownership_cutover_readiness_requires_all_skein_routes() {
+        let mut bundle = ready_bundle();
+        let typed = super::route_ownership_cutover_readiness(&bundle);
+        assert!(typed.evidence_ready());
+        assert!(typed.production_cutover_ready);
+        assert!(typed.require_all_skein);
+        assert!(typed.legacy_route_count_zero);
+
+        bundle["route_ownership"]["routes"][0]["read_engine"] = serde_json::json!("legacy");
+        bundle["route_ownership"]["legacy_route_count"] = serde_json::json!(1);
+        bundle["route_ownership"]["skein_route_count"] =
+            serde_json::json!(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() - 1);
+        bundle["route_ownership"]["legacy_routes"] =
+            serde_json::json!([REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES[0]]);
+        bundle["route_ownership"]["skein_routes"] =
+            serde_json::json!(&REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES[1..]);
+        bundle["route_ownership"]["ready"] = serde_json::json!(false);
+        bundle["route_ownership"]["production_cutover_ready"] = serde_json::json!(false);
+        bundle["route_ownership"]["blocker_codes"] =
+            serde_json::json!(["route_ownership_legacy_routes_remaining"]);
+
+        let typed = super::route_ownership_cutover_readiness(&bundle);
+        assert!(!typed.evidence_ready());
+        assert!(!typed.ready);
+        assert!(!typed.production_cutover_ready);
+        assert!(!typed.skein_route_count_matches);
+        assert!(!typed.legacy_route_count_zero);
+        assert_eq!(
+            typed.blocker_codes,
+            vec!["route_ownership_legacy_routes_remaining".to_string()]
+        );
+    }
+
+    #[test]
+    fn integration_readiness_fails_closed_without_route_ownership() {
+        let mut bundle = ready_bundle();
+        bundle.as_object_mut().unwrap().remove("route_ownership");
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert!(report["failed_checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check == "route_ownership"));
+        let check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "route_ownership")
+            .unwrap();
+        assert_eq!(
+            check["failed_evidence_fields"],
+            serde_json::json!([
+                "route_ownership.protocol",
+                "route_ownership.ready",
+                "route_ownership.production_cutover_ready",
+                "route_ownership.require_all_skein",
+                "route_ownership.required_route_count",
+                "route_ownership.explicit_route_count",
+                "route_ownership.skein_route_count",
+                "route_ownership.legacy_route_count",
+                "route_ownership.route_readiness_present",
+                "route_ownership.route_readiness_ready",
+                "route_ownership.route_catalog_version",
+                "route_ownership.route_catalog_digest"
+            ])
+        );
+        assert!(report["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "attach_route_ownership_evidence"));
+    }
+
+    #[test]
+    fn final_cutover_preflight_fails_closed_on_legacy_route_ownership() {
+        let mut bundle = ready_bundle();
+        bundle["route_ownership"]["routes"][0]["read_engine"] = serde_json::json!("legacy");
+        bundle["route_ownership"]["legacy_route_count"] = serde_json::json!(1);
+        bundle["route_ownership"]["skein_route_count"] =
+            serde_json::json!(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() - 1);
+        bundle["route_ownership"]["legacy_routes"] =
+            serde_json::json!([REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES[0]]);
+        bundle["route_ownership"]["skein_routes"] =
+            serde_json::json!(&REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES[1..]);
+        bundle["route_ownership"]["ready"] = serde_json::json!(false);
+        bundle["route_ownership"]["production_cutover_ready"] = serde_json::json!(false);
+        bundle["route_ownership"]["blocker_codes"] =
+            serde_json::json!(["route_ownership_legacy_routes_remaining"]);
+
+        let report = super::nowledge_mem_final_cutover_preflight(&bundle);
+
+        assert!(!report.production_cutover_ready);
+        assert!(!report.integration_ready);
+        assert!(!report.route_coverage_ready);
+        assert!(report
+            .blocking_categories
+            .contains(&"route_coverage".to_string()));
+        assert!(report
+            .failed_checks
+            .contains(&"route_ownership".to_string()));
+        assert!(report
+            .next_action_names
+            .contains(&"attach_route_ownership_evidence".to_string()));
     }
 
     #[test]
@@ -8107,6 +8488,7 @@ mod tests {
             "route_catalog": nowledge_mem_graph_read_route_specs_json(),
             "routes": ready_graph_route_profile_routes()
         });
+        bundle["route_ownership"] = ready_route_ownership();
         bundle["graph_route_parity_alignment"] = serde_json::json!({
             "ready": true,
             "required_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
@@ -8240,6 +8622,30 @@ mod tests {
                 })
             })
             .collect::<Vec<_>>())
+    }
+
+    fn ready_route_ownership() -> serde_json::Value {
+        nowledge_mem_route_ownership_readiness(
+            &nowledge_mem_route_ownership_all_skein(),
+            Some(&ready_route_readiness_summary()),
+            NowledgeMemRouteOwnershipPolicy::production_cutover(),
+        )
+        .json()
+    }
+
+    fn ready_route_readiness_summary() -> NowledgeMemRouteReadinessSummary {
+        NowledgeMemRouteReadinessSummary {
+            route_primary_ready: true,
+            primary_ready_routes: REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+                .iter()
+                .map(|route| (*route).to_string())
+                .collect(),
+            route_query_plan_evidence_ready: true,
+            route_query_profile_evidence_ready: true,
+            relationship_property_pruning_required_count: 0,
+            relationship_property_pruning_report_count: 0,
+            route_relationship_property_pruning_evidence_ready: true,
+        }
     }
 
     fn ready_graph_route_profile_routes() -> Vec<serde_json::Value> {

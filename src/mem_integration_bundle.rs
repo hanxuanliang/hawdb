@@ -15,7 +15,7 @@ const ROUTE_PARITY_EVIDENCE_SOURCE: &str = "route_parity_evidence";
 const ROUTE_PARITY_FULL_MATCH_PER_MILLION: u64 = 1_000_000;
 
 pub fn nowledge_mem_integration_bundle_usage() -> String {
-    "nowledge-mem-integration-bundle requires [--require-ready] --submodule-path <path> --submodule-commit <commit> --legacy-data-retained --coexistence-mode shadow|side_by_side --content-store-present --content-store-engine sqlite --content-store-messages-available --content-store-source-chunks-available --previous-wrapper-preflight-json <path> --replacement-summary-json <path> --bounded-read-evidence-json <path> --graph-route-readiness-json <path> --query-runtime-preflight-json <path> --search-candidate-shadow-evidence-json <path> --library-readiness-json <path> --blackbox-manifest-json <path>"
+    "nowledge-mem-integration-bundle requires [--require-ready] --submodule-path <path> --submodule-commit <commit> --legacy-data-retained --coexistence-mode shadow|side_by_side --content-store-present --content-store-engine sqlite --content-store-messages-available --content-store-source-chunks-available --previous-wrapper-preflight-json <path> --replacement-summary-json <path> --bounded-read-evidence-json <path> --graph-route-readiness-json <path> --route-ownership-json <path> --query-runtime-preflight-json <path> --search-candidate-shadow-evidence-json <path> --library-readiness-json <path> --blackbox-manifest-json <path>"
         .to_string()
 }
 
@@ -35,6 +35,7 @@ pub struct IntegrationBundleInputs {
     pub replacement_summary: Option<serde_json::Value>,
     pub bounded_read_evidence: Option<serde_json::Value>,
     pub graph_route_readiness: Option<serde_json::Value>,
+    pub route_ownership: Option<serde_json::Value>,
     pub query_runtime_preflight: Option<serde_json::Value>,
     pub search_candidate_shadow_evidence: Option<serde_json::Value>,
     pub library_readiness: Option<serde_json::Value>,
@@ -89,6 +90,9 @@ pub fn run_nowledge_mem_integration_bundle(
             "--graph-route-readiness-json" => {
                 inputs.graph_route_readiness = Some(read_json_arg(&mut args)?);
             }
+            "--route-ownership-json" => {
+                inputs.route_ownership = Some(read_json_arg(&mut args)?);
+            }
             "--query-runtime-preflight-json" => {
                 inputs.query_runtime_preflight = Some(read_json_arg(&mut args)?);
             }
@@ -134,6 +138,7 @@ pub fn nowledge_mem_integration_bundle_json(
         require_json(inputs.bounded_read_evidence, "--bounded-read-evidence-json")?;
     let graph_route_readiness =
         require_json(inputs.graph_route_readiness, "--graph-route-readiness-json")?;
+    let route_ownership = require_json(inputs.route_ownership, "--route-ownership-json")?;
     let query_runtime_preflight = require_json(
         inputs.query_runtime_preflight,
         "--query-runtime-preflight-json",
@@ -187,6 +192,7 @@ pub fn nowledge_mem_integration_bundle_json(
         "graph_route_readiness": graph_route_readiness,
         "replacement_summary_graph_route_alignment": graph_route_alignment,
         "graph_route_parity_alignment": graph_route_parity_alignment,
+        "route_ownership": route_ownership,
         "query_runtime_preflight": query_runtime_preflight,
         "replacement_summary_query_runtime_alignment": query_runtime_alignment,
         "search_candidate_shadow_evidence": search_candidate_shadow_evidence,
@@ -1233,8 +1239,10 @@ mod tests {
     use crate::{
         nowledge_mem_graph_read_route_catalog_digest, nowledge_mem_graph_read_route_spec,
         nowledge_mem_graph_read_route_specs_json, nowledge_mem_integration_readiness_json,
-        nowledge_mem_search_candidate_shadow_evidence_json,
-        NowledgeMemSearchCandidateShadowAccumulator, NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
+        nowledge_mem_route_ownership_all_skein, nowledge_mem_route_ownership_readiness,
+        nowledge_mem_search_candidate_shadow_evidence_json, NowledgeMemRouteOwnershipPolicy,
+        NowledgeMemRouteReadinessSummary, NowledgeMemSearchCandidateShadowAccumulator,
+        NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
         NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
     };
 
@@ -1562,6 +1570,7 @@ mod tests {
             replacement_summary: Some(ready_replacement_summary()),
             bounded_read_evidence: Some(ready_bounded_read_evidence()),
             graph_route_readiness: Some(ready_graph_route_readiness()),
+            route_ownership: Some(ready_route_ownership()),
             query_runtime_preflight: Some(ready_query_runtime_preflight()),
             search_candidate_shadow_evidence: Some(ready_search_candidate_shadow_evidence()),
             library_readiness: Some(ready_library_readiness()),
@@ -1745,6 +1754,30 @@ mod tests {
             "route_catalog_digest": nowledge_mem_graph_read_route_catalog_digest(),
             "blocker_codes": []
         })
+    }
+
+    fn ready_route_ownership() -> serde_json::Value {
+        nowledge_mem_route_ownership_readiness(
+            &nowledge_mem_route_ownership_all_skein(),
+            Some(&ready_route_readiness_summary()),
+            NowledgeMemRouteOwnershipPolicy::production_cutover(),
+        )
+        .json()
+    }
+
+    fn ready_route_readiness_summary() -> NowledgeMemRouteReadinessSummary {
+        NowledgeMemRouteReadinessSummary {
+            route_primary_ready: true,
+            primary_ready_routes: REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+                .iter()
+                .map(|route| (*route).to_string())
+                .collect(),
+            route_query_plan_evidence_ready: true,
+            route_query_profile_evidence_ready: true,
+            relationship_property_pruning_required_count: 0,
+            relationship_property_pruning_report_count: 0,
+            route_relationship_property_pruning_evidence_ready: true,
+        }
     }
 
     fn ready_graph_route_readiness() -> serde_json::Value {
