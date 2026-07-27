@@ -14,7 +14,7 @@ const ROUTE_PARITY_EVIDENCE_SOURCE: &str = "route_parity_evidence";
 const ROUTE_PARITY_FULL_MATCH_PER_MILLION: u64 = 1_000_000;
 
 pub fn nowledge_mem_integration_bundle_usage() -> String {
-    "nowledge-mem-integration-bundle requires [--require-ready] --submodule-path <path> --submodule-commit <commit> --legacy-data-retained --coexistence-mode shadow|side_by_side --content-store-present --content-store-engine sqlite --content-store-messages-available --content-store-source-chunks-available --previous-wrapper-preflight-json <path> --replacement-summary-json <path> --bounded-read-evidence-json <path> --graph-route-readiness-json <path> --query-runtime-preflight-json <path> --search-candidate-shadow-evidence-json <path> --library-readiness-json <path>"
+    "nowledge-mem-integration-bundle requires [--require-ready] --submodule-path <path> --submodule-commit <commit> --legacy-data-retained --coexistence-mode shadow|side_by_side --content-store-present --content-store-engine sqlite --content-store-messages-available --content-store-source-chunks-available --previous-wrapper-preflight-json <path> --replacement-summary-json <path> --bounded-read-evidence-json <path> --graph-route-readiness-json <path> --query-runtime-preflight-json <path> --search-candidate-shadow-evidence-json <path> --library-readiness-json <path> --blackbox-manifest-json <path>"
         .to_string()
 }
 
@@ -37,6 +37,7 @@ pub struct IntegrationBundleInputs {
     pub query_runtime_preflight: Option<serde_json::Value>,
     pub search_candidate_shadow_evidence: Option<serde_json::Value>,
     pub library_readiness: Option<serde_json::Value>,
+    pub blackbox_manifest: Option<serde_json::Value>,
 }
 
 pub fn run_nowledge_mem_integration_bundle(
@@ -96,6 +97,9 @@ pub fn run_nowledge_mem_integration_bundle(
             "--library-readiness-json" => {
                 inputs.library_readiness = Some(read_json_arg(&mut args)?);
             }
+            "--blackbox-manifest-json" => {
+                inputs.blackbox_manifest = Some(read_json_arg(&mut args)?);
+            }
             _ => {
                 return Err(SkeinError::Semantic(nowledge_mem_integration_bundle_usage()));
             }
@@ -138,6 +142,7 @@ pub fn nowledge_mem_integration_bundle_json(
         "--search-candidate-shadow-evidence-json",
     )?;
     let library_readiness = require_json(inputs.library_readiness, "--library-readiness-json")?;
+    let blackbox_manifest = require_json(inputs.blackbox_manifest, "--blackbox-manifest-json")?;
     let bounded_alignment =
         bounded_read_alignment_json(&bounded_read_evidence, &replacement_summary);
     let graph_route_alignment =
@@ -185,6 +190,7 @@ pub fn nowledge_mem_integration_bundle_json(
         "replacement_summary_query_runtime_alignment": query_runtime_alignment,
         "search_candidate_shadow_evidence": search_candidate_shadow_evidence,
         "library_readiness": library_readiness,
+        "blackbox_manifest": blackbox_manifest,
     }))
 }
 
@@ -1054,6 +1060,14 @@ mod tests {
                 ["route_catalog_metadata_ready_matches"],
             true
         );
+        assert_eq!(
+            bundle["blackbox_manifest"]["protocol"],
+            "skein-blackbox-report-v1"
+        );
+        assert_eq!(
+            bundle["blackbox_manifest"]["redaction"]["raw_query_text_copied"],
+            false
+        );
         assert_eq!(readiness["ready"], true);
         assert_eq!(readiness["failed_checks"], serde_json::json!([]));
     }
@@ -1223,6 +1237,7 @@ mod tests {
             query_runtime_preflight: Some(ready_query_runtime_preflight()),
             search_candidate_shadow_evidence: Some(ready_search_candidate_shadow_evidence()),
             library_readiness: Some(ready_library_readiness()),
+            blackbox_manifest: Some(ready_blackbox_manifest()),
         }
     }
 
@@ -1677,6 +1692,21 @@ mod tests {
                 "search_projection": {"ready": true, "blocker_codes": []},
                 "search_projection_shadow": {"ready": true, "blocker_codes": []},
                 "search_candidate_shadow": {"ready": true, "blocker_codes": []}
+            }
+        })
+    }
+
+    fn ready_blackbox_manifest() -> serde_json::Value {
+        serde_json::json!({
+            "protocol": "skein-blackbox-report-v1",
+            "artifact_dir_present": true,
+            "artifact_count": 2,
+            "events_path": "events.jsonl",
+            "redaction": {
+                "raw_query_text_copied": false,
+                "raw_parameters_copied": false,
+                "raw_artifact_payloads_copied": false,
+                "artifact_paths_are_relative": true
             }
         })
     }

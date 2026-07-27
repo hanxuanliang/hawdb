@@ -166,7 +166,7 @@ contract.
   - [x] Add a storage recovery evidence negative fixture that rejects reports
     whose raw checkpoint, WAL replay, or torn-tail fields contradict claimed
     readiness.
-- [ ] PR 7: Make background QoS a readiness gate.
+- [x] PR 7: Make background QoS a readiness gate.
   - Scope: connect resource classes for import, projection, compaction,
     analytics, and migration work to typed background-maintenance readiness.
   - Deliverables: foreground-first admission evidence, background deferral
@@ -193,6 +193,9 @@ contract.
     diagnostics.
   - Acceptance: `production_cutover_ready=true` is impossible unless every
     blocker above is proven by current, route-matching evidence.
+  - [x] Require blackbox redaction evidence in the Mem integration readiness
+    gate so retained diagnostics cannot copy raw query text, parameters,
+    artifact payloads, or absolute artifact paths.
 - [ ] PR 10: Remove or quarantine obsolete compatibility paths.
   - Scope: after gates are satisfied, remove unused CLI-only, Python-only, and
     request-time shadow compare code from the production path.

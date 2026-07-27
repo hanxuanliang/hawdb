@@ -1,4 +1,5 @@
 use crate::{
+    blackbox::BLACKBOX_REPORT_PROTOCOL,
     graph_route_readiness::{
         NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL, NMEM_GRAPH_ROUTE_READINESS_PROTOCOL,
     },
@@ -1377,6 +1378,46 @@ pub fn nowledge_mem_integration_readiness(
                 ],
             ),
         ),
+        check(
+            "blackbox_redaction",
+            [
+                str_path(bundle, &["blackbox_manifest", "protocol"]) == Some(BLACKBOX_REPORT_PROTOCOL),
+                bool_path(
+                    bundle,
+                    &["blackbox_manifest", "artifact_dir_present"],
+                ) == Some(true),
+                u64_path(bundle, &["blackbox_manifest", "artifact_count"])
+                    .is_some_and(|value| value > 0),
+                str_path(bundle, &["blackbox_manifest", "events_path"]) == Some("events.jsonl"),
+                bool_path(
+                    bundle,
+                    &["blackbox_manifest", "redaction", "raw_query_text_copied"],
+                ) == Some(false),
+                bool_path(
+                    bundle,
+                    &["blackbox_manifest", "redaction", "raw_parameters_copied"],
+                ) == Some(false),
+                bool_path(
+                    bundle,
+                    &["blackbox_manifest", "redaction", "raw_artifact_payloads_copied"],
+                ) == Some(false),
+                bool_path(
+                    bundle,
+                    &["blackbox_manifest", "redaction", "artifact_paths_are_relative"],
+                ) == Some(true),
+            ],
+            [
+                "blackbox_manifest.protocol",
+                "blackbox_manifest.artifact_dir_present",
+                "blackbox_manifest.artifact_count",
+                "blackbox_manifest.events_path",
+                "blackbox_manifest.redaction.raw_query_text_copied",
+                "blackbox_manifest.redaction.raw_parameters_copied",
+                "blackbox_manifest.redaction.raw_artifact_payloads_copied",
+                "blackbox_manifest.redaction.artifact_paths_are_relative",
+            ],
+            blocker_codes(bundle, &[&["blackbox_manifest", "blocker_codes"][..]]),
+        ),
     ];
     let ready = checks.iter().all(|check| check.ready);
     let failed_checks = checks
@@ -1722,6 +1763,22 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<NowledgeMemInteg
                 "library_readiness.open_report.graph_opened",
                 "library_readiness.open_report.search_projection_opened",
                 "library_readiness.readiness_by_area",
+            ],
+        ));
+    }
+    if !blackbox_redaction_ready(bundle) {
+        actions.push(next_action(
+            "attach_blackbox_redaction_report",
+            "Nowledge Mem cutover requires redacted blackbox evidence before diagnostics can be retained",
+            [
+                "blackbox_manifest.protocol",
+                "blackbox_manifest.artifact_dir_present",
+                "blackbox_manifest.artifact_count",
+                "blackbox_manifest.events_path",
+                "blackbox_manifest.redaction.raw_query_text_copied",
+                "blackbox_manifest.redaction.raw_parameters_copied",
+                "blackbox_manifest.redaction.raw_artifact_payloads_copied",
+                "blackbox_manifest.redaction.artifact_paths_are_relative",
             ],
         ));
     }
@@ -2861,6 +2918,37 @@ fn library_readiness_area_ready(bundle: &serde_json::Value, area: &str) -> bool 
         == Some(true)
 }
 
+fn blackbox_redaction_ready(bundle: &serde_json::Value) -> bool {
+    str_path(bundle, &["blackbox_manifest", "protocol"]) == Some(BLACKBOX_REPORT_PROTOCOL)
+        && bool_path(bundle, &["blackbox_manifest", "artifact_dir_present"]) == Some(true)
+        && u64_path(bundle, &["blackbox_manifest", "artifact_count"]).is_some_and(|value| value > 0)
+        && str_path(bundle, &["blackbox_manifest", "events_path"]) == Some("events.jsonl")
+        && bool_path(
+            bundle,
+            &["blackbox_manifest", "redaction", "raw_query_text_copied"],
+        ) == Some(false)
+        && bool_path(
+            bundle,
+            &["blackbox_manifest", "redaction", "raw_parameters_copied"],
+        ) == Some(false)
+        && bool_path(
+            bundle,
+            &[
+                "blackbox_manifest",
+                "redaction",
+                "raw_artifact_payloads_copied",
+            ],
+        ) == Some(false)
+        && bool_path(
+            bundle,
+            &[
+                "blackbox_manifest",
+                "redaction",
+                "artifact_paths_are_relative",
+            ],
+        ) == Some(true)
+}
+
 fn replacement_summary_storage_recovery_ready(bundle: &serde_json::Value) -> bool {
     [
         &[
@@ -3102,7 +3190,70 @@ mod tests {
             .checks
             .iter()
             .any(|check| check.name == "query_runtime_preflight"));
+        assert!(report
+            .checks
+            .iter()
+            .any(|check| check.name == "blackbox_redaction"));
         assert_eq!(report.json()["ready"], true);
+    }
+
+    #[test]
+    fn requires_blackbox_redaction_manifest() {
+        let mut bundle = ready_bundle();
+        bundle.as_object_mut().unwrap().remove("blackbox_manifest");
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert!(report["failed_checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check == "blackbox_redaction"));
+        let blackbox_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "blackbox_redaction")
+            .unwrap();
+        assert_eq!(
+            blackbox_check["failed_evidence_fields"],
+            serde_json::json!([
+                "blackbox_manifest.protocol",
+                "blackbox_manifest.artifact_dir_present",
+                "blackbox_manifest.artifact_count",
+                "blackbox_manifest.events_path",
+                "blackbox_manifest.redaction.raw_query_text_copied",
+                "blackbox_manifest.redaction.raw_parameters_copied",
+                "blackbox_manifest.redaction.raw_artifact_payloads_copied",
+                "blackbox_manifest.redaction.artifact_paths_are_relative"
+            ])
+        );
+        assert!(report["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "attach_blackbox_redaction_report"));
+    }
+
+    #[test]
+    fn rejects_blackbox_manifest_that_copies_raw_query_text() {
+        let mut bundle = ready_bundle();
+        bundle["blackbox_manifest"]["redaction"]["raw_query_text_copied"] = serde_json::json!(true);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        let blackbox_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "blackbox_redaction")
+            .unwrap();
+        assert_eq!(
+            blackbox_check["failed_evidence_fields"],
+            serde_json::json!(["blackbox_manifest.redaction.raw_query_text_copied"])
+        );
     }
 
     #[test]
@@ -5600,6 +5751,7 @@ mod tests {
                 &search_candidate_evidence.evidence(),
             );
         bundle["library_readiness"] = ready_library_readiness();
+        bundle["blackbox_manifest"] = ready_blackbox_manifest();
         bundle
     }
 
@@ -5903,6 +6055,45 @@ mod tests {
             "search_projection_shadow_evidence": {
                 "ready": true,
                 "blocker_codes": []
+            }
+        })
+    }
+
+    fn ready_blackbox_manifest() -> serde_json::Value {
+        serde_json::json!({
+            "protocol": "skein-blackbox-report-v1",
+            "protocol_version": 1,
+            "run_id": "integration-ready",
+            "run_status": "completed",
+            "exit_code": 0,
+            "generated_unix_seconds": 1,
+            "artifact_dir_present": true,
+            "artifact_count": 3,
+            "events_path": "events.jsonl",
+            "artifacts": [
+                {
+                    "name": "replacement-summary.json",
+                    "format": "json",
+                    "byte_len": 256,
+                    "checksum": 1,
+                    "json": {
+                        "parse_ready": true,
+                        "protocol": "skein-nowledge-replacement-summary",
+                        "ready": true,
+                        "blocker_codes": [],
+                        "blocking_categories": [],
+                        "failed_checks": [],
+                        "missing_evidence": [],
+                        "production_cutover_ready": true,
+                        "production_replacement_per_million": 1000000
+                    }
+                }
+            ],
+            "redaction": {
+                "raw_query_text_copied": false,
+                "raw_parameters_copied": false,
+                "raw_artifact_payloads_copied": false,
+                "artifact_paths_are_relative": true
             }
         })
     }
