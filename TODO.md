@@ -56,6 +56,8 @@ query family, or cutover gate requires them.
   - [x] Redact integration-bundle input read and parse failures by default so
     bundle assembly does not copy local paths or payload fragments into command
     errors.
+  - [x] Redact query-runtime preflight probe JSON parse failures by default so
+    Cypher text and parameters are not copied into command errors.
 
 ## P0: Concrete Cutover Blockers
 

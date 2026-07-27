@@ -382,10 +382,10 @@ fn read_json_file(path: &Path) -> Result<serde_json::Value> {
             error.kind()
         ))
     })?;
-    serde_json::from_str(&content).map_err(|error| {
-        SkeinError::Semantic(format!(
-            "failed to parse query runtime preflight JSON: {error}"
-        ))
+    serde_json::from_str(&content).map_err(|_| {
+        SkeinError::Semantic(
+            "failed to parse query runtime preflight JSON: invalid_json".to_string(),
+        )
     })
 }
 
@@ -802,6 +802,28 @@ mod tests {
         assert_eq!(report["probes"][0]["success"], false);
         assert_eq!(report["probes"][0]["error_class"], "parse");
         assert!(!report.to_string().contains("do-not-emit"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn query_runtime_preflight_probe_json_parse_errors_are_redacted_by_default() {
+        let root = unique_test_dir("query-runtime-preflight-parse-redaction");
+        let probe_path = root.join("secret-probe-path-do-not-emit.json");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            &probe_path,
+            "{ \"cypher\": \"MATCH (m {id: 'secret-cypher-do-not-emit'})\", \"parameters\": ",
+        )
+        .unwrap();
+
+        let error = super::read_json_file(&probe_path).unwrap_err().to_string();
+
+        assert_eq!(
+            error,
+            "semantic error: failed to parse query runtime preflight JSON: invalid_json"
+        );
+        assert!(!error.contains("secret-probe-path-do-not-emit"));
+        assert!(!error.contains("secret-cypher-do-not-emit"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
