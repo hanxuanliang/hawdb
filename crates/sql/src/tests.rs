@@ -9,7 +9,7 @@ fn parses_postgres_select_subset() {
     let statement = parse_postgres_sql(
         "SELECT query, elapsed_micros AS elapsed FROM system.slow_queries \
          WHERE start_time >= '2026-07-23T00:00:00Z' AND work_class IN ('query', 'shadow') \
-         ORDER BY elapsed_micros DESC LIMIT 20 OFFSET 5",
+        ORDER BY elapsed_micros DESC LIMIT 20 OFFSET 5",
     )
     .expect("valid PostgreSQL select");
 

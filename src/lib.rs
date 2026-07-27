@@ -166,10 +166,13 @@ pub use nowledge_mem::{
     nowledge_mem_bounded_read_evidence_json,
     nowledge_mem_bounded_read_evidence_json_with_route_readiness,
     nowledge_mem_bounded_read_evidence_json_with_routes, nowledge_mem_graph_config,
-    nowledge_mem_graph_config_with_search_mode, nowledge_mem_required_query_families_for_route,
+    nowledge_mem_graph_config_with_search_mode, nowledge_mem_graph_read_route_spec,
+    nowledge_mem_graph_read_route_spec_json, nowledge_mem_graph_read_route_specs_json,
+    nowledge_mem_required_query_families_for_route,
     nowledge_mem_search_candidate_shadow_evidence_json, NowledgeMemBackgroundMaintenanceReport,
     NowledgeMemEmbeddedStore, NowledgeMemEmbeddedStoreHandle, NowledgeMemGraph,
-    NowledgeMemGraphMode, NowledgeMemLibraryReadinessReport, NowledgeMemOpenOptions,
+    NowledgeMemGraphMode, NowledgeMemGraphReadRouteEvidenceKind, NowledgeMemGraphReadRouteOwner,
+    NowledgeMemGraphReadRouteSpec, NowledgeMemLibraryReadinessReport, NowledgeMemOpenOptions,
     NowledgeMemOpenReport, NowledgeMemQueryExecutionPath, NowledgeMemQueryOutput,
     NowledgeMemQueryReport, NowledgeMemQueryReportOptions, NowledgeMemReadOptions,
     NowledgeMemReadOutput, NowledgeMemReadReport, NowledgeMemReadinessAreaSummary,
@@ -215,8 +218,10 @@ pub use query_runtime_preflight::{
     query_runtime_preflight_json, run_nowledge_query_runtime_preflight,
 };
 pub use replacement_summary::{
+    nowledge_graph_route_readiness_summary, nowledge_graph_route_readiness_summary_from_bundle,
     nowledge_replacement_summary_json, nowledge_replacement_summary_json_with_options,
-    nowledge_replacement_summary_usage, NowledgeReplacementSummaryOptions,
+    nowledge_replacement_summary_usage, GraphRouteReadinessSummary,
+    NowledgeReplacementSummaryOptions,
 };
 pub use schema::{
     BasicGraphStatistics, CompositeIndexDescriptor, ConstraintDescriptor, ConstraintId,

@@ -1105,18 +1105,58 @@ pub fn storage_recovery_evidence_health(
         .and_then(serde_json::Value::as_str)
         .map(|protocol| protocol == "skein-storage-recovery-report");
     let readiness = storage_recovery.get("readiness");
-    let durable_recovery_observed = readiness
+    let readiness_durable_recovery_observed = readiness
         .and_then(|readiness| readiness.get("durable_recovery_observed"))
         .and_then(serde_json::Value::as_bool);
-    let checkpoint_boundary_present = readiness
+    let readiness_checkpoint_boundary_present = readiness
         .and_then(|readiness| readiness.get("checkpoint_boundary_present"))
         .and_then(serde_json::Value::as_bool);
-    let wal_replay_bounded = readiness
+    let readiness_wal_replay_bounded = readiness
         .and_then(|readiness| readiness.get("wal_replay_bounded"))
         .and_then(serde_json::Value::as_bool);
-    let torn_tail_clean = readiness
+    let readiness_torn_tail_clean = readiness
         .and_then(|readiness| readiness.get("torn_tail_clean"))
         .and_then(serde_json::Value::as_bool);
+    let durable_recovery_observed = Some(
+        readiness_durable_recovery_observed == Some(true)
+            && storage_recovery
+                .get("durable")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true),
+    );
+    let checkpoint_boundary_present = Some(
+        readiness_checkpoint_boundary_present == Some(true)
+            && storage_recovery
+                .get("checkpoint_epoch")
+                .and_then(serde_json::Value::as_u64)
+                .is_some()
+            && storage_recovery
+                .get("checkpoint_commit_epoch")
+                .and_then(serde_json::Value::as_u64)
+                .is_some(),
+    );
+    let replayed_wal_entries = storage_recovery
+        .get("replayed_wal_entries")
+        .and_then(serde_json::Value::as_u64);
+    let max_wal_replay_entries = storage_recovery
+        .get("max_wal_replay_entries")
+        .and_then(serde_json::Value::as_u64);
+    let wal_replay_bounded = Some(
+        readiness_wal_replay_bounded == Some(true)
+            && replayed_wal_entries
+                .zip(max_wal_replay_entries)
+                .is_some_and(|(replayed, max)| replayed <= max),
+    );
+    let torn_tail_clean = Some(
+        readiness_torn_tail_clean == Some(true)
+            && storage_recovery
+                .get("torn_tail_ignored")
+                .and_then(serde_json::Value::as_bool)
+                == Some(false)
+            && storage_recovery
+                .get("torn_tail_reason")
+                .is_none_or(serde_json::Value::is_null),
+    );
     let mut blocker_codes = Vec::new();
     let mut blockers = Vec::new();
     if protocol_matches != Some(true) {
@@ -2391,6 +2431,13 @@ mod tests {
                 storage_recovery: Some(serde_json::json!({
                     "protocol": "skein-storage-recovery-report",
                     "storage_version": "skein-storage-v1",
+                    "durable": true,
+                    "checkpoint_epoch": 7,
+                    "checkpoint_commit_epoch": 7,
+                    "replayed_wal_entries": 1,
+                    "max_wal_replay_entries": 1024,
+                    "torn_tail_ignored": false,
+                    "torn_tail_reason": null,
                     "readiness": {
                         "durable_recovery_observed": true,
                         "checkpoint_boundary_present": true,
@@ -2988,6 +3035,44 @@ mod tests {
             vec![
                 "protocol_mismatch".to_string(),
                 "durable_recovery_not_observed".to_string(),
+                "checkpoint_boundary_missing".to_string(),
+                "wal_replay_unbounded".to_string(),
+                "torn_tail_observed".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn storage_recovery_evidence_health_recomputes_raw_recovery_fields() {
+        let report = serde_json::json!({
+            "protocol": "skein-storage-recovery-report",
+            "durable": true,
+            "checkpoint_epoch": 7,
+            "checkpoint_commit_epoch": null,
+            "replayed_wal_entries": 3,
+            "max_wal_replay_entries": 2,
+            "torn_tail_ignored": true,
+            "torn_tail_reason": "partial wal entry",
+            "readiness": {
+                "durable_recovery_observed": true,
+                "checkpoint_boundary_present": true,
+                "wal_replay_bounded": true,
+                "torn_tail_clean": true
+            }
+        });
+
+        let health = super::storage_recovery_evidence_health(Some(&report), true);
+
+        assert!(health.present);
+        assert!(!health.ready);
+        assert_eq!(health.protocol_matches, Some(true));
+        assert_eq!(health.durable_recovery_observed, Some(true));
+        assert_eq!(health.checkpoint_boundary_present, Some(false));
+        assert_eq!(health.wal_replay_bounded, Some(false));
+        assert_eq!(health.torn_tail_clean, Some(false));
+        assert_eq!(
+            health.blocker_codes,
+            vec![
                 "checkpoint_boundary_missing".to_string(),
                 "wal_replay_unbounded".to_string(),
                 "torn_tail_observed".to_string()

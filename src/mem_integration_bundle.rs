@@ -1,4 +1,8 @@
-use crate::{Result, SkeinError, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES};
+use crate::{
+    graph_route_readiness::NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL,
+    nowledge_graph_route_readiness_summary, Result, SkeinError,
+    REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -6,7 +10,6 @@ const NOWLEDGE_MEM_SKEIN_INTEGRATION_BUNDLE_PROTOCOL: &str =
     "nowledge-mem-skein-integration-bundle";
 const SKEIN_NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL: &str =
     "skein-nowledge-query-runtime-preflight-v1";
-const NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL: &str = "nmem-graph-route-evidence-v1";
 const ROUTE_PARITY_EVIDENCE_SOURCE: &str = "route_parity_evidence";
 const ROUTE_PARITY_FULL_MATCH_PER_MILLION: u64 = 1_000_000;
 
@@ -190,48 +193,43 @@ fn graph_route_alignment_json(
     replacement_summary: &serde_json::Value,
 ) -> serde_json::Value {
     let summary = replacement_summary
-        .get("bounded_read_evidence")
+        .get("graph_route_readiness")
         .unwrap_or(&serde_json::Value::Null);
-    let evidence_present = !graph_route_readiness.is_null();
-    let summary_present = !summary.is_null();
-    let evidence_protocol_matches = str_path(graph_route_readiness, &["evidence_protocol"])
-        == Some(NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL);
-    let evidence_ready = bool_path(graph_route_readiness, &["evidence_ready"]) == Some(true);
-    let evidence_route_primary_ready =
-        bool_path(graph_route_readiness, &["route_primary_ready"]) == Some(true);
-    let summary_route_primary_ready = bool_path(summary, &["route_primary_ready"]) == Some(true);
+    let evidence = nowledge_graph_route_readiness_summary(graph_route_readiness);
+    let summary = nowledge_graph_route_readiness_summary(summary);
+    let evidence_present = evidence.present;
+    let summary_present = summary.present;
+    let evidence_protocol_matches =
+        evidence.evidence_protocol.as_deref() == Some(NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL);
+    let evidence_ready = evidence.evidence_ready == Some(true);
+    let evidence_route_primary_ready = evidence.route_primary_ready == Some(true);
+    let summary_route_primary_ready = summary.route_primary_ready == Some(true);
     let evidence_route_query_plan_evidence_ready =
-        bool_path(graph_route_readiness, &["route_query_plan_evidence_ready"]) == Some(true);
+        evidence.route_query_plan_evidence_ready == Some(true);
     let summary_route_query_plan_evidence_ready =
-        bool_path(summary, &["route_query_plan_evidence_ready"]) == Some(true);
-    let evidence_route_query_profile_evidence_ready = bool_path(
-        graph_route_readiness,
-        &["route_query_profile_evidence_ready"],
-    ) == Some(true);
+        summary.route_query_plan_evidence_ready == Some(true);
+    let evidence_route_query_profile_evidence_ready =
+        evidence.route_query_profile_evidence_ready == Some(true);
     let summary_route_query_profile_evidence_ready =
-        bool_path(summary, &["route_query_profile_evidence_ready"]) == Some(true);
-    let evidence_route_relationship_property_pruning_evidence_ready = bool_path(
-        graph_route_readiness,
-        &["route_relationship_property_pruning_evidence_ready"],
-    ) == Some(true);
-    let summary_route_relationship_property_pruning_evidence_ready = bool_path(
-        summary,
-        &["route_relationship_property_pruning_evidence_ready"],
-    ) == Some(true);
-    let evidence_relationship_property_pruning_required_count = u64_path(
-        graph_route_readiness,
-        &["relationship_property_pruning_required_count"],
-    );
+        summary.route_query_profile_evidence_ready == Some(true);
+    let evidence_route_relationship_property_pruning_evidence_ready =
+        evidence.route_relationship_property_pruning_evidence_ready == Some(true);
+    let summary_route_relationship_property_pruning_evidence_ready =
+        summary.route_relationship_property_pruning_evidence_ready == Some(true);
+    let evidence_relationship_property_pruning_required_count =
+        evidence.relationship_property_pruning_required_count;
     let summary_relationship_property_pruning_required_count =
-        u64_path(summary, &["relationship_property_pruning_required_count"]);
-    let evidence_relationship_property_pruning_report_count = u64_path(
-        graph_route_readiness,
-        &["relationship_property_pruning_report_count"],
-    );
+        summary.relationship_property_pruning_required_count;
+    let evidence_relationship_property_pruning_report_count =
+        evidence.relationship_property_pruning_report_count;
     let summary_relationship_property_pruning_report_count =
-        u64_path(summary, &["relationship_property_pruning_report_count"]);
+        summary.relationship_property_pruning_report_count;
+    let evidence_route_catalog_metadata_ready = evidence.route_catalog_metadata_ready;
+    let summary_route_catalog_metadata_ready = summary.route_catalog_metadata_ready;
+    let route_catalog_metadata_ready_matches =
+        evidence_route_catalog_metadata_ready == summary_route_catalog_metadata_ready;
     let evidence_primary_ready_routes = graph_route_primary_ready_routes(graph_route_readiness);
-    let summary_primary_ready_routes = string_set_path(summary, &["primary_ready_routes"]);
+    let summary_primary_ready_routes = summary.covered_routes.into_iter().collect::<BTreeSet<_>>();
     let required_routes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
         .iter()
         .map(|route| (*route).to_string())
@@ -276,6 +274,9 @@ fn graph_route_alignment_json(
         route_relationship_property_pruning_evidence_ready_matches,
         relationship_property_pruning_required_count_matches,
         relationship_property_pruning_report_count_matches,
+        evidence_route_catalog_metadata_ready,
+        summary_route_catalog_metadata_ready,
+        route_catalog_metadata_ready_matches,
         primary_ready_routes_match,
         evidence_required_routes_covered,
         summary_required_routes_covered,
@@ -305,6 +306,9 @@ fn graph_route_alignment_json(
         "evidence_relationship_property_pruning_report_count": evidence_relationship_property_pruning_report_count,
         "summary_relationship_property_pruning_report_count": summary_relationship_property_pruning_report_count,
         "relationship_property_pruning_report_count_matches": relationship_property_pruning_report_count_matches,
+        "evidence_route_catalog_metadata_ready": evidence_route_catalog_metadata_ready,
+        "summary_route_catalog_metadata_ready": summary_route_catalog_metadata_ready,
+        "route_catalog_metadata_ready_matches": route_catalog_metadata_ready_matches,
         "primary_ready_routes_match": primary_ready_routes_match,
         "evidence_required_routes_covered": evidence_required_routes_covered,
         "summary_required_routes_covered": summary_required_routes_covered,
@@ -447,6 +451,9 @@ struct GraphRouteAlignment {
     route_relationship_property_pruning_evidence_ready_matches: bool,
     relationship_property_pruning_required_count_matches: bool,
     relationship_property_pruning_report_count_matches: bool,
+    evidence_route_catalog_metadata_ready: bool,
+    summary_route_catalog_metadata_ready: bool,
+    route_catalog_metadata_ready_matches: bool,
     primary_ready_routes_match: bool,
     evidence_required_routes_covered: bool,
     summary_required_routes_covered: bool,
@@ -472,6 +479,9 @@ impl GraphRouteAlignment {
             && self.route_relationship_property_pruning_evidence_ready_matches
             && self.relationship_property_pruning_required_count_matches
             && self.relationship_property_pruning_report_count_matches
+            && self.evidence_route_catalog_metadata_ready
+            && self.summary_route_catalog_metadata_ready
+            && self.route_catalog_metadata_ready_matches
             && self.primary_ready_routes_match
             && self.evidence_required_routes_covered
             && self.summary_required_routes_covered
@@ -483,7 +493,7 @@ impl GraphRouteAlignment {
             blockers.push("graph_route_readiness_missing");
         }
         if !self.summary_present {
-            blockers.push("replacement_summary_bounded_read_evidence_missing");
+            blockers.push("replacement_summary_graph_route_readiness_missing");
         }
         if !self.evidence_protocol_matches {
             blockers.push("graph_route_evidence_protocol_mismatch");
@@ -532,6 +542,15 @@ impl GraphRouteAlignment {
         }
         if !self.relationship_property_pruning_report_count_matches {
             blockers.push("graph_route_relationship_property_pruning_report_count_mismatch");
+        }
+        if !self.evidence_route_catalog_metadata_ready {
+            blockers.push("graph_route_catalog_metadata_not_ready");
+        }
+        if !self.summary_route_catalog_metadata_ready {
+            blockers.push("replacement_summary_route_catalog_metadata_not_ready");
+        }
+        if !self.route_catalog_metadata_ready_matches {
+            blockers.push("graph_route_catalog_metadata_ready_mismatch");
         }
         if !self.primary_ready_routes_match {
             blockers.push("graph_route_primary_ready_routes_mismatch");
@@ -990,6 +1009,7 @@ fn value_path<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a ser
 mod tests {
     use super::{nowledge_mem_integration_bundle_json, IntegrationBundleInputs};
     use crate::{
+        nowledge_mem_graph_read_route_spec, nowledge_mem_graph_read_route_specs_json,
         nowledge_mem_integration_readiness_json,
         nowledge_mem_search_candidate_shadow_evidence_json,
         NowledgeMemSearchCandidateShadowAccumulator, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
@@ -1017,6 +1037,21 @@ mod tests {
         );
         assert_eq!(
             bundle["replacement_summary_graph_route_alignment"]["evidence_ready"],
+            true
+        );
+        assert_eq!(
+            bundle["replacement_summary_graph_route_alignment"]
+                ["evidence_route_catalog_metadata_ready"],
+            true
+        );
+        assert_eq!(
+            bundle["replacement_summary_graph_route_alignment"]
+                ["summary_route_catalog_metadata_ready"],
+            true
+        );
+        assert_eq!(
+            bundle["replacement_summary_graph_route_alignment"]
+                ["route_catalog_metadata_ready_matches"],
             true
         );
         assert_eq!(readiness["ready"], true);
@@ -1111,9 +1146,9 @@ mod tests {
     #[test]
     fn generated_bundle_detects_graph_route_pruning_summary_mismatch() {
         let mut inputs = ready_inputs();
-        inputs.replacement_summary.as_mut().unwrap()["bounded_read_evidence"]
+        inputs.replacement_summary.as_mut().unwrap()["graph_route_readiness"]
             ["relationship_property_pruning_report_count"] = serde_json::json!(1);
-        inputs.replacement_summary.as_mut().unwrap()["bounded_read_evidence"]
+        inputs.replacement_summary.as_mut().unwrap()["graph_route_readiness"]
             ["route_relationship_property_pruning_evidence_ready"] = serde_json::json!(false);
 
         let bundle = nowledge_mem_integration_bundle_json(inputs).unwrap();
@@ -1155,7 +1190,7 @@ mod tests {
         );
         assert_eq!(
             bundle["graph_route_parity_alignment"]["not_ready_routes"],
-            serde_json::json!(["/graph/overview"])
+            serde_json::json!([REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES[0]])
         );
         assert_eq!(readiness["ready"], false);
         assert!(readiness["failed_checks"]
@@ -1249,6 +1284,7 @@ mod tests {
                 "blocker_codes": []
             },
             "bounded_read_evidence": ready_bounded_read_evidence(),
+            "graph_route_readiness": ready_graph_route_readiness(),
             "query_runtime_preflight": ready_replacement_summary_query_runtime_preflight(),
             "cutover_evidence": {
                 "storage_recovery_required": true,
@@ -1348,6 +1384,16 @@ mod tests {
                     .unwrap_or("memory_lookup");
                 let mut object = serde_json::Map::new();
                 object.insert("route".to_string(), serde_json::json!(route));
+                let spec = nowledge_mem_graph_read_route_spec(route).unwrap();
+                object.insert("owner".to_string(), serde_json::json!(spec.owner.as_str()));
+                object.insert(
+                    "required_evidence_kind".to_string(),
+                    serde_json::json!(spec.required_evidence_kind.as_str()),
+                );
+                object.insert(
+                    "stale_on_catalog_change".to_string(),
+                    serde_json::json!(spec.stale_on_catalog_change),
+                );
                 object.insert("shadow_compare_ready".to_string(), serde_json::json!(true));
                 object.insert(
                     "shadow_compare_evidence_source".to_string(),
@@ -1467,6 +1513,7 @@ mod tests {
             "route_relationship_property_pruning_evidence_ready": true,
             "route_primary_ready": true,
             "route_primary_blocker_codes": [],
+            "route_catalog": nowledge_mem_graph_read_route_specs_json(),
             "routes": routes
         })
     }
@@ -1613,7 +1660,7 @@ mod tests {
             "protocol": "skein-nowledge-mem-library-readiness-v1",
             "present": true,
             "ready": true,
-            "ready_area_count": 7,
+            "ready_area_count": 8,
             "blocked_area_count": 0,
             "blocker_codes": [],
             "open_report": {
@@ -1626,8 +1673,10 @@ mod tests {
                 "storage": {"ready": true, "blocker_codes": []},
                 "background": {"ready": true, "blocker_codes": []},
                 "query_family": {"ready": true, "blocker_codes": []},
+                "graph_route": {"ready": true, "blocker_codes": []},
                 "search_projection": {"ready": true, "blocker_codes": []},
-                "search_projection_shadow": {"ready": true, "blocker_codes": []}
+                "search_projection_shadow": {"ready": true, "blocker_codes": []},
+                "search_candidate_shadow": {"ready": true, "blocker_codes": []}
             }
         })
     }

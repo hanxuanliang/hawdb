@@ -556,7 +556,10 @@ mod tests {
             REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len()
         );
         assert_eq!(report["route_coverage_ready"], true);
-        assert_eq!(report["probes"][0]["route"], "/graph/overview");
+        assert_eq!(
+            report["probes"][0]["route"],
+            REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES[0]
+        );
         assert_eq!(report["probes"][0]["query_family"], "memory_lookup");
         assert_eq!(report["probes"][0]["ready"], true);
         assert!(report["probes"][0].get("rows").is_none());

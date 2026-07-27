@@ -1,4 +1,5 @@
 use crate::{
+    nowledge_mem_graph_read_route_spec, nowledge_mem_graph_read_route_specs_json,
     nowledge_mem_required_query_families_for_route, Result, SkeinError,
     NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
     REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
@@ -165,6 +166,7 @@ pub fn nowledge_graph_route_readiness_json(
         "route_relationship_property_pruning_evidence_ready": route_relationship_property_pruning_evidence_ready,
         "route_primary_ready": route_primary_ready,
         "route_primary_blocker_codes": route_primary_blocker_codes,
+        "route_catalog": nowledge_mem_graph_read_route_specs_json(),
         "routes": routes.into_iter().map(RouteEvidence::json).collect::<Vec<_>>(),
     }))
 }
@@ -437,7 +439,8 @@ impl RouteEvidence {
             .into_iter()
             .map(QueryRuntimeReport::json)
             .collect::<Vec<_>>();
-        serde_json::json!({
+        let route_catalog_metadata = nowledge_mem_graph_read_route_spec(&self.route);
+        let mut json = serde_json::json!({
             "route": self.route,
             "shadow_compare_ready": self.shadow_compare_ready,
             "shadow_compare_evidence_source": self.shadow_compare_evidence_source,
@@ -462,7 +465,20 @@ impl RouteEvidence {
             "query_profile_evidence_ready": query_profile_evidence_ready,
             "query_reports": query_reports,
             "blocker_codes": self.blocker_codes,
-        })
+        });
+        if let Some(spec) = route_catalog_metadata {
+            let object = json.as_object_mut().expect("route JSON is an object");
+            object.insert("owner".to_string(), serde_json::json!(spec.owner.as_str()));
+            object.insert(
+                "required_evidence_kind".to_string(),
+                serde_json::json!(spec.required_evidence_kind.as_str()),
+            );
+            object.insert(
+                "stale_on_catalog_change".to_string(),
+                serde_json::json!(spec.stale_on_catalog_change),
+            );
+        }
+        json
     }
 }
 
@@ -1016,7 +1032,9 @@ fn value_path<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a ser
 #[cfg(test)]
 mod tests {
     use super::nowledge_graph_route_readiness_json;
-    use crate::REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES;
+    use crate::{
+        nowledge_mem_graph_read_route_specs_json, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+    };
 
     #[test]
     fn route_readiness_reports_ready_for_all_required_routes() {
@@ -1074,6 +1092,22 @@ mod tests {
             readiness["covered_routes"],
             serde_json::json!(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES)
         );
+        assert_eq!(
+            readiness["route_catalog"],
+            nowledge_mem_graph_read_route_specs_json()
+        );
+        let search_route = readiness["routes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|route| route["route"] == "/graph/search")
+            .unwrap();
+        assert_eq!(search_route["owner"], "search_runtime");
+        assert_eq!(
+            search_route["required_evidence_kind"],
+            "search_candidate_shadow"
+        );
+        assert_eq!(search_route["stale_on_catalog_change"], true);
         assert_eq!(readiness["missing_required_routes"], serde_json::json!([]));
         assert_eq!(readiness["required_routes_covered"], true);
         assert_eq!(readiness["unknown_routes"], serde_json::json!([]));
@@ -1111,7 +1145,7 @@ mod tests {
         );
         assert_eq!(
             readiness["missing_required_routes"],
-            serde_json::json!(["/graph/shortest-path"])
+            serde_json::json!([REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.last().unwrap()])
         );
     }
 

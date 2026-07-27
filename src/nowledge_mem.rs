@@ -16,6 +16,7 @@ use crate::{
     SlowQueryLogRecordSummary, Value,
 };
 use crate::{
+    graph_route_readiness::NMEM_GRAPH_ROUTE_READINESS_PROTOCOL,
     nowledge_inventory::{
         background_maintenance_evidence_health, background_maintenance_summary_to_json,
         replacement_readiness_family_evidence_health, REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
@@ -149,8 +150,23 @@ pub const NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE: &str = "skein";
 pub const NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_ENGINE: &str = "skein-shadow";
 pub const NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_PRIMARY_ENGINE: &str = "lancedb";
 pub const NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_SHADOW_ENGINE: &str = "skein";
+const NOWLEDGE_SEARCH_PROJECTION_EVIDENCE_PROTOCOL: &str =
+    "skein-nowledge-search-projection-evidence";
+const NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL: &str =
+    "skein-nowledge-search-projection-shadow-evidence";
+const NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE: &str = "skein-rust-cli";
+const SEARCH_PROJECTION_SHADOW_PUSHDOWN_NOT_READY: &str =
+    "search_projection_shadow_pushdown_evidence_not_ready";
+const SKEIN_SEARCH_PROJECTION_SEGMENT_DESCRIPTOR_MISSING: &str =
+    "skein_search_projection_segment_descriptor_missing";
+const SKEIN_SEARCH_PROJECTION_SEGMENT_DESCRIPTOR_FIELDS_MISSING: &str =
+    "skein_search_projection_segment_descriptor_fields_missing";
 pub const REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES: &[&str] = &[
+    "/communities",
+    "/communities/{community_id}",
     "/graph/overview",
+    "/graph/sample",
+    "/graph/search",
     "/graph/explore",
     "/graph/expand/{node_id}",
     "/graph/live-preview",
@@ -165,11 +181,153 @@ pub const REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES: &[&str] = &[
     "/graph/node-details/{node_id}",
     "/graph/orphans",
     "/graph/shortest-path",
+    "/sources/{source_id}",
+    "/stats/entity-relations",
+    "/stats/sources",
+    "/stats/top-communities",
+    "/entities",
+    "/entities/{entity_id}/relationships",
+    "/agent/evolves",
 ];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NowledgeMemGraphReadRouteOwner {
+    GraphRuntime,
+    SearchRuntime,
+    ReadBatchRuntime,
+}
+
+impl NowledgeMemGraphReadRouteOwner {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::GraphRuntime => "graph_runtime",
+            Self::SearchRuntime => "search_runtime",
+            Self::ReadBatchRuntime => "read_batch_runtime",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NowledgeMemGraphReadRouteEvidenceKind {
+    GraphRouteExecution,
+    SearchCandidateShadow,
+    ReadBatchRuntime,
+}
+
+impl NowledgeMemGraphReadRouteEvidenceKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::GraphRouteExecution => "graph_route_execution",
+            Self::SearchCandidateShadow => "search_candidate_shadow",
+            Self::ReadBatchRuntime => "read_batch_runtime",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NowledgeMemGraphReadRouteSpec {
+    pub route: &'static str,
+    pub owner: NowledgeMemGraphReadRouteOwner,
+    pub required_evidence_kind: NowledgeMemGraphReadRouteEvidenceKind,
+    pub stale_on_catalog_change: bool,
+}
+
+const fn graph_route(route: &'static str) -> NowledgeMemGraphReadRouteSpec {
+    NowledgeMemGraphReadRouteSpec {
+        route,
+        owner: NowledgeMemGraphReadRouteOwner::GraphRuntime,
+        required_evidence_kind: NowledgeMemGraphReadRouteEvidenceKind::GraphRouteExecution,
+        stale_on_catalog_change: true,
+    }
+}
+
+const fn search_route(route: &'static str) -> NowledgeMemGraphReadRouteSpec {
+    NowledgeMemGraphReadRouteSpec {
+        route,
+        owner: NowledgeMemGraphReadRouteOwner::SearchRuntime,
+        required_evidence_kind: NowledgeMemGraphReadRouteEvidenceKind::SearchCandidateShadow,
+        stale_on_catalog_change: true,
+    }
+}
+
+const fn read_batch_route(route: &'static str) -> NowledgeMemGraphReadRouteSpec {
+    NowledgeMemGraphReadRouteSpec {
+        route,
+        owner: NowledgeMemGraphReadRouteOwner::ReadBatchRuntime,
+        required_evidence_kind: NowledgeMemGraphReadRouteEvidenceKind::ReadBatchRuntime,
+        stale_on_catalog_change: true,
+    }
+}
+
+pub const NOWLEDGE_MEM_GRAPH_READ_ROUTE_SPECS: &[NowledgeMemGraphReadRouteSpec] = &[
+    read_batch_route("/communities"),
+    read_batch_route("/communities/{community_id}"),
+    graph_route("/graph/overview"),
+    graph_route("/graph/sample"),
+    search_route("/graph/search"),
+    graph_route("/graph/explore"),
+    graph_route("/graph/expand/{node_id}"),
+    graph_route("/graph/live-preview"),
+    graph_route("/graph/live-preview/{node_id}"),
+    graph_route("/graph/community-members/{community_id}"),
+    graph_route("/library/community/{community_id}/subgraph"),
+    graph_route("/library/community/{community_id}/recent-memories"),
+    graph_route("/library/community/{community_id}/related"),
+    graph_route("/graph/analysis"),
+    graph_route("/graph/augmentation/state"),
+    graph_route("/graph/augmentation/pagerank/plan"),
+    graph_route("/graph/node-details/{node_id}"),
+    graph_route("/graph/orphans"),
+    graph_route("/graph/shortest-path"),
+    read_batch_route("/sources/{source_id}"),
+    read_batch_route("/stats/entity-relations"),
+    read_batch_route("/stats/sources"),
+    read_batch_route("/stats/top-communities"),
+    read_batch_route("/entities"),
+    read_batch_route("/entities/{entity_id}/relationships"),
+    read_batch_route("/agent/evolves"),
+];
+
+pub fn nowledge_mem_graph_read_route_spec(
+    route: &str,
+) -> Option<&'static NowledgeMemGraphReadRouteSpec> {
+    NOWLEDGE_MEM_GRAPH_READ_ROUTE_SPECS
+        .iter()
+        .find(|spec| spec.route == route)
+}
+
+pub fn nowledge_mem_graph_read_route_spec_json(
+    spec: &NowledgeMemGraphReadRouteSpec,
+) -> serde_json::Value {
+    serde_json::json!({
+        "route": spec.route,
+        "owner": spec.owner.as_str(),
+        "required_evidence_kind": spec.required_evidence_kind.as_str(),
+        "stale_on_catalog_change": spec.stale_on_catalog_change,
+    })
+}
+
+pub fn nowledge_mem_graph_read_route_specs_json() -> serde_json::Value {
+    serde_json::json!(NOWLEDGE_MEM_GRAPH_READ_ROUTE_SPECS
+        .iter()
+        .map(nowledge_mem_graph_read_route_spec_json)
+        .collect::<Vec<_>>())
+}
 
 pub fn nowledge_mem_required_query_families_for_route(route: &str) -> &'static [&'static str] {
     match route {
+        "/communities"
+        | "/communities/{community_id}"
+        | "/sources/{source_id}"
+        | "/stats/entity-relations"
+        | "/stats/sources"
+        | "/stats/top-communities"
+        | "/entities"
+        | "/entities/{entity_id}/relationships"
+        | "/agent/evolves" => &["label_stats_read"],
+        "/graph/search" => &["search_projection"],
         "/graph/overview"
+        | "/graph/sample"
         | "/graph/live-preview"
         | "/graph/live-preview/{node_id}"
         | "/graph/community-members/{community_id}"
@@ -709,16 +867,56 @@ impl NowledgeMemSearchCandidateShadowAccumulator {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
+        let mut observed_fields = self
+            .filter_pushdown
+            .as_ref()
+            .map(|filter| {
+                filter
+                    .field_summaries
+                    .iter()
+                    .map(|summary| summary.field.clone())
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        observed_fields.extend(fields.into_iter().map(|field| field.as_ref().to_string()));
         self.filter_pushdown = Some(NowledgeMemSearchCandidateFilterPushdownEvidence {
-            pushed_predicate_count,
-            shadow_scan_present: true,
-            field_summaries: fields
+            pushed_predicate_count: self
+                .filter_pushdown
+                .as_ref()
+                .map(|filter| filter.pushed_predicate_count)
+                .unwrap_or_default()
+                .saturating_add(pushed_predicate_count),
+            shadow_scan_present: self
+                .filter_pushdown
+                .as_ref()
+                .map(|filter| filter.shadow_scan_present)
+                .unwrap_or(true),
+            field_summaries: observed_fields
                 .into_iter()
-                .map(|field| NowledgeMemSearchCandidateFieldSummary {
-                    field: field.as_ref().to_string(),
-                })
+                .map(|field| NowledgeMemSearchCandidateFieldSummary { field })
                 .collect(),
         });
+    }
+
+    pub fn record_filter_pushdown_report(&mut self, report: &NowledgeMemSearchCandidateReport) {
+        let fields = if report.persisted_segment_descriptor_used {
+            NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.to_vec()
+        } else {
+            report
+                .candidate_set
+                .metadata_predicate_pushdown
+                .field_summaries
+                .iter()
+                .map(|summary| summary.field.as_str())
+                .collect::<Vec<_>>()
+        };
+        self.record_filter_pushdown_fields(report.pushed_predicate_count as u64, fields);
+        if !report.persisted_segment_descriptor_used {
+            self.add_blocker_code("search_candidate_segment_descriptor_not_used");
+        }
+        if report.residual_predicate_count > 0 {
+            self.add_blocker_code("search_candidate_metadata_filter_residual");
+        }
     }
 
     pub fn record_compare_candidate_ids(
@@ -755,6 +953,28 @@ impl NowledgeMemSearchCandidateShadowAccumulator {
             &mut self.matched_candidate_identity_checksum,
             &matched,
         );
+    }
+
+    pub fn record_search_candidate_output<I, S>(
+        &mut self,
+        primary_candidate_ids: I,
+        shadow_output: &NowledgeMemSearchCandidateOutput,
+    ) where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let primary_candidate_ids = primary_candidate_ids
+            .into_iter()
+            .map(|id| id.as_ref().to_string())
+            .collect::<Vec<_>>();
+        let shadow_candidate_ids = shadow_output
+            .result
+            .hits
+            .iter()
+            .map(|hit| hit.id.clone())
+            .collect::<Vec<_>>();
+        self.record_compare_candidate_ids(&primary_candidate_ids, &shadow_candidate_ids);
+        self.record_filter_pushdown_report(&shadow_output.report);
     }
 
     pub fn evidence(&self) -> NowledgeMemSearchCandidateShadowEvidence {
@@ -1197,6 +1417,7 @@ pub struct NowledgeMemReadinessOptions {
     pub search_projection_probe_options: SearchProjectionProbeOptions,
     pub primary_search_projection_probe: Option<serde_json::Value>,
     pub search_projection_shadow_evidence: Option<serde_json::Value>,
+    pub search_candidate_shadow_evidence: Option<serde_json::Value>,
     pub qos_policy: LocalQosPolicy,
     pub qos_state: LocalQosState,
     pub background_maintenance_options: BackgroundMaintenanceOptions,
@@ -1214,12 +1435,14 @@ pub struct NowledgeMemLibraryReadinessReport {
     pub blocked_area_count: usize,
     pub graph_open: bool,
     pub graph_read_only: bool,
+    pub graph_route_readiness: serde_json::Value,
     pub bounded_read_evidence: serde_json::Value,
     pub storage_recovery: serde_json::Value,
     pub background_maintenance: serde_json::Value,
     pub query_family_evidence: serde_json::Value,
     pub search_projection_evidence: serde_json::Value,
     pub search_projection_shadow_evidence: serde_json::Value,
+    pub search_candidate_shadow_evidence: serde_json::Value,
 }
 
 impl NowledgeMemLibraryReadinessReport {
@@ -1238,12 +1461,14 @@ impl NowledgeMemLibraryReadinessReport {
                 "mode": self.mode.as_str(),
                 "read_only": self.graph_read_only,
             },
+            "graph_route_readiness": self.graph_route_readiness,
             "bounded_read_evidence": self.bounded_read_evidence,
             "storage_recovery": self.storage_recovery,
             "background_maintenance": self.background_maintenance,
             "query_family_evidence": self.query_family_evidence,
             "search_projection_evidence": self.search_projection_evidence,
             "search_projection_shadow_evidence": self.search_projection_shadow_evidence,
+            "search_candidate_shadow_evidence": self.search_candidate_shadow_evidence,
         })
     }
 }
@@ -1353,11 +1578,11 @@ impl NowledgeMemStorageRecoveryReport {
     pub fn from_storage_report(report: &StorageRecoveryReport) -> Self {
         let durable_recovery_observed = report.durable;
         let checkpoint_boundary_present =
-            report.checkpoint_epoch.is_some() || report.checkpoint_commit_epoch.is_some();
+            report.checkpoint_epoch.is_some() && report.checkpoint_commit_epoch.is_some();
         let wal_replay_bounded = report
             .max_wal_replay_entries
             .is_some_and(|limit| report.replayed_wal_entries <= limit);
-        let torn_tail_clean = !report.torn_tail_ignored;
+        let torn_tail_clean = !report.torn_tail_ignored && report.torn_tail_reason.is_none();
         let mut blocker_codes = Vec::new();
         if !durable_recovery_observed {
             blocker_codes.push("durable_recovery_not_observed".to_string());
@@ -2144,6 +2369,34 @@ impl NowledgeMemSearchProjection {
         self.search_candidates_with_report(request)
             .readiness_report(options)
     }
+
+    pub fn search_candidate_shadow_evidence<I, S>(
+        &self,
+        request: &NowledgeMemSearchCandidateRequest,
+        primary_candidate_ids: I,
+    ) -> NowledgeMemSearchCandidateShadowEvidence
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let output = self.search_candidates_with_report(request);
+        let mut accumulator = NowledgeMemSearchCandidateShadowAccumulator::new();
+        accumulator.record_search_candidate_output(primary_candidate_ids, &output);
+        accumulator.evidence()
+    }
+
+    pub fn search_candidate_shadow_evidence_json<I, S>(
+        &self,
+        request: &NowledgeMemSearchCandidateRequest,
+        primary_candidate_ids: I,
+    ) -> serde_json::Value
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.search_candidate_shadow_evidence(request, primary_candidate_ids)
+            .json()
+    }
 }
 
 #[derive(Debug)]
@@ -2242,6 +2495,19 @@ impl NowledgeMemEmbeddedStoreHandle {
     ) -> Result<NowledgeMemSearchCandidateReadinessReport> {
         self.lock_store()?
             .search_candidate_readiness(request, options)
+    }
+
+    pub fn search_candidate_shadow_evidence_json<I, S>(
+        &self,
+        request: &NowledgeMemSearchCandidateRequest,
+        primary_candidate_ids: I,
+    ) -> Result<serde_json::Value>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.lock_store()?
+            .search_candidate_shadow_evidence_json(request, primary_candidate_ids)
     }
 
     pub fn slow_query_report(&self) -> Result<NowledgeMemSlowQueryReport> {
@@ -2472,6 +2738,20 @@ impl NowledgeMemEmbeddedStore {
             .search_candidate_readiness(request, options))
     }
 
+    pub fn search_candidate_shadow_evidence_json<I, S>(
+        &self,
+        request: &NowledgeMemSearchCandidateRequest,
+        primary_candidate_ids: I,
+    ) -> Result<serde_json::Value>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        Ok(self
+            .require_search_projection()?
+            .search_candidate_shadow_evidence_json(request, primary_candidate_ids))
+    }
+
     pub fn retrieve_knowledge(
         &self,
         request: &KnowledgeRetrievalRequest,
@@ -2631,6 +2911,8 @@ impl NowledgeMemEmbeddedStore {
         let query_family_evidence = query_family_replacement_evidence_json(
             options.replacement_readiness_by_query_family.as_ref(),
         );
+        let graph_route_readiness =
+            nowledge_mem_graph_route_readiness_json(options.graph_route_readiness.as_ref());
         let search_projection_evidence =
             options
                 .search_projection_evidence
@@ -2657,22 +2939,22 @@ impl NowledgeMemEmbeddedStore {
                     })
                     .unwrap_or_else(missing_primary_search_projection_probe_json)
             });
-        let blocker_codes = library_readiness_blocker_codes(
-            &bounded_read_evidence,
-            &storage_recovery,
-            &background_maintenance,
-            &query_family_evidence,
-            &search_projection_evidence,
-            &search_projection_shadow_evidence,
-        );
-        let readiness_by_area = library_readiness_by_area_json(
-            &bounded_read_evidence,
-            &storage_recovery,
-            &background_maintenance,
-            &query_family_evidence,
-            &search_projection_evidence,
-            &search_projection_shadow_evidence,
-        );
+        let search_candidate_shadow_evidence = options
+            .search_candidate_shadow_evidence
+            .clone()
+            .unwrap_or_else(missing_search_candidate_shadow_evidence_json);
+        let evidence = LibraryReadinessEvidence {
+            bounded_read_evidence: &bounded_read_evidence,
+            storage_recovery: &storage_recovery,
+            background_maintenance: &background_maintenance,
+            query_family_evidence: &query_family_evidence,
+            graph_route_readiness: &graph_route_readiness,
+            search_projection_evidence: &search_projection_evidence,
+            search_projection_shadow_evidence: &search_projection_shadow_evidence,
+            search_candidate_shadow_evidence: &search_candidate_shadow_evidence,
+        };
+        let blocker_codes = library_readiness_blocker_codes(&evidence);
+        let readiness_by_area = library_readiness_by_area_json(&evidence);
         let ready_area_count = readiness_area_count(&readiness_by_area, true);
         let blocked_area_count = readiness_area_count(&readiness_by_area, false);
         let blocker_codes = blocker_codes
@@ -2692,12 +2974,14 @@ impl NowledgeMemEmbeddedStore {
             blocked_area_count,
             graph_open: true,
             graph_read_only: self.graph.database().config().read_only,
+            graph_route_readiness,
             bounded_read_evidence,
             storage_recovery,
             background_maintenance,
             query_family_evidence,
             search_projection_evidence,
             search_projection_shadow_evidence,
+            search_candidate_shadow_evidence,
         }
     }
 
@@ -3283,6 +3567,36 @@ fn missing_primary_search_projection_probe_json() -> serde_json::Value {
     })
 }
 
+fn missing_search_candidate_shadow_evidence_json() -> serde_json::Value {
+    serde_json::json!({
+        "protocol": NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
+        "route": NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
+        "evidence_source": NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE,
+        "present": false,
+        "ready": false,
+        "candidate_primary_engine": NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE,
+        "request_count": null,
+        "primary_candidate_count": null,
+        "shadow_candidate_count": null,
+        "matched_candidate_count": null,
+        "primary_only_candidate_count": null,
+        "candidate_identity": {
+            "ready": false,
+            "parity": false,
+        },
+        "filter_pushdown_ready": false,
+        "filter_pushdown": {
+            "ready": false,
+            "required_fields": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
+            "missing_required_fields": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
+            "field_summary_count": 0,
+            "field_summaries": [],
+            "blocker_codes": ["search_candidate_shadow_evidence_missing"],
+        },
+        "blocker_codes": ["search_candidate_shadow_evidence_missing"],
+    })
+}
+
 fn query_family_replacement_evidence_json(
     replacement_readiness_by_query_family: Option<&serde_json::Value>,
 ) -> serde_json::Value {
@@ -3343,91 +3657,440 @@ fn query_family_replacement_blocker_codes(
     blockers
 }
 
-fn library_readiness_blocker_codes(
-    bounded_read_evidence: &serde_json::Value,
-    storage_recovery: &serde_json::Value,
-    background_maintenance: &serde_json::Value,
-    query_family_evidence: &serde_json::Value,
-    search_projection_evidence: &serde_json::Value,
-    search_projection_shadow_evidence: &serde_json::Value,
-) -> Vec<&'static str> {
+fn nowledge_mem_graph_route_readiness_json(
+    route_readiness: Option<&NowledgeMemRouteReadinessSummary>,
+) -> serde_json::Value {
+    let Some(summary) = route_readiness else {
+        return serde_json::json!({
+            "protocol": NMEM_GRAPH_ROUTE_READINESS_PROTOCOL,
+            "present": false,
+            "ready": false,
+            "required_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+            "primary_ready_route_count": 0,
+            "primary_ready_routes": [],
+            "missing_required_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+            "route_primary_ready": null,
+            "route_query_plan_evidence_ready": null,
+            "route_query_profile_evidence_ready": null,
+            "relationship_property_pruning_required_count": null,
+            "relationship_property_pruning_report_count": null,
+            "route_relationship_property_pruning_evidence_ready": null,
+            "blocker_codes": ["graph_route_readiness_missing"],
+        });
+    };
+
+    let missing_required_routes =
+        missing_nowledge_mem_bounded_read_routes(&summary.primary_ready_routes);
+    let relationship_property_pruning_count_matches = summary
+        .relationship_property_pruning_required_count
+        == summary.relationship_property_pruning_report_count;
+    let mut blocker_codes = Vec::new();
+    if !summary.route_primary_ready || !missing_required_routes.is_empty() {
+        blocker_codes.push("route_primary_not_ready");
+    }
+    if !summary.route_query_plan_evidence_ready {
+        blocker_codes.push("route_query_plan_evidence_not_ready");
+    }
+    if !summary.route_query_profile_evidence_ready {
+        blocker_codes.push("route_query_profile_evidence_not_ready");
+    }
+    if !summary.route_relationship_property_pruning_evidence_ready
+        || !relationship_property_pruning_count_matches
+    {
+        blocker_codes.push("route_relationship_property_pruning_not_ready");
+    }
+
+    serde_json::json!({
+        "protocol": NMEM_GRAPH_ROUTE_READINESS_PROTOCOL,
+        "present": true,
+        "ready": blocker_codes.is_empty(),
+        "required_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+        "primary_ready_route_count": summary.primary_ready_routes.len(),
+        "primary_ready_routes": summary.primary_ready_routes,
+        "missing_required_routes": missing_required_routes,
+        "route_primary_ready": summary.route_primary_ready,
+        "route_query_plan_evidence_ready": summary.route_query_plan_evidence_ready,
+        "route_query_profile_evidence_ready": summary.route_query_profile_evidence_ready,
+        "relationship_property_pruning_required_count": summary.relationship_property_pruning_required_count,
+        "relationship_property_pruning_report_count": summary.relationship_property_pruning_report_count,
+        "route_relationship_property_pruning_evidence_ready": summary.route_relationship_property_pruning_evidence_ready,
+        "blocker_codes": blocker_codes,
+    })
+}
+
+struct LibraryReadinessEvidence<'a> {
+    bounded_read_evidence: &'a serde_json::Value,
+    storage_recovery: &'a serde_json::Value,
+    background_maintenance: &'a serde_json::Value,
+    query_family_evidence: &'a serde_json::Value,
+    graph_route_readiness: &'a serde_json::Value,
+    search_projection_evidence: &'a serde_json::Value,
+    search_projection_shadow_evidence: &'a serde_json::Value,
+    search_candidate_shadow_evidence: &'a serde_json::Value,
+}
+
+fn library_readiness_blocker_codes(evidence: &LibraryReadinessEvidence<'_>) -> Vec<&'static str> {
     let mut blockers = Vec::new();
-    if bounded_read_evidence
+    if evidence
+        .bounded_read_evidence
         .get("ready")
         .and_then(serde_json::Value::as_bool)
         != Some(true)
     {
         blockers.push("bounded_read_evidence_not_ready");
     }
-    if storage_recovery
+    if evidence
+        .storage_recovery
         .get("ready")
         .and_then(serde_json::Value::as_bool)
         != Some(true)
     {
         blockers.push("storage_recovery_not_ready");
     }
-    if !library_background_maintenance_ready(background_maintenance) {
+    if !library_background_maintenance_ready(evidence.background_maintenance) {
         blockers.push("background_maintenance_not_ready");
     }
-    if query_family_evidence
+    if evidence
+        .query_family_evidence
         .get("ready")
         .and_then(serde_json::Value::as_bool)
         != Some(true)
     {
         blockers.push("query_family_evidence_not_ready");
     }
-    if search_projection_evidence
+    if evidence
+        .graph_route_readiness
         .get("ready")
         .and_then(serde_json::Value::as_bool)
         != Some(true)
     {
+        blockers.push("graph_route_readiness_not_ready");
+    }
+    if !search_projection_evidence_ready(evidence.search_projection_evidence) {
         blockers.push("search_projection_evidence_not_ready");
     }
-    if search_projection_shadow_evidence
-        .get("ready")
-        .and_then(serde_json::Value::as_bool)
-        != Some(true)
-    {
+    if !search_projection_shadow_evidence_ready(evidence.search_projection_shadow_evidence) {
         blockers.push("search_projection_shadow_evidence_not_ready");
+    }
+    if !search_candidate_shadow_evidence_ready(evidence.search_candidate_shadow_evidence) {
+        blockers.push("search_candidate_shadow_evidence_not_ready");
     }
     blockers
 }
 
-fn library_readiness_by_area_json(
-    bounded_read_evidence: &serde_json::Value,
-    storage_recovery: &serde_json::Value,
-    background_maintenance: &serde_json::Value,
-    query_family_evidence: &serde_json::Value,
-    search_projection_evidence: &serde_json::Value,
-    search_projection_shadow_evidence: &serde_json::Value,
-) -> serde_json::Value {
+fn library_readiness_by_area_json(evidence: &LibraryReadinessEvidence<'_>) -> serde_json::Value {
     serde_json::json!({
         "graph": {
             "ready": true,
             "blocker_codes": [],
         },
         "query": readiness_area_json(
-            bounded_read_evidence,
+            evidence.bounded_read_evidence,
             "bounded_read_evidence_not_ready"
         ),
         "storage": readiness_area_json(
-            storage_recovery,
+            evidence.storage_recovery,
             "storage_recovery_not_ready"
         ),
-        "background": background_maintenance_readiness_area_json(background_maintenance),
+        "background": background_maintenance_readiness_area_json(evidence.background_maintenance),
         "query_family": readiness_area_json(
-            query_family_evidence,
+            evidence.query_family_evidence,
             "query_family_evidence_not_ready"
         ),
-        "search_projection": readiness_area_json(
-            search_projection_evidence,
-            "search_projection_evidence_not_ready"
+        "graph_route": readiness_area_json(
+            evidence.graph_route_readiness,
+            "graph_route_readiness_not_ready"
         ),
-        "search_projection_shadow": readiness_area_json(
-            search_projection_shadow_evidence,
-            "search_projection_shadow_evidence_not_ready"
+        "search_projection": search_projection_readiness_area_json(
+            evidence.search_projection_evidence,
+        ),
+        "search_projection_shadow": search_projection_shadow_readiness_area_json(
+            evidence.search_projection_shadow_evidence,
+        ),
+        "search_candidate_shadow": search_candidate_shadow_readiness_area_json(
+            evidence.search_candidate_shadow_evidence,
         ),
     })
+}
+
+fn search_projection_readiness_area_json(evidence: &serde_json::Value) -> serde_json::Value {
+    let blocker_codes = search_projection_readiness_blocker_codes(evidence);
+    serde_json::json!({
+        "ready": blocker_codes.is_empty(),
+        "blocker_codes": blocker_codes,
+    })
+}
+
+fn search_projection_shadow_readiness_area_json(evidence: &serde_json::Value) -> serde_json::Value {
+    let blocker_codes = search_projection_shadow_readiness_blocker_codes(evidence);
+    serde_json::json!({
+        "ready": blocker_codes.is_empty(),
+        "blocker_codes": blocker_codes,
+    })
+}
+
+fn search_projection_evidence_ready(evidence: &serde_json::Value) -> bool {
+    search_projection_readiness_blocker_codes(evidence).is_empty()
+}
+
+fn search_projection_shadow_evidence_ready(evidence: &serde_json::Value) -> bool {
+    search_projection_shadow_readiness_blocker_codes(evidence).is_empty()
+}
+
+fn search_projection_readiness_blocker_codes(evidence: &serde_json::Value) -> Vec<String> {
+    let mut blockers = evidence_blocker_codes(evidence);
+    if evidence.get("present").and_then(serde_json::Value::as_bool) == Some(false) {
+        if blockers.is_empty() {
+            blockers.insert("search_projection_not_configured".to_string());
+        }
+        return blockers.into_iter().collect();
+    }
+    if evidence_string(evidence, "protocol") != Some(NOWLEDGE_SEARCH_PROJECTION_EVIDENCE_PROTOCOL) {
+        blockers.insert("search_projection_protocol_mismatch".to_string());
+    }
+    if evidence_bool(evidence, "ready") != Some(true) {
+        blockers.insert("search_projection_not_ready".to_string());
+    }
+    if evidence_bool(evidence, "derived_projection") != Some(true) {
+        blockers.insert("search_projection_not_derived".to_string());
+    }
+    if evidence_bool(evidence, "all_tables_covered") != Some(true)
+        || !evidence_u64(evidence, "covered_table_count").is_some_and(|count| count > 0)
+        || evidence_u64(evidence, "covered_table_count")
+            != evidence_u64(evidence, "required_table_count")
+    {
+        blockers.insert("search_projection_tables_not_ready".to_string());
+    }
+    if evidence_bool(evidence, "fts_ready") != Some(true) {
+        blockers.insert("search_projection_fts_not_ready".to_string());
+    }
+    if evidence_bool(evidence, "vector_ready") != Some(true) {
+        blockers.insert("search_projection_vector_not_ready".to_string());
+    }
+    if evidence_bool(evidence, "document_identity_ready") != Some(true) {
+        blockers.insert("search_projection_document_identity_not_ready".to_string());
+    }
+    if evidence_bool(evidence, "embedding_identity_ready") != Some(true) {
+        blockers.insert("search_projection_embedding_identity_not_ready".to_string());
+    }
+    if evidence_bool(evidence, "fail_soft_ready") != Some(true) {
+        blockers.insert("search_projection_fail_soft_not_ready".to_string());
+    }
+    if evidence_bool(evidence, "rebuild_marker_ready") != Some(true) {
+        blockers.insert("search_projection_rebuild_marker_not_ready".to_string());
+    }
+    if evidence_bool(evidence, "metadata_repair_marker_ready") != Some(true) {
+        blockers.insert("search_projection_metadata_repair_marker_not_ready".to_string());
+    }
+    if evidence_bool(evidence, "incremental_update_ready") != Some(true) {
+        blockers.insert("search_projection_incremental_update_not_ready".to_string());
+    }
+    if evidence_bool(evidence, "source_chunk_ready") != Some(true) {
+        blockers.insert("search_projection_source_chunk_not_ready".to_string());
+    }
+    if evidence_bool(evidence, "predicate_pushdown_ready") != Some(true) {
+        blockers.insert("search_projection_predicate_pushdown_not_ready".to_string());
+    }
+    if evidence_bool(evidence, "compressed_vector_projection_ready") == Some(false) {
+        blockers.insert("search_projection_compressed_vector_not_ready".to_string());
+    }
+    blockers.into_iter().collect()
+}
+
+fn search_projection_shadow_readiness_blocker_codes(evidence: &serde_json::Value) -> Vec<String> {
+    let mut blockers = evidence_blocker_codes(evidence);
+    if evidence.get("present").and_then(serde_json::Value::as_bool) == Some(false) {
+        if blockers.is_empty() {
+            blockers.insert("search_projection_not_configured".to_string());
+        }
+        return blockers.into_iter().collect();
+    }
+    if evidence_string(evidence, "protocol")
+        != Some(NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL)
+    {
+        blockers.insert("search_projection_shadow_protocol_mismatch".to_string());
+    }
+    if evidence_string(evidence, "evidence_source")
+        != Some(NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE)
+    {
+        blockers.insert("search_projection_shadow_evidence_source_mismatch".to_string());
+    }
+    if evidence_bool(evidence, "ready") != Some(true) {
+        blockers.insert("search_projection_shadow_not_ready".to_string());
+    }
+    if evidence_bool(evidence, "primary_ready") != Some(true) {
+        blockers.insert("search_projection_shadow_primary_not_ready".to_string());
+    }
+    if evidence_bool(evidence, "shadow_ready") != Some(true) {
+        blockers.insert("search_projection_shadow_shadow_not_ready".to_string());
+    }
+    if evidence_bool(evidence, "document_count_parity") != Some(true)
+        || evidence_bool(evidence, "document_identity_parity") != Some(true)
+    {
+        blockers.insert("search_projection_shadow_document_identity_not_ready".to_string());
+    }
+    if nested_bool(evidence, &["table_parity", "ready"]) != Some(true)
+        && evidence_bool(evidence, "table_parity_ready") != Some(true)
+    {
+        blockers.insert("search_projection_shadow_table_parity_not_ready".to_string());
+    }
+    if evidence_bool(evidence, "embedding_identity_parity") != Some(true) {
+        blockers.insert("search_projection_shadow_embedding_identity_not_ready".to_string());
+    }
+    if evidence_bool(evidence, "lifecycle_parity") != Some(true) {
+        blockers.insert("search_projection_shadow_lifecycle_not_ready".to_string());
+    }
+    if evidence_bool(evidence, "incremental_watermark_parity") != Some(true) {
+        blockers.insert("search_projection_shadow_incremental_watermark_not_ready".to_string());
+    }
+    if evidence_bool(evidence, "predicate_pushdown_parity") != Some(true) {
+        blockers.insert("search_projection_shadow_predicate_pushdown_not_ready".to_string());
+    }
+    if nested_bool(evidence, &["pushdown_evidence", "ready"]) != Some(true) {
+        blockers.insert(SEARCH_PROJECTION_SHADOW_PUSHDOWN_NOT_READY.to_string());
+    }
+    if nested_bool(
+        evidence,
+        &[
+            "pushdown_evidence",
+            "shadow_persisted_segment_descriptor_ready",
+        ],
+    ) != Some(true)
+    {
+        blockers.insert(SKEIN_SEARCH_PROJECTION_SEGMENT_DESCRIPTOR_MISSING.to_string());
+    }
+    if nested_bool(
+        evidence,
+        &[
+            "pushdown_evidence",
+            "shadow_segment_descriptor_scan_filter_fields_ready",
+        ],
+    ) != Some(true)
+    {
+        blockers.insert(SKEIN_SEARCH_PROJECTION_SEGMENT_DESCRIPTOR_FIELDS_MISSING.to_string());
+    }
+    blockers.into_iter().collect()
+}
+
+fn search_candidate_shadow_readiness_area_json(evidence: &serde_json::Value) -> serde_json::Value {
+    let blocker_codes = search_candidate_shadow_readiness_blocker_codes(evidence);
+    serde_json::json!({
+        "ready": blocker_codes.is_empty(),
+        "blocker_codes": blocker_codes,
+    })
+}
+
+fn search_candidate_shadow_evidence_ready(evidence: &serde_json::Value) -> bool {
+    search_candidate_shadow_readiness_blocker_codes(evidence).is_empty()
+}
+
+fn search_candidate_shadow_readiness_blocker_codes(evidence: &serde_json::Value) -> Vec<String> {
+    let mut blockers = evidence_blocker_codes(evidence);
+    if evidence.get("present").and_then(serde_json::Value::as_bool) == Some(false) {
+        if blockers.is_empty() {
+            blockers.insert("search_candidate_shadow_evidence_missing".to_string());
+        }
+        return blockers.into_iter().collect();
+    }
+    if evidence_string(evidence, "protocol")
+        != Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL)
+    {
+        blockers.insert("search_candidate_shadow_protocol_mismatch".to_string());
+    }
+    if evidence_string(evidence, "route") != Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE) {
+        blockers.insert("search_candidate_shadow_route_mismatch".to_string());
+    }
+    if evidence_string(evidence, "evidence_source")
+        != Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE)
+    {
+        blockers.insert("search_candidate_shadow_evidence_source_mismatch".to_string());
+    }
+    if evidence_bool(evidence, "ready") != Some(true) {
+        blockers.insert("search_candidate_shadow_not_ready".to_string());
+    }
+    if evidence_string(evidence, "candidate_primary_engine")
+        != Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE)
+    {
+        blockers.insert("search_candidate_primary_engine_not_skein".to_string());
+    }
+    if !search_candidate_shadow_counts_ready(evidence) {
+        blockers.insert("search_candidate_counts_not_ready".to_string());
+    }
+    if nested_bool(evidence, &["candidate_identity", "ready"]) != Some(true)
+        || nested_bool(evidence, &["candidate_identity", "parity"]) != Some(true)
+    {
+        blockers.insert("search_candidate_identity_not_ready".to_string());
+    }
+    if nested_bool(evidence, &["filter_pushdown", "ready"]) != Some(true)
+        || evidence_bool(evidence, "filter_pushdown_ready") != Some(true)
+    {
+        blockers.insert("search_candidate_filter_pushdown_not_ready".to_string());
+    }
+    if !nested_u64(evidence, &["filter_pushdown", "field_summary_count"])
+        .is_some_and(|count| count > 0)
+        || !string_array_at(evidence, &["filter_pushdown", "missing_required_fields"])
+            .is_some_and(|fields| fields.is_empty())
+    {
+        blockers.insert("search_candidate_field_pruning_missing".to_string());
+    }
+    blockers.into_iter().collect()
+}
+
+fn evidence_string<'a>(evidence: &'a serde_json::Value, field: &str) -> Option<&'a str> {
+    evidence.get(field).and_then(serde_json::Value::as_str)
+}
+
+fn evidence_bool(evidence: &serde_json::Value, field: &str) -> Option<bool> {
+    evidence.get(field).and_then(serde_json::Value::as_bool)
+}
+
+fn evidence_u64(evidence: &serde_json::Value, field: &str) -> Option<u64> {
+    evidence.get(field).and_then(serde_json::Value::as_u64)
+}
+
+fn nested_value<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a serde_json::Value> {
+    path.iter()
+        .try_fold(value, |current, key| current.get(*key))
+}
+
+fn nested_bool(value: &serde_json::Value, path: &[&str]) -> Option<bool> {
+    nested_value(value, path).and_then(serde_json::Value::as_bool)
+}
+
+fn nested_u64(value: &serde_json::Value, path: &[&str]) -> Option<u64> {
+    nested_value(value, path).and_then(serde_json::Value::as_u64)
+}
+
+fn string_array_at(value: &serde_json::Value, path: &[&str]) -> Option<Vec<String>> {
+    nested_value(value, path)?
+        .as_array()?
+        .iter()
+        .map(|item| item.as_str().map(str::to_string))
+        .collect()
+}
+
+fn evidence_blocker_codes(evidence: &serde_json::Value) -> BTreeSet<String> {
+    evidence
+        .get("blocker_codes")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_string)
+        .collect()
+}
+
+fn search_candidate_shadow_counts_ready(evidence: &serde_json::Value) -> bool {
+    let request_count = evidence_u64(evidence, "request_count");
+    let primary_candidate_count = evidence_u64(evidence, "primary_candidate_count");
+    let shadow_candidate_count = evidence_u64(evidence, "shadow_candidate_count");
+    let matched_candidate_count = evidence_u64(evidence, "matched_candidate_count");
+    let primary_only_candidate_count = evidence_u64(evidence, "primary_only_candidate_count");
+    request_count.is_some_and(|count| count > 0)
+        && primary_candidate_count.is_some()
+        && primary_candidate_count == shadow_candidate_count
+        && matched_candidate_count == shadow_candidate_count
+        && primary_only_candidate_count == Some(0)
 }
 
 fn readiness_area_json(
@@ -3503,6 +4166,11 @@ fn nowledge_mem_readiness_dashboard_areas(
             "query_family",
             "query_family_evidence_not_ready",
         ),
+        readiness_dashboard_area_from_json(
+            readiness,
+            "graph_route",
+            "graph_route_readiness_not_ready",
+        ),
         readiness_dashboard_area_from_json(readiness, "storage", "storage_recovery_not_ready"),
         readiness_dashboard_area_from_json(
             readiness,
@@ -3513,6 +4181,11 @@ fn nowledge_mem_readiness_dashboard_areas(
             readiness,
             "search_projection_shadow",
             "search_projection_shadow_evidence_not_ready",
+        ),
+        readiness_dashboard_area_from_json(
+            readiness,
+            "search_candidate_shadow",
+            "search_candidate_shadow_evidence_not_ready",
         ),
         readiness_dashboard_area_from_json(
             readiness,
@@ -3924,7 +4597,7 @@ mod tests {
         NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
         NOWLEDGE_MEM_SLOW_QUERY_REPORT_PROTOCOL, NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL,
         NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
-        REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
+        REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES, SEARCH_PROJECTION_SHADOW_PUSHDOWN_NOT_READY,
     };
     use crate::search::CompressedVectorSearchMode;
     use crate::search::SearchFusionWeights;
@@ -4860,6 +5533,10 @@ mod tests {
             serde_json::json!(["primary_search_projection_probe_missing"])
         );
         assert_eq!(
+            readiness["search_candidate_shadow_evidence"]["blocker_codes"],
+            serde_json::json!(["search_candidate_shadow_evidence_missing"])
+        );
+        assert_eq!(
             readiness["query_family_evidence"]["blocker_codes"],
             serde_json::json!(["query_family_evidence_missing"])
         );
@@ -4889,6 +5566,18 @@ mod tests {
             serde_json::json!(["query_family_evidence_missing"])
         );
         assert_eq!(
+            readiness["graph_route_readiness"]["blocker_codes"],
+            serde_json::json!(["graph_route_readiness_missing"])
+        );
+        assert_eq!(
+            readiness["readiness_by_area"]["graph_route"]["ready"],
+            false
+        );
+        assert_eq!(
+            readiness["readiness_by_area"]["graph_route"]["blocker_codes"],
+            serde_json::json!(["graph_route_readiness_missing"])
+        );
+        assert_eq!(
             readiness["readiness_by_area"]["search_projection"]["ready"],
             false
         );
@@ -4896,8 +5585,16 @@ mod tests {
             readiness["readiness_by_area"]["search_projection_shadow"]["ready"],
             false
         );
+        assert_eq!(
+            readiness["readiness_by_area"]["search_candidate_shadow"]["ready"],
+            false
+        );
+        assert_eq!(
+            readiness["readiness_by_area"]["search_candidate_shadow"]["blocker_codes"],
+            serde_json::json!(["search_candidate_shadow_evidence_missing"])
+        );
         assert_eq!(readiness["ready_area_count"], 1);
-        assert_eq!(readiness["blocked_area_count"], 6);
+        assert_eq!(readiness["blocked_area_count"], 8);
         assert!(!readiness.to_string().contains("redacted"));
     }
 
@@ -4917,11 +5614,15 @@ mod tests {
         assert!(report.graph_open);
         assert!(!report.graph_read_only);
         assert_eq!(report.ready_area_count, 1);
-        assert_eq!(report.blocked_area_count, 6);
+        assert_eq!(report.blocked_area_count, 8);
         assert!(report
             .blocker_codes
             .iter()
             .any(|code| code == "bounded_read_evidence_not_ready"));
+        assert!(report
+            .blocker_codes
+            .iter()
+            .any(|code| code == "graph_route_readiness_not_ready"));
         assert_eq!(json["ready"], false);
         assert_eq!(
             json["blocker_codes"],
@@ -4932,6 +5633,116 @@ mod tests {
             json["bounded_read_evidence"]["blocker_codes"],
             serde_json::json!(["bounded_read_probe_missing"])
         );
+    }
+
+    #[test]
+    fn embedded_store_library_readiness_recomputes_search_candidate_shadow_evidence() {
+        let db = Database::new();
+        let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::ShadowReadOnly);
+        let mut store = NowledgeMemEmbeddedStore::new(graph, None);
+
+        let readiness = store.library_readiness_json(&NowledgeMemReadinessOptions {
+            search_candidate_shadow_evidence: Some(serde_json::json!({
+                "ready": true,
+                "blocker_codes": []
+            })),
+            ..NowledgeMemReadinessOptions::default()
+        });
+
+        assert_eq!(
+            readiness["readiness_by_area"]["search_candidate_shadow"]["ready"],
+            false
+        );
+        let blocker_codes = readiness["readiness_by_area"]["search_candidate_shadow"]
+            ["blocker_codes"]
+            .as_array()
+            .unwrap();
+        assert!(blocker_codes
+            .iter()
+            .any(|code| code == "search_candidate_shadow_protocol_mismatch"));
+        assert!(blocker_codes
+            .iter()
+            .any(|code| code == "search_candidate_counts_not_ready"));
+        assert!(readiness["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "search_candidate_shadow_evidence_not_ready"));
+    }
+
+    #[test]
+    fn embedded_store_library_readiness_recomputes_search_projection_evidence() {
+        let db = Database::new();
+        let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::ShadowReadOnly);
+        let mut store = NowledgeMemEmbeddedStore::new(graph, None);
+
+        let readiness = store.library_readiness_json(&NowledgeMemReadinessOptions {
+            search_projection_evidence: Some(serde_json::json!({
+                "ready": true,
+                "blocker_codes": []
+            })),
+            ..NowledgeMemReadinessOptions::default()
+        });
+
+        assert_eq!(
+            readiness["readiness_by_area"]["search_projection"]["ready"],
+            false
+        );
+        let blocker_codes = readiness["readiness_by_area"]["search_projection"]["blocker_codes"]
+            .as_array()
+            .unwrap();
+        assert!(blocker_codes
+            .iter()
+            .any(|code| code == "search_projection_protocol_mismatch"));
+        assert!(blocker_codes
+            .iter()
+            .any(|code| code == "search_projection_tables_not_ready"));
+        assert!(blocker_codes
+            .iter()
+            .any(|code| code == "search_projection_document_identity_not_ready"));
+        assert!(readiness["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "search_projection_evidence_not_ready"));
+    }
+
+    #[test]
+    fn embedded_store_library_readiness_recomputes_search_projection_shadow_evidence() {
+        let db = Database::new();
+        let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::ShadowReadOnly);
+        let mut store = NowledgeMemEmbeddedStore::new(graph, None);
+
+        let readiness = store.library_readiness_json(&NowledgeMemReadinessOptions {
+            search_projection_shadow_evidence: Some(serde_json::json!({
+                "ready": true,
+                "blocker_codes": []
+            })),
+            ..NowledgeMemReadinessOptions::default()
+        });
+
+        assert_eq!(
+            readiness["readiness_by_area"]["search_projection_shadow"]["ready"],
+            false
+        );
+        let blocker_codes = readiness["readiness_by_area"]["search_projection_shadow"]
+            ["blocker_codes"]
+            .as_array()
+            .unwrap();
+        assert!(blocker_codes
+            .iter()
+            .any(|code| code == "search_projection_shadow_protocol_mismatch"));
+        assert!(blocker_codes
+            .iter()
+            .any(|code| code == "search_projection_shadow_document_identity_not_ready"));
+        assert!(blocker_codes
+            .iter()
+            .any(|code| code == SEARCH_PROJECTION_SHADOW_PUSHDOWN_NOT_READY));
+        assert!(readiness["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "search_projection_shadow_evidence_not_ready"));
     }
 
     #[test]
@@ -4959,9 +5770,9 @@ mod tests {
         );
         assert_eq!(dashboard.mode, NowledgeMemGraphMode::ShadowReadOnly);
         assert!(!dashboard.ready);
-        assert_eq!(dashboard.area_count, 8);
+        assert_eq!(dashboard.area_count, 10);
         assert_eq!(dashboard.ready_area_count, 3);
-        assert_eq!(dashboard.blocked_area_count, 5);
+        assert_eq!(dashboard.blocked_area_count, 7);
         assert!(dashboard.slow_query_ready);
         assert_eq!(dashboard.slow_query_record_count, 1);
         assert!(readiness_dashboard_area(&dashboard, "graph").ready);
@@ -4973,6 +5784,10 @@ mod tests {
         assert_eq!(
             readiness_dashboard_area(&dashboard, "query_family").blocker_codes,
             vec!["query_family_evidence_missing".to_string()]
+        );
+        assert_eq!(
+            readiness_dashboard_area(&dashboard, "graph_route").blocker_codes,
+            vec!["graph_route_readiness_missing".to_string()]
         );
         assert_eq!(
             readiness_dashboard_area(&dashboard, "storage").blocker_codes,
@@ -4989,6 +5804,10 @@ mod tests {
         assert_eq!(
             readiness_dashboard_area(&dashboard, "search_projection_shadow").blocker_codes,
             vec!["primary_search_projection_probe_missing".to_string()]
+        );
+        assert_eq!(
+            readiness_dashboard_area(&dashboard, "search_candidate_shadow").blocker_codes,
+            vec!["search_candidate_shadow_evidence_missing".to_string()]
         );
         assert!(readiness_dashboard_area(&dashboard, "slow_query").ready);
         assert_eq!(json["protocol"], NOWLEDGE_MEM_READINESS_DASHBOARD_PROTOCOL);
@@ -5029,6 +5848,43 @@ mod tests {
         assert_eq!(json["ready"], true);
         assert_eq!(json["readiness"]["wal_replay_bounded"], true);
         assert_eq!(json["max_wal_replay_entries"], 16);
+    }
+
+    #[test]
+    fn storage_recovery_report_recomputes_typed_readiness_from_raw_fields() {
+        let report =
+            NowledgeMemStorageRecoveryReport::from_storage_report(&StorageRecoveryReport {
+                durable: true,
+                recovery_mode: RecoveryMode::Strict,
+                max_wal_replay_entries: Some(2),
+                checkpoint_epoch: Some(3),
+                checkpoint_commit_epoch: None,
+                wal_present: true,
+                wal_replay_start_lsn: Some(4),
+                next_lsn_after_replay: Some(8),
+                replayed_wal_entries: 3,
+                torn_tail_ignored: false,
+                torn_tail_reason: Some("partial wal entry".to_string()),
+                recovered_commit_epoch: 13,
+            });
+        let json = report.json();
+
+        assert!(report.durable_recovery_observed);
+        assert!(!report.ready);
+        assert!(!report.checkpoint_boundary_present);
+        assert!(!report.wal_replay_bounded);
+        assert!(!report.torn_tail_clean);
+        assert_eq!(
+            report.blocker_codes,
+            vec![
+                "checkpoint_boundary_missing".to_string(),
+                "wal_replay_unbounded".to_string(),
+                "torn_tail_observed".to_string()
+            ]
+        );
+        assert_eq!(json["readiness"]["checkpoint_boundary_present"], false);
+        assert_eq!(json["readiness"]["wal_replay_bounded"], false);
+        assert_eq!(json["readiness"]["torn_tail_clean"], false);
     }
 
     #[test]
@@ -5109,6 +5965,11 @@ mod tests {
         assert_eq!(
             readiness["readiness_by_area"]["query_family"]["ready"],
             true
+        );
+        assert_eq!(readiness["readiness_by_area"]["graph_route"]["ready"], true);
+        assert_eq!(
+            readiness["graph_route_readiness"]["primary_ready_route_count"],
+            REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len()
         );
         assert_eq!(
             readiness["query_family_evidence"]["missing_required_query_families"],
@@ -5600,6 +6461,44 @@ mod tests {
                 [0]["field"],
             "lifecycle_state"
         );
+
+        let mut accumulator = NowledgeMemSearchCandidateShadowAccumulator::new();
+        accumulator.record_search_candidate_output(["memory:active"], &output);
+        let evidence = accumulator.json();
+
+        assert_eq!(evidence["ready"], true);
+        assert_eq!(
+            evidence["evidence_source"],
+            NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE
+        );
+        assert_eq!(evidence["request_count"], 1);
+        assert_eq!(evidence["candidate_primary_engine"], "skein");
+        assert_eq!(evidence["candidate_identity"]["ready"], true);
+        assert_eq!(evidence["filter_pushdown"]["ready"], true);
+        assert_eq!(
+            evidence["filter_pushdown"]["field_summary_count"],
+            NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len()
+        );
+        assert_eq!(
+            evidence["filter_pushdown"]["missing_required_fields"],
+            serde_json::json!([])
+        );
+        assert!(evidence["filter_pushdown"]["field_summaries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|summary| summary["field"] == "lifecycle_state"));
+
+        let direct_evidence = store
+            .search_candidate_shadow_evidence_json(&request, ["memory:active"])
+            .unwrap();
+        assert_eq!(direct_evidence["ready"], true);
+        assert_eq!(
+            direct_evidence["evidence_source"],
+            NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE
+        );
+        assert_eq!(direct_evidence["candidate_identity"]["ready"], true);
+        assert_eq!(direct_evidence["filter_pushdown"]["ready"], true);
         std::fs::remove_dir_all(root).unwrap();
     }
 

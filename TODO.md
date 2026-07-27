@@ -105,6 +105,90 @@ must block default cutover.
   - Completion evidence: replacement summary distinguishes graph replacement,
     search projection replacement, and out-of-scope content storage.
 
+## P0: PR-Sized Cutover Goals
+
+Use these as concrete PR boundaries. Each PR should be reviewable on its own,
+have a single owner boundary, and leave replacement readiness stricter or more
+complete than before. Avoid bundling Mem route changes, Skein kernel changes,
+and readiness gate changes unless the PR explicitly proves the end-to-end
+contract.
+
+- [ ] PR 1: Define the active Mem route cutover inventory.
+  - Scope: generate or update the shared route catalog for active graph/search
+    read routes, including REST and MCP surfaces.
+  - Deliverables: route list, legacy/Skein ownership field, required evidence
+    kind, and stale-evidence invalidation rule.
+  - Acceptance: replacement summary fails closed when a route is missing,
+    renamed, or not covered by evidence.
+- [ ] PR 2: Remove direct Kuzu reads from one low-risk graph read route.
+  - Scope: move one existing read route to the embedded query runtime with
+    `legacy`/`skein` selection controlled by configuration.
+  - Deliverables: typed route result, no request-time dual-read compare, and a
+    dedicated parity evidence endpoint.
+  - Acceptance: the route can run with `skein` selected through the library
+    runtime and legacy remains available as configured fallback.
+- [ ] PR 3: Repeat route runtime migration for the remaining graph-first reads.
+  - Scope: migrate overview, node details, expansion, shortest path,
+    communities, PageRank plan, augmentation state, orphans, and related
+    community reads in small route groups.
+  - Deliverables: route-group PRs that remove direct application-side graph
+    execution and preserve response shape.
+  - Acceptance: every migrated group adds route evidence and keeps production
+    handlers free of request-time shadow compare.
+- [ ] PR 4: Add search projection scan-pruning evidence for production filters.
+  - Scope: prove search projection segment descriptors prune `unit_type`,
+    lifecycle state, metadata keys, `importance`, `confidence`, and timestamps
+    before returning rows to Mem.
+  - Deliverables: typed pruning report, `EXPLAIN ANALYZE` evidence, and
+    fail-closed readiness checks for missing field summaries.
+  - Acceptance: replacement summary rejects search candidate cutover when
+    pushed predicates lack segment-level pruning evidence.
+- [ ] PR 5: Close LanceDB candidate read replacement.
+  - Scope: run FTS, vector, source chunk identity, embedding identity,
+    fail-soft, rebuild marker, repair marker, and incremental watermark evidence
+    through typed Rust APIs.
+  - Deliverables: Rust-bridge shadow evidence consumed by Mem without
+    hand-built cutover JSON.
+  - Acceptance: LanceDB candidate replacement gates pass only when all typed
+    evidence areas are present and internally consistent.
+- [ ] PR 6: Prove WAL and checkpoint recovery with Mem-shaped mutations.
+  - Scope: add fixtures for committed batch replay, torn WAL tail handling, and
+    checkpoint replay boundaries that match Mem graph/search writes.
+  - Deliverables: typed storage recovery readiness and negative fixtures.
+  - Acceptance: recovery readiness fails closed on missing or contradictory
+    WAL/checkpoint evidence and passes Mem-shaped replay cases.
+- [ ] PR 7: Make background QoS a readiness gate.
+  - Scope: connect resource classes for import, projection, compaction,
+    analytics, and migration work to typed background-maintenance readiness.
+  - Deliverables: foreground-first admission evidence, background deferral
+    counters, memory-pressure behavior, and compact blackbox events.
+  - Acceptance: production readiness blocks when background tasks can starve
+    foreground user reads or exceed configured memory budgets.
+- [ ] PR 8: Make Mem's Skein startup and readiness library-only.
+  - Scope: ensure Mem starts Skein in-process and consumes typed readiness,
+    route evidence, search projection evidence, slow log, blackbox, recovery,
+    and maintenance APIs.
+  - Deliverables: no production shell-out, CLI wrappers remain thin developer
+    adapters, and production config selects read engine explicitly.
+  - Acceptance: a Mem integration test can initialize Skein as a library and
+    evaluate cutover gates without invoking Skein CLI tools.
+- [ ] PR 9: Add the final cutover preflight bundle gate.
+  - Scope: combine route coverage, graph evidence, LanceDB projection evidence,
+    storage recovery, background QoS, redaction, and library-only integration
+    into one fail-closed integration readiness report.
+  - Deliverables: typed final preflight report plus compact redacted JSON for
+    diagnostics.
+  - Acceptance: `production_cutover_ready=true` is impossible unless every
+    blocker above is proven by current, route-matching evidence.
+- [ ] PR 10: Remove or quarantine obsolete compatibility paths.
+  - Scope: after gates are satisfied, remove unused CLI-only, Python-only, and
+    request-time shadow compare code from the production path.
+  - Deliverables: deleted or nightly-only compatibility entrypoints and updated
+    documentation.
+  - Acceptance: production Mem still supports explicit legacy read selection
+    during the migration window, but no stale compatibility helper bypasses the
+    query runtime or readiness gates.
+
 ## P0: Graph Kernel Compatibility
 
 - [ ] Finish the Nowledge-used Cypher subset.

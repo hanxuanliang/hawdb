@@ -1,11 +1,12 @@
 use crate::{
-    nowledge_mem_required_query_families_for_route, Result, SkeinError,
-    NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
-    NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE, NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE,
+    graph_route_readiness::{
+        NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL, NMEM_GRAPH_ROUTE_READINESS_PROTOCOL,
+    },
+    nowledge_graph_route_readiness_summary, nowledge_mem_required_query_families_for_route, Result,
+    SkeinError, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
+    NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE,
+    NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE,
     NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
-    NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_EVIDENCE_SOURCE,
-    NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_PRIMARY_ENGINE,
-    NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_SHADOW_ENGINE,
     NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
     REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
 };
@@ -22,8 +23,6 @@ const SKEIN_NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-mem-bounded-read-evidence-v1";
 const SKEIN_NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL: &str =
     "skein-nowledge-query-runtime-preflight-v1";
-const NMEM_GRAPH_ROUTE_READINESS_PROTOCOL: &str = "nmem-graph-route-readiness-v1";
-const NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL: &str = "nmem-graph-route-evidence-v1";
 const SKEIN_NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL: &str = "skein-nowledge-mem-query-report-v1";
 const ROUTE_PARITY_EVIDENCE_SOURCE: &str = "route_parity_evidence";
 const ROUTE_PARITY_FULL_MATCH_PER_MILLION: u64 = 1_000_000;
@@ -525,9 +524,9 @@ pub fn nowledge_mem_integration_readiness(
                 search_candidate_engine_identity_ready(bundle),
                 search_candidate_parity_ready(bundle),
                 search_candidate_identity_ready(bundle),
-                search_candidate_filter_pushdown_flag_or_trace_ready(bundle),
-                search_candidate_filter_pushdown_field_summary_or_trace_ready(bundle),
-                search_candidate_filter_pushdown_required_fields_or_trace_ready(bundle),
+                search_candidate_filter_pushdown_flag_ready(bundle),
+                search_candidate_filter_pushdown_field_summary_ready(bundle),
+                search_candidate_filter_pushdown_required_fields_ready(bundle),
             ],
             [
                 "search_candidate_shadow_evidence.protocol",
@@ -690,20 +689,14 @@ pub fn nowledge_mem_integration_readiness(
         check(
             "graph_route_readiness",
             [
-                str_path(bundle, &["graph_route_readiness", "protocol"])
-                    == Some(NMEM_GRAPH_ROUTE_READINESS_PROTOCOL),
-                str_path(bundle, &["graph_route_readiness", "evidence_protocol"])
-                    == Some(NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL),
-                bool_path(bundle, &["graph_route_readiness", "evidence_ready"]) == Some(true),
+                graph_route_protocol_ready(bundle),
+                graph_route_evidence_protocol_ready(bundle),
+                graph_route_evidence_ready(bundle),
                 u64_path(bundle, &["graph_route_readiness", "route_count"])
                     .is_some_and(|value| value > 0),
-                u64_path(bundle, &["graph_route_readiness", "required_route_count"])
-                    == Some(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64),
-                graph_route_readiness_route_coverage_ready(bundle),
-                string_array_path_is_empty(
-                    bundle,
-                    &["graph_route_readiness", "missing_required_routes"],
-                ),
+                graph_route_required_route_count_ready(bundle),
+                graph_route_readiness_coverage_ready(bundle),
+                graph_route_missing_required_routes_empty(bundle),
                 u64_path(bundle, &["graph_route_readiness", "query_runtime_route_count"])
                     == Some(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64),
                 u64_path(bundle, &["graph_route_readiness", "query_runtime_report_count"])
@@ -714,16 +707,13 @@ pub fn nowledge_mem_integration_readiness(
                     bundle,
                     &["graph_route_readiness", "missing_query_runtime_routes"],
                 ),
-                bool_path(bundle, &["graph_route_readiness", "route_query_runtime_ready"])
-                    == Some(true),
-                bool_path(bundle, &["graph_route_readiness", "route_primary_ready"]) == Some(true),
-                graph_route_primary_ready_count_matches(bundle),
+                graph_route_query_runtime_ready(bundle),
+                graph_route_primary_ready(bundle),
+                graph_route_primary_ready_count_ready(bundle),
                 string_array_path(bundle, &["graph_route_readiness", "route_primary_blocker_codes"])
                     .is_empty(),
-                bool_path(bundle, &["graph_route_readiness", "evidence_route_coverage_present"])
-                    == Some(true),
-                bool_path(bundle, &["graph_route_readiness", "evidence_route_coverage_matches"])
-                    == Some(true),
+                graph_route_evidence_route_coverage_present(bundle),
+                graph_route_evidence_route_coverage_matches(bundle),
                 string_array_path(
                     bundle,
                     &[
@@ -1107,8 +1097,10 @@ pub fn nowledge_mem_integration_readiness(
                 library_readiness_area_ready(bundle, "storage"),
                 library_readiness_area_ready(bundle, "background"),
                 library_readiness_area_ready(bundle, "query_family"),
+                library_readiness_area_ready(bundle, "graph_route"),
                 library_readiness_area_ready(bundle, "search_projection"),
                 library_readiness_area_ready(bundle, "search_projection_shadow"),
+                library_readiness_area_ready(bundle, "search_candidate_shadow"),
             ],
             [
                 "library_readiness.protocol",
@@ -1123,8 +1115,10 @@ pub fn nowledge_mem_integration_readiness(
                 "library_readiness.readiness_by_area.storage.ready",
                 "library_readiness.readiness_by_area.background.ready",
                 "library_readiness.readiness_by_area.query_family.ready",
+                "library_readiness.readiness_by_area.graph_route.ready",
                 "library_readiness.readiness_by_area.search_projection.ready",
                 "library_readiness.readiness_by_area.search_projection_shadow.ready",
+                "library_readiness.readiness_by_area.search_candidate_shadow.ready",
             ],
             blocker_codes(
                 bundle,
@@ -1163,6 +1157,12 @@ pub fn nowledge_mem_integration_readiness(
                     &[
                         "library_readiness",
                         "readiness_by_area",
+                        "graph_route",
+                        "blocker_codes",
+                    ][..],
+                    &[
+                        "library_readiness",
+                        "readiness_by_area",
                         "search_projection",
                         "blocker_codes",
                     ][..],
@@ -1170,6 +1170,12 @@ pub fn nowledge_mem_integration_readiness(
                         "library_readiness",
                         "readiness_by_area",
                         "search_projection_shadow",
+                        "blocker_codes",
+                    ][..],
+                    &[
+                        "library_readiness",
+                        "readiness_by_area",
+                        "search_candidate_shadow",
                         "blocker_codes",
                     ][..],
                 ],
@@ -1903,164 +1909,64 @@ fn search_candidate_evidence_source(bundle: &serde_json::Value) -> Option<&str> 
 }
 
 fn search_candidate_evidence_source_ready(bundle: &serde_json::Value) -> bool {
-    matches!(
-        search_candidate_evidence_source(bundle),
-        Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE)
-            | Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_EVIDENCE_SOURCE)
-    )
+    search_candidate_evidence_source(bundle) == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE)
 }
 
 fn search_candidate_bridge_evidence(bundle: &serde_json::Value) -> bool {
     search_candidate_evidence_source(bundle) == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE)
 }
 
-fn search_candidate_trace_evidence(bundle: &serde_json::Value) -> bool {
-    search_candidate_evidence_source(bundle)
-        == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_EVIDENCE_SOURCE)
-}
-
-fn search_candidate_unrecognized_evidence_source_present(bundle: &serde_json::Value) -> bool {
-    search_candidate_evidence_source(bundle).is_some()
-        && !search_candidate_evidence_source_ready(bundle)
+fn search_candidate_unsupported_evidence_source_present(bundle: &serde_json::Value) -> bool {
+    search_candidate_evidence_source(bundle).is_some() && !search_candidate_bridge_evidence(bundle)
 }
 
 fn search_candidate_engine_identity_ready(bundle: &serde_json::Value) -> bool {
-    if search_candidate_bridge_evidence(bundle) {
-        return str_path(
+    if search_candidate_unsupported_evidence_source_present(bundle) {
+        return true;
+    }
+    search_candidate_bridge_evidence(bundle)
+        && str_path(
             bundle,
             &[
                 "search_candidate_shadow_evidence",
                 "candidate_primary_engine",
             ],
-        ) == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE);
-    }
-    if search_candidate_unrecognized_evidence_source_present(bundle) {
-        return true;
-    }
-    search_candidate_trace_evidence(bundle)
-        && str_path(
-            bundle,
-            &["search_candidate_shadow_evidence", "primary_engine"],
-        ) == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_PRIMARY_ENGINE)
-        && str_path(
-            bundle,
-            &["search_candidate_shadow_evidence", "shadow_engine"],
-        ) == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_SHADOW_ENGINE)
+        ) == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE)
 }
 
 fn search_candidate_parity_ready(bundle: &serde_json::Value) -> bool {
-    if search_candidate_bridge_evidence(bundle) {
-        return search_candidate_shadow_counts_ready(bundle);
-    }
-    if search_candidate_unrecognized_evidence_source_present(bundle) {
+    if search_candidate_unsupported_evidence_source_present(bundle) {
         return true;
     }
-    search_candidate_trace_evidence(bundle)
-        && bool_path(
-            bundle,
-            &["search_candidate_shadow_evidence", "row_count_parity"],
-        ) == Some(true)
-        && bool_path(
-            bundle,
-            &[
-                "search_candidate_shadow_evidence",
-                "vector_top_k_overlap_ready",
-            ],
-        ) == Some(true)
-        && bool_path(
-            bundle,
-            &[
-                "search_candidate_shadow_evidence",
-                "fts_top_k_overlap_ready",
-            ],
-        ) == Some(true)
+    search_candidate_bridge_evidence(bundle) && search_candidate_shadow_counts_ready(bundle)
 }
 
 fn search_candidate_identity_ready(bundle: &serde_json::Value) -> bool {
-    if search_candidate_bridge_evidence(bundle) {
-        return bool_path(
+    if search_candidate_unsupported_evidence_source_present(bundle) {
+        return true;
+    }
+    search_candidate_bridge_evidence(bundle)
+        && bool_path(
             bundle,
             &[
                 "search_candidate_shadow_evidence",
                 "candidate_identity",
                 "ready",
             ],
-        ) == Some(true);
-    }
-    if search_candidate_unrecognized_evidence_source_present(bundle) {
-        return true;
-    }
-    search_candidate_trace_evidence(bundle) && search_candidate_parity_ready(bundle)
+        ) == Some(true)
 }
 
 fn search_candidate_filter_pushdown_ready(bundle: &serde_json::Value) -> bool {
-    search_candidate_filter_pushdown_flag_or_trace_ready(bundle)
-        && search_candidate_filter_pushdown_field_summary_or_trace_ready(bundle)
-        && search_candidate_filter_pushdown_required_fields_or_trace_ready(bundle)
-}
-
-fn search_candidate_filter_pushdown_flag_or_trace_ready(bundle: &serde_json::Value) -> bool {
-    if search_candidate_bridge_evidence(bundle) {
-        return search_candidate_filter_pushdown_flag_ready(bundle);
-    }
-    if search_candidate_unrecognized_evidence_source_present(bundle) {
-        return true;
-    }
-    search_candidate_trace_evidence(bundle)
-        && bool_path(
-            bundle,
-            &[
-                "search_candidate_shadow_evidence",
-                "shadow_scan_filter_pushdown_ready",
-            ],
-        ) == Some(true)
-        && bool_path(
-            bundle,
-            &[
-                "search_candidate_shadow_evidence",
-                "shadow_scan_field_pruning_ready",
-            ],
-        ) == Some(true)
-}
-
-fn search_candidate_filter_pushdown_field_summary_or_trace_ready(
-    bundle: &serde_json::Value,
-) -> bool {
-    if search_candidate_bridge_evidence(bundle) {
-        return search_candidate_filter_pushdown_field_summary_ready(bundle);
-    }
-    if search_candidate_unrecognized_evidence_source_present(bundle) {
-        return true;
-    }
-    search_candidate_trace_evidence(bundle)
-        && u64_path(
-            bundle,
-            &[
-                "search_candidate_shadow_evidence",
-                "shadow_scan_field_summary_count",
-            ],
-        )
-        .is_some_and(|count| count > 0)
-}
-
-fn search_candidate_filter_pushdown_required_fields_or_trace_ready(
-    bundle: &serde_json::Value,
-) -> bool {
-    if search_candidate_bridge_evidence(bundle) {
-        return search_candidate_filter_pushdown_required_fields_ready(bundle);
-    }
-    if search_candidate_unrecognized_evidence_source_present(bundle) {
-        return true;
-    }
-    search_candidate_trace_evidence(bundle)
-        && string_array_path(
-            bundle,
-            &["search_candidate_shadow_evidence", "blocker_codes"],
-        )
-        .is_empty()
+    search_candidate_bridge_evidence(bundle)
+        && search_candidate_filter_pushdown_flag_ready(bundle)
+        && search_candidate_filter_pushdown_field_summary_ready(bundle)
+        && search_candidate_filter_pushdown_required_fields_ready(bundle)
 }
 
 fn search_candidate_filter_pushdown_flag_ready(bundle: &serde_json::Value) -> bool {
+    if search_candidate_unsupported_evidence_source_present(bundle) {
+        return true;
+    }
     bool_path(
         bundle,
         &[
@@ -2072,6 +1978,9 @@ fn search_candidate_filter_pushdown_flag_ready(bundle: &serde_json::Value) -> bo
 }
 
 fn search_candidate_filter_pushdown_field_summary_ready(bundle: &serde_json::Value) -> bool {
+    if search_candidate_unsupported_evidence_source_present(bundle) {
+        return true;
+    }
     u64_path(
         bundle,
         &[
@@ -2084,6 +1993,9 @@ fn search_candidate_filter_pushdown_field_summary_ready(bundle: &serde_json::Val
 }
 
 fn search_candidate_filter_pushdown_required_fields_ready(bundle: &serde_json::Value) -> bool {
+    if search_candidate_unsupported_evidence_source_present(bundle) {
+        return true;
+    }
     let path = &[
         "search_candidate_shadow_evidence",
         "filter_pushdown",
@@ -2246,20 +2158,14 @@ fn bounded_read_route_coverage_ready(bundle: &serde_json::Value) -> bool {
 }
 
 fn graph_route_readiness_ready(bundle: &serde_json::Value) -> bool {
-    str_path(bundle, &["graph_route_readiness", "protocol"])
-        == Some(NMEM_GRAPH_ROUTE_READINESS_PROTOCOL)
-        && str_path(bundle, &["graph_route_readiness", "evidence_protocol"])
-            == Some(NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL)
-        && bool_path(bundle, &["graph_route_readiness", "evidence_ready"]) == Some(true)
+    graph_route_protocol_ready(bundle)
+        && graph_route_evidence_protocol_ready(bundle)
+        && graph_route_evidence_ready(bundle)
         && u64_path(bundle, &["graph_route_readiness", "route_count"])
             .is_some_and(|value| value > 0)
-        && u64_path(bundle, &["graph_route_readiness", "required_route_count"])
-            == Some(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64)
-        && graph_route_readiness_route_coverage_ready(bundle)
-        && string_array_path_is_empty(
-            bundle,
-            &["graph_route_readiness", "missing_required_routes"],
-        )
+        && graph_route_required_route_count_ready(bundle)
+        && graph_route_readiness_coverage_ready(bundle)
+        && graph_route_missing_required_routes_empty(bundle)
         && u64_path(
             bundle,
             &["graph_route_readiness", "query_runtime_route_count"],
@@ -2270,29 +2176,21 @@ fn graph_route_readiness_ready(bundle: &serde_json::Value) -> bool {
         )
         .is_some_and(|value| value >= REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64)
         && graph_route_query_plan_profile_summary_ready(bundle)
+        && graph_route_relationship_property_pruning_summary_ready(bundle)
         && string_array_path_is_empty(
             bundle,
             &["graph_route_readiness", "missing_query_runtime_routes"],
         )
-        && bool_path(
-            bundle,
-            &["graph_route_readiness", "route_query_runtime_ready"],
-        ) == Some(true)
-        && bool_path(bundle, &["graph_route_readiness", "route_primary_ready"]) == Some(true)
-        && graph_route_primary_ready_count_matches(bundle)
+        && graph_route_query_runtime_ready(bundle)
+        && graph_route_primary_ready(bundle)
+        && graph_route_primary_ready_count_ready(bundle)
         && string_array_path(
             bundle,
             &["graph_route_readiness", "route_primary_blocker_codes"],
         )
         .is_empty()
-        && bool_path(
-            bundle,
-            &["graph_route_readiness", "evidence_route_coverage_present"],
-        ) == Some(true)
-        && bool_path(
-            bundle,
-            &["graph_route_readiness", "evidence_route_coverage_matches"],
-        ) == Some(true)
+        && graph_route_evidence_route_coverage_present(bundle)
+        && graph_route_evidence_route_coverage_matches(bundle)
         && string_array_path(
             bundle,
             &[
@@ -2304,32 +2202,67 @@ fn graph_route_readiness_ready(bundle: &serde_json::Value) -> bool {
         && graph_route_query_profiles_ready(bundle)
 }
 
-fn graph_route_readiness_route_coverage_ready(bundle: &serde_json::Value) -> bool {
-    let Some(value) = json_get_path(bundle, &["graph_route_readiness"]) else {
-        return false;
-    };
-    let covered_routes = string_array_path(value, &["covered_routes"]);
-    covered_routes.len() == REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len()
-        && REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
-            .iter()
-            .all(|route| covered_routes.iter().any(|covered| covered == route))
-        && u64_path(value, &["covered_route_count"])
-            == Some(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64)
-        && bool_path(value, &["required_routes_covered"]) == Some(true)
-        && string_array_path(value, &["missing_required_routes"]).is_empty()
-        && string_array_path(value, &["unknown_routes"]).is_empty()
-        && string_array_path(value, &["duplicate_routes"]).is_empty()
-        && bool_path(value, &["route_coverage_ready"]) == Some(true)
-        && string_array_path(value, &["route_coverage_blocker_codes"]).is_empty()
+fn graph_route_readiness_summary(bundle: &serde_json::Value) -> crate::GraphRouteReadinessSummary {
+    let value =
+        json_get_path(bundle, &["graph_route_readiness"]).unwrap_or(&serde_json::Value::Null);
+    nowledge_graph_route_readiness_summary(value)
 }
 
-fn graph_route_primary_ready_count_matches(bundle: &serde_json::Value) -> bool {
-    let route_count = u64_path(bundle, &["graph_route_readiness", "route_count"]);
-    let primary_ready_route_count = u64_path(
-        bundle,
-        &["graph_route_readiness", "primary_ready_route_count"],
-    );
-    route_count.is_some_and(|value| value > 0) && route_count == primary_ready_route_count
+fn graph_route_protocol_ready(bundle: &serde_json::Value) -> bool {
+    graph_route_readiness_summary(bundle).protocol.as_deref()
+        == Some(NMEM_GRAPH_ROUTE_READINESS_PROTOCOL)
+}
+
+fn graph_route_evidence_protocol_ready(bundle: &serde_json::Value) -> bool {
+    graph_route_readiness_summary(bundle)
+        .evidence_protocol
+        .as_deref()
+        == Some(NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL)
+}
+
+fn graph_route_evidence_ready(bundle: &serde_json::Value) -> bool {
+    graph_route_readiness_summary(bundle).evidence_ready == Some(true)
+}
+
+fn graph_route_required_route_count_ready(bundle: &serde_json::Value) -> bool {
+    graph_route_readiness_summary(bundle).required_route_count
+        == Some(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64)
+}
+
+fn graph_route_readiness_coverage_ready(bundle: &serde_json::Value) -> bool {
+    let summary = graph_route_readiness_summary(bundle);
+    summary.covered_route_count == Some(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64)
+        && summary.missing_required_routes.is_empty()
+        && summary.unknown_routes.is_empty()
+        && summary.duplicate_routes.is_empty()
+        && summary.route_coverage_ready == Some(true)
+}
+
+fn graph_route_missing_required_routes_empty(bundle: &serde_json::Value) -> bool {
+    graph_route_readiness_summary(bundle)
+        .missing_required_routes
+        .is_empty()
+}
+
+fn graph_route_query_runtime_ready(bundle: &serde_json::Value) -> bool {
+    graph_route_readiness_summary(bundle).route_query_runtime_ready == Some(true)
+}
+
+fn graph_route_primary_ready(bundle: &serde_json::Value) -> bool {
+    graph_route_readiness_summary(bundle).route_primary_ready == Some(true)
+}
+
+fn graph_route_primary_ready_count_ready(bundle: &serde_json::Value) -> bool {
+    graph_route_readiness_summary(bundle).primary_ready_route_count
+        == Some(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64)
+}
+
+fn graph_route_evidence_route_coverage_present(bundle: &serde_json::Value) -> bool {
+    graph_route_readiness_summary(bundle).evidence_route_coverage_present == Some(true)
+}
+
+fn graph_route_evidence_route_coverage_matches(bundle: &serde_json::Value) -> bool {
+    graph_route_readiness_summary(bundle).evidence_route_coverage_matches == Some(true)
 }
 
 fn graph_route_query_plan_profile_summary_ready(bundle: &serde_json::Value) -> bool {
@@ -2910,8 +2843,10 @@ fn library_readiness_ready(bundle: &serde_json::Value) -> bool {
             "storage",
             "background",
             "query_family",
+            "graph_route",
             "search_projection",
             "search_projection_shadow",
+            "search_candidate_shadow",
         ]
         .into_iter()
         .all(|area| library_readiness_area_ready(bundle, area))
@@ -3129,6 +3064,7 @@ fn json_get_path<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a 
 mod tests {
     use super::nowledge_mem_integration_readiness_json;
     use crate::{
+        nowledge_mem_graph_read_route_spec, nowledge_mem_graph_read_route_specs_json,
         nowledge_mem_search_candidate_shadow_evidence_json,
         NowledgeMemSearchCandidateShadowAccumulator, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_ENGINE,
@@ -3518,27 +3454,9 @@ mod tests {
     }
 
     #[test]
-    fn accepts_search_candidate_trace_evidence() {
+    fn rejects_search_candidate_trace_evidence_for_library_readiness() {
         let mut bundle = ready_bundle();
         bundle["search_candidate_shadow_evidence"] = ready_search_candidate_trace_evidence();
-
-        let report = nowledge_mem_integration_readiness_json(&bundle);
-
-        assert_eq!(report["ready"], true);
-        assert_eq!(report["failed_checks"], serde_json::json!([]));
-        assert_eq!(report["blocker_codes"], serde_json::json!([]));
-    }
-
-    #[test]
-    fn rejects_weak_search_candidate_trace_evidence() {
-        let mut bundle = ready_bundle();
-        bundle["search_candidate_shadow_evidence"] = ready_search_candidate_trace_evidence();
-        bundle["search_candidate_shadow_evidence"]["shadow_scan_filter_pushdown_ready"] =
-            serde_json::json!(false);
-        bundle["search_candidate_shadow_evidence"]["shadow_scan_field_summary_count"] =
-            serde_json::json!(0);
-        bundle["search_candidate_shadow_evidence"]["blocker_codes"] =
-            serde_json::json!(["search_candidate_field_pruning_missing"]);
 
         let report = nowledge_mem_integration_readiness_json(&bundle);
 
@@ -3546,10 +3464,6 @@ mod tests {
         assert_eq!(
             report["failed_checks"],
             serde_json::json!(["search_candidate_primary_evidence"])
-        );
-        assert_eq!(
-            report["blocker_codes"],
-            serde_json::json!(["search_candidate_field_pruning_missing"])
         );
         let candidate_check = report["checks"]
             .as_array()
@@ -3559,11 +3473,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             candidate_check["failed_evidence_fields"],
-            serde_json::json!([
-                "search_candidate_shadow_evidence.filter_pushdown.ready",
-                "search_candidate_shadow_evidence.filter_pushdown.field_summary_count",
-                "search_candidate_shadow_evidence.filter_pushdown.missing_required_fields"
-            ])
+            serde_json::json!(["search_candidate_shadow_evidence.evidence_source"])
         );
     }
 
@@ -5113,8 +5023,10 @@ mod tests {
                 "library_readiness.readiness_by_area.storage.ready",
                 "library_readiness.readiness_by_area.background.ready",
                 "library_readiness.readiness_by_area.query_family.ready",
+                "library_readiness.readiness_by_area.graph_route.ready",
                 "library_readiness.readiness_by_area.search_projection.ready",
-                "library_readiness.readiness_by_area.search_projection_shadow.ready"
+                "library_readiness.readiness_by_area.search_projection_shadow.ready",
+                "library_readiness.readiness_by_area.search_candidate_shadow.ready"
             ])
         );
         assert!(report["next_actions"]
@@ -5162,6 +5074,49 @@ mod tests {
                 "library_readiness.ready",
                 "library_readiness.blocked_area_count",
                 "library_readiness.readiness_by_area.search_projection.ready"
+            ])
+        );
+    }
+
+    #[test]
+    fn rejects_blocked_library_graph_route_readiness_area() {
+        let mut bundle = ready_bundle();
+        bundle["library_readiness"]["ready"] = serde_json::json!(false);
+        bundle["library_readiness"]["ready_area_count"] = serde_json::json!(7);
+        bundle["library_readiness"]["blocked_area_count"] = serde_json::json!(1);
+        bundle["library_readiness"]["blocker_codes"] =
+            serde_json::json!(["graph_route_readiness_not_ready"]);
+        bundle["library_readiness"]["readiness_by_area"]["graph_route"]["ready"] =
+            serde_json::json!(false);
+        bundle["library_readiness"]["readiness_by_area"]["graph_route"]["blocker_codes"] =
+            serde_json::json!(["graph_route_readiness_missing"]);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["library_readiness"])
+        );
+        assert_eq!(
+            report["blocker_codes"],
+            serde_json::json!([
+                "graph_route_readiness_missing",
+                "graph_route_readiness_not_ready"
+            ])
+        );
+        let library_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "library_readiness")
+            .unwrap();
+        assert_eq!(
+            library_check["failed_evidence_fields"],
+            serde_json::json!([
+                "library_readiness.ready",
+                "library_readiness.blocked_area_count",
+                "library_readiness.readiness_by_area.graph_route.ready"
             ])
         );
     }
@@ -5368,23 +5323,7 @@ mod tests {
                 "operator_row_cap_enabled": true,
                 "blocking_operator_count": 0,
                 "streaming": false,
-                "covered_routes": [
-                    "/graph/overview",
-                    "/graph/explore",
-                    "/graph/expand/{node_id}",
-                    "/graph/live-preview",
-                    "/graph/live-preview/{node_id}",
-                    "/graph/community-members/{community_id}",
-                    "/library/community/{community_id}/subgraph",
-                    "/library/community/{community_id}/recent-memories",
-                    "/library/community/{community_id}/related",
-                    "/graph/analysis",
-                    "/graph/augmentation/state",
-                    "/graph/augmentation/pagerank/plan",
-                    "/graph/node-details/{node_id}",
-                    "/graph/orphans",
-                    "/graph/shortest-path"
-                ],
+                "covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
                 "blocker_codes": []
             },
             "replacement_summary_bounded_read_alignment": {
@@ -5472,23 +5411,7 @@ mod tests {
                     "operator_row_cap_enabled": true,
                     "blocking_operator_count": 0,
                     "streaming": false,
-                    "covered_routes": [
-                        "/graph/overview",
-                        "/graph/explore",
-                        "/graph/expand/{node_id}",
-                        "/graph/live-preview",
-                        "/graph/live-preview/{node_id}",
-                        "/graph/community-members/{community_id}",
-                        "/library/community/{community_id}/subgraph",
-                        "/library/community/{community_id}/recent-memories",
-                        "/library/community/{community_id}/related",
-                        "/graph/analysis",
-                        "/graph/augmentation/state",
-                        "/graph/augmentation/pagerank/plan",
-                        "/graph/node-details/{node_id}",
-                        "/graph/orphans",
-                        "/graph/shortest-path"
-                    ],
+                    "covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
                     "missing_covered_routes": [],
                     "blocker_codes": []
                 },
@@ -5543,6 +5466,9 @@ mod tests {
             "evidence_relationship_property_pruning_report_count": 0,
             "summary_relationship_property_pruning_report_count": 0,
             "relationship_property_pruning_report_count_matches": true,
+            "evidence_route_catalog_metadata_ready": true,
+            "summary_route_catalog_metadata_ready": true,
+            "route_catalog_metadata_ready_matches": true,
             "primary_ready_routes_match": true,
             "evidence_required_routes_covered": true,
             "summary_required_routes_covered": true,
@@ -5604,12 +5530,13 @@ mod tests {
             "route_relationship_property_pruning_evidence_ready": true,
             "route_primary_ready": true,
             "route_primary_blocker_codes": [],
+            "route_catalog": nowledge_mem_graph_read_route_specs_json(),
             "routes": ready_graph_route_profile_routes()
         });
         bundle["graph_route_parity_alignment"] = serde_json::json!({
             "ready": true,
-            "required_route_count": 18,
-            "ready_route_count": 18,
+            "required_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+            "ready_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
             "ready_routes": [
                 "augmentation_state",
                 "pagerank_plan",
@@ -5727,8 +5654,12 @@ mod tests {
                     .first()
                     .copied()
                     .unwrap_or("memory_lookup");
+                let spec = nowledge_mem_graph_read_route_spec(route).unwrap();
                 serde_json::json!({
                     "route": route,
+                    "owner": spec.owner.as_str(),
+                    "required_evidence_kind": spec.required_evidence_kind.as_str(),
+                    "stale_on_catalog_change": spec.stale_on_catalog_change,
                     "shadow_compare_ready": true,
                     "shadow_compare_evidence_source": "route_parity_evidence",
                     "shadow_compare": {
@@ -5895,7 +5826,7 @@ mod tests {
             "present": true,
             "ready": true,
             "mode": "shadow_read_only",
-            "ready_area_count": 7,
+            "ready_area_count": 8,
             "blocked_area_count": 0,
             "blocker_codes": [],
             "open_report": {
@@ -5933,11 +5864,19 @@ mod tests {
                     "ready": true,
                     "blocker_codes": []
                 },
+                "graph_route": {
+                    "ready": true,
+                    "blocker_codes": []
+                },
                 "search_projection": {
                     "ready": true,
                     "blocker_codes": []
                 },
                 "search_projection_shadow": {
+                    "ready": true,
+                    "blocker_codes": []
+                },
+                "search_candidate_shadow": {
                     "ready": true,
                     "blocker_codes": []
                 }

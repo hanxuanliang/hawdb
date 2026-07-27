@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 pub fn nowledge_mem_library_readiness_usage() -> String {
-    "nowledge-mem-library-readiness requires [--require-ready] [--mode shadow_read_only|writable_cutover] [--search-projection <path>] [--bounded-probe-json <path>] [--bounded-read-evidence-json <path>] [--covered-routes-json <path>] [--graph-route-readiness-json <path>] [--query-family-evidence-json <path>] [--search-projection-evidence-json <path>] [--primary-search-projection-probe-json <path>] [--search-projection-shadow-evidence-json <path>] [--active-model <model>] [--active-dimension <n>] <graph-db>"
+    "nowledge-mem-library-readiness requires [--require-ready] [--mode shadow_read_only|writable_cutover] [--search-projection <path>] [--bounded-probe-json <path>] [--bounded-read-evidence-json <path>] [--covered-routes-json <path>] [--graph-route-readiness-json <path>] [--query-family-evidence-json <path>] [--search-projection-evidence-json <path>] [--primary-search-projection-probe-json <path>] [--search-projection-shadow-evidence-json <path>] [--search-candidate-shadow-evidence-json <path>] [--active-model <model>] [--active-dimension <n>] <graph-db>"
         .to_string()
 }
 
@@ -25,6 +25,7 @@ pub fn run_nowledge_mem_library_readiness(
     let mut search_projection_evidence = None;
     let mut primary_search_projection_probe = None;
     let mut search_projection_shadow_evidence = None;
+    let mut search_candidate_shadow_evidence = None;
     let mut search_projection_probe_options = SearchProjectionProbeOptions::default();
     let mut graph_path = None;
 
@@ -98,6 +99,12 @@ pub fn run_nowledge_mem_library_readiness(
                     .ok_or_else(|| SkeinError::Semantic(nowledge_mem_library_readiness_usage()))?;
                 search_projection_shadow_evidence = Some(read_json_file(Path::new(&path))?);
             }
+            "--search-candidate-shadow-evidence-json" => {
+                let path = args
+                    .next()
+                    .ok_or_else(|| SkeinError::Semantic(nowledge_mem_library_readiness_usage()))?;
+                search_candidate_shadow_evidence = Some(read_json_file(Path::new(&path))?);
+            }
             "--active-model" => {
                 search_projection_probe_options.active_embedding_model =
                     Some(args.next().ok_or_else(|| {
@@ -140,6 +147,7 @@ pub fn run_nowledge_mem_library_readiness(
         search_projection_probe_options,
         primary_search_projection_probe,
         search_projection_shadow_evidence,
+        search_candidate_shadow_evidence,
         ..NowledgeMemReadinessOptions::default()
     };
     let mut readiness = store.library_readiness_json(&options);
@@ -399,6 +407,14 @@ mod tests {
             serde_json::json!(true)
         );
         assert_eq!(
+            readiness["graph_route_readiness"]["ready"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            readiness["readiness_by_area"]["graph_route"]["ready"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
             readiness["query_family_evidence"]["blocker_codes"],
             serde_json::json!(["query_family_evidence_missing"])
         );
@@ -427,6 +443,8 @@ mod tests {
         let query_family_evidence_path = root.join("query-family-evidence.json");
         let search_evidence_path = root.join("search-projection-evidence.json");
         let search_shadow_evidence_path = root.join("search-projection-shadow-evidence.json");
+        let search_candidate_shadow_evidence_path =
+            root.join("search-candidate-shadow-evidence.json");
         std::fs::create_dir_all(&root).unwrap();
         let db = Database::open(&graph_path).unwrap();
         drop(db);
@@ -468,6 +486,36 @@ mod tests {
             .to_string(),
         )
         .unwrap();
+        std::fs::write(
+            &search_candidate_shadow_evidence_path,
+            serde_json::json!({
+                "protocol": "skein-nowledge-search-candidate-shadow-evidence",
+                "route": "/search-index/skein-shadow/candidate-evidence",
+                "evidence_source": "nmem-rust-bridge",
+                "present": true,
+                "ready": true,
+                "candidate_primary_engine": "skein",
+                "request_count": 1,
+                "primary_candidate_count": 1,
+                "shadow_candidate_count": 1,
+                "matched_candidate_count": 1,
+                "primary_only_candidate_count": 0,
+                "candidate_identity": {
+                    "ready": true,
+                    "parity": true
+                },
+                "filter_pushdown_ready": true,
+                "filter_pushdown": {
+                    "ready": true,
+                    "field_summary_count": 1,
+                    "missing_required_fields": [],
+                    "blocker_codes": []
+                },
+                "blocker_codes": []
+            })
+            .to_string(),
+        )
+        .unwrap();
 
         let (readiness, _) = run_nowledge_mem_library_readiness(
             [
@@ -479,6 +527,8 @@ mod tests {
                 search_evidence_path.to_str().unwrap(),
                 "--search-projection-shadow-evidence-json",
                 search_shadow_evidence_path.to_str().unwrap(),
+                "--search-candidate-shadow-evidence-json",
+                search_candidate_shadow_evidence_path.to_str().unwrap(),
                 graph_path.to_str().unwrap(),
             ]
             .into_iter()
@@ -492,6 +542,15 @@ mod tests {
         assert_eq!(
             readiness["search_projection_shadow_evidence"]["ready"],
             true
+        );
+        assert_eq!(readiness["search_candidate_shadow_evidence"]["ready"], true);
+        assert_eq!(
+            readiness["graph_route_readiness"]["blocker_codes"],
+            serde_json::json!(["graph_route_readiness_missing"])
+        );
+        assert_eq!(
+            readiness["readiness_by_area"]["graph_route"]["ready"],
+            false
         );
         assert_eq!(readiness["open_report"]["graph_opened"], true);
         assert_eq!(readiness["open_report"]["search_projection_opened"], false);
