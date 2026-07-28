@@ -512,19 +512,20 @@ document content or embeddings.
 
 ## Durability Policy
 
-The default durability policy is `SyncOnCheckpoint`.
+The default durability policy is `SyncOnEveryWrite`.
 
-Under this policy, each WAL append is flushed to the operating system, but it is
-not individually `fsync`ed. Checkpoint creation writes and syncs a temporary
-snapshot file, atomically renames it into place, and truncates the WAL.
+Under this policy, each WAL append is flushed and synchronized before the
+committed snapshot is published and the request returns. When the WAL is first
+created, its parent directory is synchronized as part of the same durability
+boundary.
 
-This default avoids per-mutation fsync write amplification. Workloads that need
-stronger single-write durability can opt into `SyncOnEveryWrite`, which calls
-`sync_data` after each WAL entry.
+`SyncOnCheckpoint` remains available as an explicit relaxed policy. It flushes
+each WAL append to the operating system without synchronizing every entry, so it
+does not satisfy the production response-durability contract.
 
-The explicit policy is important because graph ingestion often creates many
-small node and relationship records. Syncing each tiny WAL append can dominate
-runtime and cause pathological write amplification.
+Callers that need higher ingest throughput SHOULD batch related mutations into
+one transaction and one WAL batch rather than weakening the default durability
+contract.
 
 ## Relationship Locality
 

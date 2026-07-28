@@ -4,27 +4,58 @@ use crate::nowledge_mem::{
 };
 use crate::store::DurabilityPolicy;
 use crate::{Database, DatabaseConfig, Result};
+use skein_qos::{IoConcurrencyBudget, RuntimeResourceBudget};
 use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EmbeddedDeploymentProfile {
+    #[default]
+    DesktopBound,
+    MobileEmbedded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmbeddedRuntimeResources {
+    pub cpu: RuntimeResourceBudget,
+    pub storage_io: IoConcurrencyBudget,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkeinEmbeddedOpenOptions {
     pub path: PathBuf,
     pub config: DatabaseConfig,
     pub durability: DurabilityPolicy,
+    pub deployment_profile: EmbeddedDeploymentProfile,
+    pub storage_io: Option<IoConcurrencyBudget>,
 }
 
 #[derive(Debug)]
 pub struct SkeinEmbedded {
     path: PathBuf,
     database: Database,
+    deployment_profile: EmbeddedDeploymentProfile,
+    runtime_resources: EmbeddedRuntimeResources,
 }
 
 impl SkeinEmbeddedOpenOptions {
     pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self::for_profile(path, EmbeddedDeploymentProfile::DesktopBound)
+    }
+
+    pub fn mobile(path: impl Into<PathBuf>) -> Self {
+        Self::for_profile(path, EmbeddedDeploymentProfile::MobileEmbedded)
+    }
+
+    pub fn for_profile(
+        path: impl Into<PathBuf>,
+        deployment_profile: EmbeddedDeploymentProfile,
+    ) -> Self {
         Self {
             path: path.into(),
-            config: DatabaseConfig::default(),
+            config: default_database_config(deployment_profile),
             durability: DurabilityPolicy::default(),
+            deployment_profile,
+            storage_io: None,
         }
     }
 
@@ -37,6 +68,11 @@ impl SkeinEmbeddedOpenOptions {
         self.durability = durability;
         self
     }
+
+    pub fn with_storage_io_budget(mut self, storage_io: IoConcurrencyBudget) -> Self {
+        self.storage_io = Some(storage_io);
+        self
+    }
 }
 
 impl SkeinEmbedded {
@@ -45,6 +81,10 @@ impl SkeinEmbedded {
     }
 
     pub fn open_with_options(options: SkeinEmbeddedOpenOptions) -> Result<Self> {
+        let cpu = RuntimeResourceBudget::detect();
+        let storage_io = options
+            .storage_io
+            .unwrap_or_else(|| default_io_budget(options.deployment_profile, cpu));
         let database = Database::open_with_durability_and_config(
             &options.path,
             options.durability,
@@ -53,6 +93,8 @@ impl SkeinEmbedded {
         Ok(Self {
             path: options.path,
             database,
+            deployment_profile: options.deployment_profile,
+            runtime_resources: EmbeddedRuntimeResources { cpu, storage_io },
         })
     }
 
@@ -64,6 +106,14 @@ impl SkeinEmbedded {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn deployment_profile(&self) -> EmbeddedDeploymentProfile {
+        self.deployment_profile
+    }
+
+    pub fn runtime_resources(&self) -> EmbeddedRuntimeResources {
+        self.runtime_resources
     }
 
     pub fn database(&self) -> &Database {
@@ -97,6 +147,32 @@ impl SkeinEmbedded {
             run_status,
             exit_code,
         })
+    }
+}
+
+fn default_database_config(profile: EmbeddedDeploymentProfile) -> DatabaseConfig {
+    match profile {
+        EmbeddedDeploymentProfile::DesktopBound => DatabaseConfig::default(),
+        EmbeddedDeploymentProfile::MobileEmbedded => DatabaseConfig {
+            max_read_result_rows: Some(512),
+            max_optimizer_groups: Some(256),
+            max_wal_replay_entries: Some(100_000),
+            max_search_projection_change_log_entries: Some(512),
+            max_plan_cache_entries: Some(32),
+            slow_query_log_capacity: 128,
+            statement_summary_capacity: 128,
+            ..DatabaseConfig::default()
+        },
+    }
+}
+
+fn default_io_budget(
+    profile: EmbeddedDeploymentProfile,
+    cpu: RuntimeResourceBudget,
+) -> IoConcurrencyBudget {
+    match profile {
+        EmbeddedDeploymentProfile::DesktopBound => IoConcurrencyBudget::desktop_bound(cpu),
+        EmbeddedDeploymentProfile::MobileEmbedded => IoConcurrencyBudget::mobile_embedded(cpu),
     }
 }
 
@@ -151,7 +227,7 @@ mod tests {
     fn embedded_handle_opens_nowledge_mem_store() {
         let root = unique_test_dir("embedded-nowledge-mem");
         let graph_path = root.join("graph");
-        let (mut store, open_report) = SkeinEmbedded::open_nowledge_mem(
+        let (store, open_report) = SkeinEmbedded::open_nowledge_mem(
             NowledgeMemOpenOptions::graph_only(&graph_path, NowledgeMemGraphMode::WritableCutover),
         )
         .unwrap();
@@ -166,6 +242,43 @@ mod tests {
         assert_eq!(readiness.protocol, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL);
         assert_eq!(readiness.mode, NowledgeMemGraphMode::WritableCutover);
         assert!(readiness.graph_open);
+    }
+
+    #[test]
+    fn mobile_profile_uses_bounded_defaults() {
+        let options = SkeinEmbeddedOpenOptions::mobile("mobile.db");
+
+        assert_eq!(
+            options.deployment_profile,
+            EmbeddedDeploymentProfile::MobileEmbedded
+        );
+        assert_eq!(options.config.max_read_result_rows, Some(512));
+        assert_eq!(options.config.max_plan_cache_entries, Some(32));
+        assert_eq!(
+            options.config.max_search_projection_change_log_entries,
+            Some(512)
+        );
+    }
+
+    #[test]
+    fn explicit_storage_io_budget_overrides_profile_default() {
+        let root = unique_test_dir("embedded-io-budget");
+        let options = SkeinEmbeddedOpenOptions::mobile(root.join("graph"))
+            .with_storage_io_budget(IoConcurrencyBudget::new(7, 2));
+        let engine = SkeinEmbedded::open_with_options(options).unwrap();
+
+        assert_eq!(
+            engine.deployment_profile(),
+            EmbeddedDeploymentProfile::MobileEmbedded
+        );
+        assert_eq!(
+            engine.runtime_resources().storage_io.foreground_depth.get(),
+            7
+        );
+        assert_eq!(
+            engine.runtime_resources().storage_io.background_depth.get(),
+            2
+        );
     }
 
     fn unique_test_dir(prefix: &str) -> PathBuf {

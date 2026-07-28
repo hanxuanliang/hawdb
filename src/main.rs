@@ -1327,7 +1327,7 @@ fn nowledge_bounded_read_report_json(
     parameters: &BTreeMap<String, Value>,
     options: &NowledgeMemReadOptions,
 ) -> Result<serde_json::Value> {
-    let mut graph = NowledgeMemGraph::open(path, NowledgeMemGraphMode::ShadowReadOnly)?;
+    let graph = NowledgeMemGraph::open(path, NowledgeMemGraphMode::ShadowReadOnly)?;
     let read = graph.read_query_with_params(query, parameters, options)?;
     Ok(read.report.json())
 }

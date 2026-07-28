@@ -45,18 +45,27 @@ EndRead(reader) ==
     /\ readerEpoch' = [readerEpoch EXCEPT ![reader] = -1]
     /\ UNCHANGED <<publishedEpoch, durableEpoch, writer, stagedEpoch>>
 
+Crash ==
+    /\ writer' = "none"
+    /\ stagedEpoch' = 0
+    /\ readerEpoch' = [reader \in Readers |-> -1]
+    /\ UNCHANGED <<publishedEpoch, durableEpoch>>
+
 Next ==
     \/ BeginWrite
     \/ MakeDurable
     \/ Publish
     \/ \E reader \in Readers: BeginRead(reader)
     \/ \E reader \in Readers: EndRead(reader)
+    \/ Crash
 
 DurableBeforePublish == publishedEpoch <= durableEpoch
 WriterOwnsNextEpoch == writer = "active" => stagedEpoch = publishedEpoch + 1
 ReadersSeePublishedSnapshots ==
     \A reader \in Readers:
         readerEpoch[reader] = -1 \/ readerEpoch[reader] <= publishedEpoch
+
+CrashLeavesRecoverablePublication == publishedEpoch <= durableEpoch
 
 Spec == Init /\ [][Next]_vars
 

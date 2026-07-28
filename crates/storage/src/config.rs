@@ -1,7 +1,7 @@
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum DurabilityPolicy {
-    #[default]
     SyncOnCheckpoint,
+    #[default]
     SyncOnEveryWrite,
 }
 
@@ -32,7 +32,7 @@ mod tests {
     fn defaults_are_bounded_and_recoverable() {
         assert_eq!(
             DurabilityPolicy::default(),
-            DurabilityPolicy::SyncOnCheckpoint
+            DurabilityPolicy::SyncOnEveryWrite
         );
         assert_eq!(RecoveryMode::default(), RecoveryMode::TolerateTornTail);
         assert_eq!(DurableCompression::default(), DurableCompression::Zstd);

@@ -6848,12 +6848,9 @@ impl DurableStore {
                 properties: properties.clone(),
             },
         };
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.wal_path)?;
+        let (mut file, created) = self.open_wal_append()?;
         writeln!(file, "{}", entry.encode())?;
-        self.finish_wal_append(&mut file)?;
+        self.finish_wal_append(&mut file, created)?;
         self.next_lsn += 1;
         Ok(())
     }
@@ -6876,12 +6873,9 @@ impl DurableStore {
                 properties: properties.clone(),
             },
         };
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.wal_path)?;
+        let (mut file, created) = self.open_wal_append()?;
         writeln!(file, "{}", entry.encode())?;
-        self.finish_wal_append(&mut file)?;
+        self.finish_wal_append(&mut file, created)?;
         self.next_lsn += 1;
         Ok(())
     }
@@ -6891,12 +6885,9 @@ impl DurableStore {
             lsn: self.next_lsn,
             op: WalOp::Batch(ops),
         };
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.wal_path)?;
+        let (mut file, created) = self.open_wal_append()?;
         writeln!(file, "{}", entry.encode())?;
-        self.finish_wal_append(&mut file)?;
+        self.finish_wal_append(&mut file, created)?;
         self.next_lsn += 1;
         Ok(())
     }
@@ -6914,20 +6905,29 @@ impl DurableStore {
                 rel_types: definition.rel_types.clone(),
             },
         };
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.wal_path)?;
+        let (mut file, created) = self.open_wal_append()?;
         writeln!(file, "{}", entry.encode())?;
-        self.finish_wal_append(&mut file)?;
+        self.finish_wal_append(&mut file, created)?;
         self.next_lsn += 1;
         Ok(())
     }
 
-    fn finish_wal_append(&self, file: &mut File) -> Result<()> {
+    fn open_wal_append(&self) -> Result<(File, bool)> {
+        let created = !self.wal_path.exists();
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.wal_path)?;
+        Ok((file, created))
+    }
+
+    fn finish_wal_append(&self, file: &mut File, created: bool) -> Result<()> {
         file.flush()?;
         if self.durability == DurabilityPolicy::SyncOnEveryWrite {
             file.sync_data()?;
+            if created {
+                sync_parent_dir(&self.wal_path)?;
+            }
         }
         Ok(())
     }

@@ -18,13 +18,14 @@ use skein_plan::{VectorCandidateSource, VectorSearchLogicalPlan};
 use skein_storage::{
     EnumDictionaryStats, FieldSummary, RangeBound, ScanPredicate, SegmentPruner, SegmentSummary,
 };
-use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::Mutex;
 
 mod analyzer_lexicon;
 #[cfg(feature = "turbovec")]
@@ -33,6 +34,7 @@ use analyzer_lexicon::{CORE_SEMANTIC_ALIAS_RULES, NOWLEDGE_MEMORY_SEMANTIC_ALIAS
 
 const SEARCH_SNAPSHOT_FILE: &str = "search_projection.skein";
 const SEARCH_SEGMENT_DESCRIPTOR_FILE: &str = "search_projection_segments.skein";
+static QUARANTINE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "turbovec")]
 const SEARCH_TURBOVEC_PROJECTION_FILE: &str = "search_projection.tvim";
 #[cfg(feature = "turbovec")]
@@ -119,6 +121,8 @@ pub struct SearchEmbeddingManifest {
 pub struct SearchProjectionFreshness {
     pub document_count: usize,
     pub source_graph_commit_epoch: Option<u64>,
+    pub durable_source_graph_commit_epoch: Option<u64>,
+    pub has_uncheckpointed_changes: bool,
     pub full_reindex_needed: bool,
     pub full_reindex_reasons: Vec<String>,
     pub metadata_repair_needed: bool,
@@ -670,7 +674,8 @@ pub struct SearchIndex {
     embedding_dimension: Option<usize>,
     embedding_manifest: Option<SearchEmbeddingManifest>,
     source_graph_commit_epoch: Option<u64>,
-    marker_lines: RefCell<BTreeMap<String, Vec<String>>>,
+    durable_source_graph_commit_epoch: Mutex<Option<u64>>,
+    marker_lines: Mutex<BTreeMap<String, Vec<String>>>,
     analyzer_lexicon: SearchAnalyzerLexicon,
     segment_descriptor: Option<SearchSegmentDescriptor>,
 }
@@ -688,7 +693,8 @@ impl SearchIndex {
             embedding_dimension: None,
             embedding_manifest: None,
             source_graph_commit_epoch: None,
-            marker_lines: RefCell::new(BTreeMap::new()),
+            durable_source_graph_commit_epoch: Mutex::new(None),
+            marker_lines: Mutex::new(BTreeMap::new()),
             analyzer_lexicon: SearchAnalyzerLexicon::default(),
             segment_descriptor: None,
         };
@@ -893,9 +899,16 @@ impl SearchIndex {
         let metadata_repair_reasons = self
             .read_marker_lines(METADATA_REPAIR_MARKER)
             .unwrap_or_default();
+        let durable_source_graph_commit_epoch = *self
+            .durable_source_graph_commit_epoch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         SearchProjectionFreshness {
             document_count: self.documents.len(),
             source_graph_commit_epoch: self.source_graph_commit_epoch,
+            durable_source_graph_commit_epoch,
+            has_uncheckpointed_changes: self.source_graph_commit_epoch
+                != durable_source_graph_commit_epoch,
             full_reindex_needed: !full_reindex_reasons.is_empty(),
             full_reindex_reasons,
             metadata_repair_needed: !metadata_repair_reasons.is_empty(),
@@ -977,11 +990,13 @@ impl SearchIndex {
                 "source_graph_commit_epoch": freshness.source_graph_commit_epoch,
             },
             "incremental_update": {
-                "ready": has_documents && freshness.source_graph_commit_epoch.is_some(),
+                "ready": has_documents && freshness.durable_source_graph_commit_epoch.is_some(),
                 "upsert_ready": has_documents,
                 "delete_ready": has_documents,
-                "watermark_ready": freshness.source_graph_commit_epoch.is_some(),
+                "watermark_ready": freshness.durable_source_graph_commit_epoch.is_some(),
                 "source_graph_commit_epoch": freshness.source_graph_commit_epoch,
+                "durable_source_graph_commit_epoch": freshness.durable_source_graph_commit_epoch,
+                "has_uncheckpointed_changes": freshness.has_uncheckpointed_changes,
             },
             "compressed_vector_projection": compressed_vector_projection,
             "predicate_pushdown": predicate_pushdown,
@@ -1322,6 +1337,10 @@ impl SearchIndex {
         self.write_segment_descriptor(path)?;
         #[cfg(feature = "turbovec")]
         self.write_turbovec_projection_artifact(path)?;
+        *self
+            .durable_source_graph_commit_epoch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = self.source_graph_commit_epoch;
         Ok(())
     }
 
@@ -1861,8 +1880,12 @@ impl SearchIndex {
             let fields = line.split('\t').collect::<Vec<_>>();
             match fields.as_slice() {
                 ["source_graph_commit_epoch", raw] => {
-                    self.source_graph_commit_epoch =
-                        Some(parse_u64(raw, "source graph commit epoch")?);
+                    let epoch = parse_u64(raw, "source graph commit epoch")?;
+                    self.source_graph_commit_epoch = Some(epoch);
+                    *self
+                        .durable_source_graph_commit_epoch
+                        .get_mut()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(epoch);
                 }
                 ["embedding_manifest", raw_model, raw_version, raw_dimension] => {
                     let version = decode_string(raw_version)?;
@@ -1923,7 +1946,13 @@ impl SearchIndex {
             Ok(Some(descriptor)) if descriptor.matches_documents(&self.documents) => {
                 Some(descriptor)
             }
-            Ok(_) | Err(_) => Some(SearchSegmentDescriptor::build(&self.documents)),
+            Ok(None) => Some(SearchSegmentDescriptor::build(&self.documents)),
+            Ok(Some(_)) | Err(_) => {
+                quarantine_rebuildable_artifact(path, SEARCH_SEGMENT_DESCRIPTOR_FILE);
+                let descriptor = SearchSegmentDescriptor::build(&self.documents);
+                let _ = write_search_segment_descriptor(path, &descriptor);
+                Some(descriptor)
+            }
         };
         Ok(())
     }
@@ -1984,7 +2013,10 @@ impl SearchIndex {
 
     fn append_marker(&self, name: &str, reason: &str) -> Result<()> {
         {
-            let mut marker_lines = self.marker_lines.borrow_mut();
+            let mut marker_lines = self
+                .marker_lines
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let lines = marker_lines.entry(name.to_string()).or_default();
             if !lines.iter().any(|line| line == reason) {
                 lines.push(reason.to_string());
@@ -2008,7 +2040,8 @@ impl SearchIndex {
 
     fn write_marker(&self, name: &str, reason: &str) -> Result<()> {
         self.marker_lines
-            .borrow_mut()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(name.to_string(), vec![reason.to_string()]);
         let Some(path) = self.marker_path(name) else {
             return Ok(());
@@ -2018,7 +2051,10 @@ impl SearchIndex {
     }
 
     fn clear_marker(&self, name: &str) -> Result<()> {
-        self.marker_lines.borrow_mut().remove(name);
+        self.marker_lines
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(name);
         let Some(path) = self.marker_path(name) else {
             return Ok(());
         };
@@ -2033,7 +2069,8 @@ impl SearchIndex {
         let Some(path) = self.marker_path(name) else {
             return Ok(self
                 .marker_lines
-                .borrow()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .get(name)
                 .cloned()
                 .unwrap_or_default());
@@ -2046,6 +2083,16 @@ impl SearchIndex {
             .map(str::to_string)
             .collect())
     }
+}
+
+fn quarantine_rebuildable_artifact(parent: &Path, name: &str) {
+    let source = parent.join(name);
+    if !source.exists() {
+        return;
+    }
+    let sequence = QUARANTINE_SEQUENCE.fetch_add(1, AtomicOrdering::Relaxed);
+    let quarantine_name = format!("{name}.corrupt.{}.{}", std::process::id(), sequence);
+    let _ = fs::rename(source, parent.join(quarantine_name));
 }
 
 const NOWLEDGE_SEARCH_PROJECTION_TABLES: &[(&str, &str, bool)] = &[
@@ -8412,6 +8459,13 @@ mod tests {
         std::fs::write(path.join(SEARCH_SEGMENT_DESCRIPTOR_FILE), "corrupt").unwrap();
 
         let index = SearchIndex::open(&path).unwrap();
+        assert!(std::fs::read_dir(&path).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("search_projection_segments.skein.corrupt.")
+        }));
         let result = index.search_with_options(
             "segment descriptor recovery",
             None,
@@ -8521,7 +8575,8 @@ mod tests {
 
     #[test]
     fn nowledge_search_projection_probe_reports_ready_shape() {
-        let mut index = SearchIndex::in_memory();
+        let path = unique_test_dir("nowledge_search_projection_probe_ready");
+        let mut index = SearchIndex::open(&path).unwrap();
         index
             .apply_embedding_manifest(SearchEmbeddingManifest {
                 model: "bge-m3".to_string(),
@@ -8537,6 +8592,7 @@ mod tests {
                 source_graph_commit_epoch: Some(7),
             })
             .unwrap();
+        index.checkpoint().unwrap();
 
         let probe = index.nowledge_search_projection_probe_json(SearchProjectionProbeOptions {
             active_embedding_model: Some("bge-m3".to_string()),
@@ -8585,6 +8641,7 @@ mod tests {
         assert_eq!(probe["incremental_update"]["ready"], true);
         assert_eq!(probe["compressed_vector_projection"]["engine"], "turbovec");
         assert_eq!(probe["blocker_codes"], serde_json::json!([]));
+        std::fs::remove_dir_all(path).unwrap();
     }
 
     #[test]
@@ -9341,10 +9398,52 @@ mod tests {
         assert_eq!(report.source_graph_commit_epoch_before, None);
         assert_eq!(report.source_graph_commit_epoch_after, Some(7));
         assert!(report.source_graph_commit_epoch_updated);
+        let freshness = index.projection_freshness();
+        assert_eq!(freshness.source_graph_commit_epoch, Some(7));
+        assert_eq!(freshness.durable_source_graph_commit_epoch, None);
+        assert!(freshness.has_uncheckpointed_changes);
+    }
+
+    #[test]
+    fn projection_checkpoint_advances_durable_watermark() {
+        let path = unique_test_dir("durable_projection_watermark");
+        let mut index = SearchIndex::open(&path).unwrap();
+        index
+            .apply_projection_delta(SearchProjectionDelta {
+                upserts: vec![SearchProjectionRow {
+                    kind: SearchProjectionKind::Memory,
+                    external_id: "new".to_string(),
+                    title: "Durable graph delta".to_string(),
+                    body: "Checkpoint publishes the durable projection watermark".to_string(),
+                    embedding: None,
+                    source_id: None,
+                    metadata: BTreeMap::new(),
+                }],
+                deletes: Vec::new(),
+                max_operations: Some(1),
+                source_graph_commit_epoch: Some(9),
+            })
+            .unwrap();
+
         assert_eq!(
-            index.projection_freshness().source_graph_commit_epoch,
-            Some(7)
+            index
+                .projection_freshness()
+                .durable_source_graph_commit_epoch,
+            None
         );
+        index.checkpoint().unwrap();
+        let freshness = index.projection_freshness();
+        assert_eq!(freshness.durable_source_graph_commit_epoch, Some(9));
+        assert!(!freshness.has_uncheckpointed_changes);
+
+        let reopened = SearchIndex::open(&path).unwrap();
+        assert_eq!(
+            reopened
+                .projection_freshness()
+                .durable_source_graph_commit_epoch,
+            Some(9)
+        );
+        std::fs::remove_dir_all(path).unwrap();
     }
 
     #[test]

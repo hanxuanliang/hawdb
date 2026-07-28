@@ -29,7 +29,7 @@ use crate::{
 pub use skein_readiness::{NowledgeMemReadinessAreaMap, NowledgeMemReadinessAreaSummary};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3789,6 +3789,7 @@ pub struct NowledgeMemSearchCandidateReport {
     pub projection_full_reindex_needed: bool,
     pub projection_metadata_repair_needed: bool,
     pub projection_source_graph_commit_epoch: Option<u64>,
+    pub projection_durable_source_graph_commit_epoch: Option<u64>,
     pub projection_embedding_model: Option<String>,
     pub projection_embedding_version: Option<String>,
     pub projection_embedding_dimension: Option<usize>,
@@ -3796,7 +3797,7 @@ pub struct NowledgeMemSearchCandidateReport {
 
 impl NowledgeMemSearchCandidateReport {
     pub fn json(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut value = serde_json::json!({
             "protocol": self.protocol,
             "compressed_vector_search_mode": self.compressed_vector_search_mode.as_str(),
             "requested_compressed_vector_search_mode": self.requested_compressed_vector_search_mode.as_str(),
@@ -3838,7 +3839,15 @@ impl NowledgeMemSearchCandidateReport {
             "projection_embedding_model": self.projection_embedding_model,
             "projection_embedding_version": self.projection_embedding_version,
             "projection_embedding_dimension": self.projection_embedding_dimension,
-        })
+        });
+        value
+            .as_object_mut()
+            .expect("report JSON is an object")
+            .insert(
+                "projection_durable_source_graph_commit_epoch".to_string(),
+                serde_json::json!(self.projection_durable_source_graph_commit_epoch),
+            );
+        value
     }
 }
 
@@ -3983,7 +3992,7 @@ impl NowledgeMemSearchCandidateReadinessReport {
         let projection_marker_status_visible =
             candidate_report.protocol == NOWLEDGE_MEM_SEARCH_CANDIDATE_REPORT_PROTOCOL;
         let projection_watermark_ready = candidate_report
-            .projection_source_graph_commit_epoch
+            .projection_durable_source_graph_commit_epoch
             .is_some();
         let embedding_identity_ready =
             search_candidate_embedding_identity_ready(&candidate_report, options);
@@ -4163,12 +4172,12 @@ impl NowledgeMemGraph {
         self.slow_query_report().json()
     }
 
-    pub fn read_query(&mut self, cypher: &str) -> Result<NowledgeMemReadOutput> {
+    pub fn read_query(&self, cypher: &str) -> Result<NowledgeMemReadOutput> {
         self.read_query_with_params(cypher, &BTreeMap::new(), &NowledgeMemReadOptions::default())
     }
 
     pub fn read_query_with_options(
-        &mut self,
+        &self,
         cypher: &str,
         options: &NowledgeMemReadOptions,
     ) -> Result<NowledgeMemReadOutput> {
@@ -4176,7 +4185,7 @@ impl NowledgeMemGraph {
     }
 
     pub fn read_query_with_params(
-        &mut self,
+        &self,
         cypher: &str,
         parameters: &BTreeMap<String, Value>,
         options: &NowledgeMemReadOptions,
@@ -4212,7 +4221,7 @@ impl NowledgeMemGraph {
     }
 
     pub fn read_graph_overview(
-        &mut self,
+        &self,
         options: &NowledgeMemGraphOverviewOptions,
     ) -> Result<NowledgeMemGraphOverviewOutput> {
         let limit = i64::try_from(options.limit).map_err(|_| {
@@ -4249,7 +4258,7 @@ impl NowledgeMemGraph {
     }
 
     pub fn read_graph_sample(
-        &mut self,
+        &self,
         options: &NowledgeMemGraphSampleOptions,
     ) -> Result<NowledgeMemGraphSampleOutput> {
         let limit = i64::try_from(options.limit).map_err(|_| {
@@ -4285,7 +4294,7 @@ impl NowledgeMemGraph {
     }
 
     pub fn read_graph_node_details(
-        &mut self,
+        &self,
         options: &NowledgeMemGraphNodeDetailsOptions,
     ) -> Result<NowledgeMemGraphNodeDetailsOutput> {
         let node_id = i64::try_from(options.node_id).map_err(|_| {
@@ -4318,7 +4327,7 @@ impl NowledgeMemGraph {
     }
 
     pub fn read_graph_community_members(
-        &mut self,
+        &self,
         options: &NowledgeMemGraphCommunityMembersOptions,
     ) -> Result<NowledgeMemGraphCommunityMembersOutput> {
         let limit = i64::try_from(options.limit).map_err(|_| {
@@ -4359,7 +4368,7 @@ impl NowledgeMemGraph {
     }
 
     pub fn read_graph_community_recent_memories(
-        &mut self,
+        &self,
         options: &NowledgeMemGraphCommunityRecentMemoriesOptions,
     ) -> Result<NowledgeMemGraphCommunityRecentMemoriesOutput> {
         let limit = i64::try_from(options.limit).map_err(|_| {
@@ -4402,7 +4411,7 @@ impl NowledgeMemGraph {
     }
 
     pub fn read_graph_community_subgraph(
-        &mut self,
+        &self,
         options: &NowledgeMemGraphCommunitySubgraphOptions,
     ) -> Result<NowledgeMemGraphCommunitySubgraphOutput> {
         let max_entities = i64::try_from(options.max_entities).map_err(|_| {
@@ -4485,7 +4494,7 @@ impl NowledgeMemGraph {
     }
 
     pub fn read_graph_augmentation_state(
-        &mut self,
+        &self,
         options: &NowledgeMemGraphAugmentationStateOptions,
     ) -> Result<NowledgeMemGraphAugmentationStateOutput> {
         let read = self.read_query_with_params(
@@ -4512,7 +4521,7 @@ impl NowledgeMemGraph {
     }
 
     pub fn read_graph_pagerank_plan(
-        &mut self,
+        &self,
         options: &NowledgeMemGraphPageRankPlanOptions,
     ) -> Result<NowledgeMemGraphPageRankPlanOutput> {
         let graph_commit_epoch = self.db.commit_epoch();
@@ -4620,7 +4629,7 @@ impl NowledgeMemGraph {
     }
 
     fn read_graph_pagerank_plan_meta(
-        &mut self,
+        &self,
         options: &NowledgeMemGraphPageRankPlanOptions,
         read_reports: &mut Vec<NowledgeMemReadReport>,
     ) -> Result<Option<NowledgeMemGraphPageRankPlanMetaRow>> {
@@ -4640,7 +4649,7 @@ impl NowledgeMemGraph {
     }
 
     fn read_graph_pagerank_plan_count(
-        &mut self,
+        &self,
         query: &str,
         parameters: &BTreeMap<String, Value>,
         options: &NowledgeMemGraphPageRankPlanOptions,
@@ -4663,7 +4672,7 @@ impl NowledgeMemGraph {
     }
 
     pub fn read_graph_orphans(
-        &mut self,
+        &self,
         options: &NowledgeMemGraphOrphansOptions,
     ) -> Result<NowledgeMemGraphOrphansOutput> {
         let limit = i64::try_from(options.limit).map_err(|_| {
@@ -5149,13 +5158,13 @@ pub struct NowledgeMemEmbeddedStore {
 
 #[derive(Debug, Clone)]
 pub struct NowledgeMemEmbeddedStoreHandle {
-    inner: Arc<Mutex<NowledgeMemEmbeddedStore>>,
+    inner: Arc<RwLock<NowledgeMemEmbeddedStore>>,
 }
 
 impl NowledgeMemEmbeddedStoreHandle {
     pub fn new(store: NowledgeMemEmbeddedStore) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(store)),
+            inner: Arc::new(RwLock::new(store)),
         }
     }
 
@@ -5167,7 +5176,7 @@ impl NowledgeMemEmbeddedStoreHandle {
     }
 
     pub fn query_with_report(&self, cypher: &str) -> Result<NowledgeMemQueryOutput> {
-        self.lock_store()?.query_with_report(cypher)
+        self.write_store()?.query_with_report(cypher)
     }
 
     pub fn query_with_report_options(
@@ -5175,7 +5184,7 @@ impl NowledgeMemEmbeddedStoreHandle {
         cypher: &str,
         options: NowledgeMemQueryReportOptions,
     ) -> Result<NowledgeMemQueryOutput> {
-        self.lock_store()?
+        self.write_store()?
             .query_with_report_options(cypher, options)
     }
 
@@ -5184,7 +5193,7 @@ impl NowledgeMemEmbeddedStoreHandle {
         cypher: &str,
         parameters: &BTreeMap<String, Value>,
     ) -> Result<NowledgeMemQueryOutput> {
-        self.lock_store()?
+        self.write_store()?
             .query_with_params_with_report(cypher, parameters)
     }
 
@@ -5194,7 +5203,7 @@ impl NowledgeMemEmbeddedStoreHandle {
         parameters: &BTreeMap<String, Value>,
         options: NowledgeMemQueryReportOptions,
     ) -> Result<NowledgeMemQueryOutput> {
-        self.lock_store()?
+        self.write_store()?
             .query_with_params_with_report_options(cypher, parameters, options)
     }
 
@@ -5203,7 +5212,7 @@ impl NowledgeMemEmbeddedStoreHandle {
         cypher: &str,
         options: &NowledgeMemReadOptions,
     ) -> Result<NowledgeMemReadOutput> {
-        self.lock_store()?.read_query_with_options(cypher, options)
+        self.read_store()?.read_query_with_options(cypher, options)
     }
 
     pub fn read_query_with_params(
@@ -5212,7 +5221,7 @@ impl NowledgeMemEmbeddedStoreHandle {
         parameters: &BTreeMap<String, Value>,
         options: &NowledgeMemReadOptions,
     ) -> Result<NowledgeMemReadOutput> {
-        self.lock_store()?
+        self.read_store()?
             .read_query_with_params(cypher, parameters, options)
     }
 
@@ -5220,35 +5229,35 @@ impl NowledgeMemEmbeddedStoreHandle {
         &self,
         options: &NowledgeMemGraphOverviewOptions,
     ) -> Result<NowledgeMemGraphOverviewOutput> {
-        self.lock_store()?.read_graph_overview(options)
+        self.read_store()?.read_graph_overview(options)
     }
 
     pub fn read_graph_sample(
         &self,
         options: &NowledgeMemGraphSampleOptions,
     ) -> Result<NowledgeMemGraphSampleOutput> {
-        self.lock_store()?.read_graph_sample(options)
+        self.read_store()?.read_graph_sample(options)
     }
 
     pub fn read_graph_node_details(
         &self,
         options: &NowledgeMemGraphNodeDetailsOptions,
     ) -> Result<NowledgeMemGraphNodeDetailsOutput> {
-        self.lock_store()?.read_graph_node_details(options)
+        self.read_store()?.read_graph_node_details(options)
     }
 
     pub fn read_graph_community_members(
         &self,
         options: &NowledgeMemGraphCommunityMembersOptions,
     ) -> Result<NowledgeMemGraphCommunityMembersOutput> {
-        self.lock_store()?.read_graph_community_members(options)
+        self.read_store()?.read_graph_community_members(options)
     }
 
     pub fn read_graph_community_recent_memories(
         &self,
         options: &NowledgeMemGraphCommunityRecentMemoriesOptions,
     ) -> Result<NowledgeMemGraphCommunityRecentMemoriesOutput> {
-        self.lock_store()?
+        self.read_store()?
             .read_graph_community_recent_memories(options)
     }
 
@@ -5256,42 +5265,42 @@ impl NowledgeMemEmbeddedStoreHandle {
         &self,
         options: &NowledgeMemGraphCommunitySubgraphOptions,
     ) -> Result<NowledgeMemGraphCommunitySubgraphOutput> {
-        self.lock_store()?.read_graph_community_subgraph(options)
+        self.read_store()?.read_graph_community_subgraph(options)
     }
 
     pub fn read_graph_augmentation_state(
         &self,
         options: &NowledgeMemGraphAugmentationStateOptions,
     ) -> Result<NowledgeMemGraphAugmentationStateOutput> {
-        self.lock_store()?.read_graph_augmentation_state(options)
+        self.read_store()?.read_graph_augmentation_state(options)
     }
 
     pub fn read_graph_pagerank_plan(
         &self,
         options: &NowledgeMemGraphPageRankPlanOptions,
     ) -> Result<NowledgeMemGraphPageRankPlanOutput> {
-        self.lock_store()?.read_graph_pagerank_plan(options)
+        self.read_store()?.read_graph_pagerank_plan(options)
     }
 
     pub fn read_graph_orphans(
         &self,
         options: &NowledgeMemGraphOrphansOptions,
     ) -> Result<NowledgeMemGraphOrphansOutput> {
-        self.lock_store()?.read_graph_orphans(options)
+        self.read_store()?.read_graph_orphans(options)
     }
 
     pub fn search_candidates(
         &self,
         request: &NowledgeMemSearchCandidateRequest,
     ) -> Result<SearchResultSet> {
-        Ok(self.lock_store()?.search_candidates(request)?.result)
+        Ok(self.read_store()?.search_candidates(request)?.result)
     }
 
     pub fn search_candidates_with_report(
         &self,
         request: &NowledgeMemSearchCandidateRequest,
     ) -> Result<NowledgeMemSearchCandidateOutput> {
-        self.lock_store()?.search_candidates(request)
+        self.read_store()?.search_candidates(request)
     }
 
     pub fn search_candidate_readiness(
@@ -5299,7 +5308,7 @@ impl NowledgeMemEmbeddedStoreHandle {
         request: &NowledgeMemSearchCandidateRequest,
         options: &NowledgeMemSearchCandidateReadinessOptions,
     ) -> Result<NowledgeMemSearchCandidateReadinessReport> {
-        self.lock_store()?
+        self.read_store()?
             .search_candidate_readiness(request, options)
     }
 
@@ -5312,63 +5321,69 @@ impl NowledgeMemEmbeddedStoreHandle {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        self.lock_store()?
+        self.read_store()?
             .search_candidate_shadow_evidence_json(request, primary_candidate_ids)
     }
 
     pub fn slow_query_report(&self) -> Result<NowledgeMemSlowQueryReport> {
-        Ok(self.lock_store()?.slow_query_report())
+        Ok(self.read_store()?.slow_query_report())
     }
 
     pub fn slow_query_report_json(&self) -> Result<serde_json::Value> {
-        Ok(self.lock_store()?.slow_query_report_json())
+        Ok(self.read_store()?.slow_query_report_json())
     }
 
     pub fn library_readiness(
         &self,
         options: &NowledgeMemReadinessOptions,
     ) -> Result<NowledgeMemLibraryReadinessReport> {
-        Ok(self.lock_store()?.library_readiness(options))
+        Ok(self.read_store()?.library_readiness(options))
     }
 
     pub fn library_readiness_json(
         &self,
         options: &NowledgeMemReadinessOptions,
     ) -> Result<serde_json::Value> {
-        Ok(self.lock_store()?.library_readiness_json(options))
+        Ok(self.read_store()?.library_readiness_json(options))
     }
 
     pub fn readiness_dashboard(
         &self,
         options: &NowledgeMemReadinessOptions,
     ) -> Result<NowledgeMemReadinessDashboard> {
-        Ok(self.lock_store()?.readiness_dashboard(options))
+        Ok(self.read_store()?.readiness_dashboard(options))
     }
 
     pub fn readiness_dashboard_json(
         &self,
         options: &NowledgeMemReadinessOptions,
     ) -> Result<serde_json::Value> {
-        Ok(self.lock_store()?.readiness_dashboard_json(options))
+        Ok(self.read_store()?.readiness_dashboard_json(options))
     }
 
     pub fn query_runtime_preflight(
         &self,
         probes: &[NowledgeQueryRuntimePreflightProbe],
     ) -> Result<NowledgeQueryRuntimePreflightReport> {
-        Ok(self.lock_store()?.query_runtime_preflight(probes))
+        Ok(self.write_store()?.query_runtime_preflight(probes))
     }
 
     pub fn query_runtime_preflight_json(
         &self,
         probes: &[NowledgeQueryRuntimePreflightProbe],
     ) -> Result<serde_json::Value> {
-        Ok(self.lock_store()?.query_runtime_preflight_json(probes))
+        Ok(self.write_store()?.query_runtime_preflight_json(probes))
     }
 
-    fn lock_store(&self) -> Result<MutexGuard<'_, NowledgeMemEmbeddedStore>> {
-        self.inner.lock().map_err(|_| {
-            SkeinError::Execution("nowledge mem embedded store lock poisoned".to_string())
+    fn read_store(&self) -> Result<RwLockReadGuard<'_, NowledgeMemEmbeddedStore>> {
+        self.inner.read().map_err(|_| {
+            SkeinError::Execution("nowledge mem embedded store read lock poisoned".to_string())
+        })
+    }
+
+    fn write_store(&self) -> Result<RwLockWriteGuard<'_, NowledgeMemEmbeddedStore>> {
+        self.inner.write().map_err(|_| {
+            SkeinError::Execution("nowledge mem embedded store write lock poisoned".to_string())
         })
     }
 }
@@ -5582,7 +5597,7 @@ impl NowledgeMemEmbeddedStore {
         Ok(NowledgeMemRetrievalOutput { output, report })
     }
 
-    pub fn read_query(&mut self, cypher: &str) -> Result<NowledgeMemReadOutput> {
+    pub fn read_query(&self, cypher: &str) -> Result<NowledgeMemReadOutput> {
         self.graph.read_query(cypher)
     }
 
@@ -5639,7 +5654,7 @@ impl NowledgeMemEmbeddedStore {
     }
 
     pub fn read_query_with_options(
-        &mut self,
+        &self,
         cypher: &str,
         options: &NowledgeMemReadOptions,
     ) -> Result<NowledgeMemReadOutput> {
@@ -5647,7 +5662,7 @@ impl NowledgeMemEmbeddedStore {
     }
 
     pub fn read_query_with_params(
-        &mut self,
+        &self,
         cypher: &str,
         parameters: &BTreeMap<String, Value>,
         options: &NowledgeMemReadOptions,
@@ -5657,63 +5672,63 @@ impl NowledgeMemEmbeddedStore {
     }
 
     pub fn read_graph_overview(
-        &mut self,
+        &self,
         options: &NowledgeMemGraphOverviewOptions,
     ) -> Result<NowledgeMemGraphOverviewOutput> {
         self.graph.read_graph_overview(options)
     }
 
     pub fn read_graph_sample(
-        &mut self,
+        &self,
         options: &NowledgeMemGraphSampleOptions,
     ) -> Result<NowledgeMemGraphSampleOutput> {
         self.graph.read_graph_sample(options)
     }
 
     pub fn read_graph_node_details(
-        &mut self,
+        &self,
         options: &NowledgeMemGraphNodeDetailsOptions,
     ) -> Result<NowledgeMemGraphNodeDetailsOutput> {
         self.graph.read_graph_node_details(options)
     }
 
     pub fn read_graph_community_members(
-        &mut self,
+        &self,
         options: &NowledgeMemGraphCommunityMembersOptions,
     ) -> Result<NowledgeMemGraphCommunityMembersOutput> {
         self.graph.read_graph_community_members(options)
     }
 
     pub fn read_graph_community_recent_memories(
-        &mut self,
+        &self,
         options: &NowledgeMemGraphCommunityRecentMemoriesOptions,
     ) -> Result<NowledgeMemGraphCommunityRecentMemoriesOutput> {
         self.graph.read_graph_community_recent_memories(options)
     }
 
     pub fn read_graph_community_subgraph(
-        &mut self,
+        &self,
         options: &NowledgeMemGraphCommunitySubgraphOptions,
     ) -> Result<NowledgeMemGraphCommunitySubgraphOutput> {
         self.graph.read_graph_community_subgraph(options)
     }
 
     pub fn read_graph_augmentation_state(
-        &mut self,
+        &self,
         options: &NowledgeMemGraphAugmentationStateOptions,
     ) -> Result<NowledgeMemGraphAugmentationStateOutput> {
         self.graph.read_graph_augmentation_state(options)
     }
 
     pub fn read_graph_pagerank_plan(
-        &mut self,
+        &self,
         options: &NowledgeMemGraphPageRankPlanOptions,
     ) -> Result<NowledgeMemGraphPageRankPlanOutput> {
         self.graph.read_graph_pagerank_plan(options)
     }
 
     pub fn read_graph_orphans(
-        &mut self,
+        &self,
         options: &NowledgeMemGraphOrphansOptions,
     ) -> Result<NowledgeMemGraphOrphansOutput> {
         self.graph.read_graph_orphans(options)
@@ -5760,14 +5775,14 @@ impl NowledgeMemEmbeddedStore {
     }
 
     pub fn library_readiness_json(
-        &mut self,
+        &self,
         options: &NowledgeMemReadinessOptions,
     ) -> serde_json::Value {
         self.library_readiness(options).json()
     }
 
     pub fn library_readiness(
-        &mut self,
+        &self,
         options: &NowledgeMemReadinessOptions,
     ) -> NowledgeMemLibraryReadinessReport {
         let bounded_read_evidence = options
@@ -5868,7 +5883,7 @@ impl NowledgeMemEmbeddedStore {
     }
 
     pub fn readiness_dashboard(
-        &mut self,
+        &self,
         options: &NowledgeMemReadinessOptions,
     ) -> NowledgeMemReadinessDashboard {
         let library = self.library_readiness(options);
@@ -5877,14 +5892,14 @@ impl NowledgeMemEmbeddedStore {
     }
 
     pub fn readiness_dashboard_json(
-        &mut self,
+        &self,
         options: &NowledgeMemReadinessOptions,
     ) -> serde_json::Value {
         self.readiness_dashboard(options).json()
     }
 
     fn bounded_read_probe_evidence_json(
-        &mut self,
+        &self,
         options: &NowledgeMemReadinessOptions,
     ) -> serde_json::Value {
         let Some(probe) = options.bounded_read_probe.as_ref() else {
@@ -7395,6 +7410,9 @@ fn nowledge_mem_search_candidate_report(
         projection_full_reindex_needed: result.projection_freshness.full_reindex_needed,
         projection_metadata_repair_needed: result.projection_freshness.metadata_repair_needed,
         projection_source_graph_commit_epoch: result.projection_freshness.source_graph_commit_epoch,
+        projection_durable_source_graph_commit_epoch: result
+            .projection_freshness
+            .durable_source_graph_commit_epoch,
         projection_embedding_model: result.projection_freshness.embedding_model.clone(),
         projection_embedding_version: result.projection_freshness.embedding_version.clone(),
         projection_embedding_dimension: result.projection_freshness.embedding_dimension,
@@ -7793,7 +7811,9 @@ mod tests {
         StorageRecoveryReport, WorkClass,
     };
     use std::collections::BTreeMap;
+    use std::sync::mpsc;
     use std::thread;
+    use std::time::Duration;
 
     #[test]
     fn graph_config_tracks_shadow_vs_cutover_mode() {
@@ -8849,7 +8869,7 @@ mod tests {
     }
 
     #[test]
-    fn embedded_store_handle_serializes_shared_library_state() {
+    fn embedded_store_handle_supports_shared_read_and_observability_access() {
         let db = Database::new_with_config(DatabaseConfig {
             max_plan_cache_entries: Some(8),
             slow_query_log_threshold_micros: 0,
@@ -8868,13 +8888,13 @@ mod tests {
             thread::spawn(move || {
                 for _ in 0..4 {
                     let query = handle
-                        .query_with_report(
+                        .read_query(
                             "MATCH (m:Memory {id: 'shared-1'}) RETURN m.title AS title",
+                            &NowledgeMemReadOptions::default(),
                         )
                         .unwrap();
                     assert_eq!(query.output.rows.len(), 1);
-                    assert!(query.report.plan_cache_cacheable);
-                    assert!(!query.report.plan_cache_bypassed);
+                    assert!(query.report.row_limit_enforced_before_output);
                 }
             })
         };
@@ -8900,8 +8920,42 @@ mod tests {
 
         let final_slow_query = handle.slow_query_report().unwrap();
         assert!(final_slow_query.ready);
-        assert_eq!(final_slow_query.latest_sequence, Some(5));
-        assert_eq!(final_slow_query.record_count, 5);
+        assert_eq!(final_slow_query.latest_sequence, Some(1));
+        assert_eq!(final_slow_query.record_count, 1);
+    }
+
+    #[test]
+    fn embedded_store_handle_allows_overlapping_read_guards() {
+        let graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::WritableCutover);
+        let handle =
+            NowledgeMemEmbeddedStoreHandle::new(NowledgeMemEmbeddedStore::new(graph, None));
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+
+        let first = {
+            let handle = handle.clone();
+            let acquired_tx = acquired_tx.clone();
+            thread::spawn(move || {
+                let _guard = handle.read_store().unwrap();
+                acquired_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            })
+        };
+        acquired_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let second = {
+            let handle = handle.clone();
+            thread::spawn(move || {
+                let _guard = handle.read_store().unwrap();
+                acquired_tx.send(()).unwrap();
+            })
+        };
+        acquired_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        release_tx.send(()).unwrap();
+
+        first.join().unwrap();
+        second.join().unwrap();
     }
 
     #[test]
@@ -9539,7 +9593,7 @@ mod tests {
         graph
             .query("CREATE (:Memory {id: 'mem-store-read', title: 'Store read'})")
             .unwrap();
-        let mut store = NowledgeMemEmbeddedStore::new(graph, None);
+        let store = NowledgeMemEmbeddedStore::new(graph, None);
 
         let read = store
             .read_query_with_options(
@@ -9558,7 +9612,7 @@ mod tests {
     fn embedded_store_library_readiness_fails_closed_without_required_evidence() {
         let db = Database::new();
         let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::ShadowReadOnly);
-        let mut store = NowledgeMemEmbeddedStore::new(graph, None);
+        let store = NowledgeMemEmbeddedStore::new(graph, None);
 
         let readiness = store.library_readiness_json(&NowledgeMemReadinessOptions::default());
 
@@ -9675,7 +9729,7 @@ mod tests {
     fn embedded_store_exposes_typed_library_readiness_report() {
         let db = Database::new();
         let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::ShadowReadOnly);
-        let mut store = NowledgeMemEmbeddedStore::new(graph, None);
+        let store = NowledgeMemEmbeddedStore::new(graph, None);
 
         let report = store.library_readiness(&NowledgeMemReadinessOptions::default());
         let json = report.json();
@@ -9761,7 +9815,7 @@ mod tests {
     fn embedded_store_library_readiness_accepts_typed_workload_fixture_evidence() {
         let db = Database::new();
         let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::ShadowReadOnly);
-        let mut store = NowledgeMemEmbeddedStore::new(graph, None);
+        let store = NowledgeMemEmbeddedStore::new(graph, None);
         let workload_fixture = nowledge_graph_route_workload_fixture_report(
             NowledgeGraphRouteWorkloadFixtureOptions {
                 capture_physical_plan: true,
@@ -9807,7 +9861,7 @@ mod tests {
     fn embedded_store_library_readiness_recomputes_search_candidate_shadow_evidence() {
         let db = Database::new();
         let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::ShadowReadOnly);
-        let mut store = NowledgeMemEmbeddedStore::new(graph, None);
+        let store = NowledgeMemEmbeddedStore::new(graph, None);
 
         let readiness = store.library_readiness_json(&NowledgeMemReadinessOptions {
             search_candidate_shadow_evidence: Some(serde_json::json!({
@@ -9842,7 +9896,7 @@ mod tests {
     fn embedded_store_library_readiness_recomputes_search_projection_evidence() {
         let db = Database::new();
         let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::ShadowReadOnly);
-        let mut store = NowledgeMemEmbeddedStore::new(graph, None);
+        let store = NowledgeMemEmbeddedStore::new(graph, None);
 
         let readiness = store.library_readiness_json(&NowledgeMemReadinessOptions {
             search_projection_evidence: Some(serde_json::json!({
@@ -9879,7 +9933,7 @@ mod tests {
     fn embedded_store_library_readiness_recomputes_search_projection_shadow_evidence() {
         let db = Database::new();
         let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::ShadowReadOnly);
-        let mut store = NowledgeMemEmbeddedStore::new(graph, None);
+        let store = NowledgeMemEmbeddedStore::new(graph, None);
 
         let readiness = store.library_readiness_json(&NowledgeMemReadinessOptions {
             search_projection_shadow_evidence: Some(serde_json::json!({
@@ -10133,7 +10187,7 @@ mod tests {
             .database_mut()
             .query("CREATE (:Memory {id: 'mem-readiness', title: 'Readiness'})")
             .unwrap();
-        let mut store = NowledgeMemEmbeddedStore::new(graph, None);
+        let store = NowledgeMemEmbeddedStore::new(graph, None);
 
         let readiness = store.library_readiness_json(&NowledgeMemReadinessOptions {
             bounded_read_probe: Some(NowledgeGraphStatement {
@@ -10213,7 +10267,7 @@ mod tests {
             .database_mut()
             .query("CREATE (:Memory {id: 'mem-preflight', title: 'Preflight'})")
             .unwrap();
-        let mut store = NowledgeMemEmbeddedStore::new(graph, None);
+        let store = NowledgeMemEmbeddedStore::new(graph, None);
 
         let library = store.library_readiness(&NowledgeMemReadinessOptions {
             bounded_read_probe: Some(NowledgeGraphStatement {
@@ -10268,7 +10322,7 @@ mod tests {
     fn embedded_store_library_readiness_recomputes_bounded_read_payload_budget() {
         let db = Database::new();
         let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::ShadowReadOnly);
-        let mut store = NowledgeMemEmbeddedStore::new(graph, None);
+        let store = NowledgeMemEmbeddedStore::new(graph, None);
 
         let readiness = store.library_readiness_json(&NowledgeMemReadinessOptions {
             bounded_read_evidence: Some(serde_json::json!({

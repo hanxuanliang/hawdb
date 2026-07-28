@@ -27,6 +27,7 @@ pub mod search;
 pub mod search_candidate_shadow_evidence;
 pub mod storage_recovery_evidence;
 pub mod store;
+pub mod telemetry;
 pub mod workload_fixtures;
 
 mod regex_cache;
@@ -117,7 +118,9 @@ pub use compat::{
     REQUIRED_EXTERNAL_SHADOW_CAPABILITIES,
 };
 pub use cypher::RelationshipDirection;
-pub use embedded::{SkeinEmbedded, SkeinEmbeddedOpenOptions};
+pub use embedded::{
+    EmbeddedDeploymentProfile, EmbeddedRuntimeResources, SkeinEmbedded, SkeinEmbeddedOpenOptions,
+};
 pub use error::{Result, SkeinError};
 pub use executor::ReadExecutionProfile;
 pub use graph_route_evidence::{
@@ -336,6 +339,9 @@ pub use store::{
     PropertyIndexConsistencyReport, RecoveryMode, StorageReclamationWatermark,
     StorageRecoveryReport, WalReplayConfig, DENSE_ADJACENCY_DEGREE_THRESHOLD,
 };
+#[cfg(feature = "opentelemetry")]
+pub use telemetry::OpenTelemetryMetrics;
+pub use telemetry::{QueryTelemetry, TelemetrySink};
 pub use value::Value;
 pub use workload_fixtures::{
     nowledge_graph_route_workload_fixture_queries, nowledge_graph_route_workload_fixture_report,

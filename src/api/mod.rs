@@ -33,6 +33,7 @@ use crate::store::{
     PropertyIndexProjectionRebuildAction, RecoveryMode, RelRecord, SchemaMaintenanceAction,
     StorageReclamationWatermark, StorageRecoveryReport, WalReplayConfig,
 };
+use crate::telemetry::TelemetrySink;
 use crate::value::Value;
 use canonical_snapshot::export_canonical_graph_snapshot_for;
 use explain::{empty_read_execution_profile, explain_analyze_output_row, explain_output_row};
@@ -60,11 +61,10 @@ pub use skein_api_types::{
     KnowledgeMemoryEvolvesRelationCountRow, KnowledgeNeighborDirection,
 };
 use skein_optimizer::{SearchPredicate, SearchPredicateOp, SearchPredicateSet};
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use system_variables::{query_work_request_for_statement, reject_system_variable_parameters};
 
 mod artifact_jobs;
@@ -101,14 +101,34 @@ pub struct Database {
     catalog: Catalog,
     store: GraphStore,
     optimizer: CascadesOptimizer,
-    plan_cache: RefCell<PlanCache>,
-    slow_query_log: RefCell<system_sql::SlowQueryLog>,
-    statement_summary: RefCell<system_sql::StatementSummary>,
+    plan_cache: SharedState<PlanCache>,
+    slow_query_log: SharedState<system_sql::SlowQueryLog>,
+    statement_summary: SharedState<system_sql::StatementSummary>,
     config: DatabaseConfig,
     system_variables: QuerySystemVariables,
     reader_pins: Arc<Mutex<ReaderPins>>,
     next_derived_artifact_job_id: u64,
     derived_artifact_jobs: Vec<DerivedArtifactJob>,
+    telemetry: Option<Arc<dyn TelemetrySink>>,
+}
+
+#[derive(Debug)]
+pub(super) struct SharedState<T>(Mutex<T>);
+
+impl<T> SharedState<T> {
+    fn new(value: T) -> Self {
+        Self(Mutex::new(value))
+    }
+
+    pub(super) fn borrow(&self) -> MutexGuard<'_, T> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub(super) fn borrow_mut(&self) -> MutexGuard<'_, T> {
+        self.borrow()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5215,7 +5235,7 @@ pub struct DatabaseReadTransaction {
     catalog: Catalog,
     store: GraphStore,
     optimizer: CascadesOptimizer,
-    plan_cache: RefCell<PlanCache>,
+    plan_cache: SharedState<PlanCache>,
     slow_query_snapshot: Vec<system_sql::SlowQueryRecord>,
     statement_summary_snapshot: Vec<system_sql::StatementSummaryRecord>,
     config: DatabaseConfig,
@@ -5250,11 +5270,11 @@ impl Default for Database {
             catalog: Catalog::default(),
             store,
             optimizer: CascadesOptimizer::new(optimizer_config_from_database_config(&config)),
-            plan_cache: RefCell::new(PlanCache::new(config.max_plan_cache_entries)),
-            slow_query_log: RefCell::new(system_sql::SlowQueryLog::new(
+            plan_cache: SharedState::new(PlanCache::new(config.max_plan_cache_entries)),
+            slow_query_log: SharedState::new(system_sql::SlowQueryLog::new(
                 config.slow_query_log_capacity,
             )),
-            statement_summary: RefCell::new(system_sql::StatementSummary::new(
+            statement_summary: SharedState::new(system_sql::StatementSummary::new(
                 config.statement_summary_capacity,
             )),
             config,
@@ -5262,6 +5282,7 @@ impl Default for Database {
             reader_pins: Arc::new(Mutex::new(ReaderPins::default())),
             next_derived_artifact_job_id: 1,
             derived_artifact_jobs: Vec::new(),
+            telemetry: None,
         }
     }
 }
@@ -5281,11 +5302,11 @@ impl Database {
             catalog: Catalog::default(),
             store,
             optimizer,
-            plan_cache: RefCell::new(PlanCache::new(config.max_plan_cache_entries)),
-            slow_query_log: RefCell::new(system_sql::SlowQueryLog::new(
+            plan_cache: SharedState::new(PlanCache::new(config.max_plan_cache_entries)),
+            slow_query_log: SharedState::new(system_sql::SlowQueryLog::new(
                 config.slow_query_log_capacity,
             )),
-            statement_summary: RefCell::new(system_sql::StatementSummary::new(
+            statement_summary: SharedState::new(system_sql::StatementSummary::new(
                 config.statement_summary_capacity,
             )),
             config,
@@ -5293,6 +5314,7 @@ impl Database {
             reader_pins: Arc::new(Mutex::new(ReaderPins::default())),
             next_derived_artifact_job_id: 1,
             derived_artifact_jobs: Vec::new(),
+            telemetry: None,
         }
     }
 
@@ -5347,11 +5369,11 @@ impl Database {
             catalog,
             store,
             optimizer: CascadesOptimizer::new(optimizer_config_from_database_config(&config)),
-            plan_cache: RefCell::new(PlanCache::new(config.max_plan_cache_entries)),
-            slow_query_log: RefCell::new(system_sql::SlowQueryLog::new(
+            plan_cache: SharedState::new(PlanCache::new(config.max_plan_cache_entries)),
+            slow_query_log: SharedState::new(system_sql::SlowQueryLog::new(
                 config.slow_query_log_capacity,
             )),
-            statement_summary: RefCell::new(system_sql::StatementSummary::new(
+            statement_summary: SharedState::new(system_sql::StatementSummary::new(
                 config.statement_summary_capacity,
             )),
             config,
@@ -5359,11 +5381,16 @@ impl Database {
             reader_pins: Arc::new(Mutex::new(ReaderPins::default())),
             next_derived_artifact_job_id: 1,
             derived_artifact_jobs: Vec::new(),
+            telemetry: None,
         })
     }
 
     pub fn config(&self) -> &DatabaseConfig {
         &self.config
+    }
+
+    pub fn set_telemetry_sink(&mut self, telemetry: Option<Arc<dyn TelemetrySink>>) {
+        self.telemetry = telemetry;
     }
 
     pub fn system_variables(&self) -> &QuerySystemVariables {
@@ -5452,7 +5479,7 @@ impl Database {
             catalog: self.catalog.clone(),
             store: self.store.snapshot(),
             optimizer: self.optimizer.clone(),
-            plan_cache: RefCell::new(PlanCache::new(self.config.max_plan_cache_entries)),
+            plan_cache: SharedState::new(PlanCache::new(self.config.max_plan_cache_entries)),
             slow_query_snapshot: self.slow_query_log.borrow().snapshot(),
             statement_summary_snapshot: self.statement_summary.borrow().snapshot(),
             config: self.config.clone(),

@@ -1,5 +1,6 @@
 use super::{
     optimizer_catalog, optimizer_config_from_database_config, statement_body, DatabaseConfig,
+    SharedState,
 };
 use crate::cypher;
 use crate::error::Result;
@@ -12,7 +13,6 @@ use crate::store::GraphStore;
 use crate::value::Value;
 use skein_plan_cache::LfuCache;
 pub use skein_plan_cache::PlanCacheStats;
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 pub(crate) const DEFAULT_PLAN_CACHE_MAX_ENTRIES: usize = 128;
@@ -67,7 +67,7 @@ pub(super) struct PlanCacheContext<'a> {
     pub(super) store: &'a GraphStore,
     pub(super) optimizer: &'a CascadesOptimizer,
     pub(super) config: &'a DatabaseConfig,
-    pub(super) cache: &'a RefCell<PlanCache>,
+    pub(super) cache: &'a SharedState<PlanCache>,
 }
 
 pub(super) struct OptimizedQueryPlan {

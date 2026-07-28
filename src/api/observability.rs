@@ -2,6 +2,7 @@ use super::{
     system_sql, Database, QueryOutput, SlowQueryLogExportOptions, SlowQueryLogRecordSummary,
 };
 use crate::error::{Result, SkeinError};
+use crate::telemetry::QueryTelemetry;
 use std::io::Write;
 use std::path::Path;
 
@@ -31,6 +32,15 @@ impl Database {
                 error.to_string(),
             ),
         };
+        if let Some(telemetry) = &self.telemetry {
+            telemetry.record_query(QueryTelemetry {
+                query_language,
+                statement_kind,
+                success: result.is_ok(),
+                elapsed_micros: elapsed_micros.min(u64::MAX as u128) as u64,
+                row_count: result.map_or(0, |output| output.rows.len()),
+            });
+        }
         self.statement_summary.borrow_mut().record(execution);
 
         let Ok(output) = result else {

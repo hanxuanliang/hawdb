@@ -46,6 +46,12 @@ Three codebases define the work:
 10. FTS/BM25 and retrieval projections must support incremental maintenance for
     ordinary row upsert/delete changes; full rebuilds are repair paths, not the
     steady-state update mechanism.
+11. Desktop deployments are application-bound in-process databases. Mobile
+    deployments are SQLite-like embedded databases with stricter memory,
+    background, battery, and thermal budgets.
+12. Optional advanced capabilities, including the future ACL extension, may be
+    disabled or compiled out on mobile. Core durability, recovery, transactions,
+    parameterized Cypher, and incremental base indexes remain mandatory.
 
 ## Required Capability Surface
 

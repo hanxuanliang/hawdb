@@ -1,4 +1,8 @@
+mod resource;
+
 use std::str::FromStr;
+
+pub use resource::{IoConcurrencyBudget, RuntimeResourceBudget};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkPriority {

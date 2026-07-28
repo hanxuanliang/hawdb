@@ -165,7 +165,7 @@ pub fn run_nowledge_mem_library_readiness_report(
         Some(path) => NowledgeMemOpenOptions::with_search_projection(graph_path, path, mode),
         None => NowledgeMemOpenOptions::graph_only(graph_path, mode),
     };
-    let (mut store, open_report) = NowledgeMemEmbeddedStore::open_with_options(open_options)?;
+    let (store, open_report) = NowledgeMemEmbeddedStore::open_with_options(open_options)?;
     let options = NowledgeMemReadinessOptions {
         bounded_read_probe,
         bounded_read_evidence,

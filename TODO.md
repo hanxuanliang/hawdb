@@ -760,11 +760,38 @@ contract.
 
 ## P1: Operability
 
+- [ ] Add production deployment profiles and optional capability gates.
+  - [x] Expose a `DesktopBound` profile for an application-bound, in-process
+    database with bounded plan cache, FTS, vector, analytics, and background
+    maintenance defaults.
+  - [x] Expose a `MobileEmbedded` profile with strict memory, result, plan-cache,
+    replay, and incremental-change-log defaults.
+  - [ ] Disable optional heavy mobile capabilities through typed runtime
+    capability gates before adding compile-time feature removal.
+  - [ ] Give each profile separate CPU and storage I/O budgets. Use bounded
+    parallel segment reads to exploit modern SSD/NVMe queues while keeping WAL,
+    manifest publication, and per-index delta ordering serialized.
+  - [ ] Allow explicit host I/O-depth overrides and later add platform-specific
+    device discovery without deriving a claimed SSD channel count from CPU
+    count alone.
+  - [ ] Keep the durable storage format and core Cypher semantics compatible
+    across profiles; return typed capability-unavailable errors instead of
+    silent unbounded fallbacks.
+  - [ ] Add build-time feature gates for optional mobile capabilities after the
+    runtime capability contract is stable.
+- [ ] Add optional ACL support after the embedded read/write contract is stable.
+  - Keep ACL disabled by default and compile-time removable on mobile.
+  - Bind authorization context and policy epoch into binder/planner/executor and
+    plan-cache contracts.
+  - Enforce visibility before payload materialization where storage metadata
+    permits it; result-only filtering is not sufficient.
+  - Fail closed on missing, stale, or unsupported policy state and keep
+    credentials and policy inputs out of telemetry.
 - [x] Add compact readiness dashboards for route, query-family, storage, search,
   and background-maintenance blockers.
 - [x] Add stable counters for plan cache hit, miss, admission, eviction, and
   memory pressure.
-- [x] Add concurrency model and race-oriented tests for shared library state.
+- [ ] Complete the multi-reader, single durable writer library contract.
   - [x] Cover bounded LFU plan cache invariants with a feature-gated Loom model
     in CI.
   - [x] Cover local QoS scheduler background admission and permit accounting
@@ -773,6 +800,23 @@ contract.
     feature-gated Loom model in CI.
   - [x] Cover the embedded Mem library handle with a multi-threaded query,
     slow-query, and readiness-dashboard access test.
+  - [x] Remove whole-store read serialization from the embedded Mem handle.
+  - [x] Prove overlapping handle reads and model crash-safe
+    durable-before-publish behavior.
+  - [ ] Prove overlapping pinned query execution while commits remain serialized and
+    durable-before-publish.
+- [ ] Complete host-owned OpenTelemetry coverage.
+  - [x] Provide an optional OpenTelemetry metrics adapter that accepts a
+    host-provided `Meter` and never initializes global telemetry state.
+  - [x] Emit low-cardinality query count, duration, row count, success, language,
+    and statement-kind metrics without query text or parameters.
+  - [ ] Add WAL, checkpoint, recovery, index maintenance, and background QoS
+    metrics with bounded exporter behavior owned by the host.
+- [ ] Complete durable incremental-index catch-up.
+  - [x] Distinguish the applied source graph epoch from the durable checkpoint
+    watermark and report uncheckpointed changes.
+  - [ ] Persist ordered delta identity and resume catch-up from the last durable
+    watermark without requiring a full rebuild.
 - [x] Add library readiness APIs for Mem integration.
   - Expose structured readiness, slow-query, blackbox, storage-recovery,
     background-maintenance, and search-projection reports through Rust APIs.
