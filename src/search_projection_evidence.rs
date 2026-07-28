@@ -201,6 +201,7 @@ pub fn nowledge_search_projection_probe_contract_json() -> serde_json::Value {
             "persisted_segment_descriptor_used",
             "payload_read_avoidance_ready",
             "explain_analyze_ready",
+            "sample_evidence_ready",
             "sample_count",
             "ready_field_count",
             "required_field_count",
@@ -1182,6 +1183,7 @@ fn production_filter_pruning_report(probe: &serde_json::Value) -> serde_json::Va
     let samples = value_path(pruning, &["samples"])
         .cloned()
         .unwrap_or_else(|| serde_json::json!([]));
+    let sample_evidence = production_filter_pruning_sample_evidence(&samples);
     let required_fields_ready = sample_count == required_field_count
         && ready_field_count == required_field_count
         && required_field_count == NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len() as u64
@@ -1191,18 +1193,132 @@ fn production_filter_pruning_report(probe: &serde_json::Value) -> serde_json::Va
         && payload_read_avoidance_ready
         && explain_analyze_ready
         && required_fields_ready;
+    let ready = ready && sample_evidence.ready;
     serde_json::json!({
         "ready": ready,
         "persisted_segment_descriptor_used": persisted_segment_descriptor_used,
         "payload_read_avoidance_ready": payload_read_avoidance_ready,
         "explain_analyze_ready": explain_analyze_ready,
+        "sample_evidence_ready": sample_evidence.ready,
+        "sample_payload_read_avoidance_count": sample_evidence.payload_read_avoidance_count,
         "sample_count": sample_count,
         "ready_field_count": ready_field_count,
         "required_field_count": required_field_count,
         "required_fields_ready": required_fields_ready,
+        "missing_sample_fields": sample_evidence.missing_fields,
         "missing_fields": missing_fields,
         "samples": samples,
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProductionFilterPruningSampleEvidence {
+    ready: bool,
+    payload_read_avoidance_count: u64,
+    missing_fields: Vec<&'static str>,
+}
+
+fn production_filter_pruning_sample_evidence(
+    samples: &serde_json::Value,
+) -> ProductionFilterPruningSampleEvidence {
+    let sample_items = samples.as_array().map(Vec::as_slice).unwrap_or_default();
+    let payload_read_avoidance_count = sample_items
+        .iter()
+        .filter(|sample| production_filter_pruning_sample_ready(sample))
+        .count() as u64;
+    let missing_fields = NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
+        .iter()
+        .copied()
+        .filter(|field| {
+            !sample_items.iter().any(|sample| {
+                str_path(sample, &["field"]) == Some(*field)
+                    && production_filter_pruning_sample_ready(sample)
+            })
+        })
+        .collect::<Vec<_>>();
+    ProductionFilterPruningSampleEvidence {
+        ready: missing_fields.is_empty()
+            && payload_read_avoidance_count
+                == NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len() as u64,
+        payload_read_avoidance_count,
+        missing_fields,
+    }
+}
+
+fn production_filter_pruning_sample_ready(sample: &serde_json::Value) -> bool {
+    if bool_path(sample, &["ready"]) != Some(true)
+        || bool_path(sample, &["capability_ready"]) != Some(true)
+        || bool_path(sample, &["persisted_segment_descriptor_used"]) != Some(true)
+    {
+        return false;
+    }
+    let Some(segment_count) = u64_path(sample, &["segment_count"]) else {
+        return false;
+    };
+    let Some(scanned_segment_count) = u64_path(sample, &["scanned_segment_count"]) else {
+        return false;
+    };
+    let Some(pruned_segment_count) = u64_path(sample, &["pruned_segment_count"]) else {
+        return false;
+    };
+    if segment_count == 0
+        || scanned_segment_count == 0
+        || pruned_segment_count == 0
+        || scanned_segment_count.checked_add(pruned_segment_count) != Some(segment_count)
+    {
+        return false;
+    }
+    let Some(candidate_document_count) =
+        u64_path(sample, &["segment_pruning_candidate_document_count"])
+    else {
+        return false;
+    };
+    let Some(scanned_document_count) = u64_path(sample, &["segment_scanned_document_count"]) else {
+        return false;
+    };
+    let Some(pruned_document_count) = u64_path(sample, &["segment_pruned_document_count"]) else {
+        return false;
+    };
+    if candidate_document_count == 0
+        || scanned_document_count == 0
+        || pruned_document_count == 0
+        || scanned_document_count.checked_add(pruned_document_count)
+            != Some(candidate_document_count)
+    {
+        return false;
+    }
+    production_filter_pruning_explain_analyze_ready(
+        sample,
+        segment_count,
+        scanned_segment_count,
+        pruned_segment_count,
+        candidate_document_count,
+        scanned_document_count,
+        pruned_document_count,
+    )
+}
+
+fn production_filter_pruning_explain_analyze_ready(
+    sample: &serde_json::Value,
+    segment_count: u64,
+    scanned_segment_count: u64,
+    pruned_segment_count: u64,
+    candidate_document_count: u64,
+    scanned_document_count: u64,
+    pruned_document_count: u64,
+) -> bool {
+    let Some(explain) = value_path(sample, &["explain_analyze"]) else {
+        return false;
+    };
+    bool_path(explain, &["ready"]) == Some(true)
+        && str_path(explain, &["operator"]) == Some("search_projection_segment_scan")
+        && u64_path(explain, &["segment_count"]) == Some(segment_count)
+        && u64_path(explain, &["scanned_segment_count"]) == Some(scanned_segment_count)
+        && u64_path(explain, &["pruned_segment_count"]) == Some(pruned_segment_count)
+        && u64_path(explain, &["candidate_document_count"]) == Some(candidate_document_count)
+        && u64_path(explain, &["scanned_document_count"]) == Some(scanned_document_count)
+        && u64_path(explain, &["pruned_document_count"]) == Some(pruned_document_count)
+        && bool_path(explain, &["payload_read_avoidance"]) == Some(true)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1390,7 +1506,7 @@ mod tests {
     };
     use crate::{
         SearchEmbeddingManifest, SearchIndex, SearchProjectionDelta, SearchProjectionKind,
-        SearchProjectionRow,
+        SearchProjectionRow, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
     };
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -1731,6 +1847,34 @@ mod tests {
         assert_eq!(
             report["production_filter_pruning"]["explain_analyze_ready"],
             false
+        );
+        assert_eq!(
+            report["blocker_codes"],
+            serde_json::json!(["skein_production_filter_pruning_not_ready"])
+        );
+    }
+
+    #[test]
+    fn skein_search_projection_evidence_requires_payload_avoidance_samples() {
+        let mut probe = ready_probe();
+        probe["production_filter_pruning"]["samples"][0]["explain_analyze"]
+            ["payload_read_avoidance"] = serde_json::json!(false);
+
+        let report = nowledge_search_projection_evidence_json(&probe);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(report["production_filter_pruning_ready"], false);
+        assert_eq!(
+            report["production_filter_pruning"]["sample_evidence_ready"],
+            false
+        );
+        assert_eq!(
+            report["production_filter_pruning"]["sample_payload_read_avoidance_count"],
+            (NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len() - 1) as u64
+        );
+        assert_eq!(
+            report["production_filter_pruning"]["missing_sample_fields"],
+            serde_json::json!([NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS[0]])
         );
         assert_eq!(
             report["blocker_codes"],

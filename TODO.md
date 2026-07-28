@@ -115,6 +115,10 @@ must block default cutover.
     false negatives are impossible.
   - Completion evidence: `EXPLAIN ANALYZE` and readiness reports show payload
     read avoidance for graph and search projection filters.
+  - [x] Require search projection production-filter pruning evidence to validate
+    every required field sample's segment counters, document counters,
+    `EXPLAIN ANALYZE` operator, and payload-read avoidance before accepting
+    cutover readiness.
 - [ ] Prove storage recovery under real mutation shapes.
   - WAL replay must recover whole committed batches or nothing.
   - Torn WAL tails, checkpoint boundaries, and replay markers must be detected
