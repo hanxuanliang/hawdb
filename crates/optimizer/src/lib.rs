@@ -7,6 +7,7 @@ pub mod predicate;
 pub mod properties;
 pub mod rule;
 pub mod search;
+pub mod stage;
 pub mod trace;
 
 pub use cost::{PlanCost, PlanCostBreakdown};
@@ -22,10 +23,17 @@ pub use predicate::{
     SearchPredicate, SearchPredicateOp, SearchPredicateParseError, SearchPredicatePushdown,
     SearchPredicateSet, SearchScalarValue, SearchScanPredicateSupport,
 };
-pub use properties::{Distribution, PhysicalProperties, RequiredProperties};
+pub use properties::{
+    Distribution, MemoryBudgetClass, PhysicalProperties, RequiredProperties, ScanPruningSupport,
+    VectorPrecision,
+};
 pub use rule::{
     apply_rule_batch, AppliedRule, OptimizerRule, RuleApplication, RuleBatch, RuleId, RuleKind,
     RulePromise,
 };
 pub use search::{OptimizationSearchReport, RuleEvent, RuleOutcome, SearchMode, SelectedPlanTrace};
+pub use stage::{
+    ApplyOrder, OptimizationPipeline, OptimizationStage, PipelineExecution, RuleStage,
+    StageRuleBatch, StageStats, StageTrace,
+};
 pub use trace::{OptimizerConfig, OptimizerTrace};

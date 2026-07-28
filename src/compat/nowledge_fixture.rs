@@ -31,7 +31,7 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
         checks: vec![
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
-                    "parameterized lookup uses index",
+                    "parameterized lookup uses small-label scan",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (m:Memory) WHERE m.id = $id RETURN m.title AS title",
                         BTreeMap::from([("id".to_string(), Value::Int(1))]),
@@ -41,7 +41,7 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                         Value::String("Graph foundations".to_string()),
                     )])]),
                 )
-                .with_plan_contains(vec!["IndexNodeSeek".to_string()]),
+                .with_plan_contains(vec!["SeqNodeScan".to_string()]),
             ),
             CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
                 "graph totals memory count read",
@@ -19203,7 +19203,7 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
         "nowledge-memory-core-inventory",
         [
             CompatibilityQueryCallSite::new(
-                "parameterized lookup uses index",
+                "parameterized lookup uses small-label scan",
                 "parameterized_read",
                 "nowledge-memory-core::lookup",
             )

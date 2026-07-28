@@ -407,6 +407,12 @@ mod tests {
             .unwrap();
         db.query("CREATE (:Memory {id: 'mem-b', kind: 'task', title: 'B'})")
             .unwrap();
+        for id in 0..8 {
+            db.query(&format!(
+                "CREATE (:Memory {{id: 'mem-filler-{id}', kind: 'task', title: 'Filler {id}'}})"
+            ))
+            .unwrap();
+        }
         drop(db);
         let probes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
             .iter()

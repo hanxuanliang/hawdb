@@ -1,5 +1,6 @@
 use crate::cost::{PlanCost, PlanCostBreakdown};
 use crate::properties::PhysicalProperties;
+use crate::stage::StageTrace;
 use crate::trace::OptimizerTrace;
 use std::collections::BTreeMap;
 use std::str::FromStr;
@@ -17,6 +18,7 @@ pub struct OptimizationSearchReport {
     warnings: Vec<String>,
     decisions: Vec<String>,
     rule_events: Vec<RuleEvent>,
+    stage_events: Vec<StageTrace>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +55,7 @@ impl OptimizationSearchReport {
             warnings: Vec::new(),
             decisions: Vec::new(),
             rule_events: Vec::new(),
+            stage_events: Vec::new(),
         }
     }
 
@@ -63,6 +66,7 @@ impl OptimizationSearchReport {
             warnings: Vec::new(),
             decisions: Vec::new(),
             rule_events: Vec::new(),
+            stage_events: Vec::new(),
         };
         report.warnings.push(format!(
             "optimizer memo budget exceeded: required_groups={required_groups} max_groups={max_groups}; used deterministic direct physical fallback"
@@ -88,6 +92,14 @@ impl OptimizationSearchReport {
 
     pub fn rule_events(&self) -> &[RuleEvent] {
         &self.rule_events
+    }
+
+    pub fn stage_events(&self) -> &[StageTrace] {
+        &self.stage_events
+    }
+
+    pub fn push_stage_event(&mut self, event: StageTrace) {
+        self.stage_events.push(event);
     }
 
     pub fn push_decision(&mut self, decision: impl Into<String>) {
@@ -130,6 +142,7 @@ impl OptimizationSearchReport {
             warnings: self.warnings,
             decisions: self.decisions,
             rule_events: self.rule_events,
+            stage_events: self.stage_events,
         }
     }
 }
@@ -248,7 +261,7 @@ impl FromStr for RuleOutcome {
 #[cfg(test)]
 mod tests {
     use super::{OptimizationSearchReport, RuleEvent, RuleOutcome, SearchMode, SelectedPlanTrace};
-    use crate::{PlanCost, PlanCostBreakdown};
+    use crate::{ApplyOrder, OptimizationStage, PlanCost, PlanCostBreakdown, StageStats};
     use std::collections::BTreeMap;
 
     #[test]
@@ -261,6 +274,7 @@ mod tests {
         assert!(report.warnings()[0].contains("required_groups=9 max_groups=4"));
         assert!(report.decisions().is_empty());
         assert!(report.rule_events().is_empty());
+        assert!(report.stage_events().is_empty());
     }
 
     #[test]
@@ -292,6 +306,10 @@ mod tests {
     #[test]
     fn search_report_builds_legacy_trace_surface() {
         let mut report = OptimizationSearchReport::memo(2);
+        report.push_stage_event(
+            OptimizationStage::new("physical_search", ApplyOrder::BottomUp)
+                .trace(StageStats::new(2, 1).with_rule_counts(1, 0)),
+        );
         report.push_decision("choose IndexNodeSeek");
         report.record_selected_plan_cost(PlanCost {
             estimated_rows: 1,
@@ -314,6 +332,9 @@ mod tests {
         assert_eq!(trace.groups, 2);
         assert_eq!(trace.search_mode, SearchMode::Memo);
         assert!(trace.warnings.is_empty());
+        assert_eq!(trace.stage_events[0].name(), "physical_search");
+        assert_eq!(trace.stage_events[0].apply_order(), ApplyOrder::BottomUp);
+        assert_eq!(trace.stage_events[0].stats().applied_rules, 1);
         assert_eq!(trace.decisions[0], "choose IndexNodeSeek");
         assert_eq!(
             trace.decisions[1],

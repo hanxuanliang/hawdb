@@ -4575,6 +4575,11 @@ fn explain_diagnostics_json(input: ExplainDiagnosticsJsonInput<'_>) -> serde_jso
         "selected_plan_properties": physical_properties_json(&input.trace.selected_plan_properties),
         "selected_plan_operator_counts": input.trace.selected_plan_operator_counts,
         "selected_plan_class_counts": input.trace.selected_plan_class_counts,
+        "optimizer_stages": input.trace
+            .stage_events
+            .iter()
+            .map(optimizer_stage_json)
+            .collect::<Vec<_>>(),
         "work_request": {
             "priority": input.work_request.priority.as_str(),
             "class": input.work_request.class.as_str(),
@@ -4684,6 +4689,10 @@ fn physical_properties_json(
     serde_json::json!({
         "distribution": distribution_json(&properties.distribution),
         "ordering": properties.ordering,
+        "covering_fields": properties.covering_fields,
+        "scan_pruning": properties.scan_pruning.as_str(),
+        "vector_precision": properties.vector_precision.as_str(),
+        "memory_budget": properties.memory_budget.as_str(),
     })
 }
 
@@ -4702,6 +4711,18 @@ fn distribution_json(distribution: &skein::optimizer::Distribution) -> serde_jso
             })
         }
     }
+}
+
+fn optimizer_stage_json(stage: &skein::optimizer::StageTrace) -> serde_json::Value {
+    let stats = stage.stats();
+    serde_json::json!({
+        "name": stage.name(),
+        "apply_order": stage.apply_order().as_str(),
+        "input_count": stats.input_count,
+        "output_count": stats.output_count,
+        "applied_rules": stats.applied_rules,
+        "skipped_rules": stats.skipped_rules,
+    })
 }
 
 fn rule_event_json(event: &skein::optimizer::RuleEvent) -> serde_json::Value {
@@ -6070,6 +6091,10 @@ mod tests {
                 selected_plan_properties: skein::optimizer::PhysicalProperties {
                     distribution: skein::optimizer::Distribution::Single,
                     ordering: vec!["title asc".to_string()],
+                    covering_fields: vec!["Memory.title".to_string()],
+                    scan_pruning: skein::optimizer::ScanPruningSupport::Index,
+                    vector_precision: skein::optimizer::VectorPrecision::NotVector,
+                    memory_budget: skein::optimizer::MemoryBudgetClass::RowLinear,
                 },
                 selected_plan_operator_counts: operator_counts,
                 selected_plan_class_counts: class_counts,
@@ -6079,6 +6104,11 @@ mod tests {
                     "implementation:node_equality_index_seek",
                     "priority=100 property=id",
                 )],
+                stage_events: vec![skein::optimizer::OptimizationStage::new(
+                    "physical_search",
+                    skein::optimizer::ApplyOrder::BottomUp,
+                )
+                .trace(skein::optimizer::StageStats::new(2, 1).with_rule_counts(1, 3))],
             },
         };
 
@@ -6120,8 +6150,27 @@ mod tests {
             "single"
         );
         assert_eq!(json["selected_plan_properties"]["ordering"][0], "title asc");
+        assert_eq!(
+            json["selected_plan_properties"]["covering_fields"][0],
+            "Memory.title"
+        );
+        assert_eq!(json["selected_plan_properties"]["scan_pruning"], "index");
+        assert_eq!(
+            json["selected_plan_properties"]["vector_precision"],
+            "not_vector"
+        );
+        assert_eq!(
+            json["selected_plan_properties"]["memory_budget"],
+            "row_linear"
+        );
         assert_eq!(json["selected_plan_operator_counts"]["SeqNodeScan"], 1);
         assert_eq!(json["selected_plan_class_counts"]["access"], 1);
+        assert_eq!(json["optimizer_stages"][0]["name"], "physical_search");
+        assert_eq!(json["optimizer_stages"][0]["apply_order"], "bottom_up");
+        assert_eq!(json["optimizer_stages"][0]["input_count"], 2);
+        assert_eq!(json["optimizer_stages"][0]["output_count"], 1);
+        assert_eq!(json["optimizer_stages"][0]["applied_rules"], 1);
+        assert_eq!(json["optimizer_stages"][0]["skipped_rules"], 3);
         assert_eq!(json["work_request"]["priority"], "background");
         assert_eq!(json["work_request"]["class"], "analytics");
         assert_eq!(json["work_request"]["estimated_operations"], 64);

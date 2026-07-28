@@ -1,0 +1,460 @@
+use super::plan_cache::OptimizedQueryPlan;
+use crate::executor::{self, Row};
+use crate::optimizer::{Distribution, PhysicalProperties, PlanCost, PlanCostBreakdown, StageTrace};
+use crate::qos::WorkRequest;
+use crate::store::{ScanPruningReport, ScanPruningStrategy};
+use crate::value::Value;
+use std::collections::BTreeMap;
+
+pub(super) fn explain_output_row(
+    optimized: &OptimizedQueryPlan,
+    work_request: WorkRequest,
+    statement_kind: &'static str,
+) -> Row {
+    let mut row = Row::new();
+    row.insert("mode".to_string(), Value::String("explain".to_string()));
+    row.insert(
+        "statement_kind".to_string(),
+        Value::String(statement_kind.to_string()),
+    );
+    row.insert(
+        "plan".to_string(),
+        Value::String(optimized.physical_plan.explain(0)),
+    );
+    row.insert(
+        "selected_plan".to_string(),
+        Value::String(optimized.trace.selected_plan.clone()),
+    );
+    row.insert(
+        "selected_plan_fingerprint".to_string(),
+        Value::String(optimized.trace.selected_plan_fingerprint.clone()),
+    );
+    row.insert(
+        "selected_plan_cost".to_string(),
+        explain_plan_cost_value(optimized.trace.selected_plan_cost),
+    );
+    row.insert(
+        "selected_plan_cost_breakdown".to_string(),
+        explain_plan_cost_breakdown_value(optimized.trace.selected_plan_cost_breakdown),
+    );
+    row.insert(
+        "selected_plan_properties".to_string(),
+        explain_physical_properties_value(&optimized.trace.selected_plan_properties),
+    );
+    row.insert(
+        "optimizer_stages".to_string(),
+        explain_optimizer_stages_value(&optimized.trace.stage_events),
+    );
+    row.insert(
+        "semantic_checks".to_string(),
+        explain_semantic_checks_value(),
+    );
+    row.insert("fast_path".to_string(), explain_fast_path_value(optimized));
+    row.insert(
+        "optimizer_budget".to_string(),
+        explain_optimizer_budget_value(optimized),
+    );
+    row.insert(
+        "chosen_indexes".to_string(),
+        explain_chosen_indexes_value(optimized),
+    );
+    row.insert(
+        "plan_cache_lookup".to_string(),
+        Value::String(optimized.plan_cache_lookup.as_str().to_string()),
+    );
+    if let Some(reason) = optimized.plan_cache_lookup.bypass_reason() {
+        row.insert(
+            "plan_cache_bypass_reason".to_string(),
+            Value::String(reason.as_str().to_string()),
+        );
+    } else {
+        row.insert("plan_cache_bypass_reason".to_string(), Value::Null);
+    }
+    row.insert(
+        "work_request".to_string(),
+        explain_work_request_value(&work_request),
+    );
+    row.insert(
+        "resource_class".to_string(),
+        Value::String(work_request.class.as_str().to_string()),
+    );
+    row
+}
+
+pub(super) fn explain_analyze_output_row(
+    optimized: &OptimizedQueryPlan,
+    work_request: WorkRequest,
+    statement_kind: &'static str,
+    row_count: usize,
+    profile: &executor::ReadExecutionProfile,
+) -> Row {
+    let mut row = explain_output_row(optimized, work_request, statement_kind);
+    row.insert(
+        "mode".to_string(),
+        Value::String("explain_analyze".to_string()),
+    );
+    row.insert("row_count".to_string(), usize_value(row_count));
+    row.insert(
+        "scan_pruning_report_count".to_string(),
+        usize_value(profile.scan_pruning_reports.len()),
+    );
+    row.insert(
+        "scan_pruning_reports".to_string(),
+        Value::List(
+            profile
+                .scan_pruning_reports
+                .iter()
+                .map(scan_pruning_report_value)
+                .collect(),
+        ),
+    );
+    row.insert(
+        "row_limit_enforced_before_output".to_string(),
+        Value::Bool(profile.row_limit_enforced_before_output),
+    );
+    row.insert(
+        "operator_row_cap_enabled".to_string(),
+        Value::Bool(profile.operator_row_cap_enabled),
+    );
+    row
+}
+
+pub(super) fn empty_read_execution_profile() -> executor::ReadExecutionProfile {
+    executor::ReadExecutionProfile {
+        max_rows: None,
+        detection_row_cap: None,
+        row_limit_enforced_before_output: false,
+        operator_row_cap_enabled: false,
+        blocking_operator_kinds: Vec::new(),
+        scan_pruning_reports: Vec::new(),
+    }
+}
+
+fn scan_pruning_report_value(report: &ScanPruningReport) -> Value {
+    Value::Map(BTreeMap::from([
+        (
+            "target_kind".to_string(),
+            Value::String(report.target_kind.as_str().to_string()),
+        ),
+        (
+            "label_id".to_string(),
+            report
+                .label_id
+                .map(|label_id| Value::Int(i64::from(label_id.0)))
+                .unwrap_or(Value::Null),
+        ),
+        (
+            "rel_type_id".to_string(),
+            report
+                .rel_type_id
+                .map(|rel_type_id| Value::Int(i64::from(rel_type_id.0)))
+                .unwrap_or(Value::Null),
+        ),
+        (
+            "strategy".to_string(),
+            scan_pruning_strategy_value(&report.strategy),
+        ),
+        ("pruned".to_string(), Value::Bool(report.pruned)),
+        ("exact_empty".to_string(), Value::Bool(report.exact_empty)),
+        (
+            "candidate_count_before_pruning".to_string(),
+            usize_value(report.candidate_count_before_pruning),
+        ),
+        (
+            "pruned_candidate_count".to_string(),
+            usize_value(report.pruned_candidate_count),
+        ),
+        (
+            "candidate_count_before_filter".to_string(),
+            usize_value(report.candidate_count_before_filter),
+        ),
+        ("output_count".to_string(), usize_value(report.output_count)),
+        (
+            "filtered_out_count".to_string(),
+            usize_value(report.filtered_out_count),
+        ),
+    ]))
+}
+
+fn scan_pruning_strategy_value(strategy: &ScanPruningStrategy) -> Value {
+    match strategy {
+        ScanPruningStrategy::FullLabelScan => {
+            Value::Map(BTreeMap::from([kind_value_pair("full_label_scan")]))
+        }
+        ScanPruningStrategy::Empty => Value::Map(BTreeMap::from([kind_value_pair("empty")])),
+        ScanPruningStrategy::IdEq => Value::Map(BTreeMap::from([kind_value_pair("id_eq")])),
+        ScanPruningStrategy::IdIn => Value::Map(BTreeMap::from([kind_value_pair("id_in")])),
+        ScanPruningStrategy::IdRange => Value::Map(BTreeMap::from([kind_value_pair("id_range")])),
+        ScanPruningStrategy::PropertyEq { property } => {
+            scan_pruning_property_strategy_value("property_eq", property)
+        }
+        ScanPruningStrategy::PropertyNotEq { property } => {
+            scan_pruning_property_strategy_value("property_not_eq", property)
+        }
+        ScanPruningStrategy::PropertyMissingOrNull { property } => {
+            scan_pruning_property_strategy_value("property_missing_or_null", property)
+        }
+        ScanPruningStrategy::PropertyExists { property } => {
+            scan_pruning_property_strategy_value("property_exists", property)
+        }
+        ScanPruningStrategy::PropertyDefaultIfNullEq { property } => {
+            scan_pruning_property_strategy_value("property_default_if_null_eq", property)
+        }
+        ScanPruningStrategy::PropertyDefaultIfNullNotEq { property } => {
+            scan_pruning_property_strategy_value("property_default_if_null_not_eq", property)
+        }
+        ScanPruningStrategy::PropertyIn { property } => {
+            scan_pruning_property_strategy_value("property_in", property)
+        }
+        ScanPruningStrategy::PropertyRange { property } => {
+            scan_pruning_property_strategy_value("property_range", property)
+        }
+        ScanPruningStrategy::OrUnion => Value::Map(BTreeMap::from([kind_value_pair("or_union")])),
+    }
+}
+
+fn scan_pruning_property_strategy_value(kind: &str, property: &str) -> Value {
+    Value::Map(BTreeMap::from([
+        kind_value_pair(kind),
+        ("property".to_string(), Value::String(property.to_string())),
+    ]))
+}
+
+fn kind_value_pair(kind: &str) -> (String, Value) {
+    ("kind".to_string(), Value::String(kind.to_string()))
+}
+
+fn explain_plan_cost_value(cost: PlanCost) -> Value {
+    Value::Map(BTreeMap::from([
+        ("estimated_rows".to_string(), u64_value(cost.estimated_rows)),
+        ("cost".to_string(), u64_value(cost.cost)),
+    ]))
+}
+
+fn explain_plan_cost_breakdown_value(cost: PlanCostBreakdown) -> Value {
+    Value::Map(BTreeMap::from([
+        ("estimated_rows".to_string(), u64_value(cost.estimated_rows)),
+        ("cost".to_string(), u64_value(cost.cost)),
+        ("cpu".to_string(), u64_value(cost.cpu)),
+        ("random_io".to_string(), u64_value(cost.random_io)),
+        ("sequential_io".to_string(), u64_value(cost.sequential_io)),
+        ("output_rows".to_string(), u64_value(cost.output_rows)),
+    ]))
+}
+
+fn explain_optimizer_stages_value(stages: &[StageTrace]) -> Value {
+    Value::List(stages.iter().map(explain_optimizer_stage_value).collect())
+}
+
+fn explain_optimizer_stage_value(stage: &StageTrace) -> Value {
+    let stats = stage.stats();
+    Value::Map(BTreeMap::from([
+        ("name".to_string(), Value::String(stage.name().to_string())),
+        (
+            "apply_order".to_string(),
+            Value::String(stage.apply_order().as_str().to_string()),
+        ),
+        ("input_count".to_string(), usize_value(stats.input_count)),
+        ("output_count".to_string(), usize_value(stats.output_count)),
+        (
+            "applied_rules".to_string(),
+            usize_value(stats.applied_rules),
+        ),
+        (
+            "skipped_rules".to_string(),
+            usize_value(stats.skipped_rules),
+        ),
+    ]))
+}
+
+fn explain_physical_properties_value(properties: &PhysicalProperties) -> Value {
+    Value::Map(BTreeMap::from([
+        (
+            "distribution".to_string(),
+            explain_distribution_value(&properties.distribution),
+        ),
+        (
+            "ordering".to_string(),
+            Value::List(
+                properties
+                    .ordering
+                    .iter()
+                    .cloned()
+                    .map(Value::String)
+                    .collect(),
+            ),
+        ),
+        (
+            "covering_fields".to_string(),
+            Value::List(
+                properties
+                    .covering_fields
+                    .iter()
+                    .cloned()
+                    .map(Value::String)
+                    .collect(),
+            ),
+        ),
+        (
+            "scan_pruning".to_string(),
+            Value::String(properties.scan_pruning.as_str().to_string()),
+        ),
+        (
+            "vector_precision".to_string(),
+            Value::String(properties.vector_precision.as_str().to_string()),
+        ),
+        (
+            "memory_budget".to_string(),
+            Value::String(properties.memory_budget.as_str().to_string()),
+        ),
+    ]))
+}
+
+fn explain_distribution_value(distribution: &Distribution) -> Value {
+    let keys = match distribution {
+        Distribution::Hash(keys) => keys.clone(),
+        Distribution::Any | Distribution::Single => Vec::new(),
+    };
+    Value::Map(BTreeMap::from([
+        (
+            "kind".to_string(),
+            Value::String(distribution.as_str().to_string()),
+        ),
+        (
+            "keys".to_string(),
+            Value::List(keys.into_iter().map(Value::String).collect()),
+        ),
+    ]))
+}
+
+fn explain_semantic_checks_value() -> Value {
+    Value::Map(BTreeMap::from([
+        ("parse".to_string(), Value::String("passed".to_string())),
+        (
+            "parameter_binding".to_string(),
+            Value::String("passed".to_string()),
+        ),
+        (
+            "semantic_validation".to_string(),
+            Value::String("passed".to_string()),
+        ),
+    ]))
+}
+
+fn explain_fast_path_value(optimized: &OptimizedQueryPlan) -> Value {
+    let reason = explain_fast_path_reason(optimized);
+    Value::Map(BTreeMap::from([
+        ("selected".to_string(), Value::Bool(reason.is_some())),
+        (
+            "reason".to_string(),
+            reason
+                .map(|reason| Value::String(reason.to_string()))
+                .unwrap_or(Value::Null),
+        ),
+    ]))
+}
+
+fn explain_fast_path_reason(optimized: &OptimizedQueryPlan) -> Option<&'static str> {
+    if optimized
+        .trace
+        .selected_plan_operator_counts
+        .contains_key("IndexNodeSeek")
+        && !optimized
+            .trace
+            .selected_plan_operator_counts
+            .contains_key("FilterExec")
+    {
+        return Some("index_node_seek_without_residual_filter");
+    }
+    if optimized
+        .trace
+        .selected_plan_operator_counts
+        .contains_key("IndexNodeMultiSeek")
+        && !optimized
+            .trace
+            .selected_plan_operator_counts
+            .contains_key("FilterExec")
+    {
+        return Some("index_node_multi_seek_without_residual_filter");
+    }
+    None
+}
+
+fn explain_optimizer_budget_value(optimized: &OptimizedQueryPlan) -> Value {
+    Value::Map(BTreeMap::from([
+        (
+            "max_groups".to_string(),
+            usize_value(optimized.effective_max_optimizer_groups),
+        ),
+        (
+            "configured_max_groups".to_string(),
+            option_usize_value(optimized.configured_max_optimizer_groups),
+        ),
+        ("groups".to_string(), usize_value(optimized.trace.groups)),
+        (
+            "search_mode".to_string(),
+            Value::String(optimized.trace.search_mode.as_str().to_string()),
+        ),
+        (
+            "budget_exceeded".to_string(),
+            Value::Bool(
+                optimized
+                    .trace
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains("optimizer memo budget exceeded")),
+            ),
+        ),
+    ]))
+}
+
+fn explain_chosen_indexes_value(optimized: &OptimizedQueryPlan) -> Value {
+    let counts = &optimized.trace.selected_plan_operator_counts;
+    let index_operator_counts = [
+        ("IndexNodeSeek", "node_seek"),
+        ("IndexNodeMultiSeek", "node_multi_seek"),
+        ("IndexNodeRangeSeek", "node_range_seek"),
+        ("IndexNodeTextSeek", "node_text_seek"),
+    ]
+    .into_iter()
+    .filter_map(|(operator, kind)| {
+        counts.get(operator).map(|count| {
+            Value::Map(BTreeMap::from([
+                ("operator".to_string(), Value::String(operator.to_string())),
+                ("kind".to_string(), Value::String(kind.to_string())),
+                ("count".to_string(), usize_value(*count)),
+            ]))
+        })
+    })
+    .collect::<Vec<_>>();
+    Value::List(index_operator_counts)
+}
+
+fn explain_work_request_value(work_request: &WorkRequest) -> Value {
+    Value::Map(BTreeMap::from([
+        (
+            "priority".to_string(),
+            Value::String(work_request.priority.as_str().to_string()),
+        ),
+        (
+            "class".to_string(),
+            Value::String(work_request.class.as_str().to_string()),
+        ),
+        (
+            "estimated_operations".to_string(),
+            usize_value(work_request.estimated_operations),
+        ),
+    ]))
+}
+
+fn usize_value(value: usize) -> Value {
+    Value::Int(i64::try_from(value).unwrap_or(i64::MAX))
+}
+
+fn u64_value(value: u64) -> Value {
+    Value::Int(i64::try_from(value).unwrap_or(i64::MAX))
+}
+
+fn option_usize_value(value: Option<usize>) -> Value {
+    value.map(usize_value).unwrap_or(Value::Null)
+}

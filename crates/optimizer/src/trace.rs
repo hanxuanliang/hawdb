@@ -1,6 +1,7 @@
 use crate::cost::{PlanCost, PlanCostBreakdown};
 use crate::properties::PhysicalProperties;
 use crate::search::{RuleEvent, SearchMode};
+use crate::stage::StageTrace;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,4 +29,5 @@ pub struct OptimizerTrace {
     pub warnings: Vec<String>,
     pub decisions: Vec<String>,
     pub rule_events: Vec<RuleEvent>,
+    pub stage_events: Vec<StageTrace>,
 }

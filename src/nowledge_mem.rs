@@ -8921,6 +8921,13 @@ mod tests {
         store
             .query_with_report("CREATE (:Memory {id: 'preflight-1', title: 'Preflight'})")
             .unwrap();
+        for id in 0..8 {
+            store
+                .query_with_report(&format!(
+                    "CREATE (:Memory {{id: 'preflight-filler-{id}', title: 'Filler {id}'}})"
+                ))
+                .unwrap();
+        }
         let probes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
             .iter()
             .map(|route| {
