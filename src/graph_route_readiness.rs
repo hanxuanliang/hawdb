@@ -99,6 +99,10 @@ pub fn nowledge_graph_route_readiness_json(
         .iter()
         .map(RouteEvidence::query_runtime_profile_report_count)
         .sum::<usize>();
+    let query_runtime_api_behavior_report_count = routes
+        .iter()
+        .map(RouteEvidence::query_runtime_api_behavior_report_count)
+        .sum::<usize>();
     let query_runtime_failed_query_count = routes
         .iter()
         .map(RouteEvidence::query_runtime_failed_query_count)
@@ -125,6 +129,10 @@ pub fn nowledge_graph_route_readiness_json(
         && routes
             .iter()
             .all(RouteEvidence::query_profile_evidence_ready);
+    let route_query_api_behavior_evidence_ready = route_coverage.ready
+        && routes
+            .iter()
+            .all(RouteEvidence::query_api_behavior_evidence_ready);
     let route_relationship_property_pruning_evidence_ready = route_coverage.ready
         && routes
             .iter()
@@ -157,6 +165,7 @@ pub fn nowledge_graph_route_readiness_json(
         "query_runtime_report_count": query_runtime_report_count,
         "query_runtime_plan_report_count": query_runtime_plan_report_count,
         "query_runtime_profile_report_count": query_runtime_profile_report_count,
+        "query_runtime_api_behavior_report_count": query_runtime_api_behavior_report_count,
         "query_runtime_failed_query_count": query_runtime_failed_query_count,
         "query_runtime_missing_plan_evidence_count": query_runtime_missing_plan_evidence_count,
         "query_runtime_missing_profile_evidence_count": query_runtime_missing_profile_evidence_count,
@@ -166,6 +175,7 @@ pub fn nowledge_graph_route_readiness_json(
         "route_query_runtime_ready": missing_query_runtime_routes.is_empty(),
         "route_query_plan_evidence_ready": route_query_plan_evidence_ready,
         "route_query_profile_evidence_ready": route_query_profile_evidence_ready,
+        "route_query_api_behavior_evidence_ready": route_query_api_behavior_evidence_ready,
         "route_relationship_property_pruning_evidence_ready": route_relationship_property_pruning_evidence_ready,
         "route_primary_ready": route_primary_ready,
         "route_primary_blocker_codes": route_primary_blocker_codes,
@@ -377,6 +387,13 @@ impl RouteEvidence {
             .count()
     }
 
+    fn query_runtime_api_behavior_report_count(&self) -> usize {
+        self.query_reports
+            .iter()
+            .filter(|report| report.api_behavior_evidence_ready())
+            .count()
+    }
+
     fn query_runtime_failed_query_count(&self) -> usize {
         self.query_reports
             .iter()
@@ -398,6 +415,11 @@ impl RouteEvidence {
 
     fn query_profile_evidence_ready(&self) -> bool {
         !self.query_reports.is_empty() && self.query_runtime_missing_profile_evidence_count() == 0
+    }
+
+    fn query_api_behavior_evidence_ready(&self) -> bool {
+        !self.query_reports.is_empty()
+            && self.query_runtime_api_behavior_report_count() == self.query_runtime_report_count()
     }
 
     fn relationship_property_pruning_required_count(&self) -> usize {
@@ -430,6 +452,8 @@ impl RouteEvidence {
         let query_report_count = self.query_runtime_report_count();
         let query_runtime_plan_report_count = self.query_runtime_plan_report_count();
         let query_runtime_profile_report_count = self.query_runtime_profile_report_count();
+        let query_runtime_api_behavior_report_count =
+            self.query_runtime_api_behavior_report_count();
         let query_runtime_failed_query_count = self.query_runtime_failed_query_count();
         let query_runtime_missing_plan_evidence_count =
             self.query_runtime_missing_plan_evidence_count();
@@ -437,6 +461,7 @@ impl RouteEvidence {
             self.query_runtime_missing_profile_evidence_count();
         let query_plan_evidence_ready = self.query_plan_evidence_ready();
         let query_profile_evidence_ready = self.query_profile_evidence_ready();
+        let query_api_behavior_evidence_ready = self.query_api_behavior_evidence_ready();
         let relationship_property_pruning_required_count =
             self.reported_relationship_property_pruning_required_count;
         let relationship_property_pruning_report_count =
@@ -465,6 +490,7 @@ impl RouteEvidence {
             "query_runtime_report_count": query_report_count,
             "query_runtime_plan_report_count": query_runtime_plan_report_count,
             "query_runtime_profile_report_count": query_runtime_profile_report_count,
+            "query_runtime_api_behavior_report_count": query_runtime_api_behavior_report_count,
             "query_runtime_failed_query_count": query_runtime_failed_query_count,
             "query_runtime_missing_plan_evidence_count": query_runtime_missing_plan_evidence_count,
             "query_runtime_missing_profile_evidence_count": query_runtime_missing_profile_evidence_count,
@@ -474,6 +500,7 @@ impl RouteEvidence {
             "relationship_property_pruning_evidence_ready": relationship_property_pruning_evidence_ready,
             "query_plan_evidence_ready": query_plan_evidence_ready,
             "query_profile_evidence_ready": query_profile_evidence_ready,
+            "query_api_behavior_evidence_ready": query_api_behavior_evidence_ready,
             "query_reports": query_reports,
             "blocker_codes": self.blocker_codes,
         });
@@ -667,6 +694,10 @@ impl QueryRuntimeReport {
             && self.scan_pruning_reports_ready()
     }
 
+    fn api_behavior_evidence_ready(&self) -> bool {
+        self.api_behavior.ready()
+    }
+
     fn json(self) -> serde_json::Value {
         serde_json::json!({
             "query_name": self.query_name,
@@ -854,7 +885,15 @@ impl QueryApiBehaviorEvidence {
             "error_class_stable": self.error_class_stable,
             "statement_has_ordering": self.statement_has_ordering,
             "statement_has_pagination": self.statement_has_pagination,
+            "ready": self.ready(),
         })
+    }
+
+    fn ready(&self) -> bool {
+        self.include_metadata_false_strips_metadata == Some(true)
+            && self.ordering_contract_recorded == Some(true)
+            && self.pagination_contract_recorded == Some(true)
+            && self.error_class_stable == Some(true)
     }
 }
 
@@ -1079,6 +1118,9 @@ fn route_primary_blocker_codes(
         if !route.query_profile_evidence_ready() {
             blockers.insert("route_query_profile_evidence_not_ready".to_string());
         }
+        if !route.query_api_behavior_evidence_ready() {
+            blockers.insert("route_query_api_behavior_evidence_not_ready".to_string());
+        }
         if !route.relationship_property_pruning_evidence_ready() {
             blockers.insert("route_relationship_property_pruning_evidence_not_ready".to_string());
         }
@@ -1190,6 +1232,10 @@ mod tests {
             readiness["query_runtime_profile_report_count"],
             serde_json::json!(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len())
         );
+        assert_eq!(
+            readiness["query_runtime_api_behavior_report_count"],
+            serde_json::json!(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len())
+        );
         assert_eq!(readiness["query_runtime_failed_query_count"], 0);
         assert_eq!(readiness["query_runtime_missing_plan_evidence_count"], 0);
         assert_eq!(readiness["query_runtime_missing_profile_evidence_count"], 0);
@@ -1197,6 +1243,7 @@ mod tests {
         assert_eq!(readiness["relationship_property_pruning_report_count"], 0);
         assert_eq!(readiness["route_query_plan_evidence_ready"], true);
         assert_eq!(readiness["route_query_profile_evidence_ready"], true);
+        assert_eq!(readiness["route_query_api_behavior_evidence_ready"], true);
         assert_eq!(
             readiness["route_relationship_property_pruning_evidence_ready"],
             true
@@ -1653,11 +1700,33 @@ mod tests {
 
         assert_eq!(readiness["route_primary_ready"], false);
         assert_eq!(readiness["route_query_runtime_ready"], false);
+        assert_eq!(
+            readiness["query_runtime_api_behavior_report_count"],
+            serde_json::json!(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() - 1)
+        );
+        assert_eq!(readiness["route_query_api_behavior_evidence_ready"], false);
+        assert!(readiness["route_primary_blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "route_query_api_behavior_evidence_not_ready"));
         assert!(readiness["route_primary_blocker_codes"]
             .as_array()
             .unwrap()
             .iter()
             .any(|code| code == "query_report_api_behavior_ordering_missing"));
+        assert_eq!(
+            readiness["routes"][0]["query_runtime_api_behavior_report_count"],
+            0
+        );
+        assert_eq!(
+            readiness["routes"][0]["query_api_behavior_evidence_ready"],
+            false
+        );
+        assert_eq!(
+            readiness["routes"][0]["query_reports"][0]["api_behavior"]["ready"],
+            false
+        );
     }
 
     #[test]

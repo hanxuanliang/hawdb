@@ -461,6 +461,9 @@ contract.
   - [x] Require graph-route query reports to carry compact API behavior evidence
     for ordering, pagination, and error-class stability before route cutover
     readiness can pass.
+  - [x] Expose graph-route API behavior evidence as aggregate route and
+    readiness counters so replacement gates can consume API compatibility
+    directly.
 
 ## P0: Storage and Recovery
 
