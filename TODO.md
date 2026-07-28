@@ -119,6 +119,9 @@ must block default cutover.
     every required field sample's segment counters, document counters,
     `EXPLAIN ANALYZE` operator, and payload-read avoidance before accepting
     cutover readiness.
+  - [x] Require production-filter pruning evidence to cover equality,
+    enum/in-list, numeric range, date/time range, null/missing, existence,
+    normalized default equality, and unique-key operation families.
 - [ ] Prove storage recovery under real mutation shapes.
   - WAL replay must recover whole committed batches or nothing.
   - Torn WAL tails, checkpoint boundaries, and replay markers must be detected

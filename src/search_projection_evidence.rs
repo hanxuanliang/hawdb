@@ -38,6 +38,16 @@ const REQUIRED_NUMERIC_RANGE_FIELDS: &[&str] = &["importance", "confidence"];
 const REQUIRED_TIMESTAMP_RANGE_FIELDS: &[&str] =
     &["created_at", "updated_at", "event_start", "event_end"];
 const REQUIRED_UNIQUE_KEY_SUMMARY_FIELDS: &[&str] = &["document_id"];
+const REQUIRED_PRODUCTION_FILTER_OPERATION_FAMILIES: &[&str] = &[
+    "equality",
+    "enum_in_list",
+    "numeric_range",
+    "timestamp_range",
+    "null_missing",
+    "existence",
+    "normalized_default_equality",
+    "unique_key",
+];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct NowledgeSearchProjectionEvidenceReport {
@@ -846,50 +856,92 @@ fn ready_probe_template(engine: &str) -> serde_json::Value {
 }
 
 fn ready_production_filter_pruning_template() -> serde_json::Value {
+    let mut samples = NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
+        .iter()
+        .map(|field| match *field {
+            "unit_type" | "lifecycle_state" => {
+                ready_production_filter_pruning_sample_template(field, "in", "enum_in_list")
+            }
+            "importance" | "confidence" => {
+                ready_production_filter_pruning_sample_template(field, "gte", "numeric_range")
+            }
+            "created_at" | "updated_at" | "event_start" | "event_end" => {
+                ready_production_filter_pruning_sample_template(field, "gte", "timestamp_range")
+            }
+            "is_latest" => ready_production_filter_pruning_sample_template(
+                field,
+                "eq",
+                "normalized_default_equality",
+            ),
+            _ => ready_production_filter_pruning_sample_template(field, "eq", "equality"),
+        })
+        .collect::<Vec<_>>();
+    samples.push(ready_production_filter_pruning_sample_template(
+        "source_id",
+        "is_missing",
+        "null_missing",
+    ));
+    samples.push(ready_production_filter_pruning_sample_template(
+        "source_id",
+        "exists",
+        "existence",
+    ));
+    samples.push(ready_production_filter_pruning_sample_template(
+        "document_id",
+        "eq",
+        "unique_key",
+    ));
     serde_json::json!({
         "ready": true,
         "persisted_segment_descriptor_used": true,
         "payload_read_avoidance_ready": true,
         "explain_analyze_ready": true,
-        "sample_count": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len(),
+        "sample_count": samples.len(),
         "ready_field_count": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len(),
         "required_field_count": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len(),
         "missing_fields": [],
-        "samples": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
-            .iter()
-            .map(|field| serde_json::json!({
-                "field": field,
-                "operation": if matches!(*field, "importance" | "confidence" | "created_at" | "updated_at" | "event_start" | "event_end") {
-                    "gte"
-                } else {
-                    "eq"
-                },
-                "ready": true,
-                "capability_ready": true,
-                "persisted_segment_descriptor_used": true,
-                "segment_count": 2,
-                "scanned_segment_count": 1,
-                "pruned_segment_count": 1,
-                "segment_pruning_candidate_document_count": 6,
-                "segment_scanned_document_count": 2,
-                "segment_pruned_document_count": 4,
-                "field_report_count": 1,
-                "value_summary_used": !matches!(*field, "importance" | "confidence" | "created_at" | "updated_at" | "event_start" | "event_end"),
-                "numeric_range_summary_used": matches!(*field, "importance" | "confidence"),
-                "timestamp_range_summary_used": matches!(*field, "created_at" | "updated_at" | "event_start" | "event_end"),
-                "explain_analyze": {
-                    "ready": true,
-                    "operator": "search_projection_segment_scan",
-                    "segment_count": 2,
-                    "scanned_segment_count": 1,
-                    "pruned_segment_count": 1,
-                    "candidate_document_count": 6,
-                    "scanned_document_count": 2,
-                    "pruned_document_count": 4,
-                    "payload_read_avoidance": true,
-                },
-            }))
-            .collect::<Vec<_>>(),
+        "samples": samples,
+    })
+}
+
+fn ready_production_filter_pruning_sample_template(
+    field: &str,
+    operation: &str,
+    operation_family: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "field": field,
+        "operation": operation,
+        "operation_family": operation_family,
+        "ready": true,
+        "capability_ready": true,
+        "persisted_segment_descriptor_used": true,
+        "segment_count": 2,
+        "scanned_segment_count": 1,
+        "pruned_segment_count": 1,
+        "segment_pruning_candidate_document_count": 6,
+        "segment_scanned_document_count": 2,
+        "segment_pruned_document_count": 4,
+        "field_report_count": 1,
+        "value_summary_used": matches!(
+            operation_family,
+            "equality" | "enum_in_list" | "null_missing" | "existence" | "normalized_default_equality" | "unique_key"
+        ),
+        "numeric_range_summary_used": operation_family == "numeric_range",
+        "timestamp_range_summary_used": operation_family == "timestamp_range",
+        "normalized_default_equality": operation_family == "normalized_default_equality",
+        "unique_key_lookup": operation_family == "unique_key",
+        "explain_analyze": {
+            "ready": true,
+            "operator": "search_projection_segment_scan",
+            "segment_count": 2,
+            "scanned_segment_count": 1,
+            "pruned_segment_count": 1,
+            "candidate_document_count": 6,
+            "scanned_document_count": 2,
+            "pruned_document_count": 4,
+            "payload_read_avoidance": true,
+        },
     })
 }
 
@@ -1184,8 +1236,8 @@ fn production_filter_pruning_report(probe: &serde_json::Value) -> serde_json::Va
         .cloned()
         .unwrap_or_else(|| serde_json::json!([]));
     let sample_evidence = production_filter_pruning_sample_evidence(&samples);
-    let required_fields_ready = sample_count == required_field_count
-        && ready_field_count == required_field_count
+    let required_fields_ready = sample_count >= required_field_count
+        && ready_field_count >= required_field_count
         && required_field_count == NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len() as u64
         && missing_fields.is_empty();
     let ready = ready
@@ -1201,6 +1253,10 @@ fn production_filter_pruning_report(probe: &serde_json::Value) -> serde_json::Va
         "explain_analyze_ready": explain_analyze_ready,
         "sample_evidence_ready": sample_evidence.ready,
         "sample_payload_read_avoidance_count": sample_evidence.payload_read_avoidance_count,
+        "operation_family_evidence_ready": sample_evidence.operation_family_evidence_ready,
+        "required_operation_families": REQUIRED_PRODUCTION_FILTER_OPERATION_FAMILIES,
+        "observed_operation_families": sample_evidence.observed_operation_families,
+        "missing_operation_families": sample_evidence.missing_operation_families,
         "sample_count": sample_count,
         "ready_field_count": ready_field_count,
         "required_field_count": required_field_count,
@@ -1216,6 +1272,9 @@ struct ProductionFilterPruningSampleEvidence {
     ready: bool,
     payload_read_avoidance_count: u64,
     missing_fields: Vec<&'static str>,
+    operation_family_evidence_ready: bool,
+    observed_operation_families: Vec<String>,
+    missing_operation_families: Vec<&'static str>,
 }
 
 fn production_filter_pruning_sample_evidence(
@@ -1236,12 +1295,35 @@ fn production_filter_pruning_sample_evidence(
             })
         })
         .collect::<Vec<_>>();
+    let observed_operation_families = sample_items
+        .iter()
+        .filter(|sample| production_filter_pruning_sample_ready(sample))
+        .filter_map(|sample| str_path(sample, &["operation_family"]))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let missing_operation_families = REQUIRED_PRODUCTION_FILTER_OPERATION_FAMILIES
+        .iter()
+        .copied()
+        .filter(|family| {
+            !sample_items.iter().any(|sample| {
+                str_path(sample, &["operation_family"]) == Some(*family)
+                    && production_filter_pruning_sample_ready(sample)
+            })
+        })
+        .collect::<Vec<_>>();
+    let operation_family_evidence_ready = missing_operation_families.is_empty();
     ProductionFilterPruningSampleEvidence {
         ready: missing_fields.is_empty()
+            && operation_family_evidence_ready
             && payload_read_avoidance_count
-                == NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len() as u64,
+                >= NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len() as u64,
         payload_read_avoidance_count,
         missing_fields,
+        operation_family_evidence_ready,
+        observed_operation_families,
+        missing_operation_families,
     }
 }
 
@@ -1250,6 +1332,9 @@ fn production_filter_pruning_sample_ready(sample: &serde_json::Value) -> bool {
         || bool_path(sample, &["capability_ready"]) != Some(true)
         || bool_path(sample, &["persisted_segment_descriptor_used"]) != Some(true)
     {
+        return false;
+    }
+    if !production_filter_pruning_sample_operation_ready(sample) {
         return false;
     }
     let Some(segment_count) = u64_path(sample, &["segment_count"]) else {
@@ -1296,6 +1381,31 @@ fn production_filter_pruning_sample_ready(sample: &serde_json::Value) -> bool {
         scanned_document_count,
         pruned_document_count,
     )
+}
+
+fn production_filter_pruning_sample_operation_ready(sample: &serde_json::Value) -> bool {
+    let Some(operation) = str_path(sample, &["operation"]) else {
+        return false;
+    };
+    let Some(operation_family) = str_path(sample, &["operation_family"]) else {
+        return false;
+    };
+    match operation_family {
+        "equality" => operation == "eq",
+        "enum_in_list" => operation == "in",
+        "numeric_range" | "timestamp_range" => {
+            matches!(operation, "gt" | "gte" | "lt" | "lte" | "between" | "range")
+        }
+        "null_missing" => matches!(operation, "is_null" | "is_missing"),
+        "existence" => matches!(operation, "exists" | "is_not_null"),
+        "normalized_default_equality" => {
+            operation == "eq" && bool_path(sample, &["normalized_default_equality"]) == Some(true)
+        }
+        "unique_key" => {
+            operation == "eq" && bool_path(sample, &["unique_key_lookup"]) == Some(true)
+        }
+        _ => false,
+    }
 }
 
 fn production_filter_pruning_explain_analyze_ready(
@@ -1870,11 +1980,81 @@ mod tests {
         );
         assert_eq!(
             report["production_filter_pruning"]["sample_payload_read_avoidance_count"],
-            (NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len() - 1) as u64
+            report["production_filter_pruning"]["sample_count"]
+                .as_u64()
+                .unwrap()
+                - 1
         );
         assert_eq!(
             report["production_filter_pruning"]["missing_sample_fields"],
             serde_json::json!([NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS[0]])
+        );
+        assert_eq!(
+            report["blocker_codes"],
+            serde_json::json!(["skein_production_filter_pruning_not_ready"])
+        );
+    }
+
+    #[test]
+    fn skein_search_projection_evidence_requires_filter_operation_families() {
+        let mut probe = ready_probe();
+        probe["production_filter_pruning"]["samples"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|sample| sample["operation_family"].as_str() != Some("null_missing"));
+        let sample_count = probe["production_filter_pruning"]["samples"]
+            .as_array()
+            .unwrap()
+            .len();
+        probe["production_filter_pruning"]["sample_count"] = serde_json::json!(sample_count);
+
+        let report = nowledge_search_projection_evidence_json(&probe);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(report["production_filter_pruning_ready"], false);
+        assert_eq!(
+            report["production_filter_pruning"]["sample_evidence_ready"],
+            false
+        );
+        assert_eq!(
+            report["production_filter_pruning"]["operation_family_evidence_ready"],
+            false
+        );
+        assert_eq!(
+            report["production_filter_pruning"]["missing_operation_families"],
+            serde_json::json!(["null_missing"])
+        );
+        assert_eq!(
+            report["blocker_codes"],
+            serde_json::json!(["skein_production_filter_pruning_not_ready"])
+        );
+    }
+
+    #[test]
+    fn skein_search_projection_evidence_requires_normalized_default_equality_flag() {
+        let mut probe = ready_probe();
+        let samples = probe["production_filter_pruning"]["samples"]
+            .as_array_mut()
+            .unwrap();
+        let sample = samples
+            .iter_mut()
+            .find(|sample| {
+                sample["operation_family"].as_str() == Some("normalized_default_equality")
+            })
+            .unwrap();
+        sample["normalized_default_equality"] = serde_json::json!(false);
+
+        let report = nowledge_search_projection_evidence_json(&probe);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(report["production_filter_pruning_ready"], false);
+        assert_eq!(
+            report["production_filter_pruning"]["missing_sample_fields"],
+            serde_json::json!(["is_latest"])
+        );
+        assert_eq!(
+            report["production_filter_pruning"]["missing_operation_families"],
+            serde_json::json!(["normalized_default_equality"])
         );
         assert_eq!(
             report["blocker_codes"],
