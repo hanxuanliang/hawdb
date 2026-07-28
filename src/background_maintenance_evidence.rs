@@ -135,6 +135,22 @@ pub fn nowledge_background_maintenance_evidence_json(
         "qos_snapshot_blocker_codes",
         &health.qos_snapshot_blocker_codes,
     );
+    insert_json(&mut object, "slow_query_ready", health.slow_query_ready);
+    insert_json(
+        &mut object,
+        "slow_query_record_count",
+        health.slow_query_record_count,
+    );
+    insert_json(
+        &mut object,
+        "slow_query_capacity",
+        health.slow_query_capacity,
+    );
+    insert_json(
+        &mut object,
+        "slow_query_redaction_ready",
+        health.slow_query_redaction_ready,
+    );
     insert_json(
         &mut object,
         "foreground_ranked_count",
@@ -250,6 +266,26 @@ pub fn nowledge_background_maintenance_evidence_json(
     );
     insert_json(
         &mut object,
+        "background_maintenance_slow_query_ready",
+        health.slow_query_ready,
+    );
+    insert_json(
+        &mut object,
+        "background_maintenance_slow_query_record_count",
+        health.slow_query_record_count,
+    );
+    insert_json(
+        &mut object,
+        "background_maintenance_slow_query_capacity",
+        health.slow_query_capacity,
+    );
+    insert_json(
+        &mut object,
+        "background_maintenance_slow_query_redaction_ready",
+        health.slow_query_redaction_ready,
+    );
+    insert_json(
+        &mut object,
         "background_maintenance_blocker_codes",
         &health.blocker_codes,
     );
@@ -324,6 +360,8 @@ mod tests {
         assert_eq!(evidence["foreground_admission_probe_admission"], "admit");
         assert_eq!(evidence["qos_snapshot_ready"], true);
         assert_eq!(evidence["qos_snapshot_background_bounded"], true);
+        assert_eq!(evidence["slow_query_ready"], true);
+        assert_eq!(evidence["slow_query_redaction_ready"], true);
         assert_eq!(
             evidence["background_maintenance_qos_snapshot_blocker_codes"],
             serde_json::json!([])
@@ -402,6 +440,27 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
 
+    #[test]
+    fn background_maintenance_evidence_command_fails_closed_for_slow_query_redaction() {
+        let path = unique_test_file("background_maintenance_slow_query_redaction");
+        let mut summary = ready_summary();
+        summary["slow_query"]["redaction"]["query_text_copied"] = serde_json::json!(true);
+        std::fs::write(&path, summary.to_string()).unwrap();
+
+        let (evidence, _) = run_nowledge_background_maintenance_evidence(
+            [path.to_str().unwrap()].into_iter().map(str::to_string),
+        )
+        .unwrap();
+
+        assert_eq!(evidence["ready"], false);
+        assert_eq!(evidence["slow_query_redaction_ready"], false);
+        assert_eq!(
+            evidence["background_maintenance_blocker_codes"],
+            serde_json::json!(["slow_query_redaction_not_ready"])
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
     fn ready_summary() -> serde_json::Value {
         serde_json::json!({
             "protocol": "skein-background-maintenance-report",
@@ -418,6 +477,16 @@ mod tests {
                 "remaining_total_background_operations": 4096,
                 "total_background_over_budget": false,
                 "blocker_codes": []
+            },
+            "slow_query": {
+                "ready": true,
+                "capacity": 8,
+                "record_count": 1,
+                "redaction": {
+                    "query_text_copied": false,
+                    "parameters_copied": false,
+                    "local_paths_copied": false
+                }
             },
             "ranked": [
                 {

@@ -81,6 +81,10 @@ pub struct BackgroundMaintenanceEvidenceHealth {
     pub qos_snapshot_background_bounded: Option<bool>,
     pub qos_snapshot_total_background_over_budget: Option<bool>,
     pub qos_snapshot_blocker_codes: Vec<String>,
+    pub slow_query_ready: Option<bool>,
+    pub slow_query_record_count: Option<u64>,
+    pub slow_query_capacity: Option<u64>,
+    pub slow_query_redaction_ready: Option<bool>,
     pub foreground_ranked_count: u64,
     pub unknown_admission_count: u64,
     pub blocker_codes: Vec<String>,
@@ -930,6 +934,10 @@ pub fn background_maintenance_evidence_health(
             qos_snapshot_background_bounded: None,
             qos_snapshot_total_background_over_budget: None,
             qos_snapshot_blocker_codes: Vec::new(),
+            slow_query_ready: None,
+            slow_query_record_count: None,
+            slow_query_capacity: None,
+            slow_query_redaction_ready: None,
             foreground_ranked_count: 0,
             unknown_admission_count: 0,
             blocker_codes: if required {
@@ -1078,6 +1086,34 @@ pub fn background_maintenance_evidence_health(
         .filter_map(serde_json::Value::as_str)
         .map(str::to_string)
         .collect::<Vec<_>>();
+    let slow_query = background_maintenance.get("slow_query");
+    let slow_query_ready = slow_query
+        .and_then(|slow_query| slow_query.get("ready"))
+        .or_else(|| background_maintenance.get("slow_query_ready"))
+        .and_then(serde_json::Value::as_bool);
+    let slow_query_record_count = slow_query
+        .and_then(|slow_query| slow_query.get("record_count"))
+        .or_else(|| background_maintenance.get("slow_query_record_count"))
+        .and_then(serde_json::Value::as_u64);
+    let slow_query_capacity = slow_query
+        .and_then(|slow_query| slow_query.get("capacity"))
+        .or_else(|| background_maintenance.get("slow_query_capacity"))
+        .and_then(serde_json::Value::as_u64);
+    let slow_query_redaction = slow_query.and_then(|slow_query| slow_query.get("redaction"));
+    let slow_query_redaction_ready = slow_query.map(|_| {
+        slow_query_redaction
+            .and_then(|redaction| redaction.get("query_text_copied"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(false)
+            && slow_query_redaction
+                .and_then(|redaction| redaction.get("parameters_copied"))
+                .and_then(serde_json::Value::as_bool)
+                == Some(false)
+            && slow_query_redaction
+                .and_then(|redaction| redaction.get("local_paths_copied"))
+                .and_then(serde_json::Value::as_bool)
+                == Some(false)
+    });
     let foreground_ranked_count = ranked
         .into_iter()
         .flatten()
@@ -1148,6 +1184,25 @@ pub fn background_maintenance_evidence_health(
         blockers.push("background maintenance local QoS snapshot is over budget".to_string());
     }
     blocker_codes.extend(qos_snapshot_blocker_codes.iter().cloned());
+    if required && slow_query_ready.is_none() {
+        blocker_codes.push("slow_query_missing".to_string());
+        blockers.push("background maintenance evidence lacks slow-query summary".to_string());
+    }
+    if slow_query_ready == Some(false) {
+        blocker_codes.push("slow_query_not_ready".to_string());
+        blockers.push("background maintenance slow-query summary is not ready".to_string());
+    }
+    if slow_query_record_count
+        .zip(slow_query_capacity)
+        .is_some_and(|(record_count, capacity)| record_count > capacity)
+    {
+        blocker_codes.push("slow_query_unbounded".to_string());
+        blockers.push("background maintenance slow-query summary exceeds capacity".to_string());
+    }
+    if slow_query_redaction_ready == Some(false) {
+        blocker_codes.push("slow_query_redaction_not_ready".to_string());
+        blockers.push("background maintenance slow-query summary is not redacted".to_string());
+    }
     BackgroundMaintenanceEvidenceHealth {
         required,
         present: true,
@@ -1172,6 +1227,10 @@ pub fn background_maintenance_evidence_health(
         qos_snapshot_background_bounded,
         qos_snapshot_total_background_over_budget,
         qos_snapshot_blocker_codes,
+        slow_query_ready,
+        slow_query_record_count,
+        slow_query_capacity,
+        slow_query_redaction_ready,
         foreground_ranked_count,
         unknown_admission_count,
         blocker_codes,
@@ -2884,6 +2943,28 @@ mod tests {
                     }
                 })),
                 background_maintenance_required: true,
+                background_maintenance: Some(serde_json::json!({
+                    "protocol": "skein-background-maintenance-report",
+                    "total_candidates": 1,
+                    "admitted_count": 1,
+                    "deferred_count": 0,
+                    "rejected_count": 0,
+                    "foreground_admission_probe_ready": true,
+                    "foreground_admission_probe_admission": "admit",
+                    "qos_snapshot": ready_qos_snapshot(),
+                    "slow_query": ready_slow_query(),
+                    "ranked": [
+                        {
+                            "kind": "search_projection_graph_delta",
+                            "work_class": "projection",
+                            "priority": "background",
+                            "admission": "admit",
+                            "has_executable_search_projection_graph_delta": true,
+                            "search_projection_graph_delta_operation_count": 1,
+                            "search_projection_graph_delta_complete_through_graph_commit_epoch": 1
+                        }
+                    ]
+                })),
                 replacement_readiness_by_query_family: Some(
                     ready_replacement_readiness_by_query_family(),
                 ),
@@ -3232,6 +3313,7 @@ mod tests {
                     "foreground_admission_probe_ready": true,
                     "foreground_admission_probe_admission": "admit",
                     "qos_snapshot": ready_qos_snapshot(),
+                    "slow_query": ready_slow_query(),
                     "ranked": []
                 })),
                 ..NowledgeCypherMigrationGateJsonOptions::default()
@@ -3269,6 +3351,7 @@ mod tests {
             "foreground_admission_probe_ready": true,
             "foreground_admission_probe_admission": "admit",
             "qos_snapshot": ready_qos_snapshot(),
+            "slow_query": ready_slow_query(),
             "ranked": [
                 {
                     "kind": "schema_maintenance",
@@ -3414,6 +3497,19 @@ mod tests {
         })
     }
 
+    fn ready_slow_query() -> serde_json::Value {
+        serde_json::json!({
+            "ready": true,
+            "capacity": 8,
+            "record_count": 1,
+            "redaction": {
+                "query_text_copied": false,
+                "parameters_copied": false,
+                "local_paths_copied": false
+            }
+        })
+    }
+
     #[test]
     fn replacement_readiness_family_evidence_health_requires_nowledge_families() {
         let families = ready_replacement_readiness_by_query_family();
@@ -3448,6 +3544,7 @@ mod tests {
             "foreground_admission_probe_ready": true,
             "foreground_admission_probe_admission": "admit",
             "qos_snapshot": ready_qos_snapshot(),
+            "slow_query": ready_slow_query(),
             "ranked": [
                 {
                     "kind": "schema_maintenance",
@@ -3483,6 +3580,7 @@ mod tests {
             "foreground_admission_probe_ready": true,
             "foreground_admission_probe_admission": "admit",
             "qos_snapshot": ready_qos_snapshot(),
+            "slow_query": ready_slow_query(),
             "memory_pressure": {
                 "ready": true,
                 "budget_bytes": 4096,
@@ -3522,6 +3620,7 @@ mod tests {
             "total_candidates": 1,
             "foreground_admission_probe_ready": true,
             "foreground_admission_probe_admission": "admit",
+            "slow_query": ready_slow_query(),
             "ranked": [
                 {
                     "kind": "search_projection_graph_delta",
@@ -3565,6 +3664,7 @@ mod tests {
                 "total_background_over_budget": false,
                 "blocker_codes": ["background_unbounded"]
             },
+            "slow_query": ready_slow_query(),
             "ranked": [
                 {
                     "kind": "search_projection_graph_delta",
@@ -3601,6 +3701,7 @@ mod tests {
             "protocol": "skein-background-maintenance-report",
             "total_candidates": 1,
             "qos_snapshot": ready_qos_snapshot(),
+            "slow_query": ready_slow_query(),
             "ranked": [
                 {
                     "kind": "search_projection_graph_delta",
@@ -3626,6 +3727,36 @@ mod tests {
         assert_eq!(
             health.blocker_codes,
             vec!["foreground_admission_probe_missing".to_string()]
+        );
+    }
+
+    #[test]
+    fn background_maintenance_evidence_health_requires_slow_query_summary() {
+        let summary = serde_json::json!({
+            "protocol": "skein-background-maintenance-report",
+            "total_candidates": 1,
+            "foreground_admission_probe_ready": true,
+            "foreground_admission_probe_admission": "admit",
+            "qos_snapshot": ready_qos_snapshot(),
+            "ranked": [
+                {
+                    "kind": "search_projection_graph_delta",
+                    "work_class": "projection",
+                    "priority": "background",
+                    "admission": "admit"
+                }
+            ]
+        });
+
+        let health = super::background_maintenance_evidence_health(Some(&summary), true);
+
+        assert!(health.present);
+        assert!(!health.ready);
+        assert_eq!(health.slow_query_ready, None);
+        assert_eq!(health.blocker_codes, vec!["slow_query_missing".to_string()]);
+        assert_eq!(
+            health.blockers,
+            vec!["background maintenance evidence lacks slow-query summary".to_string()]
         );
     }
 

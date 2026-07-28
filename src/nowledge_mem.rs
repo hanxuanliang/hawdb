@@ -3342,6 +3342,10 @@ pub struct NowledgeMemBackgroundMaintenanceReport {
     pub memory_pressure_ready: Option<bool>,
     pub memory_budget_bytes: Option<u64>,
     pub estimated_memory_bytes: Option<u64>,
+    pub slow_query_ready: Option<bool>,
+    pub slow_query_record_count: Option<u64>,
+    pub slow_query_capacity: Option<u64>,
+    pub slow_query_redaction_ready: Option<bool>,
     pub top_admitted_kind: Option<BackgroundMaintenanceKind>,
     pub top_admitted_name: Option<String>,
     pub ranked_count: u64,
@@ -3353,12 +3357,37 @@ pub struct NowledgeMemBackgroundMaintenanceReport {
 
 impl NowledgeMemBackgroundMaintenanceReport {
     pub fn from_summary(summary: &BackgroundMaintenanceSummary) -> Self {
+        Self::from_summary_with_slow_query(summary, None)
+    }
+
+    fn from_summary_with_slow_query(
+        summary: &BackgroundMaintenanceSummary,
+        slow_query: Option<&NowledgeMemSlowQueryReport>,
+    ) -> Self {
         let mut json = background_maintenance_summary_to_json(summary);
         if let Some(object) = json.as_object_mut() {
             object.insert(
                 "protocol".to_string(),
                 serde_json::Value::String("skein-background-maintenance-report".to_string()),
             );
+            if let Some(slow_query) = slow_query {
+                object.insert(
+                    "slow_query".to_string(),
+                    background_maintenance_slow_query_json(slow_query),
+                );
+                object.insert(
+                    "slow_query_ready".to_string(),
+                    serde_json::Value::Bool(slow_query.ready),
+                );
+                object.insert(
+                    "slow_query_record_count".to_string(),
+                    serde_json::json!(slow_query.record_count),
+                );
+                object.insert(
+                    "slow_query_capacity".to_string(),
+                    serde_json::json!(slow_query.capacity),
+                );
+            }
         }
         let health = background_maintenance_evidence_health(Some(&json), true);
 
@@ -3394,6 +3423,10 @@ impl NowledgeMemBackgroundMaintenanceReport {
             memory_pressure_ready: health.memory_pressure_ready,
             memory_budget_bytes: health.memory_budget_bytes,
             estimated_memory_bytes: health.estimated_memory_bytes,
+            slow_query_ready: health.slow_query_ready,
+            slow_query_record_count: health.slow_query_record_count,
+            slow_query_capacity: health.slow_query_capacity,
+            slow_query_redaction_ready: health.slow_query_redaction_ready,
             top_admitted_kind: summary.top_admitted_kind,
             top_admitted_name: summary.top_admitted_name.clone(),
             ranked_count: health.ranked_count.unwrap_or_default(),
@@ -3407,6 +3440,24 @@ impl NowledgeMemBackgroundMaintenanceReport {
     pub fn json(&self) -> serde_json::Value {
         self.summary.clone()
     }
+}
+
+fn background_maintenance_slow_query_json(
+    slow_query: &NowledgeMemSlowQueryReport,
+) -> serde_json::Value {
+    serde_json::json!({
+        "protocol": slow_query.protocol,
+        "ready": slow_query.ready,
+        "capacity": slow_query.capacity,
+        "record_count": slow_query.record_count,
+        "latest_sequence": slow_query.latest_sequence,
+        "max_elapsed_micros": slow_query.max_elapsed_micros,
+        "redaction": {
+            "query_text_copied": false,
+            "parameters_copied": false,
+            "local_paths_copied": false,
+        },
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5529,8 +5580,11 @@ impl NowledgeMemEmbeddedStore {
         state: &LocalQosState,
         options: BackgroundMaintenanceOptions,
     ) -> NowledgeMemBackgroundMaintenanceReport {
-        NowledgeMemBackgroundMaintenanceReport::from_summary(
-            &self.background_maintenance_summary(policy, state, options),
+        let summary = self.background_maintenance_summary(policy, state, options);
+        let slow_query = self.slow_query_report();
+        NowledgeMemBackgroundMaintenanceReport::from_summary_with_slow_query(
+            &summary,
+            Some(&slow_query),
         )
     }
 
@@ -11436,8 +11490,15 @@ mod tests {
         assert_eq!(report.unknown_admission_count, 0);
         assert_eq!(report.executable_search_projection_graph_delta_count, 1);
         assert_eq!(report.admitted_search_projection_graph_delta_count, 1);
+        assert_eq!(report.slow_query_ready, Some(true));
+        assert_eq!(report.slow_query_record_count, Some(0));
+        assert_eq!(report.slow_query_capacity, Some(256));
+        assert_eq!(report.slow_query_redaction_ready, Some(true));
         assert!(report.blocker_codes.is_empty());
         assert_eq!(json["protocol"], "skein-background-maintenance-report");
+        assert_eq!(json["slow_query"]["ready"], true);
+        assert_eq!(json["slow_query"]["record_count"], 0);
+        assert_eq!(json["slow_query"]["capacity"], 256);
         assert_eq!(json["ranked"].as_array().unwrap().len(), 1);
     }
 

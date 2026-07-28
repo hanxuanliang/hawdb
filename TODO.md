@@ -532,6 +532,8 @@ contract.
   - [x] Apply incremental search projection deltas in place after fail-fast
     validation, avoiding a full document-map clone on steady-state background
     maintenance updates.
+  - [x] Require background-maintenance cutover evidence to include compact
+    slow-query readiness, capacity, record-count, and redaction signals.
 
 ## P0: Search Projection Replacement
 
