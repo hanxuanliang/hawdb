@@ -638,6 +638,9 @@ contract.
   - Raw float32 or SQ8 remains the safe path.
   - TurboQuant-style compressed projections can be used for cold or constrained
     local segments only after recall and parity evidence is available.
+  - [x] Gate advanced compressed vector retrieval modes behind typed recall,
+    parity, and cold/local-segment advisor evidence for embedded store opens
+    and search-candidate requests.
 
 ## P1: Operability
 
