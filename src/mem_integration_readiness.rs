@@ -9562,6 +9562,8 @@ mod tests {
                 }
             }
         });
+        bundle["replacement_summary"]["cutover_evidence"]
+            ["storage_recovery_replay_boundary_consistent"] = serde_json::json!(true);
         bundle["replacement_summary"]["replacement_boundaries"] = serde_json::json!({
             "graph_layer": {
                 "scope": "kuzu_ladybug_graph_layer",

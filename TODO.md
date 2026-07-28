@@ -493,6 +493,9 @@ contract.
   - [x] Require typed Mem storage-recovery reports to fail closed when checkpoint
     commit epoch, WAL replay LSNs, replayed entry count, and recovered commit
     epoch form an inconsistent replay boundary.
+  - [x] Require replacement summary to recompute storage-recovery raw fields,
+    including replay-boundary consistency, instead of trusting
+    `storage_recovery_ready=true`.
 - [x] Add storage-level scan pruning where semantics are exact.
   - Equality, numeric range, date/time range, enum/in-list, and unique-key
     summaries should decide whether a segment needs to be read.
@@ -790,6 +793,18 @@ contract.
 
 ## P1: Performance From Architecture
 
+- [ ] Split more internal packages into focused crates to improve abstraction
+  boundaries and compile-time ownership.
+  - Use a Polars/RisingWave-style workspace layout where stable contracts live
+    in small crates and heavy implementations depend inward, not sideways.
+  - Candidate split targets: core value/types/error, parser/AST, logical plan,
+    optimizer rules, physical executor, storage/WAL/checkpoint, search
+    projection, readiness/evidence, and Nowledge Mem facade.
+  - Keep the top-level `skein` crate as the SQLite-like embedded library facade;
+    do not expose internal crates as production integration points until their
+    APIs are stable.
+  - Migration should be mechanical and test-preserving first; behavioral
+    refactors happen after crate boundaries compile cleanly.
 - [x] Improve statistics maintenance.
   - Prefer incremental label, relationship, distinct-value, and degree summaries
     once correctness is proven.

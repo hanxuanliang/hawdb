@@ -117,6 +117,8 @@ pub fn nowledge_replacement_summary_json_with_options(
     let query_runtime_preflight_ready = query_runtime_preflight.ready;
     let workload_fixture_evidence = workload_fixture_evidence_summary(bundle);
     let workload_fixture_evidence_ready = workload_fixture_evidence.ready;
+    let storage_recovery_evidence_ready =
+        !storage_recovery_required(bundle) || storage_recovery_raw_evidence_ready(bundle);
     let background_graph_delta_evidence_missing =
         background_maintenance_graph_delta_evidence_missing(bundle);
     let family_health = replacement_readiness_family_evidence_health_from_bundle(bundle);
@@ -137,6 +139,7 @@ pub fn nowledge_replacement_summary_json_with_options(
         && graph_route_readiness_ready
         && query_runtime_preflight_ready
         && workload_fixture_evidence_ready
+        && storage_recovery_evidence_ready
         && !background_graph_delta_evidence_missing
         && family_evidence_ready
         && replacement_readiness_per_million == Some(1_000_000);
@@ -399,6 +402,15 @@ pub fn nowledge_replacement_summary_json_with_options(
         "replacement_readiness_family_summary": family_summary,
         "replacement_readiness_by_query_family": family_details.families,
     });
+    summary["cutover_evidence"]["storage_recovery_replay_boundary_consistent"] =
+        json_get_bool_path(
+            bundle,
+            &[
+                "cutover_evidence",
+                "storage_recovery_replay_boundary_consistent",
+            ],
+        )
+        .map_or(serde_json::Value::Null, serde_json::Value::Bool);
     if let Some(object) = summary.as_object_mut() {
         object.insert(
             "replacement_boundaries".to_string(),
@@ -2376,9 +2388,7 @@ fn nowledge_replacement_blocking_categories(
     if !inputs.workload_fixture_evidence_ready {
         categories.insert("workload_fixture_evidence".to_string());
     }
-    if json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_required"]) == Some(true)
-        && json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_ready"]) != Some(true)
-    {
+    if storage_recovery_required(bundle) && !storage_recovery_raw_evidence_ready(bundle) {
         categories.insert("storage_recovery".to_string());
     }
     if json_get_bool_path(
@@ -2694,15 +2704,19 @@ fn nowledge_replacement_next_actions(
             ],
         ));
     }
-    if json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_required"]) == Some(true)
-        && json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_ready"]) != Some(true)
-    {
+    if storage_recovery_required(bundle) && !storage_recovery_raw_evidence_ready(bundle) {
         actions.push(next_action(
             "attach_storage_recovery_report",
             "required storage recovery evidence is missing or blocked",
             [
                 "cutover_evidence.storage_recovery_present",
                 "cutover_evidence.storage_recovery_ready",
+                "cutover_evidence.storage_recovery_protocol_matches",
+                "cutover_evidence.storage_recovery_durable",
+                "cutover_evidence.storage_recovery_checkpoint_boundary_present",
+                "cutover_evidence.storage_recovery_wal_replay_bounded",
+                "cutover_evidence.storage_recovery_replay_boundary_consistent",
+                "cutover_evidence.storage_recovery_torn_tail_clean",
                 "cutover_evidence.storage_recovery_blocker_codes",
             ],
         ));
@@ -2750,7 +2764,7 @@ fn nowledge_replacement_missing_evidence(bundle: &serde_json::Value) -> Vec<Stri
     if bundle.get("cutover_evidence").is_none() {
         missing.push("cutover_evidence".to_string());
     }
-    if json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_required"]) == Some(true)
+    if storage_recovery_required(bundle)
         && json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_present"])
             != Some(true)
     {
@@ -2888,6 +2902,42 @@ fn background_maintenance_graph_delta_evidence_missing(bundle: &serde_json::Valu
             ],
         )
         .is_none()
+}
+
+fn storage_recovery_required(bundle: &serde_json::Value) -> bool {
+    json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_required"]) == Some(true)
+}
+
+fn storage_recovery_raw_evidence_ready(bundle: &serde_json::Value) -> bool {
+    json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_ready"]) == Some(true)
+        && json_get_bool_path(
+            bundle,
+            &["cutover_evidence", "storage_recovery_protocol_matches"],
+        ) == Some(true)
+        && json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_durable"])
+            == Some(true)
+        && json_get_bool_path(
+            bundle,
+            &[
+                "cutover_evidence",
+                "storage_recovery_checkpoint_boundary_present",
+            ],
+        ) == Some(true)
+        && json_get_bool_path(
+            bundle,
+            &["cutover_evidence", "storage_recovery_wal_replay_bounded"],
+        ) == Some(true)
+        && json_get_bool_path(
+            bundle,
+            &[
+                "cutover_evidence",
+                "storage_recovery_replay_boundary_consistent",
+            ],
+        ) == Some(true)
+        && json_get_bool_path(
+            bundle,
+            &["cutover_evidence", "storage_recovery_torn_tail_clean"],
+        ) == Some(true)
 }
 
 fn nowledge_replacement_blockers(bundle: &serde_json::Value) -> Vec<String> {
@@ -3232,6 +3282,10 @@ mod tests {
         );
         assert_eq!(
             summary["cutover_evidence"]["storage_recovery_wal_replay_bounded"],
+            true
+        );
+        assert_eq!(
+            summary["cutover_evidence"]["storage_recovery_replay_boundary_consistent"],
             true
         );
         assert_eq!(
@@ -5729,6 +5783,12 @@ mod tests {
                     "evidence_fields": [
                         "cutover_evidence.storage_recovery_present",
                         "cutover_evidence.storage_recovery_ready",
+                        "cutover_evidence.storage_recovery_protocol_matches",
+                        "cutover_evidence.storage_recovery_durable",
+                        "cutover_evidence.storage_recovery_checkpoint_boundary_present",
+                        "cutover_evidence.storage_recovery_wal_replay_bounded",
+                        "cutover_evidence.storage_recovery_replay_boundary_consistent",
+                        "cutover_evidence.storage_recovery_torn_tail_clean",
                         "cutover_evidence.storage_recovery_blocker_codes"
                     ]
                 },
@@ -5765,6 +5825,43 @@ mod tests {
         assert!(nowledge_replacement_summary_usage().contains("--query-family-evidence-json"));
     }
 
+    #[test]
+    fn replacement_summary_recomputes_storage_recovery_raw_fields() {
+        let mut bundle = production_ready_bundle();
+        bundle["cutover_evidence"]["storage_recovery_ready"] = serde_json::json!(true);
+        bundle["cutover_evidence"]["storage_recovery_replay_boundary_consistent"] =
+            serde_json::json!(false);
+        bundle["cutover_evidence"]["storage_recovery_blocker_codes"] =
+            serde_json::json!(["replay_boundary_inconsistent"]);
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert!(summary["blocking_categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|category| category == "storage_recovery"));
+        assert_eq!(
+            summary["cutover_evidence"]["storage_recovery_replay_boundary_consistent"],
+            serde_json::json!(false)
+        );
+        assert!(summary["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| {
+                action["action"] == "attach_storage_recovery_report"
+                    && action["evidence_fields"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|field| {
+                            field == "cutover_evidence.storage_recovery_replay_boundary_consistent"
+                        })
+            }));
+    }
+
     fn production_ready_bundle() -> serde_json::Value {
         let query_runtime_preflight = ready_query_runtime_preflight();
         let mut bundle = serde_json::json!({
@@ -5798,6 +5895,7 @@ mod tests {
                 "storage_recovery_durable": true,
                 "storage_recovery_checkpoint_boundary_present": true,
                 "storage_recovery_wal_replay_bounded": true,
+                "storage_recovery_replay_boundary_consistent": true,
                 "storage_recovery_torn_tail_clean": true,
                 "storage_recovery_blocker_codes": [],
                 "storage_recovery_blockers": [],
