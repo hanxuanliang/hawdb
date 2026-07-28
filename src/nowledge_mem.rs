@@ -119,6 +119,11 @@ pub struct NowledgeMemOpenOptions {
     pub retrieval_projection_advisor: NowledgeMemRetrievalProjectionAdvisor,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NowledgeMemOpenDiagnosticOptions {
+    pub include_local_paths: bool,
+}
+
 impl NowledgeMemOpenOptions {
     pub fn graph_only(graph_path: impl Into<PathBuf>, mode: NowledgeMemGraphMode) -> Self {
         Self {
@@ -185,6 +190,37 @@ impl NowledgeMemOpenOptions {
             graph_opened: false,
             search_projection_opened: false,
         }
+    }
+
+    pub fn diagnostic_report_json(
+        &self,
+        options: NowledgeMemOpenDiagnosticOptions,
+    ) -> serde_json::Value {
+        let mut report = self.sanitized_report().json();
+        if let Some(object) = report.as_object_mut() {
+            object.insert(
+                "debug_local_paths_included".to_string(),
+                serde_json::Value::Bool(options.include_local_paths),
+            );
+            object.insert(
+                "local_paths_redacted".to_string(),
+                serde_json::Value::Bool(!options.include_local_paths),
+            );
+            if options.include_local_paths {
+                object.insert(
+                    "graph_path".to_string(),
+                    serde_json::Value::String(self.graph_path.to_string_lossy().into_owned()),
+                );
+                object.insert(
+                    "search_projection_path".to_string(),
+                    self.search_projection_path
+                        .as_ref()
+                        .map(|path| serde_json::Value::String(path.to_string_lossy().into_owned()))
+                        .unwrap_or(serde_json::Value::Null),
+                );
+            }
+        }
+        report
     }
 }
 
@@ -7658,9 +7694,9 @@ mod tests {
         NowledgeMemGraphCommunityRecentMemoriesOptions, NowledgeMemGraphCommunitySubgraphOptions,
         NowledgeMemGraphMode, NowledgeMemGraphNodeDetailsOptions, NowledgeMemGraphOrphansOptions,
         NowledgeMemGraphOverviewOptions, NowledgeMemGraphPageRankPlanOptions,
-        NowledgeMemGraphSampleOptions, NowledgeMemOpenOptions, NowledgeMemQueryExecutionPath,
-        NowledgeMemQueryReportOptions, NowledgeMemReadOptions, NowledgeMemReadReport,
-        NowledgeMemReadinessAreaSummary, NowledgeMemReadinessDashboard,
+        NowledgeMemGraphSampleOptions, NowledgeMemOpenDiagnosticOptions, NowledgeMemOpenOptions,
+        NowledgeMemQueryExecutionPath, NowledgeMemQueryReportOptions, NowledgeMemReadOptions,
+        NowledgeMemReadReport, NowledgeMemReadinessAreaSummary, NowledgeMemReadinessDashboard,
         NowledgeMemReadinessOptions, NowledgeMemRetrievalProjectionAdvisor,
         NowledgeMemRouteReadinessSummary, NowledgeMemSearchCandidateReadinessOptions,
         NowledgeMemSearchCandidateRequest, NowledgeMemSearchCandidateShadowAccumulator,
@@ -10327,6 +10363,31 @@ mod tests {
         assert!(report.get("search_projection_path").is_none());
         assert!(!report.to_string().contains("redacted_graph_path"));
         assert!(!report.to_string().contains("redacted_search_path"));
+    }
+
+    #[test]
+    fn open_options_diagnostics_include_local_paths_only_with_debug_flag() {
+        let options = NowledgeMemOpenOptions::with_search_projection(
+            "debug_graph_path",
+            "debug_search_path",
+            NowledgeMemGraphMode::ShadowReadOnly,
+        );
+
+        let redacted = options.diagnostic_report_json(NowledgeMemOpenDiagnosticOptions::default());
+        assert_eq!(redacted["debug_local_paths_included"], false);
+        assert_eq!(redacted["local_paths_redacted"], true);
+        assert!(redacted.get("graph_path").is_none());
+        assert!(redacted.get("search_projection_path").is_none());
+        assert!(!redacted.to_string().contains("debug_graph_path"));
+        assert!(!redacted.to_string().contains("debug_search_path"));
+
+        let debug = options.diagnostic_report_json(NowledgeMemOpenDiagnosticOptions {
+            include_local_paths: true,
+        });
+        assert_eq!(debug["debug_local_paths_included"], true);
+        assert_eq!(debug["local_paths_redacted"], false);
+        assert_eq!(debug["graph_path"], "debug_graph_path");
+        assert_eq!(debug["search_projection_path"], "debug_search_path");
     }
 
     #[test]

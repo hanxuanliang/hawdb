@@ -77,6 +77,8 @@ query family, or cutover gate requires them.
   - [x] Redact shared CLI JSON file parse failures by default so nightly
     diagnostics do not copy local paths or payload fragments into command
     errors.
+  - [x] Expose local open-path diagnostics only behind an explicit debug flag;
+    default open diagnostics remain redacted.
 
 ## P0: Concrete Cutover Blockers
 
