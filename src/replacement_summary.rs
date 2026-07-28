@@ -742,6 +742,7 @@ pub struct GraphRouteReadinessSummary {
     pub route_query_runtime_ready: Option<bool>,
     pub route_query_plan_evidence_ready: Option<bool>,
     pub route_query_profile_evidence_ready: Option<bool>,
+    pub route_query_api_behavior_evidence_ready: Option<bool>,
     pub relationship_property_pruning_required_count: Option<u64>,
     pub relationship_property_pruning_report_count: Option<u64>,
     pub route_relationship_property_pruning_evidence_ready: Option<bool>,
@@ -774,6 +775,7 @@ impl GraphRouteReadinessSummary {
             "route_query_runtime_ready": self.route_query_runtime_ready,
             "route_query_plan_evidence_ready": self.route_query_plan_evidence_ready,
             "route_query_profile_evidence_ready": self.route_query_profile_evidence_ready,
+            "route_query_api_behavior_evidence_ready": self.route_query_api_behavior_evidence_ready,
             "relationship_property_pruning_required_count": self.relationship_property_pruning_required_count,
             "relationship_property_pruning_report_count": self.relationship_property_pruning_report_count,
             "route_relationship_property_pruning_evidence_ready": self.route_relationship_property_pruning_evidence_ready,
@@ -1937,6 +1939,8 @@ fn graph_route_readiness_summary_at(
         json_get_bool_path_from_dynamic(bundle, path, "route_query_plan_evidence_ready");
     let route_query_profile_evidence_ready =
         json_get_bool_path_from_dynamic(bundle, path, "route_query_profile_evidence_ready");
+    let route_query_api_behavior_evidence_ready =
+        json_get_bool_path_from_dynamic(bundle, path, "route_query_api_behavior_evidence_ready");
     let relationship_property_pruning_required_count = json_get_u64_path_from_dynamic(
         bundle,
         path,
@@ -1971,6 +1975,7 @@ fn graph_route_readiness_summary_at(
         && route_query_runtime_ready == Some(true)
         && route_query_plan_evidence_ready == Some(true)
         && route_query_profile_evidence_ready == Some(true)
+        && route_query_api_behavior_evidence_ready == Some(true)
         && route_relationship_property_pruning_evidence_ready == Some(true)
         && relationship_property_pruning_required_count.is_some()
         && relationship_property_pruning_counts_match
@@ -1995,6 +2000,7 @@ fn graph_route_readiness_summary_at(
         route_query_runtime_ready,
         route_query_plan_evidence_ready,
         route_query_profile_evidence_ready,
+        route_query_api_behavior_evidence_ready,
         relationship_property_pruning_required_count,
         relationship_property_pruning_report_count,
         route_relationship_property_pruning_evidence_ready,
@@ -2632,6 +2638,7 @@ fn nowledge_replacement_next_actions(
                 "graph_route_readiness.route_query_runtime_ready",
                 "graph_route_readiness.route_query_plan_evidence_ready",
                 "graph_route_readiness.route_query_profile_evidence_ready",
+                "graph_route_readiness.route_query_api_behavior_evidence_ready",
                 "graph_route_readiness.relationship_property_pruning_required_count",
                 "graph_route_readiness.relationship_property_pruning_report_count",
                 "graph_route_readiness.route_relationship_property_pruning_evidence_ready",
@@ -3414,6 +3421,43 @@ mod tests {
             direct.route_catalog_metadata_mismatch_routes,
             vec!["__route_catalog__".to_string()]
         );
+    }
+
+    #[test]
+    fn graph_route_readiness_summary_requires_api_behavior_evidence() {
+        let mut bundle = production_ready_bundle();
+        bundle["graph_route_readiness"]
+            .as_object_mut()
+            .unwrap()
+            .remove("route_query_api_behavior_evidence_ready");
+
+        let direct =
+            nowledge_graph_route_readiness_summary(bundle.get("graph_route_readiness").unwrap());
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert!(!direct.ready);
+        assert_eq!(direct.route_query_api_behavior_evidence_ready, None);
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["graph_route_readiness"]["ready"], false);
+        assert!(summary["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "graph_route_readiness_ready"));
+        assert!(summary["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| {
+                action["action"] == "attach_graph_route_readiness_evidence"
+                    && action["evidence_fields"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|field| {
+                            field == "graph_route_readiness.route_query_api_behavior_evidence_ready"
+                        })
+            }));
     }
 
     #[test]
@@ -5593,6 +5637,7 @@ mod tests {
                         "graph_route_readiness.route_query_runtime_ready",
                         "graph_route_readiness.route_query_plan_evidence_ready",
                         "graph_route_readiness.route_query_profile_evidence_ready",
+                        "graph_route_readiness.route_query_api_behavior_evidence_ready",
                         "graph_route_readiness.relationship_property_pruning_required_count",
                         "graph_route_readiness.relationship_property_pruning_report_count",
                         "graph_route_readiness.route_relationship_property_pruning_evidence_ready",
@@ -6108,6 +6153,7 @@ mod tests {
             "route_query_runtime_ready": true,
             "route_query_plan_evidence_ready": true,
             "route_query_profile_evidence_ready": true,
+            "route_query_api_behavior_evidence_ready": true,
             "route_relationship_property_pruning_evidence_ready": true,
             "route_primary_ready": true,
             "route_primary_blocker_codes": [],

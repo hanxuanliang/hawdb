@@ -464,6 +464,8 @@ contract.
   - [x] Expose graph-route API behavior evidence as aggregate route and
     readiness counters so replacement gates can consume API compatibility
     directly.
+  - [x] Require replacement summary to consume graph-route API behavior
+    aggregate evidence before production cutover can pass.
 
 ## P0: Storage and Recovery
 
