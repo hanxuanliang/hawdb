@@ -488,6 +488,11 @@ mod tests {
                     "local_paths_copied": false
                 }
             },
+            "memory_pressure": {
+                "ready": true,
+                "budget_bytes": 4096,
+                "estimated_bytes": 1024
+            },
             "ranked": [
                 {
                     "kind": "search_projection_graph_delta",

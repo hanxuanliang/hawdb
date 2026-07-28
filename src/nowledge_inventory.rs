@@ -17,6 +17,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const DEFAULT_INVENTORY_NAME: &str = "nowledge-scanned-inventory";
+const BACKGROUND_MAINTENANCE_ESTIMATED_BYTES_PER_OPERATION: u64 = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NowledgeInventoryScanOptions {
@@ -1162,6 +1163,10 @@ pub fn background_maintenance_evidence_health(
         blocker_codes.push("unknown_admission".to_string());
         blockers.push("background maintenance evidence has unknown admission values".to_string());
     }
+    if required && memory_pressure_ready.is_none() {
+        blocker_codes.push("memory_pressure_missing".to_string());
+        blockers.push("background maintenance evidence lacks memory-pressure budget".to_string());
+    }
     if memory_pressure_ready == Some(false) {
         blocker_codes.push("memory_budget_exceeded".to_string());
         blockers
@@ -1620,6 +1625,11 @@ pub fn background_maintenance_summary_to_json(
                 .map(|code| code.as_str())
                 .collect::<Vec<_>>(),
         );
+        insert_json(
+            &mut object,
+            "memory_pressure",
+            background_maintenance_memory_pressure_to_json(summary, qos_snapshot),
+        );
     }
     insert_json(
         &mut object,
@@ -1641,6 +1651,31 @@ pub fn background_maintenance_summary_to_json(
             .collect::<Vec<_>>(),
     );
     serde_json::Value::Object(object)
+}
+
+fn background_maintenance_memory_pressure_to_json(
+    summary: &BackgroundMaintenanceSummary,
+    qos_snapshot: &LocalQosSnapshot,
+) -> serde_json::Value {
+    let estimated_memory_bytes =
+        estimate_background_maintenance_memory_bytes(summary.total_estimated_operations);
+    let memory_budget_bytes = qos_snapshot
+        .remaining_total_background_operations
+        .or(qos_snapshot.max_total_background_operations)
+        .map(estimate_background_maintenance_memory_bytes)
+        .unwrap_or(0);
+    serde_json::json!({
+        "ready": !qos_snapshot.total_background_over_budget
+            && estimated_memory_bytes <= memory_budget_bytes,
+        "budget_bytes": memory_budget_bytes,
+        "estimated_bytes": estimated_memory_bytes,
+    })
+}
+
+fn estimate_background_maintenance_memory_bytes(operations: usize) -> u64 {
+    u64::try_from(operations)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(BACKGROUND_MAINTENANCE_ESTIMATED_BYTES_PER_OPERATION)
 }
 
 fn background_maintenance_qos_snapshot_to_json(snapshot: &LocalQosSnapshot) -> serde_json::Value {
@@ -2953,6 +2988,7 @@ mod tests {
                     "foreground_admission_probe_admission": "admit",
                     "qos_snapshot": ready_qos_snapshot(),
                     "slow_query": ready_slow_query(),
+                    "memory_pressure": ready_memory_pressure(),
                     "ranked": [
                         {
                             "kind": "search_projection_graph_delta",
@@ -3314,6 +3350,7 @@ mod tests {
                     "foreground_admission_probe_admission": "admit",
                     "qos_snapshot": ready_qos_snapshot(),
                     "slow_query": ready_slow_query(),
+                    "memory_pressure": ready_memory_pressure(),
                     "ranked": []
                 })),
                 ..NowledgeCypherMigrationGateJsonOptions::default()
@@ -3352,6 +3389,7 @@ mod tests {
             "foreground_admission_probe_admission": "admit",
             "qos_snapshot": ready_qos_snapshot(),
             "slow_query": ready_slow_query(),
+            "memory_pressure": ready_memory_pressure(),
             "ranked": [
                 {
                     "kind": "schema_maintenance",
@@ -3510,6 +3548,14 @@ mod tests {
         })
     }
 
+    fn ready_memory_pressure() -> serde_json::Value {
+        serde_json::json!({
+            "ready": true,
+            "budget_bytes": 4096,
+            "estimated_bytes": 1024
+        })
+    }
+
     #[test]
     fn replacement_readiness_family_evidence_health_requires_nowledge_families() {
         let families = ready_replacement_readiness_by_query_family();
@@ -3545,6 +3591,7 @@ mod tests {
             "foreground_admission_probe_admission": "admit",
             "qos_snapshot": ready_qos_snapshot(),
             "slow_query": ready_slow_query(),
+            "memory_pressure": ready_memory_pressure(),
             "ranked": [
                 {
                     "kind": "schema_maintenance",
@@ -3614,12 +3661,47 @@ mod tests {
     }
 
     #[test]
+    fn background_maintenance_evidence_health_requires_memory_pressure() {
+        let summary = serde_json::json!({
+            "protocol": "skein-background-maintenance-report",
+            "total_candidates": 1,
+            "foreground_admission_probe_ready": true,
+            "foreground_admission_probe_admission": "admit",
+            "qos_snapshot": ready_qos_snapshot(),
+            "slow_query": ready_slow_query(),
+            "ranked": [
+                {
+                    "kind": "search_projection_graph_delta",
+                    "work_class": "projection",
+                    "priority": "background",
+                    "admission": "defer"
+                }
+            ]
+        });
+
+        let health = super::background_maintenance_evidence_health(Some(&summary), true);
+
+        assert!(health.present);
+        assert!(!health.ready);
+        assert_eq!(health.memory_pressure_ready, None);
+        assert_eq!(
+            health.blockers,
+            vec!["background maintenance evidence lacks memory-pressure budget".to_string()]
+        );
+        assert_eq!(
+            health.blocker_codes,
+            vec!["memory_pressure_missing".to_string()]
+        );
+    }
+
+    #[test]
     fn background_maintenance_evidence_health_requires_qos_snapshot() {
         let summary = serde_json::json!({
             "protocol": "skein-background-maintenance-report",
             "total_candidates": 1,
             "foreground_admission_probe_ready": true,
             "foreground_admission_probe_admission": "admit",
+            "memory_pressure": ready_memory_pressure(),
             "slow_query": ready_slow_query(),
             "ranked": [
                 {
@@ -3653,6 +3735,7 @@ mod tests {
             "total_candidates": 1,
             "foreground_admission_probe_ready": true,
             "foreground_admission_probe_admission": "admit",
+            "memory_pressure": ready_memory_pressure(),
             "qos_snapshot": {
                 "ready": false,
                 "foreground_admitted": true,
@@ -3700,6 +3783,7 @@ mod tests {
         let summary = serde_json::json!({
             "protocol": "skein-background-maintenance-report",
             "total_candidates": 1,
+            "memory_pressure": ready_memory_pressure(),
             "qos_snapshot": ready_qos_snapshot(),
             "slow_query": ready_slow_query(),
             "ranked": [
@@ -3737,6 +3821,7 @@ mod tests {
             "total_candidates": 1,
             "foreground_admission_probe_ready": true,
             "foreground_admission_probe_admission": "admit",
+            "memory_pressure": ready_memory_pressure(),
             "qos_snapshot": ready_qos_snapshot(),
             "ranked": [
                 {

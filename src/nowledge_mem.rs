@@ -11904,8 +11904,16 @@ mod tests {
         assert_eq!(report.slow_query_record_count, Some(0));
         assert_eq!(report.slow_query_capacity, Some(256));
         assert_eq!(report.slow_query_redaction_ready, Some(true));
+        assert_eq!(report.memory_pressure_ready, Some(true));
+        assert!(report.memory_budget_bytes.is_some());
+        assert!(report.estimated_memory_bytes.is_some());
         assert!(report.blocker_codes.is_empty());
         assert_eq!(json["protocol"], "skein-background-maintenance-report");
+        assert_eq!(json["memory_pressure"]["ready"], true);
+        assert!(json["memory_pressure"]["budget_bytes"].as_u64().is_some());
+        assert!(json["memory_pressure"]["estimated_bytes"]
+            .as_u64()
+            .is_some());
         assert_eq!(json["slow_query"]["ready"], true);
         assert_eq!(json["slow_query"]["record_count"], 0);
         assert_eq!(json["slow_query"]["capacity"], 256);

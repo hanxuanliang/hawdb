@@ -564,6 +564,9 @@ contract.
     maintenance updates.
   - [x] Require background-maintenance cutover evidence to include compact
     slow-query readiness, capacity, record-count, and redaction signals.
+  - [x] Require required background-maintenance evidence to include
+    memory-pressure budget fields, and emit those fields from library-generated
+    background-maintenance reports.
 
 ## P0: Search Projection Replacement
 
