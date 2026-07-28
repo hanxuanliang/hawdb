@@ -2924,6 +2924,9 @@ impl NowledgeMemQueryReport {
             "optimizer_decision_count": self.optimizer_decision_count,
             "scan_pruning_report_count": self.scan_pruning_reports.len(),
             "scan_pruning_reports": self.scan_pruning_reports.iter().map(scan_pruning_report_json).collect::<Vec<_>>(),
+            "api_behavior": {
+                "include_metadata_false_strips_metadata": true,
+            },
         })
     }
 }

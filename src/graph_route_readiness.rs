@@ -601,6 +601,7 @@ struct QueryRuntimeReport {
     plan_cache_hit: Option<bool>,
     plan_cache_miss: Option<bool>,
     plan_cache_bypassed: Option<bool>,
+    include_metadata_false_strips_metadata: Option<bool>,
     blocker_codes: Vec<String>,
 }
 
@@ -641,6 +642,11 @@ impl QueryRuntimeReport {
             plan_cache_hit,
             plan_cache_miss,
             plan_cache_bypassed,
+            include_metadata_false_strips_metadata: bool_path(
+                value,
+                &["api_behavior", "include_metadata_false_strips_metadata"],
+            )
+            .or_else(|| bool_path(value, &["include_metadata_false_strips_metadata"])),
             blocker_codes: Vec::new(),
         };
         report.blocker_codes = report.computed_blocker_codes();
@@ -687,6 +693,9 @@ impl QueryRuntimeReport {
                 "hit": self.plan_cache_hit,
                 "miss": self.plan_cache_miss,
                 "bypassed": self.plan_cache_bypassed,
+            },
+            "api_behavior": {
+                "include_metadata_false_strips_metadata": self.include_metadata_false_strips_metadata,
             },
             "ready": self.ready(),
             "blocker_codes": self.blocker_codes,
@@ -760,6 +769,9 @@ impl QueryRuntimeReport {
             || self.plan_cache_bypassed == Some(true)
         {
             blockers.insert("query_report_plan_cache_bypassed".to_string());
+        }
+        if self.include_metadata_false_strips_metadata != Some(true) {
+            blockers.insert("query_report_api_behavior_metadata_stripping_missing".to_string());
         }
         blockers.into_iter().collect()
     }
@@ -1501,6 +1513,47 @@ mod tests {
     }
 
     #[test]
+    fn route_readiness_fails_closed_without_api_behavior_metadata_stripping() {
+        let mut routes = ready_routes();
+        routes[0]["query_reports"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("api_behavior");
+
+        let readiness = nowledge_graph_route_readiness_json(&ready_evidence(routes)).unwrap();
+
+        assert_eq!(readiness["route_primary_ready"], false);
+        assert_eq!(readiness["route_query_runtime_ready"], false);
+        assert!(readiness["route_primary_blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "query_report_api_behavior_metadata_stripping_missing"));
+        assert_eq!(
+            readiness["routes"][0]["query_reports"][0]["api_behavior"]
+                ["include_metadata_false_strips_metadata"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn route_readiness_fails_closed_when_api_behavior_metadata_stripping_is_false() {
+        let mut routes = ready_routes();
+        routes[0]["query_reports"][0]["api_behavior"]["include_metadata_false_strips_metadata"] =
+            serde_json::json!(false);
+
+        let readiness = nowledge_graph_route_readiness_json(&ready_evidence(routes)).unwrap();
+
+        assert_eq!(readiness["route_primary_ready"], false);
+        assert_eq!(readiness["route_query_runtime_ready"], false);
+        assert!(readiness["route_primary_blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "query_report_api_behavior_metadata_stripping_missing"));
+    }
+
+    #[test]
     fn route_readiness_accepts_relationship_property_pruning_evidence() {
         let mut routes = ready_routes();
         routes[0]["relationship_property_pruning_required_count"] = serde_json::json!(1);
@@ -1818,6 +1871,9 @@ mod tests {
                 "hit": false,
                 "miss": true,
                 "bypassed": false
+            },
+            "api_behavior": {
+                "include_metadata_false_strips_metadata": true
             }
         })
     }

@@ -453,6 +453,9 @@ contract.
   - Preserve node, relationship, metadata, pagination, and ordering contracts.
   - Preserve `include_metadata=false` metadata stripping behavior.
   - Compare row shape and error class before allowing replacement readiness.
+  - [x] Require graph-route query reports to carry compact API behavior evidence
+    proving `include_metadata=false` strips metadata before route cutover
+    readiness can pass.
 
 ## P0: Storage and Recovery
 
