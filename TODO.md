@@ -466,6 +466,9 @@ contract.
     directly.
   - [x] Require replacement summary to consume graph-route API behavior
     aggregate evidence before production cutover can pass.
+  - [x] Require final previous-wrapper preflight to validate graph-route API
+    behavior aggregate evidence from replacement summary before release gates
+    can pass.
 
 ## P0: Storage and Recovery
 

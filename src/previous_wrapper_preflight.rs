@@ -1008,6 +1008,80 @@ pub fn nowledge_previous_wrapper_preflight_check(
             ),
         ),
         preflight_check(
+            "replacement_summary_graph_route",
+            [
+                bool_path(&replacement_summary, &["graph_route_readiness", "present"])
+                    == Some(true),
+                bool_path(&replacement_summary, &["graph_route_readiness", "ready"])
+                    == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &["graph_route_readiness", "evidence_ready"],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &["graph_route_readiness", "route_coverage_ready"],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &["graph_route_readiness", "evidence_route_coverage_matches"],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &["graph_route_readiness", "route_query_runtime_ready"],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &["graph_route_readiness", "route_query_plan_evidence_ready"],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &["graph_route_readiness", "route_query_profile_evidence_ready"],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &[
+                        "graph_route_readiness",
+                        "route_query_api_behavior_evidence_ready",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &[
+                        "graph_route_readiness",
+                        "route_relationship_property_pruning_evidence_ready",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &["graph_route_readiness", "route_primary_ready"],
+                ) == Some(true),
+                u64_path(
+                    &replacement_summary,
+                    &["graph_route_readiness", "primary_ready_route_count"],
+                )
+                .is_some_and(|count| count == REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64),
+            ],
+            [
+                "replacement_summary.graph_route_readiness.present",
+                "replacement_summary.graph_route_readiness.ready",
+                "replacement_summary.graph_route_readiness.evidence_ready",
+                "replacement_summary.graph_route_readiness.route_coverage_ready",
+                "replacement_summary.graph_route_readiness.evidence_route_coverage_matches",
+                "replacement_summary.graph_route_readiness.route_query_runtime_ready",
+                "replacement_summary.graph_route_readiness.route_query_plan_evidence_ready",
+                "replacement_summary.graph_route_readiness.route_query_profile_evidence_ready",
+                "replacement_summary.graph_route_readiness.route_query_api_behavior_evidence_ready",
+                "replacement_summary.graph_route_readiness.route_relationship_property_pruning_evidence_ready",
+                "replacement_summary.graph_route_readiness.route_primary_ready",
+                "replacement_summary.graph_route_readiness.primary_ready_route_count",
+            ],
+            blocker_codes(
+                &replacement_summary,
+                &[&["graph_route_readiness", "blocker_codes"][..]],
+            ),
+        ),
+        preflight_check(
             "replacement_summary_bounded_read",
             [
                 str_path(&replacement_summary, &["bounded_read_evidence", "protocol"])
@@ -3087,6 +3161,7 @@ mod tests {
                 "background_maintenance",
                 "replacement_summary",
                 "replacement_summary_route_catalog",
+                "replacement_summary_graph_route",
                 "replacement_summary_bounded_read"
             ])
         );
@@ -3188,6 +3263,23 @@ mod tests {
                 "workload_fixture_evidence.failed_bounded_expansion_probe_count",
                 "workload_fixture_evidence.search_metadata_probe_count",
                 "workload_fixture_evidence.failed_search_metadata_probe_count"
+            ])
+        );
+        assert_eq!(
+            check_by_name(&report, "replacement_summary_graph_route")["failed_evidence_fields"],
+            serde_json::json!([
+                "replacement_summary.graph_route_readiness.present",
+                "replacement_summary.graph_route_readiness.ready",
+                "replacement_summary.graph_route_readiness.evidence_ready",
+                "replacement_summary.graph_route_readiness.route_coverage_ready",
+                "replacement_summary.graph_route_readiness.evidence_route_coverage_matches",
+                "replacement_summary.graph_route_readiness.route_query_runtime_ready",
+                "replacement_summary.graph_route_readiness.route_query_plan_evidence_ready",
+                "replacement_summary.graph_route_readiness.route_query_profile_evidence_ready",
+                "replacement_summary.graph_route_readiness.route_query_api_behavior_evidence_ready",
+                "replacement_summary.graph_route_readiness.route_relationship_property_pruning_evidence_ready",
+                "replacement_summary.graph_route_readiness.route_primary_ready",
+                "replacement_summary.graph_route_readiness.primary_ready_route_count"
             ])
         );
         assert_eq!(
@@ -4062,6 +4154,36 @@ mod tests {
     }
 
     #[test]
+    fn preflight_check_requires_graph_route_api_behavior_evidence() {
+        let mut inputs = ready_inputs();
+        let replacement_summary = inputs.replacement_summary.as_mut().unwrap();
+        replacement_summary["graph_route_readiness"]
+            .as_object_mut()
+            .unwrap()
+            .remove("route_query_api_behavior_evidence_ready");
+        replacement_summary["graph_route_readiness"]["blocker_codes"] =
+            serde_json::json!(["route_query_api_behavior_evidence_not_ready"]);
+
+        let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["replacement_summary_graph_route"])
+        );
+        assert_eq!(
+            check_by_name(&report, "replacement_summary_graph_route")["failed_evidence_fields"],
+            serde_json::json!([
+                "replacement_summary.graph_route_readiness.route_query_api_behavior_evidence_ready"
+            ])
+        );
+        assert_eq!(
+            check_by_name(&report, "replacement_summary_graph_route")["blocker_codes"],
+            serde_json::json!(["route_query_api_behavior_evidence_not_ready"])
+        );
+    }
+
+    #[test]
     fn preflight_check_rejects_bounded_read_payload_budget_overrun() {
         let mut inputs = ready_inputs();
         let replacement_summary = inputs.replacement_summary.as_mut().unwrap();
@@ -4421,7 +4543,7 @@ mod tests {
                 "search_candidate_shadow_evidence": ready_search_candidate_shadow_evidence(),
                 "bounded_read_evidence": ready_bounded_read_evidence(),
                 "workload_fixture_evidence": ready_workload_fixture_evidence(),
-                "graph_route_readiness": ready_route_catalog_metadata(),
+                "graph_route_readiness": ready_graph_route_readiness(),
                 "query_runtime_preflight": ready_route_catalog_metadata()
             })),
             query_runtime_preflight: Some(ready_query_runtime_preflight()),
@@ -4433,6 +4555,26 @@ mod tests {
         serde_json::json!({
             "route_catalog_version": NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
             "route_catalog_digest": nowledge_mem_graph_read_route_catalog_digest(),
+            "blocker_codes": []
+        })
+    }
+
+    fn ready_graph_route_readiness() -> serde_json::Value {
+        serde_json::json!({
+            "route_catalog_version": NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
+            "route_catalog_digest": nowledge_mem_graph_read_route_catalog_digest(),
+            "present": true,
+            "ready": true,
+            "evidence_ready": true,
+            "route_coverage_ready": true,
+            "evidence_route_coverage_matches": true,
+            "route_query_runtime_ready": true,
+            "route_query_plan_evidence_ready": true,
+            "route_query_profile_evidence_ready": true,
+            "route_query_api_behavior_evidence_ready": true,
+            "route_relationship_property_pruning_evidence_ready": true,
+            "route_primary_ready": true,
+            "primary_ready_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
             "blocker_codes": []
         })
     }
