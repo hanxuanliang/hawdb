@@ -131,14 +131,14 @@ must block default cutover.
   - Completion evidence: storage recovery readiness fails closed on missing or
     contradictory WAL/checkpoint evidence and passes replay fixtures that match
     Mem writes.
-- [ ] Make resource control a cutover gate.
+- [x] Make resource control a cutover gate.
   - Foreground user reads should be admitted ahead of background import,
     projection, compaction, analytics, and migration tasks.
   - Background work must be bounded by resource class, memory budget, and QoS
     limits on consumer hardware.
   - Completion evidence: background-maintenance readiness and blackbox reports
     show admission, deferral, memory-pressure behavior, and slow-query signals.
-- [ ] Keep the Mem integration library-only on the production path.
+- [x] Keep the Mem integration library-only on the production path.
   - Mem must start and operate Skein in-process through Rust APIs.
   - Production readiness, route evidence, search projection evidence, slow log,
     blackbox, storage recovery, and maintenance reports must all have typed Rust
@@ -148,7 +148,7 @@ must block default cutover.
   - [x] Require typed library readiness to prove the production path is
     in-process and does not require CLI wrappers, environment control planes, or
     spawned helper processes.
-- [ ] Preserve replacement boundaries.
+- [x] Preserve replacement boundaries.
   - Kuzu/Ladybug graph and LanceDB search projection are the replacement scope.
   - SQLite content store and large blob/value storage remain external unless a
     Nowledge graph/search route requires a narrower value-store API.
@@ -546,7 +546,7 @@ contract.
   - [x] Expose query-runtime scan-pruning evidence for parameterized normalized
     default equality and inequality predicates used by Nowledge thread-space
     repair reads.
-- [ ] Keep memory use bounded by default.
+- [x] Keep memory use bounded by default.
   - User foreground reads are admitted first.
   - Internal background import, projection, compaction, analytics, and shadow
     migration work must be deferrable under resource pressure.
