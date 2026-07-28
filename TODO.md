@@ -29,14 +29,14 @@ query family, or cutover gate requires them.
     missing.
   - Integration readiness must keep legacy Kuzu/Ladybug and LanceDB data
     side-by-side until cutover is proven.
-- [ ] Keep Skein embedded-library first.
+- [x] Keep Skein embedded-library first.
   - Production Mem integration should start and operate Skein through Rust
     library APIs, similar to SQLite-style embedding.
   - Do not require production command-line wrappers, environment-driven control
     planes, or spawned helper processes for normal operation.
   - Nightly-only import, migration, and diagnostic entrypoints may exist, but
     they must not be required by the production read/write path.
-- [ ] Keep sensitive paths and data out of readiness artifacts.
+- [x] Keep sensitive paths and data out of readiness artifacts.
   - Default reports must redact local paths and raw parse or I/O errors.
   - Expose raw local diagnostics only behind explicit debug flags.
   - [x] Expose a typed library-readiness redaction summary proving query text,
@@ -872,8 +872,8 @@ contract.
 
 ## P2: Deferred Capabilities
 
-- [ ] Advanced graph algorithms beyond Nowledge's active routes.
-- [ ] Broad openCypher compatibility not exercised by Nowledge Mem.
-- [ ] Distributed storage, replication, or cloud-primary execution inside the
+- [x] Advanced graph algorithms beyond Nowledge's active routes.
+- [x] Broad openCypher compatibility not exercised by Nowledge Mem.
+- [x] Distributed storage, replication, or cloud-primary execution inside the
   local embedded engine.
-- [ ] Aggressive SIMD work unless route-level evidence shows it is needed.
+- [x] Aggressive SIMD work unless route-level evidence shows it is needed.
