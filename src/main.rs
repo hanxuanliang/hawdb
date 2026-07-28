@@ -2282,6 +2282,10 @@ fn background_maintenance_report_json_with_options(
             serde_json::Value::String("skein-background-maintenance-report".to_string()),
         );
         object.insert(
+            "slow_query".to_string(),
+            background_maintenance_slow_query_json(database),
+        );
+        object.insert(
             "qos_policy".to_string(),
             background_maintenance_qos_policy_json(&options.policy),
         );
@@ -2291,6 +2295,25 @@ fn background_maintenance_report_json_with_options(
         );
     }
     report
+}
+
+fn background_maintenance_slow_query_json(database: &Database) -> serde_json::Value {
+    let records = database.slow_query_log_snapshot();
+    let latest_sequence = records.iter().map(|record| record.sequence).max();
+    let max_elapsed_micros = records.iter().map(|record| record.elapsed_micros).max();
+    serde_json::json!({
+        "ready": true,
+        "capacity": database.config().slow_query_log_capacity,
+        "threshold_micros": database.config().slow_query_log_threshold_micros,
+        "record_count": records.len(),
+        "latest_sequence": latest_sequence,
+        "max_elapsed_micros": max_elapsed_micros,
+        "redaction": {
+            "query_text_copied": false,
+            "parameters_copied": false,
+            "local_paths_copied": false,
+        },
+    })
 }
 
 fn background_maintenance_qos_policy_json(policy: &LocalQosPolicy) -> serde_json::Value {
@@ -5961,12 +5984,11 @@ mod tests {
         assert_eq!(health.protocol_matches, Some(true));
         assert_eq!(
             health.blocker_codes,
-            vec![
-                "no_candidates".to_string(),
-                "no_ranked_work".to_string(),
-                "slow_query_missing".to_string()
-            ]
+            vec!["no_candidates".to_string(), "no_ranked_work".to_string()]
         );
+        assert_eq!(health.slow_query_ready, Some(true));
+        assert_eq!(health.slow_query_record_count, Some(0));
+        assert_eq!(health.slow_query_redaction_ready, Some(true));
     }
 
     #[test]
