@@ -5976,7 +5976,11 @@ mod tests {
         assert_eq!(health.protocol_matches, Some(true));
         assert_eq!(
             health.blocker_codes,
-            vec!["no_candidates".to_string(), "no_ranked_work".to_string()]
+            vec![
+                "no_candidates".to_string(),
+                "no_ranked_work".to_string(),
+                "slow_query_missing".to_string()
+            ]
         );
     }
 

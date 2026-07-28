@@ -26,6 +26,7 @@ use crate::{
         NowledgeGraphRouteWorkloadFixtureReport, NOWLEDGE_GRAPH_ROUTE_WORKLOAD_FIXTURE_PROTOCOL,
     },
 };
+pub use skein_readiness::{NowledgeMemReadinessAreaMap, NowledgeMemReadinessAreaSummary};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -3255,84 +3256,6 @@ impl NowledgeMemReadinessRedactionSummary {
             "query_text_copied": self.query_text_copied,
             "parameters_copied": self.parameters_copied,
             "local_paths_copied": self.local_paths_copied,
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NowledgeMemReadinessAreaMap {
-    pub graph: NowledgeMemReadinessAreaSummary,
-    pub query: NowledgeMemReadinessAreaSummary,
-    pub query_family: NowledgeMemReadinessAreaSummary,
-    pub graph_route: NowledgeMemReadinessAreaSummary,
-    pub storage: NowledgeMemReadinessAreaSummary,
-    pub search_projection: NowledgeMemReadinessAreaSummary,
-    pub search_projection_shadow: NowledgeMemReadinessAreaSummary,
-    pub search_candidate_shadow: NowledgeMemReadinessAreaSummary,
-    pub workload_fixture: NowledgeMemReadinessAreaSummary,
-    pub background: NowledgeMemReadinessAreaSummary,
-}
-
-impl NowledgeMemReadinessAreaMap {
-    pub fn areas(&self) -> Vec<NowledgeMemReadinessAreaSummary> {
-        vec![
-            self.graph.clone(),
-            self.query.clone(),
-            self.query_family.clone(),
-            self.graph_route.clone(),
-            self.storage.clone(),
-            self.search_projection.clone(),
-            self.search_projection_shadow.clone(),
-            self.search_candidate_shadow.clone(),
-            self.workload_fixture.clone(),
-            self.background.clone(),
-        ]
-    }
-
-    pub fn json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "graph": self.graph.state_json(),
-            "query": self.query.state_json(),
-            "storage": self.storage.state_json(),
-            "background": self.background.state_json(),
-            "query_family": self.query_family.state_json(),
-            "graph_route": self.graph_route.state_json(),
-            "search_projection": self.search_projection.state_json(),
-            "search_projection_shadow": self.search_projection_shadow.state_json(),
-            "search_candidate_shadow": self.search_candidate_shadow.state_json(),
-            "workload_fixture": self.workload_fixture.state_json(),
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NowledgeMemReadinessAreaSummary {
-    pub name: String,
-    pub ready: bool,
-    pub blocker_codes: Vec<String>,
-}
-
-impl NowledgeMemReadinessAreaSummary {
-    fn new(name: impl Into<String>, ready: bool, blocker_codes: impl Into<Vec<String>>) -> Self {
-        Self {
-            name: name.into(),
-            ready,
-            blocker_codes: blocker_codes.into(),
-        }
-    }
-
-    fn json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "name": self.name,
-            "ready": self.ready,
-            "blocker_codes": self.blocker_codes,
-        })
-    }
-
-    fn state_json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "ready": self.ready,
-            "blocker_codes": self.blocker_codes,
         })
     }
 }

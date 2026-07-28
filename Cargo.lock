@@ -1173,6 +1173,7 @@ dependencies = [
  "skein-optimizer",
  "skein-plan-cache",
  "skein-qos",
+ "skein-readiness",
  "skein-sql",
  "turbovec",
  "zstd",
@@ -1215,6 +1216,13 @@ name = "skein-qos"
 version = "0.1.0"
 dependencies = [
  "loom",
+]
+
+[[package]]
+name = "skein-readiness"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

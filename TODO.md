@@ -800,6 +800,9 @@ contract.
   - Candidate split targets: core value/types/error, parser/AST, logical plan,
     optimizer rules, physical executor, storage/WAL/checkpoint, search
     projection, readiness/evidence, and Nowledge Mem facade.
+  - [x] Split stable readiness area summary/map contracts into
+    `skein-readiness` while keeping the top-level `skein` facade API and JSON
+    contract unchanged.
   - Keep the top-level `skein` crate as the SQLite-like embedded library facade;
     do not expose internal crates as production integration points until their
     APIs are stable.

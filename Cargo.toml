@@ -15,6 +15,7 @@ skein-cypher = { path = "crates/cypher" }
 skein-optimizer = { path = "crates/optimizer" }
 skein-plan-cache = { path = "crates/plan-cache" }
 skein-qos = { path = "crates/qos" }
+skein-readiness = { path = "crates/readiness" }
 skein-sql = { path = "crates/sql" }
 zstd = "0.13"
 turbovec = { version = "0.9.0", optional = true }
@@ -33,6 +34,7 @@ members = [
   "crates/optimizer",
   "crates/plan-cache",
   "crates/qos",
+  "crates/readiness",
   "crates/sql",
 ]
 resolver = "2"
