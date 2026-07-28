@@ -5245,8 +5245,7 @@ fn background_maintenance_cutover_conditions(
         ),
         (
             "replacement_summary.cutover_evidence.background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch",
-            readiness
-                .max_search_projection_graph_delta_complete_through_graph_commit_epoch_present,
+            readiness.max_search_projection_graph_delta_complete_through_graph_commit_epoch_present,
         ),
         (
             "replacement_summary.cutover_evidence.background_maintenance_foreground_admission_probe_ready",
@@ -9291,8 +9290,7 @@ mod tests {
         bundle["replacement_summary"]["cutover_evidence"]
             ["background_maintenance_rejected_search_projection_graph_delta_count"] =
             serde_json::Value::Null;
-        bundle["replacement_summary"]["cutover_evidence"]
-            ["background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch"] =
+        bundle["replacement_summary"]["cutover_evidence"]["background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch"] =
             serde_json::Value::Null;
 
         let typed = super::background_maintenance_cutover_readiness(&bundle);

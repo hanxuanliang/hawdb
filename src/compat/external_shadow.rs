@@ -331,7 +331,10 @@ fn validate_protocol_version(
                 "unsupported shadow protocol version {version}; expected {EXTERNAL_SHADOW_PROTOCOL_VERSION}"
             ),
         )),
-        None => Err(json_error("execution", "shadow request missing protocol_version")),
+        None => Err(json_error(
+            "execution",
+            "shadow request missing protocol_version",
+        )),
     }
 }
 

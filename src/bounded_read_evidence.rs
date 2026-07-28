@@ -57,10 +57,10 @@ pub fn run_nowledge_bounded_read_evidence(
         return Err(SkeinError::Semantic(nowledge_bounded_read_evidence_usage()));
     };
     let report = parse_read_report_json(&read_json_file(Path::new(&report_path))?)?;
-    if covered_routes.is_empty() {
-        if let Some(readiness) = graph_route_readiness.as_ref() {
-            covered_routes = readiness.primary_ready_routes.clone();
-        }
+    if covered_routes.is_empty()
+        && let Some(readiness) = graph_route_readiness.as_ref()
+    {
+        covered_routes = readiness.primary_ready_routes.clone();
     }
     Ok((
         nowledge_mem_bounded_read_evidence_json_with_route_readiness(

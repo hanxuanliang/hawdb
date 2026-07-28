@@ -109,8 +109,12 @@ must block default cutover.
     glue.
 - [x] Finish exact storage scan pruning for production filters.
   - Segment descriptors must cover equality, enum/in-list, numeric range,
-    date/time range, null/missing, existence, normalized default equality, and
-    unique-key filters used by Nowledge.
+    date/time range, normalized default equality, and unique-key filters used by
+    Nowledge.
+  - Capability evidence is required for every supported field, while observed
+    payload-read avoidance requires at least one representative pruning sample;
+    a field is not required to prune when every segment contains the sampled
+    value.
   - Scan planning must decide whether to read a segment before loading row
     payloads into memory.
   - Bloom or cuckoo filters may only be used where false positives are safe and

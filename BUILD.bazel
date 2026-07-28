@@ -1,0 +1,46 @@
+load("@crate_index//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+rust_library(
+    name = "skein",
+    crate_name = "skein",
+    crate_root = "src/lib.rs",
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = [
+            "src/bin/**",
+            "src/main.rs",
+        ],
+    ),
+    edition = "2024",
+    aliases = aliases(),
+    deps = all_crate_deps(normal = True) + [
+        "//crates/api-types:skein_api_types",
+        "//crates/core:skein_core",
+        "//crates/cypher:skein_cypher",
+        "//crates/ddl:skein_ddl",
+        "//crates/executor:skein_executor",
+        "//crates/optimizer:skein_optimizer",
+        "//crates/plan:skein_plan",
+        "//crates/plan-cache:skein_plan_cache",
+        "//crates/qos:skein_qos",
+        "//crates/readiness:skein_readiness",
+        "//crates/sql:skein_sql",
+        "//crates/storage:skein_storage",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+)
+
+rust_test(
+    name = "skein_unit_tests",
+    crate = ":skein",
+    edition = "2024",
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    deps = all_crate_deps(normal_dev = True),
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+)

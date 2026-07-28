@@ -1,0 +1,43 @@
+load("@crate_index//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+rust_library(
+    name = "skein_optimizer",
+    crate_name = "skein_optimizer",
+    crate_root = "src/lib.rs",
+    srcs = glob(["src/**/*.rs"]),
+    edition = "2024",
+    aliases = aliases(),
+    deps = all_crate_deps(normal = True) + [
+        "//crates/core:skein_core",
+        "//crates/cypher:skein_cypher",
+        "//crates/plan:skein_plan",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+)
+
+rust_test(
+    name = "skein_optimizer_tests",
+    crate = ":skein_optimizer",
+    edition = "2024",
+    aliases = aliases(normal_dev = True, proc_macro_dev = True),
+    deps = all_crate_deps(normal_dev = True),
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+)
+
+rust_test(
+    name = "planner_golden_test",
+    srcs = ["tests/planner_golden.rs"],
+    crate_root = "tests/planner_golden.rs",
+    compile_data = ["tests/golden/indexed_memory_lookup.golden"],
+    edition = "2024",
+    aliases = aliases(normal_dev = True, proc_macro_dev = True),
+    deps = all_crate_deps(normal_dev = True) + [
+        ":skein_optimizer",
+        "//crates/cypher:skein_cypher",
+        "//crates/plan:skein_plan",
+    ],
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+)

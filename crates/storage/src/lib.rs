@@ -4,6 +4,7 @@ pub mod ids;
 pub mod mutation;
 pub mod projection;
 pub mod scan;
+pub mod snapshot;
 
 pub use adjacency::{
     AdjacencyDirection, AdjacencyGroupConsistencyMismatch, AdjacencyGroupKey, AdjacencyGroupStats,
@@ -23,4 +24,12 @@ pub use projection::{
     SchemaMaintenanceAction, SchemaMaintenancePlanItem, SearchProjectionGraphChange,
     StorageReclamationWatermark, StorageRecoveryReport, StoreStableIdMapping,
 };
-pub use scan::{ScanPruningReport, ScanPruningStrategy, ScanPruningTargetKind};
+pub use scan::{
+    CandidateCursor, DateTimeMinMax, EnumDictionaryStats, FieldSummary, MembershipFilterSummary,
+    MembershipVerdict, NumericMinMax, PruningDecision, PruningReason, RangeBound, ScanPredicate,
+    ScanPruningReport, ScanPruningStrategy, ScanPruningTargetKind, ScanScalar, SegmentPruner,
+    SegmentSummary,
+};
+pub use snapshot::{
+    SnapshotCommitError, SnapshotCoordinator, SnapshotReadGuard, VersionedSnapshot,
+};

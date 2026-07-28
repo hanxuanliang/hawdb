@@ -492,18 +492,12 @@ pub const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ENTITY_RELATION_COUNT_QUERY: &str =
     "MATCH (:Entity)-[r:RELATES_TO]->(:Entity) RETURN count(r) AS total";
 pub const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_MENTION_EDGE_COUNT_QUERY: &str =
     "MATCH (:Memory)-[r:MENTIONS]->(:Entity) RETURN count(r) AS total";
-pub const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ACTIVE_MEMORY_RELATION_COUNT_QUERY: &str =
-    "MATCH (:Memory)-[r:MEMORY_RELATES_TO]->(:Memory) WHERE r.status = 'active' RETURN count(r) AS total";
-pub const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_MEMORY_COUNT_QUERY: &str =
-    "MATCH (m:Memory) WHERE m.created_at > $cutoff OR m.updated_at > $cutoff RETURN count(m) AS total";
-pub const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_ENTITY_COUNT_QUERY: &str =
-    "MATCH (e:Entity) WHERE e.created_at > $cutoff OR e.updated_at > $cutoff RETURN count(e) AS total";
-pub const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_MENTION_EDGE_COUNT_QUERY: &str =
-    "MATCH (:Memory)-[r:MENTIONS]->(:Entity) WHERE r.created_at > $cutoff OR r.updated_at > $cutoff RETURN count(r) AS total";
-pub const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_ENTITY_RELATION_COUNT_QUERY: &str =
-    "MATCH (:Entity)-[r:RELATES_TO]->(:Entity) WHERE r.created_at > $cutoff OR r.updated_at > $cutoff RETURN count(r) AS total";
-pub const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_MEMORY_RELATION_COUNT_QUERY: &str =
-    "MATCH (:Memory)-[r:MEMORY_RELATES_TO]->(:Memory) WHERE r.status = 'active' AND (r.created_at > $cutoff OR r.updated_at > $cutoff) RETURN count(r) AS total";
+pub const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ACTIVE_MEMORY_RELATION_COUNT_QUERY: &str = "MATCH (:Memory)-[r:MEMORY_RELATES_TO]->(:Memory) WHERE r.status = 'active' RETURN count(r) AS total";
+pub const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_MEMORY_COUNT_QUERY: &str = "MATCH (m:Memory) WHERE m.created_at > $cutoff OR m.updated_at > $cutoff RETURN count(m) AS total";
+pub const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_ENTITY_COUNT_QUERY: &str = "MATCH (e:Entity) WHERE e.created_at > $cutoff OR e.updated_at > $cutoff RETURN count(e) AS total";
+pub const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_MENTION_EDGE_COUNT_QUERY: &str = "MATCH (:Memory)-[r:MENTIONS]->(:Entity) WHERE r.created_at > $cutoff OR r.updated_at > $cutoff RETURN count(r) AS total";
+pub const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_ENTITY_RELATION_COUNT_QUERY: &str = "MATCH (:Entity)-[r:RELATES_TO]->(:Entity) WHERE r.created_at > $cutoff OR r.updated_at > $cutoff RETURN count(r) AS total";
+pub const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_CHANGED_MEMORY_RELATION_COUNT_QUERY: &str = "MATCH (:Memory)-[r:MEMORY_RELATES_TO]->(:Memory) WHERE r.status = 'active' AND (r.created_at > $cutoff OR r.updated_at > $cutoff) RETURN count(r) AS total";
 pub const NOWLEDGE_MEM_GRAPH_ORPHANS_ROUTE: &str = "/graph/orphans";
 pub const NOWLEDGE_MEM_GRAPH_ORPHAN_ENTITIES_QUERY: &str = "\
 MATCH (e:Entity) \
@@ -6279,10 +6273,10 @@ fn query_runtime_probe_blocker_codes(
     if probe.require_pruned && pruned_scan_count == 0 {
         blockers.push("scan_pruning_not_pruned".to_string());
     }
-    if let Some(max_output_rows) = probe.max_output_rows {
-        if output_row_count > max_output_rows {
-            blockers.push("output_row_count_exceeded".to_string());
-        }
+    if let Some(max_output_rows) = probe.max_output_rows
+        && output_row_count > max_output_rows
+    {
+        blockers.push("output_row_count_exceeded".to_string());
     }
     blockers
 }
@@ -10339,22 +10333,7 @@ mod tests {
 
     #[test]
     fn embedded_store_exposes_search_projection_replacement_evidence() {
-        let mut index = SearchIndex::in_memory();
-        index
-            .apply_embedding_manifest(SearchEmbeddingManifest {
-                model: "bge-m3".to_string(),
-                version: None,
-                dimension: 8,
-            })
-            .unwrap();
-        index
-            .apply_projection_delta(SearchProjectionDelta {
-                upserts: nowledge_projection_evidence_rows(),
-                deletes: Vec::new(),
-                max_operations: None,
-                source_graph_commit_epoch: Some(17),
-            })
-            .unwrap();
+        let index = persisted_nowledge_projection_evidence_index("replacement_evidence");
         let projection = NowledgeMemSearchProjection::from_index(index);
         let graph =
             NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::ShadowReadOnly);
@@ -10372,7 +10351,7 @@ mod tests {
             "skein-nowledge-search-projection-evidence"
         );
         #[cfg(feature = "turbovec")]
-        assert_eq!(evidence["ready"], true);
+        assert_eq!(evidence["ready"], true, "evidence={evidence:#}");
         #[cfg(not(feature = "turbovec"))]
         {
             assert_eq!(evidence["ready"], false);
@@ -10396,22 +10375,7 @@ mod tests {
 
     #[test]
     fn embedded_store_exposes_typed_search_projection_replacement_evidence() {
-        let mut index = SearchIndex::in_memory();
-        index
-            .apply_embedding_manifest(SearchEmbeddingManifest {
-                model: "bge-m3".to_string(),
-                version: None,
-                dimension: 8,
-            })
-            .unwrap();
-        index
-            .apply_projection_delta(SearchProjectionDelta {
-                upserts: nowledge_projection_evidence_rows(),
-                deletes: Vec::new(),
-                max_operations: None,
-                source_graph_commit_epoch: Some(17),
-            })
-            .unwrap();
+        let index = persisted_nowledge_projection_evidence_index("typed_replacement_evidence");
         let projection = NowledgeMemSearchProjection::from_index(index);
         let graph =
             NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::ShadowReadOnly);
@@ -10447,22 +10411,7 @@ mod tests {
 
     #[test]
     fn embedded_store_exposes_search_projection_shadow_evidence() {
-        let mut index = SearchIndex::in_memory();
-        index
-            .apply_embedding_manifest(SearchEmbeddingManifest {
-                model: "bge-m3".to_string(),
-                version: None,
-                dimension: 8,
-            })
-            .unwrap();
-        index
-            .apply_projection_delta(SearchProjectionDelta {
-                upserts: nowledge_projection_evidence_rows(),
-                deletes: Vec::new(),
-                max_operations: None,
-                source_graph_commit_epoch: Some(17),
-            })
-            .unwrap();
+        let index = persisted_nowledge_projection_evidence_index("shadow_evidence");
         let projection = NowledgeMemSearchProjection::from_index(index);
         let graph =
             NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::ShadowReadOnly);
@@ -10485,7 +10434,7 @@ mod tests {
         );
         #[cfg(feature = "turbovec")]
         {
-            assert_eq!(evidence["ready"], true);
+            assert_eq!(evidence["ready"], true, "evidence={evidence:#}");
             assert_eq!(evidence["primary_ready"], true);
             assert_eq!(evidence["shadow_ready"], true);
         }
@@ -12062,6 +12011,28 @@ mod tests {
         ]
     }
 
+    fn persisted_nowledge_projection_evidence_index(name: &str) -> SearchIndex {
+        let path = unique_nowledge_mem_test_dir(name);
+        let mut index = SearchIndex::open(&path).unwrap();
+        index
+            .apply_embedding_manifest(SearchEmbeddingManifest {
+                model: "bge-m3".to_string(),
+                version: None,
+                dimension: 8,
+            })
+            .unwrap();
+        index
+            .apply_projection_delta(SearchProjectionDelta {
+                upserts: nowledge_projection_evidence_rows(),
+                deletes: Vec::new(),
+                max_operations: None,
+                source_graph_commit_epoch: Some(17),
+            })
+            .unwrap();
+        index.checkpoint().unwrap();
+        SearchIndex::open(path).unwrap()
+    }
+
     fn nowledge_projection_evidence_row(
         kind: SearchProjectionKind,
         external_id: &str,
@@ -12074,7 +12045,18 @@ mod tests {
             body: format!("{external_id} body"),
             embedding: include_embedding.then_some(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
             source_id: Some("source_1".to_string()),
-            metadata: BTreeMap::from([("space_id".to_string(), "default".to_string())]),
+            metadata: BTreeMap::from([
+                ("space_id".to_string(), "default".to_string()),
+                ("unit_type".to_string(), "fact".to_string()),
+                ("lifecycle_state".to_string(), "active".to_string()),
+                ("importance".to_string(), "0.8".to_string()),
+                ("confidence".to_string(), "0.9".to_string()),
+                ("created_at".to_string(), "11".to_string()),
+                ("updated_at".to_string(), "12".to_string()),
+                ("event_start".to_string(), "10".to_string()),
+                ("event_end".to_string(), "20".to_string()),
+                ("is_latest".to_string(), "true".to_string()),
+            ]),
         }
     }
 

@@ -32,15 +32,15 @@ impl Parser<'_> {
     pub(super) fn parse_match_statement(&mut self) -> Result<Statement> {
         let path_variable = self.consume_match_path_binding_prefix();
         let (variable, label, properties) = self.parse_match_node_pattern()?;
-        if let Some(path_variable) = path_variable.as_ref() {
-            if self.next_relationship_pattern_is_all_shortest() {
-                return self.parse_shortest_path_return(
-                    path_variable.clone(),
-                    variable,
-                    label,
-                    properties,
-                );
-            }
+        if let Some(path_variable) = path_variable.as_ref()
+            && self.next_relationship_pattern_is_all_shortest()
+        {
+            return self.parse_shortest_path_return(
+                path_variable.clone(),
+                variable,
+                label,
+                properties,
+            );
         }
         if self.consume_char(',') || self.consume_keyword("MATCH") {
             let (target_variable, target_label, target_properties) =
@@ -316,45 +316,45 @@ impl Parser<'_> {
         } else {
             None
         };
-        if let Some(first_optional) = &optional_expand {
-            if self.next_keyword_is("WHERE") || self.next_keyword_is("OPTIONAL") {
-                let first_filter = if self.consume_keyword("WHERE") {
-                    Some(self.parse_optional_relationship_count_filter(first_optional)?)
+        if let Some(first_optional) = &optional_expand
+            && (self.next_keyword_is("WHERE") || self.next_keyword_is("OPTIONAL"))
+        {
+            let first_filter = if self.consume_keyword("WHERE") {
+                Some(self.parse_optional_relationship_count_filter(first_optional)?)
+            } else {
+                None
+            };
+            if self.consume_keyword("OPTIONAL") {
+                self.expect_keyword("MATCH")?;
+                let second_optional =
+                    self.parse_optional_relationship_expand(&BTreeSet::from([variable.clone()]))?;
+                let second_filter = if self.consume_keyword("WHERE") {
+                    Some(self.parse_optional_relationship_count_filter(&second_optional)?)
                 } else {
                     None
                 };
-                if self.consume_keyword("OPTIONAL") {
-                    self.expect_keyword("MATCH")?;
-                    let second_optional = self
-                        .parse_optional_relationship_expand(&BTreeSet::from([variable.clone()]))?;
-                    let second_filter = if self.consume_keyword("WHERE") {
-                        Some(self.parse_optional_relationship_count_filter(&second_optional)?)
-                    } else {
-                        None
-                    };
-                    self.expect_keyword("RETURN")?;
-                    let (first_count, second_count, output) =
-                        self.parse_optional_relationship_count_sum_return()?;
-                    let first_leg = self.optional_relationship_count_leg(
-                        first_optional,
-                        first_filter,
-                        &first_count,
-                    )?;
-                    let second_leg = self.optional_relationship_count_leg(
-                        &second_optional,
-                        second_filter,
-                        &second_count,
-                    )?;
-                    return Ok(Statement::MatchOptionalRelationshipCountSum(
-                        MatchOptionalRelationshipCountSum {
-                            variable,
-                            label,
-                            properties,
-                            legs: vec![first_leg, second_leg],
-                            output,
-                        },
-                    ));
-                }
+                self.expect_keyword("RETURN")?;
+                let (first_count, second_count, output) =
+                    self.parse_optional_relationship_count_sum_return()?;
+                let first_leg = self.optional_relationship_count_leg(
+                    first_optional,
+                    first_filter,
+                    &first_count,
+                )?;
+                let second_leg = self.optional_relationship_count_leg(
+                    &second_optional,
+                    second_filter,
+                    &second_count,
+                )?;
+                return Ok(Statement::MatchOptionalRelationshipCountSum(
+                    MatchOptionalRelationshipCountSum {
+                        variable,
+                        label,
+                        properties,
+                        legs: vec![first_leg, second_leg],
+                        output,
+                    },
+                ));
             }
         }
         let with_clause = if self.consume_keyword("WITH") {

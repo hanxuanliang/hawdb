@@ -12,7 +12,7 @@ use super::{
     LogicalPlanRoot, OptimizationSearchReport, OptimizedLogicalPlanRoot, OptimizerCatalog,
     OptimizerConfig, OptimizerTrace, PhysicalPlan, PhysicalPlanRoot, StageStats,
 };
-use crate::{GroupId, Memo, StageTrace};
+use crate::{GroupId, Memo, OptimizerContext, StageTrace};
 use skein_core::Value;
 use skein_plan::LogicalPlan;
 use std::collections::BTreeMap;
@@ -34,12 +34,22 @@ struct GroupExpr {
 
 #[derive(Debug, Default, Clone)]
 pub struct CascadesOptimizer {
-    config: OptimizerConfig,
+    context: OptimizerContext,
 }
 
 impl CascadesOptimizer {
     pub fn new(config: OptimizerConfig) -> Self {
-        Self { config }
+        Self {
+            context: OptimizerContext::from_config(config),
+        }
+    }
+
+    pub fn with_context(context: OptimizerContext) -> Self {
+        Self { context }
+    }
+
+    pub fn context(&self) -> &OptimizerContext {
+        &self.context
     }
 
     pub fn optimize(&self, logical: &LogicalPlan) -> PhysicalPlan {
@@ -81,13 +91,13 @@ impl CascadesOptimizer {
     ) -> PhysicalPlanRoot {
         let logical = root.plan();
         let required_groups = logical_group_count(logical);
-        if required_groups > self.config.max_groups {
+        let max_groups = self.context.optimizer_config().max_groups;
+        if required_groups > max_groups {
             let mut decisions = Vec::new();
             let mut stage_events = Vec::new();
             let plan =
                 logical_to_physical_direct(logical, catalog, &mut decisions, &mut stage_events);
-            let mut report =
-                OptimizationSearchReport::direct_fallback(required_groups, self.config.max_groups);
+            let mut report = OptimizationSearchReport::direct_fallback(required_groups, max_groups);
             report.push_stage_event(
                 LOGICAL_GROUPING_STAGE.trace(StageStats::new(1, required_groups)),
             );

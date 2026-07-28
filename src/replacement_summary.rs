@@ -3395,8 +3395,7 @@ mod tests {
             3
         );
         assert_eq!(
-            summary["cutover_evidence"]
-                ["background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch"],
+            summary["cutover_evidence"]["background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch"],
             42
         );
         assert_eq!(summary["shadow_evidence"]["ready"], true);

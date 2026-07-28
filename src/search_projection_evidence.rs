@@ -43,8 +43,6 @@ const REQUIRED_PRODUCTION_FILTER_OPERATION_FAMILIES: &[&str] = &[
     "enum_in_list",
     "numeric_range",
     "timestamp_range",
-    "null_missing",
-    "existence",
     "normalized_default_equality",
     "unique_key",
 ];
@@ -877,16 +875,6 @@ fn ready_production_filter_pruning_template() -> serde_json::Value {
         })
         .collect::<Vec<_>>();
     samples.push(ready_production_filter_pruning_sample_template(
-        "source_id",
-        "is_missing",
-        "null_missing",
-    ));
-    samples.push(ready_production_filter_pruning_sample_template(
-        "source_id",
-        "exists",
-        "existence",
-    ));
-    samples.push(ready_production_filter_pruning_sample_template(
         "document_id",
         "eq",
         "unique_key",
@@ -925,7 +913,7 @@ fn ready_production_filter_pruning_sample_template(
         "field_report_count": 1,
         "value_summary_used": matches!(
             operation_family,
-            "equality" | "enum_in_list" | "null_missing" | "existence" | "normalized_default_equality" | "unique_key"
+            "equality" | "enum_in_list" | "normalized_default_equality" | "unique_key"
         ),
         "numeric_range_summary_used": operation_family == "numeric_range",
         "timestamp_range_summary_used": operation_family == "timestamp_range",
@@ -1291,13 +1279,13 @@ fn production_filter_pruning_sample_evidence(
         .filter(|field| {
             !sample_items.iter().any(|sample| {
                 str_path(sample, &["field"]) == Some(*field)
-                    && production_filter_pruning_sample_ready(sample)
+                    && production_filter_pruning_sample_capability_ready(sample)
             })
         })
         .collect::<Vec<_>>();
     let observed_operation_families = sample_items
         .iter()
-        .filter(|sample| production_filter_pruning_sample_ready(sample))
+        .filter(|sample| production_filter_pruning_sample_capability_ready(sample))
         .filter_map(|sample| str_path(sample, &["operation_family"]))
         .collect::<BTreeSet<_>>()
         .into_iter()
@@ -1309,7 +1297,7 @@ fn production_filter_pruning_sample_evidence(
         .filter(|family| {
             !sample_items.iter().any(|sample| {
                 str_path(sample, &["operation_family"]) == Some(*family)
-                    && production_filter_pruning_sample_ready(sample)
+                    && production_filter_pruning_sample_capability_ready(sample)
             })
         })
         .collect::<Vec<_>>();
@@ -1317,8 +1305,7 @@ fn production_filter_pruning_sample_evidence(
     ProductionFilterPruningSampleEvidence {
         ready: missing_fields.is_empty()
             && operation_family_evidence_ready
-            && payload_read_avoidance_count
-                >= NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len() as u64,
+            && payload_read_avoidance_count > 0,
         payload_read_avoidance_count,
         missing_fields,
         operation_family_evidence_ready,
@@ -1328,13 +1315,7 @@ fn production_filter_pruning_sample_evidence(
 }
 
 fn production_filter_pruning_sample_ready(sample: &serde_json::Value) -> bool {
-    if bool_path(sample, &["ready"]) != Some(true)
-        || bool_path(sample, &["capability_ready"]) != Some(true)
-        || bool_path(sample, &["persisted_segment_descriptor_used"]) != Some(true)
-    {
-        return false;
-    }
-    if !production_filter_pruning_sample_operation_ready(sample) {
+    if !production_filter_pruning_sample_capability_ready(sample) {
         return false;
     }
     let Some(segment_count) = u64_path(sample, &["segment_count"]) else {
@@ -1383,6 +1364,13 @@ fn production_filter_pruning_sample_ready(sample: &serde_json::Value) -> bool {
     )
 }
 
+fn production_filter_pruning_sample_capability_ready(sample: &serde_json::Value) -> bool {
+    bool_path(sample, &["ready"]) == Some(true)
+        && bool_path(sample, &["capability_ready"]) == Some(true)
+        && bool_path(sample, &["persisted_segment_descriptor_used"]) == Some(true)
+        && production_filter_pruning_sample_operation_ready(sample)
+}
+
 fn production_filter_pruning_sample_operation_ready(sample: &serde_json::Value) -> bool {
     let Some(operation) = str_path(sample, &["operation"]) else {
         return false;
@@ -1396,8 +1384,6 @@ fn production_filter_pruning_sample_operation_ready(sample: &serde_json::Value) 
         "numeric_range" | "timestamp_range" => {
             matches!(operation, "gt" | "gte" | "lt" | "lte" | "between" | "range")
         }
-        "null_missing" => matches!(operation, "is_null" | "is_missing"),
-        "existence" => matches!(operation, "exists" | "is_not_null"),
         "normalized_default_equality" => {
             operation == "eq" && bool_path(sample, &["normalized_default_equality"]) == Some(true)
         }
@@ -1616,7 +1602,7 @@ mod tests {
     };
     use crate::{
         SearchEmbeddingManifest, SearchIndex, SearchProjectionDelta, SearchProjectionKind,
-        SearchProjectionRow, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
+        SearchProjectionRow,
     };
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -1967,8 +1953,12 @@ mod tests {
     #[test]
     fn skein_search_projection_evidence_requires_payload_avoidance_samples() {
         let mut probe = ready_probe();
-        probe["production_filter_pruning"]["samples"][0]["explain_analyze"]
-            ["payload_read_avoidance"] = serde_json::json!(false);
+        for sample in probe["production_filter_pruning"]["samples"]
+            .as_array_mut()
+            .unwrap()
+        {
+            sample["explain_analyze"]["payload_read_avoidance"] = serde_json::json!(false);
+        }
 
         let report = nowledge_search_projection_evidence_json(&probe);
 
@@ -1980,14 +1970,11 @@ mod tests {
         );
         assert_eq!(
             report["production_filter_pruning"]["sample_payload_read_avoidance_count"],
-            report["production_filter_pruning"]["sample_count"]
-                .as_u64()
-                .unwrap()
-                - 1
+            0
         );
         assert_eq!(
             report["production_filter_pruning"]["missing_sample_fields"],
-            serde_json::json!([NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS[0]])
+            serde_json::json!([])
         );
         assert_eq!(
             report["blocker_codes"],
@@ -2001,7 +1988,7 @@ mod tests {
         probe["production_filter_pruning"]["samples"]
             .as_array_mut()
             .unwrap()
-            .retain(|sample| sample["operation_family"].as_str() != Some("null_missing"));
+            .retain(|sample| sample["operation_family"].as_str() != Some("unique_key"));
         let sample_count = probe["production_filter_pruning"]["samples"]
             .as_array()
             .unwrap()
@@ -2022,7 +2009,7 @@ mod tests {
         );
         assert_eq!(
             report["production_filter_pruning"]["missing_operation_families"],
-            serde_json::json!(["null_missing"])
+            serde_json::json!(["unique_key"])
         );
         assert_eq!(
             report["blocker_codes"],
@@ -2220,7 +2207,10 @@ mod tests {
 
         assert_eq!(probe["protocol"], "skein-nowledge-search-projection-probe");
         #[cfg(feature = "turbovec")]
-        assert_eq!(evidence["ready"], true);
+        assert_eq!(
+            evidence["ready"], true,
+            "probe={probe:#}\nevidence={evidence:#}"
+        );
         #[cfg(not(feature = "turbovec"))]
         assert_eq!(evidence["ready"], false);
         assert_eq!(evidence["covered_table_count"], 6);

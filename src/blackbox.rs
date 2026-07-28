@@ -676,7 +676,10 @@ fn background_qos_summary_from_json(value: &serde_json::Value) -> BlackboxBackgr
         ready: first_bool_field(value, &["ready", "background_maintenance_ready"]),
         total_candidates: first_u64_field(
             value,
-            &["total_candidates", "background_maintenance_total_candidates"],
+            &[
+                "total_candidates",
+                "background_maintenance_total_candidates",
+            ],
         ),
         admitted_count: first_u64_field(value, &["admitted_count"]),
         deferred_count: first_u64_field(value, &["deferred_count"]),
@@ -759,7 +762,10 @@ fn background_qos_summary_from_json(value: &serde_json::Value) -> BlackboxBackgr
             }),
         blocker_codes: string_array_field(value, "blocker_codes")
             .into_iter()
-            .chain(string_array_field(value, "background_maintenance_blocker_codes"))
+            .chain(string_array_field(
+                value,
+                "background_maintenance_blocker_codes",
+            ))
             .collect(),
     }
 }

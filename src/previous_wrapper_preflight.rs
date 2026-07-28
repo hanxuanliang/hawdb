@@ -515,7 +515,10 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 ) == Some(true),
                 u64_path(
                     &replacement_summary,
-                    &["cutover_evidence", "background_maintenance_memory_budget_bytes"],
+                    &[
+                        "cutover_evidence",
+                        "background_maintenance_memory_budget_bytes",
+                    ],
                 )
                 .is_some_and(|value| value > 0),
                 u64_path(
@@ -661,7 +664,10 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 ) == Some(true),
                 bool_path(
                     &replacement_summary,
-                    &["search_projection_evidence", "production_filter_pruning_ready"],
+                    &[
+                        "search_projection_evidence",
+                        "production_filter_pruning_ready",
+                    ],
                 ) == Some(true),
                 bool_path(
                     &replacement_summary,
@@ -693,7 +699,10 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 ) == Some(true),
                 bool_path(
                     &replacement_summary,
-                    &["search_projection_shadow_evidence", "document_identity_parity"],
+                    &[
+                        "search_projection_shadow_evidence",
+                        "document_identity_parity",
+                    ],
                 ) == Some(true),
                 bool_path(
                     &replacement_summary,
@@ -719,7 +728,11 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 ) == Some(true),
                 bool_path(
                     &replacement_summary,
-                    &["search_projection_shadow_evidence", "pushdown_evidence", "ready"],
+                    &[
+                        "search_projection_shadow_evidence",
+                        "pushdown_evidence",
+                        "ready",
+                    ],
                 ) == Some(true),
                 bool_path(
                     &replacement_summary,
@@ -764,9 +777,7 @@ pub fn nowledge_previous_wrapper_preflight_check(
                     &replacement_summary,
                     "shadow_segment_scanned_document_count",
                 ),
-                search_projection_shadow_segment_descriptor_summaries_ready(
-                    &replacement_summary,
-                ),
+                search_projection_shadow_segment_descriptor_summaries_ready(&replacement_summary),
                 str_path(
                     &replacement_summary,
                     &["search_candidate_shadow_evidence", "protocol"],
@@ -789,7 +800,10 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 ) == Some(true),
                 str_path(
                     &replacement_summary,
-                    &["search_candidate_shadow_evidence", "candidate_primary_engine"],
+                    &[
+                        "search_candidate_shadow_evidence",
+                        "candidate_primary_engine",
+                    ],
                 ) == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE),
                 search_candidate_shadow_counts_ready(&replacement_summary),
                 bool_path(
@@ -802,11 +816,17 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 ) == Some(true),
                 bool_path(
                     &replacement_summary,
-                    &["search_candidate_shadow_evidence", "fts_top_k_overlap_ready"],
+                    &[
+                        "search_candidate_shadow_evidence",
+                        "fts_top_k_overlap_ready",
+                    ],
                 ) == Some(true),
                 bool_path(
                     &replacement_summary,
-                    &["search_candidate_shadow_evidence", "vector_top_k_overlap_ready"],
+                    &[
+                        "search_candidate_shadow_evidence",
+                        "vector_top_k_overlap_ready",
+                    ],
                 ) == Some(true),
                 bool_path(
                     &replacement_summary,
@@ -835,7 +855,10 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 ) == Some(true),
                 bool_path(
                     &replacement_summary,
-                    &["search_candidate_shadow_evidence", "embedding_identity_ready"],
+                    &[
+                        "search_candidate_shadow_evidence",
+                        "embedding_identity_ready",
+                    ],
                 ) == Some(true),
                 bool_path(
                     &replacement_summary,
@@ -883,16 +906,28 @@ pub fn nowledge_previous_wrapper_preflight_check(
                     &replacement_summary,
                     "filter_pushdown_missing_timestamp_range_fields",
                 ),
-                str_path(&replacement_summary, &["workload_fixture_evidence", "protocol"])
-                    == Some(NOWLEDGE_GRAPH_ROUTE_WORKLOAD_FIXTURE_PROTOCOL),
-                bool_path(&replacement_summary, &["workload_fixture_evidence", "present"])
-                    == Some(true),
-                bool_path(&replacement_summary, &["workload_fixture_evidence", "ready"])
-                    == Some(true),
-                u64_path(&replacement_summary, &["workload_fixture_evidence", "route_count"])
-                    .is_some_and(|count| count > 0),
-                u64_path(&replacement_summary, &["workload_fixture_evidence", "query_count"])
-                    .is_some_and(|count| count > 0),
+                str_path(
+                    &replacement_summary,
+                    &["workload_fixture_evidence", "protocol"],
+                ) == Some(NOWLEDGE_GRAPH_ROUTE_WORKLOAD_FIXTURE_PROTOCOL),
+                bool_path(
+                    &replacement_summary,
+                    &["workload_fixture_evidence", "present"],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &["workload_fixture_evidence", "ready"],
+                ) == Some(true),
+                u64_path(
+                    &replacement_summary,
+                    &["workload_fixture_evidence", "route_count"],
+                )
+                .is_some_and(|count| count > 0),
+                u64_path(
+                    &replacement_summary,
+                    &["workload_fixture_evidence", "query_count"],
+                )
+                .is_some_and(|count| count > 0),
                 u64_path(
                     &replacement_summary,
                     &["workload_fixture_evidence", "failed_query_count"],
@@ -1052,8 +1087,7 @@ pub fn nowledge_previous_wrapper_preflight_check(
             [
                 bool_path(&replacement_summary, &["graph_route_readiness", "present"])
                     == Some(true),
-                bool_path(&replacement_summary, &["graph_route_readiness", "ready"])
-                    == Some(true),
+                bool_path(&replacement_summary, &["graph_route_readiness", "ready"]) == Some(true),
                 bool_path(
                     &replacement_summary,
                     &["graph_route_readiness", "evidence_ready"],
@@ -1076,7 +1110,10 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 ) == Some(true),
                 bool_path(
                     &replacement_summary,
-                    &["graph_route_readiness", "route_query_profile_evidence_ready"],
+                    &[
+                        "graph_route_readiness",
+                        "route_query_profile_evidence_ready",
+                    ],
                 ) == Some(true),
                 bool_path(
                     &replacement_summary,
@@ -1100,7 +1137,9 @@ pub fn nowledge_previous_wrapper_preflight_check(
                     &replacement_summary,
                     &["graph_route_readiness", "primary_ready_route_count"],
                 )
-                .is_some_and(|count| count == REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64),
+                .is_some_and(|count| {
+                    count == REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64
+                }),
             ],
             [
                 "replacement_summary.graph_route_readiness.present",
@@ -1128,8 +1167,7 @@ pub fn nowledge_previous_wrapper_preflight_check(
                     == Some(NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL),
                 bool_path(&replacement_summary, &["bounded_read_evidence", "present"])
                     == Some(true),
-                bool_path(&replacement_summary, &["bounded_read_evidence", "ready"])
-                    == Some(true),
+                bool_path(&replacement_summary, &["bounded_read_evidence", "ready"]) == Some(true),
                 str_path(&replacement_summary, &["bounded_read_evidence", "mode"])
                     == Some("shadow_read_only"),
                 bounded_read_execution_row_cap_ready(&replacement_summary),
@@ -1159,8 +1197,10 @@ pub fn nowledge_previous_wrapper_preflight_check(
                     &replacement_summary,
                     &["bounded_read_evidence", "row_budget_exceeded"],
                 ) == Some(false),
-                bool_path(&replacement_summary, &["bounded_read_evidence", "streaming"])
-                    == Some(false),
+                bool_path(
+                    &replacement_summary,
+                    &["bounded_read_evidence", "streaming"],
+                ) == Some(false),
                 u64_path(
                     &replacement_summary,
                     &["bounded_read_evidence", "blocking_operator_count"],
@@ -1179,7 +1219,10 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 ) == Some(true),
                 bool_path(
                     &replacement_summary,
-                    &["bounded_read_evidence", "route_query_profile_evidence_ready"],
+                    &[
+                        "bounded_read_evidence",
+                        "route_query_profile_evidence_ready",
+                    ],
                 ) == Some(true),
                 bool_path(
                     &replacement_summary,
@@ -1233,12 +1276,18 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 bool_path(&query_runtime_preflight, &["database_opened"]) == Some(true),
                 bool_path(&query_runtime_preflight, &["redaction", "ready"]) == Some(true),
                 bool_path(&query_runtime_preflight, &["redaction", "rows_copied"]) == Some(false),
-                bool_path(&query_runtime_preflight, &["redaction", "parameters_copied"])
-                    == Some(false),
-                bool_path(&query_runtime_preflight, &["redaction", "local_paths_copied"])
-                    == Some(false),
-                bool_path(&query_runtime_preflight, &["redaction", "raw_errors_copied"])
-                    == Some(false),
+                bool_path(
+                    &query_runtime_preflight,
+                    &["redaction", "parameters_copied"],
+                ) == Some(false),
+                bool_path(
+                    &query_runtime_preflight,
+                    &["redaction", "local_paths_copied"],
+                ) == Some(false),
+                bool_path(
+                    &query_runtime_preflight,
+                    &["redaction", "raw_errors_copied"],
+                ) == Some(false),
                 u64_path(&query_runtime_preflight, &["probe_count"]).is_some_and(|value| value > 0),
                 query_runtime_preflight_counts_match(&query_runtime_preflight),
                 u64_path(&query_runtime_preflight, &["failed_probe_count"]) == Some(0),
@@ -1285,12 +1334,9 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 u64_path(&library_readiness, &["ready_area_count"]).is_some_and(|value| value > 0),
                 u64_path(&library_readiness, &["blocked_area_count"]) == Some(0),
                 bool_path(&library_readiness, &["redaction", "ready"]) == Some(true),
-                bool_path(&library_readiness, &["redaction", "query_text_copied"])
-                    == Some(false),
-                bool_path(&library_readiness, &["redaction", "parameters_copied"])
-                    == Some(false),
-                bool_path(&library_readiness, &["redaction", "local_paths_copied"])
-                    == Some(false),
+                bool_path(&library_readiness, &["redaction", "query_text_copied"]) == Some(false),
+                bool_path(&library_readiness, &["redaction", "parameters_copied"]) == Some(false),
+                bool_path(&library_readiness, &["redaction", "local_paths_copied"]) == Some(false),
                 bool_path(&library_readiness, &["open_report", "graph_opened"]) == Some(true),
                 bool_path(
                     &library_readiness,
@@ -1351,11 +1397,7 @@ pub fn nowledge_previous_wrapper_preflight_check(
                         "search_candidate_shadow",
                         "blocker_codes",
                     ][..],
-                    &[
-                        "readiness_by_area",
-                        "workload_fixture",
-                        "blocker_codes",
-                    ][..],
+                    &["readiness_by_area", "workload_fixture", "blocker_codes"][..],
                 ],
             ),
         ),

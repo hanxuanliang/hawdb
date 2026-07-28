@@ -71,6 +71,7 @@ mod canonical_snapshot;
 mod explain;
 mod observability;
 mod plan_cache;
+mod query_runtime;
 mod system_sql;
 mod system_variables;
 
@@ -5367,164 +5368,6 @@ impl Database {
         &self.system_variables
     }
 
-    pub fn query_work_request(&self) -> WorkRequest {
-        self.system_variables.query_work_request()
-    }
-
-    pub fn query_work_request_for(&self, cypher_text: &str) -> Result<WorkRequest> {
-        let statement = cypher::parse(cypher_text)?;
-        query_work_request_for_statement(&self.system_variables, &statement)
-    }
-
-    pub fn query(&mut self, cypher_text: &str) -> Result<QueryOutput> {
-        self.query_with_params(cypher_text, &BTreeMap::new())
-    }
-
-    pub fn query_with_params(
-        &mut self,
-        cypher_text: &str,
-        parameters: &BTreeMap<String, Value>,
-    ) -> Result<QueryOutput> {
-        self.query_with_params_trace(cypher_text, parameters, false)
-            .map(|(output, _)| output)
-    }
-
-    pub(crate) fn query_with_params_trace(
-        &mut self,
-        cypher_text: &str,
-        parameters: &BTreeMap<String, Value>,
-        capture_trace: bool,
-    ) -> Result<(QueryOutput, QueryExecutionTrace)> {
-        let started = std::time::Instant::now();
-        let statement = cypher::parse(cypher_text)?;
-        let body = statement_body(&statement);
-        let statement_kind_name = statement_kind(&statement);
-        if let cypher::Statement::Explain(explain) = &statement {
-            let query_result = self
-                .execute_explain_statement(cypher_text, explain, parameters)
-                .map(|output| (output, QueryExecutionTrace::uncached(statement)));
-            let statement_result = match &query_result {
-                Ok((output, _)) => Ok(output),
-                Err(error) => Err(error),
-            };
-            self.record_statement_execution(
-                "cypher",
-                cypher_text,
-                statement_kind_name,
-                started,
-                statement_result,
-            );
-            return query_result;
-        }
-        if let cypher::Statement::SetSystemVariable(set) = body {
-            reject_system_variable_parameters(parameters)?;
-            return self
-                .system_variables
-                .apply_set_system_variable(set)
-                .map(|output| (output, QueryExecutionTrace::uncached(statement.clone())));
-        }
-        if matches!(body, cypher::Statement::Checkpoint) {
-            if !parameters.is_empty() {
-                return Err(SkeinError::Semantic(
-                    "CHECKPOINT does not accept parameters".to_string(),
-                ));
-            }
-            self.checkpoint()?;
-            return Ok((
-                QueryOutput { rows: Vec::new() },
-                QueryExecutionTrace::uncached(statement),
-            ));
-        }
-        let query_result = (|| {
-            query_work_request_for_statement(&self.system_variables, &statement)?;
-            let optimized = self.optimized_query_plan(cypher_text, &statement, parameters)?;
-            let is_mutation = executor::is_mutation_plan(&optimized.physical_plan)?;
-            if is_mutation {
-                self.ensure_writable()?;
-            }
-            let (rows, execution_profile) = if is_mutation {
-                (
-                    executor::execute(
-                        &optimized.physical_plan,
-                        &mut self.catalog,
-                        &mut self.store,
-                    )?,
-                    None,
-                )
-            } else {
-                let profiled = executor::execute_with_row_limit_profile(
-                    &optimized.physical_plan,
-                    &mut self.catalog,
-                    &mut self.store,
-                    self.config.max_read_result_rows,
-                )?;
-                (profiled.rows, Some(profiled.profile))
-            };
-            Ok((
-                QueryOutput { rows },
-                QueryExecutionTrace {
-                    statement,
-                    optimizer_trace: capture_trace.then_some(optimized.trace),
-                    plan_cache_lookup: Some(optimized.plan_cache_lookup),
-                    execution_profile,
-                },
-            ))
-        })();
-        let statement_result = match &query_result {
-            Ok((output, _)) => Ok(output),
-            Err(error) => Err(error),
-        };
-        self.record_statement_execution(
-            "cypher",
-            cypher_text,
-            statement_kind_name,
-            started,
-            statement_result,
-        );
-        query_result
-    }
-
-    fn execute_explain_statement(
-        &mut self,
-        cypher_text: &str,
-        explain: &cypher::Explain,
-        parameters: &BTreeMap<String, Value>,
-    ) -> Result<QueryOutput> {
-        let work_request =
-            query_work_request_for_statement(&self.system_variables, &explain.statement)?;
-        let optimized = self.optimized_query_plan(cypher_text, &explain.statement, parameters)?;
-        let inner_statement_kind = statement_kind(statement_body(&explain.statement));
-        if explain.analyze {
-            if executor::is_mutation_plan(&optimized.physical_plan)? {
-                return Err(SkeinError::Execution(
-                    "EXPLAIN ANALYZE only supports read queries".to_string(),
-                ));
-            }
-            let profiled = executor::execute_with_row_limit_profile(
-                &optimized.physical_plan,
-                &mut self.catalog,
-                &mut self.store,
-                self.config.max_read_result_rows,
-            )?;
-            return Ok(QueryOutput {
-                rows: vec![explain_analyze_output_row(
-                    &optimized,
-                    work_request,
-                    inner_statement_kind,
-                    profiled.rows.len(),
-                    &profiled.profile,
-                )],
-            });
-        }
-        Ok(QueryOutput {
-            rows: vec![explain_output_row(
-                &optimized,
-                work_request,
-                inner_statement_kind,
-            )],
-        })
-    }
-
     fn query_read_only_with_params_bounded(
         &self,
         cypher_text: &str,
@@ -6437,24 +6280,23 @@ impl Database {
     ) -> Vec<BackgroundMaintenanceCandidate> {
         let mut candidates = Vec::new();
 
-        if options.include_schema_maintenance {
-            if let Some(plan) = self.schema_maintenance_background_work_plan(options.hint.clone()) {
-                candidates.push(BackgroundMaintenanceCandidate::new(
-                    BackgroundMaintenanceKind::SchemaMaintenance,
-                    plan,
-                ));
-            }
+        if options.include_schema_maintenance
+            && let Some(plan) = self.schema_maintenance_background_work_plan(options.hint.clone())
+        {
+            candidates.push(BackgroundMaintenanceCandidate::new(
+                BackgroundMaintenanceKind::SchemaMaintenance,
+                plan,
+            ));
         }
 
-        if options.include_property_index_projection {
-            if let Some(plan) =
+        if options.include_property_index_projection
+            && let Some(plan) =
                 self.property_index_projection_background_work_plan(options.hint.clone())
-            {
-                candidates.push(BackgroundMaintenanceCandidate::new(
-                    BackgroundMaintenanceKind::PropertyIndexProjection,
-                    plan,
-                ));
-            }
+        {
+            candidates.push(BackgroundMaintenanceCandidate::new(
+                BackgroundMaintenanceKind::PropertyIndexProjection,
+                plan,
+            ));
         }
 
         if let Some(delta_request) = &options.search_projection_graph_delta {
@@ -6479,39 +6321,37 @@ impl Database {
                     .with_search_projection_graph_delta(delta_request.clone()),
                 );
             }
-        } else if options.include_search_projection_graph_delta_freshness {
-            if let Some(search_index) = search_index {
-                let executable_request = self
-                    .build_search_projection_graph_delta_request_from_freshness(search_index, None)
-                    .ok()
-                    .flatten();
-                if let Some(request) = executable_request {
-                    if let Some(plan) = self
-                        .search_projection_graph_delta_freshness_background_work_plan(
-                            search_index,
-                            &request,
-                            options.hint.clone(),
-                        )
-                    {
-                        candidates.push(
-                            BackgroundMaintenanceCandidate::new(
-                                BackgroundMaintenanceKind::SearchProjectionGraphDelta,
-                                plan,
-                            )
-                            .with_search_projection_graph_delta(request),
-                        );
-                    }
-                } else if let Some(plan) = self
-                    .search_projection_freshness_lag_background_work_plan(
+        } else if options.include_search_projection_graph_delta_freshness
+            && let Some(search_index) = search_index
+        {
+            let executable_request = self
+                .build_search_projection_graph_delta_request_from_freshness(search_index, None)
+                .ok()
+                .flatten();
+            if let Some(request) = executable_request {
+                if let Some(plan) = self
+                    .search_projection_graph_delta_freshness_background_work_plan(
                         search_index,
+                        &request,
                         options.hint.clone(),
                     )
                 {
-                    candidates.push(BackgroundMaintenanceCandidate::new(
-                        BackgroundMaintenanceKind::SearchProjectionGraphDelta,
-                        plan,
-                    ));
+                    candidates.push(
+                        BackgroundMaintenanceCandidate::new(
+                            BackgroundMaintenanceKind::SearchProjectionGraphDelta,
+                            plan,
+                        )
+                        .with_search_projection_graph_delta(request),
+                    );
                 }
+            } else if let Some(plan) = self.search_projection_freshness_lag_background_work_plan(
+                search_index,
+                options.hint.clone(),
+            ) {
+                candidates.push(BackgroundMaintenanceCandidate::new(
+                    BackgroundMaintenanceKind::SearchProjectionGraphDelta,
+                    plan,
+                ));
             }
         }
 
@@ -6532,40 +6372,39 @@ impl Database {
                 }
             }
 
-            if options.include_search_projection_metadata_repair {
-                if let Some(plan) = self.search_projection_metadata_repair_background_work_plan(
+            if options.include_search_projection_metadata_repair
+                && let Some(plan) = self.search_projection_metadata_repair_background_work_plan(
                     search_index,
                     options.hint.clone(),
-                ) {
-                    candidates.push(BackgroundMaintenanceCandidate::new(
-                        BackgroundMaintenanceKind::SearchProjectionMetadataRepair,
-                        plan,
-                    ));
-                }
-            }
-        }
-
-        if options.include_graph_lightning_bootstrap_export {
-            if let Some(plan) =
-                self.graph_lightning_bootstrap_export_background_work_plan(options.hint.clone())
+                )
             {
                 candidates.push(BackgroundMaintenanceCandidate::new(
-                    BackgroundMaintenanceKind::GraphLightningBootstrapExport,
+                    BackgroundMaintenanceKind::SearchProjectionMetadataRepair,
                     plan,
                 ));
             }
         }
 
-        if options.include_external_content_artifact_jobs {
-            if let Some(plan) = self.external_content_artifact_job_background_work_plan(
+        if options.include_graph_lightning_bootstrap_export
+            && let Some(plan) =
+                self.graph_lightning_bootstrap_export_background_work_plan(options.hint.clone())
+        {
+            candidates.push(BackgroundMaintenanceCandidate::new(
+                BackgroundMaintenanceKind::GraphLightningBootstrapExport,
+                plan,
+            ));
+        }
+
+        if options.include_external_content_artifact_jobs
+            && let Some(plan) = self.external_content_artifact_job_background_work_plan(
                 options.hint,
                 options.external_content_artifact_estimated_operations,
-            ) {
-                candidates.push(BackgroundMaintenanceCandidate::new(
-                    BackgroundMaintenanceKind::ExternalContentArtifactJob,
-                    plan,
-                ));
-            }
+            )
+        {
+            candidates.push(BackgroundMaintenanceCandidate::new(
+                BackgroundMaintenanceKind::ExternalContentArtifactJob,
+                plan,
+            ));
         }
 
         candidates
@@ -8513,12 +8352,13 @@ fn knowledge_search_retriever_truncation_reasons(
         return Vec::new();
     }
     let mut reasons = Vec::new();
-    if let Some(rank_window) = rank_window {
-        if candidate_count > rank_window && returned_count <= rank_window {
-            reasons.push(format!(
-                "{name} rank_window {rank_window} returned from {candidate_count} candidates"
-            ));
-        }
+    if let Some(rank_window) = rank_window
+        && candidate_count > rank_window
+        && returned_count <= rank_window
+    {
+        reasons.push(format!(
+            "{name} rank_window {rank_window} returned from {candidate_count} candidates"
+        ));
     }
     if returned_count >= search_limit && candidate_count > search_limit {
         reasons.push(format!(
@@ -8543,10 +8383,11 @@ fn knowledge_search_retriever_truncation_reason_codes(
         return Vec::new();
     }
     let mut codes = Vec::new();
-    if let Some(rank_window) = rank_window {
-        if candidate_count > rank_window && returned_count <= rank_window {
-            codes.push(KnowledgeTruncationReasonCode::RankWindowExceeded);
-        }
+    if let Some(rank_window) = rank_window
+        && candidate_count > rank_window
+        && returned_count <= rank_window
+    {
+        codes.push(KnowledgeTruncationReasonCode::RankWindowExceeded);
     }
     if returned_count >= search_limit && candidate_count > search_limit {
         codes.push(KnowledgeTruncationReasonCode::SearchLimitExceeded);
@@ -9801,12 +9642,12 @@ fn knowledge_entity_mention_counts_via_query_runtime(
 fn validate_entity_mention_count_request(
     request: &KnowledgeEntityMentionCountListRequest,
 ) -> Result<()> {
-    if let Some(cursor) = &request.cursor {
-        if cursor.after_name.is_empty() {
-            return Err(SkeinError::Semantic(
-                "knowledge entity mention count cursor requires a non-empty after_name".to_string(),
-            ));
-        }
+    if let Some(cursor) = &request.cursor
+        && cursor.after_name.is_empty()
+    {
+        return Err(SkeinError::Semantic(
+            "knowledge entity mention count cursor requires a non-empty after_name".to_string(),
+        ));
     }
     Ok(())
 }
@@ -12808,14 +12649,14 @@ fn knowledge_memory_evolves_relation_counts_for(
             })
             .count();
         matched_relationship_count += count;
-        if count > 0 {
-            if let Some(memory_id) = node_external_id(memory) {
-                rows.push(KnowledgeMemoryEvolvesRelationCountRow {
-                    memory_id,
-                    node_id: memory.id.0,
-                    count,
-                });
-            }
+        if count > 0
+            && let Some(memory_id) = node_external_id(memory)
+        {
+            rows.push(KnowledgeMemoryEvolvesRelationCountRow {
+                memory_id,
+                node_id: memory.id.0,
+                count,
+            });
         }
     }
 
@@ -13059,14 +12900,14 @@ fn knowledge_memory_crystal_synthesis_counts_for(
             })
             .count();
         matched_relationship_count += count;
-        if count > 0 {
-            if let Some(memory_id) = node_external_id(memory) {
-                rows.push(KnowledgeMemoryCrystalSynthesisCountRow {
-                    memory_id,
-                    node_id: memory.id.0,
-                    count,
-                });
-            }
+        if count > 0
+            && let Some(memory_id) = node_external_id(memory)
+        {
+            rows.push(KnowledgeMemoryCrystalSynthesisCountRow {
+                memory_id,
+                node_id: memory.id.0,
+                count,
+            });
         }
     }
 
@@ -14011,10 +13852,10 @@ fn projected_properties(
     let mut projected = BTreeMap::new();
     let mut seen = BTreeSet::new();
     for property_name in property_names {
-        if seen.insert(property_name) {
-            if let Some(value) = properties.get(property_name) {
-                projected.insert(property_name.clone(), value.clone());
-            }
+        if seen.insert(property_name)
+            && let Some(value) = properties.get(property_name)
+        {
+            projected.insert(property_name.clone(), value.clone());
         }
     }
     projected
@@ -21188,10 +21029,8 @@ fn update_knowledge_thread_message_count_batch_for(
             Value::Int(update.message_count),
         )]);
         let updated_at_changed = should_update_thread_updated_at(seed, update);
-        if updated_at_changed {
-            if let Some(updated_at) = &update.updated_at {
-                assignments.insert("updated_at".to_string(), updated_at.clone());
-            }
+        if updated_at_changed && let Some(updated_at) = &update.updated_at {
+            assignments.insert("updated_at".to_string(), updated_at.clone());
         }
         let row_updated_property_count = assignments.len();
         matched_count += 1;
@@ -21742,8 +21581,9 @@ fn knowledge_skill_memories_via_query_runtime(
     let mut parameters = BTreeMap::new();
     let seed_predicate = knowledge_skill_memory_seed_predicate(request, &mut parameters);
 
-    let skill_query =
-        format!("MATCH (s:Skill){seed_predicate} RETURN id(s) AS skill_node_id ORDER BY s.id ASC, id(s) ASC");
+    let skill_query = format!(
+        "MATCH (s:Skill){seed_predicate} RETURN id(s) AS skill_node_id ORDER BY s.id ASC, id(s) ASC"
+    );
     let skill_output = db.query_read_only_with_params_bounded(&skill_query, &parameters, None)?;
     let matched_skill_count = skill_output.rows.len();
     let missing_skill_count = usize::from(request.skill_id.is_some() && matched_skill_count == 0);
@@ -27908,12 +27748,12 @@ fn knowledge_community_via_query_runtime(
 }
 
 fn validate_knowledge_community_request(request: &KnowledgeCommunityRequest) -> Result<()> {
-    if let KnowledgeCommunityLookupKey::Id(id) = &request.key {
-        if id.is_empty() {
-            return Err(SkeinError::Semantic(
-                "knowledge community read requires a non-empty id".to_string(),
-            ));
-        }
+    if let KnowledgeCommunityLookupKey::Id(id) = &request.key
+        && id.is_empty()
+    {
+        return Err(SkeinError::Semantic(
+            "knowledge community read requires a non-empty id".to_string(),
+        ));
     }
     Ok(())
 }
@@ -30362,18 +30202,17 @@ fn upsert_scoped_knowledge_relationship_batch_for(
     }
     tx.commit()?;
     for row in &mut rows {
-        if row.created {
-            if let (Some(source_node_id), Some(target_node_id)) =
+        if row.created
+            && let (Some(source_node_id), Some(target_node_id)) =
                 (row.source_node_id, row.target_node_id)
-            {
-                row.relationship_id = existing_knowledge_relationship_id(
-                    &db.catalog,
-                    &db.store,
-                    NodeId(source_node_id),
-                    NodeId(target_node_id),
-                    row.relationship_type.as_str(),
-                );
-            }
+        {
+            row.relationship_id = existing_knowledge_relationship_id(
+                &db.catalog,
+                &db.store,
+                NodeId(source_node_id),
+                NodeId(target_node_id),
+                row.relationship_type.as_str(),
+            );
         }
     }
     Ok(KnowledgeRelationshipUpsertBatchOutput {
@@ -34665,12 +34504,12 @@ fn search_projection_graph_delta_for(
     request: &SearchProjectionGraphDeltaRequest,
 ) -> Result<SearchProjectionDelta> {
     let operation_count = request.operation_count();
-    if let Some(limit) = request.max_operations {
-        if operation_count > limit {
-            return Err(SkeinError::Storage(format!(
+    if let Some(limit) = request.max_operations
+        && operation_count > limit
+    {
+        return Err(SkeinError::Storage(format!(
                 "search projection graph delta operation count {operation_count} exceeded configured limit {limit}"
             )));
-        }
     }
     if let Some(epoch) = request.complete_through_graph_commit_epoch {
         let current_epoch = store.commit_epoch();

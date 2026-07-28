@@ -429,12 +429,12 @@ fn execute_system_table_scan(
         .take(limit.unwrap_or(usize::MAX))
         .collect();
 
-    if let Some(max_rows) = max_rows {
-        if rows.len() > max_rows {
-            return Err(SkeinError::Execution(format!(
+    if let Some(max_rows) = max_rows
+        && rows.len() > max_rows
+    {
+        return Err(SkeinError::Execution(format!(
                 "SQL query returned more than {max_rows} rows, exceeding max_read_result_rows {max_rows}"
             )));
-        }
     }
 
     project_rows(rows, &scan.projection)

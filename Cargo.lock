@@ -1052,6 +1052,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "roaring"
+version = "0.10.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19e8d2cfa184d94d0726d650a9f4a1be7f9b76ac9fdb954219878dc00c1c1e7b"
+dependencies = [
+ "bytemuck",
+ "byteorder",
+]
+
+[[package]]
 name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1159,6 +1169,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "simsimd"
+version = "6.5.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f4fb3bc3cdce07a7d7d4caa4c54f8aa967f6be41690482b54b24100a2253fa70"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "skein"
 version = "0.1.0"
 dependencies = [
@@ -1167,6 +1186,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "simsimd",
  "skein-api-types",
  "skein-core",
  "skein-cypher",
@@ -1270,6 +1290,8 @@ dependencies = [
 name = "skein-storage"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "roaring",
  "skein-core",
 ]
 

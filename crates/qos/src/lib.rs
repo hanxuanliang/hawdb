@@ -333,14 +333,14 @@ impl BackgroundWorkHint {
         let mut reason_codes = Vec::new();
         let mut reasons = Vec::new();
 
-        if let Some(remaining) = self.tenant_budget_remaining_operations {
-            if remaining < estimated_operations {
-                reason_codes.push(BackgroundWorkReasonCode::TenantBudgetBelowEstimate);
-                reasons.push(format!(
-                    "tenant budget remaining {remaining} below estimated operations {estimated_operations}"
-                ));
-                return (0, reason_codes, reasons);
-            }
+        if let Some(remaining) = self.tenant_budget_remaining_operations
+            && remaining < estimated_operations
+        {
+            reason_codes.push(BackgroundWorkReasonCode::TenantBudgetBelowEstimate);
+            reasons.push(format!(
+                "tenant budget remaining {remaining} below estimated operations {estimated_operations}"
+            ));
+            return (0, reason_codes, reasons);
         }
 
         if self.active_topic {
@@ -567,16 +567,16 @@ impl LocalQosPolicy {
                 reason: "background work is disabled".to_string(),
             };
         }
-        if let Some(limit) = self.max_background_operations {
-            if request.estimated_operations > limit {
-                return QosAdmission::Defer {
-                    code: QosAdmissionCode::PerWorkLimitExceeded,
-                    reason: format!(
-                        "background {:?} estimated operations {} exceeded per-work limit {limit}",
-                        request.class, request.estimated_operations
-                    ),
-                };
-            }
+        if let Some(limit) = self.max_background_operations
+            && request.estimated_operations > limit
+        {
+            return QosAdmission::Defer {
+                code: QosAdmissionCode::PerWorkLimitExceeded,
+                reason: format!(
+                    "background {:?} estimated operations {} exceeded per-work limit {limit}",
+                    request.class, request.estimated_operations
+                ),
+            };
         }
         if let Some(limit) = self.max_total_background_operations {
             let total = state

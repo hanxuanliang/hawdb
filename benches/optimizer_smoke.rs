@@ -244,9 +244,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 cost: 2254,
             },
             fingerprint_contains: "PropertyContains",
-            decision_contains: &[
-                "selected physical plan cost: estimated_rows=250 cost=2254",
-            ],
+            decision_contains: &["selected physical plan cost: estimated_rows=250 cost=2254"],
         },
         OptimizerSmokeCase {
             name: "low_selectivity_scan",
@@ -526,9 +524,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 cost: 12_004,
             },
             fingerprint_contains: "OptionalDegreeExec",
-            decision_contains: &[
-                "selected physical plan cost: estimated_rows=1000 cost=12004",
-            ],
+            decision_contains: &["selected physical plan cost: estimated_rows=1000 cost=12004"],
         },
         OptimizerSmokeCase {
             name: "endpoint_existence_cartesian_product",
@@ -585,9 +581,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 cost: 2004,
             },
             fingerprint_contains: "PropertyIn",
-            decision_contains: &[
-                "selected physical plan cost: estimated_rows=30 cost=2004",
-            ],
+            decision_contains: &["selected physical plan cost: estimated_rows=30 cost=2004"],
         },
         OptimizerSmokeCase {
             name: "thread_optional_source_filter",
@@ -598,9 +592,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 cost: 2004,
             },
             fingerprint_contains: "Or(False,PropertyEq",
-            decision_contains: &[
-                "selected physical plan cost: estimated_rows=100 cost=2004",
-            ],
+            decision_contains: &["selected physical plan cost: estimated_rows=100 cost=2004"],
         },
         OptimizerSmokeCase {
             name: "community_summary_presence_filter",
@@ -611,9 +603,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 cost: 2004,
             },
             fingerprint_contains: "PropertyIsNotNull",
-            decision_contains: &[
-                "selected physical plan cost: estimated_rows=900 cost=2004",
-            ],
+            decision_contains: &["selected physical plan cost: estimated_rows=900 cost=2004"],
         },
         OptimizerSmokeCase {
             name: "normalized_space_exclusion_filter",
@@ -624,9 +614,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 cost: 2004,
             },
             fingerprint_contains: "PropertyNotEq",
-            decision_contains: &[
-                "selected physical plan cost: estimated_rows=900 cost=2004",
-            ],
+            decision_contains: &["selected physical plan cost: estimated_rows=900 cost=2004"],
         },
         OptimizerSmokeCase {
             name: "thread_candidate_normalized_space_multi_seek",

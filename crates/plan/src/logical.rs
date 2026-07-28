@@ -1639,15 +1639,14 @@ pub fn plan_with_params(
                 &scope,
                 parameters,
             )?;
-            if let Some(predicate) = predicate {
-                if let Some(predicate) =
+            if let Some(predicate) = predicate
+                && let Some(predicate) =
                     pushdown_relationship_property_eq_predicates(&mut input, predicate)
-                {
-                    input = LogicalPlan::Filter {
-                        predicate,
-                        input: Box::new(input),
-                    };
-                }
+            {
+                input = LogicalPlan::Filter {
+                    predicate,
+                    input: Box::new(input),
+                };
             }
             if let Some(collect_with) = &query.collect_with {
                 return plan_collect_with_match_return(input, query, collect_with);
@@ -1849,17 +1848,17 @@ pub fn plan_with_params(
                 }
                 return Ok(input);
             }
-            if let Some(optional) = &query.optional_expand {
-                if let Some(count_alias) = optional_direct_count_alias(query, optional)? {
-                    return plan_optional_direct_count_return(
-                        input,
-                        &scope,
-                        query,
-                        optional,
-                        count_alias,
-                        parameters,
-                    );
-                }
+            if let Some(optional) = &query.optional_expand
+                && let Some(count_alias) = optional_direct_count_alias(query, optional)?
+            {
+                return plan_optional_direct_count_return(
+                    input,
+                    &scope,
+                    query,
+                    optional,
+                    count_alias,
+                    parameters,
+                );
             }
             if let Some(optional) = &query.optional_expand {
                 let optional_row_projection = optional_direct_row_projection(query, optional);
@@ -2369,14 +2368,12 @@ fn validate_aggregate_with_match_return(
                 "WITH aggregate RETURN currently supports only projected columns".to_string(),
             ));
         }
-        if let Some(lookup) = &query.post_with_match {
-            if matches!(&item.expression, ReturnExpression::Variable(variable) if variable == &lookup.variable)
-            {
-                return Err(SkeinError::Semantic(
-                    "post-WITH MATCH RETURN does not support whole lookup node projection"
-                        .to_string(),
-                ));
-            }
+        if let Some(lookup) = &query.post_with_match
+            && matches!(&item.expression, ReturnExpression::Variable(variable) if variable == &lookup.variable)
+        {
+            return Err(SkeinError::Semantic(
+                "post-WITH MATCH RETURN does not support whole lookup node projection".to_string(),
+            ));
         }
         if !return_expression_is_scoped(&item.expression, &post_lookup_scope, &column_names) {
             return Err(SkeinError::Semantic(format!(
@@ -2390,13 +2387,13 @@ fn validate_aggregate_with_match_return(
         &post_lookup_scope,
         &column_names,
     )?;
-    if let Some(lookup) = &query.post_with_match {
-        if !column_names.contains(&lookup.column) {
-            return Err(SkeinError::Semantic(format!(
-                "unknown post-WITH MATCH lookup column '{}'",
-                lookup.column
-            )));
-        }
+    if let Some(lookup) = &query.post_with_match
+        && !column_names.contains(&lookup.column)
+    {
+        return Err(SkeinError::Semantic(format!(
+            "unknown post-WITH MATCH lookup column '{}'",
+            lookup.column
+        )));
     }
     Ok(())
 }

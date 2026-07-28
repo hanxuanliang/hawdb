@@ -522,12 +522,12 @@ fn expected_rows_matches(
         Some(kind) => {
             return Err(SkeinError::Semantic(format!(
                 "unsupported expected_rows kind '{kind}'"
-            )))
+            )));
         }
         None => {
             return Err(SkeinError::Semantic(
                 "expected_rows missing kind".to_string(),
-            ))
+            ));
         }
     }
     Ok(())

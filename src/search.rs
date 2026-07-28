@@ -7,10 +7,16 @@ use crate::schema::Catalog;
 use crate::store::{GraphStore, NodeId, NodeRecord};
 use crate::value::Value;
 use chrono::{DateTime, NaiveDate, NaiveDateTime};
+use simsimd::SpatialSimilarity;
 use skein_optimizer::{
-    normalize_search_enum_value, push_search_predicates, search_field_is_enum_like,
-    SearchPredicate, SearchPredicateOp, SearchPredicateSet, SearchScalarValue,
-    SearchScanPredicateSupport,
+    normalize_search_enum_value, plan_vector_search, push_search_predicates,
+    search_field_is_enum_like, OptimizerContext, QueryFamily, ResourceHints, SearchPredicate,
+    SearchPredicateOp, SearchPredicateSet, SearchScalarValue, SearchScanPredicateSupport,
+    VectorPrecision,
+};
+use skein_plan::{VectorCandidateSource, VectorSearchLogicalPlan};
+use skein_storage::{
+    EnumDictionaryStats, FieldSummary, RangeBound, ScanPredicate, SegmentPruner, SegmentSummary,
 };
 use std::cell::RefCell;
 use std::cmp::Ordering;
@@ -453,6 +459,16 @@ impl VectorSearchBackend<'_> {
             Self::Turbovec(_) => "turbovec_projection",
         }
     }
+
+    fn candidate_source(self) -> VectorCandidateSource {
+        match self {
+            Self::Scalar | Self::CompressedRequiredUnavailable => VectorCandidateSource::Scalar,
+            #[cfg(not(feature = "turbovec"))]
+            Self::_Lifetime(_) => VectorCandidateSource::Scalar,
+            #[cfg(feature = "turbovec")]
+            Self::Turbovec(_) => VectorCandidateSource::Quantized,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -713,12 +729,12 @@ impl SearchIndex {
         delta: SearchProjectionDelta,
     ) -> Result<SearchProjectionDeltaReport> {
         let operation_count = delta.operation_count();
-        if let Some(limit) = delta.max_operations {
-            if operation_count > limit {
-                return Err(SkeinError::Storage(format!(
+        if let Some(limit) = delta.max_operations
+            && operation_count > limit
+        {
+            return Err(SkeinError::Storage(format!(
                     "incremental projection update operation count {operation_count} exceeded configured limit {limit}"
                 )));
-            }
         }
 
         let mut next_embedding_dimension = self.embedding_dimension;
@@ -727,13 +743,13 @@ impl SearchIndex {
                 continue;
             };
             let dimension = embedding.len();
-            if let Some(manifest) = &self.embedding_manifest {
-                if manifest.dimension != dimension {
-                    return Err(SkeinError::Storage(format!(
-                        "embedding dimension mismatch: manifest expects {}, row has {dimension}",
-                        manifest.dimension
-                    )));
-                }
+            if let Some(manifest) = &self.embedding_manifest
+                && manifest.dimension != dimension
+            {
+                return Err(SkeinError::Storage(format!(
+                    "embedding dimension mismatch: manifest expects {}, row has {dimension}",
+                    manifest.dimension
+                )));
             }
             match next_embedding_dimension {
                 Some(existing) if existing != dimension => {
@@ -1520,6 +1536,31 @@ impl SearchIndex {
         predicate_pushdown.report.field_summaries = filtered.field_summaries;
         let filtered_documents = filtered.documents;
         let filtered_document_count = filtered_documents.len();
+        if let Some(dimension) = self.embedding_dimension {
+            let candidate_limit = limit.max(options.rank_window.unwrap_or(0)).max(1);
+            let logical = VectorSearchLogicalPlan {
+                embedding_dimension: dimension,
+                filter_fields: predicate_pushdown
+                    .predicates
+                    .predicates()
+                    .iter()
+                    .map(|predicate| predicate.field().name().to_string())
+                    .collect(),
+                candidate_source: vector_backend.candidate_source(),
+                candidate_limit,
+                top_k: limit.max(1),
+            };
+            let context = OptimizerContext::default()
+                .with_query_family(QueryFamily::VectorSearch)
+                .with_resource_hints(ResourceHints {
+                    priority: 128,
+                    max_memory_bytes: None,
+                    max_parallelism: 1,
+                });
+            let planned = plan_vector_search(&logical, &context)
+                .expect("validated search options must produce a vector physical plan");
+            debug_assert_eq!(planned.properties.precision, VectorPrecision::RawReranked);
+        }
         let candidate_set = SearchCandidateSetReport {
             id_space: "search_projection_document_id".to_string(),
             representation: "sorted_document_ids".to_string(),
@@ -1777,13 +1818,13 @@ impl SearchIndex {
     }
 
     fn validate_or_set_dimension(&mut self, dimension: usize) -> Result<()> {
-        if let Some(manifest) = &self.embedding_manifest {
-            if manifest.dimension != dimension {
-                return Err(SkeinError::Storage(format!(
-                    "embedding dimension mismatch: manifest expects {}, row has {dimension}",
-                    manifest.dimension
-                )));
-            }
+        if let Some(manifest) = &self.embedding_manifest
+            && manifest.dimension != dimension
+        {
+            return Err(SkeinError::Storage(format!(
+                "embedding dimension mismatch: manifest expects {}, row has {dimension}",
+                manifest.dimension
+            )));
         }
         match self.embedding_dimension {
             Some(existing) if existing != dimension => Err(SkeinError::Storage(format!(
@@ -1839,13 +1880,13 @@ impl SearchIndex {
                 }
                 ["embedding_dimension", raw] => {
                     let dimension = parse_usize(raw, "embedding dimension")?;
-                    if let Some(manifest) = &self.embedding_manifest {
-                        if manifest.dimension != dimension {
-                            return Err(SkeinError::Storage(format!(
+                    if let Some(manifest) = &self.embedding_manifest
+                        && manifest.dimension != dimension
+                    {
+                        return Err(SkeinError::Storage(format!(
                                 "embedding manifest dimension {} does not match snapshot dimension {dimension}",
                                 manifest.dimension
                             )));
-                        }
                     }
                     self.embedding_dimension = Some(dimension);
                 }
@@ -2192,7 +2233,7 @@ fn search_projection_probe_production_filter_pruning_report(
         });
     };
 
-    let samples = NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
+    let mut samples = NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
         .iter()
         .map(|field| search_projection_probe_production_filter_sample(descriptor, field))
         .collect::<Vec<_>>();
@@ -2201,6 +2242,13 @@ fn search_projection_probe_production_filter_pruning_report(
         .filter(|sample| !sample.ready)
         .map(|sample| sample.field)
         .collect::<Vec<_>>();
+    let ready_field_count = NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
+        .len()
+        .saturating_sub(missing_fields.len());
+    samples.push(search_projection_probe_production_filter_sample(
+        descriptor,
+        SEARCH_DOCUMENT_ID_FIELD,
+    ));
     let payload_read_avoidance_ready = samples
         .iter()
         .any(|sample| sample.segment_pruned_document_count > 0);
@@ -2212,7 +2260,7 @@ fn search_projection_probe_production_filter_pruning_report(
         "payload_read_avoidance_ready": payload_read_avoidance_ready,
         "explain_analyze_ready": explain_analyze_ready,
         "sample_count": samples.len(),
-        "ready_field_count": samples.len().saturating_sub(missing_fields.len()),
+        "ready_field_count": ready_field_count,
         "required_field_count": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len(),
         "missing_fields": missing_fields,
         "samples": samples
@@ -2226,6 +2274,7 @@ fn search_projection_probe_production_filter_pruning_report(
 struct SearchProjectionProbeProductionFilterSample<'a> {
     field: &'a str,
     operation: &'static str,
+    operation_family: &'static str,
     value_kind: &'static str,
     ready: bool,
     capability_ready: bool,
@@ -2240,6 +2289,8 @@ struct SearchProjectionProbeProductionFilterSample<'a> {
     value_summary_used: bool,
     numeric_range_summary_used: bool,
     timestamp_range_summary_used: bool,
+    normalized_default_equality: bool,
+    unique_key_lookup: bool,
     explain_analyze_ready: bool,
 }
 
@@ -2248,6 +2299,7 @@ impl SearchProjectionProbeProductionFilterSample<'_> {
         serde_json::json!({
             "field": self.field,
             "operation": self.operation,
+            "operation_family": self.operation_family,
             "value_kind": self.value_kind,
             "ready": self.ready,
             "capability_ready": self.capability_ready,
@@ -2262,6 +2314,8 @@ impl SearchProjectionProbeProductionFilterSample<'_> {
             "value_summary_used": self.value_summary_used,
             "numeric_range_summary_used": self.numeric_range_summary_used,
             "timestamp_range_summary_used": self.timestamp_range_summary_used,
+            "normalized_default_equality": self.normalized_default_equality,
+            "unique_key_lookup": self.unique_key_lookup,
             "explain_analyze": {
                 "ready": self.explain_analyze_ready,
                 "operator": "search_projection_segment_scan",
@@ -2282,6 +2336,7 @@ fn search_projection_probe_production_filter_sample<'a>(
     field: &'a str,
 ) -> SearchProjectionProbeProductionFilterSample<'a> {
     let value_kind = search_projection_probe_production_filter_value_kind(field);
+    let operation_family = search_projection_probe_production_filter_operation_family(field);
     let (operation, predicate) =
         search_projection_probe_production_filter_predicate(descriptor, field);
     let predicates = SearchPredicateSet::new(vec![predicate]);
@@ -2300,9 +2355,17 @@ fn search_projection_probe_production_filter_sample<'a>(
     let timestamp_range_summary_used = field_reports
         .iter()
         .any(|summary| summary.timestamp_range_summary_used);
-    let capability_ready = match value_kind {
+    let unique_key_lookup = field == SEARCH_DOCUMENT_ID_FIELD
+        && descriptor.segments.iter().all(|segment| {
+            segment.metadata.get(field).is_some_and(|summary| {
+                summary.present_count == segment.document_count
+                    && summary.values.len() == segment.document_count
+            })
+        });
+    let capability_ready = match operation_family {
         "numeric_range" => numeric_range_summary_used,
         "timestamp_range" => timestamp_range_summary_used || numeric_range_summary_used,
+        "unique_key" => unique_key_lookup,
         _ => value_summary_used,
     };
     let ready = pruning.persisted_segment_descriptor_used
@@ -2318,6 +2381,7 @@ fn search_projection_probe_production_filter_sample<'a>(
     SearchProjectionProbeProductionFilterSample {
         field,
         operation,
+        operation_family,
         value_kind,
         ready,
         capability_ready,
@@ -2332,6 +2396,8 @@ fn search_projection_probe_production_filter_sample<'a>(
         value_summary_used,
         numeric_range_summary_used,
         timestamp_range_summary_used,
+        normalized_default_equality: operation_family == "normalized_default_equality",
+        unique_key_lookup,
         explain_analyze_ready,
     }
 }
@@ -2392,9 +2458,24 @@ fn search_projection_probe_production_filter_predicate(
                 })
         })
         .unwrap_or_default();
-    match search_projection_probe_production_filter_value_kind(field) {
+    match search_projection_probe_production_filter_operation_family(field) {
         "numeric_range" | "timestamp_range" => ("gte", SearchPredicate::gte(field, value)),
+        "enum_in_list" => (
+            "in",
+            SearchPredicate::in_list(field, std::iter::once(value)),
+        ),
         _ => ("eq", SearchPredicate::eq(field, value)),
+    }
+}
+
+fn search_projection_probe_production_filter_operation_family(field: &str) -> &'static str {
+    match field {
+        SEARCH_DOCUMENT_ID_FIELD => "unique_key",
+        "unit_type" | "lifecycle_state" => "enum_in_list",
+        "importance" | "confidence" => "numeric_range",
+        "created_at" | "updated_at" | "event_start" | "event_end" => "timestamp_range",
+        "is_latest" => "normalized_default_equality",
+        _ => "equality",
     }
 }
 
@@ -2718,11 +2799,20 @@ fn vector_scores_for_backend(
                 .collect::<BTreeSet<_>>();
             let candidate_limit = limit.max(rank_window.unwrap_or(0)).max(1);
             match projection.search(query_embedding, candidate_limit, Some(&allowlist)) {
-                Ok(hits) => hits
-                    .into_iter()
-                    .filter(|hit| hit.score > 0.0)
-                    .map(|hit| (hit.id, hit.score))
-                    .collect(),
+                Ok(hits) => {
+                    let raw_documents = documents
+                        .iter()
+                        .map(|document| (document.id.as_str(), *document))
+                        .collect::<BTreeMap<_, _>>();
+                    hits.into_iter()
+                        .filter_map(|hit| {
+                            let document = raw_documents.get(hit.id.as_str())?;
+                            let score =
+                                cosine_similarity(query_embedding, document.embedding.as_deref()?)?;
+                            (score > 0.0).then_some((hit.id, score))
+                        })
+                        .collect()
+                }
                 Err(error) => {
                     fallback_reason_codes.push(SearchFallbackReasonCode::VectorIndexEmpty);
                     fallback_reasons.push(format!(
@@ -3402,10 +3492,59 @@ impl SearchFilterSegmentSummary {
         if predicates.is_unsatisfiable() {
             return false;
         }
-        predicates
-            .predicates()
-            .iter()
-            .all(|predicate| self.may_match_predicate(predicate))
+        let summary = self.storage_summary();
+        predicates.predicates().iter().all(|predicate| {
+            if !self.may_match_predicate(predicate) {
+                return false;
+            }
+            search_storage_scan_predicate(predicate).map_or_else(
+                || true,
+                |predicate| {
+                    SegmentPruner::new(&summary)
+                        .evaluate(&predicate)
+                        .should_open_payload()
+                },
+            )
+        })
+    }
+
+    fn storage_summary(&self) -> SegmentSummary {
+        let mut segment = SegmentSummary::new(0, self.document_count as u64);
+        for field in self
+            .present_counts
+            .keys()
+            .chain(self.values.keys())
+            .chain(self.numeric_ranges.keys())
+            .chain(self.timestamp_ranges.keys())
+        {
+            if segment.field(field).is_some() {
+                continue;
+            }
+            let present_count = self.present_counts.get(field).copied().unwrap_or_default() as u64;
+            let mut summary = FieldSummary::new(self.document_count as u64)
+                .with_presence_counts(present_count, 0, self.document_count as u64 - present_count)
+                .expect("search summary counts must match segment rows");
+            if let Some(range) = self.numeric_ranges.get(field) {
+                summary = summary
+                    .with_numeric_min_max(range.min, range.max)
+                    .expect("search numeric summary must be finite and ordered");
+            }
+            if let Some(range) = self.timestamp_ranges.get(field) {
+                summary = summary
+                    .with_datetime_min_max(range.min_epoch_millis, range.max_epoch_millis)
+                    .expect("search timestamp summary must be ordered");
+            }
+            if let Some(values) = self.values.get(field) {
+                summary = summary.with_enum_dictionary(EnumDictionaryStats::complete(
+                    values
+                        .iter()
+                        .map(|value| search_segment_summary_value(field, value))
+                        .map(Value::String),
+                ));
+            }
+            segment.insert_field(field.clone(), summary);
+        }
+        segment
     }
 
     fn may_match_predicate(&self, predicate: &SearchPredicate) -> bool {
@@ -3589,10 +3728,52 @@ impl SearchSegmentDescriptorEntry {
         if predicates.is_unsatisfiable() {
             return false;
         }
-        predicates
-            .predicates()
-            .iter()
-            .all(|predicate| self.may_match_predicate(predicate))
+        let summary = self.storage_summary();
+        predicates.predicates().iter().all(|predicate| {
+            if !self.may_match_predicate(predicate) {
+                return false;
+            }
+            search_storage_scan_predicate(predicate).map_or_else(
+                || true,
+                |predicate| {
+                    SegmentPruner::new(&summary)
+                        .evaluate(&predicate)
+                        .should_open_payload()
+                },
+            )
+        })
+    }
+
+    fn storage_summary(&self) -> SegmentSummary {
+        let mut segment = SegmentSummary::new(0, self.document_count as u64);
+        for (field, persisted) in &self.metadata {
+            let mut summary = FieldSummary::new(self.document_count as u64)
+                .with_presence_counts(
+                    persisted.present_count as u64,
+                    0,
+                    self.document_count as u64 - persisted.present_count as u64,
+                )
+                .expect("persisted search summary counts must match segment rows");
+            if let Some(range) = persisted.numeric_range {
+                summary = summary
+                    .with_numeric_min_max(range.min, range.max)
+                    .expect("persisted numeric summary must be finite and ordered");
+            }
+            if let Some(range) = persisted.timestamp_range {
+                summary = summary
+                    .with_datetime_min_max(range.min_epoch_millis, range.max_epoch_millis)
+                    .expect("persisted timestamp summary must be ordered");
+            }
+            summary = summary.with_enum_dictionary(EnumDictionaryStats::complete(
+                persisted
+                    .values
+                    .iter()
+                    .map(|value| search_segment_summary_value(field, value))
+                    .map(Value::String),
+            ));
+            segment.insert_field(field.clone(), summary);
+        }
+        segment
     }
 
     fn may_match_predicate(&self, predicate: &SearchPredicate) -> bool {
@@ -3663,6 +3844,53 @@ impl SearchSegmentDescriptorEntry {
             expected,
         )
     }
+}
+
+fn search_storage_scan_predicate(predicate: &SearchPredicate) -> Option<ScanPredicate> {
+    let property = predicate.field().name().to_string();
+    let summary_value = |value: &SearchScalarValue| {
+        Value::String(search_segment_summary_value(
+            predicate.field().name(),
+            value.as_str(),
+        ))
+    };
+    match predicate.op() {
+        SearchPredicateOp::Eq(value) => Some(ScanPredicate::Eq {
+            property,
+            value: summary_value(value),
+        }),
+        SearchPredicateOp::In(values) => Some(ScanPredicate::In {
+            property,
+            values: values.iter().map(summary_value).collect(),
+        }),
+        SearchPredicateOp::NotIn(_) => None,
+        SearchPredicateOp::Gt(value) => Some(ScanPredicate::Range {
+            property,
+            lower: Some(RangeBound::exclusive(search_range_summary_value(value))),
+            upper: None,
+        }),
+        SearchPredicateOp::Gte(value) => Some(ScanPredicate::Range {
+            property,
+            lower: Some(RangeBound::inclusive(search_range_summary_value(value))),
+            upper: None,
+        }),
+        SearchPredicateOp::Lt(value) => Some(ScanPredicate::Range {
+            property,
+            lower: None,
+            upper: Some(RangeBound::exclusive(search_range_summary_value(value))),
+        }),
+        SearchPredicateOp::Lte(value) => Some(ScanPredicate::Range {
+            property,
+            lower: None,
+            upper: Some(RangeBound::inclusive(search_range_summary_value(value))),
+        }),
+    }
+}
+
+fn search_range_summary_value(value: &SearchScalarValue) -> Value {
+    metadata_numeric_value(value.as_str())
+        .map(Value::Float)
+        .unwrap_or_else(|| Value::String(value.as_str().to_string()))
 }
 
 impl SearchSegmentFieldSummary {
@@ -3760,7 +3988,7 @@ fn search_segment_summary_value(key: &str, value: &str) -> String {
             .map(str::to_string)
             .unwrap_or_else(|| normalize_search_enum_value(value)),
         key if search_field_is_enum_like(key) => normalize_search_enum_value(value),
-        _ => value.to_string(),
+        _ => normalize_metadata_filter_value(value),
     }
 }
 
@@ -4277,25 +4505,26 @@ fn normalize_english_suffixes(token: &str) -> Vec<String> {
     if token.len() <= 4 || token.contains('_') || token.chars().any(|ch| ch.is_ascii_digit()) {
         return Vec::new();
     }
-    if let Some(stem) = token.strip_suffix("ies") {
-        if stem.len() >= 2 {
-            return vec![format!("{stem}y")];
-        }
+    if let Some(stem) = token.strip_suffix("ies")
+        && stem.len() >= 2
+    {
+        return vec![format!("{stem}y")];
     }
-    if let Some(stem) = token.strip_suffix("ing") {
-        if stem.len() >= 3 {
-            return suffix_stem_variants(trim_doubled_suffix_consonant(stem));
-        }
+    if let Some(stem) = token.strip_suffix("ing")
+        && stem.len() >= 3
+    {
+        return suffix_stem_variants(trim_doubled_suffix_consonant(stem));
     }
-    if let Some(stem) = token.strip_suffix("ed") {
-        if stem.len() >= 3 {
-            return suffix_stem_variants(trim_doubled_suffix_consonant(stem));
-        }
+    if let Some(stem) = token.strip_suffix("ed")
+        && stem.len() >= 3
+    {
+        return suffix_stem_variants(trim_doubled_suffix_consonant(stem));
     }
-    if let Some(stem) = token.strip_suffix('s') {
-        if stem.len() >= 3 && !stem.ends_with('s') {
-            return vec![stem.to_string()];
-        }
+    if let Some(stem) = token.strip_suffix('s')
+        && stem.len() >= 3
+        && !stem.ends_with('s')
+    {
+        return vec![stem.to_string()];
     }
     Vec::new()
 }
@@ -4381,20 +4610,13 @@ fn cosine_similarity(left: &[f32], right: &[f32]) -> Option<f64> {
     if left.len() != right.len() || left.is_empty() {
         return None;
     }
-    let mut dot = 0.0_f64;
-    let mut left_norm = 0.0_f64;
-    let mut right_norm = 0.0_f64;
-    for (l, r) in left.iter().zip(right.iter()) {
-        let l = f64::from(*l);
-        let r = f64::from(*r);
-        dot += l * r;
-        left_norm += l * l;
-        right_norm += r * r;
-    }
-    if left_norm == 0.0 || right_norm == 0.0 {
+    let dot = f32::dot(left, right)?;
+    let left_norm_squared = f32::dot(left, left)?;
+    let right_norm_squared = f32::dot(right, right)?;
+    if left_norm_squared == 0.0 || right_norm_squared == 0.0 {
         return None;
     }
-    Some((dot / (left_norm.sqrt() * right_norm.sqrt())).max(0.0))
+    Some((dot / (left_norm_squared.sqrt() * right_norm_squared.sqrt())).clamp(0.0, 1.0))
 }
 
 fn encode_embedding(embedding: Option<&[f32]>) -> String {
@@ -7182,7 +7404,7 @@ mod tests {
         let explicit_result = index.search_with_turbovec_projection(
             &projection,
             "",
-            Some(&[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            Some(&[0.8, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
             SearchMode::Vector,
             SearchQueryOptions {
                 limit: 10,
@@ -7209,7 +7431,7 @@ mod tests {
             active_embedding_dimension: Some(8),
         });
 
-        assert_eq!(explicit_result.hits[0].id, "memory:b");
+        assert_eq!(explicit_result.hits[0].id, "memory:a");
         assert_eq!(automatic_result.hits[0].id, "memory:b");
         assert_eq!(
             automatic_result.retrievers[0].backend,
@@ -7948,7 +8170,7 @@ mod tests {
         assert_eq!(production_filter_pruning["explain_analyze_ready"], true);
         assert_eq!(
             production_filter_pruning["sample_count"],
-            NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len()
+            NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len() + 1
         );
         assert_eq!(
             production_filter_pruning["ready_field_count"],
@@ -7965,12 +8187,12 @@ mod tests {
                 "missing production filter pruning sample for {field}"
             );
         }
-        assert!(samples
-            .iter()
-            .any(|sample| sample["segment_pruned_document_count"]
+        assert!(samples.iter().any(|sample| {
+            sample["segment_pruned_document_count"]
                 .as_u64()
                 .unwrap_or(0)
-                > 0));
+                > 0
+        }));
         assert!(samples
             .iter()
             .all(|sample| sample["explain_analyze"]["ready"] == true));
@@ -8449,7 +8671,7 @@ mod tests {
         let result = index.search_with_turbovec_projection(
             &projection,
             "",
-            Some(&[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            Some(&[0.8, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
             SearchMode::Vector,
             SearchQueryOptions {
                 limit: 10,
@@ -8465,6 +8687,7 @@ mod tests {
         assert_eq!(result.retrievers[0].name, "vector");
         assert_eq!(result.retrievers[0].backend, "turbovec_projection");
         assert!(result.retrievers[0].available);
+        assert!((result.retrievers[0].top_candidates[0].score - 0.8).abs() < 1e-6);
         assert_eq!(result.candidate_set.cardinality, 1);
         assert_eq!(result.candidate_set.filtered_out_count, 1);
         assert_eq!(result.candidate_set.policy_epoch, Some(42));

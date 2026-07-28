@@ -458,10 +458,10 @@ fn insert_cutover_evidence_json(
     if ready_preflight && ready_engine_kind.is_none() {
         blockers.push("shadow ready response missing engine_kind".to_string());
     }
-    if let Some(engine_kind) = ready_engine_kind {
-        if engine_kind != "previous_wrapper" {
-            blockers.push("shadow ready engine_kind is not previous_wrapper".to_string());
-        }
+    if let Some(engine_kind) = ready_engine_kind
+        && engine_kind != "previous_wrapper"
+    {
+        blockers.push("shadow ready engine_kind is not previous_wrapper".to_string());
     }
     if ready_preflight
         && ready_engine_kind == Some("previous_wrapper")

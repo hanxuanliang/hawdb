@@ -1,3 +1,4 @@
+pub mod context;
 pub mod cost;
 pub mod graph;
 pub mod logical;
@@ -9,7 +10,11 @@ pub mod rule;
 pub mod search;
 pub mod stage;
 pub mod trace;
+pub mod vector;
 
+pub use context::{
+    ExplainMode, OptimizerContext, QueryFamily, ResourceHints, StatementClass, TraceSink,
+};
 pub use cost::{PlanCost, PlanCostBreakdown};
 pub use graph::{
     CascadesOptimizer, FastPathPhysicalPhase, FastPathPhysicalPlanRoot, LogicalPhase,
@@ -43,3 +48,7 @@ pub use stage::{
     StageRuleBatch, StageStats, StageTrace,
 };
 pub use trace::{OptimizerConfig, OptimizerTrace};
+pub use vector::{
+    plan_vector_search, validate_vector_pipeline, PlannedVectorSearch, VectorPlanError,
+    VectorPlanProperties,
+};

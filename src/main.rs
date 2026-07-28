@@ -1716,10 +1716,10 @@ fn add_cutover_evidence_report(
     if ready_preflight && ready_engine_kind.is_none() {
         blockers.push("shadow ready response missing engine_kind".to_string());
     }
-    if let Some(engine_kind) = ready_engine_kind {
-        if engine_kind != "previous_wrapper" {
-            blockers.push("shadow ready engine_kind is not previous_wrapper".to_string());
-        }
+    if let Some(engine_kind) = ready_engine_kind
+        && engine_kind != "previous_wrapper"
+    {
+        blockers.push("shadow ready engine_kind is not previous_wrapper".to_string());
     }
     if ready_preflight
         && ready_engine_kind == Some("previous_wrapper")
@@ -2163,13 +2163,13 @@ fn external_shadow_adapter_smoke_report_json(
         },
         "adapter_smoke_ready": missing_capabilities.is_empty() && dual_engine_ready,
     });
-    if let Some(trace_path) = trace_path {
-        if let Some(object) = json.as_object_mut() {
-            object.insert(
-                "shadow_trace".to_string(),
-                external_shadow_trace_report_json(trace_path, request_count),
-            );
-        }
+    if let Some(trace_path) = trace_path
+        && let Some(object) = json.as_object_mut()
+    {
+        object.insert(
+            "shadow_trace".to_string(),
+            external_shadow_trace_report_json(trace_path, request_count),
+        );
     }
     json
 }

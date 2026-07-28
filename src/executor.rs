@@ -2083,46 +2083,44 @@ fn execute_bindings_with_limit(
             },
         ),
         PhysicalPlan::FilterExec { predicate, input } => {
-            if let PhysicalPlan::SeqNodeScan { variable, label } = input.as_ref() {
-                if let Ok(filter) = property_filter_from_predicate(predicate) {
-                    return execute_node_scan_with_optional_filter(
-                        variable,
-                        label,
-                        Some((predicate, &filter)),
-                        catalog,
-                        store,
-                        execution_limit,
-                    );
-                }
+            if let PhysicalPlan::SeqNodeScan { variable, label } = input.as_ref()
+                && let Ok(filter) = property_filter_from_predicate(predicate)
+            {
+                return execute_node_scan_with_optional_filter(
+                    variable,
+                    label,
+                    Some((predicate, &filter)),
+                    catalog,
+                    store,
+                    execution_limit,
+                );
             }
             if let PhysicalPlan::AdjacencyExpandExec {
                 rel_variable: Some(rel_variable),
                 input: expand_input,
                 ..
             } = input.as_ref()
-            {
-                if let Some(filter) =
+                && let Some(filter) =
                     exact_relationship_scan_filter_from_predicate(predicate, rel_variable)
-                {
-                    let input = execute_adjacency_expand(
-                        input,
-                        expand_input,
-                        catalog,
-                        store,
-                        execution_limit,
-                        Some(&filter),
-                    )?;
-                    let mut output = Vec::new();
-                    for binding in input {
-                        if evaluate_predicate(predicate, catalog, store, &binding) {
-                            output.push(binding);
-                            if execution_limit.is_reached(output.len()) {
-                                return Ok(output);
-                            }
+            {
+                let input = execute_adjacency_expand(
+                    input,
+                    expand_input,
+                    catalog,
+                    store,
+                    execution_limit,
+                    Some(&filter),
+                )?;
+                let mut output = Vec::new();
+                for binding in input {
+                    if evaluate_predicate(predicate, catalog, store, &binding) {
+                        output.push(binding);
+                        if execution_limit.is_reached(output.len()) {
+                            return Ok(output);
                         }
                     }
-                    return Ok(output);
                 }
+                return Ok(output);
             }
             let input = execute_bindings(input, catalog, store)?;
             let mut output = Vec::new();
@@ -3665,12 +3663,11 @@ struct BoundedExpand<'a> {
 
 impl<'a> BoundedExpand<'a> {
     fn collect(&self, current: NodeId, depth: usize, targets: &mut Vec<&'a NodeRecord>) {
-        if depth >= self.min_hops {
-            if let Some(node) = self.store.node(current) {
-                if node_matches_label_pattern(node, self.target_label_ids.as_deref()) {
-                    targets.push(node);
-                }
-            }
+        if depth >= self.min_hops
+            && let Some(node) = self.store.node(current)
+            && node_matches_label_pattern(node, self.target_label_ids.as_deref())
+        {
+            targets.push(node);
         }
         if depth == self.max_hops {
             return;

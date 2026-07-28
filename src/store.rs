@@ -2550,15 +2550,15 @@ impl GraphStore {
             self.find_node_by_label_and_properties(source_label_id, &request.source_properties);
         let target =
             self.find_node_by_label_and_properties(target_label_id, &request.target_properties);
-        if let (Some(source), Some(target)) = (source, target) {
-            if let Some(relationship) = self.find_relationship_by_properties(
+        if let (Some(source), Some(target)) = (source, target)
+            && let Some(relationship) = self.find_relationship_by_properties(
                 source,
                 target,
                 rel_type_id,
                 &request.rel_properties,
-            ) {
-                return Ok((source, relationship, target, false));
-            }
+            )
+        {
+            return Ok((source, relationship, target, false));
         }
 
         let source = source.unwrap_or(NodeId(self.next_node_id));
@@ -4028,11 +4028,10 @@ impl GraphStore {
                     properties,
                     ..
                 } = op
+                    && *create_id == id
                 {
-                    if *create_id == id {
-                        properties.insert(assignment.property.clone(), value.clone());
-                        break;
-                    }
+                    properties.insert(assignment.property.clone(), value.clone());
+                    break;
                 }
             }
         }
@@ -4403,24 +4402,22 @@ impl GraphStore {
                     }
                 }
                 WalOp::SetNodeProperty { id, property, .. } => {
-                    if let Some(node) = self.nodes.get(id) {
-                        if let Some(document_id) =
+                    if let Some(node) = self.nodes.get(id)
+                        && let Some(document_id) =
                             search_projection_document_id_for_node(catalog, node)
-                        {
-                            if property == "id" {
-                                delete_document_ids.insert(document_id);
-                            }
-                            upsert_node_ids.insert(*id);
+                    {
+                        if property == "id" {
+                            delete_document_ids.insert(document_id);
                         }
+                        upsert_node_ids.insert(*id);
                     }
                 }
                 WalOp::DeleteNode { id } => {
-                    if let Some(node) = self.nodes.get(id) {
-                        if let Some(document_id) =
+                    if let Some(node) = self.nodes.get(id)
+                        && let Some(document_id) =
                             search_projection_document_id_for_node(catalog, node)
-                        {
-                            delete_document_ids.insert(document_id);
-                        }
+                    {
+                        delete_document_ids.insert(document_id);
                     }
                 }
                 WalOp::Batch(batch_ops) => self.collect_search_projection_graph_changes_for_ops(
@@ -4669,10 +4666,10 @@ impl GraphStore {
                 property,
                 state,
             } => {
-                if let Some(table_id) = catalog.table_id(table_kind, &table) {
-                    if let Some(id) = catalog.property_descriptor_id(table_id, &property) {
-                        catalog.set_property_state(id, state);
-                    }
+                if let Some(table_id) = catalog.table_id(table_kind, &table)
+                    && let Some(id) = catalog.property_descriptor_id(table_id, &property)
+                {
+                    catalog.set_property_state(id, state);
                 }
             }
             WalOp::GcPropertyDescriptor {
@@ -4680,10 +4677,10 @@ impl GraphStore {
                 table,
                 property,
             } => {
-                if let Some(table_id) = catalog.table_id(table_kind, &table) {
-                    if let Some(id) = catalog.property_descriptor_id(table_id, &property) {
-                        catalog.remove_property_descriptor(id);
-                    }
+                if let Some(table_id) = catalog.table_id(table_kind, &table)
+                    && let Some(id) = catalog.property_descriptor_id(table_id, &property)
+                {
+                    catalog.remove_property_descriptor(id);
                 }
             }
             WalOp::GcTableDescriptor { table_kind, table } => {
@@ -6534,12 +6531,12 @@ impl GraphStore {
                     }
                 },
             };
-            if let Some(max_entries) = config.max_entries {
-                if replayed_entries >= max_entries {
-                    return Err(SkeinError::Storage(format!(
-                        "WAL replay entry limit exceeded: max_wal_replay_entries={max_entries}"
-                    )));
-                }
+            if let Some(max_entries) = config.max_entries
+                && replayed_entries >= max_entries
+            {
+                return Err(SkeinError::Storage(format!(
+                    "WAL replay entry limit exceeded: max_wal_replay_entries={max_entries}"
+                )));
             }
             replayed_entries += 1;
             next_lsn = next_lsn.max(entry.lsn + 1);
@@ -6628,10 +6625,10 @@ impl GraphStore {
                 property,
                 state,
             } => {
-                if let Some(table_id) = catalog.table_id(table_kind, &table) {
-                    if let Some(id) = catalog.property_descriptor_id(table_id, &property) {
-                        catalog.set_property_state(id, state);
-                    }
+                if let Some(table_id) = catalog.table_id(table_kind, &table)
+                    && let Some(id) = catalog.property_descriptor_id(table_id, &property)
+                {
+                    catalog.set_property_state(id, state);
                 }
             }
             WalOp::GcPropertyDescriptor {
@@ -6639,10 +6636,10 @@ impl GraphStore {
                 table,
                 property,
             } => {
-                if let Some(table_id) = catalog.table_id(table_kind, &table) {
-                    if let Some(id) = catalog.property_descriptor_id(table_id, &property) {
-                        catalog.remove_property_descriptor(id);
-                    }
+                if let Some(table_id) = catalog.table_id(table_kind, &table)
+                    && let Some(id) = catalog.property_descriptor_id(table_id, &property)
+                {
+                    catalog.remove_property_descriptor(id);
                 }
             }
             WalOp::GcTableDescriptor { table_kind, table } => {

@@ -1,0 +1,70 @@
+[cypher]
+MATCH (m:Memory) WHERE m.id = 7 RETURN m.title AS title
+
+[logical]
+Project {
+    items: [
+        Projection {
+            expression: Property {
+                variable: "m",
+                property: "title",
+            },
+            name: "title",
+        },
+    ],
+    input: Filter {
+        predicate: PropertyEq {
+            variable: "m",
+            property: "id",
+            value: Int(
+                7,
+            ),
+        },
+        input: NodeScan {
+            variable: "m",
+            label: "Memory",
+        },
+    },
+}
+
+[optimized-logical]
+Project {
+    items: [
+        Projection {
+            expression: Property {
+                variable: "m",
+                property: "title",
+            },
+            name: "title",
+        },
+    ],
+    input: Filter {
+        predicate: PropertyEq {
+            variable: "m",
+            property: "id",
+            value: Int(
+                7,
+            ),
+        },
+        input: NodeScan {
+            variable: "m",
+            label: "Memory",
+        },
+    },
+}
+
+[physical]
+ProjectExec columns=[title]
+  IndexNodeSeek variable=m label=Memory property=id value=Int(7)
+
+[stage-trace]
+logical_grouping order=once input=1 output=3 applied=0 skipped=0
+access_path_selection order=bottom_up input=1 output=1 applied=1 skipped=0
+physical_search order=bottom_up input=3 output=1 applied=1 skipped=0
+selected_plan_costing order=once input=1 output=1 applied=0 skipped=0
+
+[cost]
+estimated_rows=1 total=4 cpu=1 random_io=3 sequential_io=0 output_rows=0
+
+[properties]
+distribution=single ordering=[] covering_fields=["Memory.id"] scan_pruning=index vector_precision=not_vector memory_budget=row_linear

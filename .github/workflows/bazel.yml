@@ -1,0 +1,97 @@
+name: Bazel
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+env:
+  BAZEL_BUILD_TARGETS: >-
+    //:skein
+  BAZEL_ROOT_TEST_TARGETS: >-
+    //:skein_unit_tests
+  BAZEL_CRATE_TEST_TARGETS: >-
+    //crates/api-types:skein_api_types_tests
+    //crates/core:skein_core_tests
+    //crates/cypher:skein_cypher_tests
+    //crates/ddl:skein_ddl_tests
+    //crates/executor:skein_executor_tests
+    //crates/optimizer:skein_optimizer_tests
+    //crates/optimizer:planner_golden_test
+    //crates/plan-cache:skein_plan_cache_tests
+    //crates/plan:skein_plan_tests
+    //crates/qos:skein_qos_tests
+    //crates/readiness:skein_readiness_tests
+    //crates/sql:skein_sql_tests
+    //crates/storage:skein_storage_tests
+
+jobs:
+  build:
+    name: Bazel Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          profile: minimal
+
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+          external-cache: false
+          disk-cache: bazel-build
+
+      - name: Build
+        run: bazel build $BAZEL_BUILD_TARGETS
+
+  test-root:
+    name: Bazel Test (Root)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          profile: minimal
+
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+          external-cache: false
+          disk-cache: bazel-test-root
+
+      - name: Test
+        run: bazel test --test_output=errors $BAZEL_ROOT_TEST_TARGETS
+
+  test-crates:
+    name: Bazel Test (Crates)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          profile: minimal
+
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+          external-cache: false
+          disk-cache: bazel-test-crates
+
+      - name: Test
+        run: bazel test --test_output=errors $BAZEL_CRATE_TEST_TARGETS

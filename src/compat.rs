@@ -1122,13 +1122,13 @@ fn assert_projected_graph_matches_fixture(
         }
     }
 
-    if let Some(expected_node) = check.page_rank_top_node {
-        if output.page_rank_top_node != Some(expected_node) {
-            return Err(SkeinError::Execution(format!(
-                "fixture '{}' check '{}' expected PageRank top node {}, got {:?}",
-                fixture.name, check.name, expected_node, output.page_rank_top_node
-            )));
-        }
+    if let Some(expected_node) = check.page_rank_top_node
+        && output.page_rank_top_node != Some(expected_node)
+    {
+        return Err(SkeinError::Execution(format!(
+            "fixture '{}' check '{}' expected PageRank top node {}, got {:?}",
+            fixture.name, check.name, expected_node, output.page_rank_top_node
+        )));
     }
     if !check.expected_communities.is_empty() {
         let communities = output
