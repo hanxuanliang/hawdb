@@ -1,31 +1,31 @@
 mod cli;
 
-use cli::background_maintenance_evidence::run_nowledge_background_maintenance_evidence;
-use cli::bounded_read_evidence::run_nowledge_bounded_read_evidence;
 use cli::fixture_contract::{nowledge_fixture_contract_json, nowledge_fixture_contract_usage};
 use cli::fixture_contract_check::run_nowledge_fixture_contract_command_check;
-use cli::graph_route_evidence::run_nowledge_graph_route_evidence;
-use cli::graph_route_readiness::run_nowledge_graph_route_readiness;
-use cli::mem_integration_bundle::run_nowledge_mem_integration_bundle;
-use cli::mem_integration_readiness::{
+use skein::background_maintenance_evidence::run_nowledge_background_maintenance_evidence;
+use skein::bounded_read_evidence::run_nowledge_bounded_read_evidence;
+use skein::graph_route_evidence::run_nowledge_graph_route_evidence;
+use skein::graph_route_readiness::run_nowledge_graph_route_readiness;
+use skein::mem_integration_bundle::run_nowledge_mem_integration_bundle;
+use skein::mem_integration_readiness::{
     nowledge_mem_integration_readiness_json, run_nowledge_mem_integration_readiness,
 };
-use cli::mem_library_readiness::run_nowledge_mem_library_readiness;
-use cli::previous_wrapper_preflight::run_nowledge_previous_wrapper_preflight_check;
-use cli::query_family_evidence::run_nowledge_query_family_evidence;
-use cli::query_runtime_preflight::run_nowledge_query_runtime_preflight;
-use cli::replacement_summary::{
+use skein::mem_library_readiness::run_nowledge_mem_library_readiness;
+use skein::nowledge_inventory::background_maintenance_summary_to_json;
+use skein::previous_wrapper_preflight::run_nowledge_previous_wrapper_preflight_check;
+use skein::query_family_evidence::run_nowledge_query_family_evidence;
+use skein::query_runtime_preflight::run_nowledge_query_runtime_preflight;
+use skein::replacement_summary::{
     nowledge_replacement_summary_json, nowledge_replacement_summary_json_with_options,
     nowledge_replacement_summary_usage, NowledgeReplacementSummaryOptions,
 };
-use cli::search_candidate_shadow_evidence::run_nowledge_search_candidate_shadow_evidence;
-use cli::search_projection_evidence::{
+use skein::search_candidate_shadow_evidence::run_nowledge_search_candidate_shadow_evidence;
+use skein::search_projection_evidence::{
     nowledge_search_projection_probe_contract_json,
     nowledge_search_projection_probe_contract_usage, run_nowledge_search_projection_evidence,
     run_nowledge_search_projection_shadow_evidence, run_skein_search_projection_probe,
 };
-use cli::storage_recovery_evidence::run_nowledge_storage_recovery_evidence;
-use skein::nowledge_inventory::background_maintenance_summary_to_json;
+use skein::storage_recovery_evidence::run_nowledge_storage_recovery_evidence;
 use skein::{
     background_maintenance_evidence_health_from_bundle, external_shadow_ready_missing_capabilities,
     external_shadow_trace_health_from_bundle, external_shadow_trace_report_json,
