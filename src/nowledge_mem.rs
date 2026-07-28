@@ -5303,6 +5303,20 @@ impl NowledgeMemEmbeddedStoreHandle {
         self.read_store()?.search_candidates(request)
     }
 
+    pub fn retrieve_knowledge(
+        &self,
+        request: &KnowledgeRetrievalRequest,
+    ) -> Result<KnowledgeRetrievalOutput> {
+        self.read_store()?.retrieve_knowledge(request)
+    }
+
+    pub fn retrieve_knowledge_with_report(
+        &self,
+        request: &KnowledgeRetrievalRequest,
+    ) -> Result<NowledgeMemRetrievalOutput> {
+        self.read_store()?.retrieve_knowledge_with_report(request)
+    }
+
     pub fn search_candidate_readiness(
         &self,
         request: &NowledgeMemSearchCandidateRequest,
@@ -10786,6 +10800,46 @@ mod tests {
         let reopened = SearchIndex::open(&search_path).unwrap();
         assert!(reopened.document("memory:m1").is_some());
         assert!(reopened.document("memory:m2").is_some());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn embedded_store_handle_reuses_open_store_for_knowledge_retrieval() {
+        let root = unique_nowledge_mem_test_dir("embedded_handle_retrieval");
+        let search_path = root.join("search");
+        let db = Database::new();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        graph
+            .query("CREATE (:Memory {id: 'm1', title: 'Reusable handle', content: 'embedded retrieval'})")
+            .unwrap();
+        let projection =
+            NowledgeMemSearchProjection::from_index(SearchIndex::open(&search_path).unwrap());
+        let handle = NowledgeMemEmbeddedStoreHandle::new(NowledgeMemEmbeddedStore::new(
+            graph,
+            Some(projection),
+        ));
+        handle.catch_up_search_projection(16, 1).unwrap();
+
+        let output = handle
+            .retrieve_knowledge(&KnowledgeRetrievalRequest {
+                query_text: "reusable handle".to_string(),
+                query_embedding: None,
+                mode: SearchMode::Text,
+                limit: 10,
+                rank_window: None,
+                search_fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::new(),
+                candidate_limit: None,
+                candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
+                graph_seed_limit: 4,
+                graph_context_limit: 4,
+                graph_context_max_hops: 1,
+            })
+            .unwrap();
+
+        assert_eq!(output.search.total_hits, 1);
+        assert_eq!(output.search.hits[0].external_id.as_deref(), Some("m1"));
+        drop(handle);
         std::fs::remove_dir_all(root).unwrap();
     }
 
