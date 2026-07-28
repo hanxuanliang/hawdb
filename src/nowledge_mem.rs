@@ -8688,6 +8688,80 @@ mod tests {
     }
 
     #[test]
+    fn graph_query_report_exposes_normalized_default_scan_pruning() {
+        let db = Database::new();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        graph
+            .query("CREATE (:Thread {thread_id: 'thread-missing', title: 'Missing space'})")
+            .unwrap();
+        graph
+            .query(
+                "CREATE (:Thread {thread_id: 'thread-empty', space_id: '', title: 'Empty space'})",
+            )
+            .unwrap();
+        graph
+            .query("CREATE (:Thread {thread_id: 'thread-default', space_id: 'default', title: 'Default space'})")
+            .unwrap();
+        graph
+            .query("CREATE (:Thread {thread_id: 'thread-team', space_id: 'team', title: 'Team space'})")
+            .unwrap();
+
+        let source_params = BTreeMap::from([(
+            "source_space_id".to_string(),
+            Value::String("default".to_string()),
+        )]);
+        let source_query = graph
+            .query_with_params_with_report(
+                "MATCH (t:Thread) WHERE CASE WHEN t.space_id IS NULL OR t.space_id = '' THEN 'default' ELSE t.space_id END = $source_space_id RETURN t.thread_id AS thread_id",
+                &source_params,
+            )
+            .unwrap();
+
+        assert_eq!(source_query.output.rows.len(), 3);
+        assert_eq!(source_query.report.scan_pruning_reports.len(), 1);
+        let source_scan = &source_query.report.scan_pruning_reports[0];
+        assert!(source_scan.pruned);
+        assert_eq!(source_scan.candidate_count_before_pruning, 4);
+        assert_eq!(source_scan.candidate_count_before_filter, 3);
+        assert_eq!(source_scan.pruned_candidate_count, 1);
+        assert_eq!(
+            source_query.report.json()["scan_pruning_reports"][0]["strategy"]["kind"],
+            "property_default_if_null_eq"
+        );
+        assert_eq!(
+            source_query.report.json()["scan_pruning_reports"][0]["strategy"]["property"],
+            "space_id"
+        );
+
+        let target_params = BTreeMap::from([(
+            "target_space_id".to_string(),
+            Value::String("default".to_string()),
+        )]);
+        let target_query = graph
+            .query_with_params_with_report(
+                "MATCH (t:Thread) WHERE CASE WHEN t.space_id IS NULL OR t.space_id = '' THEN 'default' ELSE t.space_id END <> $target_space_id RETURN t.thread_id AS thread_id",
+                &target_params,
+            )
+            .unwrap();
+
+        assert_eq!(target_query.output.rows.len(), 1);
+        assert_eq!(target_query.report.scan_pruning_reports.len(), 1);
+        let target_scan = &target_query.report.scan_pruning_reports[0];
+        assert!(target_scan.pruned);
+        assert_eq!(target_scan.candidate_count_before_pruning, 4);
+        assert_eq!(target_scan.candidate_count_before_filter, 1);
+        assert_eq!(target_scan.pruned_candidate_count, 3);
+        assert_eq!(
+            target_query.report.json()["scan_pruning_reports"][0]["strategy"]["kind"],
+            "property_default_if_null_not_eq"
+        );
+        assert_eq!(
+            target_query.report.json()["scan_pruning_reports"][0]["strategy"]["property"],
+            "space_id"
+        );
+    }
+
+    #[test]
     fn graph_query_with_report_keeps_system_statement_out_of_plan_cache() {
         let db = Database::new();
         let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
