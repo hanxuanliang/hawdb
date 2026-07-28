@@ -17,7 +17,7 @@ const SKEIN_NOWLEDGE_SEARCH_PROJECTION_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-search-projection-evidence";
 const SKEIN_NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-search-projection-shadow-evidence";
-const SKEIN_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE: &str = "skein-rust-cli";
+const SKEIN_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE: &str = "skein-rust-library";
 const SKEIN_NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-mem-bounded-read-evidence-v1";
 const SKEIN_NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL: &str =
@@ -3052,7 +3052,8 @@ mod tests {
         REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES, SEARCH_PROJECTION_REPLACEMENT_SCOPE,
         SEARCH_PROJECTION_SHADOW_PUSHDOWN_NOT_READY,
         SKEIN_SEARCH_PROJECTION_SEGMENT_DESCRIPTOR_FIELDS_MISSING,
-        SKEIN_SEARCH_PROJECTION_SEGMENT_DESCRIPTOR_MISSING, SQLITE_CONTENT_STORE_SCOPE,
+        SKEIN_SEARCH_PROJECTION_SEGMENT_DESCRIPTOR_MISSING,
+        SKEIN_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE, SQLITE_CONTENT_STORE_SCOPE,
     };
     use crate::{
         nowledge_mem_graph_read_route_spec, nowledge_mem_graph_read_route_specs_json,
@@ -3317,7 +3318,7 @@ mod tests {
         assert_eq!(summary["search_projection_shadow_evidence"]["ready"], true);
         assert_eq!(
             summary["search_projection_shadow_evidence"]["evidence_source"],
-            "skein-rust-cli"
+            SKEIN_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE
         );
         assert_eq!(
             summary["search_projection_shadow_evidence"]["primary_engine"],
@@ -5859,7 +5860,7 @@ mod tests {
             },
             "search_projection_shadow_evidence": {
                 "protocol": "skein-nowledge-search-projection-shadow-evidence",
-                "evidence_source": "skein-rust-cli",
+                "evidence_source": SKEIN_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE,
                 "ready": true,
                 "primary_engine": "lancedb",
                 "shadow_engine": "skein",

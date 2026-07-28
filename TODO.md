@@ -570,6 +570,9 @@ contract.
   - [x] Require final previous-wrapper preflight to consume search projection
     document identity evidence and shadow document-identity parity before
     LanceDB replacement gates can pass.
+  - [x] Require final previous-wrapper preflight to validate search projection
+    evidence protocols and Rust-library shadow evidence source before LanceDB
+    replacement gates can pass.
 - [ ] Keep FTS and vector projection maintenance incremental.
   - Full rebuild is a repair path, not the steady-state update mechanism.
   - Background projection updates must respect QoS limits.

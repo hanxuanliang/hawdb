@@ -13,6 +13,11 @@ use std::path::Path;
 
 pub const NOWLEDGE_PREVIOUS_WRAPPER_PREFLIGHT_PROTOCOL: &str =
     "skein-nowledge-previous-wrapper-preflight-check";
+const SKEIN_NOWLEDGE_SEARCH_PROJECTION_EVIDENCE_PROTOCOL: &str =
+    "skein-nowledge-search-projection-evidence";
+const SKEIN_NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL: &str =
+    "skein-nowledge-search-projection-shadow-evidence";
+const SKEIN_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE: &str = "skein-rust-library";
 
 #[derive(Debug, Clone)]
 pub struct NowledgePreviousWrapperPreflightInputs {
@@ -597,6 +602,10 @@ pub fn nowledge_previous_wrapper_preflight_check(
                     &replacement_summary,
                     &["search_projection_evidence", "present"],
                 ) == Some(true),
+                str_path(
+                    &replacement_summary,
+                    &["search_projection_evidence", "protocol"],
+                ) == Some(SKEIN_NOWLEDGE_SEARCH_PROJECTION_EVIDENCE_PROTOCOL),
                 bool_path(
                     &replacement_summary,
                     &["search_projection_evidence", "ready"],
@@ -658,6 +667,14 @@ pub fn nowledge_previous_wrapper_preflight_check(
                     &replacement_summary,
                     &["search_projection_shadow_evidence", "present"],
                 ) == Some(true),
+                str_path(
+                    &replacement_summary,
+                    &["search_projection_shadow_evidence", "protocol"],
+                ) == Some(SKEIN_NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL),
+                str_path(
+                    &replacement_summary,
+                    &["search_projection_shadow_evidence", "evidence_source"],
+                ) == Some(SKEIN_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE),
                 bool_path(
                     &replacement_summary,
                     &["search_projection_shadow_evidence", "ready"],
@@ -923,6 +940,7 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 "dual_engine_evidence.matched_check_count",
                 "dual_engine_evidence.primary_only_check_count",
                 "search_projection_evidence.present",
+                "search_projection_evidence.protocol",
                 "search_projection_evidence.ready",
                 "search_projection_evidence.derived_projection",
                 "search_projection_evidence.all_tables_covered",
@@ -939,6 +957,8 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 "search_projection_evidence.predicate_pushdown_ready",
                 "search_projection_evidence.production_filter_pruning_ready",
                 "search_projection_shadow_evidence.present",
+                "search_projection_shadow_evidence.protocol",
+                "search_projection_shadow_evidence.evidence_source",
                 "search_projection_shadow_evidence.ready",
                 "search_projection_shadow_evidence.primary_ready",
                 "search_projection_shadow_evidence.shadow_ready",
@@ -1795,6 +1815,14 @@ fn previous_wrapper_preflight_release_summary(
     );
     insert_json_value(
         &mut summary,
+        "search_projection_evidence_protocol",
+        str_path(
+            replacement_summary,
+            &["search_projection_evidence", "protocol"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
         "search_projection_all_tables_covered",
         bool_path(
             replacement_summary,
@@ -1890,6 +1918,22 @@ fn previous_wrapper_preflight_release_summary(
         bool_path(
             replacement_summary,
             &["search_projection_shadow_evidence", "ready"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "search_projection_shadow_evidence_protocol",
+        str_path(
+            replacement_summary,
+            &["search_projection_shadow_evidence", "protocol"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "search_projection_shadow_evidence_source",
+        str_path(
+            replacement_summary,
+            &["search_projection_shadow_evidence", "evidence_source"],
         ),
     );
     insert_json_value(
@@ -2922,6 +2966,9 @@ mod tests {
     use super::{
         check_by_name, nowledge_previous_wrapper_preflight_check_json,
         run_nowledge_previous_wrapper_preflight_check, PreviousWrapperPreflightCheckInputs,
+        SKEIN_NOWLEDGE_SEARCH_PROJECTION_EVIDENCE_PROTOCOL,
+        SKEIN_NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL,
+        SKEIN_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE,
     };
     use crate::{
         nowledge_mem_graph_read_route_catalog_digest,
@@ -3037,6 +3084,11 @@ mod tests {
         assert_release_summary_field(summary, "dual_engine_primary_only_check_count", 0);
         assert_release_summary_field(summary, "dual_engine_matched_per_million", 1_000_000);
         assert_release_summary_field(summary, "search_projection_evidence_ready", true);
+        assert_release_summary_field(
+            summary,
+            "search_projection_evidence_protocol",
+            SKEIN_NOWLEDGE_SEARCH_PROJECTION_EVIDENCE_PROTOCOL,
+        );
         assert_release_summary_field(summary, "search_projection_all_tables_covered", true);
         assert_release_summary_field(summary, "search_projection_covered_table_count", 6);
         assert_release_summary_field(summary, "search_projection_required_table_count", 6);
@@ -3053,6 +3105,16 @@ mod tests {
             true,
         );
         assert_release_summary_field(summary, "search_projection_shadow_evidence_ready", true);
+        assert_release_summary_field(
+            summary,
+            "search_projection_shadow_evidence_protocol",
+            SKEIN_NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL,
+        );
+        assert_release_summary_field(
+            summary,
+            "search_projection_shadow_evidence_source",
+            SKEIN_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE,
+        );
         assert_release_summary_field(summary, "search_projection_shadow_primary_ready", true);
         assert_release_summary_field(summary, "search_projection_shadow_shadow_ready", true);
         assert_release_summary_field(
@@ -3323,6 +3385,7 @@ mod tests {
                 "dual_engine_evidence.matched_check_count",
                 "dual_engine_evidence.primary_only_check_count",
                 "search_projection_evidence.present",
+                "search_projection_evidence.protocol",
                 "search_projection_evidence.ready",
                 "search_projection_evidence.derived_projection",
                 "search_projection_evidence.all_tables_covered",
@@ -3339,6 +3402,8 @@ mod tests {
                 "search_projection_evidence.predicate_pushdown_ready",
                 "search_projection_evidence.production_filter_pruning_ready",
                 "search_projection_shadow_evidence.present",
+                "search_projection_shadow_evidence.protocol",
+                "search_projection_shadow_evidence.evidence_source",
                 "search_projection_shadow_evidence.ready",
                 "search_projection_shadow_evidence.primary_ready",
                 "search_projection_shadow_evidence.shadow_ready",
@@ -3486,6 +3551,8 @@ mod tests {
     fn preflight_check_requires_summary_search_projection_evidence() {
         let mut inputs = ready_inputs();
         let replacement_summary = inputs.replacement_summary.as_mut().unwrap();
+        replacement_summary["search_projection_evidence"]["protocol"] =
+            serde_json::json!("legacy-search-projection-evidence");
         replacement_summary["search_projection_evidence"]["ready"] = serde_json::json!(true);
         replacement_summary["search_projection_evidence"]["covered_table_count"] =
             serde_json::json!(5);
@@ -3508,6 +3575,7 @@ mod tests {
         assert_eq!(
             check_by_name(&report, "replacement_summary")["failed_evidence_fields"],
             serde_json::json!([
+                "search_projection_evidence.protocol",
                 "search_projection_evidence.covered_table_count",
                 "search_projection_evidence.document_identity_ready",
                 "search_projection_evidence.source_chunk_ready",
@@ -3524,6 +3592,10 @@ mod tests {
     fn preflight_check_requires_summary_search_projection_shadow_evidence() {
         let mut inputs = ready_inputs();
         let replacement_summary = inputs.replacement_summary.as_mut().unwrap();
+        replacement_summary["search_projection_shadow_evidence"]["protocol"] =
+            serde_json::json!("legacy-search-projection-shadow-evidence");
+        replacement_summary["search_projection_shadow_evidence"]["evidence_source"] =
+            serde_json::json!("cli-wrapper");
         replacement_summary["search_projection_shadow_evidence"]["ready"] = serde_json::json!(true);
         replacement_summary["search_projection_shadow_evidence"]["table_parity_ready"] =
             serde_json::json!(false);
@@ -3552,6 +3624,8 @@ mod tests {
         assert_eq!(
             check_by_name(&report, "replacement_summary")["failed_evidence_fields"],
             serde_json::json!([
+                "search_projection_shadow_evidence.protocol",
+                "search_projection_shadow_evidence.evidence_source",
                 "search_projection_shadow_evidence.document_identity_parity",
                 "search_projection_shadow_evidence.table_parity_ready",
                 "search_projection_shadow_evidence.incremental_watermark_parity",
@@ -4988,6 +5062,7 @@ mod tests {
 
     fn ready_search_projection_evidence() -> serde_json::Value {
         serde_json::json!({
+            "protocol": SKEIN_NOWLEDGE_SEARCH_PROJECTION_EVIDENCE_PROTOCOL,
             "present": true,
             "ready": true,
             "derived_projection": true,
@@ -5011,6 +5086,8 @@ mod tests {
 
     fn ready_search_projection_shadow_evidence() -> serde_json::Value {
         serde_json::json!({
+            "protocol": SKEIN_NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL,
+            "evidence_source": SKEIN_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE,
             "present": true,
             "ready": true,
             "primary_engine": "lancedb",

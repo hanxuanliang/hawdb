@@ -24,7 +24,7 @@ const SKEIN_NOWLEDGE_SEARCH_PROJECTION_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-search-projection-evidence";
 const SKEIN_NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-search-projection-shadow-evidence";
-const SKEIN_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE: &str = "skein-rust-cli";
+const SKEIN_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE: &str = "skein-rust-library";
 const SKEIN_NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-mem-bounded-read-evidence-v1";
 const SKEIN_NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL: &str =
@@ -5345,7 +5345,9 @@ fn json_get_path<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a 
 
 #[cfg(test)]
 mod tests {
-    use super::nowledge_mem_integration_readiness_json;
+    use super::{
+        nowledge_mem_integration_readiness_json, SKEIN_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE,
+    };
     use crate::{
         nowledge_mem_graph_read_route_catalog_digest, nowledge_mem_graph_read_route_spec,
         nowledge_mem_graph_read_route_specs_json, nowledge_mem_route_ownership_all_skein,
@@ -9494,7 +9496,7 @@ mod tests {
                 },
                 "search_projection_shadow_evidence": {
                     "protocol": "skein-nowledge-search-projection-shadow-evidence",
-                    "evidence_source": "skein-rust-cli",
+                    "evidence_source": SKEIN_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE,
                     "present": true,
                     "ready": true,
                     "document_count_parity": true,
