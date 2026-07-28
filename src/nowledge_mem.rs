@@ -2939,6 +2939,7 @@ pub struct NowledgeMemLibraryReadinessReport {
     pub ready: bool,
     pub mode: NowledgeMemGraphMode,
     pub redaction: NowledgeMemReadinessRedactionSummary,
+    pub production_path: NowledgeMemLibraryProductionPathSummary,
     pub blocker_codes: Vec<String>,
     pub readiness_by_area: NowledgeMemReadinessAreaMap,
     pub ready_area_count: usize,
@@ -2969,6 +2970,7 @@ impl NowledgeMemLibraryReadinessReport {
             "ready": self.ready,
             "mode": self.mode.as_str(),
             "redaction": self.redaction.json(),
+            "production_path": self.production_path.json(),
             "blocker_codes": self.blocker_codes,
             "readiness_by_area": self.readiness_by_area.json(),
             "areas": areas.iter().map(NowledgeMemReadinessAreaSummary::json).collect::<Vec<_>>(),
@@ -2988,6 +2990,44 @@ impl NowledgeMemLibraryReadinessReport {
             "search_projection_shadow_evidence": self.search_projection_shadow_evidence,
             "search_candidate_shadow_evidence": self.search_candidate_shadow_evidence,
             "workload_fixture_evidence": self.workload_fixture_evidence,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NowledgeMemLibraryProductionPathSummary {
+    pub in_process: bool,
+    pub cli_required: bool,
+    pub env_control_plane_required: bool,
+    pub spawned_helper_required: bool,
+}
+
+impl Default for NowledgeMemLibraryProductionPathSummary {
+    fn default() -> Self {
+        Self {
+            in_process: true,
+            cli_required: false,
+            env_control_plane_required: false,
+            spawned_helper_required: false,
+        }
+    }
+}
+
+impl NowledgeMemLibraryProductionPathSummary {
+    pub fn ready(&self) -> bool {
+        self.in_process
+            && !self.cli_required
+            && !self.env_control_plane_required
+            && !self.spawned_helper_required
+    }
+
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "ready": self.ready(),
+            "in_process": self.in_process,
+            "cli_required": self.cli_required,
+            "env_control_plane_required": self.env_control_plane_required,
+            "spawned_helper_required": self.spawned_helper_required,
         })
     }
 }
@@ -5567,6 +5607,7 @@ impl NowledgeMemEmbeddedStore {
             ready,
             mode: self.graph.mode(),
             redaction: NowledgeMemReadinessRedactionSummary::default(),
+            production_path: NowledgeMemLibraryProductionPathSummary::default(),
             blocker_codes,
             readiness_by_area,
             ready_area_count,
@@ -9074,6 +9115,17 @@ mod tests {
         assert_eq!(readiness["present"], true);
         assert_eq!(readiness["ready"], false);
         assert_eq!(readiness["mode"], "shadow_read_only");
+        assert_eq!(readiness["production_path"]["ready"], true);
+        assert_eq!(readiness["production_path"]["in_process"], true);
+        assert_eq!(readiness["production_path"]["cli_required"], false);
+        assert_eq!(
+            readiness["production_path"]["env_control_plane_required"],
+            false
+        );
+        assert_eq!(
+            readiness["production_path"]["spawned_helper_required"],
+            false
+        );
         assert_eq!(readiness["bounded_read_evidence"]["present"], false);
         assert_eq!(
             readiness["bounded_read_evidence"]["blocker_codes"],

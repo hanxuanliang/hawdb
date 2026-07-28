@@ -136,6 +136,9 @@ must block default cutover.
     API entrypoints.
   - CLI tools may remain thin developer wrappers, but no production route or
     gate may require shelling out.
+  - [x] Require typed library readiness to prove the production path is
+    in-process and does not require CLI wrappers, environment control planes, or
+    spawned helper processes.
 - [ ] Preserve replacement boundaries.
   - Kuzu/Ladybug graph and LanceDB search projection are the replacement scope.
   - SQLite content store and large blob/value storage remain external unless a
@@ -656,6 +659,9 @@ contract.
     and keep the CLI as a thin wrapper.
   - [x] Expose library readiness area gates as typed Rust structs so embedded
     Mem callers do not need to parse `readiness_by_area` JSON.
+  - [x] Expose a typed library production-path summary and require integration
+    readiness to fail closed when production depends on CLI wrappers,
+    environment control planes, or spawned helper processes.
   - [x] Expose a typed Nowledge Mem library-readiness runner and keep the CLI
     function as a JSON-only wrapper over the Rust report.
   - [x] Expose typed graph replacement and query-family replacement readiness

@@ -2187,6 +2187,13 @@ mod tests {
                 "parameters_copied": false,
                 "local_paths_copied": false
             },
+            "production_path": {
+                "ready": true,
+                "in_process": true,
+                "cli_required": false,
+                "env_control_plane_required": false,
+                "spawned_helper_required": false
+            },
             "open_report": {
                 "graph_opened": true,
                 "search_projection_opened": true

@@ -273,6 +273,11 @@ pub struct LibraryReadinessCutoverReadiness {
     pub protocol_matches: bool,
     pub present: bool,
     pub ready: bool,
+    pub production_path_ready: bool,
+    pub production_path_in_process: bool,
+    pub production_path_cli_not_required: bool,
+    pub production_path_env_control_plane_not_required: bool,
+    pub production_path_spawned_helper_not_required: bool,
     pub ready_area_count_present: bool,
     pub blocked_area_count_zero: bool,
     pub redaction_ready: bool,
@@ -599,6 +604,11 @@ impl LibraryReadinessCutoverReadiness {
         self.protocol_matches
             && self.present
             && self.ready
+            && self.production_path_ready
+            && self.production_path_in_process
+            && self.production_path_cli_not_required
+            && self.production_path_env_control_plane_not_required
+            && self.production_path_spawned_helper_not_required
             && self.ready_area_count_present
             && self.blocked_area_count_zero
             && self.redaction_ready
@@ -4633,6 +4643,34 @@ pub fn library_readiness_cutover_readiness(
             == Some(NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL),
         present: bool_path(bundle, &["library_readiness", "present"]) == Some(true),
         ready: bool_path(bundle, &["library_readiness", "ready"]) == Some(true),
+        production_path_ready: bool_path(
+            bundle,
+            &["library_readiness", "production_path", "ready"],
+        ) == Some(true),
+        production_path_in_process: bool_path(
+            bundle,
+            &["library_readiness", "production_path", "in_process"],
+        ) == Some(true),
+        production_path_cli_not_required: bool_path(
+            bundle,
+            &["library_readiness", "production_path", "cli_required"],
+        ) == Some(false),
+        production_path_env_control_plane_not_required: bool_path(
+            bundle,
+            &[
+                "library_readiness",
+                "production_path",
+                "env_control_plane_required",
+            ],
+        ) == Some(false),
+        production_path_spawned_helper_not_required: bool_path(
+            bundle,
+            &[
+                "library_readiness",
+                "production_path",
+                "spawned_helper_required",
+            ],
+        ) == Some(false),
         ready_area_count_present: u64_path(bundle, &["library_readiness", "ready_area_count"])
             .is_some_and(|value| value > 0),
         blocked_area_count_zero: u64_path(bundle, &["library_readiness", "blocked_area_count"])
@@ -4755,6 +4793,26 @@ fn library_readiness_cutover_conditions(
         ("library_readiness.protocol", readiness.protocol_matches),
         ("library_readiness.present", readiness.present),
         ("library_readiness.ready", readiness.ready),
+        (
+            "library_readiness.production_path.ready",
+            readiness.production_path_ready,
+        ),
+        (
+            "library_readiness.production_path.in_process",
+            readiness.production_path_in_process,
+        ),
+        (
+            "library_readiness.production_path.cli_required",
+            readiness.production_path_cli_not_required,
+        ),
+        (
+            "library_readiness.production_path.env_control_plane_required",
+            readiness.production_path_env_control_plane_not_required,
+        ),
+        (
+            "library_readiness.production_path.spawned_helper_required",
+            readiness.production_path_spawned_helper_not_required,
+        ),
         (
             "library_readiness.ready_area_count",
             readiness.ready_area_count_present,
@@ -8754,6 +8812,11 @@ mod tests {
                 "library_readiness.protocol",
                 "library_readiness.present",
                 "library_readiness.ready",
+                "library_readiness.production_path.ready",
+                "library_readiness.production_path.in_process",
+                "library_readiness.production_path.cli_required",
+                "library_readiness.production_path.env_control_plane_required",
+                "library_readiness.production_path.spawned_helper_required",
                 "library_readiness.ready_area_count",
                 "library_readiness.blocked_area_count",
                 "library_readiness.redaction.ready",
@@ -8836,6 +8899,72 @@ mod tests {
                 "library_readiness.readiness_by_area.search_projection.ready"
             ])
         );
+    }
+
+    #[test]
+    fn rejects_library_readiness_that_requires_cli_on_production_path() {
+        let mut bundle = ready_bundle();
+        bundle["library_readiness"]["ready"] = serde_json::json!(false);
+        bundle["library_readiness"]["production_path"]["ready"] = serde_json::json!(false);
+        bundle["library_readiness"]["production_path"]["cli_required"] = serde_json::json!(true);
+        bundle["library_readiness"]["production_path"]["spawned_helper_required"] =
+            serde_json::json!(true);
+        bundle["library_readiness"]["blocker_codes"] =
+            serde_json::json!(["library_production_path_not_embedded"]);
+
+        let typed = super::library_readiness_cutover_readiness(&bundle);
+        assert!(!typed.evidence_ready());
+        assert!(typed.protocol_matches);
+        assert!(typed.present);
+        assert!(!typed.ready);
+        assert!(!typed.production_path_ready);
+        assert!(!typed.production_path_cli_not_required);
+        assert!(!typed.production_path_spawned_helper_not_required);
+        assert_eq!(
+            typed.blocker_codes,
+            vec!["library_production_path_not_embedded".to_string()]
+        );
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["library_readiness"])
+        );
+        let check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "library_readiness")
+            .unwrap();
+        assert_eq!(
+            check["failed_evidence_fields"],
+            serde_json::json!([
+                "library_readiness.ready",
+                "library_readiness.production_path.ready",
+                "library_readiness.production_path.cli_required",
+                "library_readiness.production_path.spawned_helper_required"
+            ])
+        );
+    }
+
+    #[test]
+    fn typed_library_readiness_requires_production_path_contract() {
+        let mut bundle = ready_bundle();
+        bundle["library_readiness"]
+            .as_object_mut()
+            .unwrap()
+            .remove("production_path");
+
+        let typed = super::library_readiness_cutover_readiness(&bundle);
+
+        assert!(!typed.evidence_ready());
+        assert!(!typed.production_path_ready);
+        assert!(!typed.production_path_in_process);
+        assert!(!typed.production_path_cli_not_required);
+        assert!(!typed.production_path_env_control_plane_not_required);
+        assert!(!typed.production_path_spawned_helper_not_required);
     }
 
     #[test]
@@ -9916,6 +10045,13 @@ mod tests {
                 "query_text_copied": false,
                 "parameters_copied": false,
                 "local_paths_copied": false
+            },
+            "production_path": {
+                "ready": true,
+                "in_process": true,
+                "cli_required": false,
+                "env_control_plane_required": false,
+                "spawned_helper_required": false
             },
             "open_report": {
                 "protocol": "skein-nowledge-mem-open-report",
