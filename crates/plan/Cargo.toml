@@ -1,11 +1,10 @@
 [package]
-name = "skein-optimizer"
+name = "skein-plan"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-serde_json = "1"
 skein-core = { path = "../core" }
 skein-cypher = { path = "../cypher" }
-skein-plan = { path = "../plan" }
+skein-ddl = { path = "../ddl" }

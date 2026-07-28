@@ -1,6 +1,6 @@
 use super::value_range::{compare_histogram_value, range_bound_matches, ValueRangeBound};
-use crate::planner::ComparisonOp;
-use crate::value::Value;
+use skein_core::Value;
+use skein_plan::ComparisonOp;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

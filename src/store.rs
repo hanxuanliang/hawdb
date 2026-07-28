@@ -9590,7 +9590,7 @@ fn property_filter_matches(
         PropertyFilter::RegexMatch { property, pattern } => properties
             .get(property)
             .and_then(|actual| match actual {
-                Value::String(actual) => Some(crate::regex_cache::regex_is_match(pattern, actual)),
+                Value::String(actual) => Some(pattern.is_match(actual)),
                 _ => None,
             })
             .unwrap_or(false),

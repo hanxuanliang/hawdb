@@ -1,8 +1,9 @@
 use super::{
-    fingerprint::write_projection_expression, Distribution, MemoryBudgetClass, PhysicalPlan,
-    PhysicalProperties, ScanPruningSupport, VectorPrecision,
+    Distribution, MemoryBudgetClass, PhysicalPlan, PhysicalProperties, ScanPruningSupport,
+    VectorPrecision,
 };
-use crate::planner::{SortDirection, SortItem, SortKey};
+use skein_plan::write_projection_expression;
+use skein_plan::{SortDirection, SortItem, SortKey};
 
 pub(super) fn selected_plan_properties(plan: &PhysicalPlan) -> PhysicalProperties {
     match plan {

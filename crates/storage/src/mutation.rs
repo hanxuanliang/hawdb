@@ -1,4 +1,4 @@
-use skein_core::{PropertyType, SchemaObjectState, TableKind, Value};
+use skein_core::{PropertyType, SchemaObjectState, TableKind, ValidatedRegex, Value};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -334,7 +334,7 @@ pub enum PropertyFilter {
     },
     RegexMatch {
         property: String,
-        pattern: String,
+        pattern: ValidatedRegex,
     },
     DefaultIfNullOrEq {
         property: String,

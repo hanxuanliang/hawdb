@@ -4002,7 +4002,7 @@ fn evaluate_predicate(
             pattern,
         } => binding_property(binding, variable, property)
             .and_then(|actual| match actual {
-                Value::String(actual) => Some(crate::regex_cache::regex_is_match(pattern, actual)),
+                Value::String(actual) => Some(pattern.is_match(actual)),
                 _ => None,
             })
             .unwrap_or(false),

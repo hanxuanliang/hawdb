@@ -3,7 +3,9 @@ use super::{
 };
 use crate::cypher;
 use crate::error::Result;
-use crate::optimizer::{CascadesOptimizer, OptimizerTrace, PhysicalPlan};
+use crate::optimizer::{
+    CascadesOptimizer, LogicalPlanRoot, OptimizerTrace, PhysicalPlan, PhysicalPlanRoot,
+};
 use crate::planner;
 use crate::schema::Catalog;
 use crate::store::GraphStore;
@@ -78,8 +80,7 @@ pub(super) struct OptimizedQueryPlan {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct CachedPlan {
-    physical_plan: PhysicalPlan,
-    trace: OptimizerTrace,
+    physical_root: PhysicalPlanRoot,
 }
 
 pub(super) type PlanCache = LfuCache<PlanCacheKey, CachedPlan>;
@@ -110,12 +111,12 @@ pub(super) fn optimized_query_plan_for(
     if cache_mode == PlanCacheMode::Use {
         let key = key.as_ref().expect("cache key exists in use mode");
         if let Some(cached) = context.cache.borrow_mut().get(key) {
-            let mut trace = cached.trace;
+            let (physical_plan, mut trace) = cached.physical_root.into_parts();
             trace
                 .decisions
                 .push("plan cache hit: exact parameterized physical plan".to_string());
             return Ok(OptimizedQueryPlan {
-                physical_plan: cached.physical_plan,
+                physical_plan,
                 trace,
                 plan_cache_lookup: PlanCacheLookup::Hit,
                 configured_max_optimizer_groups: context.config.max_optimizer_groups,
@@ -125,18 +126,18 @@ pub(super) fn optimized_query_plan_for(
     }
 
     let logical = planner::plan_with_params(statement_body(statement), parameters)?;
-    let (physical_plan, trace) = context.optimizer.optimize_with_catalog(
-        &logical,
+    let logical_root = LogicalPlanRoot::new(logical);
+    let physical_root = context.optimizer.optimize_root_with_catalog(
+        &logical_root,
         &optimizer_catalog(context.catalog, &context.store.statistics()),
     );
-    let mut trace = trace;
+    let (physical_plan, mut trace) = physical_root.clone().into_parts();
     if cache_mode == PlanCacheMode::Use {
         let key = key.expect("cache key exists in use mode");
         context.cache.borrow_mut().insert(
             key,
             CachedPlan {
-                physical_plan: physical_plan.clone(),
-                trace: trace.clone(),
+                physical_root: physical_root.clone(),
             },
         );
         trace

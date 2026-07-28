@@ -1173,6 +1173,7 @@ dependencies = [
  "skein-ddl",
  "skein-executor",
  "skein-optimizer",
+ "skein-plan",
  "skein-plan-cache",
  "skein-qos",
  "skein-readiness",
@@ -1192,6 +1193,9 @@ dependencies = [
 [[package]]
 name = "skein-core"
 version = "0.1.0"
+dependencies = [
+ "regex",
+]
 
 [[package]]
 name = "skein-cypher"
@@ -1219,6 +1223,18 @@ name = "skein-optimizer"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "skein-core",
+ "skein-cypher",
+ "skein-plan",
+]
+
+[[package]]
+name = "skein-plan"
+version = "0.1.0"
+dependencies = [
+ "skein-core",
+ "skein-cypher",
+ "skein-ddl",
 ]
 
 [[package]]

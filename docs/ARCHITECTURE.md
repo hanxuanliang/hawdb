@@ -56,34 +56,30 @@ crate remains the stable embedded facade, while implementation crates are split
 out as interfaces harden and dependency direction becomes acyclic. The current
 crate split includes `skein-core` for common graph primitives,
 `skein-cypher` for syntax-only Cypher AST/parser support, `skein-qos` for
-local resource classes, background admission, and expected-value ranking, and
-`skein-optimizer` for Cascades-style optimizer primitives, stable physical
-operator metadata, generic plan-node traversal helpers, structured cost
-summaries, and bounded search reporting. Cypher graph logical and physical
-operators still live in the root crate until planner/executor contracts are
-stable enough to move without creating cycles.
+local resource classes, background admission, and expected-value ranking,
+`skein-plan` for Cypher logical/physical IR, typed phase roots, deterministic
+fingerprints, explain rendering, and plan-node metadata, and `skein-optimizer`
+for Cascades primitives plus graph-specific catalog, costing, access-path, and
+lowering logic.
 
 ```text
 crates/
   core/                errors, values, ids, catalog names, schema descriptors
+  plan/                logical/physical IR, phase roots, explain, fingerprints
   qos/                 work classes, local admission, background ranking
-  optimizer/           Cascades cost, memo ids/groups, operator metadata,
-                       plan traversal, properties, search reports, trace config
+  optimizer/           Cascades memo/rules/search plus graph cost and lowering
   cypher/              token cursor, parser, AST, parameter model
-  catalog/             labels, relationship types, property schema, stats
-  planner/             semantic analysis, logical plan, physical plan
-  graph-optimizer/     graph-specific Cascades rules and physical alternatives
   storage/             embedded persistence, WAL, MVCC, indexes
   executor/            physical operators and query execution
   api/                 stable embedded API facade
 ```
 
 The public facade should stay in the root `skein` crate. Internal crates should
-be allowed to evolve while the embedded API stays small and stable. `src/cypher.rs`
-is now a compatibility re-export facade over `skein-cypher`; parser tests live
-with the parser crate. Shared optimizer primitives should remain free of Cypher
-AST, planner, executor, and storage dependencies; graph-specific rules can then
-migrate behind that boundary incrementally.
+be allowed to evolve while the embedded API stays small and stable.
+`src/cypher.rs`, `src/planner.rs`, and `src/optimizer.rs` are compatibility
+re-export facades over their owning crates. `skein-plan` depends only on
+`skein-core`, `skein-cypher`, and `skein-ddl`; `skein-optimizer` depends inward
+on `skein-plan` and remains free of executor and storage implementations.
 
 `src/qos.rs` is also a compatibility re-export facade over `skein-qos`. The
 QoS crate owns local foreground/background work classes, admission decisions,
@@ -251,13 +247,13 @@ concerns. The current hand-written parser should keep that boundary while
 avoiding a generated grammar until the Cypher subset is large and stable enough
 to justify it.
 
-The optimizer should follow the same incremental split while graph-specific
-contracts are still in the root crate:
+The optimizer boundary is:
 
 ```text
-crates/optimizer/               generic Cascades primitives and trace reports
-src/optimizer.rs                optimizer facade, graph plan enum, graph rules
-src/optimizer/physical_plan.rs  graph facade to optimizer operator metadata
+crates/plan/                    logical/physical IR and typed phase roots
+crates/optimizer/               generic Cascades primitives
+crates/optimizer/src/graph/     graph catalog, costing, rules, and lowering
+src/optimizer.rs                compatibility re-export facade
 ```
 
 ## Logical Plan
@@ -303,15 +299,23 @@ in that direction incrementally:
 
 - keep `PhysicalPlan` as the public compatibility facade until executor
   contracts are stable
-- keep `PhysicalPlanKind`, `PhysicalPlanClass`, `PlanChildren`, `PlanNode`,
-  plan histogram helpers, `OptimizationSearchReport`, and `SelectedPlanTrace`
-  in `skein-optimizer`; root graph plans only map facade variants, child
-  references, costs, and selected-plan summaries to those crate-owned identities
-- split large physical operators into modules and later into per-node structs
-  behind the facade
-- move graph-specific implementation rules into a `graph-optimizer` crate only
-  after parser, planner, executor, and storage dependencies no longer create
-  cycles
+- use `PhysicalPlanDomainRef` and its schema, mutation, access, traversal,
+  relational, and procedure wrappers as the zero-copy typed boundary for
+  domain-specific behavior; callers cannot construct a wrapper for the wrong
+  operator domain
+- keep `PhysicalPlanKind`, `PhysicalPlanClass`, `PlanChildren`, `PlanNode`, and
+  plan histogram helpers beside the IR in `skein-plan`
+- keep `OptimizationSearchReport`, `SelectedPlanTrace`, memo/rule primitives,
+  and graph-specific costing/lowering in `skein-optimizer`
+- keep deterministic fingerprint helpers split by value, predicate, and
+  projection responsibility, and keep access-path candidate composition
+  separate from rule execution
+- split optimizer tests by plan structure, search costing, aggregate costing,
+  and traversal costing so failures retain a clear ownership boundary
+- migrate domain behavior behind the typed wrappers before introducing
+  per-node structs behind the facade
+- do not add another graph-optimizer crate unless the graph module develops an
+  independently reusable contract and the dependency direction remains acyclic
 
 Core physical operators:
 
@@ -338,12 +342,12 @@ index seeks matter more than full relational join sophistication.
 Skein should use a Cascades model similar to Chryso:
 
 - `Memo`: stores equivalent plan alternatives. The generic group storage lives
-  in `skein-optimizer`; the root graph optimizer stores Cypher-specific
+  in `skein-optimizer`; `skein_optimizer::graph` stores Cypher-specific
   `GroupExpr` payloads in that crate-owned memo.
 - `Group`: represents a logical equivalence class.
 - `GroupExpr`: stores an operator plus child group references. Graph-specific
-  lowering still owns this payload until logical operator contracts move out of
-  the root crate.
+  lowering owns this private payload while public logical operators live in
+  `skein-plan`.
 - `Rule`: transforms logical expressions into equivalent logical alternatives.
 - `ImplementationRule`: maps logical expressions to physical alternatives.
 - `CostModel`: scores physical alternatives using graph statistics. The current

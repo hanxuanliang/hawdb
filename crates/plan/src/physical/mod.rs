@@ -1,22 +1,25 @@
-use crate::cypher::RelationshipDirection;
-use crate::planner::{
+use crate::{
     Aggregation, GraphAlgorithmKind, GraphAlgorithmOptions, Predicate, Projection,
     RelationshipCountLeg, RelationshipOnCreateValue, RelationshipSetAssignment, SchemaObjectState,
     SchemaPropertyType, SchemaTableKind, SetAssignment, SetNodePropertiesReturnMode, SetValue,
     ShortestPathProjection, SortItem,
 };
-use crate::value::Value;
+use skein_core::Value;
+use skein_cypher::RelationshipDirection;
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PhysicalOperatorDomain {
-    Schema,
-    Mutation,
-    Access,
-    Traversal,
-    Relational,
-    Procedure,
-}
+mod domain;
+mod explain;
+mod fingerprint;
+mod metadata;
+mod plan_node;
+
+pub use fingerprint::write_projection_expression;
+pub use metadata::{
+    plan_class_counts, plan_operator_counts, visit_plan, PhysicalPlanClass, PhysicalPlanKind,
+    PhysicalPlanNode, PlanChildren,
+};
+pub use plan_node::PhysicalPlanChildren;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PhysicalPlan {
@@ -377,64 +380,8 @@ pub enum PhysicalPlan {
     },
 }
 
-impl PhysicalPlan {
-    pub fn domain(&self) -> PhysicalOperatorDomain {
-        match self {
-            PhysicalPlan::CreateNodeLabel { .. }
-            | PhysicalPlan::CreateRelationshipType { .. }
-            | PhysicalPlan::CreateNodeTable { .. }
-            | PhysicalPlan::CreateRelationshipTable { .. }
-            | PhysicalPlan::CreateProperty { .. }
-            | PhysicalPlan::AlterTableState { .. }
-            | PhysicalPlan::AlterPropertyState { .. }
-            | PhysicalPlan::CreateIndex { .. }
-            | PhysicalPlan::CreateCompositeIndex { .. }
-            | PhysicalPlan::CreateRangeIndex { .. }
-            | PhysicalPlan::CreateFullTextIndex { .. }
-            | PhysicalPlan::CreateUniqueConstraint { .. }
-            | PhysicalPlan::CreateNodePropertyExistsConstraint { .. }
-            | PhysicalPlan::CreateRelationshipUniqueConstraint { .. }
-            | PhysicalPlan::CreateRelationshipPropertyExistsConstraint { .. } => {
-                PhysicalOperatorDomain::Schema
-            }
-            PhysicalPlan::CreateNode { .. }
-            | PhysicalPlan::MergeNode { .. }
-            | PhysicalPlan::MergeRelationship { .. }
-            | PhysicalPlan::MergeMatchedRelationship { .. }
-            | PhysicalPlan::MergeRelationshipFromMatchedRelationship { .. }
-            | PhysicalPlan::MergeRelationshipToMatchedTarget { .. }
-            | PhysicalPlan::MergeRelationshipFromMatchedTarget { .. }
-            | PhysicalPlan::CreateMatchedRelationship { .. }
-            | PhysicalPlan::SetNodeProperty { .. }
-            | PhysicalPlan::SetNodeProperties { .. }
-            | PhysicalPlan::SetNodePropertiesReturn { .. }
-            | PhysicalPlan::SetRelationshipProperty { .. }
-            | PhysicalPlan::SetRelationshipProperties { .. }
-            | PhysicalPlan::DeleteNode { .. }
-            | PhysicalPlan::DeleteRelationship { .. }
-            | PhysicalPlan::DeleteRelationshipTargetNodes { .. }
-            | PhysicalPlan::CreateRelationship { .. } => PhysicalOperatorDomain::Mutation,
-            PhysicalPlan::SeqNodeScan { .. }
-            | PhysicalPlan::NodeColumnLookupExec { .. }
-            | PhysicalPlan::IndexNodeSeek { .. }
-            | PhysicalPlan::IndexNodeMultiSeek { .. }
-            | PhysicalPlan::IndexNodeCompositeSeek { .. }
-            | PhysicalPlan::IndexNodeRangeSeek { .. }
-            | PhysicalPlan::IndexNodeTextSeek { .. } => PhysicalOperatorDomain::Access,
-            PhysicalPlan::AdjacencyExpandExec { .. }
-            | PhysicalPlan::OptionalDegreeExec { .. }
-            | PhysicalPlan::OptionalRelationshipCountSumExec { .. }
-            | PhysicalPlan::ShortestPathExec { .. } => PhysicalOperatorDomain::Traversal,
-            PhysicalPlan::NodeCartesianProductExec { .. }
-            | PhysicalPlan::FilterExec { .. }
-            | PhysicalPlan::ProjectExec { .. }
-            | PhysicalPlan::AggregateExec { .. }
-            | PhysicalPlan::DistinctExec { .. }
-            | PhysicalPlan::SortExec { .. }
-            | PhysicalPlan::LimitExec { .. } => PhysicalOperatorDomain::Relational,
-            PhysicalPlan::ProjectGraph { .. }
-            | PhysicalPlan::GraphAlgorithm { .. }
-            | PhysicalPlan::ThreadRepairStatsExec { .. } => PhysicalOperatorDomain::Procedure,
-        }
-    }
-}
+pub use domain::{
+    AccessPhysicalPlanRef, MutationPhysicalPlanRef, PhysicalOperatorDomain, PhysicalPlanDomainRef,
+    ProcedurePhysicalPlanRef, RelationalPhysicalPlanRef, SchemaPhysicalPlanRef,
+    TraversalPhysicalPlanRef,
+};

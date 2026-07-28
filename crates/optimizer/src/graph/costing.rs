@@ -3,9 +3,9 @@ use super::cardinality::{
     estimate_optional_degree_work,
 };
 use super::{OptimizerCatalog, PhysicalPlan, PlanCost, PlanCostBreakdown};
-use crate::cypher::RelationshipDirection;
-use crate::planner::RelationshipCountLeg;
-use crate::value::Value;
+use skein_core::Value;
+use skein_cypher::RelationshipDirection;
+use skein_plan::RelationshipCountLeg;
 use std::collections::BTreeMap;
 
 pub(super) const NODE_INDEX_EQ_STARTUP_COST: u64 = 1;

@@ -1,6 +1,6 @@
 use super::PhysicalPlan;
-use crate::cypher::RelationshipDirection;
-use crate::planner::{SetAssignment, SetNodePropertiesReturnMode, SetValue};
+use crate::{SetAssignment, SetNodePropertiesReturnMode, SetValue};
+use skein_cypher::RelationshipDirection;
 
 impl PhysicalPlan {
     pub fn explain(&self, indent: usize) -> String {

@@ -1,5 +1,4 @@
-use super::PhysicalPlan;
-use skein_optimizer::{PhysicalPlanClass, PhysicalPlanKind, PhysicalPlanNode, PlanChildren};
+use super::{PhysicalPlan, PhysicalPlanClass, PhysicalPlanKind, PhysicalPlanNode, PlanChildren};
 
 pub type PhysicalPlanChildren<'a> = PlanChildren<'a, PhysicalPlan>;
 

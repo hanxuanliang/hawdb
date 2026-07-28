@@ -1,4 +1,4 @@
-use skein_optimizer::{ApplyOrder, OptimizationStage};
+use crate::{ApplyOrder, OptimizationStage};
 
 pub(super) const LOGICAL_GROUPING_STAGE: OptimizationStage =
     OptimizationStage::new("logical_grouping", ApplyOrder::Once);

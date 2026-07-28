@@ -1,5 +1,5 @@
-use crate::planner::ComparisonOp;
-use crate::value::Value;
+use skein_core::Value;
+use skein_plan::ComparisonOp;
 
 pub(super) type ValueRangeBound = (Value, bool);
 pub(super) type ValueRangeBounds = (Option<ValueRangeBound>, Option<ValueRangeBound>);

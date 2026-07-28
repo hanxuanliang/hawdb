@@ -1,5 +1,5 @@
 use super::{costing, properties, OptimizerCatalog, PhysicalPlan};
-use skein_optimizer::{plan_class_counts, plan_operator_counts, SelectedPlanTrace};
+use crate::{plan_class_counts, plan_operator_counts, SelectedPlanTrace};
 
 pub(super) fn selected_plan_trace(
     plan: &PhysicalPlan,
