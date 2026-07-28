@@ -3212,6 +3212,7 @@ pub struct NowledgeMemStorageRecoveryReport {
     pub durable_recovery_observed: bool,
     pub checkpoint_boundary_present: bool,
     pub wal_replay_bounded: bool,
+    pub replay_boundary_consistent: bool,
     pub torn_tail_clean: bool,
     pub blocker_codes: Vec<String>,
 }
@@ -3224,6 +3225,7 @@ impl NowledgeMemStorageRecoveryReport {
         let wal_replay_bounded = report
             .max_wal_replay_entries
             .is_some_and(|limit| report.replayed_wal_entries <= limit);
+        let replay_boundary_consistent = storage_recovery_replay_boundary_consistent(report);
         let torn_tail_clean = !report.torn_tail_ignored && report.torn_tail_reason.is_none();
         let mut blocker_codes = Vec::new();
         if !durable_recovery_observed {
@@ -3234,6 +3236,9 @@ impl NowledgeMemStorageRecoveryReport {
         }
         if !wal_replay_bounded {
             blocker_codes.push("wal_replay_unbounded".to_string());
+        }
+        if !replay_boundary_consistent {
+            blocker_codes.push("replay_boundary_inconsistent".to_string());
         }
         if !torn_tail_clean {
             blocker_codes.push("torn_tail_observed".to_string());
@@ -3258,6 +3263,7 @@ impl NowledgeMemStorageRecoveryReport {
             durable_recovery_observed,
             checkpoint_boundary_present,
             wal_replay_bounded,
+            replay_boundary_consistent,
             torn_tail_clean,
             blocker_codes,
         }
@@ -3284,11 +3290,31 @@ impl NowledgeMemStorageRecoveryReport {
                 "durable_recovery_observed": self.durable_recovery_observed,
                 "checkpoint_boundary_present": self.checkpoint_boundary_present,
                 "wal_replay_bounded": self.wal_replay_bounded,
+                "replay_boundary_consistent": self.replay_boundary_consistent,
                 "torn_tail_clean": self.torn_tail_clean,
             },
             "blocker_codes": self.blocker_codes,
         })
     }
+}
+
+fn storage_recovery_replay_boundary_consistent(report: &StorageRecoveryReport) -> bool {
+    let Some(checkpoint_commit_epoch) = report.checkpoint_commit_epoch else {
+        return false;
+    };
+    let Some(wal_replay_start_lsn) = report.wal_replay_start_lsn else {
+        return false;
+    };
+    let Some(next_lsn_after_replay) = report.next_lsn_after_replay else {
+        return false;
+    };
+    let Ok(replayed_wal_entries) = u64::try_from(report.replayed_wal_entries) else {
+        return false;
+    };
+    checkpoint_commit_epoch <= report.recovered_commit_epoch
+        && wal_replay_start_lsn.checked_add(replayed_wal_entries) == Some(next_lsn_after_replay)
+        && checkpoint_commit_epoch.checked_add(replayed_wal_entries)
+            == Some(report.recovered_commit_epoch)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -9508,7 +9534,8 @@ mod tests {
             vec![
                 "durable_recovery_not_observed".to_string(),
                 "checkpoint_boundary_missing".to_string(),
-                "wal_replay_unbounded".to_string()
+                "wal_replay_unbounded".to_string(),
+                "replay_boundary_inconsistent".to_string()
             ]
         );
         assert_eq!(
@@ -9551,7 +9578,7 @@ mod tests {
                 replayed_wal_entries: 3,
                 torn_tail_ignored: false,
                 torn_tail_reason: None,
-                recovered_commit_epoch: 13,
+                recovered_commit_epoch: 14,
             });
         let json = report.json();
 
@@ -9561,10 +9588,12 @@ mod tests {
         assert!(report.durable_recovery_observed);
         assert!(report.checkpoint_boundary_present);
         assert!(report.wal_replay_bounded);
+        assert!(report.replay_boundary_consistent);
         assert!(report.torn_tail_clean);
         assert!(report.blocker_codes.is_empty());
         assert_eq!(json["ready"], true);
         assert_eq!(json["readiness"]["wal_replay_bounded"], true);
+        assert_eq!(json["readiness"]["replay_boundary_consistent"], true);
         assert_eq!(json["max_wal_replay_entries"], 16);
     }
 
@@ -9591,18 +9620,53 @@ mod tests {
         assert!(!report.ready);
         assert!(!report.checkpoint_boundary_present);
         assert!(!report.wal_replay_bounded);
+        assert!(!report.replay_boundary_consistent);
         assert!(!report.torn_tail_clean);
         assert_eq!(
             report.blocker_codes,
             vec![
                 "checkpoint_boundary_missing".to_string(),
                 "wal_replay_unbounded".to_string(),
+                "replay_boundary_inconsistent".to_string(),
                 "torn_tail_observed".to_string()
             ]
         );
         assert_eq!(json["readiness"]["checkpoint_boundary_present"], false);
         assert_eq!(json["readiness"]["wal_replay_bounded"], false);
+        assert_eq!(json["readiness"]["replay_boundary_consistent"], false);
         assert_eq!(json["readiness"]["torn_tail_clean"], false);
+    }
+
+    #[test]
+    fn storage_recovery_report_rejects_inconsistent_replay_boundary() {
+        let report =
+            NowledgeMemStorageRecoveryReport::from_storage_report(&StorageRecoveryReport {
+                durable: true,
+                recovery_mode: RecoveryMode::Strict,
+                max_wal_replay_entries: Some(16),
+                checkpoint_epoch: Some(3),
+                checkpoint_commit_epoch: Some(11),
+                wal_present: true,
+                wal_replay_start_lsn: Some(4),
+                next_lsn_after_replay: Some(7),
+                replayed_wal_entries: 3,
+                torn_tail_ignored: false,
+                torn_tail_reason: None,
+                recovered_commit_epoch: 13,
+            });
+        let json = report.json();
+
+        assert!(report.durable_recovery_observed);
+        assert!(report.checkpoint_boundary_present);
+        assert!(report.wal_replay_bounded);
+        assert!(!report.replay_boundary_consistent);
+        assert!(report.torn_tail_clean);
+        assert!(!report.ready);
+        assert_eq!(
+            report.blocker_codes,
+            vec!["replay_boundary_inconsistent".to_string()]
+        );
+        assert_eq!(json["readiness"]["replay_boundary_consistent"], false);
     }
 
     #[test]
@@ -9622,7 +9686,8 @@ mod tests {
             vec![
                 "durable_recovery_not_observed".to_string(),
                 "checkpoint_boundary_missing".to_string(),
-                "wal_replay_unbounded".to_string()
+                "wal_replay_unbounded".to_string(),
+                "replay_boundary_inconsistent".to_string()
             ]
         );
         assert_eq!(json["ready"], false);
