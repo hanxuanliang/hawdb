@@ -602,7 +602,7 @@ struct QueryRuntimeReport {
     plan_cache_hit: Option<bool>,
     plan_cache_miss: Option<bool>,
     plan_cache_bypassed: Option<bool>,
-    include_metadata_false_strips_metadata: Option<bool>,
+    api_behavior: QueryApiBehaviorEvidence,
     blocker_codes: Vec<String>,
 }
 
@@ -644,11 +644,7 @@ impl QueryRuntimeReport {
             plan_cache_hit,
             plan_cache_miss,
             plan_cache_bypassed,
-            include_metadata_false_strips_metadata: bool_path(
-                value,
-                &["api_behavior", "include_metadata_false_strips_metadata"],
-            )
-            .or_else(|| bool_path(value, &["include_metadata_false_strips_metadata"])),
+            api_behavior: QueryApiBehaviorEvidence::parse(value),
             blocker_codes: Vec::new(),
         };
         report.blocker_codes = report.computed_blocker_codes();
@@ -697,9 +693,7 @@ impl QueryRuntimeReport {
                 "miss": self.plan_cache_miss,
                 "bypassed": self.plan_cache_bypassed,
             },
-            "api_behavior": {
-                "include_metadata_false_strips_metadata": self.include_metadata_false_strips_metadata,
-            },
+            "api_behavior": self.api_behavior.json(),
             "ready": self.ready(),
             "blocker_codes": self.blocker_codes,
         })
@@ -776,8 +770,17 @@ impl QueryRuntimeReport {
         {
             blockers.insert("query_report_plan_cache_bypassed".to_string());
         }
-        if self.include_metadata_false_strips_metadata != Some(true) {
+        if self.api_behavior.include_metadata_false_strips_metadata != Some(true) {
             blockers.insert("query_report_api_behavior_metadata_stripping_missing".to_string());
+        }
+        if self.api_behavior.ordering_contract_recorded != Some(true) {
+            blockers.insert("query_report_api_behavior_ordering_missing".to_string());
+        }
+        if self.api_behavior.pagination_contract_recorded != Some(true) {
+            blockers.insert("query_report_api_behavior_pagination_missing".to_string());
+        }
+        if self.api_behavior.error_class_stable != Some(true) {
+            blockers.insert("query_report_api_behavior_error_class_missing".to_string());
         }
         blockers.into_iter().collect()
     }
@@ -805,6 +808,53 @@ impl QueryRuntimeReport {
                 .scan_pruning_reports
                 .iter()
                 .all(scan_pruning_report_ready)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QueryApiBehaviorEvidence {
+    include_metadata_false_strips_metadata: Option<bool>,
+    ordering_contract_recorded: Option<bool>,
+    pagination_contract_recorded: Option<bool>,
+    error_class_stable: Option<bool>,
+    statement_has_ordering: Option<bool>,
+    statement_has_pagination: Option<bool>,
+}
+
+impl QueryApiBehaviorEvidence {
+    fn parse(value: &serde_json::Value) -> Self {
+        Self {
+            include_metadata_false_strips_metadata: bool_path(
+                value,
+                &["api_behavior", "include_metadata_false_strips_metadata"],
+            )
+            .or_else(|| bool_path(value, &["include_metadata_false_strips_metadata"])),
+            ordering_contract_recorded: bool_path(
+                value,
+                &["api_behavior", "ordering_contract_recorded"],
+            ),
+            pagination_contract_recorded: bool_path(
+                value,
+                &["api_behavior", "pagination_contract_recorded"],
+            ),
+            error_class_stable: bool_path(value, &["api_behavior", "error_class_stable"]),
+            statement_has_ordering: bool_path(value, &["api_behavior", "statement_has_ordering"]),
+            statement_has_pagination: bool_path(
+                value,
+                &["api_behavior", "statement_has_pagination"],
+            ),
+        }
+    }
+
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "include_metadata_false_strips_metadata": self.include_metadata_false_strips_metadata,
+            "ordering_contract_recorded": self.ordering_contract_recorded,
+            "pagination_contract_recorded": self.pagination_contract_recorded,
+            "error_class_stable": self.error_class_stable,
+            "statement_has_ordering": self.statement_has_ordering,
+            "statement_has_pagination": self.statement_has_pagination,
+        })
     }
 }
 
@@ -1592,6 +1642,63 @@ mod tests {
     }
 
     #[test]
+    fn route_readiness_fails_closed_without_api_behavior_ordering_contract() {
+        let mut routes = ready_routes();
+        routes[0]["query_reports"][0]["api_behavior"]
+            .as_object_mut()
+            .unwrap()
+            .remove("ordering_contract_recorded");
+
+        let readiness = nowledge_graph_route_readiness_json(&ready_evidence(routes)).unwrap();
+
+        assert_eq!(readiness["route_primary_ready"], false);
+        assert_eq!(readiness["route_query_runtime_ready"], false);
+        assert!(readiness["route_primary_blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "query_report_api_behavior_ordering_missing"));
+    }
+
+    #[test]
+    fn route_readiness_fails_closed_without_api_behavior_error_class_contract() {
+        let mut routes = ready_routes();
+        routes[0]["query_reports"][0]["api_behavior"]
+            .as_object_mut()
+            .unwrap()
+            .remove("error_class_stable");
+
+        let readiness = nowledge_graph_route_readiness_json(&ready_evidence(routes)).unwrap();
+
+        assert_eq!(readiness["route_primary_ready"], false);
+        assert_eq!(readiness["route_query_runtime_ready"], false);
+        assert!(readiness["route_primary_blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "query_report_api_behavior_error_class_missing"));
+    }
+
+    #[test]
+    fn route_readiness_fails_closed_without_api_behavior_pagination_contract() {
+        let mut routes = ready_routes();
+        routes[0]["query_reports"][0]["api_behavior"]
+            .as_object_mut()
+            .unwrap()
+            .remove("pagination_contract_recorded");
+
+        let readiness = nowledge_graph_route_readiness_json(&ready_evidence(routes)).unwrap();
+
+        assert_eq!(readiness["route_primary_ready"], false);
+        assert_eq!(readiness["route_query_runtime_ready"], false);
+        assert!(readiness["route_primary_blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "query_report_api_behavior_pagination_missing"));
+    }
+
+    #[test]
     fn route_readiness_fails_closed_without_output_row_shape() {
         let mut routes = ready_routes();
         routes[0]["query_reports"][0]
@@ -1959,7 +2066,12 @@ mod tests {
                 "bypassed": false
             },
             "api_behavior": {
-                "include_metadata_false_strips_metadata": true
+                "include_metadata_false_strips_metadata": true,
+                "ordering_contract_recorded": true,
+                "pagination_contract_recorded": true,
+                "error_class_stable": true,
+                "statement_has_ordering": false,
+                "statement_has_pagination": false
             }
         })
     }

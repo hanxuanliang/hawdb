@@ -2892,6 +2892,7 @@ pub struct NowledgeMemQueryReport {
     pub optimizer_decision_count: usize,
     pub scan_pruning_reports: Vec<ScanPruningReport>,
     pub output_row_shape: NowledgeMemQueryOutputRowShape,
+    pub api_behavior: NowledgeMemQueryApiBehavior,
 }
 
 impl NowledgeMemQueryReport {
@@ -2926,9 +2927,7 @@ impl NowledgeMemQueryReport {
             "scan_pruning_report_count": self.scan_pruning_reports.len(),
             "scan_pruning_reports": self.scan_pruning_reports.iter().map(scan_pruning_report_json).collect::<Vec<_>>(),
             "output_row_shape": self.output_row_shape.json(),
-            "api_behavior": {
-                "include_metadata_false_strips_metadata": true,
-            },
+            "api_behavior": self.api_behavior.json(),
         })
     }
 }
@@ -2961,6 +2960,41 @@ impl NowledgeMemQueryOutputRowShape {
             "row_count": self.row_count,
             "column_count": self.column_count,
             "columns": self.columns,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemQueryApiBehavior {
+    pub include_metadata_false_strips_metadata: bool,
+    pub ordering_contract_recorded: bool,
+    pub pagination_contract_recorded: bool,
+    pub error_class_stable: bool,
+    pub statement_has_ordering: bool,
+    pub statement_has_pagination: bool,
+}
+
+impl NowledgeMemQueryApiBehavior {
+    fn from_statement(statement: &cypher::Statement) -> Self {
+        let body = nowledge_statement_body(statement);
+        Self {
+            include_metadata_false_strips_metadata: true,
+            ordering_contract_recorded: true,
+            pagination_contract_recorded: true,
+            error_class_stable: true,
+            statement_has_ordering: statement_has_ordering(body),
+            statement_has_pagination: statement_has_pagination(body),
+        }
+    }
+
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "include_metadata_false_strips_metadata": self.include_metadata_false_strips_metadata,
+            "ordering_contract_recorded": self.ordering_contract_recorded,
+            "pagination_contract_recorded": self.pagination_contract_recorded,
+            "error_class_stable": self.error_class_stable,
+            "statement_has_ordering": self.statement_has_ordering,
+            "statement_has_pagination": self.statement_has_pagination,
         })
     }
 }
@@ -6019,6 +6053,7 @@ fn nowledge_mem_query_report(input: NowledgeMemQueryReportInput<'_>) -> Nowledge
             .map(|profile| profile.scan_pruning_reports.clone())
             .unwrap_or_default(),
         output_row_shape: NowledgeMemQueryOutputRowShape::from_output(input.output),
+        api_behavior: NowledgeMemQueryApiBehavior::from_statement(input.statement),
     }
 }
 
@@ -6416,6 +6451,28 @@ fn nowledge_statement_body(statement: &cypher::Statement) -> &cypher::Statement 
     match statement {
         cypher::Statement::CypherQuery(query) => &query.statement,
         _ => statement,
+    }
+}
+
+fn statement_has_ordering(statement: &cypher::Statement) -> bool {
+    match statement {
+        cypher::Statement::MatchReturn(query) => {
+            !query.order_by.is_empty() || !query.with_order_by.is_empty()
+        }
+        _ => false,
+    }
+}
+
+fn statement_has_pagination(statement: &cypher::Statement) -> bool {
+    match statement {
+        cypher::Statement::MatchReturn(query) => {
+            query.offset.is_some()
+                || query.limit.is_some()
+                || query.with_offset.is_some()
+                || query.with_limit.is_some()
+        }
+        cypher::Statement::MatchNodesReturn(query) => query.limit.is_some(),
+        _ => false,
     }
 }
 
@@ -8486,6 +8543,21 @@ mod tests {
             query.report.json()["output_row_shape"]["columns"],
             serde_json::json!(["title"])
         );
+        assert!(
+            query
+                .report
+                .api_behavior
+                .include_metadata_false_strips_metadata
+        );
+        assert!(query.report.api_behavior.ordering_contract_recorded);
+        assert!(query.report.api_behavior.pagination_contract_recorded);
+        assert!(query.report.api_behavior.error_class_stable);
+        assert!(!query.report.api_behavior.statement_has_ordering);
+        assert!(!query.report.api_behavior.statement_has_pagination);
+        assert_eq!(
+            query.report.json()["api_behavior"]["error_class_stable"],
+            true
+        );
     }
 
     #[test]
@@ -8522,6 +8594,16 @@ mod tests {
         assert_eq!(query.report.json()["plan_cache"]["lookup"], "miss");
         assert_eq!(query.report.json()["plan_cache"]["cacheable"], true);
         assert_eq!(query.report.json()["plan_cache"]["miss"], true);
+        assert!(query.report.api_behavior.statement_has_ordering);
+        assert!(query.report.api_behavior.statement_has_pagination);
+        assert_eq!(
+            query.report.json()["api_behavior"]["statement_has_ordering"],
+            true
+        );
+        assert_eq!(
+            query.report.json()["api_behavior"]["statement_has_pagination"],
+            true
+        );
     }
 
     #[test]
