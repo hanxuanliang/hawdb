@@ -696,6 +696,63 @@ contract.
   - [x] Gate advanced compressed vector retrieval modes behind typed recall,
     parity, and cold/local-segment advisor evidence for embedded store opens
     and search-candidate requests.
+  - [ ] Add a unified filtered-vector execution path.
+    - Push `WHERE` predicates for lifecycle, unit type, metadata, numeric
+      ranges, timestamp ranges, and unique document ids into segment descriptors
+      before vector scoring whenever the predicate is descriptor-safe.
+    - Keep an iterative-filter fallback for complex predicates: bounded vector
+      candidate generation first, scalar predicate evaluation second, and repeat
+      until `topK` is satisfied or the budget is exhausted.
+    - Preserve scalar cosine scan as the exact baseline for small filtered
+      candidate sets and high-filter-ratio workloads.
+  - [ ] Split vector retrieval into candidate generation plus raw-vector
+    reranking.
+    - Treat compressed or ANN results as candidates only.
+    - Rerank the bounded candidate window against raw vectors before returning
+      scores to callers.
+    - Report both approximate score source and final raw-vector score source.
+  - [ ] Add an adaptive vector backend selector.
+    - Prefer flat scan for small tables, high-filter-ratio predicates, and
+      recall-validation probes.
+    - Prefer compressed IVF/SQ/PQ-style projections for constrained local
+      hardware when memory budgets are tight.
+    - Keep graph-heavy indexes such as HNSW optional because they can add large
+      resident memory overhead.
+    - Consider DiskANN-style or mmap-backed layouts only after local vector
+      payloads exceed the configured memory budget.
+  - [ ] Add sampled recall validation for approximate vector paths.
+    - Compare ANN or compressed-vector results against scalar flat-scan
+      ground truth on bounded sampled queries.
+    - Track recall@k, overlap@k, fallback counts, and filter selectivity.
+    - Make production readiness fail closed when recall evidence is absent for
+      a required approximate backend.
+  - [ ] Extend vector observability in explain, explain analyze, slow log, and
+    blackbox reports.
+    - Include vector backend, compressed projection mode, candidate count,
+      descriptor-pruned count, scalar-filtered count, rerank count, raw-vector
+      bytes read, index coverage, and fallback reason codes.
+    - Keep reports compact and never copy raw embedding values.
+  - [ ] Add vector seed as a graph query operator.
+    - Model semantic search as a bounded candidate-producing operator, not as a
+      standalone answer path.
+    - Feed seed document, entity, or memory ids into graph plans as a typed
+      candidate set that can participate in `MATCH` and `WHERE`.
+    - Let the optimizer choose whether descriptor-safe filters run before vector
+      seed generation or after bounded candidate generation.
+  - [ ] Add graph-constrained retrieval plans.
+    - Use vector seeds to filter the graph, then perform bounded 1-2 hop
+      expansion by relation type and candidate budget.
+    - Keep graph edges as first-class records in the plan instead of treating the
+      graph as a post-search primary-key lookup.
+    - Report seed count, expanded node count, expanded edge count, relation
+      types, hop count, rerank count, and payload byte budget usage.
+  - [ ] Add schema-guided query-generation support for GraphRAG callers.
+    - Expose compact label, relationship type, property, common-path, and route
+      catalog summaries for LLM-assisted Cypher generation.
+    - Keep schema context generated from stable graph metadata and Nowledge
+      ontology, not from free-form LLM-created labels or edge types.
+    - Run generated queries through the normal parser, optimizer, execution
+      profile, and slow-query/blackbox reporting path.
 
 ## P1: Operability
 

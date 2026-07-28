@@ -1,5 +1,5 @@
 use super::PhysicalPlan;
-use skein_optimizer::{PhysicalPlanClass, PhysicalPlanKind, PlanChildren, PlanNode};
+use skein_optimizer::{PhysicalPlanClass, PhysicalPlanKind, PhysicalPlanNode, PlanChildren};
 
 pub type PhysicalPlanChildren<'a> = PlanChildren<'a, PhysicalPlan>;
 
@@ -115,7 +115,7 @@ impl PhysicalPlan {
     }
 }
 
-impl PlanNode for PhysicalPlan {
+impl PhysicalPlanNode for PhysicalPlan {
     fn kind(&self) -> PhysicalPlanKind {
         PhysicalPlan::kind(self)
     }
