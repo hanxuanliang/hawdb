@@ -411,6 +411,75 @@ pub fn nowledge_replacement_summary_json_with_options(
             ],
         )
         .map_or(serde_json::Value::Null, serde_json::Value::Bool);
+    summary["cutover_evidence"]["background_maintenance_memory_pressure_ready"] =
+        json_get_bool_path(
+            bundle,
+            &[
+                "cutover_evidence",
+                "background_maintenance_memory_pressure_ready",
+            ],
+        )
+        .map_or(serde_json::Value::Null, serde_json::Value::Bool);
+    summary["cutover_evidence"]["background_maintenance_memory_budget_bytes"] = json_get_u64_path(
+        bundle,
+        &[
+            "cutover_evidence",
+            "background_maintenance_memory_budget_bytes",
+        ],
+    )
+    .map_or(serde_json::Value::Null, serde_json::Value::from);
+    summary["cutover_evidence"]["background_maintenance_estimated_memory_bytes"] =
+        json_get_u64_path(
+            bundle,
+            &[
+                "cutover_evidence",
+                "background_maintenance_estimated_memory_bytes",
+            ],
+        )
+        .map_or(serde_json::Value::Null, serde_json::Value::from);
+    summary["cutover_evidence"]["background_maintenance_qos_snapshot_ready"] = json_get_bool_path(
+        bundle,
+        &[
+            "cutover_evidence",
+            "background_maintenance_qos_snapshot_ready",
+        ],
+    )
+    .map_or(serde_json::Value::Null, serde_json::Value::Bool);
+    summary["cutover_evidence"]["background_maintenance_qos_snapshot_foreground_admitted"] =
+        json_get_u64_path(
+            bundle,
+            &[
+                "cutover_evidence",
+                "background_maintenance_qos_snapshot_foreground_admitted",
+            ],
+        )
+        .map_or(serde_json::Value::Null, serde_json::Value::from);
+    summary["cutover_evidence"]["background_maintenance_qos_snapshot_background_bounded"] =
+        json_get_bool_path(
+            bundle,
+            &[
+                "cutover_evidence",
+                "background_maintenance_qos_snapshot_background_bounded",
+            ],
+        )
+        .map_or(serde_json::Value::Null, serde_json::Value::Bool);
+    summary["cutover_evidence"]
+        ["background_maintenance_qos_snapshot_total_background_over_budget"] = json_get_u64_path(
+        bundle,
+        &[
+            "cutover_evidence",
+            "background_maintenance_qos_snapshot_total_background_over_budget",
+        ],
+    )
+    .map_or(serde_json::Value::Null, serde_json::Value::from);
+    summary["cutover_evidence"]["background_maintenance_qos_snapshot_blocker_codes"] =
+        json_get_array_path(
+            bundle,
+            &[
+                "cutover_evidence",
+                "background_maintenance_qos_snapshot_blocker_codes",
+            ],
+        );
     if let Some(object) = summary.as_object_mut() {
         object.insert(
             "replacement_boundaries".to_string(),

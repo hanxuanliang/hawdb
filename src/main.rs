@@ -1848,6 +1848,11 @@ fn add_cutover_evidence_report(
     );
     insert_json(
         &mut evidence,
+        "storage_recovery_replay_boundary_consistent",
+        storage_recovery_health.replay_boundary_consistent,
+    );
+    insert_json(
+        &mut evidence,
         "storage_recovery_torn_tail_clean",
         storage_recovery_health.torn_tail_clean,
     );
@@ -1938,6 +1943,46 @@ fn add_cutover_evidence_report(
         background_maintenance_health
             .foreground_admission_probe_admission_name
             .as_deref(),
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_memory_pressure_ready",
+        background_maintenance_health.memory_pressure_ready,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_memory_budget_bytes",
+        background_maintenance_health.memory_budget_bytes,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_estimated_memory_bytes",
+        background_maintenance_health.estimated_memory_bytes,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_qos_snapshot_ready",
+        background_maintenance_health.qos_snapshot_ready,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_qos_snapshot_foreground_admitted",
+        background_maintenance_health.qos_snapshot_foreground_admitted,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_qos_snapshot_background_bounded",
+        background_maintenance_health.qos_snapshot_background_bounded,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_qos_snapshot_total_background_over_budget",
+        background_maintenance_health.qos_snapshot_total_background_over_budget,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_qos_snapshot_blocker_codes",
+        background_maintenance_health.qos_snapshot_blocker_codes,
     );
     insert_json(
         &mut evidence,

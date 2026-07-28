@@ -2496,13 +2496,17 @@ fn replacement_summary_background_maintenance_graph_delta_ready(
             "cutover_evidence",
             "background_maintenance_admitted_search_projection_graph_delta_operations",
         ][..],
-        &[
-            "cutover_evidence",
-            "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch",
-        ][..],
     ]
     .iter()
     .all(|path| u64_path(replacement_summary, path).is_some())
+        && value_path(
+            replacement_summary,
+            &[
+                "cutover_evidence",
+                "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch",
+            ],
+        )
+        .is_some_and(|value| value.is_u64() || value.is_null())
         && bool_path(
             replacement_summary,
             &[

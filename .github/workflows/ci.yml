@@ -547,7 +547,16 @@ jobs:
           checks = {check["name"]: check for check in report["checks"]}
           assert checks["storage_recovery"]["ready"] is True
           assert checks["background_maintenance"]["ready"] is True
-          assert report["failed_checks"] == ["adapter_smoke", "migration_gate", "replacement_summary"]
+          assert report["failed_checks"] == [
+              "adapter_smoke",
+              "migration_gate",
+              "replacement_summary",
+              "replacement_summary_route_catalog",
+              "replacement_summary_graph_route",
+              "replacement_summary_bounded_read",
+              "query_runtime_preflight",
+              "library_readiness",
+          ]
           assert checks["adapter_smoke"]["failed_evidence_fields"] == [
               "dual_engine_evidence.ready",
               "dual_engine_evidence.matched_check_count",
