@@ -1,0 +1,88 @@
+use crate::{NodeId, RelId};
+use skein_core::{SchemaObjectState, Value};
+use std::collections::BTreeMap;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectedGraphDefinition {
+    pub node_labels: Vec<String>,
+    pub rel_types: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectedGraphStatus {
+    pub name: String,
+    pub node_labels: Vec<String>,
+    pub rel_types: Vec<String>,
+    pub projection_epoch: Option<u64>,
+    pub commit_epoch: Option<u64>,
+    pub node_count: Option<usize>,
+    pub edge_count: Option<usize>,
+    pub reusable: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StorageReclamationWatermark {
+    pub current_commit_epoch: u64,
+    pub checkpoint_epoch: Option<u64>,
+    pub checkpoint_commit_epoch: Option<u64>,
+    pub oldest_reader_commit_epoch: Option<u64>,
+    pub safe_reclaim_commit_epoch: u64,
+    pub durable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StorageRecoveryReport {
+    pub durable: bool,
+    pub recovery_mode: crate::RecoveryMode,
+    pub max_wal_replay_entries: Option<usize>,
+    pub checkpoint_epoch: Option<u64>,
+    pub checkpoint_commit_epoch: Option<u64>,
+    pub wal_present: bool,
+    pub wal_replay_start_lsn: Option<u64>,
+    pub next_lsn_after_replay: Option<u64>,
+    pub replayed_wal_entries: usize,
+    pub torn_tail_ignored: bool,
+    pub torn_tail_reason: Option<String>,
+    pub recovered_commit_epoch: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StoreStableIdMapping {
+    pub node_stable_ids: BTreeMap<NodeId, Value>,
+    pub relationship_stable_ids: BTreeMap<RelId, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemaMaintenanceAction {
+    pub object_type: String,
+    pub object: String,
+    pub from_state: SchemaObjectState,
+    pub to_state: Option<SchemaObjectState>,
+    pub action: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemaMaintenancePlanItem {
+    pub object_type: String,
+    pub object: String,
+    pub from_state: SchemaObjectState,
+    pub to_state: Option<SchemaObjectState>,
+    pub action: String,
+    pub estimated_operations: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PropertyIndexProjectionRebuildAction {
+    pub index_kind: String,
+    pub label: String,
+    pub properties: Vec<String>,
+    pub estimated_operations: usize,
+    pub indexed_entries: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchProjectionGraphChange {
+    pub commit_epoch: u64,
+    pub upsert_node_ids: Vec<u64>,
+    pub delete_document_ids: Vec<String>,
+}
