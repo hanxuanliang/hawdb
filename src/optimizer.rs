@@ -916,22 +916,12 @@ impl PhysicalPlan {
                 nullable,
             } => {
                 output.push_str("CreateProperty(");
-                output.push_str(match table_kind {
-                    SchemaTableKind::Node => "node",
-                    SchemaTableKind::Relationship => "relationship",
-                });
+                output.push_str(table_kind.as_str());
                 output.push(':');
                 write_identifier(output, table);
                 output.push('.');
                 write_identifier(output, property);
-                output.push_str(match value_type {
-                    SchemaPropertyType::Any => ":any",
-                    SchemaPropertyType::Bool => ":bool",
-                    SchemaPropertyType::Int => ":int",
-                    SchemaPropertyType::Float => ":float",
-                    SchemaPropertyType::String => ":string",
-                    SchemaPropertyType::List => ":list",
-                });
+                output.push_str(value_type.fingerprint_suffix());
                 output.push_str(if *nullable { ":nullable" } else { ":not_null" });
                 output.push(')');
             }
@@ -941,14 +931,11 @@ impl PhysicalPlan {
                 state,
             } => {
                 output.push_str("AlterTableState(");
-                output.push_str(match table_kind {
-                    SchemaTableKind::Node => "node",
-                    SchemaTableKind::Relationship => "relationship",
-                });
+                output.push_str(table_kind.as_str());
                 output.push(':');
                 write_identifier(output, table);
                 output.push(':');
-                output.push_str(schema_state_fingerprint(*state));
+                output.push_str(state.as_str());
                 output.push(')');
             }
             PhysicalPlan::AlterPropertyState {
@@ -958,16 +945,13 @@ impl PhysicalPlan {
                 state,
             } => {
                 output.push_str("AlterPropertyState(");
-                output.push_str(match table_kind {
-                    SchemaTableKind::Node => "node",
-                    SchemaTableKind::Relationship => "relationship",
-                });
+                output.push_str(table_kind.as_str());
                 output.push(':');
                 write_identifier(output, table);
                 output.push('.');
                 write_identifier(output, property);
                 output.push(':');
-                output.push_str(schema_state_fingerprint(*state));
+                output.push_str(state.as_str());
                 output.push(')');
             }
             PhysicalPlan::CreateIndex { label, property } => {
@@ -6711,17 +6695,6 @@ fn write_identifier(output: &mut String, value: &str) {
     output.push_str(&value.len().to_string());
     output.push(':');
     output.push_str(value);
-}
-
-fn schema_state_fingerprint(state: SchemaObjectState) -> &'static str {
-    match state {
-        SchemaObjectState::DeleteOnly => "delete_only",
-        SchemaObjectState::WriteOnly => "write_only",
-        SchemaObjectState::Backfill => "backfill",
-        SchemaObjectState::Validating => "validating",
-        SchemaObjectState::Public => "public",
-        SchemaObjectState::Gc => "gc",
-    }
 }
 
 fn write_identifier_list(output: &mut String, values: &[String]) {

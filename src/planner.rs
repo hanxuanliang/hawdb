@@ -12,6 +12,7 @@ use crate::cypher::{
 };
 use crate::error::{Result, SkeinError};
 use crate::value::Value;
+pub use skein_ddl::{SchemaObjectState, SchemaPropertyType, SchemaTableKind};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -458,32 +459,6 @@ pub enum ComparisonOp {
     Lte,
     Gt,
     Gte,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SchemaTableKind {
-    Node,
-    Relationship,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SchemaPropertyType {
-    Any,
-    Bool,
-    Int,
-    Float,
-    String,
-    List,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SchemaObjectState {
-    DeleteOnly,
-    WriteOnly,
-    Backfill,
-    Validating,
-    Public,
-    Gc,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

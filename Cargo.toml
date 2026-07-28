@@ -12,6 +12,8 @@ serde_json = "1"
 skein-core = { path = "crates/core" }
 skein-api-types = { path = "crates/api-types" }
 skein-cypher = { path = "crates/cypher" }
+skein-ddl = { path = "crates/ddl" }
+skein-executor = { path = "crates/executor" }
 skein-optimizer = { path = "crates/optimizer" }
 skein-plan-cache = { path = "crates/plan-cache" }
 skein-qos = { path = "crates/qos" }
@@ -31,6 +33,8 @@ members = [
   "crates/api-types",
   "crates/core",
   "crates/cypher",
+  "crates/ddl",
+  "crates/executor",
   "crates/optimizer",
   "crates/plan-cache",
   "crates/qos",

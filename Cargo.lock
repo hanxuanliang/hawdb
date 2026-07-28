@@ -1170,6 +1170,8 @@ dependencies = [
  "skein-api-types",
  "skein-core",
  "skein-cypher",
+ "skein-ddl",
+ "skein-executor",
  "skein-optimizer",
  "skein-plan-cache",
  "skein-qos",
@@ -1192,6 +1194,20 @@ version = "0.1.0"
 
 [[package]]
 name = "skein-cypher"
+version = "0.1.0"
+dependencies = [
+ "skein-core",
+]
+
+[[package]]
+name = "skein-ddl"
+version = "0.1.0"
+dependencies = [
+ "skein-core",
+]
+
+[[package]]
+name = "skein-executor"
 version = "0.1.0"
 dependencies = [
  "skein-core",

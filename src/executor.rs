@@ -5,11 +5,11 @@ use crate::optimizer::PhysicalPlan;
 use crate::planner::{
     AggregateFunction, AggregateTarget, Aggregation, CoalesceDifferenceProjectionTerm,
     ComparisonOp, DatePart, GraphAlgorithmKind, Predicate, Projection, ProjectionExpression,
-    RelationshipCountFilter, RelationshipCountLeg, RelationshipOnCreateValue, SchemaObjectState,
-    SchemaPropertyType, SchemaTableKind, SetNodePropertiesReturnMode, SetValue,
-    ShortestPathProjection, ShortestPathProjectionExpression, SortDirection, SortItem, SortKey,
+    RelationshipCountFilter, RelationshipCountLeg, RelationshipOnCreateValue,
+    SetNodePropertiesReturnMode, SetValue, ShortestPathProjection,
+    ShortestPathProjectionExpression, SortDirection, SortItem, SortKey,
 };
-use crate::schema::{Catalog, PropertyType, TableKind};
+use crate::schema::Catalog;
 use crate::store::{
     AdjacencyDirection, ConnectedNodesCreate, GraphMutation, GraphStore,
     MatchedRelationshipCopyMerge, MatchedRelationshipCreate, MatchedRelationshipMerge,
@@ -20,74 +20,19 @@ use crate::store::{
     RelationshipTargetNodeDelete, ScanPruningReport, ScanPruningStrategy,
 };
 use crate::value::Value;
+use skein_ddl::{object_state_to_core, property_type_to_core, table_kind_to_core};
+use skein_executor::ExecutionLimit;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-pub type Row = BTreeMap<String, Value>;
+pub type Row = skein_executor::Row;
+pub type ReadExecutionProfile = skein_executor::ReadExecutionProfile<ScanPruningReport>;
+pub type ProfiledQueryRows = skein_executor::ProfiledQueryRows<ScanPruningReport>;
 type ValueRangeBound = (Value, bool);
 type ValueRangeBounds = (Option<ValueRangeBound>, Option<ValueRangeBound>);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ExecutionLimit {
-    output_rows: Option<usize>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReadExecutionProfile {
-    pub max_rows: Option<usize>,
-    pub detection_row_cap: Option<usize>,
-    pub row_limit_enforced_before_output: bool,
-    pub operator_row_cap_enabled: bool,
-    pub blocking_operator_kinds: Vec<String>,
-    pub scan_pruning_reports: Vec<ScanPruningReport>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProfiledQueryRows {
-    pub rows: Vec<Row>,
-    pub profile: ReadExecutionProfile,
-}
-
 thread_local! {
     static SCAN_PRUNING_REPORT_CAPTURE: RefCell<Option<Vec<ScanPruningReport>>> = const { RefCell::new(None) };
-}
-
-impl ExecutionLimit {
-    fn unlimited() -> Self {
-        Self { output_rows: None }
-    }
-
-    fn from_user_max_rows(max_rows: Option<usize>) -> Result<Self> {
-        let Some(max_rows) = max_rows else {
-            return Ok(Self::unlimited());
-        };
-        let output_rows = max_rows.checked_add(1).ok_or_else(|| {
-            SkeinError::Execution("read query row limit is too large".to_string())
-        })?;
-        Ok(Self {
-            output_rows: Some(output_rows),
-        })
-    }
-
-    fn child_for_limit(self, offset: usize, limit: Option<usize>) -> Self {
-        let output_rows = match (self.output_rows, limit) {
-            (Some(cap), Some(limit)) => Some(offset.saturating_add(cap.min(limit))),
-            (Some(cap), None) => Some(offset.saturating_add(cap)),
-            (None, Some(limit)) => Some(offset.saturating_add(limit)),
-            (None, None) => None,
-        };
-        Self { output_rows }
-    }
-
-    fn is_reached(self, len: usize) -> bool {
-        self.output_rows.is_some_and(|cap| len >= cap)
-    }
-}
-
-impl ReadExecutionProfile {
-    pub fn blocking_operator_count(&self) -> usize {
-        self.blocking_operator_kinds.len()
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -253,10 +198,10 @@ pub fn mutation_command(plan: &PhysicalPlan) -> Result<Option<GraphMutation>> {
             value_type,
             nullable,
         } => Ok(Some(GraphMutation::CreateProperty {
-            table_kind: schema_table_kind(*table_kind),
+            table_kind: table_kind_to_core(*table_kind),
             table: table.clone(),
             property: property.clone(),
-            value_type: schema_property_type(*value_type),
+            value_type: property_type_to_core(*value_type),
             nullable: *nullable,
         })),
         PhysicalPlan::AlterTableState {
@@ -264,9 +209,9 @@ pub fn mutation_command(plan: &PhysicalPlan) -> Result<Option<GraphMutation>> {
             table,
             state,
         } => Ok(Some(GraphMutation::AlterTableState {
-            table_kind: schema_table_kind(*table_kind),
+            table_kind: table_kind_to_core(*table_kind),
             table: table.clone(),
-            state: schema_object_state(*state),
+            state: object_state_to_core(*state),
         })),
         PhysicalPlan::AlterPropertyState {
             table_kind,
@@ -274,10 +219,10 @@ pub fn mutation_command(plan: &PhysicalPlan) -> Result<Option<GraphMutation>> {
             property,
             state,
         } => Ok(Some(GraphMutation::AlterPropertyState {
-            table_kind: schema_table_kind(*table_kind),
+            table_kind: table_kind_to_core(*table_kind),
             table: table.clone(),
             property: property.clone(),
-            state: schema_object_state(*state),
+            state: object_state_to_core(*state),
         })),
         PhysicalPlan::CreateIndex { label, property } => Ok(Some(GraphMutation::CreateIndex {
             label: label.clone(),
@@ -720,24 +665,6 @@ pub fn is_mutation_plan(plan: &PhysicalPlan) -> Result<bool> {
     mutation_command(plan).map(|mutation| mutation.is_some())
 }
 
-fn schema_table_kind(kind: SchemaTableKind) -> TableKind {
-    match kind {
-        SchemaTableKind::Node => TableKind::Node,
-        SchemaTableKind::Relationship => TableKind::Relationship,
-    }
-}
-
-fn schema_property_type(value_type: SchemaPropertyType) -> PropertyType {
-    match value_type {
-        SchemaPropertyType::Any => PropertyType::Any,
-        SchemaPropertyType::Bool => PropertyType::Bool,
-        SchemaPropertyType::Int => PropertyType::Int,
-        SchemaPropertyType::Float => PropertyType::Float,
-        SchemaPropertyType::String => PropertyType::String,
-        SchemaPropertyType::List => PropertyType::List,
-    }
-}
-
 fn node_set_assignment(assignment: &crate::planner::SetAssignment) -> NodeSetAssignment {
     NodeSetAssignment {
         property: assignment.property.clone(),
@@ -770,17 +697,6 @@ fn relationship_on_create_property_value(
                 property: property.clone(),
             }
         }
-    }
-}
-
-fn schema_object_state(state: SchemaObjectState) -> crate::schema::SchemaObjectState {
-    match state {
-        SchemaObjectState::DeleteOnly => crate::schema::SchemaObjectState::DeleteOnly,
-        SchemaObjectState::WriteOnly => crate::schema::SchemaObjectState::WriteOnly,
-        SchemaObjectState::Backfill => crate::schema::SchemaObjectState::Backfill,
-        SchemaObjectState::Validating => crate::schema::SchemaObjectState::Validating,
-        SchemaObjectState::Public => crate::schema::SchemaObjectState::Public,
-        SchemaObjectState::Gc => crate::schema::SchemaObjectState::Gc,
     }
 }
 
@@ -883,7 +799,7 @@ fn execute_bindings_with_limit(
             value_type,
             nullable,
         } => {
-            let table_kind = schema_table_kind(*table_kind);
+            let table_kind = table_kind_to_core(*table_kind);
             let existed = catalog
                 .table_id(table_kind, table)
                 .and_then(|table_id| catalog.property_descriptor_id(table_id, property))
@@ -893,7 +809,7 @@ fn execute_bindings_with_limit(
                 table_kind,
                 table,
                 property,
-                schema_property_type(*value_type),
+                property_type_to_core(*value_type),
                 *nullable,
             )?;
             Ok(vec![Binding {
@@ -910,9 +826,9 @@ fn execute_bindings_with_limit(
             table,
             state,
         } => {
-            let state = schema_object_state(*state);
+            let state = object_state_to_core(*state);
             let (id, changed) =
-                store.alter_table_state(catalog, schema_table_kind(*table_kind), table, state)?;
+                store.alter_table_state(catalog, table_kind_to_core(*table_kind), table, state)?;
             Ok(vec![Binding {
                 values: BTreeMap::from([
                     ("table_id".to_string(), Value::Int(id.0 as i64)),
@@ -928,10 +844,10 @@ fn execute_bindings_with_limit(
             property,
             state,
         } => {
-            let state = schema_object_state(*state);
+            let state = object_state_to_core(*state);
             let (id, changed) = store.alter_property_state(
                 catalog,
-                schema_table_kind(*table_kind),
+                table_kind_to_core(*table_kind),
                 table,
                 property,
                 state,
