@@ -503,6 +503,9 @@ contract.
   - [x] Require replacement summary to recompute storage-recovery raw fields,
     including replay-boundary consistency, instead of trusting
     `storage_recovery_ready=true`.
+  - [x] Cover Mem-shaped post-checkpoint WAL batches that update an old Memory,
+    create replacement Memory nodes, and create an `EVOLVES` relationship while
+    proving a torn following batch is ignored without partial recovery.
 - [x] Add storage-level scan pruning where semantics are exact.
   - Equality, numeric range, date/time range, enum/in-list, and unique-key
     summaries should decide whether a segment needs to be read.

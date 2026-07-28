@@ -11168,9 +11168,10 @@ mod tests {
         checksum_bytes, compute_statistics, encode_durable_text, read_durable_text,
         AdjacencyDirection, AdjacencyGroupStats, AdjacencyLayout, ConnectedNodesCreate,
         DegreeStatisticsEntry, DegreeStatisticsKey, DurableCompression, GraphStore, NodeId,
-        NodeRecord, OrderedAdjacencyEntry, ProjectedGraphDefinition, PropertyFilter, RelId,
-        RelRecord, RelTypeId, RelationshipDeleteRequest, ScanPruningStrategy,
-        ScanPruningTargetKind, DENSE_ADJACENCY_DEGREE_THRESHOLD, DURABLE_COMPRESSION_HEADER,
+        NodeRecord, NodeSetAssignment, NodeSetValue, OrderedAdjacencyEntry,
+        ProjectedGraphDefinition, PropertyFilter, RelId, RelRecord, RelTypeId,
+        RelationshipDeleteRequest, ScanPruningStrategy, ScanPruningTargetKind,
+        DENSE_ADJACENCY_DEGREE_THRESHOLD, DURABLE_COMPRESSION_HEADER,
     };
     use crate::schema::{Catalog, LabelId};
     use crate::value::Value;
@@ -12697,6 +12698,135 @@ mod tests {
         let store = GraphStore::open(&path, &mut catalog).unwrap();
         assert!(store.scan_nodes(None).next().is_none());
         assert!(catalog.rel_type_id("MENTIONS").is_none());
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn recovers_mem_shaped_batches_after_checkpoint_without_torn_tail() {
+        let path = unique_test_dir("mem_shaped_batch_recovery");
+        {
+            let mut catalog = Catalog::default();
+            let mut store = GraphStore::open(&path, &mut catalog).unwrap();
+            let old_memory = store
+                .create_node(
+                    &mut catalog,
+                    "Memory",
+                    properties([
+                        ("id", Value::String("mem-old".to_string())),
+                        ("is_latest", Value::Bool(true)),
+                        ("updated_at", Value::Int(10)),
+                    ]),
+                )
+                .unwrap();
+            store.checkpoint(&catalog).unwrap();
+
+            store
+                .set_node_properties_by_ids(
+                    &mut catalog,
+                    &[old_memory],
+                    &[
+                        NodeSetAssignment {
+                            property: "is_latest".to_string(),
+                            value: NodeSetValue::Value(Value::Bool(false)),
+                        },
+                        NodeSetAssignment {
+                            property: "updated_at".to_string(),
+                            value: NodeSetValue::Value(Value::Int(20)),
+                        },
+                    ],
+                )
+                .unwrap();
+            store
+                .create_connected_nodes(
+                    &mut catalog,
+                    ConnectedNodesCreate {
+                        source_label: "Memory".to_string(),
+                        source_properties: properties([
+                            ("id", Value::String("mem-new".to_string())),
+                            ("is_latest", Value::Bool(true)),
+                        ]),
+                        rel_type: "EVOLVES".to_string(),
+                        rel_properties: properties([
+                            ("content_relation", Value::String("replaces".to_string())),
+                            ("confidence", Value::Float(0.9)),
+                        ]),
+                        target_label: "Memory".to_string(),
+                        target_properties: properties([
+                            ("id", Value::String("mem-snapshot-old".to_string())),
+                            ("is_latest", Value::Bool(false)),
+                        ]),
+                    },
+                )
+                .unwrap();
+            store
+                .create_connected_nodes(
+                    &mut catalog,
+                    ConnectedNodesCreate {
+                        source_label: "Memory".to_string(),
+                        source_properties: properties([(
+                            "id",
+                            Value::String("mem-torn-new".to_string()),
+                        )]),
+                        rel_type: "EVOLVES".to_string(),
+                        rel_properties: properties([(
+                            "content_relation",
+                            Value::String("torn".to_string()),
+                        )]),
+                        target_label: "Memory".to_string(),
+                        target_properties: properties([(
+                            "id",
+                            Value::String("mem-torn-old".to_string()),
+                        )]),
+                    },
+                )
+                .unwrap();
+        }
+
+        let wal_path = path.join("wal.skein");
+        let wal = std::fs::read_to_string(&wal_path).unwrap();
+        let torn = wal.rsplit_once('\t').unwrap().0;
+        std::fs::write(&wal_path, torn).unwrap();
+
+        let mut catalog = Catalog::default();
+        let store = GraphStore::open(&path, &mut catalog).unwrap();
+        let report = store.storage_recovery_report();
+        assert!(report.durable);
+        assert_eq!(report.checkpoint_commit_epoch, Some(1));
+        assert_eq!(report.wal_replay_start_lsn, Some(1));
+        assert_eq!(report.next_lsn_after_replay, Some(3));
+        assert_eq!(report.replayed_wal_entries, 2);
+        assert!(report.torn_tail_ignored);
+        assert!(report.torn_tail_reason.is_some());
+        assert_eq!(report.recovered_commit_epoch, 3);
+
+        let memory_label = catalog.label_id("Memory").unwrap();
+        let memories = store.scan_nodes(Some(memory_label)).collect::<Vec<_>>();
+        let ids = memories
+            .iter()
+            .filter_map(|node| node.properties.get("id").cloned())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            ids,
+            BTreeSet::from([
+                Value::String("mem-old".to_string()),
+                Value::String("mem-new".to_string()),
+                Value::String("mem-snapshot-old".to_string()),
+            ])
+        );
+        let old = memories
+            .iter()
+            .find(|node| node.properties.get("id") == Some(&Value::String("mem-old".to_string())))
+            .unwrap();
+        assert_eq!(old.properties.get("is_latest"), Some(&Value::Bool(false)));
+        assert_eq!(old.properties.get("updated_at"), Some(&Value::Int(20)));
+
+        let evolves = catalog.rel_type_id("EVOLVES").unwrap();
+        let relationships = store.scan_relationships(Some(evolves)).collect::<Vec<_>>();
+        assert_eq!(relationships.len(), 1);
+        assert_eq!(
+            relationships[0].properties.get("content_relation"),
+            Some(&Value::String("replaces".to_string()))
+        );
         std::fs::remove_dir_all(path).unwrap();
     }
 
