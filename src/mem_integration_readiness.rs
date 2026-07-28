@@ -265,6 +265,9 @@ pub struct BackgroundMaintenanceCutoverReadiness {
     pub admitted_search_projection_graph_delta_operations_present: bool,
     pub max_search_projection_graph_delta_complete_through_graph_commit_epoch_present: bool,
     pub foreground_admission_probe_ready: bool,
+    pub memory_pressure_ready: bool,
+    pub memory_budget_bytes_present: bool,
+    pub estimated_memory_bytes_present: bool,
     pub blocker_codes: Vec<String>,
 }
 
@@ -902,6 +905,9 @@ impl BackgroundMaintenanceCutoverReadiness {
             && self.admitted_search_projection_graph_delta_operations_present
             && self.max_search_projection_graph_delta_complete_through_graph_commit_epoch_present
             && self.foreground_admission_probe_ready
+            && self.memory_pressure_ready
+            && self.memory_budget_bytes_present
+            && self.estimated_memory_bytes_present
     }
 }
 
@@ -1945,6 +1951,10 @@ fn next_actions(
                 "replacement_summary.cutover_evidence.background_maintenance_executable_search_projection_graph_delta_operations",
                 "replacement_summary.cutover_evidence.background_maintenance_admitted_search_projection_graph_delta_operations",
                 "replacement_summary.cutover_evidence.background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch",
+                "replacement_summary.cutover_evidence.background_maintenance_foreground_admission_probe_ready",
+                "replacement_summary.cutover_evidence.background_maintenance_memory_pressure_ready",
+                "replacement_summary.cutover_evidence.background_maintenance_memory_budget_bytes",
+                "replacement_summary.cutover_evidence.background_maintenance_estimated_memory_bytes",
                 "replacement_summary.cutover_evidence.background_maintenance_blocker_codes",
             ],
         ));
@@ -5147,6 +5157,32 @@ pub fn background_maintenance_cutover_readiness(
                 "background_maintenance_foreground_admission_probe_ready",
             ],
         ) == Some(true),
+        memory_pressure_ready: bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "cutover_evidence",
+                "background_maintenance_memory_pressure_ready",
+            ],
+        ) == Some(true),
+        memory_budget_bytes_present: u64_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "cutover_evidence",
+                "background_maintenance_memory_budget_bytes",
+            ],
+        )
+        .is_some(),
+        estimated_memory_bytes_present: u64_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "cutover_evidence",
+                "background_maintenance_estimated_memory_bytes",
+            ],
+        )
+        .is_some(),
         blocker_codes: blocker_codes(
             bundle,
             &[
@@ -5213,6 +5249,18 @@ fn background_maintenance_cutover_conditions(
         (
             "replacement_summary.cutover_evidence.background_maintenance_foreground_admission_probe_ready",
             readiness.foreground_admission_probe_ready,
+        ),
+        (
+            "replacement_summary.cutover_evidence.background_maintenance_memory_pressure_ready",
+            readiness.memory_pressure_ready,
+        ),
+        (
+            "replacement_summary.cutover_evidence.background_maintenance_memory_budget_bytes",
+            readiness.memory_budget_bytes_present,
+        ),
+        (
+            "replacement_summary.cutover_evidence.background_maintenance_estimated_memory_bytes",
+            readiness.estimated_memory_bytes_present,
         ),
     ]
 }
@@ -9255,6 +9303,9 @@ mod tests {
         assert!(
             !typed.max_search_projection_graph_delta_complete_through_graph_commit_epoch_present
         );
+        assert!(typed.memory_pressure_ready);
+        assert!(typed.memory_budget_bytes_present);
+        assert!(typed.estimated_memory_bytes_present);
 
         let report = nowledge_mem_integration_readiness_json(&bundle);
 
@@ -9275,6 +9326,53 @@ mod tests {
                 "replacement_summary.cutover_evidence.background_maintenance_deferred_search_projection_graph_delta_count",
                 "replacement_summary.cutover_evidence.background_maintenance_rejected_search_projection_graph_delta_count",
                 "replacement_summary.cutover_evidence.background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch"
+            ])
+        );
+        assert!(report["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "attach_background_maintenance_report"));
+    }
+
+    #[test]
+    fn rejects_missing_background_maintenance_memory_pressure_summary() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary"]["cutover_evidence"]
+            ["background_maintenance_memory_pressure_ready"] = serde_json::Value::Null;
+        bundle["replacement_summary"]["cutover_evidence"]
+            ["background_maintenance_memory_budget_bytes"] = serde_json::Value::Null;
+        bundle["replacement_summary"]["cutover_evidence"]
+            ["background_maintenance_estimated_memory_bytes"] = serde_json::Value::Null;
+
+        let typed = super::background_maintenance_cutover_readiness(&bundle);
+        assert!(!typed.evidence_ready());
+        assert!(typed.required);
+        assert!(typed.ready);
+        assert!(typed.protocol_matches);
+        assert!(!typed.memory_pressure_ready);
+        assert!(!typed.memory_budget_bytes_present);
+        assert!(!typed.estimated_memory_bytes_present);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["background_maintenance_evidence"])
+        );
+        let maintenance_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "background_maintenance_evidence")
+            .unwrap();
+        assert_eq!(
+            maintenance_check["failed_evidence_fields"],
+            serde_json::json!([
+                "replacement_summary.cutover_evidence.background_maintenance_memory_pressure_ready",
+                "replacement_summary.cutover_evidence.background_maintenance_memory_budget_bytes",
+                "replacement_summary.cutover_evidence.background_maintenance_estimated_memory_bytes"
             ])
         );
         assert!(report["next_actions"]
@@ -9593,6 +9691,12 @@ mod tests {
         bundle["replacement_summary"]["cutover_evidence"]
             ["background_maintenance_foreground_admission_probe_admission"] =
             serde_json::json!("admit");
+        bundle["replacement_summary"]["cutover_evidence"]
+            ["background_maintenance_memory_pressure_ready"] = serde_json::json!(true);
+        bundle["replacement_summary"]["cutover_evidence"]
+            ["background_maintenance_memory_budget_bytes"] = serde_json::json!(4096);
+        bundle["replacement_summary"]["cutover_evidence"]
+            ["background_maintenance_estimated_memory_bytes"] = serde_json::json!(1024);
         bundle["replacement_summary"]["query_runtime_preflight"] = ready_query_runtime_summary();
         bundle["replacement_summary_graph_route_alignment"] = serde_json::json!({
             "ready": true,

@@ -567,6 +567,9 @@ contract.
   - [x] Require required background-maintenance evidence to include
     memory-pressure budget fields, and emit those fields from library-generated
     background-maintenance reports.
+  - [x] Require Mem integration background-maintenance cutover readiness to
+    consume memory-pressure budget fields, so forged `ready=true` evidence
+    cannot bypass resource-budget gates.
 
 ## P0: Search Projection Replacement
 
