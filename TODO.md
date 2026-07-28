@@ -795,6 +795,9 @@ contract.
 
 - [ ] Split more internal packages into focused crates to improve abstraction
   boundaries and compile-time ownership.
+  - Do not split crates for their own sake; every new crate must have a clear
+    ownership boundary, dependency-direction benefit, compile-time isolation
+    benefit, or stable reuse contract.
   - Use a Polars/RisingWave-style workspace layout where stable contracts live
     in small crates and heavy implementations depend inward, not sideways.
   - Candidate split targets: core value/types/error, parser/AST, logical plan,
