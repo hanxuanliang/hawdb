@@ -592,6 +592,9 @@ contract.
   - [x] Require search projection descriptor evidence to expose `document_id`
     unique-key summaries, and make replacement/integration readiness fail
     closed when unique-key scan-pruning capability is missing.
+  - [x] Require final previous-wrapper preflight to consume search projection
+    production-filter pruning readiness and descriptor field-summary
+    capabilities before LanceDB replacement gates can pass.
   - [x] Redact search-projection evidence JSON read and parse failures by
     default so local paths and document identity payload fragments are not
     copied into command errors.

@@ -5,7 +5,8 @@ use crate::{
     NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE,
     NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE,
     NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
-    NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+    NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
+    REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -647,6 +648,10 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 ) == Some(true),
                 bool_path(
                     &replacement_summary,
+                    &["search_projection_evidence", "production_filter_pruning_ready"],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
                     &["search_projection_shadow_evidence", "present"],
                 ) == Some(true),
                 bool_path(
@@ -733,6 +738,9 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 search_projection_shadow_segment_pruning_count_is_positive(
                     &replacement_summary,
                     "shadow_segment_scanned_document_count",
+                ),
+                search_projection_shadow_segment_descriptor_summaries_ready(
+                    &replacement_summary,
                 ),
                 str_path(
                     &replacement_summary,
@@ -920,6 +928,7 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 "search_projection_evidence.incremental_update_ready",
                 "search_projection_evidence.source_chunk_ready",
                 "search_projection_evidence.predicate_pushdown_ready",
+                "search_projection_evidence.production_filter_pruning_ready",
                 "search_projection_shadow_evidence.present",
                 "search_projection_shadow_evidence.ready",
                 "search_projection_shadow_evidence.primary_ready",
@@ -937,6 +946,7 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 "search_projection_shadow_evidence.pushdown_evidence.shadow_segment_pruning_candidate_document_count",
                 "search_projection_shadow_evidence.pushdown_evidence.shadow_segment_pruned_document_count",
                 "search_projection_shadow_evidence.pushdown_evidence.shadow_segment_scanned_document_count",
+                "search_projection_shadow_evidence.pushdown_evidence.shadow_segment_descriptor_field_summaries",
                 "search_candidate_shadow_evidence.protocol",
                 "search_candidate_shadow_evidence.evidence_source",
                 "search_candidate_shadow_evidence.route",
@@ -1847,6 +1857,17 @@ fn previous_wrapper_preflight_release_summary(
     );
     insert_json_value(
         &mut summary,
+        "search_projection_production_filter_pruning_ready",
+        bool_path(
+            replacement_summary,
+            &[
+                "search_projection_evidence",
+                "production_filter_pruning_ready",
+            ],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
         "search_projection_shadow_evidence_ready",
         bool_path(
             replacement_summary,
@@ -2010,6 +2031,12 @@ fn previous_wrapper_preflight_release_summary(
                 "shadow_segment_scanned_document_count",
             ],
         ),
+    );
+    summary.insert(
+        "search_projection_shadow_segment_descriptor_field_summaries_ready".to_string(),
+        serde_json::json!(search_projection_shadow_segment_descriptor_summaries_ready(
+            replacement_summary
+        )),
     );
     insert_json_value(
         &mut summary,
@@ -2576,6 +2603,51 @@ fn search_projection_shadow_segment_pruning_count_is_positive(
     .is_some_and(|count| count > 0)
 }
 
+fn search_projection_shadow_segment_descriptor_summaries_ready(value: &serde_json::Value) -> bool {
+    let path = &[
+        "search_projection_shadow_evidence",
+        "pushdown_evidence",
+        "shadow_segment_descriptor_field_summaries",
+    ];
+    let Some(summaries) = value_path(value, path).and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    if summaries.is_empty() {
+        return false;
+    }
+    let fields = summaries
+        .iter()
+        .filter_map(|summary| str_path(summary, &["field"]))
+        .collect::<BTreeSet<_>>();
+    NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
+        .iter()
+        .all(|required| fields.contains(required))
+        && ["importance", "confidence"].iter().all(|field| {
+            summaries.iter().any(|summary| {
+                str_path(summary, &["field"]) == Some(*field)
+                    && bool_path(summary, &["numeric_range_summary_used"]) == Some(true)
+                    && u64_path(summary, &["numeric_range_segment_count"])
+                        .is_some_and(|count| count > 0)
+            })
+        })
+        && ["created_at", "updated_at", "event_start", "event_end"]
+            .iter()
+            .all(|field| {
+                summaries.iter().any(|summary| {
+                    str_path(summary, &["field"]) == Some(*field)
+                        && bool_path(summary, &["timestamp_range_summary_used"]) == Some(true)
+                        && u64_path(summary, &["timestamp_range_segment_count"])
+                            .is_some_and(|count| count > 0)
+                })
+            })
+        && summaries.iter().any(|summary| {
+            str_path(summary, &["field"]) == Some("document_id")
+                && bool_path(summary, &["unique_key_summary_used"]) == Some(true)
+                && u64_path(summary, &["unique_key_summary_segment_count"])
+                    .is_some_and(|count| count > 0)
+        })
+}
+
 fn search_candidate_missing_required_fields_ready(value: &serde_json::Value) -> bool {
     let path = &[
         "search_candidate_shadow_evidence",
@@ -2945,6 +3017,11 @@ mod tests {
         assert_release_summary_field(summary, "search_projection_fail_soft_ready", true);
         assert_release_summary_field(summary, "search_projection_incremental_update_ready", true);
         assert_release_summary_field(summary, "search_projection_predicate_pushdown_ready", true);
+        assert_release_summary_field(
+            summary,
+            "search_projection_production_filter_pruning_ready",
+            true,
+        );
         assert_release_summary_field(summary, "search_projection_shadow_evidence_ready", true);
         assert_release_summary_field(summary, "search_projection_shadow_primary_ready", true);
         assert_release_summary_field(summary, "search_projection_shadow_shadow_ready", true);
@@ -3000,6 +3077,11 @@ mod tests {
             summary,
             "search_projection_shadow_segment_scanned_document_count",
             2,
+        );
+        assert_release_summary_field(
+            summary,
+            "search_projection_shadow_segment_descriptor_field_summaries_ready",
+            true,
         );
         assert_release_summary_field(summary, "search_candidate_shadow_evidence_ready", true);
         assert_release_summary_field(
@@ -3219,6 +3301,7 @@ mod tests {
                 "search_projection_evidence.incremental_update_ready",
                 "search_projection_evidence.source_chunk_ready",
                 "search_projection_evidence.predicate_pushdown_ready",
+                "search_projection_evidence.production_filter_pruning_ready",
                 "search_projection_shadow_evidence.present",
                 "search_projection_shadow_evidence.ready",
                 "search_projection_shadow_evidence.primary_ready",
@@ -3236,6 +3319,7 @@ mod tests {
                 "search_projection_shadow_evidence.pushdown_evidence.shadow_segment_pruning_candidate_document_count",
                 "search_projection_shadow_evidence.pushdown_evidence.shadow_segment_pruned_document_count",
                 "search_projection_shadow_evidence.pushdown_evidence.shadow_segment_scanned_document_count",
+                "search_projection_shadow_evidence.pushdown_evidence.shadow_segment_descriptor_field_summaries",
                 "search_candidate_shadow_evidence.protocol",
                 "search_candidate_shadow_evidence.evidence_source",
                 "search_candidate_shadow_evidence.route",
@@ -3370,6 +3454,8 @@ mod tests {
             serde_json::json!(5);
         replacement_summary["search_projection_evidence"]["source_chunk_ready"] =
             serde_json::json!(false);
+        replacement_summary["search_projection_evidence"]["production_filter_pruning_ready"] =
+            serde_json::json!(false);
         replacement_summary["search_projection_evidence"]["blocker_codes"] =
             serde_json::json!(["missing_source_chunks_index"]);
 
@@ -3384,7 +3470,8 @@ mod tests {
             check_by_name(&report, "replacement_summary")["failed_evidence_fields"],
             serde_json::json!([
                 "search_projection_evidence.covered_table_count",
-                "search_projection_evidence.source_chunk_ready"
+                "search_projection_evidence.source_chunk_ready",
+                "search_projection_evidence.production_filter_pruning_ready"
             ])
         );
         assert_eq!(
@@ -3436,6 +3523,39 @@ mod tests {
                 "skein_search_projection_segment_descriptor_fields_missing",
                 "table_parity_mismatch"
             ])
+        );
+    }
+
+    #[test]
+    fn preflight_check_requires_search_projection_shadow_descriptor_summaries() {
+        let mut inputs = ready_inputs();
+        let replacement_summary = inputs.replacement_summary.as_mut().unwrap();
+        replacement_summary["search_projection_shadow_evidence"]["pushdown_evidence"]
+            ["shadow_segment_descriptor_field_summaries"] = serde_json::json!([]);
+        replacement_summary["search_projection_shadow_evidence"]["blocker_codes"] =
+            serde_json::json!(["skein_search_projection_segment_descriptor_fields_missing"]);
+
+        let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["replacement_summary"])
+        );
+        assert_eq!(
+            check_by_name(&report, "replacement_summary")["failed_evidence_fields"],
+            serde_json::json!([
+                "search_projection_shadow_evidence.pushdown_evidence.shadow_segment_descriptor_field_summaries"
+            ])
+        );
+        assert_eq!(
+            report["release_summary"]
+                ["search_projection_shadow_segment_descriptor_field_summaries_ready"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            check_by_name(&report, "replacement_summary")["blocker_codes"],
+            serde_json::json!(["skein_search_projection_segment_descriptor_fields_missing"])
         );
     }
 
@@ -4840,6 +4960,7 @@ mod tests {
             "incremental_update_ready": true,
             "source_chunk_ready": true,
             "predicate_pushdown_ready": true,
+            "production_filter_pruning_ready": true,
             "blocker_codes": []
         })
     }
@@ -4898,9 +5019,40 @@ mod tests {
                     "event_end",
                     "is_latest"
                 ],
-                "shadow_segment_descriptor_field_summaries": []
+                "shadow_segment_descriptor_field_summaries": scan_filter_field_summaries_json()
             },
             "blocker_codes": []
+        })
+    }
+
+    fn scan_filter_field_summaries_json() -> serde_json::Value {
+        let mut summaries = NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
+            .iter()
+            .map(|field| descriptor_field_summary_json(field))
+            .collect::<Vec<_>>();
+        summaries.push(descriptor_field_summary_json("document_id"));
+        serde_json::json!(summaries)
+    }
+
+    fn descriptor_field_summary_json(field: &str) -> serde_json::Value {
+        let numeric_range_summary_used = matches!(field, "importance" | "confidence");
+        let timestamp_range_summary_used = matches!(
+            field,
+            "created_at" | "updated_at" | "event_start" | "event_end"
+        );
+        let unique_key_summary_used = field == "document_id";
+        serde_json::json!({
+            "field": field,
+            "segment_count": 1,
+            "present_document_count": 2,
+            "value_summary_used": true,
+            "value_summary_segment_count": 1,
+            "numeric_range_summary_used": numeric_range_summary_used,
+            "numeric_range_segment_count": usize::from(numeric_range_summary_used),
+            "timestamp_range_summary_used": timestamp_range_summary_used,
+            "timestamp_range_segment_count": usize::from(timestamp_range_summary_used),
+            "unique_key_summary_used": unique_key_summary_used,
+            "unique_key_summary_segment_count": usize::from(unique_key_summary_used),
         })
     }
 
