@@ -5,6 +5,8 @@ use crate::nowledge_mem::{
 use crate::store::DurabilityPolicy;
 use crate::{Database, DatabaseConfig, Result};
 use skein_qos::{IoConcurrencyBudget, RuntimeResourceBudget};
+use skein_storage::SegmentReadScheduler;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -18,6 +20,22 @@ pub enum EmbeddedDeploymentProfile {
 pub struct EmbeddedRuntimeResources {
     pub cpu: RuntimeResourceBudget,
     pub storage_io: IoConcurrencyBudget,
+}
+
+impl EmbeddedRuntimeResources {
+    pub fn foreground_segment_read_scheduler(
+        self,
+        max_coalesced_bytes: NonZeroU64,
+    ) -> SegmentReadScheduler {
+        SegmentReadScheduler::new(self.storage_io.foreground_depth, max_coalesced_bytes)
+    }
+
+    pub fn background_segment_read_scheduler(
+        self,
+        max_coalesced_bytes: NonZeroU64,
+    ) -> SegmentReadScheduler {
+        SegmentReadScheduler::new(self.storage_io.background_depth, max_coalesced_bytes)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,6 +296,15 @@ mod tests {
         assert_eq!(
             engine.runtime_resources().storage_io.background_depth.get(),
             2
+        );
+        assert_eq!(
+            engine
+                .runtime_resources()
+                .foreground_segment_read_scheduler(NonZeroU64::new(1 << 20).unwrap())
+                .schedule([])
+                .io_depth
+                .get(),
+            7
         );
     }
 

@@ -11,9 +11,9 @@ use crate::{
     BackgroundWorkHint, BackgroundWorkPlan, Database, DatabaseConfig, KnowledgeRetrievalOutput,
     KnowledgeRetrievalRequest, LocalQosPolicy, LocalQosScheduler, LocalQosState,
     NowledgeGraphStatement, PlanCacheLookup, QueryOutput, ReadExecutionProfile, Result,
-    SearchIndex, SearchProjectionDeltaReport, SearchProjectionFreshness,
-    SearchProjectionGraphDeltaRequest, SearchProjectionProbeOptions, SearchResultSet, SkeinError,
-    SlowQueryLogRecordSummary, Value,
+    SearchIndex, SearchProjectionCatchUpReport, SearchProjectionDeltaReport,
+    SearchProjectionFreshness, SearchProjectionGraphDeltaRequest, SearchProjectionProbeOptions,
+    SearchResultSet, SkeinError, SlowQueryLogRecordSummary, Value,
 };
 use crate::{
     graph_route_readiness::NMEM_GRAPH_ROUTE_READINESS_PROTOCOL,
@@ -5375,6 +5375,15 @@ impl NowledgeMemEmbeddedStoreHandle {
         Ok(self.write_store()?.query_runtime_preflight_json(probes))
     }
 
+    pub fn catch_up_search_projection(
+        &self,
+        max_operations_per_batch: usize,
+        max_batches: usize,
+    ) -> Result<SearchProjectionCatchUpReport> {
+        self.write_store()?
+            .catch_up_search_projection(max_operations_per_batch, max_batches)
+    }
+
     fn read_store(&self) -> Result<RwLockReadGuard<'_, NowledgeMemEmbeddedStore>> {
         self.inner.read().map_err(|_| {
             SkeinError::Execution("nowledge mem embedded store read lock poisoned".to_string())
@@ -5488,6 +5497,23 @@ impl NowledgeMemEmbeddedStore {
         graph
             .database()
             .apply_search_projection_graph_delta(search_projection.index_mut(), request)
+    }
+
+    pub fn catch_up_search_projection(
+        &mut self,
+        max_operations_per_batch: usize,
+        max_batches: usize,
+    ) -> Result<SearchProjectionCatchUpReport> {
+        let Self {
+            graph,
+            search_projection,
+        } = self;
+        let search_projection = require_search_projection_mut(search_projection)?;
+        graph.database().catch_up_search_projection(
+            search_projection.index_mut(),
+            max_operations_per_batch,
+            max_batches,
+        )
     }
 
     pub fn apply_scheduled_background_search_projection_graph_delta(
@@ -10731,6 +10757,36 @@ mod tests {
                 .title,
             "Incremental facade"
         );
+    }
+
+    #[test]
+    fn embedded_store_handle_runs_durable_projection_catch_up() {
+        let root = unique_nowledge_mem_test_dir("embedded_projection_catch_up");
+        let search_path = root.join("search");
+        let db = Database::new();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        graph
+            .query("CREATE (:Memory {id: 'm1', title: 'First'})")
+            .unwrap();
+        graph
+            .query("CREATE (:Memory {id: 'm2', title: 'Second'})")
+            .unwrap();
+        let projection =
+            NowledgeMemSearchProjection::from_index(SearchIndex::open(&search_path).unwrap());
+        let handle = NowledgeMemEmbeddedStoreHandle::new(NowledgeMemEmbeddedStore::new(
+            graph,
+            Some(projection),
+        ));
+
+        let report = handle.catch_up_search_projection(1, 4).unwrap();
+
+        assert!(report.complete);
+        assert_eq!(report.end_applied_epoch, report.end_durable_epoch);
+        drop(handle);
+        let reopened = SearchIndex::open(&search_path).unwrap();
+        assert!(reopened.document("memory:m1").is_some());
+        assert!(reopened.document("memory:m2").is_some());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

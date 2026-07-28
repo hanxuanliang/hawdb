@@ -315,6 +315,18 @@ pub struct RankedBackgroundMaintenance {
     pub search_projection_graph_delta: Option<SearchProjectionGraphDeltaRequest>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchProjectionCatchUpReport {
+    pub graph_commit_epoch: u64,
+    pub start_applied_epoch: Option<u64>,
+    pub start_durable_epoch: Option<u64>,
+    pub end_applied_epoch: Option<u64>,
+    pub end_durable_epoch: Option<u64>,
+    pub applied_batch_count: usize,
+    pub applied_operation_count: usize,
+    pub complete: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BackgroundMaintenanceSummary {
     pub total_candidates: usize,
@@ -6272,19 +6284,53 @@ impl Database {
 
         let mut upsert_node_ids = BTreeSet::new();
         let mut delete_document_ids = BTreeSet::new();
+        let mut complete_through_graph_commit_epoch = source_graph_commit_epoch;
+        let mut saw_change = false;
         for change in self
             .store
             .search_projection_graph_changes_after(source_graph_commit_epoch)
         {
+            saw_change = true;
+            let additional_operation_count = change
+                .upsert_node_ids
+                .iter()
+                .filter(|node_id| !upsert_node_ids.contains(*node_id))
+                .count()
+                .saturating_add(
+                    change
+                        .delete_document_ids
+                        .iter()
+                        .filter(|document_id| !delete_document_ids.contains(*document_id))
+                        .count(),
+                );
+            let next_operation_count = upsert_node_ids
+                .len()
+                .saturating_add(delete_document_ids.len())
+                .saturating_add(additional_operation_count);
+            if let Some(limit) = max_operations
+                && next_operation_count > limit
+            {
+                if complete_through_graph_commit_epoch == source_graph_commit_epoch {
+                    return Err(SkeinError::Storage(format!(
+                        "search projection graph change at commit epoch {} requires {next_operation_count} operations, exceeding configured per-batch limit {limit}",
+                        change.commit_epoch
+                    )));
+                }
+                break;
+            }
             upsert_node_ids.extend(change.upsert_node_ids);
             delete_document_ids.extend(change.delete_document_ids);
+            complete_through_graph_commit_epoch = change.commit_epoch;
+        }
+        if !saw_change {
+            complete_through_graph_commit_epoch = current_epoch;
         }
 
         Ok(Some(SearchProjectionGraphDeltaRequest {
             upsert_node_ids: upsert_node_ids.into_iter().collect(),
             delete_document_ids: delete_document_ids.into_iter().collect(),
             max_operations,
-            complete_through_graph_commit_epoch: Some(current_epoch),
+            complete_through_graph_commit_epoch: Some(complete_through_graph_commit_epoch),
         }))
     }
 
@@ -6300,6 +6346,64 @@ impl Database {
                 .unwrap_or(0),
             max_operations,
         )
+    }
+
+    pub fn catch_up_search_projection(
+        &self,
+        search_index: &mut SearchIndex,
+        max_operations_per_batch: usize,
+        max_batches: usize,
+    ) -> Result<SearchProjectionCatchUpReport> {
+        if !search_index.is_persistent() {
+            return Err(SkeinError::Storage(
+                "durable search projection catch-up requires a persistent search index".to_string(),
+            ));
+        }
+        if max_operations_per_batch == 0 {
+            return Err(SkeinError::Semantic(
+                "search projection catch-up max_operations_per_batch must be greater than zero"
+                    .to_string(),
+            ));
+        }
+        if max_batches == 0 {
+            return Err(SkeinError::Semantic(
+                "search projection catch-up max_batches must be greater than zero".to_string(),
+            ));
+        }
+
+        let start = search_index.projection_freshness();
+        if start.has_uncheckpointed_changes {
+            search_index.checkpoint()?;
+        }
+        let graph_commit_epoch = self.store.commit_epoch();
+        let mut applied_batch_count = 0usize;
+        let mut applied_operation_count = 0usize;
+        while applied_batch_count < max_batches {
+            let Some(request) = self.build_search_projection_graph_delta_request_from_freshness(
+                search_index,
+                Some(max_operations_per_batch),
+            )?
+            else {
+                break;
+            };
+            let report = self.apply_search_projection_graph_delta(search_index, request)?;
+            search_index.checkpoint()?;
+            applied_batch_count = applied_batch_count.saturating_add(1);
+            applied_operation_count =
+                applied_operation_count.saturating_add(report.operation_count);
+        }
+
+        let end = search_index.projection_freshness();
+        Ok(SearchProjectionCatchUpReport {
+            graph_commit_epoch,
+            start_applied_epoch: start.source_graph_commit_epoch,
+            start_durable_epoch: start.durable_source_graph_commit_epoch,
+            end_applied_epoch: end.source_graph_commit_epoch,
+            end_durable_epoch: end.durable_source_graph_commit_epoch,
+            applied_batch_count,
+            applied_operation_count,
+            complete: end.durable_source_graph_commit_epoch.unwrap_or(0) == graph_commit_epoch,
+        })
     }
 
     pub fn background_maintenance_candidates(
@@ -34102,11 +34206,9 @@ fn search_projection_graph_delta_for(
 
     let mut upserts = Vec::new();
     for node_id in &request.upsert_node_ids {
-        let node = store.node(NodeId(*node_id)).ok_or_else(|| {
-            SkeinError::Storage(format!(
-                "search projection graph delta missing node {node_id}"
-            ))
-        })?;
+        let Some(node) = store.node(NodeId(*node_id)) else {
+            continue;
+        };
         if let Some(row) = projection_row_from_node(catalog, node) {
             upserts.push(row);
         }

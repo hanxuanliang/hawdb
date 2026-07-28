@@ -768,12 +768,15 @@ contract.
     replay, and incremental-change-log defaults.
   - [ ] Disable optional heavy mobile capabilities through typed runtime
     capability gates before adding compile-time feature removal.
-  - [ ] Give each profile separate CPU and storage I/O budgets. Use bounded
-    parallel segment reads to exploit modern SSD/NVMe queues while keeping WAL,
-    manifest publication, and per-index delta ordering serialized.
-  - [ ] Allow explicit host I/O-depth overrides and later add platform-specific
-    device discovery without deriving a claimed SSD channel count from CPU
-    count alone.
+  - [x] Give each profile separate CPU and storage I/O budgets with explicit host
+    I/O-depth overrides.
+  - [x] Add a storage-facing range scheduler that coalesces adjacent reads and
+    creates bounded SSD/NVMe I/O waves.
+  - [ ] Add physical byte ranges to persisted search segments and execute the
+    scheduled reads in the storage backend while keeping WAL, manifest
+    publication, and per-index delta ordering serialized.
+  - [ ] Add platform-specific device discovery without deriving a claimed SSD
+    channel count from CPU count alone.
   - [ ] Keep the durable storage format and core Cypher semantics compatible
     across profiles; return typed capability-unavailable errors instead of
     silent unbounded fallbacks.
@@ -815,6 +818,8 @@ contract.
 - [ ] Complete durable incremental-index catch-up.
   - [x] Distinguish the applied source graph epoch from the durable checkpoint
     watermark and report uncheckpointed changes.
+  - [x] Add a bounded library catch-up loop that truncates changefeed batches at
+    complete commit boundaries and checkpoints each applied projection batch.
   - [ ] Persist ordered delta identity and resume catch-up from the last durable
     watermark without requiring a full rebuild.
 - [x] Add library readiness APIs for Mem integration.

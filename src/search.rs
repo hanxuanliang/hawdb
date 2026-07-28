@@ -685,6 +685,10 @@ impl SearchIndex {
         Self::default()
     }
 
+    pub fn is_persistent(&self) -> bool {
+        self.path.is_some()
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         fs::create_dir_all(path.as_ref())?;
         let mut index = Self {

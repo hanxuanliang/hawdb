@@ -28,7 +28,7 @@ pub use scan::{
     CandidateCursor, DateTimeMinMax, EnumDictionaryStats, FieldSummary, MembershipFilterSummary,
     MembershipVerdict, NumericMinMax, PruningDecision, PruningReason, RangeBound, ScanPredicate,
     ScanPruningReport, ScanPruningStrategy, ScanPruningTargetKind, ScanScalar, SegmentPruner,
-    SegmentSummary,
+    SegmentReadRange, SegmentReadSchedule, SegmentReadScheduler, SegmentReadWave, SegmentSummary,
 };
 pub use snapshot::{
     SnapshotCommitError, SnapshotCoordinator, SnapshotReadGuard, VersionedSnapshot,

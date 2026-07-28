@@ -138,6 +138,91 @@ fn database_facade_builds_search_projection_delta_request_from_changefeed() {
 }
 
 #[test]
+fn durable_search_projection_catch_up_resumes_in_bounded_batches() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'm1', title: 'First'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'm2', title: 'Second'})")
+        .unwrap();
+    let path = unique_test_dir("durable_search_projection_catch_up");
+    let mut search_index = SearchIndex::open(&path).unwrap();
+
+    let first = db
+        .catch_up_search_projection(&mut search_index, 1, 1)
+        .unwrap();
+    assert_eq!(first.start_durable_epoch, None);
+    assert_eq!(first.applied_batch_count, 1);
+    assert_eq!(first.applied_operation_count, 1);
+    assert!(!first.complete);
+    assert_eq!(first.end_applied_epoch, first.end_durable_epoch);
+
+    let second = db
+        .catch_up_search_projection(&mut search_index, 1, 4)
+        .unwrap();
+    assert!(second.applied_batch_count >= 1);
+    assert!(second.complete);
+    assert_eq!(second.end_durable_epoch, Some(db.commit_epoch()));
+    assert!(search_index.document("memory:m1").is_some());
+    assert!(search_index.document("memory:m2").is_some());
+
+    drop(search_index);
+    let reopened = SearchIndex::open(&path).unwrap();
+    assert_eq!(
+        reopened
+            .projection_freshness()
+            .durable_source_graph_commit_epoch,
+        Some(db.commit_epoch())
+    );
+    assert!(reopened.document("memory:m1").is_some());
+    assert!(reopened.document("memory:m2").is_some());
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn durable_search_projection_catch_up_rejects_unbounded_or_in_memory_usage() {
+    let db = Database::new();
+    let mut in_memory = SearchIndex::in_memory();
+    let error = db
+        .catch_up_search_projection(&mut in_memory, 1, 1)
+        .unwrap_err();
+    assert!(error.to_string().contains("persistent search index"));
+
+    let path = unique_test_dir("durable_search_projection_catch_up_limits");
+    let mut persistent = SearchIndex::open(&path).unwrap();
+    assert!(db
+        .catch_up_search_projection(&mut persistent, 0, 1)
+        .unwrap_err()
+        .to_string()
+        .contains("max_operations_per_batch"));
+    assert!(db
+        .catch_up_search_projection(&mut persistent, 1, 0)
+        .unwrap_err()
+        .to_string()
+        .contains("max_batches"));
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn durable_search_projection_catch_up_skips_nodes_deleted_before_projection() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'm1', title: 'Transient'})")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'm1'}) DELETE m").unwrap();
+    let path = unique_test_dir("durable_search_projection_catch_up_deleted_node");
+    let mut search_index = SearchIndex::open(&path).unwrap();
+
+    let report = db
+        .catch_up_search_projection(&mut search_index, 2, 2)
+        .unwrap();
+
+    assert!(report.complete);
+    assert_eq!(report.applied_operation_count, 1);
+    assert_eq!(report.end_durable_epoch, Some(db.commit_epoch()));
+    assert!(search_index.document("memory:m1").is_none());
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
 fn search_projection_changefeed_can_emit_watermark_only_delta_request() {
     let mut db = Database::new();
     db.query(
@@ -440,12 +525,12 @@ fn scheduled_graph_search_projection_delta_releases_budget_on_build_error() {
                 upsert_node_ids: vec![99],
                 delete_document_ids: vec!["memory:old".to_string()],
                 max_operations: Some(2),
-                complete_through_graph_commit_epoch: Some(db.store.commit_epoch()),
+                complete_through_graph_commit_epoch: Some(db.store.commit_epoch() + 1),
             },
         )
         .unwrap_err();
 
-    assert!(error.to_string().contains("missing node 99"));
+    assert!(error.to_string().contains("ahead of graph commit epoch"));
     assert_eq!(scheduler.state().running_background_operations, 0);
     assert!(search_index.document("memory:old").is_some());
 }
