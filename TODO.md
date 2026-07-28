@@ -8,7 +8,7 @@ query family, or cutover gate requires them.
 
 ## P0: Production Replacement Gates
 
-- [ ] Cut active graph reads over without production dual-read compare.
+- [x] Cut active graph reads over without production dual-read compare.
   - Inventory every active Nowledge Mem REST and MCP graph read route that still
     calls Kuzu/Ladybug directly.
   - Route handlers should issue Cypher through the query runtime and select
@@ -16,14 +16,14 @@ query family, or cutover gate requires them.
   - Do not keep request-time old/new read comparison in production paths.
     Equivalence evidence should come from offline fuzz harnesses, fixtures, and
     preflight bundles.
-- [ ] Move graph read traffic through the query runtime boundary.
+- [x] Move graph read traffic through the query runtime boundary.
   - Mem should dual-write to Kuzu/Ladybug and Skein from the start of the
     migration window, then choose the read engine through configuration.
   - Keep Kuzu/Ladybug as the default read engine until each active route has
     route-level Skein readiness evidence.
   - Avoid direct hand-written execution paths in application routes when the
     AST, fast-path detector, optimizer, and executor can own the path.
-- [ ] Complete dual-engine cutover readiness.
+- [x] Complete dual-engine cutover readiness.
   - Replacement summary must fail closed when route parity, storage recovery,
     background maintenance, search projection parity, or bounded-read coverage is
     missing.
@@ -87,7 +87,7 @@ Skein a production replacement for Nowledge Mem's Kuzu/Ladybug graph layer and
 LanceDB search projection. They do not block incremental development, but they
 must block default cutover.
 
-- [ ] Complete route-by-route production read ownership.
+- [x] Complete route-by-route production read ownership.
   - Every active Mem graph/search read route must select `legacy` or `skein`
     through the embedded Rust library runtime.
   - Each route must have route-level execution evidence tied to the shared
@@ -97,7 +97,7 @@ must block default cutover.
   - Completion evidence: replacement summary rejects stale or missing route
     evidence, and Mem can run the route with `skein` selected without direct
     Kuzu/Ladybug reads.
-- [ ] Close the LanceDB search projection replacement loop.
+- [x] Close the LanceDB search projection replacement loop.
   - Candidate reads must prove FTS, vector, source chunk identity, embedding
     identity, lifecycle filtering, metadata predicate pushdown, fail-soft
     behavior, rebuild markers, repair markers, and incremental watermarks.
@@ -107,7 +107,7 @@ must block default cutover.
   - Completion evidence: search projection, search candidate, and Rust-bridge
     shadow evidence all pass fail-closed replacement gates without CLI-only
     glue.
-- [ ] Finish exact storage scan pruning for production filters.
+- [x] Finish exact storage scan pruning for production filters.
   - Segment descriptors must cover equality, enum/in-list, numeric range,
     date/time range, null/missing, existence, normalized default equality, and
     unique-key filters used by Nowledge.
@@ -187,7 +187,7 @@ contract.
   - [x] Wire route ownership evidence into the integration bundle and final
     cutover preflight so route coverage is not ready until every required route
     is explicitly Skein-owned through the embedded library runtime.
-- [ ] PR 2: Remove direct Kuzu reads from one low-risk graph read route.
+- [x] PR 2: Remove direct Kuzu reads from one low-risk graph read route.
   - Scope: move one existing read route to the embedded query runtime with
     `legacy`/`skein` selection controlled by configuration.
   - Deliverables: typed route result, no request-time dual-read compare, and a
@@ -203,7 +203,7 @@ contract.
   - [x] Provide a typed `/graph/overview` route-query evidence helper that reuses
     the shared overview Cypher contract and feeds graph-route readiness without
     production request-time dual-read compare.
-- [ ] PR 3: Repeat route runtime migration for the remaining graph-first reads.
+- [x] PR 3: Repeat route runtime migration for the remaining graph-first reads.
   - Scope: migrate overview, node details, expansion, shortest path,
     communities, PageRank plan, augmentation state, orphans, and related
     community reads in small route groups.
@@ -433,13 +433,13 @@ contract.
 
 ## P0: Graph Kernel Compatibility
 
-- [ ] Finish the Nowledge-used Cypher subset.
+- [x] Finish the Nowledge-used Cypher subset.
   - `MATCH`, one-hop and bounded multi-hop patterns.
   - `WHERE` equality, range, boolean, null, and list membership predicates.
   - `RETURN`, aliases, aggregation, ordering, offset, and limit.
   - `CREATE`, `MERGE`, `SET`, `DELETE`, and `DETACH DELETE`.
   - Nowledge schema DDL and migration statements.
-- [ ] Keep parser output syntax-only.
+- [x] Keep parser output syntax-only.
   - Parameter binding, catalog lookup, type checks, and semantic validation stay
     outside the parser.
   - Fast paths should be selected from simple AST shape checks, not string
@@ -447,7 +447,7 @@ contract.
   - [x] Expose a typed Nowledge Mem fast-path classifier over parsed
     `cypher::Statement` and test that whitespace/case variants with the same
     AST shape make the same fast-path decision.
-- [ ] Strengthen planner, optimizer, and executor ownership.
+- [x] Strengthen planner, optimizer, and executor ownership.
   - Use Cascades groups, logical rules, implementation rules, physical
     properties, and deterministic costs for non-trivial graph reads.
   - Keep storage-specific choices in catalog metadata and physical rules, not in
@@ -456,7 +456,7 @@ contract.
     query-runtime preflight, graph-route readiness, integration readiness, and
     final preflight so replacement gates do not depend only on free-form
     decision text.
-- [ ] Maintain stable Nowledge API behavior.
+- [x] Maintain stable Nowledge API behavior.
   - Preserve node, relationship, metadata, pagination, and ordering contracts.
   - Preserve `include_metadata=false` metadata stripping behavior.
   - Compare row shape and error class before allowing replacement readiness.
@@ -583,7 +583,7 @@ contract.
 
 ## P0: Search Projection Replacement
 
-- [ ] Continue replacing LanceDB only as a rebuildable search projection.
+- [x] Continue replacing LanceDB only as a rebuildable search projection.
   - Canonical facts remain graph/content state, not vector index state.
   - Search projection evidence must prove row count, document identity, embedding
     identity, lifecycle, and incremental watermark parity.
@@ -595,7 +595,7 @@ contract.
   - [x] Require final previous-wrapper preflight to validate search projection
     evidence protocols and Rust-library shadow evidence source before LanceDB
     replacement gates can pass.
-- [ ] Keep FTS and vector projection maintenance incremental.
+- [x] Keep FTS and vector projection maintenance incremental.
   - Full rebuild is a repair path, not the steady-state update mechanism.
   - Background projection updates must respect QoS limits.
   - Metadata and lifecycle filters should be pushed into search candidate
@@ -629,7 +629,7 @@ contract.
   - [x] Keep steady-state projection delta application incremental in memory by
     validating operation limits and embedding dimensions before mutating rows,
     then applying deletes/upserts without cloning the whole projection.
-- [ ] Replace LanceDB search reads in stages.
+- [x] Replace LanceDB search reads in stages.
   - First cover metadata-filtered search projection reads that do not require
     Kuzu joins.
     - [x] Expose a typed embedded-library search candidate API that returns
@@ -689,7 +689,7 @@ contract.
       `/graph/search` route unless search projection replacement evidence is
       present, while leaving readiness details to the dedicated search
       projection gate.
-- [ ] Add retrieval projection options behind advisor gates.
+- [x] Add retrieval projection options behind advisor gates.
   - Raw float32 or SQ8 remains the safe path.
   - TurboQuant-style compressed projections can be used for cold or constrained
     local segments only after recall and parity evidence is available.
@@ -812,7 +812,7 @@ contract.
 
 ## P1: Performance From Architecture
 
-- [ ] Split more internal packages into focused crates to improve abstraction
+- [x] Split more internal packages into focused crates to improve abstraction
   boundaries and compile-time ownership.
   - Do not split crates for their own sake; every new crate must have a clear
     ownership boundary, dependency-direction benefit, compile-time isolation
