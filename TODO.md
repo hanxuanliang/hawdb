@@ -567,6 +567,9 @@ contract.
     identity, lifecycle, and incremental watermark parity.
   - Keep content store replacement out of this milestone unless a search or
     graph route needs it.
+  - [x] Require final previous-wrapper preflight to consume search projection
+    document identity evidence and shadow document-identity parity before
+    LanceDB replacement gates can pass.
 - [ ] Keep FTS and vector projection maintenance incremental.
   - Full rebuild is a repair path, not the steady-state update mechanism.
   - Background projection updates must respect QoS limits.

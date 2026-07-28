@@ -620,6 +620,10 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 ) == Some(true),
                 bool_path(
                     &replacement_summary,
+                    &["search_projection_evidence", "document_identity_ready"],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
                     &["search_projection_evidence", "embedding_identity_ready"],
                 ) == Some(true),
                 bool_path(
@@ -669,6 +673,10 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 bool_path(
                     &replacement_summary,
                     &["search_projection_shadow_evidence", "document_count_parity"],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &["search_projection_shadow_evidence", "document_identity_parity"],
                 ) == Some(true),
                 bool_path(
                     &replacement_summary,
@@ -921,6 +929,7 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 "search_projection_evidence.covered_table_count",
                 "search_projection_evidence.fts_ready",
                 "search_projection_evidence.vector_ready",
+                "search_projection_evidence.document_identity_ready",
                 "search_projection_evidence.embedding_identity_ready",
                 "search_projection_evidence.fail_soft_ready",
                 "search_projection_evidence.rebuild_marker_ready",
@@ -934,6 +943,7 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 "search_projection_shadow_evidence.primary_ready",
                 "search_projection_shadow_evidence.shadow_ready",
                 "search_projection_shadow_evidence.document_count_parity",
+                "search_projection_shadow_evidence.document_identity_parity",
                 "search_projection_shadow_evidence.table_parity_ready",
                 "search_projection_shadow_evidence.embedding_identity_parity",
                 "search_projection_shadow_evidence.lifecycle_parity",
@@ -1825,6 +1835,14 @@ fn previous_wrapper_preflight_release_summary(
     );
     insert_json_value(
         &mut summary,
+        "search_projection_document_identity_ready",
+        bool_path(
+            replacement_summary,
+            &["search_projection_evidence", "document_identity_ready"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
         "search_projection_embedding_identity_ready",
         bool_path(
             replacement_summary,
@@ -1896,6 +1914,17 @@ fn previous_wrapper_preflight_release_summary(
         bool_path(
             replacement_summary,
             &["search_projection_shadow_evidence", "document_count_parity"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "search_projection_shadow_document_identity_parity",
+        bool_path(
+            replacement_summary,
+            &[
+                "search_projection_shadow_evidence",
+                "document_identity_parity",
+            ],
         ),
     );
     insert_json_value(
@@ -3013,6 +3042,7 @@ mod tests {
         assert_release_summary_field(summary, "search_projection_required_table_count", 6);
         assert_release_summary_field(summary, "search_projection_fts_ready", true);
         assert_release_summary_field(summary, "search_projection_vector_ready", true);
+        assert_release_summary_field(summary, "search_projection_document_identity_ready", true);
         assert_release_summary_field(summary, "search_projection_embedding_identity_ready", true);
         assert_release_summary_field(summary, "search_projection_fail_soft_ready", true);
         assert_release_summary_field(summary, "search_projection_incremental_update_ready", true);
@@ -3028,6 +3058,11 @@ mod tests {
         assert_release_summary_field(
             summary,
             "search_projection_shadow_document_count_parity",
+            true,
+        );
+        assert_release_summary_field(
+            summary,
+            "search_projection_shadow_document_identity_parity",
             true,
         );
         assert_release_summary_field(summary, "search_projection_shadow_table_parity_ready", true);
@@ -3294,6 +3329,7 @@ mod tests {
                 "search_projection_evidence.covered_table_count",
                 "search_projection_evidence.fts_ready",
                 "search_projection_evidence.vector_ready",
+                "search_projection_evidence.document_identity_ready",
                 "search_projection_evidence.embedding_identity_ready",
                 "search_projection_evidence.fail_soft_ready",
                 "search_projection_evidence.rebuild_marker_ready",
@@ -3307,6 +3343,7 @@ mod tests {
                 "search_projection_shadow_evidence.primary_ready",
                 "search_projection_shadow_evidence.shadow_ready",
                 "search_projection_shadow_evidence.document_count_parity",
+                "search_projection_shadow_evidence.document_identity_parity",
                 "search_projection_shadow_evidence.table_parity_ready",
                 "search_projection_shadow_evidence.embedding_identity_parity",
                 "search_projection_shadow_evidence.lifecycle_parity",
@@ -3452,6 +3489,8 @@ mod tests {
         replacement_summary["search_projection_evidence"]["ready"] = serde_json::json!(true);
         replacement_summary["search_projection_evidence"]["covered_table_count"] =
             serde_json::json!(5);
+        replacement_summary["search_projection_evidence"]["document_identity_ready"] =
+            serde_json::json!(false);
         replacement_summary["search_projection_evidence"]["source_chunk_ready"] =
             serde_json::json!(false);
         replacement_summary["search_projection_evidence"]["production_filter_pruning_ready"] =
@@ -3470,6 +3509,7 @@ mod tests {
             check_by_name(&report, "replacement_summary")["failed_evidence_fields"],
             serde_json::json!([
                 "search_projection_evidence.covered_table_count",
+                "search_projection_evidence.document_identity_ready",
                 "search_projection_evidence.source_chunk_ready",
                 "search_projection_evidence.production_filter_pruning_ready"
             ])
@@ -3486,6 +3526,8 @@ mod tests {
         let replacement_summary = inputs.replacement_summary.as_mut().unwrap();
         replacement_summary["search_projection_shadow_evidence"]["ready"] = serde_json::json!(true);
         replacement_summary["search_projection_shadow_evidence"]["table_parity_ready"] =
+            serde_json::json!(false);
+        replacement_summary["search_projection_shadow_evidence"]["document_identity_parity"] =
             serde_json::json!(false);
         replacement_summary["search_projection_shadow_evidence"]["incremental_watermark_parity"] =
             serde_json::json!(false);
@@ -3510,6 +3552,7 @@ mod tests {
         assert_eq!(
             check_by_name(&report, "replacement_summary")["failed_evidence_fields"],
             serde_json::json!([
+                "search_projection_shadow_evidence.document_identity_parity",
                 "search_projection_shadow_evidence.table_parity_ready",
                 "search_projection_shadow_evidence.incremental_watermark_parity",
                 "search_projection_shadow_evidence.pushdown_evidence.ready",
@@ -4953,6 +4996,7 @@ mod tests {
             "required_table_count": 6,
             "fts_ready": true,
             "vector_ready": true,
+            "document_identity_ready": true,
             "embedding_identity_ready": true,
             "fail_soft_ready": true,
             "rebuild_marker_ready": true,
@@ -4974,6 +5018,7 @@ mod tests {
             "primary_ready": true,
             "shadow_ready": true,
             "document_count_parity": true,
+            "document_identity_parity": true,
             "table_parity_ready": true,
             "embedding_identity_parity": true,
             "lifecycle_parity": true,
