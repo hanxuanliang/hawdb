@@ -2891,6 +2891,7 @@ pub struct NowledgeMemQueryReport {
     pub physical_operator_counts: BTreeMap<String, usize>,
     pub optimizer_decision_count: usize,
     pub scan_pruning_reports: Vec<ScanPruningReport>,
+    pub output_row_shape: NowledgeMemQueryOutputRowShape,
 }
 
 impl NowledgeMemQueryReport {
@@ -2924,9 +2925,42 @@ impl NowledgeMemQueryReport {
             "optimizer_decision_count": self.optimizer_decision_count,
             "scan_pruning_report_count": self.scan_pruning_reports.len(),
             "scan_pruning_reports": self.scan_pruning_reports.iter().map(scan_pruning_report_json).collect::<Vec<_>>(),
+            "output_row_shape": self.output_row_shape.json(),
             "api_behavior": {
                 "include_metadata_false_strips_metadata": true,
             },
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemQueryOutputRowShape {
+    pub row_count: usize,
+    pub column_count: usize,
+    pub columns: Vec<String>,
+}
+
+impl NowledgeMemQueryOutputRowShape {
+    fn from_output(output: &QueryOutput) -> Self {
+        let columns = output
+            .rows
+            .iter()
+            .flat_map(|row| row.keys().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        Self {
+            row_count: output.rows.len(),
+            column_count: columns.len(),
+            columns,
+        }
+    }
+
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "row_count": self.row_count,
+            "column_count": self.column_count,
+            "columns": self.columns,
         })
     }
 }
@@ -4139,15 +4173,16 @@ impl NowledgeMemGraph {
             self.db
                 .query_with_params_trace(cypher, parameters, options.capture_physical_plan)?;
         let elapsed_micros = started.elapsed().as_micros();
-        let report = nowledge_mem_query_report(
-            self.mode,
-            &execution_trace.statement,
-            execution_trace.optimizer_trace.as_ref(),
-            execution_trace.plan_cache_lookup,
-            execution_trace.execution_profile.as_ref(),
+        let report = nowledge_mem_query_report(NowledgeMemQueryReportInput {
+            mode: self.mode,
+            statement: &execution_trace.statement,
+            trace: execution_trace.optimizer_trace.as_ref(),
+            plan_cache_lookup: execution_trace.plan_cache_lookup,
+            execution_profile: execution_trace.execution_profile.as_ref(),
+            output: &output,
             options,
             elapsed_micros,
-        );
+        });
         Ok(NowledgeMemQueryOutput { output, report })
     }
 
@@ -5931,46 +5966,59 @@ fn require_search_projection_mut(
         .ok_or_else(missing_search_projection_error)
 }
 
-fn nowledge_mem_query_report(
+struct NowledgeMemQueryReportInput<'a> {
     mode: NowledgeMemGraphMode,
-    statement: &cypher::Statement,
-    trace: Option<&crate::optimizer::OptimizerTrace>,
+    statement: &'a cypher::Statement,
+    trace: Option<&'a crate::optimizer::OptimizerTrace>,
     plan_cache_lookup: Option<PlanCacheLookup>,
-    execution_profile: Option<&ReadExecutionProfile>,
+    execution_profile: Option<&'a ReadExecutionProfile>,
+    output: &'a QueryOutput,
     options: NowledgeMemQueryReportOptions,
     elapsed_micros: u128,
-) -> NowledgeMemQueryReport {
-    let statement_kind = crate::api::statement_kind(nowledge_statement_body(statement));
-    let decision = nowledge_mem_query_execution_path(statement);
-    let slow_log_candidate = options
+}
+
+fn nowledge_mem_query_report(input: NowledgeMemQueryReportInput<'_>) -> NowledgeMemQueryReport {
+    let statement_kind = crate::api::statement_kind(nowledge_statement_body(input.statement));
+    let decision = nowledge_mem_query_execution_path(input.statement);
+    let slow_log_candidate = input
+        .options
         .slow_log_threshold_micros
-        .is_some_and(|threshold| elapsed_micros >= threshold);
-    let plan_cache = NowledgeMemPlanCacheReport::from_lookup(plan_cache_lookup);
+        .is_some_and(|threshold| input.elapsed_micros >= threshold);
+    let plan_cache = NowledgeMemPlanCacheReport::from_lookup(input.plan_cache_lookup);
     NowledgeMemQueryReport {
         protocol: NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL.to_string(),
-        mode,
+        mode: input.mode,
         statement_kind: statement_kind.to_string(),
         execution_path: decision.execution_path,
         fast_path_reason: decision.fast_path_reason.map(str::to_string),
-        elapsed_micros,
-        slow_log_threshold_micros: options.slow_log_threshold_micros,
+        elapsed_micros: input.elapsed_micros,
+        slow_log_threshold_micros: input.options.slow_log_threshold_micros,
         slow_log_candidate,
-        physical_plan_captured: trace.is_some(),
-        plan_cache_lookup: plan_cache_lookup.map(|lookup| lookup.as_str().to_string()),
-        plan_cache_bypass_reason: plan_cache_lookup
+        physical_plan_captured: input.trace.is_some(),
+        plan_cache_lookup: input
+            .plan_cache_lookup
+            .map(|lookup| lookup.as_str().to_string()),
+        plan_cache_bypass_reason: input
+            .plan_cache_lookup
             .and_then(|lookup| lookup.bypass_reason())
             .map(|reason| reason.as_str().to_string()),
         plan_cache_cacheable: plan_cache.cacheable,
         plan_cache_hit: plan_cache.hit,
         plan_cache_miss: plan_cache.miss,
         plan_cache_bypassed: plan_cache.bypassed,
-        physical_operator_counts: trace
+        physical_operator_counts: input
+            .trace
             .map(|trace| trace.selected_plan_operator_counts.clone())
             .unwrap_or_default(),
-        optimizer_decision_count: trace.map(|trace| trace.decisions.len()).unwrap_or_default(),
-        scan_pruning_reports: execution_profile
+        optimizer_decision_count: input
+            .trace
+            .map(|trace| trace.decisions.len())
+            .unwrap_or_default(),
+        scan_pruning_reports: input
+            .execution_profile
             .map(|profile| profile.scan_pruning_reports.clone())
             .unwrap_or_default(),
+        output_row_shape: NowledgeMemQueryOutputRowShape::from_output(input.output),
     }
 }
 
@@ -8430,6 +8478,14 @@ mod tests {
         assert_eq!(query.report.json()["fast_path_selected"], true);
         assert_eq!(query.report.json()["physical_plan_captured"], false);
         assert_eq!(query.report.json()["plan_cache"]["cacheable"], true);
+        assert_eq!(query.report.output_row_shape.row_count, 1);
+        assert_eq!(query.report.output_row_shape.column_count, 1);
+        assert_eq!(query.report.output_row_shape.columns, vec!["title"]);
+        assert_eq!(query.report.json()["output_row_shape"]["row_count"], 1);
+        assert_eq!(
+            query.report.json()["output_row_shape"]["columns"],
+            serde_json::json!(["title"])
+        );
     }
 
     #[test]

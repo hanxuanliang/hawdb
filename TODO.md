@@ -456,6 +456,8 @@ contract.
   - [x] Require graph-route query reports to carry compact API behavior evidence
     proving `include_metadata=false` strips metadata before route cutover
     readiness can pass.
+  - [x] Require graph-route query reports to carry compact output row-shape
+    evidence before route cutover readiness can pass.
 
 ## P0: Storage and Recovery
 

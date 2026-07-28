@@ -596,6 +596,7 @@ struct QueryRuntimeReport {
     optimizer_decision_count: Option<u64>,
     scan_pruning_report_count: Option<u64>,
     scan_pruning_reports: Vec<serde_json::Value>,
+    output_row_shape: QueryOutputRowShapeEvidence,
     plan_cache_lookup: Option<String>,
     plan_cache_cacheable: Option<bool>,
     plan_cache_hit: Option<bool>,
@@ -637,6 +638,7 @@ impl QueryRuntimeReport {
                 .and_then(serde_json::Value::as_array)
                 .cloned()
                 .unwrap_or_default(),
+            output_row_shape: QueryOutputRowShapeEvidence::parse(value),
             plan_cache_lookup,
             plan_cache_cacheable,
             plan_cache_hit,
@@ -686,6 +688,7 @@ impl QueryRuntimeReport {
             "scan_pruning_report_count": self.scan_pruning_report_count,
             "scan_pruning_reports_present": !self.scan_pruning_reports.is_empty(),
             "scan_pruning_reports": self.scan_pruning_reports,
+            "output_row_shape": self.output_row_shape.json(),
             "plan_cache_lookup": self.plan_cache_lookup.clone(),
             "plan_cache": {
                 "lookup": self.plan_cache_lookup,
@@ -758,6 +761,9 @@ impl QueryRuntimeReport {
         if !self.scan_pruning_reports_ready() {
             blockers.insert("query_report_scan_pruning_profile_missing".to_string());
         }
+        if !self.output_row_shape.ready() {
+            blockers.insert("query_report_output_row_shape_missing".to_string());
+        }
         if self.plan_cache_cacheable.is_none()
             || self.plan_cache_hit.is_none()
             || self.plan_cache_miss.is_none()
@@ -799,6 +805,38 @@ impl QueryRuntimeReport {
                 .scan_pruning_reports
                 .iter()
                 .all(scan_pruning_report_ready)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QueryOutputRowShapeEvidence {
+    row_count: Option<u64>,
+    column_count: Option<u64>,
+    columns: Vec<String>,
+}
+
+impl QueryOutputRowShapeEvidence {
+    fn parse(value: &serde_json::Value) -> Self {
+        Self {
+            row_count: u64_path(value, &["output_row_shape", "row_count"]),
+            column_count: u64_path(value, &["output_row_shape", "column_count"]),
+            columns: string_array_path(value, &["output_row_shape", "columns"]),
+        }
+    }
+
+    fn ready(&self) -> bool {
+        self.row_count.is_some()
+            && self.column_count == Some(self.columns.len() as u64)
+            && !self.columns.is_empty()
+    }
+
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "row_count": self.row_count,
+            "column_count": self.column_count,
+            "columns": self.columns,
+            "ready": self.ready(),
+        })
     }
 }
 
@@ -1554,6 +1592,49 @@ mod tests {
     }
 
     #[test]
+    fn route_readiness_fails_closed_without_output_row_shape() {
+        let mut routes = ready_routes();
+        routes[0]["query_reports"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("output_row_shape");
+
+        let readiness = nowledge_graph_route_readiness_json(&ready_evidence(routes)).unwrap();
+
+        assert_eq!(readiness["route_primary_ready"], false);
+        assert_eq!(readiness["route_query_runtime_ready"], false);
+        assert!(readiness["route_primary_blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "query_report_output_row_shape_missing"));
+        assert_eq!(
+            readiness["routes"][0]["query_reports"][0]["output_row_shape"]["ready"],
+            false
+        );
+    }
+
+    #[test]
+    fn route_readiness_fails_closed_when_output_row_shape_column_count_is_stale() {
+        let mut routes = ready_routes();
+        routes[0]["query_reports"][0]["output_row_shape"]["column_count"] = serde_json::json!(3);
+
+        let readiness = nowledge_graph_route_readiness_json(&ready_evidence(routes)).unwrap();
+
+        assert_eq!(readiness["route_primary_ready"], false);
+        assert_eq!(readiness["route_query_runtime_ready"], false);
+        assert!(readiness["route_primary_blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "query_report_output_row_shape_missing"));
+        assert_eq!(
+            readiness["routes"][0]["query_reports"][0]["output_row_shape"]["ready"],
+            false
+        );
+    }
+
+    #[test]
     fn route_readiness_accepts_relationship_property_pruning_evidence() {
         let mut routes = ready_routes();
         routes[0]["relationship_property_pruning_required_count"] = serde_json::json!(1);
@@ -1847,6 +1928,11 @@ mod tests {
                 "ProjectExec": 1
             },
             "optimizer_decision_count": 2,
+            "output_row_shape": {
+                "row_count": 1,
+                "column_count": 2,
+                "columns": ["m.id", "m.title"]
+            },
             "scan_pruning_report_count": 1,
             "scan_pruning_reports": [
                 {
