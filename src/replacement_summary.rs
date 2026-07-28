@@ -2304,6 +2304,10 @@ fn query_runtime_preflight_probe_ready(probe: &serde_json::Value) -> bool {
             .and_then(serde_json::Value::as_u64)
             .is_some_and(|count| count > 0)
         && probe
+            .get("optimizer_rule_event_count")
+            .and_then(serde_json::Value::as_u64)
+            .is_some()
+        && probe
             .get("plan_cache_bypassed")
             .and_then(serde_json::Value::as_bool)
             == Some(false)
@@ -6312,6 +6316,7 @@ mod tests {
             "physical_operator_count": 2,
             "physical_operator_class_count": 2,
             "optimizer_decision_count": 1,
+            "optimizer_rule_event_count": 1,
             "plan_cache_bypassed": false,
             "scan_pruning": {
                 "ready": true,

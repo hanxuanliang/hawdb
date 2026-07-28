@@ -2055,6 +2055,7 @@ mod tests {
             "elapsed_micros": 12,
             "physical_operator_counts_present": true,
             "optimizer_decision_count": 2,
+            "optimizer_rule_event_count": 1,
             "scan_pruning_report_count": 1,
             "scan_pruning_reports_present": true,
             "scan_pruning_reports": [
@@ -2177,6 +2178,7 @@ mod tests {
                 "relational": 1
             },
             "optimizer_decision_count": 2,
+            "optimizer_rule_event_count": 1,
             "plan_cache_lookup": "miss",
             "plan_cache": {
                 "lookup": "miss",

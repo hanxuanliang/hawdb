@@ -887,6 +887,7 @@ pub struct NowledgeQueryRuntimePreflightProbeReport {
     pub selected_plan_operator_counts: BTreeMap<String, usize>,
     pub selected_plan_class_counts: BTreeMap<String, usize>,
     pub optimizer_decision_count: usize,
+    pub optimizer_rule_event_count: usize,
     pub plan_cache_lookup: Option<String>,
     pub plan_cache_bypass_reason: Option<String>,
     pub plan_cache_cacheable: bool,
@@ -944,6 +945,10 @@ impl NowledgeQueryRuntimePreflightProbeReport {
             object.insert(
                 "optimizer_decision_count".to_string(),
                 serde_json::json!(self.optimizer_decision_count),
+            );
+            object.insert(
+                "optimizer_rule_event_count".to_string(),
+                serde_json::json!(self.optimizer_rule_event_count),
             );
             object.insert(
                 "plan_cache_lookup".to_string(),
@@ -2896,6 +2901,7 @@ pub struct NowledgeMemQueryReport {
     pub plan_cache_bypassed: bool,
     pub physical_operator_counts: BTreeMap<String, usize>,
     pub optimizer_decision_count: usize,
+    pub optimizer_rule_event_count: usize,
     pub scan_pruning_reports: Vec<ScanPruningReport>,
     pub output_row_shape: NowledgeMemQueryOutputRowShape,
     pub api_behavior: NowledgeMemQueryApiBehavior,
@@ -2930,6 +2936,7 @@ impl NowledgeMemQueryReport {
             },
             "physical_operator_counts": self.physical_operator_counts,
             "optimizer_decision_count": self.optimizer_decision_count,
+            "optimizer_rule_event_count": self.optimizer_rule_event_count,
             "scan_pruning_report_count": self.scan_pruning_reports.len(),
             "scan_pruning_reports": self.scan_pruning_reports.iter().map(scan_pruning_report_json).collect::<Vec<_>>(),
             "output_row_shape": self.output_row_shape.json(),
@@ -5976,6 +5983,10 @@ fn nowledge_mem_query_report(input: NowledgeMemQueryReportInput<'_>) -> Nowledge
             .trace
             .map(|trace| trace.decisions.len())
             .unwrap_or_default(),
+        optimizer_rule_event_count: input
+            .trace
+            .map(|trace| trace.rule_events.len())
+            .unwrap_or_default(),
         scan_pruning_reports: input
             .execution_profile
             .map(|profile| profile.scan_pruning_reports.clone())
@@ -6178,6 +6189,7 @@ fn nowledge_query_runtime_probe_report(
                 selected_plan_operator_counts: output.trace.selected_plan_operator_counts,
                 selected_plan_class_counts: output.trace.selected_plan_class_counts,
                 optimizer_decision_count: output.trace.decisions.len(),
+                optimizer_rule_event_count: output.trace.rule_events.len(),
                 plan_cache_lookup: Some(plan_cache_lookup.as_str().to_string()),
                 plan_cache_bypass_reason: plan_cache_lookup
                     .bypass_reason()
@@ -6214,6 +6226,7 @@ fn nowledge_query_runtime_probe_report(
             selected_plan_operator_counts: BTreeMap::new(),
             selected_plan_class_counts: BTreeMap::new(),
             optimizer_decision_count: 0,
+            optimizer_rule_event_count: 0,
             plan_cache_lookup: None,
             plan_cache_bypass_reason: None,
             plan_cache_cacheable: false,
@@ -8502,6 +8515,8 @@ mod tests {
         assert_eq!(query.report.json()["statement_kind"], "match_return");
         assert_eq!(query.report.json()["fast_path_selected"], true);
         assert_eq!(query.report.json()["physical_plan_captured"], false);
+        assert_eq!(query.report.optimizer_rule_event_count, 0);
+        assert_eq!(query.report.json()["optimizer_rule_event_count"], 0);
         assert_eq!(query.report.json()["plan_cache"]["cacheable"], true);
         assert_eq!(query.report.output_row_shape.row_count, 1);
         assert_eq!(query.report.output_row_shape.column_count, 1);
@@ -8551,6 +8566,7 @@ mod tests {
         assert_eq!(query.report.statement_kind, "match_return");
         assert_eq!(query.report.fast_path_reason, None);
         assert_eq!(query.report.optimizer_decision_count, 0);
+        assert_eq!(query.report.optimizer_rule_event_count, 0);
         assert!(!query.report.physical_plan_captured);
         assert!(query.report.physical_operator_counts.is_empty());
         assert!(query.report.plan_cache_cacheable);
@@ -8600,6 +8616,7 @@ mod tests {
         assert!(query.report.physical_plan_captured);
         assert_eq!(query.report.statement_kind, "match_return");
         assert!(query.report.optimizer_decision_count > 0);
+        assert!(query.report.optimizer_rule_event_count > 0);
         assert!(query
             .report
             .physical_operator_counts
@@ -8608,6 +8625,9 @@ mod tests {
         assert_eq!(query.report.plan_cache_bypass_reason, None);
         assert!(query.report.slow_log_candidate);
         assert_eq!(query.report.json()["physical_plan_captured"], true);
+        assert!(query.report.json()["optimizer_rule_event_count"]
+            .as_u64()
+            .is_some_and(|count| count > 0));
         assert_eq!(query.report.json()["plan_cache_lookup"], "miss");
         assert_eq!(query.report.json()["slow_log_candidate"], true);
         assert_eq!(

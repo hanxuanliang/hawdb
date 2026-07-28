@@ -2864,6 +2864,7 @@ fn query_runtime_preflight_probe_ready(probe: &serde_json::Value) -> bool {
         && json_object_path_is_non_empty(probe, &["selected_plan_operator_counts"])
         && json_object_path_is_non_empty(probe, &["selected_plan_class_counts"])
         && u64_path(probe, &["optimizer_decision_count"]).is_some()
+        && u64_path(probe, &["optimizer_rule_event_count"]).is_some()
         && query_runtime_preflight_probe_plan_cache_ready(probe)
         && query_runtime_preflight_probe_scan_pruning_ready(probe)
         && empty_array_path(probe, &["blocker_codes"])
@@ -4959,6 +4960,7 @@ mod tests {
                 "relational": 1
             },
             "optimizer_decision_count": 2,
+            "optimizer_rule_event_count": 1,
             "plan_cache_lookup": "miss",
             "plan_cache": {
                 "lookup": "miss",

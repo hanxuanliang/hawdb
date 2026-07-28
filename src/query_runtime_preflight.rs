@@ -493,6 +493,9 @@ mod tests {
         assert!(report["probes"][0]["optimizer_decision_count"]
             .as_u64()
             .is_some());
+        assert!(report["probes"][0]["optimizer_rule_event_count"]
+            .as_u64()
+            .is_some());
         assert_eq!(report["probes"][0]["plan_cache"]["lookup"], "miss");
         assert_eq!(report["probes"][0]["plan_cache"]["bypassed"], false);
         assert_eq!(

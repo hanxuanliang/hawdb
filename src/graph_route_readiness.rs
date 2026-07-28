@@ -621,6 +621,7 @@ struct QueryRuntimeReport {
     elapsed_micros: Option<u64>,
     physical_operator_counts_present: bool,
     optimizer_decision_count: Option<u64>,
+    optimizer_rule_event_count: Option<u64>,
     scan_pruning_report_count: Option<u64>,
     scan_pruning_reports: Vec<serde_json::Value>,
     output_row_shape: QueryOutputRowShapeEvidence,
@@ -660,6 +661,7 @@ impl QueryRuntimeReport {
             physical_operator_counts_present: value_path(value, &["physical_operator_counts"])
                 .is_some_and(serde_json::Value::is_object),
             optimizer_decision_count: u64_path(value, &["optimizer_decision_count"]),
+            optimizer_rule_event_count: u64_path(value, &["optimizer_rule_event_count"]),
             scan_pruning_report_count: u64_path(value, &["scan_pruning_report_count"]),
             scan_pruning_reports: value_path(value, &["scan_pruning_reports"])
                 .and_then(serde_json::Value::as_array)
@@ -685,6 +687,7 @@ impl QueryRuntimeReport {
     fn plan_evidence_ready(&self) -> bool {
         self.physical_operator_counts_present
             && self.optimizer_decision_count.is_some()
+            && self.optimizer_rule_event_count.is_some()
             && self.plan_cache_state_ready()
     }
 
@@ -712,6 +715,7 @@ impl QueryRuntimeReport {
             "elapsed_micros": self.elapsed_micros,
             "physical_operator_counts_present": self.physical_operator_counts_present,
             "optimizer_decision_count": self.optimizer_decision_count,
+            "optimizer_rule_event_count": self.optimizer_rule_event_count,
             "scan_pruning_report_count": self.scan_pruning_report_count,
             "scan_pruning_reports_present": !self.scan_pruning_reports.is_empty(),
             "scan_pruning_reports": self.scan_pruning_reports,
@@ -782,6 +786,9 @@ impl QueryRuntimeReport {
         }
         if self.optimizer_decision_count.is_none() {
             blockers.insert("query_report_optimizer_decision_count_missing".to_string());
+        }
+        if self.optimizer_rule_event_count.is_none() {
+            blockers.insert("query_report_optimizer_rule_event_count_missing".to_string());
         }
         if !self.scan_pruning_reports_ready() {
             blockers.insert("query_report_scan_pruning_profile_missing".to_string());
@@ -1619,6 +1626,10 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("optimizer_decision_count");
+        routes[0]["query_reports"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("optimizer_rule_event_count");
 
         let readiness = nowledge_graph_route_readiness_json(&ready_evidence(routes)).unwrap();
 
@@ -1645,6 +1656,11 @@ mod tests {
             .unwrap()
             .iter()
             .any(|code| code == "query_report_optimizer_decision_count_missing"));
+        assert!(readiness["route_primary_blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "query_report_optimizer_rule_event_count_missing"));
     }
 
     #[test]
@@ -2104,6 +2120,7 @@ mod tests {
                 "ProjectExec": 1
             },
             "optimizer_decision_count": 2,
+            "optimizer_rule_event_count": 1,
             "output_row_shape": {
                 "row_count": 1,
                 "column_count": 2,

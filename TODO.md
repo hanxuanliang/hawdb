@@ -452,6 +452,10 @@ contract.
     properties, and deterministic costs for non-trivial graph reads.
   - Keep storage-specific choices in catalog metadata and physical rules, not in
     parser or route handlers.
+  - [x] Surface structured optimizer rule-event counts through query reports,
+    query-runtime preflight, graph-route readiness, integration readiness, and
+    final preflight so replacement gates do not depend only on free-form
+    decision text.
 - [ ] Maintain stable Nowledge API behavior.
   - Preserve node, relationship, metadata, pagination, and ordering contracts.
   - Preserve `include_metadata=false` metadata stripping behavior.

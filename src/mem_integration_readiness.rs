@@ -3913,6 +3913,7 @@ fn graph_route_query_report_ready(report: &serde_json::Value) -> bool {
         && u64_path(report, &["elapsed_micros"]).is_some()
         && graph_route_query_report_physical_operators_present(report)
         && u64_path(report, &["optimizer_decision_count"]).is_some()
+        && u64_path(report, &["optimizer_rule_event_count"]).is_some()
         && u64_path(report, &["scan_pruning_report_count"]).is_some()
         && graph_route_query_report_scan_pruning_present(report)
         && non_empty_str_path(report, &["plan_cache", "lookup"])
@@ -4419,6 +4420,7 @@ fn query_runtime_preflight_probe_ready(probe: &serde_json::Value) -> bool {
         && json_object_path_is_non_empty(probe, &["selected_plan_operator_counts"])
         && json_object_path_is_non_empty(probe, &["selected_plan_class_counts"])
         && u64_path(probe, &["optimizer_decision_count"]).is_some()
+        && u64_path(probe, &["optimizer_rule_event_count"]).is_some()
         && query_runtime_preflight_probe_plan_cache_ready(probe)
         && query_runtime_preflight_probe_scan_pruning_ready(probe)
         && string_array_path(probe, &["blocker_codes"]).is_empty()
@@ -10076,6 +10078,7 @@ mod tests {
                         "relational": 1
                     },
                     "optimizer_decision_count": 2,
+                    "optimizer_rule_event_count": 1,
                     "plan_cache_lookup": "miss",
                     "plan_cache": {
                         "lookup": "miss",
@@ -10158,6 +10161,7 @@ mod tests {
             "elapsed_micros": 12,
             "physical_operator_counts_present": true,
             "optimizer_decision_count": 2,
+            "optimizer_rule_event_count": 1,
             "scan_pruning_report_count": 1,
             "scan_pruning_reports_present": true,
             "scan_pruning_reports": [
