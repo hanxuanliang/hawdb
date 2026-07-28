@@ -307,6 +307,10 @@ pub fn parse_mem_library_graph_route_readiness_json(
             value,
             "route_query_profile_evidence_ready",
         )?,
+        route_query_api_behavior_evidence_ready: required_bool(
+            value,
+            "route_query_api_behavior_evidence_ready",
+        )?,
         relationship_property_pruning_required_count: required_u64(
             value,
             "relationship_property_pruning_required_count",
@@ -665,6 +669,7 @@ mod tests {
             "primary_ready_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
             "route_query_plan_evidence_ready": true,
             "route_query_profile_evidence_ready": true,
+            "route_query_api_behavior_evidence_ready": true,
             "relationship_property_pruning_required_count": 0,
             "relationship_property_pruning_report_count": 0,
             "route_relationship_property_pruning_evidence_ready": true

@@ -225,6 +225,10 @@ fn graph_route_alignment_json(
         evidence.route_query_profile_evidence_ready == Some(true);
     let summary_route_query_profile_evidence_ready =
         summary.route_query_profile_evidence_ready == Some(true);
+    let evidence_route_query_api_behavior_evidence_ready =
+        evidence.route_query_api_behavior_evidence_ready == Some(true);
+    let summary_route_query_api_behavior_evidence_ready =
+        summary.route_query_api_behavior_evidence_ready == Some(true);
     let evidence_route_relationship_property_pruning_evidence_ready =
         evidence.route_relationship_property_pruning_evidence_ready == Some(true);
     let summary_route_relationship_property_pruning_evidence_ready =
@@ -278,6 +282,9 @@ fn graph_route_alignment_json(
         evidence_route_query_plan_evidence_ready == summary_route_query_plan_evidence_ready;
     let route_query_profile_evidence_ready_matches =
         evidence_route_query_profile_evidence_ready == summary_route_query_profile_evidence_ready;
+    let route_query_api_behavior_evidence_ready_matches =
+        evidence_route_query_api_behavior_evidence_ready
+            == summary_route_query_api_behavior_evidence_ready;
     let route_relationship_property_pruning_evidence_ready_matches =
         evidence_route_relationship_property_pruning_evidence_ready
             == summary_route_relationship_property_pruning_evidence_ready;
@@ -308,6 +315,9 @@ fn graph_route_alignment_json(
         evidence_route_query_profile_evidence_ready,
         summary_route_query_profile_evidence_ready,
         route_query_profile_evidence_ready_matches,
+        evidence_route_query_api_behavior_evidence_ready,
+        summary_route_query_api_behavior_evidence_ready,
+        route_query_api_behavior_evidence_ready_matches,
         evidence_route_relationship_property_pruning_evidence_ready,
         summary_route_relationship_property_pruning_evidence_ready,
         route_relationship_property_pruning_evidence_ready_matches,
@@ -342,6 +352,9 @@ fn graph_route_alignment_json(
         "evidence_route_query_profile_evidence_ready": evidence_route_query_profile_evidence_ready,
         "summary_route_query_profile_evidence_ready": summary_route_query_profile_evidence_ready,
         "route_query_profile_evidence_ready_matches": route_query_profile_evidence_ready_matches,
+        "evidence_route_query_api_behavior_evidence_ready": evidence_route_query_api_behavior_evidence_ready,
+        "summary_route_query_api_behavior_evidence_ready": summary_route_query_api_behavior_evidence_ready,
+        "route_query_api_behavior_evidence_ready_matches": route_query_api_behavior_evidence_ready_matches,
         "evidence_route_relationship_property_pruning_evidence_ready": evidence_route_relationship_property_pruning_evidence_ready,
         "summary_route_relationship_property_pruning_evidence_ready": summary_route_relationship_property_pruning_evidence_ready,
         "route_relationship_property_pruning_evidence_ready_matches": route_relationship_property_pruning_evidence_ready_matches,
@@ -497,6 +510,9 @@ struct GraphRouteAlignment {
     evidence_route_query_profile_evidence_ready: bool,
     summary_route_query_profile_evidence_ready: bool,
     route_query_profile_evidence_ready_matches: bool,
+    evidence_route_query_api_behavior_evidence_ready: bool,
+    summary_route_query_api_behavior_evidence_ready: bool,
+    route_query_api_behavior_evidence_ready_matches: bool,
     evidence_route_relationship_property_pruning_evidence_ready: bool,
     summary_route_relationship_property_pruning_evidence_ready: bool,
     route_relationship_property_pruning_evidence_ready_matches: bool,
@@ -531,6 +547,9 @@ impl GraphRouteAlignment {
             && self.evidence_route_query_profile_evidence_ready
             && self.summary_route_query_profile_evidence_ready
             && self.route_query_profile_evidence_ready_matches
+            && self.evidence_route_query_api_behavior_evidence_ready
+            && self.summary_route_query_api_behavior_evidence_ready
+            && self.route_query_api_behavior_evidence_ready_matches
             && self.evidence_route_relationship_property_pruning_evidence_ready
             && self.summary_route_relationship_property_pruning_evidence_ready
             && self.route_relationship_property_pruning_evidence_ready_matches
@@ -590,6 +609,15 @@ impl GraphRouteAlignment {
         }
         if !self.route_query_profile_evidence_ready_matches {
             blockers.push("graph_route_query_profile_evidence_mismatch");
+        }
+        if !self.evidence_route_query_api_behavior_evidence_ready {
+            blockers.push("graph_route_query_api_behavior_evidence_not_ready");
+        }
+        if !self.summary_route_query_api_behavior_evidence_ready {
+            blockers.push("replacement_summary_query_api_behavior_evidence_not_ready");
+        }
+        if !self.route_query_api_behavior_evidence_ready_matches {
+            blockers.push("graph_route_query_api_behavior_evidence_mismatch");
         }
         if !self.evidence_route_relationship_property_pruning_evidence_ready {
             blockers.push("graph_route_relationship_property_pruning_evidence_not_ready");
@@ -1848,6 +1876,7 @@ mod tests {
                 .collect(),
             route_query_plan_evidence_ready: true,
             route_query_profile_evidence_ready: true,
+            route_query_api_behavior_evidence_ready: true,
             relationship_property_pruning_required_count: 0,
             relationship_property_pruning_report_count: 0,
             route_relationship_property_pruning_evidence_ready: true,
@@ -1985,6 +2014,7 @@ mod tests {
             "query_runtime_report_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
             "query_runtime_plan_report_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
             "query_runtime_profile_report_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+            "query_runtime_api_behavior_report_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
             "query_runtime_failed_query_count": 0,
             "query_runtime_missing_plan_evidence_count": 0,
             "query_runtime_missing_profile_evidence_count": 0,
@@ -1994,6 +2024,7 @@ mod tests {
             "route_query_runtime_ready": true,
             "route_query_plan_evidence_ready": true,
             "route_query_profile_evidence_ready": true,
+            "route_query_api_behavior_evidence_ready": true,
             "route_relationship_property_pruning_evidence_ready": true,
             "route_primary_ready": true,
             "route_primary_blocker_codes": [],

@@ -1087,6 +1087,7 @@ pub struct NowledgeMemRouteReadinessSummary {
     pub primary_ready_routes: Vec<String>,
     pub route_query_plan_evidence_ready: bool,
     pub route_query_profile_evidence_ready: bool,
+    pub route_query_api_behavior_evidence_ready: bool,
     pub relationship_property_pruning_required_count: u64,
     pub relationship_property_pruning_report_count: u64,
     pub route_relationship_property_pruning_evidence_ready: bool,
@@ -1103,6 +1104,7 @@ pub fn nowledge_mem_bounded_read_evidence_json_with_route_readiness(
         (!summary.route_primary_ready
             || !summary.route_query_plan_evidence_ready
             || !summary.route_query_profile_evidence_ready
+            || !summary.route_query_api_behavior_evidence_ready
             || !summary.route_relationship_property_pruning_evidence_ready
             || summary.relationship_property_pruning_required_count
                 != summary.relationship_property_pruning_report_count)
@@ -1123,6 +1125,8 @@ pub fn nowledge_mem_bounded_read_evidence_json_with_route_readiness(
         route_readiness.map(|summary| summary.route_query_plan_evidence_ready);
     let route_query_profile_evidence_ready =
         route_readiness.map(|summary| summary.route_query_profile_evidence_ready);
+    let route_query_api_behavior_evidence_ready =
+        route_readiness.map(|summary| summary.route_query_api_behavior_evidence_ready);
     let relationship_property_pruning_required_count =
         route_readiness.map(|summary| summary.relationship_property_pruning_required_count);
     let relationship_property_pruning_report_count =
@@ -1155,6 +1159,7 @@ pub fn nowledge_mem_bounded_read_evidence_json_with_route_readiness(
         "primary_ready_routes": primary_ready_routes,
         "route_query_plan_evidence_ready": route_query_plan_evidence_ready,
         "route_query_profile_evidence_ready": route_query_profile_evidence_ready,
+        "route_query_api_behavior_evidence_ready": route_query_api_behavior_evidence_ready,
         "relationship_property_pruning_required_count": relationship_property_pruning_required_count,
         "relationship_property_pruning_report_count": relationship_property_pruning_report_count,
         "route_relationship_property_pruning_evidence_ready": route_relationship_property_pruning_evidence_ready,
@@ -6684,6 +6689,7 @@ fn nowledge_mem_graph_route_readiness_json(
             "route_primary_ready": null,
             "route_query_plan_evidence_ready": null,
             "route_query_profile_evidence_ready": null,
+            "route_query_api_behavior_evidence_ready": null,
             "relationship_property_pruning_required_count": null,
             "relationship_property_pruning_report_count": null,
             "route_relationship_property_pruning_evidence_ready": null,
@@ -6706,6 +6712,9 @@ fn nowledge_mem_graph_route_readiness_json(
     if !summary.route_query_profile_evidence_ready {
         blocker_codes.push("route_query_profile_evidence_not_ready");
     }
+    if !summary.route_query_api_behavior_evidence_ready {
+        blocker_codes.push("route_query_api_behavior_evidence_not_ready");
+    }
     if !summary.route_relationship_property_pruning_evidence_ready
         || !relationship_property_pruning_count_matches
     {
@@ -6725,6 +6734,7 @@ fn nowledge_mem_graph_route_readiness_json(
         "route_primary_ready": summary.route_primary_ready,
         "route_query_plan_evidence_ready": summary.route_query_plan_evidence_ready,
         "route_query_profile_evidence_ready": summary.route_query_profile_evidence_ready,
+        "route_query_api_behavior_evidence_ready": summary.route_query_api_behavior_evidence_ready,
         "relationship_property_pruning_required_count": summary.relationship_property_pruning_required_count,
         "relationship_property_pruning_report_count": summary.relationship_property_pruning_report_count,
         "route_relationship_property_pruning_evidence_ready": summary.route_relationship_property_pruning_evidence_ready,
@@ -6899,6 +6909,7 @@ fn bounded_read_readiness_blocker_codes(evidence: &serde_json::Value) -> Vec<Str
     if evidence_bool(evidence, "route_primary_ready") != Some(true)
         || evidence_bool(evidence, "route_query_plan_evidence_ready") != Some(true)
         || evidence_bool(evidence, "route_query_profile_evidence_ready") != Some(true)
+        || evidence_bool(evidence, "route_query_api_behavior_evidence_ready") != Some(true)
         || evidence_bool(
             evidence,
             "route_relationship_property_pruning_evidence_ready",
@@ -10225,6 +10236,7 @@ mod tests {
                 "route_primary_ready": true,
                 "route_query_plan_evidence_ready": true,
                 "route_query_profile_evidence_ready": true,
+                "route_query_api_behavior_evidence_ready": true,
                 "relationship_property_pruning_required_count": 0,
                 "relationship_property_pruning_report_count": 0,
                 "route_relationship_property_pruning_evidence_ready": true,
@@ -12013,6 +12025,7 @@ mod tests {
             primary_ready_routes: full_bounded_read_routes(),
             route_query_plan_evidence_ready: true,
             route_query_profile_evidence_ready: true,
+            route_query_api_behavior_evidence_ready: true,
             relationship_property_pruning_required_count: 0,
             relationship_property_pruning_report_count: 0,
             route_relationship_property_pruning_evidence_ready: true,

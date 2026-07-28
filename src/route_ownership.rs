@@ -271,6 +271,7 @@ fn route_readiness_summary_ready(summary: &NowledgeMemRouteReadinessSummary) -> 
     summary.route_primary_ready
         && summary.route_query_plan_evidence_ready
         && summary.route_query_profile_evidence_ready
+        && summary.route_query_api_behavior_evidence_ready
         && summary.route_relationship_property_pruning_evidence_ready
         && summary.relationship_property_pruning_required_count
             == summary.relationship_property_pruning_report_count
@@ -355,6 +356,28 @@ mod tests {
     }
 
     #[test]
+    fn skein_routes_require_api_behavior_evidence() {
+        let mut readiness = ready_route_readiness();
+        readiness.route_query_api_behavior_evidence_ready = false;
+
+        let report = nowledge_mem_route_ownership_readiness(
+            &nowledge_mem_route_ownership_all_skein(),
+            Some(&readiness),
+            NowledgeMemRouteOwnershipPolicy::production_cutover(),
+        );
+
+        assert!(!report.ready);
+        assert!(!report.production_cutover_ready);
+        assert_eq!(
+            report.skein_not_ready_routes.len(),
+            REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len()
+        );
+        assert!(report
+            .blocker_codes
+            .contains(&"route_ownership_skein_routes_not_ready".to_string()));
+    }
+
+    #[test]
     fn ownership_fails_closed_on_missing_unknown_duplicate_or_conflicting_routes() {
         let readiness = ready_route_readiness();
         let first_route = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES[0];
@@ -397,6 +420,7 @@ mod tests {
                 .collect(),
             route_query_plan_evidence_ready: true,
             route_query_profile_evidence_ready: true,
+            route_query_api_behavior_evidence_ready: true,
             relationship_property_pruning_required_count: 1,
             relationship_property_pruning_report_count: 1,
             route_relationship_property_pruning_evidence_ready: true,

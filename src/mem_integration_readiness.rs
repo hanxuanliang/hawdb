@@ -459,6 +459,7 @@ pub struct GraphRouteAlignmentCutoverReadiness {
     pub route_primary_ready_matches: bool,
     pub route_query_plan_evidence_ready_matches: bool,
     pub route_query_profile_evidence_ready_matches: bool,
+    pub route_query_api_behavior_evidence_ready_matches: bool,
     pub route_relationship_property_pruning_evidence_ready_matches: bool,
     pub relationship_property_pruning_required_count_matches: bool,
     pub relationship_property_pruning_report_count_matches: bool,
@@ -790,6 +791,7 @@ impl GraphRouteAlignmentCutoverReadiness {
             && self.route_primary_ready_matches
             && self.route_query_plan_evidence_ready_matches
             && self.route_query_profile_evidence_ready_matches
+            && self.route_query_api_behavior_evidence_ready_matches
             && self.route_relationship_property_pruning_evidence_ready_matches
             && self.relationship_property_pruning_required_count_matches
             && self.relationship_property_pruning_report_count_matches
@@ -3969,6 +3971,10 @@ pub fn graph_route_alignment_cutover_readiness(
             bundle,
             "route_query_profile_evidence_ready_matches",
         ),
+        route_query_api_behavior_evidence_ready_matches: graph_route_alignment_bool(
+            bundle,
+            "route_query_api_behavior_evidence_ready_matches",
+        ),
         route_relationship_property_pruning_evidence_ready_matches: graph_route_alignment_bool(
             bundle,
             "route_relationship_property_pruning_evidence_ready_matches",
@@ -4066,6 +4072,10 @@ fn graph_route_alignment_cutover_conditions(
         (
             "replacement_summary_graph_route_alignment.route_query_profile_evidence_ready_matches",
             readiness.route_query_profile_evidence_ready_matches,
+        ),
+        (
+            "replacement_summary_graph_route_alignment.route_query_api_behavior_evidence_ready_matches",
+            readiness.route_query_api_behavior_evidence_ready_matches,
         ),
         (
             "replacement_summary_graph_route_alignment.route_relationship_property_pruning_evidence_ready_matches",
@@ -8604,6 +8614,41 @@ mod tests {
     }
 
     #[test]
+    fn rejects_graph_route_alignment_without_api_behavior_evidence() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary_graph_route_alignment"]["ready"] = serde_json::json!(false);
+        bundle["replacement_summary_graph_route_alignment"]
+            ["route_query_api_behavior_evidence_ready_matches"] = serde_json::json!(false);
+        bundle["replacement_summary_graph_route_alignment"]["blocker_codes"] =
+            serde_json::json!(["graph_route_query_api_behavior_evidence_mismatch"]);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["graph_route_readiness_alignment"])
+        );
+        let alignment_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "graph_route_readiness_alignment")
+            .unwrap();
+        assert_eq!(
+            alignment_check["failed_evidence_fields"],
+            serde_json::json!([
+                "replacement_summary_graph_route_alignment.ready",
+                "replacement_summary_graph_route_alignment.route_query_api_behavior_evidence_ready_matches"
+            ])
+        );
+        assert_eq!(
+            report["blocker_codes"],
+            serde_json::json!(["graph_route_query_api_behavior_evidence_mismatch"])
+        );
+    }
+
+    #[test]
     fn rejects_graph_route_alignment_without_route_evidence_envelope() {
         let mut bundle = ready_bundle();
         bundle["replacement_summary_graph_route_alignment"]["ready"] = serde_json::json!(false);
@@ -8661,6 +8706,7 @@ mod tests {
         assert!(typed.route_primary_ready_matches);
         assert!(typed.route_query_plan_evidence_ready_matches);
         assert!(typed.route_query_profile_evidence_ready_matches);
+        assert!(typed.route_query_api_behavior_evidence_ready_matches);
         assert!(typed.route_relationship_property_pruning_evidence_ready_matches);
         assert!(typed.relationship_property_pruning_required_count_matches);
         assert!(typed.relationship_property_pruning_report_count_matches);
@@ -9560,6 +9606,9 @@ mod tests {
             "evidence_route_query_profile_evidence_ready": true,
             "summary_route_query_profile_evidence_ready": true,
             "route_query_profile_evidence_ready_matches": true,
+            "evidence_route_query_api_behavior_evidence_ready": true,
+            "summary_route_query_api_behavior_evidence_ready": true,
+            "route_query_api_behavior_evidence_ready_matches": true,
             "evidence_route_relationship_property_pruning_evidence_ready": true,
             "summary_route_relationship_property_pruning_evidence_ready": true,
             "route_relationship_property_pruning_evidence_ready_matches": true,
@@ -9635,6 +9684,7 @@ mod tests {
             "query_runtime_report_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
             "query_runtime_plan_report_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
             "query_runtime_profile_report_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+            "query_runtime_api_behavior_report_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
             "query_runtime_failed_query_count": 0,
             "query_runtime_missing_plan_evidence_count": 0,
             "query_runtime_missing_profile_evidence_count": 0,
@@ -9644,6 +9694,7 @@ mod tests {
             "route_query_runtime_ready": true,
             "route_query_plan_evidence_ready": true,
             "route_query_profile_evidence_ready": true,
+            "route_query_api_behavior_evidence_ready": true,
             "route_relationship_property_pruning_evidence_ready": true,
             "route_primary_ready": true,
             "route_primary_blocker_codes": [],
@@ -9838,6 +9889,7 @@ mod tests {
                 .collect(),
             route_query_plan_evidence_ready: true,
             route_query_profile_evidence_ready: true,
+            route_query_api_behavior_evidence_ready: true,
             relationship_property_pruning_required_count: 0,
             relationship_property_pruning_report_count: 0,
             route_relationship_property_pruning_evidence_ready: true,

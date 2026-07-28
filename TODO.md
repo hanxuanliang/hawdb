@@ -469,6 +469,9 @@ contract.
   - [x] Require final previous-wrapper preflight to validate graph-route API
     behavior aggregate evidence from replacement summary before release gates
     can pass.
+  - [x] Require route ownership, bounded-read, library-readiness, and
+    integration alignment typed paths to consume graph-route API behavior
+    evidence before accepting Skein-owned routes.
 
 ## P0: Storage and Recovery
 
