@@ -444,6 +444,9 @@ contract.
     outside the parser.
   - Fast paths should be selected from simple AST shape checks, not string
     matching.
+  - [x] Expose a typed Nowledge Mem fast-path classifier over parsed
+    `cypher::Statement` and test that whitespace/case variants with the same
+    AST shape make the same fast-path decision.
 - [ ] Strengthen planner, optimizer, and executor ownership.
   - Use Cascades groups, logical rules, implementation rules, physical
     properties, and deterministic costs for non-trivial graph reads.

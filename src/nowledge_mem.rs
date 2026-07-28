@@ -5941,7 +5941,7 @@ struct NowledgeMemQueryReportInput<'a> {
 
 fn nowledge_mem_query_report(input: NowledgeMemQueryReportInput<'_>) -> NowledgeMemQueryReport {
     let statement_kind = crate::api::statement_kind(nowledge_statement_body(input.statement));
-    let decision = nowledge_mem_query_execution_path(input.statement);
+    let decision = nowledge_mem_fast_path_classification(input.statement);
     let slow_log_candidate = input
         .options
         .slow_log_threshold_micros
@@ -6304,9 +6304,9 @@ fn skein_error_class(error: &SkeinError) -> &'static str {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct NowledgeMemQueryPathDecision {
-    execution_path: NowledgeMemQueryExecutionPath,
-    fast_path_reason: Option<&'static str>,
+pub struct NowledgeMemFastPathClassification {
+    pub execution_path: NowledgeMemQueryExecutionPath,
+    pub fast_path_reason: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6348,9 +6348,9 @@ impl NowledgeMemPlanCacheReport {
     }
 }
 
-fn nowledge_mem_query_execution_path(
+pub fn nowledge_mem_fast_path_classification(
     statement: &cypher::Statement,
-) -> NowledgeMemQueryPathDecision {
+) -> NowledgeMemFastPathClassification {
     let body = nowledge_statement_body(statement);
     let fast_path_reason = match body {
         cypher::Statement::MatchReturn(query) if is_simple_node_lookup(query) => {
@@ -6365,7 +6365,7 @@ fn nowledge_mem_query_execution_path(
         cypher::Statement::ShortestPathReturn(_) => Some("bounded_shortest_path"),
         _ => None,
     };
-    NowledgeMemQueryPathDecision {
+    NowledgeMemFastPathClassification {
         execution_path: if fast_path_reason.is_some() {
             NowledgeMemQueryExecutionPath::FastPath
         } else {
@@ -7728,7 +7728,8 @@ fn nowledge_value_json(value: &Value) -> serde_json::Value {
 mod tests {
     use super::{
         nowledge_mem_bounded_read_evidence_json,
-        nowledge_mem_bounded_read_evidence_json_with_route_readiness, nowledge_mem_graph_config,
+        nowledge_mem_bounded_read_evidence_json_with_route_readiness,
+        nowledge_mem_fast_path_classification, nowledge_mem_graph_config,
         nowledge_mem_graph_config_with_search_mode,
         nowledge_mem_search_candidate_shadow_evidence_json, required_u64_field,
         NowledgeMemEmbeddedStore, NowledgeMemEmbeddedStoreHandle, NowledgeMemGraph,
@@ -7820,6 +7821,39 @@ mod tests {
 
         assert_eq!(output.rows.len(), 1);
         assert_eq!(graph.mode(), NowledgeMemGraphMode::WritableCutover);
+    }
+
+    #[test]
+    fn fast_path_classification_uses_ast_shape_not_query_text() {
+        let compact =
+            crate::cypher::parse("MATCH (m:Memory {id: $id}) RETURN m.title AS title").unwrap();
+        let spaced = crate::cypher::parse(
+            "  match   ( m : Memory   { id : $id } )   return   m.title   as   title  ",
+        )
+        .unwrap();
+        let ordered = crate::cypher::parse(
+            "MATCH (m:Memory {id: $id}) RETURN m.title AS title ORDER BY title LIMIT 1",
+        )
+        .unwrap();
+
+        let compact_classification = nowledge_mem_fast_path_classification(&compact);
+        let spaced_classification = nowledge_mem_fast_path_classification(&spaced);
+        let ordered_classification = nowledge_mem_fast_path_classification(&ordered);
+
+        assert_eq!(
+            compact_classification.execution_path,
+            NowledgeMemQueryExecutionPath::FastPath
+        );
+        assert_eq!(
+            compact_classification.fast_path_reason,
+            Some("simple_node_lookup")
+        );
+        assert_eq!(compact_classification, spaced_classification);
+        assert_eq!(
+            ordered_classification.execution_path,
+            NowledgeMemQueryExecutionPath::OptimizedPath
+        );
+        assert_eq!(ordered_classification.fast_path_reason, None);
     }
 
     #[test]
