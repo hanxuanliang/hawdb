@@ -70,21 +70,23 @@ fn creates_knowledge_relationship_batch_through_typed_api() {
     assert_eq!(output.rows[2].source_node_id, None);
     assert_eq!(output.rows[2].target_node_id, Some(2));
 
-    let relationships = db.knowledge_relationships(&KnowledgeRelationshipsRequest {
-        seeds: vec![
-            KnowledgeEntityRequest {
-                label: "Memory".to_string(),
-                external_id: "memory_1".to_string(),
-            },
-            KnowledgeEntityRequest {
-                label: "Memory".to_string(),
-                external_id: "memory_2".to_string(),
-            },
-        ],
-        relationship_type: Some("MENTIONS".to_string()),
-        direction: KnowledgeNeighborDirection::Outgoing,
-        limit_per_seed: 4,
-    });
+    let relationships = db
+        .knowledge_relationships(&KnowledgeRelationshipsRequest {
+            seeds: vec![
+                KnowledgeEntityRequest {
+                    label: "Memory".to_string(),
+                    external_id: "memory_1".to_string(),
+                },
+                KnowledgeEntityRequest {
+                    label: "Memory".to_string(),
+                    external_id: "memory_2".to_string(),
+                },
+            ],
+            relationship_type: Some("MENTIONS".to_string()),
+            direction: KnowledgeNeighborDirection::Outgoing,
+            limit_per_seed: 4,
+        })
+        .unwrap();
     assert_eq!(relationships.relationship_count, 2);
     assert_eq!(relationships.groups[0].relationships.len(), 1);
     assert_eq!(relationships.groups[1].relationships.len(), 1);
@@ -151,21 +153,23 @@ fn scoped_knowledge_relationship_batch_create_does_not_write_filtered_endpoint()
     assert!(!output.rows[1].matched);
     assert!(output.rows[1].source_filtered_out);
 
-    let relationships = db.knowledge_relationships(&KnowledgeRelationshipsRequest {
-        seeds: vec![
-            KnowledgeEntityRequest {
-                label: "Memory".to_string(),
-                external_id: "memory_1".to_string(),
-            },
-            KnowledgeEntityRequest {
-                label: "Memory".to_string(),
-                external_id: "memory_2".to_string(),
-            },
-        ],
-        relationship_type: Some("MENTIONS".to_string()),
-        direction: KnowledgeNeighborDirection::Outgoing,
-        limit_per_seed: 4,
-    });
+    let relationships = db
+        .knowledge_relationships(&KnowledgeRelationshipsRequest {
+            seeds: vec![
+                KnowledgeEntityRequest {
+                    label: "Memory".to_string(),
+                    external_id: "memory_1".to_string(),
+                },
+                KnowledgeEntityRequest {
+                    label: "Memory".to_string(),
+                    external_id: "memory_2".to_string(),
+                },
+            ],
+            relationship_type: Some("MENTIONS".to_string()),
+            direction: KnowledgeNeighborDirection::Outgoing,
+            limit_per_seed: 4,
+        })
+        .unwrap();
     assert_eq!(relationships.relationship_count, 1);
     assert_eq!(relationships.groups[0].relationships.len(), 1);
     assert!(relationships.groups[1].relationships.is_empty());
@@ -312,21 +316,23 @@ fn typed_knowledge_relationship_batch_create_persists_as_one_wal_batch_and_repla
     assert_eq!(wal.matches("\tbatch\t").count(), 1);
     {
         let db = Database::open(&path).unwrap();
-        let output = db.knowledge_relationships(&KnowledgeRelationshipsRequest {
-            seeds: vec![
-                KnowledgeEntityRequest {
-                    label: "Memory".to_string(),
-                    external_id: "memory_1".to_string(),
-                },
-                KnowledgeEntityRequest {
-                    label: "Memory".to_string(),
-                    external_id: "memory_2".to_string(),
-                },
-            ],
-            relationship_type: Some("MENTIONS".to_string()),
-            direction: KnowledgeNeighborDirection::Outgoing,
-            limit_per_seed: 4,
-        });
+        let output = db
+            .knowledge_relationships(&KnowledgeRelationshipsRequest {
+                seeds: vec![
+                    KnowledgeEntityRequest {
+                        label: "Memory".to_string(),
+                        external_id: "memory_1".to_string(),
+                    },
+                    KnowledgeEntityRequest {
+                        label: "Memory".to_string(),
+                        external_id: "memory_2".to_string(),
+                    },
+                ],
+                relationship_type: Some("MENTIONS".to_string()),
+                direction: KnowledgeNeighborDirection::Outgoing,
+                limit_per_seed: 4,
+            })
+            .unwrap();
         assert_eq!(output.relationship_count, 2);
     }
     std::fs::remove_dir_all(path).unwrap();

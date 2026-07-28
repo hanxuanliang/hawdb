@@ -22,23 +22,25 @@ fn clears_community_assignments_for_nowledge_shapes() {
     assert_eq!(scoped.rows.len(), 2);
     assert!(scoped.rows.iter().all(|row| row.cleared));
 
-    let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
-        entities: vec![
-            KnowledgeEntityRequest {
-                label: "Memory".to_string(),
-                external_id: "memory_community_1".to_string(),
-            },
-            KnowledgeEntityRequest {
-                label: "Entity".to_string(),
-                external_id: "entity_community_1".to_string(),
-            },
-            KnowledgeEntityRequest {
-                label: "Source".to_string(),
-                external_id: "source_community_1".to_string(),
-            },
-        ],
-        property_names: vec!["community_id".to_string()],
-    });
+    let rows = db
+        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            entities: vec![
+                KnowledgeEntityRequest {
+                    label: "Memory".to_string(),
+                    external_id: "memory_community_1".to_string(),
+                },
+                KnowledgeEntityRequest {
+                    label: "Entity".to_string(),
+                    external_id: "entity_community_1".to_string(),
+                },
+                KnowledgeEntityRequest {
+                    label: "Source".to_string(),
+                    external_id: "source_community_1".to_string(),
+                },
+            ],
+            property_names: vec!["community_id".to_string()],
+        })
+        .unwrap();
     assert_eq!(
         rows.rows[0].properties.get("community_id"),
         Some(&Some(Value::Null))
@@ -63,13 +65,15 @@ fn clears_community_assignments_for_nowledge_shapes() {
         all.rows[0].external_id,
         Some("source_community_1".to_string())
     );
-    let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
-        entities: vec![KnowledgeEntityRequest {
-            label: "Source".to_string(),
-            external_id: "source_community_1".to_string(),
-        }],
-        property_names: vec!["community_id".to_string()],
-    });
+    let rows = db
+        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            entities: vec![KnowledgeEntityRequest {
+                label: "Source".to_string(),
+                external_id: "source_community_1".to_string(),
+            }],
+            property_names: vec!["community_id".to_string()],
+        })
+        .unwrap();
     assert_eq!(
         rows.rows[0].properties.get("community_id"),
         Some(&Some(Value::Null))
@@ -127,19 +131,21 @@ fn typed_community_assignment_clear_persists_as_one_wal_batch_and_replays() {
     assert!(wal.contains("set_node_property"));
     {
         let db = Database::open(&path).unwrap();
-        let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
-            entities: vec![
-                KnowledgeEntityRequest {
-                    label: "Memory".to_string(),
-                    external_id: "memory_community_1".to_string(),
-                },
-                KnowledgeEntityRequest {
-                    label: "Entity".to_string(),
-                    external_id: "entity_community_1".to_string(),
-                },
-            ],
-            property_names: vec!["community_id".to_string()],
-        });
+        let rows = db
+            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+                entities: vec![
+                    KnowledgeEntityRequest {
+                        label: "Memory".to_string(),
+                        external_id: "memory_community_1".to_string(),
+                    },
+                    KnowledgeEntityRequest {
+                        label: "Entity".to_string(),
+                        external_id: "entity_community_1".to_string(),
+                    },
+                ],
+                property_names: vec!["community_id".to_string()],
+            })
+            .unwrap();
         assert_eq!(
             rows.rows[0].properties.get("community_id"),
             Some(&Some(Value::Null))

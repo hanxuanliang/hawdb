@@ -26,6 +26,7 @@ fn deletes_knowledge_entity_through_typed_api() {
             label: "Memory".to_string(),
             external_id: "memory_1".to_string(),
         })
+        .unwrap()
         .entity
         .is_none());
     assert!(db
@@ -33,17 +34,20 @@ fn deletes_knowledge_entity_through_typed_api() {
             label: "Entity".to_string(),
             external_id: "entity_1".to_string(),
         })
+        .unwrap()
         .entity
         .is_some());
-    let relationships = db.knowledge_relationships(&KnowledgeRelationshipsRequest {
-        seeds: vec![KnowledgeEntityRequest {
-            label: "Entity".to_string(),
-            external_id: "entity_1".to_string(),
-        }],
-        relationship_type: None,
-        direction: KnowledgeNeighborDirection::Incoming,
-        limit_per_seed: 4,
-    });
+    let relationships = db
+        .knowledge_relationships(&KnowledgeRelationshipsRequest {
+            seeds: vec![KnowledgeEntityRequest {
+                label: "Entity".to_string(),
+                external_id: "entity_1".to_string(),
+            }],
+            relationship_type: None,
+            direction: KnowledgeNeighborDirection::Incoming,
+            limit_per_seed: 4,
+        })
+        .unwrap();
     assert_eq!(relationships.relationship_count, 0);
 }
 
@@ -76,6 +80,7 @@ fn scoped_knowledge_entity_delete_does_not_write_filtered_seed() {
             label: "Memory".to_string(),
             external_id: "memory_1".to_string(),
         })
+        .unwrap()
         .entity
         .is_some());
 }
@@ -174,6 +179,7 @@ fn typed_knowledge_entity_delete_persists_and_replays_from_wal() {
                 label: "Memory".to_string(),
                 external_id: "memory_1".to_string(),
             })
+            .unwrap()
             .entity
             .is_none());
         assert!(db
@@ -181,6 +187,7 @@ fn typed_knowledge_entity_delete_persists_and_replays_from_wal() {
                 label: "Entity".to_string(),
                 external_id: "entity_1".to_string(),
             })
+            .unwrap()
             .entity
             .is_some());
     }

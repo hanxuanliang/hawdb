@@ -40,6 +40,7 @@ use plan_cache::{
     optimized_query_plan_for, statement_uses_plan_cache, OptimizedQueryPlan, PlanCache,
     PlanCacheContext, PlanCacheMode, DEFAULT_PLAN_CACHE_MAX_ENTRIES,
 };
+use query_domains::*;
 pub use skein_api_types::{
     KnowledgeLabelRegexMemoryConnectionRow, KnowledgeLabelRegexMemoryConnectionsOutput,
     KnowledgeLabelRegexMemoryConnectionsRequest, KnowledgeMemoryCleanupFingerprintOutput,
@@ -71,6 +72,7 @@ mod canonical_snapshot;
 mod explain;
 mod observability;
 mod plan_cache;
+mod query_domains;
 mod query_runtime;
 mod system_sql;
 mod system_variables;
@@ -6549,14 +6551,17 @@ impl Database {
         .retrieve_knowledge(search_index, request)
     }
 
-    pub fn knowledge_entity(&self, request: &KnowledgeEntityRequest) -> KnowledgeEntityOutput {
+    pub fn knowledge_entity(
+        &self,
+        request: &KnowledgeEntityRequest,
+    ) -> Result<KnowledgeEntityOutput> {
         knowledge_entity_via_query_runtime(self, request)
     }
 
     pub fn knowledge_entity_batch(
         &self,
         request: &KnowledgeEntityBatchRequest,
-    ) -> KnowledgeEntityBatchOutput {
+    ) -> Result<KnowledgeEntityBatchOutput> {
         knowledge_entity_batch_via_query_runtime(self, request)
     }
 
@@ -6745,14 +6750,14 @@ impl Database {
     pub fn knowledge_scoped_entity(
         &self,
         request: &KnowledgeScopedEntityRequest,
-    ) -> KnowledgeEntityOutput {
+    ) -> Result<KnowledgeEntityOutput> {
         knowledge_scoped_entity_via_query_runtime(self, request)
     }
 
     pub fn knowledge_scoped_entity_batch(
         &self,
         request: &KnowledgeScopedEntityBatchRequest,
-    ) -> KnowledgeEntityBatchOutput {
+    ) -> Result<KnowledgeEntityBatchOutput> {
         knowledge_scoped_entity_batch_via_query_runtime(self, request)
     }
 
@@ -6787,14 +6792,14 @@ impl Database {
     pub fn knowledge_property_batch(
         &self,
         request: &KnowledgePropertyBatchRequest,
-    ) -> KnowledgePropertyBatchOutput {
+    ) -> Result<KnowledgePropertyBatchOutput> {
         knowledge_property_batch_via_query_runtime(self, request)
     }
 
     pub fn knowledge_scoped_property_batch(
         &self,
         request: &KnowledgeScopedPropertyBatchRequest,
-    ) -> KnowledgePropertyBatchOutput {
+    ) -> Result<KnowledgePropertyBatchOutput> {
         knowledge_scoped_property_batch_via_query_runtime(self, request)
     }
 
@@ -7274,19 +7279,15 @@ impl Database {
     pub fn knowledge_label_canonical_usage(
         &self,
         request: &KnowledgeLabelUsageListRequest,
-    ) -> KnowledgeLabelUsageListOutput {
-        knowledge_label_canonical_usage_via_query_runtime(self, request).unwrap_or_else(|_| {
-            knowledge_label_canonical_usage_for(&self.catalog, &self.store, request)
-        })
+    ) -> Result<KnowledgeLabelUsageListOutput> {
+        knowledge_label_canonical_usage_via_query_runtime(self, request)
     }
 
     pub fn knowledge_label_memory_distribution(
         &self,
         request: &KnowledgeLabelMemoryDistributionRequest,
-    ) -> KnowledgeLabelMemoryDistributionOutput {
-        knowledge_label_memory_distribution_via_query_runtime(self, request).unwrap_or_else(|_| {
-            knowledge_label_memory_distribution_for(&self.catalog, &self.store, request)
-        })
+    ) -> Result<KnowledgeLabelMemoryDistributionOutput> {
+        knowledge_label_memory_distribution_via_query_runtime(self, request)
     }
 
     pub fn knowledge_label_regex_memory_connections(
@@ -7348,9 +7349,8 @@ impl Database {
     pub fn knowledge_pagerank_plan(
         &self,
         request: &KnowledgePageRankPlanRequest,
-    ) -> KnowledgePageRankPlanOutput {
+    ) -> Result<KnowledgePageRankPlanOutput> {
         knowledge_pagerank_plan_via_query_runtime(self, request)
-            .unwrap_or_else(|_| empty_knowledge_pagerank_plan(self.store.commit_epoch()))
     }
 
     pub fn knowledge_pagerank_membership(
@@ -7650,21 +7650,15 @@ impl Database {
     pub fn knowledge_relationships(
         &self,
         request: &KnowledgeRelationshipsRequest,
-    ) -> KnowledgeRelationshipsOutput {
+    ) -> Result<KnowledgeRelationshipsOutput> {
         knowledge_relationships_via_query_runtime(self, request)
     }
 
     pub fn knowledge_scoped_relationships(
         &self,
         request: &KnowledgeScopedRelationshipsRequest,
-    ) -> KnowledgeRelationshipsOutput {
-        knowledge_scoped_relationships_via_query_runtime(self, request).unwrap_or_else(|_| {
-            knowledge_empty_relationship_groups_for_query_runtime_failure(
-                &self.catalog,
-                &self.store,
-                request,
-            )
-        })
+    ) -> Result<KnowledgeRelationshipsOutput> {
+        knowledge_scoped_relationships_via_query_runtime(self, request)
     }
 
     pub fn knowledge_induced_edges(
@@ -9038,25 +9032,6 @@ fn knowledge_entity_for(
     }
 }
 
-fn knowledge_entity_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeEntityRequest,
-) -> KnowledgeEntityOutput {
-    let output = knowledge_scoped_entity_batch_via_query_runtime(
-        db,
-        &KnowledgeScopedEntityBatchRequest {
-            entities: vec![request.clone()],
-            metadata_filters: BTreeMap::new(),
-        },
-    );
-    let graph_commit_epoch = output.graph_commit_epoch;
-    let entity = output.entities.into_iter().next().flatten();
-    KnowledgeEntityOutput {
-        graph_commit_epoch,
-        entity,
-    }
-}
-
 fn knowledge_scoped_entity_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -9075,38 +9050,6 @@ fn knowledge_scoped_entity_for(
         graph_commit_epoch: store.commit_epoch(),
         entity,
     }
-}
-
-fn knowledge_scoped_entity_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeScopedEntityRequest,
-) -> KnowledgeEntityOutput {
-    let output = knowledge_scoped_entity_batch_via_query_runtime(
-        db,
-        &KnowledgeScopedEntityBatchRequest {
-            entities: vec![request.entity.clone()],
-            metadata_filters: request.metadata_filters.clone(),
-        },
-    );
-    let graph_commit_epoch = output.graph_commit_epoch;
-    let entity = output.entities.into_iter().next().flatten();
-    KnowledgeEntityOutput {
-        graph_commit_epoch,
-        entity,
-    }
-}
-
-fn knowledge_entity_batch_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeEntityBatchRequest,
-) -> KnowledgeEntityBatchOutput {
-    knowledge_scoped_entity_batch_via_query_runtime(
-        db,
-        &KnowledgeScopedEntityBatchRequest {
-            entities: request.entities.clone(),
-            metadata_filters: BTreeMap::new(),
-        },
-    )
 }
 
 fn knowledge_entity_batch_for(
@@ -9161,124 +9104,6 @@ fn knowledge_scoped_entity_batch_for(
         missing_count,
         filtered_out_count,
     }
-}
-
-fn knowledge_scoped_entity_batch_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeScopedEntityBatchRequest,
-) -> KnowledgeEntityBatchOutput {
-    let (graph_commit_epoch, found) = lookup_entities_via_query_runtime(db, &request.entities);
-
-    let mut entities = Vec::with_capacity(request.entities.len());
-    let mut found_count = 0;
-    let mut missing_count = 0;
-    let mut filtered_out_count = 0;
-    for entity_request in &request.entities {
-        if let Some(entity) = found
-            .get(&(
-                entity_request.label.clone(),
-                entity_request.external_id.clone(),
-            ))
-            .filter(|entity| {
-                request.metadata_filters.is_empty()
-                    || knowledge_entity_matches_filters(entity, &request.metadata_filters)
-            })
-            .cloned()
-        {
-            found_count += 1;
-            entities.push(Some(entity));
-        } else if found.contains_key(&(
-            entity_request.label.clone(),
-            entity_request.external_id.clone(),
-        )) {
-            filtered_out_count += 1;
-            entities.push(None);
-        } else {
-            missing_count += 1;
-            entities.push(None);
-        }
-    }
-
-    KnowledgeEntityBatchOutput {
-        graph_commit_epoch,
-        entities,
-        found_count,
-        missing_count,
-        filtered_out_count,
-    }
-}
-
-fn lookup_entities_via_query_runtime(
-    db: &Database,
-    entities: &[KnowledgeEntityRequest],
-) -> KnowledgeEntityLookup {
-    lookup_entities_via_query_runtime_with_mode(db, entities, false)
-        .unwrap_or_else(|_| (db.store.commit_epoch(), BTreeMap::new()))
-}
-
-type KnowledgeEntityLookup = (u64, BTreeMap<(String, String), KnowledgeEntity>);
-
-fn lookup_entities_via_query_runtime_strict(
-    db: &Database,
-    entities: &[KnowledgeEntityRequest],
-) -> Result<KnowledgeEntityLookup> {
-    lookup_entities_via_query_runtime_with_mode(db, entities, true)
-}
-
-fn lookup_entities_via_query_runtime_with_mode(
-    db: &Database,
-    entities: &[KnowledgeEntityRequest],
-    fail_on_query_error: bool,
-) -> Result<KnowledgeEntityLookup> {
-    let graph_commit_epoch = db.store.commit_epoch();
-    let mut entities_by_label = BTreeMap::<String, BTreeSet<String>>::new();
-    for entity in entities {
-        if entity.external_id.is_empty()
-            || validate_cypher_identifier(&entity.label, "label").is_err()
-        {
-            continue;
-        }
-        entities_by_label
-            .entry(entity.label.clone())
-            .or_default()
-            .insert(entity.external_id.clone());
-    }
-
-    let mut found = BTreeMap::<(String, String), KnowledgeEntity>::new();
-    for (label, external_ids) in entities_by_label {
-        let node_ids = external_ids
-            .iter()
-            .filter_map(|external_id| external_id.parse::<i64>().ok())
-            .filter(|node_id| *node_id >= 0)
-            .map(Value::Int)
-            .collect::<Vec<_>>();
-        let query = format!(
-            "MATCH (n:{label}) WHERE n.id IN $external_ids OR id(n) IN $node_ids RETURN n AS entity"
-        );
-        let parameters = BTreeMap::from([
-            (
-                "external_ids".to_string(),
-                Value::List(external_ids.into_iter().map(Value::String).collect()),
-            ),
-            ("node_ids".to_string(), Value::List(node_ids)),
-        ]);
-        let output = match db.query_read_only_with_params_bounded(&query, &parameters, None) {
-            Ok(output) => output,
-            Err(error) if fail_on_query_error => return Err(error),
-            Err(_) => continue,
-        };
-        for row in &output.rows {
-            let Some(entity) = row.get("entity").and_then(knowledge_entity_from_value) else {
-                continue;
-            };
-            let Some(external_id) = entity.external_id.clone() else {
-                continue;
-            };
-            found.insert((label.clone(), external_id), entity);
-        }
-    }
-
-    Ok((graph_commit_epoch, found))
 }
 
 fn knowledge_memory_entities_for(
@@ -11671,7 +11496,7 @@ fn knowledge_memory_cleanup_fingerprints_via_query_runtime(
         })
         .collect::<Vec<_>>();
     let (graph_commit_epoch, matched_memories) =
-        lookup_entities_via_query_runtime(db, &entity_requests);
+        lookup_entities_via_query_runtime_strict(db, &entity_requests)?;
     let mut rows = Vec::with_capacity(matched_memories.len());
     let mut missing_memory_ids = Vec::new();
     for memory_id in ordered_memory_ids {
@@ -13366,7 +13191,7 @@ fn knowledge_memory_evolves_projected_successors_via_query_runtime(
             external_id: old_memory_id.clone(),
         })
         .collect::<Vec<_>>();
-    let (_, found_memories) = lookup_entities_via_query_runtime(db, &entity_requests);
+    let (_, found_memories) = lookup_entities_via_query_runtime_strict(db, &entity_requests)?;
     let requested_ids = request
         .old_memory_ids
         .iter()
@@ -15770,19 +15595,6 @@ fn knowledge_property_batch_for(
     )
 }
 
-fn knowledge_property_batch_via_query_runtime(
-    db: &Database,
-    request: &KnowledgePropertyBatchRequest,
-) -> KnowledgePropertyBatchOutput {
-    knowledge_scoped_property_batch_via_query_runtime(
-        db,
-        &KnowledgeScopedPropertyBatchRequest {
-            projection: request.clone(),
-            metadata_filters: BTreeMap::new(),
-        },
-    )
-}
-
 fn knowledge_scoped_property_batch_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -15832,61 +15644,6 @@ fn knowledge_scoped_property_batch_for(
     }
     KnowledgePropertyBatchOutput {
         graph_commit_epoch: store.commit_epoch(),
-        rows,
-        found_count,
-        missing_count,
-        filtered_out_count,
-        property_names,
-    }
-}
-
-fn knowledge_scoped_property_batch_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeScopedPropertyBatchRequest,
-) -> KnowledgePropertyBatchOutput {
-    let property_names = dedup_property_names(&request.projection.property_names);
-    let (graph_commit_epoch, found) =
-        lookup_entities_via_query_runtime(db, &request.projection.entities);
-    let mut rows = Vec::with_capacity(request.projection.entities.len());
-    let mut found_count = 0;
-    let mut missing_count = 0;
-    let mut filtered_out_count = 0;
-    for entity_request in &request.projection.entities {
-        let Some(entity) = found.get(&(
-            entity_request.label.clone(),
-            entity_request.external_id.clone(),
-        )) else {
-            missing_count += 1;
-            rows.push(KnowledgePropertyRow {
-                entity: entity_request.clone(),
-                node_id: None,
-                filtered_out: false,
-                properties: empty_property_projection(&property_names),
-            });
-            continue;
-        };
-        if !request.metadata_filters.is_empty()
-            && !knowledge_entity_matches_filters(entity, &request.metadata_filters)
-        {
-            filtered_out_count += 1;
-            rows.push(KnowledgePropertyRow {
-                entity: entity_request.clone(),
-                node_id: Some(entity.node_id),
-                filtered_out: true,
-                properties: empty_property_projection(&property_names),
-            });
-            continue;
-        }
-        found_count += 1;
-        rows.push(KnowledgePropertyRow {
-            entity: entity_request.clone(),
-            node_id: Some(entity.node_id),
-            filtered_out: false,
-            properties: project_knowledge_entity_properties(entity, &property_names),
-        });
-    }
-    KnowledgePropertyBatchOutput {
-        graph_commit_epoch,
         rows,
         found_count,
         missing_count,
@@ -25258,25 +25015,6 @@ fn knowledge_label_usage_via_query_runtime(
     })
 }
 
-fn knowledge_label_canonical_usage_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeLabelUsageListRequest,
-) -> KnowledgeLabelUsageListOutput {
-    let graph_commit_epoch = store.commit_epoch();
-    let rows = label_nodes(catalog, store)
-        .into_iter()
-        .filter(|node| {
-            !request.canonical_only
-                || node
-                    .properties
-                    .get("canonical_name")
-                    .is_some_and(|value| !matches!(value, Value::Null))
-        })
-        .collect::<Vec<_>>();
-    label_usage_list_output(catalog, store, graph_commit_epoch, rows, request.limit)
-}
-
 fn knowledge_label_canonical_usage_via_query_runtime(
     db: &Database,
     request: &KnowledgeLabelUsageListRequest,
@@ -25340,70 +25078,15 @@ fn knowledge_label_usage_row_from_query(row: &Row) -> Result<KnowledgeLabelUsage
     })
 }
 
-fn knowledge_label_memory_distribution_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeLabelMemoryDistributionRequest,
-) -> KnowledgeLabelMemoryDistributionOutput {
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return empty_label_memory_distribution_output(graph_commit_epoch);
-    };
-    let Some(label_label_id) = catalog.label_id("Label") else {
-        return empty_label_memory_distribution_output(graph_commit_epoch);
-    };
-    let Some(has_label_type_id) = catalog.rel_type_id("HAS_LABEL") else {
-        return empty_label_memory_distribution_output(graph_commit_epoch);
-    };
-
-    let mut memory_ids_by_label = BTreeMap::<NodeId, BTreeSet<NodeId>>::new();
-    for memory in store.scan_nodes(Some(memory_label_id)) {
-        for relationship in store.outgoing_relationships(memory.id, has_label_type_id) {
-            let Some(label) = store
-                .node(relationship.target)
-                .filter(|node| node.labels.contains(&label_label_id))
-            else {
-                continue;
-            };
-            memory_ids_by_label
-                .entry(label.id)
-                .or_default()
-                .insert(memory.id);
-        }
-    }
-
-    let mut rows = memory_ids_by_label
-        .into_iter()
-        .filter_map(|(label_node_id, memory_ids)| {
-            store
-                .node(label_node_id)
-                .map(|label| knowledge_label_memory_distribution_row(label, memory_ids.len()))
-        })
-        .collect::<Vec<_>>();
-    sort_label_memory_distribution_rows(&mut rows);
-    let matched_count = rows.len();
-    let mut rows = rows.into_iter().skip(request.offset).collect::<Vec<_>>();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-
-    KnowledgeLabelMemoryDistributionOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        returned_count,
-    }
-}
-
 fn knowledge_label_memory_distribution_via_query_runtime(
     db: &Database,
     request: &KnowledgeLabelMemoryDistributionRequest,
 ) -> Result<KnowledgeLabelMemoryDistributionOutput> {
     let output = db.query_read_only_with_params_bounded(
         "MATCH (m:Memory)-[:HAS_LABEL]->(l:Label) \
-         WITH l, count(DISTINCT m) AS memory_count \
-         RETURN l.id AS label_id, id(l) AS label_node_id, l.name AS label_name, memory_count",
+         WITH l.id AS label_id, id(l) AS label_node_id, l.name AS label_name, \
+         count(DISTINCT m) AS memory_count \
+         RETURN label_id, label_node_id, label_name, memory_count",
         &BTreeMap::new(),
         None,
     )?;
@@ -26300,29 +25983,6 @@ fn node_property_equals_external_id(node: &NodeRecord, key: &str, expected: &str
         .is_some_and(|value| value_to_external_id(value) == expected)
 }
 
-fn empty_label_memory_distribution_output(
-    graph_commit_epoch: u64,
-) -> KnowledgeLabelMemoryDistributionOutput {
-    KnowledgeLabelMemoryDistributionOutput {
-        graph_commit_epoch,
-        rows: Vec::new(),
-        matched_count: 0,
-        returned_count: 0,
-    }
-}
-
-fn knowledge_label_memory_distribution_row(
-    label: &NodeRecord,
-    memory_count: usize,
-) -> KnowledgeLabelMemoryDistributionRow {
-    KnowledgeLabelMemoryDistributionRow {
-        label_id: node_external_id(label),
-        label_node_id: label.id.0,
-        label_name: node_string_property(label, "name"),
-        memory_count,
-    }
-}
-
 fn sort_label_memory_distribution_rows(rows: &mut [KnowledgeLabelMemoryDistributionRow]) {
     rows.sort_by(|left, right| {
         right
@@ -26636,66 +26296,6 @@ fn validate_optional_label_id(label_id: Option<&str>) -> Result<()> {
         ));
     }
     Ok(())
-}
-
-fn label_nodes<'a>(catalog: &Catalog, store: &'a GraphStore) -> Vec<&'a NodeRecord> {
-    let Some(label_id) = catalog.label_id("Label") else {
-        return Vec::new();
-    };
-    let mut nodes = store.scan_nodes(Some(label_id)).collect::<Vec<_>>();
-    nodes.sort_by_key(|node| node.id.0);
-    nodes
-}
-
-fn label_usage_list_output(
-    catalog: &Catalog,
-    store: &GraphStore,
-    graph_commit_epoch: u64,
-    nodes: Vec<&NodeRecord>,
-    limit: usize,
-) -> KnowledgeLabelUsageListOutput {
-    let matched_count = nodes.len();
-    let mut rows = nodes
-        .into_iter()
-        .take(limit)
-        .map(|node| label_usage_row(catalog, store, node))
-        .collect::<Vec<_>>();
-    rows.sort_by_key(|row| row.node_id);
-    let returned_count = rows.len();
-    KnowledgeLabelUsageListOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        returned_count,
-    }
-}
-
-fn label_usage_row(
-    catalog: &Catalog,
-    store: &GraphStore,
-    node: &NodeRecord,
-) -> KnowledgeLabelUsageRow {
-    KnowledgeLabelUsageRow {
-        label_id: node_external_id(node),
-        node_id: node.id.0,
-        name: node_string_property(node, "name"),
-        canonical_name: node_string_property(node, "canonical_name"),
-        color: node.properties.get("color").cloned(),
-        description: node.properties.get("description").cloned(),
-        created_at: node.properties.get("created_at").cloned(),
-        updated_at: node.properties.get("updated_at").cloned(),
-        usage_count: label_usage_count(catalog, store, node.id),
-    }
-}
-
-fn label_usage_count(catalog: &Catalog, store: &GraphStore, label_node_id: NodeId) -> usize {
-    let Some(rel_type_id) = catalog.rel_type_id("HAS_LABEL") else {
-        return 0;
-    };
-    store
-        .scan_relationships(Some(rel_type_id))
-        .filter(|relationship| relationship.target == label_node_id)
-        .count()
 }
 
 fn knowledge_entity_label_entities_via_query_runtime(
@@ -27140,22 +26740,6 @@ fn clear_knowledge_pagerank_scores_for(
         cleared_count,
         non_writable_count,
     })
-}
-
-fn empty_knowledge_pagerank_plan(graph_commit_epoch: u64) -> KnowledgePageRankPlanOutput {
-    KnowledgePageRankPlanOutput {
-        graph_commit_epoch,
-        memory_node_count: 0,
-        entity_node_count: 0,
-        entity_relation_count: 0,
-        mention_edge_count: 0,
-        active_memory_relation_count: 0,
-        changed_memory_count: 0,
-        changed_entity_count: 0,
-        changed_mention_edge_count: 0,
-        changed_entity_relation_count: 0,
-        changed_memory_relation_count: 0,
-    }
 }
 
 fn knowledge_pagerank_plan_via_query_runtime(
@@ -31865,18 +31449,12 @@ fn knowledge_relationships_for(
 fn knowledge_relationships_via_query_runtime(
     db: &Database,
     request: &KnowledgeRelationshipsRequest,
-) -> KnowledgeRelationshipsOutput {
+) -> Result<KnowledgeRelationshipsOutput> {
     let scoped_request = KnowledgeScopedRelationshipsRequest {
         relationships: request.clone(),
         metadata_filters: BTreeMap::new(),
     };
-    knowledge_scoped_relationships_via_query_runtime(db, &scoped_request).unwrap_or_else(|_| {
-        knowledge_empty_relationship_groups_for_query_runtime_failure(
-            &db.catalog,
-            &db.store,
-            &scoped_request,
-        )
-    })
+    knowledge_scoped_relationships_via_query_runtime(db, &scoped_request)
 }
 
 fn knowledge_scoped_relationships_via_query_runtime(
@@ -32300,31 +31878,6 @@ fn knowledge_empty_relationship_groups_for_missing_type(
             })
             .collect(),
         relationship_type_found: false,
-        found_seed_count: 0,
-        missing_seed_count: 0,
-        filtered_out_seed_count: 0,
-        relationship_count: 0,
-    }
-}
-
-fn knowledge_empty_relationship_groups_for_query_runtime_failure(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeScopedRelationshipsRequest,
-) -> KnowledgeRelationshipsOutput {
-    KnowledgeRelationshipsOutput {
-        graph_commit_epoch: store.commit_epoch(),
-        groups: request
-            .relationships
-            .seeds
-            .iter()
-            .map(|seed| knowledge_empty_relationship_group(seed, None, false))
-            .collect(),
-        relationship_type_found: request
-            .relationships
-            .relationship_type
-            .as_deref()
-            .is_none_or(|name| catalog.rel_type_id(name).is_some()),
         found_seed_count: 0,
         missing_seed_count: 0,
         filtered_out_seed_count: 0,

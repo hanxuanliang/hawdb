@@ -47,19 +47,21 @@ fn scoped_knowledge_property_batch_update_does_not_write_filtered_rows() {
     assert_eq!(output.updated_property_count, 1);
     assert!(output.rows[0].matched);
     assert!(output.rows[1].filtered_out);
-    let row = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
-        entities: vec![
-            KnowledgeEntityRequest {
-                label: "Memory".to_string(),
-                external_id: "memory_1".to_string(),
-            },
-            KnowledgeEntityRequest {
-                label: "Memory".to_string(),
-                external_id: "memory_2".to_string(),
-            },
-        ],
-        property_names: vec!["title".to_string()],
-    });
+    let row = db
+        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            entities: vec![
+                KnowledgeEntityRequest {
+                    label: "Memory".to_string(),
+                    external_id: "memory_1".to_string(),
+                },
+                KnowledgeEntityRequest {
+                    label: "Memory".to_string(),
+                    external_id: "memory_2".to_string(),
+                },
+            ],
+            property_names: vec!["title".to_string()],
+        })
+        .unwrap();
     assert_eq!(
         row.rows[0].properties.get("title"),
         Some(&Some(Value::String("New 1".to_string())))
@@ -222,19 +224,21 @@ fn typed_knowledge_property_batch_update_persists_as_one_wal_batch_and_replays()
     assert_eq!(wal.matches("\tbatch\t").count(), 1);
     {
         let db = Database::open(&path).unwrap();
-        let output = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
-            entities: vec![
-                KnowledgeEntityRequest {
-                    label: "Memory".to_string(),
-                    external_id: "memory_1".to_string(),
-                },
-                KnowledgeEntityRequest {
-                    label: "Memory".to_string(),
-                    external_id: "memory_2".to_string(),
-                },
-            ],
-            property_names: vec!["title".to_string()],
-        });
+        let output = db
+            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+                entities: vec![
+                    KnowledgeEntityRequest {
+                        label: "Memory".to_string(),
+                        external_id: "memory_1".to_string(),
+                    },
+                    KnowledgeEntityRequest {
+                        label: "Memory".to_string(),
+                        external_id: "memory_2".to_string(),
+                    },
+                ],
+                property_names: vec!["title".to_string()],
+            })
+            .unwrap();
         assert_eq!(
             output.rows[0].properties.get("title"),
             Some(&Some(Value::String("New 1".to_string())))

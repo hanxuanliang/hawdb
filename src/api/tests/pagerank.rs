@@ -50,19 +50,21 @@ fn updates_and_clears_pagerank_scores_for_nowledge_shapes() {
     assert!(output.rows[2].duplicate);
     assert!(!output.rows[3].matched);
 
-    let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
-        entities: vec![
-            KnowledgeEntityRequest {
-                label: "Memory".to_string(),
-                external_id: "memory_rank_1".to_string(),
-            },
-            KnowledgeEntityRequest {
-                label: "Entity".to_string(),
-                external_id: "entity_rank_1".to_string(),
-            },
-        ],
-        property_names: vec!["pagerank_score".to_string()],
-    });
+    let rows = db
+        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            entities: vec![
+                KnowledgeEntityRequest {
+                    label: "Memory".to_string(),
+                    external_id: "memory_rank_1".to_string(),
+                },
+                KnowledgeEntityRequest {
+                    label: "Entity".to_string(),
+                    external_id: "entity_rank_1".to_string(),
+                },
+            ],
+            property_names: vec!["pagerank_score".to_string()],
+        })
+        .unwrap();
     assert_eq!(
         rows.rows[0].properties.get("pagerank_score"),
         Some(&Some(Value::Float(0.42)))
@@ -85,19 +87,21 @@ fn updates_and_clears_pagerank_scores_for_nowledge_shapes() {
     assert_eq!(clear.rows.iter().filter(|row| row.cleared).count(), 2);
     assert_eq!(clear.rows.iter().filter(|row| row.non_writable).count(), 1);
 
-    let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
-        entities: vec![
-            KnowledgeEntityRequest {
-                label: "Memory".to_string(),
-                external_id: "memory_rank_1".to_string(),
-            },
-            KnowledgeEntityRequest {
-                label: "Entity".to_string(),
-                external_id: "entity_rank_1".to_string(),
-            },
-        ],
-        property_names: vec!["pagerank_score".to_string()],
-    });
+    let rows = db
+        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            entities: vec![
+                KnowledgeEntityRequest {
+                    label: "Memory".to_string(),
+                    external_id: "memory_rank_1".to_string(),
+                },
+                KnowledgeEntityRequest {
+                    label: "Entity".to_string(),
+                    external_id: "entity_rank_1".to_string(),
+                },
+            ],
+            property_names: vec!["pagerank_score".to_string()],
+        })
+        .unwrap();
     assert_eq!(
         rows.rows[0].properties.get("pagerank_score"),
         Some(&Some(Value::Null))
@@ -171,19 +175,21 @@ fn typed_pagerank_score_batch_persists_as_one_wal_batch_and_replays() {
     assert!(wal.contains("set_node_property"));
     {
         let db = Database::open(&path).unwrap();
-        let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
-            entities: vec![
-                KnowledgeEntityRequest {
-                    label: "Memory".to_string(),
-                    external_id: "memory_rank_1".to_string(),
-                },
-                KnowledgeEntityRequest {
-                    label: "Entity".to_string(),
-                    external_id: "entity_rank_1".to_string(),
-                },
-            ],
-            property_names: vec!["pagerank_score".to_string()],
-        });
+        let rows = db
+            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+                entities: vec![
+                    KnowledgeEntityRequest {
+                        label: "Memory".to_string(),
+                        external_id: "memory_rank_1".to_string(),
+                    },
+                    KnowledgeEntityRequest {
+                        label: "Entity".to_string(),
+                        external_id: "entity_rank_1".to_string(),
+                    },
+                ],
+                property_names: vec!["pagerank_score".to_string()],
+            })
+            .unwrap();
         assert_eq!(
             rows.rows[0].properties.get("pagerank_score"),
             Some(&Some(Value::Float(0.42)))
@@ -221,9 +227,11 @@ fn reads_pagerank_plan_counts_for_nowledge_shapes() {
         .unwrap();
 
     let graph_commit_epoch = db.store.commit_epoch();
-    let plan = db.knowledge_pagerank_plan(&KnowledgePageRankPlanRequest {
-        changed_since_epoch_nanos: Some(100),
-    });
+    let plan = db
+        .knowledge_pagerank_plan(&KnowledgePageRankPlanRequest {
+            changed_since_epoch_nanos: Some(100),
+        })
+        .unwrap();
 
     assert_eq!(plan.graph_commit_epoch, graph_commit_epoch);
     assert_eq!(plan.memory_node_count, 2);
@@ -264,8 +272,8 @@ fn pagerank_plan_uses_query_runtime_plan_cache() {
         changed_since_epoch_nanos: Some(25),
     };
 
-    let first = db.knowledge_pagerank_plan(&request);
-    let second = db.knowledge_pagerank_plan(&request);
+    let first = db.knowledge_pagerank_plan(&request).unwrap();
+    let second = db.knowledge_pagerank_plan(&request).unwrap();
 
     assert_eq!(first, second);
     assert_eq!(first.memory_node_count, 2);

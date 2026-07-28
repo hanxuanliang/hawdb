@@ -42,6 +42,7 @@ fn deletes_knowledge_entity_batch_through_typed_api() {
                 label: "Memory".to_string(),
                 external_id: external_id.to_string(),
             })
+            .unwrap()
             .entity
             .is_none());
     }
@@ -50,6 +51,7 @@ fn deletes_knowledge_entity_batch_through_typed_api() {
             label: "Memory".to_string(),
             external_id: "memory_3".to_string(),
         })
+        .unwrap()
         .entity
         .is_some());
     assert_eq!(
@@ -93,6 +95,7 @@ fn scoped_knowledge_entity_batch_delete_does_not_write_filtered_rows() {
             label: "Memory".to_string(),
             external_id: "memory_1".to_string(),
         })
+        .unwrap()
         .entity
         .is_none());
     assert!(db
@@ -100,6 +103,7 @@ fn scoped_knowledge_entity_batch_delete_does_not_write_filtered_rows() {
             label: "Memory".to_string(),
             external_id: "memory_2".to_string(),
         })
+        .unwrap()
         .entity
         .is_some());
 }
@@ -125,6 +129,7 @@ fn knowledge_entity_batch_delete_deduplicates_writes() {
             label: "Memory".to_string(),
             external_id: "memory_1".to_string(),
         })
+        .unwrap()
         .entity
         .is_none());
 }
@@ -153,6 +158,7 @@ fn knowledge_entity_batch_delete_does_not_write_projected_idless_identity() {
             label: "Memory".to_string(),
             external_id: "0".to_string(),
         })
+        .unwrap()
         .entity
         .is_some());
 }
@@ -224,6 +230,7 @@ fn typed_knowledge_entity_batch_delete_persists_and_replays_from_wal() {
                     label: "Memory".to_string(),
                     external_id: external_id.to_string(),
                 })
+                .unwrap()
                 .entity
                 .is_none());
         }
@@ -232,6 +239,7 @@ fn typed_knowledge_entity_batch_delete_persists_and_replays_from_wal() {
                 label: "Entity".to_string(),
                 external_id: "entity_1".to_string(),
             })
+            .unwrap()
             .entity
             .is_some());
     }

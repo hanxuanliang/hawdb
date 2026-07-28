@@ -6,10 +6,12 @@ fn knowledge_entity_returns_none_for_missing_seed() {
     db.query("CREATE (:Entity {id: 'entity_1', name: 'Skein'})")
         .unwrap();
 
-    let output = db.knowledge_entity(&KnowledgeEntityRequest {
-        label: "Entity".to_string(),
-        external_id: "missing".to_string(),
-    });
+    let output = db
+        .knowledge_entity(&KnowledgeEntityRequest {
+            label: "Entity".to_string(),
+            external_id: "missing".to_string(),
+        })
+        .unwrap();
 
     assert_eq!(output.graph_commit_epoch, 1);
     assert!(output.entity.is_none());
@@ -21,10 +23,12 @@ fn knowledge_entity_uses_projected_identity_for_idless_nodes() {
     db.query("CREATE (:Entity {name: 'Anonymous entity', kind: 'concept'})")
         .unwrap();
 
-    let output = db.knowledge_entity(&KnowledgeEntityRequest {
-        label: "Entity".to_string(),
-        external_id: "0".to_string(),
-    });
+    let output = db
+        .knowledge_entity(&KnowledgeEntityRequest {
+            label: "Entity".to_string(),
+            external_id: "0".to_string(),
+        })
+        .unwrap();
 
     let entity = output.entity.expect("expected entity");
     assert_eq!(output.graph_commit_epoch, 1);
@@ -67,15 +71,17 @@ fn knowledge_relationships_fail_soft_for_unknown_relationship_type() {
     db.query("CREATE (:Memory {id: 'memory_1', title: 'First'})")
         .unwrap();
 
-    let output = db.knowledge_relationships(&KnowledgeRelationshipsRequest {
-        seeds: vec![KnowledgeEntityRequest {
-            label: "Memory".to_string(),
-            external_id: "memory_1".to_string(),
-        }],
-        relationship_type: Some("DOES_NOT_EXIST".to_string()),
-        direction: KnowledgeNeighborDirection::Both,
-        limit_per_seed: 4,
-    });
+    let output = db
+        .knowledge_relationships(&KnowledgeRelationshipsRequest {
+            seeds: vec![KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "memory_1".to_string(),
+            }],
+            relationship_type: Some("DOES_NOT_EXIST".to_string()),
+            direction: KnowledgeNeighborDirection::Both,
+            limit_per_seed: 4,
+        })
+        .unwrap();
 
     assert_eq!(output.graph_commit_epoch, 1);
     assert!(!output.relationship_type_found);
@@ -475,7 +481,7 @@ fn retrieves_knowledge_relationships_grouped_by_seed() {
         direction: KnowledgeNeighborDirection::Outgoing,
         limit_per_seed: 4,
     };
-    let output = db.knowledge_relationships(&request);
+    let output = db.knowledge_relationships(&request).unwrap();
 
     assert_eq!(output.graph_commit_epoch, 2);
     assert!(output.relationship_type_found);
@@ -503,7 +509,7 @@ fn retrieves_knowledge_relationships_grouped_by_seed() {
     );
 
     let stats = db.plan_cache_stats();
-    let repeated_output = db.knowledge_relationships(&request);
+    let repeated_output = db.knowledge_relationships(&request).unwrap();
     assert_eq!(repeated_output, output);
     let repeated_stats = db.plan_cache_stats();
     assert_eq!(repeated_stats.entries, stats.entries);
@@ -548,7 +554,7 @@ fn scoped_knowledge_relationships_report_filtered_seeds() {
             ("space_id".to_string(), "default".to_string()),
         ]),
     };
-    let output = db.knowledge_scoped_relationships(&request);
+    let output = db.knowledge_scoped_relationships(&request).unwrap();
 
     assert_eq!(output.graph_commit_epoch, 2);
     assert!(output.relationship_type_found);
@@ -562,7 +568,7 @@ fn scoped_knowledge_relationships_report_filtered_seeds() {
     assert!(output.groups[1].relationships.is_empty());
 
     let stats = db.plan_cache_stats();
-    let repeated_output = db.knowledge_scoped_relationships(&request);
+    let repeated_output = db.knowledge_scoped_relationships(&request).unwrap();
     assert_eq!(repeated_output, output);
     let repeated_stats = db.plan_cache_stats();
     assert_eq!(repeated_stats.entries, stats.entries);
