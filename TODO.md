@@ -124,7 +124,7 @@ must block default cutover.
   - [x] Require production-filter pruning evidence to cover equality,
     enum/in-list, numeric range, date/time range, null/missing, existence,
     normalized default equality, and unique-key operation families.
-- [ ] Prove storage recovery under real mutation shapes.
+- [x] Prove storage recovery under real mutation shapes.
   - WAL replay must recover whole committed batches or nothing.
   - Torn WAL tails, checkpoint boundaries, and replay markers must be detected
     and surfaced through typed readiness APIs.
@@ -485,7 +485,7 @@ contract.
 
 ## P0: Storage and Recovery
 
-- [ ] Keep WAL and checkpoint recovery as cutover blockers.
+- [x] Keep WAL and checkpoint recovery as cutover blockers.
   - Mutations must recover as whole committed batches or not at all.
   - Torn WAL tails must be detected and bounded.
   - Checkpoint manifests must include replay boundaries.
