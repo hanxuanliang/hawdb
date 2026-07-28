@@ -1145,6 +1145,13 @@ pub fn nowledge_previous_wrapper_preflight_check(
                     &replacement_summary,
                     &[
                         "bounded_read_evidence",
+                        "route_query_api_behavior_evidence_ready",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &[
+                        "bounded_read_evidence",
                         "route_relationship_property_pruning_evidence_ready",
                     ],
                 ) == Some(true),
@@ -1168,6 +1175,7 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 "replacement_summary.bounded_read_evidence.route_primary_ready",
                 "replacement_summary.bounded_read_evidence.route_query_plan_evidence_ready",
                 "replacement_summary.bounded_read_evidence.route_query_profile_evidence_ready",
+                "replacement_summary.bounded_read_evidence.route_query_api_behavior_evidence_ready",
                 "replacement_summary.bounded_read_evidence.route_relationship_property_pruning_evidence_ready",
                 "replacement_summary.bounded_read_evidence.relationship_property_pruning",
             ],
@@ -3302,6 +3310,7 @@ mod tests {
                 "replacement_summary.bounded_read_evidence.route_primary_ready",
                 "replacement_summary.bounded_read_evidence.route_query_plan_evidence_ready",
                 "replacement_summary.bounded_read_evidence.route_query_profile_evidence_ready",
+                "replacement_summary.bounded_read_evidence.route_query_api_behavior_evidence_ready",
                 "replacement_summary.bounded_read_evidence.route_relationship_property_pruning_evidence_ready",
                 "replacement_summary.bounded_read_evidence.relationship_property_pruning"
             ])
@@ -4216,6 +4225,36 @@ mod tests {
     }
 
     #[test]
+    fn preflight_check_requires_bounded_read_api_behavior_evidence() {
+        let mut inputs = ready_inputs();
+        let replacement_summary = inputs.replacement_summary.as_mut().unwrap();
+        replacement_summary["bounded_read_evidence"]
+            .as_object_mut()
+            .unwrap()
+            .remove("route_query_api_behavior_evidence_ready");
+        replacement_summary["bounded_read_evidence"]["blocker_codes"] =
+            serde_json::json!(["bounded_read_graph_route_readiness_not_ready"]);
+
+        let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["replacement_summary_bounded_read"])
+        );
+        assert_eq!(
+            check_by_name(&report, "replacement_summary_bounded_read")["failed_evidence_fields"],
+            serde_json::json!([
+                "replacement_summary.bounded_read_evidence.route_query_api_behavior_evidence_ready"
+            ])
+        );
+        assert_eq!(
+            check_by_name(&report, "replacement_summary_bounded_read")["blocker_codes"],
+            serde_json::json!(["bounded_read_graph_route_readiness_not_ready"])
+        );
+    }
+
+    #[test]
     fn preflight_check_rejects_query_runtime_preflight_with_unknown_route() {
         let mut inputs = ready_inputs();
         let preflight = inputs.query_runtime_preflight.as_mut().unwrap();
@@ -4621,6 +4660,7 @@ mod tests {
             "primary_ready_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
             "route_query_plan_evidence_ready": true,
             "route_query_profile_evidence_ready": true,
+            "route_query_api_behavior_evidence_ready": true,
             "route_relationship_property_pruning_evidence_ready": true,
             "relationship_property_pruning_required_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
             "relationship_property_pruning_report_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),

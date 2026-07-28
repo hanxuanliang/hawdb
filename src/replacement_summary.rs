@@ -309,6 +309,7 @@ pub fn nowledge_replacement_summary_json_with_options(
             "primary_ready_routes": bounded_read_evidence.primary_ready_routes,
             "route_query_plan_evidence_ready": bounded_read_evidence.route_query_plan_evidence_ready,
             "route_query_profile_evidence_ready": bounded_read_evidence.route_query_profile_evidence_ready,
+            "route_query_api_behavior_evidence_ready": bounded_read_evidence.route_query_api_behavior_evidence_ready,
             "relationship_property_pruning_required_count": bounded_read_evidence.relationship_property_pruning_required_count,
             "relationship_property_pruning_report_count": bounded_read_evidence.relationship_property_pruning_report_count,
             "route_relationship_property_pruning_evidence_ready": bounded_read_evidence.route_relationship_property_pruning_evidence_ready,
@@ -717,6 +718,7 @@ struct BoundedReadEvidenceSummary<'a> {
     primary_ready_routes: Vec<String>,
     route_query_plan_evidence_ready: Option<bool>,
     route_query_profile_evidence_ready: Option<bool>,
+    route_query_api_behavior_evidence_ready: Option<bool>,
     relationship_property_pruning_required_count: Option<u64>,
     relationship_property_pruning_report_count: Option<u64>,
     route_relationship_property_pruning_evidence_ready: Option<bool>,
@@ -1820,6 +1822,8 @@ fn bounded_read_evidence_summary(bundle: &serde_json::Value) -> BoundedReadEvide
         json_get_bool_path_from_dynamic(bundle, path, "route_query_plan_evidence_ready");
     let route_query_profile_evidence_ready =
         json_get_bool_path_from_dynamic(bundle, path, "route_query_profile_evidence_ready");
+    let route_query_api_behavior_evidence_ready =
+        json_get_bool_path_from_dynamic(bundle, path, "route_query_api_behavior_evidence_ready");
     let relationship_property_pruning_required_count = json_get_u64_path_from_dynamic(
         bundle,
         path,
@@ -1852,6 +1856,7 @@ fn bounded_read_evidence_summary(bundle: &serde_json::Value) -> BoundedReadEvide
         && primary_ready_routes_cover_required
         && route_query_plan_evidence_ready == Some(true)
         && route_query_profile_evidence_ready == Some(true)
+        && route_query_api_behavior_evidence_ready == Some(true)
         && route_relationship_property_pruning_evidence_ready == Some(true)
         && relationship_property_pruning_required_count.is_some()
         && relationship_property_pruning_counts_match;
@@ -1875,6 +1880,7 @@ fn bounded_read_evidence_summary(bundle: &serde_json::Value) -> BoundedReadEvide
         primary_ready_routes,
         route_query_plan_evidence_ready,
         route_query_profile_evidence_ready,
+        route_query_api_behavior_evidence_ready,
         relationship_property_pruning_required_count,
         relationship_property_pruning_report_count,
         route_relationship_property_pruning_evidence_ready,
@@ -2612,6 +2618,7 @@ fn nowledge_replacement_next_actions(
                 "bounded_read_evidence.primary_ready_routes",
                 "bounded_read_evidence.route_query_plan_evidence_ready",
                 "bounded_read_evidence.route_query_profile_evidence_ready",
+                "bounded_read_evidence.route_query_api_behavior_evidence_ready",
                 "bounded_read_evidence.relationship_property_pruning_required_count",
                 "bounded_read_evidence.relationship_property_pruning_report_count",
                 "bounded_read_evidence.route_relationship_property_pruning_evidence_ready",
@@ -4622,6 +4629,39 @@ mod tests {
     }
 
     #[test]
+    fn replacement_summary_requires_bounded_read_api_behavior_evidence() {
+        let mut bundle = production_ready_bundle();
+        bundle["bounded_read_evidence"]
+            .as_object_mut()
+            .unwrap()
+            .remove("route_query_api_behavior_evidence_ready");
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["bounded_read_evidence"]["ready"], false);
+        assert!(summary["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "bounded_read_evidence_ready"));
+        assert!(summary["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| {
+                action["action"] == "attach_bounded_read_profile"
+                    && action["evidence_fields"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|field| {
+                            field == "bounded_read_evidence.route_query_api_behavior_evidence_ready"
+                        })
+            }));
+    }
+
+    #[test]
     fn replacement_summary_requires_bounded_read_evidence_protocol() {
         let mut bundle = production_ready_bundle();
         bundle["bounded_read_evidence"]["protocol"] = serde_json::json!("handwritten");
@@ -5613,6 +5653,7 @@ mod tests {
                         "bounded_read_evidence.primary_ready_routes",
                         "bounded_read_evidence.route_query_plan_evidence_ready",
                         "bounded_read_evidence.route_query_profile_evidence_ready",
+                        "bounded_read_evidence.route_query_api_behavior_evidence_ready",
                         "bounded_read_evidence.relationship_property_pruning_required_count",
                         "bounded_read_evidence.relationship_property_pruning_report_count",
                         "bounded_read_evidence.route_relationship_property_pruning_evidence_ready",
@@ -5899,6 +5940,7 @@ mod tests {
                 "primary_ready_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
                 "route_query_plan_evidence_ready": true,
                 "route_query_profile_evidence_ready": true,
+                "route_query_api_behavior_evidence_ready": true,
                 "relationship_property_pruning_required_count": 0,
                 "relationship_property_pruning_report_count": 0,
                 "route_relationship_property_pruning_evidence_ready": true,

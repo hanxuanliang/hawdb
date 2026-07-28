@@ -472,6 +472,9 @@ contract.
   - [x] Require route ownership, bounded-read, library-readiness, and
     integration alignment typed paths to consume graph-route API behavior
     evidence before accepting Skein-owned routes.
+  - [x] Require replacement summary and final previous-wrapper preflight to
+    consume bounded-read graph-route API behavior evidence before bounded-read
+    gates can pass.
 
 ## P0: Storage and Recovery
 
