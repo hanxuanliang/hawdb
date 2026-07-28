@@ -196,6 +196,8 @@ jobs:
           grep -q '"admission": "admit"' "$root/background.json"
 
       - name: Previous wrapper adapter smoke
+        env:
+          SKEIN_ENABLE_COMPATIBILITY_TOOLS: "1"
         run: |
           set -euo pipefail
           root="$(mktemp -d)"
@@ -241,6 +243,8 @@ jobs:
           test -s "$root/adapter-shadow.jsonl"
 
       - name: Migration gate smoke
+        env:
+          SKEIN_ENABLE_COMPATIBILITY_TOOLS: "1"
         run: |
           set -euo pipefail
           root="$(mktemp -d)"
@@ -571,6 +575,8 @@ jobs:
           grep -q "nowledge previous-wrapper preflight is not ready" "$root/preflight-required.err"
 
       - name: Migration gate blocked smoke
+        env:
+          SKEIN_ENABLE_COMPATIBILITY_TOOLS: "1"
         run: |
           set -euo pipefail
           root="$(mktemp -d)"
