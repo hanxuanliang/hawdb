@@ -38,11 +38,13 @@ thread_local! {
 
 pub struct VectorSeedExecutionRequest<'a> {
     pub embedding: &'a [f32],
+    pub metadata_filters: &'a BTreeMap<String, String>,
     pub vector_plan: &'a skein_plan::VectorPhysicalPlan,
 }
 
 pub struct VectorSeedExecutionRow {
     pub id: String,
+    pub external_id: Option<String>,
     pub score: f64,
 }
 
@@ -86,6 +88,11 @@ struct NodeColumnLookupSpec<'a> {
     optional: bool,
 }
 
+struct ExecutionContext<'a> {
+    parameters: &'a BTreeMap<String, Value>,
+    external: &'a mut dyn ExternalReadOperator,
+}
+
 pub fn execute(
     plan: &PhysicalPlan,
     catalog: &mut Catalog,
@@ -101,15 +108,14 @@ pub fn execute_with_row_limit(
     max_rows: Option<usize>,
 ) -> Result<Vec<Row>> {
     let execution_limit = ExecutionLimit::from_user_max_rows(max_rows)?;
+    let parameters = BTreeMap::new();
     let mut external = NoExternalReadOperator;
-    let bindings = execute_bindings_with_limit(
-        plan,
-        catalog,
-        store,
-        &BTreeMap::new(),
-        &mut external,
-        execution_limit,
-    )?;
+    let mut context = ExecutionContext {
+        parameters: &parameters,
+        external: &mut external,
+    };
+    let bindings =
+        execute_bindings_with_limit(plan, catalog, store, &mut context, execution_limit)?;
     collect_rows(bindings, max_rows)
 }
 
@@ -140,17 +146,14 @@ pub fn execute_with_row_limit_profile_and_external(
 ) -> Result<ProfiledQueryRows> {
     let execution_limit = ExecutionLimit::from_user_max_rows(max_rows)?;
     let mut profile = read_execution_profile(plan, max_rows)?;
+    let mut context = ExecutionContext {
+        parameters,
+        external,
+    };
     let ((bindings, scan_pruning_reports), vector_execution_reports) =
         capture_vector_execution_reports(|| {
             capture_scan_pruning_reports(|| {
-                execute_bindings_with_limit(
-                    plan,
-                    catalog,
-                    store,
-                    parameters,
-                    external,
-                    execution_limit,
-                )
+                execute_bindings_with_limit(plan, catalog, store, &mut context, execution_limit)
             })
         })?;
     profile.scan_pruning_reports = scan_pruning_reports;
@@ -880,28 +883,11 @@ fn projected_graph(
     ProjectedGraph::from_store_labels_and_rel_types(store, &label_ids, &rel_type_ids)
 }
 
-fn execute_bindings(
-    plan: &PhysicalPlan,
-    catalog: &mut Catalog,
-    store: &mut GraphStore,
-) -> Result<Vec<Binding>> {
-    let mut external = NoExternalReadOperator;
-    execute_bindings_with_limit(
-        plan,
-        catalog,
-        store,
-        &BTreeMap::new(),
-        &mut external,
-        ExecutionLimit::unlimited(),
-    )
-}
-
 fn execute_bindings_with_limit(
     plan: &PhysicalPlan,
     catalog: &mut Catalog,
     store: &mut GraphStore,
-    parameters: &BTreeMap<String, Value>,
-    external: &mut dyn ExternalReadOperator,
+    context: &mut ExecutionContext<'_>,
     execution_limit: ExecutionLimit,
 ) -> Result<Vec<Binding>> {
     match plan {
@@ -1253,25 +1239,36 @@ fn execute_bindings_with_limit(
         }
         PhysicalPlan::VectorSeedScan {
             embedding_parameter,
+            output_external_id,
+            metadata_filters,
             vector_plan,
         } => {
             let embedding =
-                vector_embedding_parameter(parameters, embedding_parameter, vector_plan)?;
-            let output = external.execute_vector_seed(VectorSeedExecutionRequest {
-                embedding: &embedding,
-                vector_plan,
-            })?;
+                vector_embedding_parameter(context.parameters, embedding_parameter, vector_plan)?;
+            let output = context
+                .external
+                .execute_vector_seed(VectorSeedExecutionRequest {
+                    embedding: &embedding,
+                    metadata_filters,
+                    vector_plan,
+                })?;
             record_vector_execution_report(output.report);
             Ok(output
                 .rows
                 .into_iter()
-                .map(|row| Binding {
-                    values: BTreeMap::from([
+                .map(|row| {
+                    let mut values = BTreeMap::from([
                         ("id".to_string(), Value::String(row.id)),
                         ("score".to_string(), Value::Float(row.score)),
-                    ]),
-                    nodes: BTreeMap::new(),
-                    relationships: BTreeMap::new(),
+                    ]);
+                    if *output_external_id && let Some(external_id) = row.external_id {
+                        values.insert("external_id".to_string(), Value::String(external_id));
+                    }
+                    Binding {
+                        values,
+                        nodes: BTreeMap::new(),
+                        relationships: BTreeMap::new(),
+                    }
                 })
                 .collect())
         }
@@ -1922,8 +1919,8 @@ fn execute_bindings_with_limit(
             execution_limit,
         ),
         PhysicalPlan::NodeCartesianProductExec { left, right } => {
-            let left = execute_bindings(left, catalog, store)?;
-            let right = execute_bindings(right, catalog, store)?;
+            let left = execute_child_bindings(left, catalog, store, context)?;
+            let right = execute_child_bindings(right, catalog, store, context)?;
             let mut output = Vec::new();
             for left_binding in &left {
                 for right_binding in &right {
@@ -1953,7 +1950,7 @@ fn execute_bindings_with_limit(
             optional,
             input,
         } => {
-            let input = execute_bindings(input, catalog, store)?;
+            let input = execute_child_bindings(input, catalog, store, context)?;
             execute_node_column_lookup(
                 NodeColumnLookupSpec {
                     variable,
@@ -2141,7 +2138,7 @@ fn execute_bindings_with_limit(
                 .collect())
         }
         PhysicalPlan::AdjacencyExpandExec { input, .. } => {
-            execute_adjacency_expand(plan, input, catalog, store, execution_limit, None)
+            execute_adjacency_expand(plan, input, catalog, store, context, execution_limit, None)
         }
         PhysicalPlan::OptionalDegreeExec {
             source_variable,
@@ -2153,7 +2150,7 @@ fn execute_bindings_with_limit(
             alias,
             input,
         } => {
-            let input = execute_bindings(input, catalog, store)?;
+            let input = execute_child_bindings(input, catalog, store, context)?;
             let rel_type_id = if rel_type.is_empty() {
                 None
             } else {
@@ -2293,6 +2290,7 @@ fn execute_bindings_with_limit(
                     expand_input,
                     catalog,
                     store,
+                    context,
                     execution_limit,
                     Some(&filter),
                 )?;
@@ -2307,7 +2305,7 @@ fn execute_bindings_with_limit(
                 }
                 return Ok(output);
             }
-            let input = execute_bindings(input, catalog, store)?;
+            let input = execute_child_bindings(input, catalog, store, context)?;
             let mut output = Vec::new();
             for binding in input {
                 if evaluate_predicate(predicate, catalog, store, &binding) {
@@ -2320,14 +2318,8 @@ fn execute_bindings_with_limit(
             Ok(output)
         }
         PhysicalPlan::ProjectExec { items, input } => {
-            let input = execute_bindings_with_limit(
-                input,
-                catalog,
-                store,
-                parameters,
-                external,
-                execution_limit,
-            )?;
+            let input =
+                execute_bindings_with_limit(input, catalog, store, context, execution_limit)?;
             let mut output = Vec::new();
             for binding in input {
                 let mut values = BTreeMap::new();
@@ -2351,15 +2343,15 @@ fn execute_bindings_with_limit(
             items,
             input,
         } => {
-            let input = execute_bindings(input, catalog, store)?;
+            let input = execute_child_bindings(input, catalog, store, context)?;
             Ok(execute_aggregate(catalog, group_keys, items, &input))
         }
         PhysicalPlan::DistinctExec { input } => {
-            let input = execute_bindings(input, catalog, store)?;
+            let input = execute_child_bindings(input, catalog, store, context)?;
             Ok(distinct_bindings(input))
         }
         PhysicalPlan::SortExec { items, input } => {
-            let mut input = execute_bindings(input, catalog, store)?;
+            let mut input = execute_child_bindings(input, catalog, store, context)?;
             input.sort_by(|left, right| compare_bindings(catalog, left, right, items));
             Ok(input)
         }
@@ -2369,14 +2361,7 @@ fn execute_bindings_with_limit(
             input,
         } => {
             let child_limit = execution_limit.child_for_limit(*offset, *query_limit);
-            let input = execute_bindings_with_limit(
-                input,
-                catalog,
-                store,
-                parameters,
-                external,
-                child_limit,
-            )?;
+            let input = execute_bindings_with_limit(input, catalog, store, context, child_limit)?;
             let rows = input
                 .into_iter()
                 .skip(*offset)
@@ -2385,6 +2370,15 @@ fn execute_bindings_with_limit(
             Ok(rows)
         }
     }
+}
+
+fn execute_child_bindings(
+    plan: &PhysicalPlan,
+    catalog: &mut Catalog,
+    store: &mut GraphStore,
+    context: &mut ExecutionContext<'_>,
+) -> Result<Vec<Binding>> {
+    execute_bindings_with_limit(plan, catalog, store, context, ExecutionLimit::unlimited())
 }
 
 fn execute_node_scan_with_optional_filter(
@@ -2619,6 +2613,7 @@ fn execute_adjacency_expand(
     input: &PhysicalPlan,
     catalog: &mut Catalog,
     store: &mut GraphStore,
+    context: &mut ExecutionContext<'_>,
     execution_limit: ExecutionLimit,
     relationship_scan_filter: Option<&PropertyFilter>,
 ) -> Result<Vec<Binding>> {
@@ -2642,7 +2637,7 @@ fn execute_adjacency_expand(
         ));
     };
 
-    let input = execute_bindings(input, catalog, store)?;
+    let input = execute_child_bindings(input, catalog, store, context)?;
     let rel_type_id = if rel_type.is_empty() {
         None
     } else {

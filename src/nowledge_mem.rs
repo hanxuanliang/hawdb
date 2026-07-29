@@ -5336,7 +5336,8 @@ impl crate::executor::ExternalReadOperator for SearchProjectionExternalReadOpera
             .ok_or_else(missing_search_projection_error)?;
         let top_k = vector_plan_top_k(request.vector_plan)?;
         let output = projection.try_search_candidates_with_report(
-            &NowledgeMemSearchCandidateRequest::vector(request.embedding.to_vec(), top_k),
+            &NowledgeMemSearchCandidateRequest::vector(request.embedding.to_vec(), top_k)
+                .with_metadata_filters(request.metadata_filters.clone()),
         )?;
         let retriever = output
             .result
@@ -5356,6 +5357,7 @@ impl crate::executor::ExternalReadOperator for SearchProjectionExternalReadOpera
                 .into_iter()
                 .map(|hit| crate::executor::VectorSeedExecutionRow {
                     id: hit.id,
+                    external_id: hit.external_id,
                     score: hit.vector_score,
                 })
                 .collect(),
@@ -11758,6 +11760,10 @@ mod tests {
             Some(&1)
         );
         assert_eq!(output.report.plan_cache_lookup.as_deref(), Some("bypass"));
+        assert_eq!(
+            output.report.vector_execution_reports[0].scalar_filtered_count,
+            0
+        );
         assert_eq!(output.report.vector_execution_reports.len(), 1);
         assert_eq!(
             output.report.vector_execution_reports[0].backend,
@@ -11850,6 +11856,173 @@ mod tests {
         );
         assert!(slow_event.get("query_text").is_none());
         assert!(!slow_log.contains("1.0"));
+    }
+
+    #[test]
+    fn embedded_query_runtime_feeds_vector_candidates_into_graph_match() {
+        let mut index = SearchIndex::in_memory();
+        for (external_id, embedding) in [("nearest", vec![1.0, 0.0]), ("farther", vec![0.8, 0.2])] {
+            index
+                .upsert_projection_row(SearchProjectionRow {
+                    kind: SearchProjectionKind::Memory,
+                    external_id: external_id.to_string(),
+                    title: external_id.to_string(),
+                    body: String::new(),
+                    embedding: Some(embedding),
+                    source_id: None,
+                    metadata: BTreeMap::from([(
+                        "space_id".to_string(),
+                        if external_id == "nearest" {
+                            "selected"
+                        } else {
+                            "other"
+                        }
+                        .to_string(),
+                    )]),
+                })
+                .unwrap();
+        }
+        let projection = NowledgeMemSearchProjection::from_index(index);
+        let mut graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::WritableCutover);
+        graph
+            .query("CREATE (:Memory {id: 'nearest', space_id: 'selected'})")
+            .unwrap();
+        graph
+            .query("CREATE (:Memory {id: 'farther', space_id: 'other'})")
+            .unwrap();
+        let mut store = NowledgeMemEmbeddedStore::new(graph, Some(projection));
+        let parameters = BTreeMap::from([
+            (
+                "embedding".to_string(),
+                Value::List(vec![Value::Float(1.0), Value::Float(0.0)]),
+            ),
+            (
+                "space_id".to_string(),
+                Value::String("selected".to_string()),
+            ),
+        ]);
+        let query = "CALL vector_search($embedding, topK := 2) YIELD id, score \
+                     MATCH (m:Memory) WHERE m.space_id = $space_id \
+                     RETURN m.id AS memory_id, score";
+        let logical =
+            crate::planner::plan_with_params(&crate::cypher::parse(query).unwrap(), &parameters)
+                .unwrap();
+        let plan = crate::optimizer::CascadesOptimizer::new(Default::default())
+            .optimize(&logical)
+            .explain(0);
+        let vector_seed_line = plan
+            .lines()
+            .find(|line| line.contains("VectorSeedScan"))
+            .expect("vector seed plan");
+        assert!(vector_seed_line.contains("metadata_filter_fields=[\"space_id\"]"));
+        assert!(!vector_seed_line.contains("selected"));
+
+        let output = store
+            .query_with_params_with_report_options(
+                query,
+                &parameters,
+                NowledgeMemQueryReportOptions {
+                    capture_physical_plan: true,
+                    slow_log_threshold_micros: None,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(output.output.rows.len(), 1);
+        assert_eq!(
+            output.output.rows[0].get("memory_id"),
+            Some(&Value::String("nearest".to_string()))
+        );
+        assert!(matches!(
+            output.output.rows[0].get("score"),
+            Some(Value::Float(score)) if *score > 0.0
+        ));
+        assert!(!output.output.rows[0].contains_key("external_id"));
+        assert_eq!(output.report.statement_kind, "vector_graph_search");
+        assert_eq!(output.report.plan_cache_lookup.as_deref(), Some("bypass"));
+        assert_eq!(
+            output.report.physical_operator_counts.get("VectorSeedScan"),
+            Some(&1)
+        );
+        assert_eq!(
+            output
+                .report
+                .physical_operator_counts
+                .get("NodeColumnLookupExec"),
+            Some(&1)
+        );
+        assert!(output.report.physical_plan_captured);
+        assert_eq!(
+            output.report.vector_execution_reports[0].scalar_filtered_count,
+            1
+        );
+    }
+
+    #[test]
+    fn embedded_query_runtime_expands_from_vector_seed_candidates() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert_projection_row(SearchProjectionRow {
+                kind: SearchProjectionKind::Memory,
+                external_id: "nearest".to_string(),
+                title: "nearest".to_string(),
+                body: String::new(),
+                embedding: Some(vec![1.0, 0.0]),
+                source_id: None,
+                metadata: BTreeMap::new(),
+            })
+            .unwrap();
+        let projection = NowledgeMemSearchProjection::from_index(index);
+        let mut graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::WritableCutover);
+        graph.query("CREATE (:Memory {id: 'nearest'})").unwrap();
+        graph.query("CREATE (:Entity {id: 'entity-rust'})").unwrap();
+        graph
+            .query(
+                "MATCH (m:Memory {id: 'nearest'}), (e:Entity {id: 'entity-rust'}) \
+                 CREATE (m)-[:MENTIONS]->(e)",
+            )
+            .unwrap();
+        let mut store = NowledgeMemEmbeddedStore::new(graph, Some(projection));
+        let parameters = BTreeMap::from([(
+            "embedding".to_string(),
+            Value::List(vec![Value::Float(1.0), Value::Float(0.0)]),
+        )]);
+
+        let output = store
+            .query_with_params_with_report_options(
+                "CALL vector_search($embedding, topK := 1) YIELD id, score \
+                 MATCH (m:Memory)-[:MENTIONS]->(e:Entity) \
+                 RETURN m.id AS memory_id, e.id AS entity_id, score",
+                &parameters,
+                NowledgeMemQueryReportOptions {
+                    capture_physical_plan: true,
+                    slow_log_threshold_micros: None,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(output.output.rows.len(), 1);
+        assert_eq!(
+            output.output.rows[0].get("memory_id"),
+            Some(&Value::String("nearest".to_string()))
+        );
+        assert_eq!(
+            output.output.rows[0].get("entity_id"),
+            Some(&Value::String("entity-rust".to_string()))
+        );
+        assert!(matches!(
+            output.output.rows[0].get("score"),
+            Some(Value::Float(score)) if *score > 0.0
+        ));
+        assert_eq!(
+            output
+                .report
+                .physical_operator_counts
+                .get("AdjacencyExpandExec"),
+            Some(&1)
+        );
     }
 
     #[test]

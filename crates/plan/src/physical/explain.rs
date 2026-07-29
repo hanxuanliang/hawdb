@@ -97,9 +97,12 @@ impl PhysicalPlan {
             }
             PhysicalPlan::VectorSeedScan {
                 embedding_parameter,
+                output_external_id,
+                metadata_filters,
                 vector_plan,
             } => format!(
-                "{pad}VectorSeedScan embedding=${embedding_parameter} {}",
+                "{pad}VectorSeedScan embedding=${embedding_parameter} output_external_id={output_external_id} metadata_filter_fields={:?} {}",
+                metadata_filters.keys().collect::<Vec<_>>(),
                 vector_plan.explain_summary()
             ),
             PhysicalPlan::CreateNode { label, .. } => {

@@ -34798,6 +34798,9 @@ pub(crate) fn statement_kind(statement: &cypher::Statement) -> &'static str {
         cypher::Statement::MatchOptionalRelationshipCountSum(_) => {
             "match_optional_relationship_count_sum"
         }
+        cypher::Statement::MatchReturn(query) if query.vector_seed.is_some() => {
+            "vector_graph_search"
+        }
         cypher::Statement::MatchReturn(_) => "match_return",
         cypher::Statement::MatchSet(_) => "match_set",
         cypher::Statement::MatchSetReturn(_) => "match_set_return",

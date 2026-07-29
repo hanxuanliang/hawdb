@@ -167,13 +167,13 @@ pub(super) fn optimized_query_plan_for(
 }
 
 pub(super) fn statement_uses_plan_cache(statement: &cypher::Statement) -> bool {
-    matches!(
-        statement_body(statement),
-        cypher::Statement::MatchReturn(_)
-            | cypher::Statement::ShortestPathReturn(_)
-            | cypher::Statement::MatchNodesReturn(_)
-            | cypher::Statement::MatchOptionalRelationshipCountSum(_)
-            | cypher::Statement::MatchThreadRepairStats(_)
-            | cypher::Statement::GraphAlgorithm(_)
-    )
+    match statement_body(statement) {
+        cypher::Statement::MatchReturn(query) => query.vector_seed.is_none(),
+        cypher::Statement::ShortestPathReturn(_)
+        | cypher::Statement::MatchNodesReturn(_)
+        | cypher::Statement::MatchOptionalRelationshipCountSum(_)
+        | cypher::Statement::MatchThreadRepairStats(_)
+        | cypher::Statement::GraphAlgorithm(_) => true,
+        _ => false,
+    }
 }

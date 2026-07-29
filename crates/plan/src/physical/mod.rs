@@ -98,6 +98,8 @@ pub enum PhysicalPlan {
     },
     VectorSeedScan {
         embedding_parameter: String,
+        output_external_id: bool,
+        metadata_filters: BTreeMap<String, String>,
         vector_plan: crate::VectorPhysicalPlan,
     },
     CreateNode {

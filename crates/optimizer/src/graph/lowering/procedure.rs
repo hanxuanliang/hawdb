@@ -28,6 +28,7 @@ pub(super) fn lower(logical: &LogicalPlan) -> Option<PhysicalPlan> {
             embedding_parameter,
             embedding_dimension,
             top_k,
+            output_external_id,
         } => {
             let logical = VectorSearchLogicalPlan {
                 embedding_dimension: *embedding_dimension,
@@ -40,6 +41,8 @@ pub(super) fn lower(logical: &LogicalPlan) -> Option<PhysicalPlan> {
             };
             Some(PhysicalPlan::VectorSeedScan {
                 embedding_parameter: embedding_parameter.clone(),
+                output_external_id: *output_external_id,
+                metadata_filters: Default::default(),
                 vector_plan: plan_vector_search(&logical, &OptimizerContext::default())
                     .ok()?
                     .plan,

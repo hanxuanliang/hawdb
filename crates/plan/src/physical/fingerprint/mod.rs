@@ -189,10 +189,26 @@ impl PhysicalPlan {
             }
             PhysicalPlan::VectorSeedScan {
                 embedding_parameter,
+                output_external_id,
+                metadata_filters,
                 vector_plan,
             } => {
                 output.push_str("VectorSeedScan(");
                 write_identifier(output, embedding_parameter);
+                output.push(':');
+                output.push_str(if *output_external_id {
+                    "external"
+                } else {
+                    "public"
+                });
+                output.push(':');
+                write_properties(
+                    output,
+                    &metadata_filters
+                        .iter()
+                        .map(|(key, value)| (key.clone(), Value::String(value.clone())))
+                        .collect(),
+                );
                 output.push(':');
                 output.push_str(&vector_plan.fingerprint());
                 output.push(')');

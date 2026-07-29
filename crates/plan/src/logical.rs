@@ -7,9 +7,9 @@ use skein_cypher::{
     ReturnExpression, ReturnItem, ReturnValueExpression,
     SchemaObjectState as CypherSchemaObjectState, SchemaPropertyType as CypherSchemaPropertyType,
     SchemaTableKind as CypherSchemaTableKind, SetProperty, SetValueExpression, ShortestPathReturn,
-    ShortestPathReturnExpression, Statement, ValueExpression, WithAggregateProjection,
-    WithAliasFilter, WithAliasFilterExpression, WithAliasFilterOp, WithCollect,
-    WithDistinctProjection, WithProjection,
+    ShortestPathReturnExpression, Statement, ValueExpression, VectorSearch as CypherVectorSearch,
+    WithAggregateProjection, WithAliasFilter, WithAliasFilterExpression, WithAliasFilterOp,
+    WithCollect, WithDistinctProjection, WithProjection,
 };
 pub use skein_ddl::{SchemaObjectState, SchemaPropertyType, SchemaTableKind};
 use std::collections::{BTreeMap, BTreeSet};
@@ -93,6 +93,7 @@ pub enum LogicalPlan {
         embedding_parameter: String,
         embedding_dimension: usize,
         top_k: usize,
+        output_external_id: bool,
     },
     CreateNode {
         label: String,
@@ -821,26 +822,7 @@ pub fn plan_with_params(
             options: bind_graph_algorithm_options(&algorithm.options, parameters)?,
             score_column: algorithm.score_column.clone(),
         }),
-        Statement::VectorSearch(search) => {
-            let (embedding_parameter, embedding_dimension) =
-                bind_vector_embedding(&search.embedding, parameters)?;
-            let top_k = search
-                .top_k
-                .as_ref()
-                .map(|value| bind_non_negative_usize(value, parameters, "topK"))
-                .transpose()?
-                .unwrap_or(10);
-            if top_k == 0 {
-                return Err(SkeinError::Semantic(
-                    "vector search topK must be greater than zero".to_string(),
-                ));
-            }
-            Ok(LogicalPlan::VectorSeed {
-                embedding_parameter,
-                embedding_dimension,
-                top_k,
-            })
-        }
+        Statement::VectorSearch(search) => bind_vector_seed(search, parameters, false),
         Statement::CreateNode(node) => Ok(LogicalPlan::CreateNode {
             label: node.label.clone(),
             properties: bind_properties(&node.properties, parameters)?,
@@ -1445,6 +1427,10 @@ pub fn plan_with_params(
         Statement::ShortestPathReturn(query) => plan_shortest_path_return(query, parameters),
         Statement::MatchReturn(query) => {
             let mut scope = BTreeSet::from([query.variable.clone()]);
+            let mut input_columns = BTreeSet::new();
+            if query.vector_seed.is_some() {
+                input_columns.extend(["id".to_string(), "score".to_string()]);
+            }
             if let Some(expand) = &query.expand {
                 scope.insert(expand.target_variable.clone());
                 if !expand.properties.is_empty() && (expand.min_hops != 1 || expand.max_hops != 1) {
@@ -1615,9 +1601,20 @@ pub fn plan_with_params(
             if let Some(predicate) = &query.predicate {
                 validate_predicate(&scope, predicate)?;
             }
-            let mut input = LogicalPlan::NodeScan {
-                variable: query.variable.clone(),
-                label: query.label.clone(),
+            let mut input = if let Some(search) = &query.vector_seed {
+                LogicalPlan::NodeColumnLookup {
+                    variable: query.variable.clone(),
+                    label: query.label.clone(),
+                    property: "id".to_string(),
+                    column: "external_id".to_string(),
+                    optional: false,
+                    input: Box::new(bind_vector_seed(search, parameters, true)?),
+                }
+            } else {
+                LogicalPlan::NodeScan {
+                    variable: query.variable.clone(),
+                    label: query.label.clone(),
+                }
             };
             if let Some(expand) = &query.expand {
                 input = LogicalPlan::Expand {
@@ -1913,7 +1910,8 @@ pub fn plan_with_params(
                     };
                 }
             }
-            let planned_returns = plan_return_items(&scope, &query.returns, parameters)?;
+            let planned_returns =
+                plan_return_items_with_columns(&scope, &input_columns, &query.returns, parameters)?;
             let projection_names = planned_returns
                 .names()
                 .iter()
@@ -3337,6 +3335,32 @@ fn bind_vector_embedding(
         )));
     }
     Ok((name.clone(), values.len()))
+}
+
+fn bind_vector_seed(
+    search: &CypherVectorSearch,
+    parameters: &BTreeMap<String, Value>,
+    output_external_id: bool,
+) -> Result<LogicalPlan> {
+    let (embedding_parameter, embedding_dimension) =
+        bind_vector_embedding(&search.embedding, parameters)?;
+    let top_k = search
+        .top_k
+        .as_ref()
+        .map(|value| bind_non_negative_usize(value, parameters, "topK"))
+        .transpose()?
+        .unwrap_or(10);
+    if top_k == 0 {
+        return Err(SkeinError::Semantic(
+            "vector search topK must be greater than zero".to_string(),
+        ));
+    }
+    Ok(LogicalPlan::VectorSeed {
+        embedding_parameter,
+        embedding_dimension,
+        top_k,
+        output_external_id,
+    })
 }
 
 fn bind_properties(
@@ -4818,6 +4842,15 @@ fn plan_return_items(
     items: &[ReturnItem],
     parameters: &BTreeMap<String, Value>,
 ) -> Result<PlannedReturns> {
+    plan_return_items_with_columns(scope, &BTreeSet::new(), items, parameters)
+}
+
+fn plan_return_items_with_columns(
+    scope: &BTreeSet<String>,
+    column_scope: &BTreeSet<String>,
+    items: &[ReturnItem],
+    parameters: &BTreeMap<String, Value>,
+) -> Result<PlannedReturns> {
     let has_aggregate = items.iter().any(|item| {
         matches!(
             item.expression,
@@ -4853,7 +4886,12 @@ fn plan_return_items(
                 | ReturnExpression::CaseCoalesceDifferenceFloorZero { .. }
                 | ReturnExpression::CaseEntitySearchRank(_)
                 | ReturnExpression::CaseColumnSearchRank(_) => {
-                    group_keys.push(plan_projection(scope, item, parameters)?);
+                    group_keys.push(plan_projection_with_columns(
+                        scope,
+                        column_scope,
+                        item,
+                        parameters,
+                    )?);
                 }
                 ReturnExpression::CountAll
                 | ReturnExpression::CountVariable { .. }
@@ -4874,7 +4912,7 @@ fn plan_return_items(
     } else {
         items
             .iter()
-            .map(|item| plan_projection(scope, item, parameters))
+            .map(|item| plan_projection_with_columns(scope, column_scope, item, parameters))
             .collect::<Result<Vec<_>>>()
             .map(PlannedReturns::Projections)
     }

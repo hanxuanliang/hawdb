@@ -235,6 +235,7 @@ impl Parser<'_> {
                     None
                 };
                 return Ok(Statement::MatchReturn(Box::new(MatchReturn {
+                    vector_seed: None,
                     variable,
                     label,
                     properties,
@@ -493,6 +494,7 @@ impl Parser<'_> {
             None
         };
         Ok(Statement::MatchReturn(Box::new(MatchReturn {
+            vector_seed: None,
             variable,
             label,
             properties,

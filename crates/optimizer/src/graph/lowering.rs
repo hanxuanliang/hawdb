@@ -373,15 +373,12 @@ impl GroupExpr {
                 {
                     plan
                 } else {
+                    let mut input =
+                        best_physical(memo, self.children[0], catalog, decisions, stage_events);
+                    push_vector_seed_metadata_filter(&mut input, predicate, decisions);
                     PhysicalPlan::FilterExec {
                         predicate: predicate.clone(),
-                        input: Box::new(best_physical(
-                            memo,
-                            self.children[0],
-                            catalog,
-                            decisions,
-                            stage_events,
-                        )),
+                        input: Box::new(input),
                     }
                 }
             }
@@ -440,6 +437,124 @@ impl GroupExpr {
             },
             _ => unreachable!("leaf logical plans are lowered before memo child planning"),
         }
+    }
+}
+
+fn push_vector_seed_metadata_filter(
+    input: &mut PhysicalPlan,
+    predicate: &skein_plan::Predicate,
+    decisions: &mut Vec<String>,
+) {
+    if let skein_plan::Predicate::And(predicates) = predicate {
+        for predicate in predicates {
+            push_vector_seed_metadata_filter(input, predicate, decisions);
+        }
+        return;
+    }
+    let skein_plan::Predicate::PropertyEq {
+        variable,
+        property,
+        value,
+    } = predicate
+    else {
+        return;
+    };
+    let Some(filter_field) = vector_seed_metadata_field(property) else {
+        return;
+    };
+    let Some(filter_value) = vector_seed_metadata_value(value) else {
+        return;
+    };
+    if attach_vector_seed_metadata_filter(input, variable, filter_field, filter_value) {
+        decisions.push(format!(
+            "push descriptor-safe vector seed filter {variable}.{property} before candidate generation"
+        ));
+    }
+}
+
+fn attach_vector_seed_metadata_filter(
+    plan: &mut PhysicalPlan,
+    variable: &str,
+    field: &str,
+    value: String,
+) -> bool {
+    match plan {
+        PhysicalPlan::NodeColumnLookupExec {
+            variable: lookup_variable,
+            input,
+            ..
+        } if lookup_variable == variable => {
+            attach_metadata_filter_to_vector_seed(input, field, value)
+        }
+        PhysicalPlan::AdjacencyExpandExec {
+            source_variable,
+            input,
+            ..
+        } if source_variable == variable => {
+            attach_vector_seed_metadata_filter(input, variable, field, value)
+        }
+        _ => false,
+    }
+}
+
+fn attach_metadata_filter_to_vector_seed(
+    plan: &mut PhysicalPlan,
+    field: &str,
+    value: String,
+) -> bool {
+    let PhysicalPlan::VectorSeedScan {
+        metadata_filters,
+        vector_plan,
+        ..
+    } = plan
+    else {
+        return false;
+    };
+    if metadata_filters
+        .get(field)
+        .is_some_and(|existing| existing != &value)
+    {
+        return false;
+    }
+    metadata_filters.insert(field.to_string(), value);
+    attach_vector_filter_field(vector_plan, field);
+    true
+}
+
+fn attach_vector_filter_field(plan: &mut skein_plan::VectorPhysicalPlan, field: &str) {
+    match plan {
+        skein_plan::VectorPhysicalPlan::Filter { fields } => {
+            if !fields.iter().any(|existing| existing == field) {
+                fields.push(field.to_string());
+                fields.sort();
+            }
+        }
+        skein_plan::VectorPhysicalPlan::VectorCandidateScan { input, .. }
+        | skein_plan::VectorPhysicalPlan::ResidualFilter { input, .. }
+        | skein_plan::VectorPhysicalPlan::RawVectorRerank { input, .. }
+        | skein_plan::VectorPhysicalPlan::TopK { input, .. } => {
+            attach_vector_filter_field(input, field);
+        }
+    }
+}
+
+fn vector_seed_metadata_field(property: &str) -> Option<&str> {
+    match property {
+        "id" => Some("external_id"),
+        "kind" | "external_id" | "source_id" | "space_id" | "unit_type" | "lifecycle_state"
+        | "importance" | "confidence" | "created_at" | "updated_at" | "event_start"
+        | "event_end" | "is_latest" => Some(property),
+        _ => None,
+    }
+}
+
+fn vector_seed_metadata_value(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Bool(value) => Some(value.to_string()),
+        Value::Int(value) => Some(value.to_string()),
+        Value::Float(value) if value.is_finite() => Some(value.to_string()),
+        Value::Null | Value::Float(_) | Value::List(_) | Value::Map(_) => None,
     }
 }
 
@@ -634,14 +749,11 @@ fn logical_to_physical_direct(
             {
                 plan
             } else {
+                let mut input = logical_to_physical_direct(input, catalog, decisions, stage_events);
+                push_vector_seed_metadata_filter(&mut input, predicate, decisions);
                 PhysicalPlan::FilterExec {
                     predicate: predicate.clone(),
-                    input: Box::new(logical_to_physical_direct(
-                        input,
-                        catalog,
-                        decisions,
-                        stage_events,
-                    )),
+                    input: Box::new(input),
                 }
             }
         }

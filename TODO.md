@@ -849,7 +849,7 @@ contract.
       descriptor-pruned count, scalar-filtered count, rerank count, raw-vector
       bytes read, index coverage, and fallback reason codes.
     - Keep reports compact and never copy raw embedding values.
-  - [ ] Add vector seed as a graph query operator.
+  - [x] Add vector seed as a graph query operator.
     - [x] Add parameterized `CALL vector_search($embedding, topK := n)` as an
       optimizer-visible exact scalar `VectorSeedScan`, with plan-cache bypass,
       embedded search-projection injection, and fail-closed graph-only

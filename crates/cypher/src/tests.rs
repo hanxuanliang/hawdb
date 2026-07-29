@@ -591,6 +591,28 @@ fn parses_parameterized_vector_search() {
 }
 
 #[test]
+fn parses_vector_search_feeding_graph_match() {
+    let statement = parse(
+        "CALL vector_search($embedding, topK := 20) YIELD id, score \
+         MATCH (m:Memory) WHERE m.space_id = $space_id \
+         RETURN m.id AS memory_id, score",
+    )
+    .unwrap();
+    let Statement::MatchReturn(query) = statement else {
+        panic!("expected vector-seeded MATCH");
+    };
+    let search = query.vector_seed.expect("vector seed");
+    assert_eq!(
+        search.embedding,
+        ValueExpression::Parameter("embedding".to_string())
+    );
+    assert_eq!(search.top_k, Some(ValueExpression::Literal(Value::Int(20))));
+    assert_eq!(query.variable, "m");
+    assert_eq!(query.label, "Memory");
+    assert_eq!(query.returns.len(), 2);
+}
+
+#[test]
 fn parses_merge_node() {
     let statement = parse("MERGE (:Memory {id: $id})").unwrap();
     let Statement::MergeNode(node) = statement else {

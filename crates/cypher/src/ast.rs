@@ -186,6 +186,7 @@ pub struct MergeNode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatchReturn {
+    pub vector_seed: Option<VectorSearch>,
     pub variable: String,
     pub label: String,
     pub properties: BTreeMap<String, ValueExpression>,

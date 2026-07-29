@@ -60,7 +60,23 @@ impl Parser<'_> {
                 return Err(self.error("unsupported vector search option"));
             }
         }
+        let search = VectorSearch { embedding, top_k };
         self.skip_ws();
+        if self.consume_keyword("YIELD") {
+            self.skip_ws();
+            let id = self.parse_ident()?;
+            self.expect_char(',')?;
+            let score = self.parse_ident()?;
+            if !id.eq_ignore_ascii_case("id") || !score.eq_ignore_ascii_case("score") {
+                return Err(self.error("vector search YIELD must be id, score"));
+            }
+            self.expect_keyword("MATCH")?;
+            let Statement::MatchReturn(mut query) = self.parse_match_statement()? else {
+                return Err(self.error("vector search YIELD must feed a MATCH read query"));
+            };
+            query.vector_seed = Some(search);
+            return Ok(Statement::MatchReturn(query));
+        }
         if self.consume_keyword("RETURN") {
             self.skip_ws();
             let id = self.parse_ident()?;
@@ -70,7 +86,7 @@ impl Parser<'_> {
                 return Err(self.error("vector search RETURN must be id, score"));
             }
         }
-        Ok(Statement::VectorSearch(VectorSearch { embedding, top_k }))
+        Ok(Statement::VectorSearch(search))
     }
 
     pub(super) fn parse_string_list(&mut self) -> Result<Vec<String>> {
