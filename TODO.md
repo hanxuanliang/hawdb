@@ -114,6 +114,11 @@ LanceDB for that path.
       replacement downgraded to `challenges` in both graphs.
   - [ ] Route Memory lifecycle/delete and the remaining entity mutation
     families through the same durable coordinator.
+    - [x] Generalize startup replay by durable operation kind and route REST
+      archive/forget lifecycle transitions through a versioned, idempotent
+      Memory lifecycle obligation (Mem PR #384 commit `6eef2c8d6`).
+    - [ ] Fold supersede/deprecate EVOLVES side effects into the same lifecycle
+      obligation, then freeze and replay the full hard-delete cascade.
   - Inject one long-lived writable Skein handle into Mem write resources.
   - Cover Memory create, update, lifecycle, and delete first, then Label,
     Entity, Thread, Source, and relationship mutations.
