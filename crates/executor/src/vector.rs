@@ -22,6 +22,73 @@ impl VectorScoreSource {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorExecutionBackend {
+    ScalarFlat,
+    AnnProjection,
+    QuantizedProjection,
+    Unavailable,
+}
+
+impl VectorExecutionBackend {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ScalarFlat => "scalar_flat",
+            Self::AnnProjection => "ann_projection",
+            Self::QuantizedProjection => "quantized_projection",
+            Self::Unavailable => "unavailable",
+        }
+    }
+
+    const fn from_candidate_source(source: VectorCandidateSource) -> Self {
+        match source {
+            VectorCandidateSource::Scalar => Self::ScalarFlat,
+            VectorCandidateSource::Ann => Self::AnnProjection,
+            VectorCandidateSource::Quantized => Self::QuantizedProjection,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorCompressionMode {
+    Unspecified,
+    Disabled,
+    Preferred,
+    Required,
+}
+
+impl VectorCompressionMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unspecified => "unspecified",
+            Self::Disabled => "disabled",
+            Self::Preferred => "preferred",
+            Self::Required => "required",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorFallbackReasonCode {
+    VectorDimensionMismatch,
+    VectorIndexEmpty,
+    CompressedVectorProjectionUnavailable,
+    QueryEmbeddingMissing,
+}
+
+impl VectorFallbackReasonCode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::VectorDimensionMismatch => "vector_dimension_mismatch",
+            Self::VectorIndexEmpty => "vector_index_empty",
+            Self::CompressedVectorProjectionUnavailable => {
+                "compressed_vector_projection_unavailable"
+            }
+            Self::QueryEmbeddingMissing => "query_embedding_missing",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct VectorCandidate {
     pub id: String,
@@ -85,15 +152,23 @@ pub trait VectorExecutionSource {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VectorExecutionReport {
+    pub backend: VectorExecutionBackend,
+    pub compression_mode: VectorCompressionMode,
     pub candidate_source: VectorCandidateSource,
     pub candidate_score_source: VectorScoreSource,
     pub final_score_source: VectorScoreSource,
     pub generated_candidate_count: usize,
+    pub descriptor_pruned_count: usize,
+    pub scalar_filtered_count: usize,
     pub residual_filtered_count: usize,
     pub candidate_scan_rounds: usize,
     pub reranked_candidate_count: usize,
     pub returned_count: usize,
     pub raw_vector_bytes_read: u64,
+    pub index_covered_document_count: Option<usize>,
+    pub index_candidate_document_count: Option<usize>,
+    pub index_coverage_complete: Option<bool>,
+    pub fallback_reason_codes: Vec<VectorFallbackReasonCode>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -270,15 +345,23 @@ pub fn execute_vector_plan<S: VectorExecutionSource>(
     };
     Ok(VectorExecutionOutput {
         report: VectorExecutionReport {
+            backend: VectorExecutionBackend::from_candidate_source(*candidate_source),
+            compression_mode: VectorCompressionMode::Unspecified,
             candidate_source: *candidate_source,
             candidate_score_source: batch.score_source,
             final_score_source,
             generated_candidate_count,
+            descriptor_pruned_count: 0,
+            scalar_filtered_count: residual_filtered_count,
             residual_filtered_count,
             candidate_scan_rounds,
             reranked_candidate_count,
             returned_count: raw_scores.len(),
             raw_vector_bytes_read: source.raw_vector_bytes_read(),
+            index_covered_document_count: None,
+            index_candidate_document_count: None,
+            index_coverage_complete: None,
+            fallback_reason_codes: Vec::new(),
         },
         scores: raw_scores,
     })

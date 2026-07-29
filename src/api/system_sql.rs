@@ -231,15 +231,23 @@ fn vector_execution_report_json(
     report: &skein_executor::VectorExecutionReport,
 ) -> serde_json::Value {
     serde_json::json!({
+        "backend": report.backend.as_str(),
+        "compression_mode": report.compression_mode.as_str(),
         "candidate_source": report.candidate_source.as_str(),
         "candidate_score_source": report.candidate_score_source.as_str(),
         "final_score_source": report.final_score_source.as_str(),
         "generated_candidate_count": report.generated_candidate_count,
+        "descriptor_pruned_count": report.descriptor_pruned_count,
+        "scalar_filtered_count": report.scalar_filtered_count,
         "residual_filtered_count": report.residual_filtered_count,
         "candidate_scan_rounds": report.candidate_scan_rounds,
         "reranked_candidate_count": report.reranked_candidate_count,
         "returned_count": report.returned_count,
         "raw_vector_bytes_read": report.raw_vector_bytes_read,
+        "index_covered_document_count": report.index_covered_document_count,
+        "index_candidate_document_count": report.index_candidate_document_count,
+        "index_coverage_complete": report.index_coverage_complete,
+        "fallback_reason_codes": report.fallback_reason_codes.iter().map(|code| code.as_str()).collect::<Vec<_>>(),
     })
 }
 

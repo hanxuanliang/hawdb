@@ -393,6 +393,7 @@ pub struct SearchRetrieverReport {
     pub candidate_scan_rounds: usize,
     pub descriptor_pruned_count: usize,
     pub scalar_filtered_count: usize,
+    pub residual_filtered_count: usize,
     pub reranked_candidate_count: usize,
     pub raw_vector_bytes_read: u64,
     pub index_covered_document_count: usize,
@@ -1905,6 +1906,10 @@ impl SearchIndex {
                             .map(|execution| execution.report.residual_filtered_count)
                             .unwrap_or(0),
                     ),
+                residual_filtered_count: vector_execution
+                    .as_ref()
+                    .map(|execution| execution.report.residual_filtered_count)
+                    .unwrap_or(0),
                 reranked_candidate_count: vector_execution
                     .as_ref()
                     .map(|execution| execution.report.reranked_candidate_count)
@@ -1959,6 +1964,7 @@ impl SearchIndex {
                         .metadata_predicate_pushdown
                         .segment_pruned_document_count,
                 ),
+                residual_filtered_count: 0,
                 reranked_candidate_count: 0,
                 raw_vector_bytes_read: 0,
                 index_covered_document_count: 0,

@@ -127,8 +127,34 @@ fn executes_filter_candidate_rerank_top_k_in_order() {
         output.report.final_score_source,
         VectorScoreSource::RawVector
     );
+    assert_eq!(
+        output.report.backend,
+        VectorExecutionBackend::QuantizedProjection
+    );
+    assert_eq!(
+        output.report.compression_mode,
+        VectorCompressionMode::Unspecified
+    );
     assert_eq!(output.report.generated_candidate_count, 3);
+    assert_eq!(output.report.descriptor_pruned_count, 0);
+    assert_eq!(output.report.scalar_filtered_count, 0);
+    assert_eq!(output.report.index_coverage_complete, None);
+    assert!(output.report.fallback_reason_codes.is_empty());
     assert_eq!(output.report.reranked_candidate_count, 3);
+}
+
+#[test]
+fn vector_observability_codes_have_stable_strings() {
+    assert_eq!(VectorExecutionBackend::ScalarFlat.as_str(), "scalar_flat");
+    assert_eq!(
+        VectorExecutionBackend::QuantizedProjection.as_str(),
+        "quantized_projection"
+    );
+    assert_eq!(VectorCompressionMode::Required.as_str(), "required");
+    assert_eq!(
+        VectorFallbackReasonCode::CompressedVectorProjectionUnavailable.as_str(),
+        "compressed_vector_projection_unavailable"
+    );
 }
 
 #[test]

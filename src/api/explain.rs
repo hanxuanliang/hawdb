@@ -136,6 +136,14 @@ pub(super) fn explain_analyze_output_row(
 fn vector_execution_report_value(report: &skein_executor::VectorExecutionReport) -> Value {
     Value::Map(BTreeMap::from([
         (
+            "backend".to_string(),
+            Value::String(report.backend.as_str().to_string()),
+        ),
+        (
+            "compression_mode".to_string(),
+            Value::String(report.compression_mode.as_str().to_string()),
+        ),
+        (
             "candidate_source".to_string(),
             Value::String(report.candidate_source.as_str().to_string()),
         ),
@@ -150,6 +158,14 @@ fn vector_execution_report_value(report: &skein_executor::VectorExecutionReport)
         (
             "generated_candidate_count".to_string(),
             usize_value(report.generated_candidate_count),
+        ),
+        (
+            "descriptor_pruned_count".to_string(),
+            usize_value(report.descriptor_pruned_count),
+        ),
+        (
+            "scalar_filtered_count".to_string(),
+            usize_value(report.scalar_filtered_count),
         ),
         (
             "residual_filtered_count".to_string(),
@@ -170,6 +186,37 @@ fn vector_execution_report_value(report: &skein_executor::VectorExecutionReport)
         (
             "raw_vector_bytes_read".to_string(),
             u64_value(report.raw_vector_bytes_read),
+        ),
+        (
+            "index_covered_document_count".to_string(),
+            report
+                .index_covered_document_count
+                .map(usize_value)
+                .unwrap_or(Value::Null),
+        ),
+        (
+            "index_candidate_document_count".to_string(),
+            report
+                .index_candidate_document_count
+                .map(usize_value)
+                .unwrap_or(Value::Null),
+        ),
+        (
+            "index_coverage_complete".to_string(),
+            report
+                .index_coverage_complete
+                .map(Value::Bool)
+                .unwrap_or(Value::Null),
+        ),
+        (
+            "fallback_reason_codes".to_string(),
+            Value::List(
+                report
+                    .fallback_reason_codes
+                    .iter()
+                    .map(|code| Value::String(code.as_str().to_string()))
+                    .collect(),
+            ),
         ),
     ]))
 }

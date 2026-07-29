@@ -1,6 +1,7 @@
 use crate::search::{
-    CompressedVectorSearchMode, SearchCandidateSetReport, SearchFusionWeights, SearchMode,
-    SearchQueryOptions, SearchRangeReadConfig, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
+    CompressedVectorSearchMode, SearchCandidateSetReport, SearchFallbackReasonCode,
+    SearchFusionWeights, SearchMode, SearchQueryOptions, SearchRangeReadConfig,
+    NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
 };
 use crate::search_projection_evidence::{
     nowledge_search_projection_evidence_json, nowledge_search_projection_shadow_evidence_json,
@@ -5261,6 +5262,7 @@ impl crate::executor::ExternalReadOperator for SearchProjectionExternalReadOpera
                     "vector search did not produce a vector retriever report".to_string(),
                 )
             })?;
+        let candidate_score_source = vector_score_source(&retriever.candidate_score_source)?;
         Ok(crate::executor::VectorSeedExecutionOutput {
             rows: output
                 .result
@@ -5272,15 +5274,29 @@ impl crate::executor::ExternalReadOperator for SearchProjectionExternalReadOpera
                 })
                 .collect(),
             report: skein_executor::VectorExecutionReport {
+                backend: vector_execution_backend(candidate_score_source),
+                compression_mode: vector_compression_mode(
+                    output.report.compressed_vector_search_mode,
+                ),
                 candidate_source: vector_plan_candidate_source(request.vector_plan)?,
-                candidate_score_source: vector_score_source(&retriever.candidate_score_source)?,
+                candidate_score_source,
                 final_score_source: vector_score_source(&retriever.final_score_source)?,
                 generated_candidate_count: retriever.generated_candidate_count,
-                residual_filtered_count: retriever.scalar_filtered_count,
+                descriptor_pruned_count: retriever.descriptor_pruned_count,
+                scalar_filtered_count: retriever.scalar_filtered_count,
+                residual_filtered_count: retriever.residual_filtered_count,
                 candidate_scan_rounds: retriever.candidate_scan_rounds,
                 reranked_candidate_count: retriever.reranked_candidate_count,
                 returned_count: retriever.candidate_count,
                 raw_vector_bytes_read: retriever.raw_vector_bytes_read,
+                index_covered_document_count: Some(retriever.index_covered_document_count),
+                index_candidate_document_count: Some(retriever.index_candidate_document_count),
+                index_coverage_complete: Some(retriever.index_coverage_complete),
+                fallback_reason_codes: retriever
+                    .fallback_reason_codes
+                    .iter()
+                    .filter_map(|code| vector_fallback_reason_code(*code))
+                    .collect(),
             },
         })
     }
@@ -5318,6 +5334,55 @@ fn vector_score_source(value: &str) -> Result<skein_executor::VectorScoreSource>
         _ => Err(SkeinError::Execution(
             "vector search returned an unsupported score source".to_string(),
         )),
+    }
+}
+
+fn vector_execution_backend(
+    score_source: skein_executor::VectorScoreSource,
+) -> skein_executor::VectorExecutionBackend {
+    match score_source {
+        skein_executor::VectorScoreSource::Unavailable => {
+            skein_executor::VectorExecutionBackend::Unavailable
+        }
+        skein_executor::VectorScoreSource::RawVector => {
+            skein_executor::VectorExecutionBackend::ScalarFlat
+        }
+        skein_executor::VectorScoreSource::AnnApproximate => {
+            skein_executor::VectorExecutionBackend::AnnProjection
+        }
+        skein_executor::VectorScoreSource::QuantizedApproximate => {
+            skein_executor::VectorExecutionBackend::QuantizedProjection
+        }
+    }
+}
+
+fn vector_compression_mode(
+    mode: CompressedVectorSearchMode,
+) -> skein_executor::VectorCompressionMode {
+    match mode {
+        CompressedVectorSearchMode::Disabled => skein_executor::VectorCompressionMode::Disabled,
+        CompressedVectorSearchMode::Preferred => skein_executor::VectorCompressionMode::Preferred,
+        CompressedVectorSearchMode::Required => skein_executor::VectorCompressionMode::Required,
+    }
+}
+
+fn vector_fallback_reason_code(
+    code: SearchFallbackReasonCode,
+) -> Option<skein_executor::VectorFallbackReasonCode> {
+    match code {
+        SearchFallbackReasonCode::VectorDimensionMismatch => {
+            Some(skein_executor::VectorFallbackReasonCode::VectorDimensionMismatch)
+        }
+        SearchFallbackReasonCode::VectorIndexEmpty => {
+            Some(skein_executor::VectorFallbackReasonCode::VectorIndexEmpty)
+        }
+        SearchFallbackReasonCode::CompressedVectorProjectionUnavailable => {
+            Some(skein_executor::VectorFallbackReasonCode::CompressedVectorProjectionUnavailable)
+        }
+        SearchFallbackReasonCode::QueryEmbeddingMissing => {
+            Some(skein_executor::VectorFallbackReasonCode::QueryEmbeddingMissing)
+        }
+        SearchFallbackReasonCode::TextQueryEmpty => None,
     }
 }
 
@@ -6259,15 +6324,23 @@ fn vector_execution_report_json(
     report: &skein_executor::VectorExecutionReport,
 ) -> serde_json::Value {
     serde_json::json!({
+        "backend": report.backend.as_str(),
+        "compression_mode": report.compression_mode.as_str(),
         "candidate_source": report.candidate_source.as_str(),
         "candidate_score_source": report.candidate_score_source.as_str(),
         "final_score_source": report.final_score_source.as_str(),
         "generated_candidate_count": report.generated_candidate_count,
+        "descriptor_pruned_count": report.descriptor_pruned_count,
+        "scalar_filtered_count": report.scalar_filtered_count,
         "residual_filtered_count": report.residual_filtered_count,
         "candidate_scan_rounds": report.candidate_scan_rounds,
         "reranked_candidate_count": report.reranked_candidate_count,
         "returned_count": report.returned_count,
         "raw_vector_bytes_read": report.raw_vector_bytes_read,
+        "index_covered_document_count": report.index_covered_document_count,
+        "index_candidate_document_count": report.index_candidate_document_count,
+        "index_coverage_complete": report.index_coverage_complete,
+        "fallback_reason_codes": report.fallback_reason_codes.iter().map(|code| code.as_str()).collect::<Vec<_>>(),
     })
 }
 
@@ -11455,6 +11528,14 @@ mod tests {
         assert_eq!(output.report.plan_cache_lookup.as_deref(), Some("bypass"));
         assert_eq!(output.report.vector_execution_reports.len(), 1);
         assert_eq!(
+            output.report.vector_execution_reports[0].backend,
+            skein_executor::VectorExecutionBackend::ScalarFlat
+        );
+        assert_eq!(
+            output.report.vector_execution_reports[0].compression_mode,
+            skein_executor::VectorCompressionMode::Disabled
+        );
+        assert_eq!(
             output.report.vector_execution_reports[0].candidate_source,
             skein_plan::VectorCandidateSource::Scalar
         );
@@ -11462,6 +11543,21 @@ mod tests {
             output.report.vector_execution_reports[0].final_score_source,
             skein_executor::VectorScoreSource::RawVector
         );
+        assert_eq!(
+            output.report.vector_execution_reports[0].index_covered_document_count,
+            Some(2)
+        );
+        assert_eq!(
+            output.report.vector_execution_reports[0].index_candidate_document_count,
+            Some(2)
+        );
+        assert_eq!(
+            output.report.vector_execution_reports[0].index_coverage_complete,
+            Some(true)
+        );
+        assert!(output.report.vector_execution_reports[0]
+            .fallback_reason_codes
+            .is_empty());
         assert!(output.report.vector_execution_reports[0].raw_vector_bytes_read > 0);
 
         let explain = store
@@ -11488,6 +11584,18 @@ mod tests {
         let slow_event: serde_json::Value =
             serde_json::from_str(slow_log.lines().next().unwrap()).unwrap();
         assert_eq!(slow_event["vector_execution_report_count"], 1);
+        assert_eq!(
+            slow_event["vector_execution_reports"][0]["backend"],
+            "scalar_flat"
+        );
+        assert_eq!(
+            slow_event["vector_execution_reports"][0]["compression_mode"],
+            "disabled"
+        );
+        assert_eq!(
+            slow_event["vector_execution_reports"][0]["index_coverage_complete"],
+            true
+        );
         assert!(slow_event.get("query_text").is_none());
         assert!(!slow_log.contains("1.0"));
     }

@@ -133,12 +133,21 @@ pub struct BlackboxJsonlArtifactSummary {
     pub nonempty_line_count: usize,
     pub vector_query_count: usize,
     pub vector_execution_report_count: usize,
+    pub vector_backends: Vec<String>,
+    pub vector_compression_modes: Vec<String>,
     pub vector_candidate_sources: Vec<String>,
     pub generated_candidate_count: u64,
+    pub descriptor_pruned_count: u64,
+    pub scalar_filtered_count: u64,
     pub residual_filtered_count: u64,
     pub reranked_candidate_count: u64,
     pub returned_count: u64,
     pub raw_vector_bytes_read: u64,
+    pub index_covered_document_count: u64,
+    pub index_candidate_document_count: u64,
+    pub index_coverage_incomplete_report_count: usize,
+    pub index_coverage_unknown_report_count: usize,
+    pub vector_fallback_reason_codes: Vec<String>,
 }
 
 impl BlackboxJsonlArtifactSummary {
@@ -148,12 +157,21 @@ impl BlackboxJsonlArtifactSummary {
             "nonempty_line_count": self.nonempty_line_count,
             "vector_query_count": self.vector_query_count,
             "vector_execution_report_count": self.vector_execution_report_count,
+            "vector_backends": self.vector_backends,
+            "vector_compression_modes": self.vector_compression_modes,
             "vector_candidate_sources": self.vector_candidate_sources,
             "generated_candidate_count": self.generated_candidate_count,
+            "descriptor_pruned_count": self.descriptor_pruned_count,
+            "scalar_filtered_count": self.scalar_filtered_count,
             "residual_filtered_count": self.residual_filtered_count,
             "reranked_candidate_count": self.reranked_candidate_count,
             "returned_count": self.returned_count,
             "raw_vector_bytes_read": self.raw_vector_bytes_read,
+            "index_covered_document_count": self.index_covered_document_count,
+            "index_candidate_document_count": self.index_candidate_document_count,
+            "index_coverage_incomplete_report_count": self.index_coverage_incomplete_report_count,
+            "index_coverage_unknown_report_count": self.index_coverage_unknown_report_count,
+            "vector_fallback_reason_codes": self.vector_fallback_reason_codes,
         })
     }
 }
@@ -848,12 +866,21 @@ fn jsonl_artifact_summary(bytes: &[u8]) -> BlackboxJsonlArtifactSummary {
     let nonempty_line_count = text.lines().filter(|line| !line.trim().is_empty()).count();
     let mut vector_query_count = 0usize;
     let mut vector_execution_report_count = 0usize;
+    let mut vector_backends = BTreeSet::new();
+    let mut vector_compression_modes = BTreeSet::new();
     let mut vector_candidate_sources = BTreeSet::new();
     let mut generated_candidate_count = 0u64;
+    let mut descriptor_pruned_count = 0u64;
+    let mut scalar_filtered_count = 0u64;
     let mut residual_filtered_count = 0u64;
     let mut reranked_candidate_count = 0u64;
     let mut returned_count = 0u64;
     let mut raw_vector_bytes_read = 0u64;
+    let mut index_covered_document_count = 0u64;
+    let mut index_candidate_document_count = 0u64;
+    let mut index_coverage_incomplete_report_count = 0usize;
+    let mut index_coverage_unknown_report_count = 0usize;
+    let mut vector_fallback_reason_codes = BTreeSet::new();
     for value in text
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
@@ -869,6 +896,15 @@ fn jsonl_artifact_summary(bytes: &[u8]) -> BlackboxJsonlArtifactSummary {
         }
         vector_execution_report_count = vector_execution_report_count.saturating_add(reports.len());
         for report in reports {
+            if let Some(backend) = report.get("backend").and_then(serde_json::Value::as_str) {
+                vector_backends.insert(backend.to_string());
+            }
+            if let Some(mode) = report
+                .get("compression_mode")
+                .and_then(serde_json::Value::as_str)
+            {
+                vector_compression_modes.insert(mode.to_string());
+            }
             if let Some(source) = report
                 .get("candidate_source")
                 .and_then(serde_json::Value::as_str)
@@ -878,6 +914,18 @@ fn jsonl_artifact_summary(bytes: &[u8]) -> BlackboxJsonlArtifactSummary {
             generated_candidate_count = generated_candidate_count.saturating_add(
                 report
                     .get("generated_candidate_count")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+            );
+            descriptor_pruned_count = descriptor_pruned_count.saturating_add(
+                report
+                    .get("descriptor_pruned_count")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+            );
+            scalar_filtered_count = scalar_filtered_count.saturating_add(
+                report
+                    .get("scalar_filtered_count")
                     .and_then(serde_json::Value::as_u64)
                     .unwrap_or(0),
             );
@@ -905,6 +953,43 @@ fn jsonl_artifact_summary(bytes: &[u8]) -> BlackboxJsonlArtifactSummary {
                     .and_then(serde_json::Value::as_u64)
                     .unwrap_or(0),
             );
+            index_covered_document_count = index_covered_document_count.saturating_add(
+                report
+                    .get("index_covered_document_count")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+            );
+            index_candidate_document_count = index_candidate_document_count.saturating_add(
+                report
+                    .get("index_candidate_document_count")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+            );
+            match report
+                .get("index_coverage_complete")
+                .and_then(serde_json::Value::as_bool)
+            {
+                Some(false) => {
+                    index_coverage_incomplete_report_count =
+                        index_coverage_incomplete_report_count.saturating_add(1);
+                }
+                Some(true) => {}
+                None => {
+                    index_coverage_unknown_report_count =
+                        index_coverage_unknown_report_count.saturating_add(1);
+                }
+            }
+            if let Some(codes) = report
+                .get("fallback_reason_codes")
+                .and_then(serde_json::Value::as_array)
+            {
+                vector_fallback_reason_codes.extend(
+                    codes
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(ToString::to_string),
+                );
+            }
         }
     }
     BlackboxJsonlArtifactSummary {
@@ -912,12 +997,21 @@ fn jsonl_artifact_summary(bytes: &[u8]) -> BlackboxJsonlArtifactSummary {
         nonempty_line_count,
         vector_query_count,
         vector_execution_report_count,
+        vector_backends: vector_backends.into_iter().collect(),
+        vector_compression_modes: vector_compression_modes.into_iter().collect(),
         vector_candidate_sources: vector_candidate_sources.into_iter().collect(),
         generated_candidate_count,
+        descriptor_pruned_count,
+        scalar_filtered_count,
         residual_filtered_count,
         reranked_candidate_count,
         returned_count,
         raw_vector_bytes_read,
+        index_covered_document_count,
+        index_candidate_document_count,
+        index_coverage_incomplete_report_count,
+        index_coverage_unknown_report_count,
+        vector_fallback_reason_codes: vector_fallback_reason_codes.into_iter().collect(),
     }
 }
 
@@ -1225,19 +1319,31 @@ mod tests {
     #[test]
     fn jsonl_summary_aggregates_redacted_vector_execution_metrics() {
         let summary = jsonl_artifact_summary(
-            br#"{"vector_execution_reports":[{"candidate_source":"scalar","generated_candidate_count":5,"residual_filtered_count":1,"reranked_candidate_count":4,"returned_count":2,"raw_vector_bytes_read":128}]}
+            br#"{"vector_execution_reports":[{"backend":"quantized_projection","compression_mode":"preferred","candidate_source":"quantized","generated_candidate_count":5,"descriptor_pruned_count":3,"scalar_filtered_count":2,"residual_filtered_count":1,"reranked_candidate_count":4,"returned_count":2,"raw_vector_bytes_read":128,"index_covered_document_count":8,"index_candidate_document_count":10,"index_coverage_complete":false,"fallback_reason_codes":["vector_index_empty"]}]}
 {"vector_execution_reports":[]}
 "#,
         );
 
         assert_eq!(summary.vector_query_count, 1);
         assert_eq!(summary.vector_execution_report_count, 1);
-        assert_eq!(summary.vector_candidate_sources, vec!["scalar"]);
+        assert_eq!(summary.vector_backends, vec!["quantized_projection"]);
+        assert_eq!(summary.vector_compression_modes, vec!["preferred"]);
+        assert_eq!(summary.vector_candidate_sources, vec!["quantized"]);
         assert_eq!(summary.generated_candidate_count, 5);
+        assert_eq!(summary.descriptor_pruned_count, 3);
+        assert_eq!(summary.scalar_filtered_count, 2);
         assert_eq!(summary.residual_filtered_count, 1);
         assert_eq!(summary.reranked_candidate_count, 4);
         assert_eq!(summary.returned_count, 2);
         assert_eq!(summary.raw_vector_bytes_read, 128);
+        assert_eq!(summary.index_covered_document_count, 8);
+        assert_eq!(summary.index_candidate_document_count, 10);
+        assert_eq!(summary.index_coverage_incomplete_report_count, 1);
+        assert_eq!(summary.index_coverage_unknown_report_count, 0);
+        assert_eq!(
+            summary.vector_fallback_reason_codes,
+            vec!["vector_index_empty"]
+        );
     }
 
     #[test]

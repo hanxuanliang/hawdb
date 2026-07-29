@@ -830,7 +830,7 @@ contract.
     - Track recall@k, overlap@k, fallback counts, and filter selectivity.
     - Make production readiness fail closed when recall evidence is absent for
       a required approximate backend.
-  - [ ] Extend vector observability in explain, explain analyze, slow log, and
+  - [x] Extend vector observability in explain, explain analyze, slow log, and
     blackbox reports.
     - [x] Carry typed execution counters for candidate scan rounds,
       descriptor-pruned and scalar-filtered candidates, raw-vector bytes read,
