@@ -10804,6 +10804,111 @@ mod tests {
     }
 
     #[test]
+    fn embedded_store_catches_up_delete_after_graph_checkpoint_and_restart() {
+        let root = unique_nowledge_mem_test_dir("embedded_projection_checkpoint_restart");
+        let graph_path = root.join("graph");
+        let search_path = root.join("search");
+        {
+            let graph =
+                NowledgeMemGraph::open(&graph_path, NowledgeMemGraphMode::WritableCutover).unwrap();
+            let projection =
+                NowledgeMemSearchProjection::from_index(SearchIndex::open(&search_path).unwrap());
+            let mut store = NowledgeMemEmbeddedStore::new(graph, Some(projection));
+            store
+                .graph_mut()
+                .query("CREATE (:Memory {id: 'm1', title: 'Removed after checkpoint'})")
+                .unwrap();
+            let initial_report = store.catch_up_search_projection(16, 1).unwrap();
+            assert!(initial_report.complete);
+            assert!(store
+                .search_projection()
+                .unwrap()
+                .index()
+                .document("memory:m1")
+                .is_some());
+
+            store
+                .graph_mut()
+                .query("MATCH (m:Memory {id: 'm1'}) DETACH DELETE m")
+                .unwrap();
+            store.graph_mut().database_mut().checkpoint().unwrap();
+        }
+
+        {
+            let graph =
+                NowledgeMemGraph::open(&graph_path, NowledgeMemGraphMode::WritableCutover).unwrap();
+            let projection =
+                NowledgeMemSearchProjection::from_index(SearchIndex::open(&search_path).unwrap());
+            let mut store = NowledgeMemEmbeddedStore::new(graph, Some(projection));
+            let report = store.catch_up_search_projection(16, 1).unwrap();
+
+            assert!(report.complete);
+            assert_eq!(report.start_durable_epoch, Some(1));
+            assert_eq!(report.end_durable_epoch, Some(2));
+            assert!(store
+                .search_projection()
+                .unwrap()
+                .index()
+                .document("memory:m1")
+                .is_none());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn embedded_store_does_not_split_graph_commit_across_projection_batches() {
+        let root = unique_nowledge_mem_test_dir("embedded_projection_commit_boundary");
+        let search_path = root.join("search");
+        let mut db = Database::new();
+        {
+            let mut transaction = db.begin_transaction();
+            transaction
+                .query("CREATE (:Memory {id: 'm1', title: 'First'})")
+                .unwrap();
+            transaction
+                .query("CREATE (:Memory {id: 'm2', title: 'Second'})")
+                .unwrap();
+            transaction.commit().unwrap();
+        }
+        let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        let projection =
+            NowledgeMemSearchProjection::from_index(SearchIndex::open(&search_path).unwrap());
+        let mut store = NowledgeMemEmbeddedStore::new(graph, Some(projection));
+
+        let error = store.catch_up_search_projection(1, 1).unwrap_err();
+        assert!(error.to_string().contains(
+            "search projection graph change at commit epoch 1 requires 2 operations, exceeding configured per-batch limit 1"
+        ));
+        let projection = store.search_projection().unwrap();
+        assert_eq!(
+            projection
+                .index()
+                .projection_freshness()
+                .durable_source_graph_commit_epoch,
+            None
+        );
+        assert!(projection.index().document("memory:m1").is_none());
+        assert!(projection.index().document("memory:m2").is_none());
+
+        let report = store.catch_up_search_projection(2, 1).unwrap();
+        assert!(report.complete);
+        assert_eq!(report.end_durable_epoch, Some(1));
+        assert!(store
+            .search_projection()
+            .unwrap()
+            .index()
+            .document("memory:m1")
+            .is_some());
+        assert!(store
+            .search_projection()
+            .unwrap()
+            .index()
+            .document("memory:m2")
+            .is_some());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn embedded_store_handle_reuses_open_store_for_knowledge_retrieval() {
         let root = unique_nowledge_mem_test_dir("embedded_handle_retrieval");
         let search_path = root.join("search");

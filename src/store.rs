@@ -4061,6 +4061,8 @@ impl GraphStore {
             commit_epoch: self.commit_epoch,
             next_node_id: self.next_node_id,
             next_rel_id: self.next_rel_id,
+            search_projection_change_log_start_epoch: self.search_projection_change_log_start_epoch,
+            search_projection_graph_changes: &self.search_projection_graph_changes,
             nodes: &self.nodes,
             relationships: &self.relationships,
             projected_graphs: &self.projected_graphs,
@@ -6300,6 +6302,7 @@ impl GraphStore {
                 "checkpoint checksum mismatch: expected {checksum}, got {actual}"
             )));
         }
+        let mut loaded_search_projection_change_log_start_epoch = None;
         for line in body.lines() {
             if line == "SKEIN_CHECKPOINT_V1" {
                 continue;
@@ -6315,6 +6318,32 @@ impl GraphStore {
                 }
                 ["commit_epoch", raw] => {
                     self.commit_epoch = parse_u64(raw, "commit_epoch")?;
+                }
+                ["search_projection_change_log_start_epoch", raw] => {
+                    if loaded_search_projection_change_log_start_epoch.is_some() {
+                        return Err(SkeinError::Storage(
+                            "checkpoint contains duplicate search projection change log start epoch"
+                                .to_string(),
+                        ));
+                    }
+                    let start_epoch = parse_u64(raw, "search projection change log start epoch")?;
+                    loaded_search_projection_change_log_start_epoch = Some(start_epoch);
+                    self.search_projection_change_log_start_epoch = start_epoch;
+                }
+                ["search_projection_change", raw_commit_epoch, raw_upsert_node_ids, raw_delete_document_ids] =>
+                {
+                    self.search_projection_graph_changes
+                        .push(SearchProjectionGraphChange {
+                            commit_epoch: parse_u64(
+                                raw_commit_epoch,
+                                "search projection change commit epoch",
+                            )?,
+                            upsert_node_ids: decode_u64_vec(
+                                raw_upsert_node_ids,
+                                "search projection change upsert node id",
+                            )?,
+                            delete_document_ids: decode_string_vec(raw_delete_document_ids)?,
+                        });
                 }
                 ["label", raw_id, raw_name] => {
                     let id = LabelId(parse_u32(raw_id, "label id")?);
@@ -6475,7 +6504,26 @@ impl GraphStore {
                 }
             }
         }
-        self.search_projection_change_log_start_epoch = self.commit_epoch;
+        match loaded_search_projection_change_log_start_epoch {
+            Some(start_epoch) => {
+                validate_search_projection_checkpoint_changes(
+                    start_epoch,
+                    self.commit_epoch,
+                    &self.search_projection_graph_changes,
+                )?;
+            }
+            None if self.search_projection_graph_changes.is_empty() => {
+                // Checkpoints written before durable projection deltas were
+                // introduced can only resume from mutations after the snapshot.
+                self.search_projection_change_log_start_epoch = self.commit_epoch;
+            }
+            None => {
+                return Err(SkeinError::Storage(
+                    "checkpoint search projection changes are missing their start epoch"
+                        .to_string(),
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -6781,6 +6829,8 @@ struct CheckpointImage<'a> {
     commit_epoch: u64,
     next_node_id: u64,
     next_rel_id: u64,
+    search_projection_change_log_start_epoch: u64,
+    search_projection_graph_changes: &'a [SearchProjectionGraphChange],
     nodes: &'a BTreeMap<NodeId, NodeRecord>,
     relationships: &'a BTreeMap<RelId, RelRecord>,
     projected_graphs: &'a BTreeMap<String, ProjectedGraphDefinition>,
@@ -6933,12 +6983,29 @@ impl DurableStore {
     }
 
     fn write_checkpoint(&self, image: CheckpointImage<'_>) -> Result<()> {
+        validate_search_projection_checkpoint_changes(
+            image.search_projection_change_log_start_epoch,
+            image.commit_epoch,
+            image.search_projection_graph_changes,
+        )?;
         let mut body = String::new();
         body.push_str("SKEIN_CHECKPOINT_V1\n");
         body.push_str(&format!("version\t{STORAGE_VERSION}\n"));
         body.push_str(&format!("commit_epoch\t{}\n", image.commit_epoch));
         body.push_str(&format!("next_node_id\t{}\n", image.next_node_id));
         body.push_str(&format!("next_rel_id\t{}\n", image.next_rel_id));
+        body.push_str(&format!(
+            "search_projection_change_log_start_epoch\t{}\n",
+            image.search_projection_change_log_start_epoch
+        ));
+        for change in image.search_projection_graph_changes {
+            body.push_str(&format!(
+                "search_projection_change\t{}\t{}\t{}\n",
+                change.commit_epoch,
+                encode_u64_vec(change.upsert_node_ids.iter().copied()),
+                encode_string_vec(&change.delete_document_ids)
+            ));
+        }
         for label in image.catalog.labels() {
             if !label.name.is_empty() {
                 body.push_str(&format!(
@@ -10281,6 +10348,55 @@ fn decode_u64_vec(input: &str, name: &str) -> Result<Vec<u64>> {
         .collect()
 }
 
+fn validate_search_projection_checkpoint_changes(
+    start_epoch: u64,
+    checkpoint_commit_epoch: u64,
+    changes: &[SearchProjectionGraphChange],
+) -> Result<()> {
+    if start_epoch > checkpoint_commit_epoch {
+        return Err(SkeinError::Storage(format!(
+            "search projection change log start epoch {start_epoch} exceeds checkpoint commit epoch {checkpoint_commit_epoch}"
+        )));
+    }
+    let mut previous_epoch = start_epoch;
+    for change in changes {
+        if change.commit_epoch <= previous_epoch {
+            return Err(SkeinError::Storage(format!(
+                "search projection change commit epoch {} is not greater than previous epoch {previous_epoch}",
+                change.commit_epoch
+            )));
+        }
+        if change.commit_epoch > checkpoint_commit_epoch {
+            return Err(SkeinError::Storage(format!(
+                "search projection change commit epoch {} exceeds checkpoint commit epoch {checkpoint_commit_epoch}",
+                change.commit_epoch
+            )));
+        }
+        if !change
+            .upsert_node_ids
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+        {
+            return Err(SkeinError::Storage(format!(
+                "search projection change at commit epoch {} has unordered or duplicate upsert node ids",
+                change.commit_epoch
+            )));
+        }
+        if !change
+            .delete_document_ids
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+        {
+            return Err(SkeinError::Storage(format!(
+                "search projection change at commit epoch {} has unordered or duplicate delete document ids",
+                change.commit_epoch
+            )));
+        }
+        previous_epoch = change.commit_epoch;
+    }
+    Ok(())
+}
+
 fn encode_usize_vec(values: impl IntoIterator<Item = usize>) -> String {
     values
         .into_iter()
@@ -10610,7 +10726,7 @@ mod tests {
         NodeRecord, NodeSetAssignment, NodeSetValue, OrderedAdjacencyEntry,
         ProjectedGraphDefinition, PropertyFilter, RelId, RelRecord, RelTypeId,
         RelationshipDeleteRequest, ScanPruningStrategy, ScanPruningTargetKind,
-        DENSE_ADJACENCY_DEGREE_THRESHOLD, DURABLE_COMPRESSION_HEADER,
+        SearchProjectionGraphChange, DENSE_ADJACENCY_DEGREE_THRESHOLD, DURABLE_COMPRESSION_HEADER,
     };
     use crate::schema::{Catalog, LabelId};
     use crate::value::Value;
@@ -11013,6 +11129,92 @@ mod tests {
             assert_eq!(rels[0].source, NodeId(0));
             assert_eq!(rels[0].target, NodeId(1));
         }
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn checkpoints_search_projection_changes_for_restart_safe_catch_up() {
+        let path = unique_test_dir("search_projection_change_checkpoint");
+        {
+            let mut catalog = Catalog::default();
+            let mut store = GraphStore::open(&path, &mut catalog).unwrap();
+            store
+                .create_node(
+                    &mut catalog,
+                    "Memory",
+                    properties([("id", Value::String("deleted-memory".to_string()))]),
+                )
+                .unwrap();
+            store
+                .delete_nodes(
+                    &mut catalog,
+                    "Memory",
+                    Some(&PropertyFilter::Eq {
+                        property: "id".to_string(),
+                        value: Value::String("deleted-memory".to_string()),
+                    }),
+                    true,
+                )
+                .unwrap();
+            store.checkpoint(&catalog).unwrap();
+        }
+
+        let mut catalog = Catalog::default();
+        let store = GraphStore::open(&path, &mut catalog).unwrap();
+        assert_eq!(store.commit_epoch(), 2);
+        assert_eq!(store.search_projection_change_log_start_epoch(), 0);
+        assert_eq!(
+            store.search_projection_graph_changes_after(0),
+            vec![
+                SearchProjectionGraphChange {
+                    commit_epoch: 1,
+                    upsert_node_ids: vec![0],
+                    delete_document_ids: Vec::new(),
+                },
+                SearchProjectionGraphChange {
+                    commit_epoch: 2,
+                    upsert_node_ids: Vec::new(),
+                    delete_document_ids: vec!["memory:deleted-memory".to_string()],
+                },
+            ]
+        );
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn legacy_checkpoint_without_projection_changes_resumes_after_snapshot() {
+        let path = unique_test_dir("legacy_search_projection_checkpoint");
+        {
+            let mut catalog = Catalog::default();
+            let mut store = GraphStore::open(&path, &mut catalog).unwrap();
+            store
+                .create_node(
+                    &mut catalog,
+                    "Memory",
+                    properties([("id", Value::String("legacy-memory".to_string()))]),
+                )
+                .unwrap();
+            store.checkpoint(&catalog).unwrap();
+        }
+        let checkpoint_path = path.join("checkpoint.skein");
+        rewrite_checksummed_file(
+            &checkpoint_path,
+            "search_projection_change_log_start_epoch\t0\n",
+            "",
+            "checkpoint",
+        );
+        rewrite_checksummed_file(
+            &checkpoint_path,
+            "search_projection_change\t1\t0\t\n",
+            "",
+            "checkpoint",
+        );
+
+        let mut catalog = Catalog::default();
+        let store = GraphStore::open(&path, &mut catalog).unwrap();
+        assert_eq!(store.commit_epoch(), 1);
+        assert_eq!(store.search_projection_change_log_start_epoch(), 1);
+        assert!(store.search_projection_graph_changes_after(0).is_empty());
         std::fs::remove_dir_all(path).unwrap();
     }
 

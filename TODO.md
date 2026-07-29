@@ -80,6 +80,106 @@ query family, or cutover gate requires them.
   - [x] Expose local open-path diagnostics only behind an explicit debug flag;
     default open diagnostics remain redacted.
 
+## P0: Nowledge Mem Production Integration
+
+The checked kernel and readiness items elsewhere in this file prove that Skein
+exposes an API or evidence contract. They do not prove that the shipped Mem
+runtime owns the corresponding production path. The items in this section stay
+open until Mem consumes the library API and no longer depends on Kuzu/Ladybug or
+LanceDB for that path.
+
+- [ ] Add crash-recoverable dual writes for Mem mutations.
+  - Inject one long-lived writable Skein handle into Mem write resources.
+  - Cover Memory create, update, lifecycle, and delete first, then Label,
+    Entity, Thread, Source, and relationship mutations.
+  - Persist an idempotent mutation obligation before either database can report
+    success, and record independent legacy and Skein apply watermarks.
+  - Replay incomplete obligations after restart without duplicating nodes,
+    relationships, or search projection rows.
+  - Acceptance: a successful request is readable from the selected engine, and
+    every crash point either has both writes durable or has a durable replay
+    obligation that converges them.
+
+- [ ] Add resumable initial import from Kuzu/Ladybug and LanceDB.
+  - Run import through bounded Rust library APIs; production startup must not
+    spawn a CLI or helper process.
+  - Import canonical graph state from Kuzu/Ladybug and rebuild or import all six
+    search projection kinds: Memory, Message, Community, Entity, Source, and
+    SourceChunk.
+  - Persist source schema/version fingerprints, batch checkpoints, document
+    identities, and graph/search watermarks.
+  - Keep foreground dual writes active while import catches up, and make retries
+    idempotent.
+  - Acceptance: restart resumes from the last durable checkpoint and read
+    cutover remains blocked until imported state and live mutations reach the
+    same durable watermark.
+
+- [ ] Migrate the complete Mem graph read route inventory.
+  - Treat the shared route catalog as an inventory, not proof of live ownership.
+  - Move REST, MCP, read-batch, export, and background-maintenance reads from
+    direct `KuzuClient` calls to parameterized Cypher through the embedded query
+    runtime.
+  - Start with the existing overview, sample, node-details, community,
+    augmentation, PageRank-plan, and orphan library APIs.
+  - Preserve response shape, ordering, pagination, error classes, and metadata
+    stripping without request-time dual-read comparison.
+  - Acceptance: each migrated route executes with Skein selected and contains
+    no direct Kuzu/Ladybug read in its request path.
+
+- [ ] Replace every active LanceDB search projection read.
+  - Wire Mem to Skein candidate reads for Memory, Message, Community, Entity,
+    Source, and SourceChunk projections.
+  - Cover thread/message FTS, entity/community discovery, source and source
+    chunk recall, `/fs/recall`, MCP search, and deep-search graph expansion.
+  - Preserve embedding identity, zero-vector semantics, CJK tokenization,
+    ranking windows, fail-soft reason codes, and repair/rebuild markers.
+  - Acceptance: no active search route requires a LanceDB handle when the Skein
+    search engine is selected.
+
+- [ ] Split graph and search cutover controls and make status truthful.
+  - Configure graph reads, search reads, dual writes, import, and projection
+    catch-up independently through host-owned library configuration.
+  - Do not report the whole graph or search engine as Skein-owned merely because
+    the feature is compiled and paths are configured.
+  - Include open state, route ownership, applied and durable watermarks,
+    projection freshness, and active blockers in readiness.
+  - Acceptance: partial route migration is represented as partial ownership, and
+    stale or unopened stores cannot report an effective Skein cutover.
+
+- [ ] Close Mem search filter and result-semantics parity.
+  - Add labels, event-date ranges, recorded-date ranges, temporal context,
+    cross-space scope, and the remaining metadata predicate forms.
+  - Push descriptor-safe predicates into segment planning before payload reads;
+    keep bounded residual evaluation only for predicates that cannot be exact.
+  - Preserve offset/limit, stable ordering, deep mode, and empty-versus-error
+    behavior.
+  - Acceptance: supported Mem search requests no longer return
+    `NOT_IMPLEMENTED`, and `EXPLAIN ANALYZE` proves payload avoidance for
+    descriptor-safe filters.
+
+- [ ] Persist the ordered graph-to-search changefeed.
+  - Persist mutation identity, commit boundaries, and ordered projection deltas
+    rather than relying on the retained in-memory graph change log.
+  - Resume from the search projection's durable source-graph watermark without
+    requiring a full rebuild.
+  - Keep one graph commit indivisible across projection batches and advance the
+    durable watermark only after a successful projection checkpoint.
+  - Acceptance: restart, bounded-log truncation, and stale upsert/delete
+    sequences converge without losing or splitting a committed graph mutation.
+
+- [ ] Integrate Skein recovery and operations into the Mem lifecycle.
+  - Wire checkpoint, shutdown, WAL replay, corruption quarantine/repair,
+    projection catch-up, QoS, slow-query, and blackbox APIs into Mem startup,
+    health, readiness, and background scheduling.
+  - Add host-owned OpenTelemetry metrics for WAL, checkpoint, recovery, index
+    maintenance, and background admission without installing a global
+    subscriber.
+  - Prove overlapping pinned reads while commits remain serialized and
+    durable-before-publish.
+  - Acceptance: Mem health exposes typed actionable blockers, and crash,
+    corruption, memory-pressure, and long-running concurrent workloads have
+    integration tests through the embedded library path.
+
 ## P0: Concrete Cutover Blockers
 
 These items are the current kernel and integration gaps that block declaring
@@ -794,7 +894,7 @@ contract.
   and background-maintenance blockers.
 - [x] Add stable counters for plan cache hit, miss, admission, eviction, and
   memory pressure.
-- [ ] Complete the multi-reader, single durable writer library contract.
+- [x] Complete the multi-reader, single durable writer library contract.
   - [x] Cover bounded LFU plan cache invariants with a feature-gated Loom model
     in CI.
   - [x] Cover local QoS scheduler background admission and permit accounting
@@ -806,7 +906,7 @@ contract.
   - [x] Remove whole-store read serialization from the embedded Mem handle.
   - [x] Prove overlapping handle reads and model crash-safe
     durable-before-publish behavior.
-  - [ ] Prove overlapping pinned query execution while commits remain serialized and
+  - [x] Prove overlapping pinned query execution while commits remain serialized and
     durable-before-publish.
 - [ ] Complete host-owned OpenTelemetry coverage.
   - [x] Provide an optional OpenTelemetry metrics adapter that accepts a
@@ -815,12 +915,12 @@ contract.
     and statement-kind metrics without query text or parameters.
   - [ ] Add WAL, checkpoint, recovery, index maintenance, and background QoS
     metrics with bounded exporter behavior owned by the host.
-- [ ] Complete durable incremental-index catch-up.
+- [x] Complete durable incremental-index catch-up.
   - [x] Distinguish the applied source graph epoch from the durable checkpoint
     watermark and report uncheckpointed changes.
   - [x] Add a bounded library catch-up loop that truncates changefeed batches at
     complete commit boundaries and checkpoints each applied projection batch.
-  - [ ] Persist ordered delta identity and resume catch-up from the last durable
+  - [x] Persist ordered delta identity and resume catch-up from the last durable
     watermark without requiring a full rebuild.
 - [x] Add library readiness APIs for Mem integration.
   - Expose structured readiness, slow-query, blackbox, storage-recovery,

@@ -318,7 +318,14 @@ fn search_projection_changefeed_retention_zero_disables_incremental_window() {
 fn search_projection_delta_request_requires_rebuild_when_changefeed_start_is_too_new() {
     let path = unique_test_dir("search_projection_changefeed_checkpoint_gap");
     {
-        let mut db = Database::open(&path).unwrap();
+        let mut db = Database::open_with_config(
+            &path,
+            DatabaseConfig {
+                max_search_projection_change_log_entries: Some(0),
+                ..DatabaseConfig::default()
+            },
+        )
+        .unwrap();
         db.query("CREATE (:Memory {id: 'm1', title: 'Checkpointed'})")
             .unwrap();
         db.checkpoint().unwrap();

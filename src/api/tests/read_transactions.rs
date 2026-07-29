@@ -1,4 +1,6 @@
 use super::*;
+use crate::DatabaseReadTransaction;
+use std::sync::{Arc, Barrier};
 
 #[test]
 fn read_transaction_keeps_snapshot_before_later_commit() {
@@ -441,6 +443,72 @@ fn read_transaction_pins_checkpoint_manifest_until_drop() {
         assert_eq!(watermark.safe_reclaim_commit_epoch, 2);
         assert!(watermark.durable);
     }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn overlapping_pinned_reads_survive_serialized_durable_commit() {
+    let path = unique_test_dir("overlapping_pinned_reads");
+    let mut db = Database::open(&path).unwrap();
+    db.query("CREATE (:Memory {id: 1, title: 'Pinned snapshot'})")
+        .unwrap();
+
+    let first_reader = db.begin_read_transaction();
+    let second_reader = db.begin_read_transaction();
+    let readers_started = Arc::new(Barrier::new(3));
+    let readers_release = Arc::new(Barrier::new(3));
+    let spawn_reader = |mut reader: DatabaseReadTransaction| {
+        let readers_started = Arc::clone(&readers_started);
+        let readers_release = Arc::clone(&readers_release);
+        std::thread::spawn(move || {
+            readers_started.wait();
+            let before = reader
+                .query("MATCH (m:Memory {id: 1}) RETURN m.title AS title")
+                .unwrap();
+            let after = reader
+                .query("MATCH (m:Memory {id: 2}) RETURN m.title AS title")
+                .unwrap();
+            readers_release.wait();
+            (before, after)
+        })
+    };
+    let first = spawn_reader(first_reader);
+    let second = spawn_reader(second_reader);
+
+    readers_started.wait();
+    db.query("CREATE (:Memory {id: 2, title: 'Durable commit'})")
+        .unwrap();
+    db.checkpoint().unwrap();
+    let watermark = db.storage_reclamation_watermark();
+    assert_eq!(watermark.current_commit_epoch, 2);
+    assert_eq!(watermark.oldest_reader_commit_epoch, Some(1));
+    assert_eq!(watermark.safe_reclaim_commit_epoch, 0);
+    assert!(watermark.durable);
+
+    readers_release.wait();
+    for reader in [first, second] {
+        let (before, after) = reader.join().unwrap();
+        assert_eq!(
+            before.rows[0].get("title"),
+            Some(&Value::String("Pinned snapshot".to_string()))
+        );
+        assert!(after.rows.is_empty());
+    }
+    assert_eq!(
+        db.storage_reclamation_watermark()
+            .oldest_reader_commit_epoch,
+        None
+    );
+    drop(db);
+
+    let mut reopened = Database::open(&path).unwrap();
+    let durable = reopened
+        .query("MATCH (m:Memory {id: 2}) RETURN m.title AS title")
+        .unwrap();
+    assert_eq!(
+        durable.rows[0].get("title"),
+        Some(&Value::String("Durable commit".to_string()))
+    );
     std::fs::remove_dir_all(path).unwrap();
 }
 
