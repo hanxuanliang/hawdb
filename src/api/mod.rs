@@ -76,6 +76,7 @@ mod observability;
 mod plan_cache;
 mod query_domains;
 mod query_runtime;
+mod schema_guidance;
 mod system_sql;
 mod system_variables;
 

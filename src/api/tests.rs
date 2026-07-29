@@ -144,6 +144,7 @@ mod delete_mutations;
 mod expression_functions;
 mod external_content_artifacts;
 mod graph_meta;
+mod graph_rag_schema_guidance;
 mod knowledge_community_entity_visibility;
 mod knowledge_community_memories;
 mod knowledge_context_memory_preview;

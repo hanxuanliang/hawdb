@@ -176,6 +176,30 @@ It resolves labels, relationship types, variable scopes, property references,
 and cardinality constraints. This keeps parser syntax compatibility separate
 from planning semantics.
 
+### Schema-guided GraphRAG queries
+
+GraphRAG callers obtain a bounded `GraphRagSchemaContext` from `Database` or a
+pinned `DatabaseReadTransaction`. The context is built only from catalog tokens
+and aggregate graph statistics. It contains ranked labels, relationship types,
+public or observed properties, one-hop routes, and common two-hop paths. It
+never reads node payloads, embeddings, content values, or histogram samples.
+
+The default context limits every collection and properties per subject. A
+stable fingerprint covers the returned snapshot and truncation state so a host
+can cache prompt context without confusing two schema views. The compact
+renderer tells a query generator to:
+
+- generate read-only Cypher;
+- parameterize values;
+- use only identifiers present in the context;
+- keep generated traversal bounded to at most two hops.
+
+Skein does not embed an LLM and does not execute generated queries through a
+special GraphRAG interpreter. The host submits generated Cypher through the
+normal query runtime, or through a read transaction when it needs an enforced
+read-only snapshot. Parsing, optimization, execution profiling, slow-query
+logging, and blackbox aggregation therefore retain their normal ownership.
+
 ### Cloud semantic seam
 
 Neither the current Cloud adapter nor Skein Cloud runs the Skein embedded

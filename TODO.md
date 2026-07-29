@@ -867,7 +867,7 @@ contract.
       graph as a post-search primary-key lookup.
     - Report seed count, expanded node count, expanded edge count, relation
       types, hop count, rerank count, and payload byte budget usage.
-  - [ ] Add schema-guided query-generation support for GraphRAG callers.
+  - [x] Add schema-guided query-generation support for GraphRAG callers.
     - Expose compact label, relationship type, property, common-path, and route
       catalog summaries for LLM-assisted Cypher generation.
     - Keep schema context generated from stable graph metadata and Nowledge
