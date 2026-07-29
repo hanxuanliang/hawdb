@@ -145,10 +145,11 @@ LanceDB for that path.
     projection freshness, and active blockers in readiness.
   - [x] Split Mem graph and search read selection into independent host
     configuration, retain the old aggregate variable only as a compatibility
-    fallback, and fail closed with a typed graph-route blocker while graph
-    routes remain legacy-owned.
+    fallback, and route the existing Skein-owned graph and search surfaces only
+    when their respective domain is selected.
     - Implemented in Mem PR #384 with domain-specific precedence tests and a
-      versioned runtime status payload.
+      versioned runtime status payload that reports partial ownership without
+      claiming either complete engine.
   - [ ] Bind readiness to the actual process-lifetime Skein open state rather
     than configured paths alone.
   - [ ] Expose graph and search route ownership, applied and durable watermarks,
