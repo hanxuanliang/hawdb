@@ -234,6 +234,15 @@ An index MAY lag canonical state. It MUST NOT claim freshness beyond its durable
 watermark. Query planning MAY use a lagging index only when a residual path
 preserves correctness; otherwise it MUST catch up or use a canonical scan.
 
+The graph-to-search changefeed uses the graph commit epoch as its stable
+mutation identity. One retained changefeed record represents one indivisible
+graph commit. Checkpointed records and WAL-only suffix records MUST reconstruct
+the same ordered stream after restart. The typed changefeed status MUST expose
+the current graph epoch, the earliest resumable source epoch, retained mutation
+bounds, and whether the stream is restart-recoverable. A host MUST block
+incremental catch-up and request a rebuild when its durable search watermark is
+older than the resumable floor.
+
 ANN, quantized vectors, FTS, BM25, property indexes, segment summaries, and
 membership filters are rebuildable. Their corruption MUST NOT make canonical
 graph data unrecoverable.

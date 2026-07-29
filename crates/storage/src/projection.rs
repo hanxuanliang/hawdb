@@ -86,3 +86,39 @@ pub struct SearchProjectionGraphChange {
     pub upsert_node_ids: Vec<u64>,
     pub delete_document_ids: Vec<String>,
 }
+
+impl SearchProjectionGraphChange {
+    pub const fn mutation_id(&self) -> SearchProjectionMutationId {
+        SearchProjectionMutationId(self.commit_epoch)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SearchProjectionMutationId(pub u64);
+
+impl SearchProjectionMutationId {
+    pub const fn commit_epoch(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchProjectionChangefeedStatus {
+    pub graph_commit_epoch: u64,
+    pub resume_floor_commit_epoch: u64,
+    pub oldest_retained_mutation_id: Option<SearchProjectionMutationId>,
+    pub newest_retained_mutation_id: Option<SearchProjectionMutationId>,
+    pub retained_mutation_count: usize,
+    pub restart_recoverable: bool,
+}
+
+impl SearchProjectionChangefeedStatus {
+    pub const fn can_resume_after(self, source_graph_commit_epoch: u64) -> bool {
+        source_graph_commit_epoch >= self.resume_floor_commit_epoch
+            && source_graph_commit_epoch <= self.graph_commit_epoch
+    }
+
+    pub const fn requires_rebuild_after(self, source_graph_commit_epoch: u64) -> bool {
+        source_graph_commit_epoch < self.resume_floor_commit_epoch
+    }
+}

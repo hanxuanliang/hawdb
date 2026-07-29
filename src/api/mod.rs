@@ -5342,6 +5342,12 @@ impl Database {
         self.store.commit_epoch()
     }
 
+    pub fn search_projection_changefeed_status(
+        &self,
+    ) -> skein_storage::SearchProjectionChangefeedStatus {
+        self.store.search_projection_changefeed_status()
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Self::open_with_durability(path, DurabilityPolicy::default())
     }

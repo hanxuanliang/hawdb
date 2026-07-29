@@ -20,10 +20,11 @@ pub use skein_storage::{
     RelationshipDeleteRequest, RelationshipOnCreatePropertyValue, RelationshipPropertiesUpdate,
     RelationshipPropertyUpdate, RelationshipSetAssignment, RelationshipTargetNodeDelete,
     ScanPruningReport, ScanPruningStrategy, ScanPruningTargetKind, SchemaMaintenanceAction,
-    SchemaMaintenancePlanItem, SearchProjectionGraphChange, SegmentRangeReader, SegmentReadError,
-    SegmentReadExecutionError, SegmentReadExecutionReport, SegmentReadExecutor, SegmentReadPayload,
-    SegmentReadRange, SegmentReadSchedule, SegmentReadScheduler, SegmentReadWave,
-    StorageReclamationWatermark, StorageRecoveryReport, StoreStableIdMapping, WalReplayConfig,
+    SchemaMaintenancePlanItem, SearchProjectionChangefeedStatus, SearchProjectionGraphChange,
+    SearchProjectionMutationId, SegmentRangeReader, SegmentReadError, SegmentReadExecutionError,
+    SegmentReadExecutionReport, SegmentReadExecutor, SegmentReadPayload, SegmentReadRange,
+    SegmentReadSchedule, SegmentReadScheduler, SegmentReadWave, StorageReclamationWatermark,
+    StorageRecoveryReport, StoreStableIdMapping, WalReplayConfig,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
@@ -4111,6 +4112,23 @@ impl GraphStore {
             .filter(|change| change.commit_epoch > commit_epoch)
             .cloned()
             .collect()
+    }
+
+    pub fn search_projection_changefeed_status(&self) -> SearchProjectionChangefeedStatus {
+        SearchProjectionChangefeedStatus {
+            graph_commit_epoch: self.commit_epoch,
+            resume_floor_commit_epoch: self.search_projection_change_log_start_epoch,
+            oldest_retained_mutation_id: self
+                .search_projection_graph_changes
+                .first()
+                .map(SearchProjectionGraphChange::mutation_id),
+            newest_retained_mutation_id: self
+                .search_projection_graph_changes
+                .last()
+                .map(SearchProjectionGraphChange::mutation_id),
+            retained_mutation_count: self.search_projection_graph_changes.len(),
+            restart_recoverable: self.durable.is_some(),
+        }
     }
 
     pub fn set_max_search_projection_change_log_entries(&mut self, max_entries: Option<usize>) {

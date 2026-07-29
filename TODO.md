@@ -158,12 +158,15 @@ LanceDB for that path.
     descriptor-safe filters.
 
 - [ ] Persist the ordered graph-to-search changefeed.
-  - Persist mutation identity, commit boundaries, and ordered projection deltas
-    rather than relying on the retained in-memory graph change log.
-  - Resume from the search projection's durable source-graph watermark without
-    requiring a full rebuild.
-  - Keep one graph commit indivisible across projection batches and advance the
+  - [x] Use the graph commit epoch as a stable mutation identity and reconstruct
+    checkpointed plus WAL-only ordered deltas after restart.
+  - [x] Expose typed changefeed status with the resumable floor, retained
+    mutation bounds, and restart-recoverable state.
+  - [x] Resume from the search projection's durable source-graph watermark,
+    keep one graph commit indivisible across bounded batches, and advance the
     durable watermark only after a successful projection checkpoint.
+  - [ ] Wire the Mem-owned background scheduler to the long-lived graph and
+    search handles so production catch-up consumes this stream.
   - Acceptance: restart, bounded-log truncation, and stale upsert/delete
     sequences converge without losing or splitting a committed graph mutation.
 

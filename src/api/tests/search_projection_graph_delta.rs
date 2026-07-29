@@ -315,6 +315,93 @@ fn search_projection_changefeed_retention_zero_disables_incremental_window() {
 }
 
 #[test]
+fn search_projection_changefeed_status_reports_resume_window_and_mutation_identity() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_search_projection_change_log_entries: Some(2),
+        ..DatabaseConfig::default()
+    });
+    for id in ["m1", "m2", "m3"] {
+        db.query_with_params(
+            "CREATE (:Memory {id: $id, title: $id})",
+            &BTreeMap::from([("id".to_string(), Value::String(id.to_string()))]),
+        )
+        .unwrap();
+    }
+
+    let status = db.search_projection_changefeed_status();
+
+    assert_eq!(status.graph_commit_epoch, 3);
+    assert_eq!(status.resume_floor_commit_epoch, 1);
+    assert_eq!(
+        status
+            .oldest_retained_mutation_id
+            .map(|id| id.commit_epoch()),
+        Some(2)
+    );
+    assert_eq!(
+        status
+            .newest_retained_mutation_id
+            .map(|id| id.commit_epoch()),
+        Some(3)
+    );
+    assert_eq!(status.retained_mutation_count, 2);
+    assert!(!status.restart_recoverable);
+    assert!(status.requires_rebuild_after(0));
+    assert!(status.can_resume_after(1));
+    assert!(status.can_resume_after(3));
+    assert!(!status.can_resume_after(4));
+}
+
+#[test]
+fn search_projection_changefeed_replays_wal_only_mutations_after_restart() {
+    let graph_path = unique_test_dir("search_projection_changefeed_wal_restart_graph");
+    let search_path = unique_test_dir("search_projection_changefeed_wal_restart_search");
+    {
+        let mut db = Database::open(&graph_path).unwrap();
+        db.query("CREATE (:Memory {id: 'm1', title: 'Checkpointed'})")
+            .unwrap();
+        db.checkpoint().unwrap();
+
+        let mut search_index = SearchIndex::open(&search_path).unwrap();
+        db.catch_up_search_projection(&mut search_index, 4, 1)
+            .unwrap();
+        assert_eq!(
+            search_index
+                .projection_freshness()
+                .durable_source_graph_commit_epoch,
+            Some(1)
+        );
+
+        db.query("CREATE (:Memory {id: 'm2', title: 'WAL only'})")
+            .unwrap();
+    }
+
+    let db = Database::open(&graph_path).unwrap();
+    let status = db.search_projection_changefeed_status();
+    assert_eq!(status.graph_commit_epoch, 2);
+    assert!(status.restart_recoverable);
+    assert_eq!(
+        status
+            .newest_retained_mutation_id
+            .map(|id| id.commit_epoch()),
+        Some(2)
+    );
+
+    let mut search_index = SearchIndex::open(&search_path).unwrap();
+    let report = db
+        .catch_up_search_projection(&mut search_index, 4, 1)
+        .unwrap();
+    assert!(report.complete);
+    assert_eq!(report.start_durable_epoch, Some(1));
+    assert_eq!(report.end_durable_epoch, Some(2));
+    assert!(search_index.document("memory:m1").is_some());
+    assert!(search_index.document("memory:m2").is_some());
+
+    std::fs::remove_dir_all(graph_path).unwrap();
+    std::fs::remove_dir_all(search_path).unwrap();
+}
+
+#[test]
 fn search_projection_delta_request_requires_rebuild_when_changefeed_start_is_too_new() {
     let path = unique_test_dir("search_projection_changefeed_checkpoint_gap");
     {
