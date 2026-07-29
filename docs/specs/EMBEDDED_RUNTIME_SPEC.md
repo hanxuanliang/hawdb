@@ -74,6 +74,14 @@ operation returns `SkeinError::CapabilityUnavailable` with a typed
 for hosts that keep the corresponding capability enabled. Capability settings
 do not alter the durable format, WAL contract, or core Cypher semantics.
 
+Profile compatibility MUST be verified by reopening the same durable database
+in both directions. Data and schema written by `DesktopBound` remain readable
+and writable through core parameterized Cypher under `MobileEmbedded`, and
+mobile writes remain readable after reopening as `DesktopBound`. A profile
+switch does not migrate or rewrite the storage format. Queries that require a
+disabled optional capability fail before planning or mutation without
+invalidating the shared database.
+
 ## Concurrency Model
 
 Skein MUST support concurrent readers and a concurrent writer through

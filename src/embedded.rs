@@ -248,9 +248,10 @@ fn default_io_budget(
 mod tests {
     use super::*;
     use crate::{
-        NowledgeMemGraphMode, NowledgeMemReadinessOptions, Value,
+        NowledgeMemGraphMode, NowledgeMemReadinessOptions, RuntimeCapability, SkeinError, Value,
         NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
     };
+    use std::collections::BTreeMap;
     use std::num::NonZeroUsize;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -415,6 +416,97 @@ mod tests {
         assert_eq!(
             engine.runtime_resources().storage_io,
             IoConcurrencyBudget::new(12, 3)
+        );
+    }
+
+    #[test]
+    fn desktop_and_mobile_profiles_share_storage_and_core_cypher_semantics() {
+        let root = unique_test_dir("embedded-profile-compatibility");
+        let graph_path = root.join("graph");
+        let storage_version = {
+            let mut desktop = SkeinEmbedded::open(&graph_path).unwrap();
+            desktop
+                .database_mut()
+                .query("CREATE NODE TABLE Memory")
+                .unwrap();
+            desktop
+                .database_mut()
+                .query("CREATE PROPERTY ON NODE TABLE Memory(id) TYPE STRING NOT NULL")
+                .unwrap();
+            desktop
+                .database_mut()
+                .query_with_params(
+                    "CREATE (:Memory {id: $id, title: $title})",
+                    &BTreeMap::from([
+                        ("id".to_string(), Value::String("desktop".to_string())),
+                        (
+                            "title".to_string(),
+                            Value::String("Written on desktop".to_string()),
+                        ),
+                    ]),
+                )
+                .unwrap();
+            desktop.database().storage_version()
+        };
+
+        {
+            let mut mobile =
+                SkeinEmbedded::open_with_options(SkeinEmbeddedOpenOptions::mobile(&graph_path))
+                    .unwrap();
+            assert_eq!(mobile.database().storage_version(), storage_version);
+            let output = mobile
+                .database_mut()
+                .query_with_params(
+                    "MATCH (m:Memory) WHERE m.id = $id RETURN m.title AS title",
+                    &BTreeMap::from([("id".to_string(), Value::String("desktop".to_string()))]),
+                )
+                .unwrap();
+            assert_eq!(
+                output.rows[0].get("title"),
+                Some(&Value::String("Written on desktop".to_string()))
+            );
+
+            let error = mobile
+                .database_mut()
+                .query("CALL project_graph('memory_graph', ['Memory'], [])")
+                .unwrap_err();
+            assert_eq!(
+                error,
+                SkeinError::CapabilityUnavailable {
+                    capability: RuntimeCapability::GraphAnalytics
+                }
+            );
+
+            mobile
+                .database_mut()
+                .query_with_params(
+                    "CREATE (:Memory {id: $id, title: $title})",
+                    &BTreeMap::from([
+                        ("id".to_string(), Value::String("mobile".to_string())),
+                        (
+                            "title".to_string(),
+                            Value::String("Written on mobile".to_string()),
+                        ),
+                    ]),
+                )
+                .unwrap();
+        }
+
+        let mut desktop = SkeinEmbedded::open(&graph_path).unwrap();
+        let output = desktop
+            .database_mut()
+            .query("MATCH (m:Memory) RETURN m.id AS id ORDER BY id ASC")
+            .unwrap();
+        assert_eq!(
+            output
+                .rows
+                .iter()
+                .map(|row| row.get("id").cloned())
+                .collect::<Vec<_>>(),
+            vec![
+                Some(Value::String("desktop".to_string())),
+                Some(Value::String("mobile".to_string())),
+            ]
         );
     }
 

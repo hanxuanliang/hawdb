@@ -899,7 +899,7 @@ contract.
     silent in-memory fallback.
   - [x] Add platform-specific device discovery without deriving a claimed SSD
     channel count from CPU count alone.
-  - [ ] Keep the durable storage format and core Cypher semantics compatible
+  - [x] Keep the durable storage format and core Cypher semantics compatible
     across profiles; return typed capability-unavailable errors instead of
     silent unbounded fallbacks.
   - [ ] Add build-time feature gates for optional mobile capabilities after the
