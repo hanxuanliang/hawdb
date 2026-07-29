@@ -5,10 +5,22 @@ pub enum VectorCandidateSource {
     Quantized,
 }
 
+impl VectorCandidateSource {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Scalar => "scalar",
+            Self::Ann => "ann",
+            Self::Quantized => "quantized",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VectorSearchLogicalPlan {
     pub embedding_dimension: usize,
     pub filter_fields: Vec<String>,
+    pub residual_filter_fields: Vec<String>,
+    pub initial_candidate_limit: usize,
     pub candidate_source: VectorCandidateSource,
     pub candidate_limit: usize,
     pub top_k: usize,
@@ -23,6 +35,11 @@ pub enum VectorPhysicalPlan {
         source: VectorCandidateSource,
         embedding_dimension: usize,
         candidate_limit: usize,
+        input: Box<VectorPhysicalPlan>,
+    },
+    ResidualFilter {
+        fields: Vec<String>,
+        initial_candidate_limit: usize,
         input: Box<VectorPhysicalPlan>,
     },
     RawVectorRerank {
@@ -40,6 +57,7 @@ impl VectorPhysicalPlan {
         match self {
             Self::Filter { .. } => "Filter",
             Self::VectorCandidateScan { .. } => "VectorCandidateScan",
+            Self::ResidualFilter { .. } => "ResidualFilter",
             Self::RawVectorRerank { .. } => "RawVectorRerank",
             Self::TopK { .. } => "TopK",
         }
@@ -49,6 +67,7 @@ impl VectorPhysicalPlan {
         match self {
             Self::Filter { .. } => None,
             Self::VectorCandidateScan { input, .. }
+            | Self::ResidualFilter { input, .. }
             | Self::RawVectorRerank { input, .. }
             | Self::TopK { input, .. } => Some(input),
         }

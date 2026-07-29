@@ -31,7 +31,10 @@ rust_test(
     name = "planner_golden_test",
     srcs = ["tests/planner_golden.rs"],
     crate_root = "tests/planner_golden.rs",
-    compile_data = ["tests/golden/indexed_memory_lookup.golden"],
+    compile_data = [
+        "tests/golden/filtered_vector_pipeline.golden",
+        "tests/golden/indexed_memory_lookup.golden",
+    ],
     edition = "2024",
     aliases = aliases(normal_dev = True, proc_macro_dev = True),
     deps = all_crate_deps(normal_dev = True) + [

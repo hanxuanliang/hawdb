@@ -800,7 +800,7 @@ contract.
   - [x] Gate advanced compressed vector retrieval modes behind typed recall,
     parity, and cold/local-segment advisor evidence for embedded store opens
     and search-candidate requests.
-  - [ ] Add a unified filtered-vector execution path.
+  - [x] Add a unified filtered-vector execution path.
     - Push `WHERE` predicates for lifecycle, unit type, metadata, numeric
       ranges, timestamp ranges, and unique document ids into segment descriptors
       before vector scoring whenever the predicate is descriptor-safe.
@@ -809,7 +809,7 @@ contract.
       until `topK` is satisfied or the budget is exhausted.
     - Preserve scalar cosine scan as the exact baseline for small filtered
       candidate sets and high-filter-ratio workloads.
-  - [ ] Split vector retrieval into candidate generation plus raw-vector
+  - [x] Split vector retrieval into candidate generation plus raw-vector
     reranking.
     - Treat compressed or ANN results as candidates only.
     - Rerank the bounded candidate window against raw vectors before returning

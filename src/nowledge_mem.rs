@@ -3793,6 +3793,8 @@ pub struct NowledgeMemSearchCandidateReport {
     pub retriever_backends: BTreeMap<String, String>,
     pub retriever_available: BTreeMap<String, bool>,
     pub retriever_candidate_counts: BTreeMap<String, usize>,
+    pub retriever_candidate_score_sources: BTreeMap<String, String>,
+    pub retriever_final_score_sources: BTreeMap<String, String>,
     pub fallback_reason_codes: Vec<String>,
     pub empty_reason_codes: Vec<String>,
     pub truncation_reason_codes: Vec<String>,
@@ -3862,6 +3864,14 @@ impl NowledgeMemSearchCandidateReport {
         object.insert(
             "physical_bytes_read".to_string(),
             serde_json::json!(self.physical_bytes_read),
+        );
+        object.insert(
+            "retriever_candidate_score_sources".to_string(),
+            serde_json::json!(self.retriever_candidate_score_sources),
+        );
+        object.insert(
+            "retriever_final_score_sources".to_string(),
+            serde_json::json!(self.retriever_final_score_sources),
         );
         value
     }
@@ -7502,6 +7512,21 @@ fn nowledge_mem_search_candidate_report(
             .retrievers
             .iter()
             .map(|retriever| (retriever.name.clone(), retriever.candidate_count))
+            .collect(),
+        retriever_candidate_score_sources: result
+            .retrievers
+            .iter()
+            .map(|retriever| {
+                (
+                    retriever.name.clone(),
+                    retriever.candidate_score_source.clone(),
+                )
+            })
+            .collect(),
+        retriever_final_score_sources: result
+            .retrievers
+            .iter()
+            .map(|retriever| (retriever.name.clone(), retriever.final_score_source.clone()))
             .collect(),
         fallback_reason_codes: result
             .fallback_reason_codes
@@ -11396,6 +11421,17 @@ mod tests {
             output.report.retriever_candidate_counts.get("vector"),
             Some(&2)
         );
+        assert_eq!(
+            output
+                .report
+                .retriever_candidate_score_sources
+                .get("vector"),
+            Some(&"raw_vector".to_string())
+        );
+        assert_eq!(
+            output.report.retriever_final_score_sources.get("vector"),
+            Some(&"raw_vector".to_string())
+        );
         assert_eq!(output.report.pushed_predicate_count, 1);
         assert_eq!(output.report.pruned_segment_count, 1);
         assert_eq!(output.report.filtered_out_count, 2);
@@ -11404,6 +11440,10 @@ mod tests {
         assert_eq!(
             output.report.json()["retriever_candidate_counts"]["vector"],
             2
+        );
+        assert_eq!(
+            output.report.json()["retriever_final_score_sources"]["vector"],
+            "raw_vector"
         );
         assert!(!output.report.json().to_string().contains("[1.0,0.0]"));
 

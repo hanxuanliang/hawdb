@@ -1287,6 +1287,7 @@ name = "skein-executor"
 version = "0.1.0"
 dependencies = [
  "skein-core",
+ "skein-plan",
 ]
 
 [[package]]

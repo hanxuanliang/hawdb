@@ -12,12 +12,11 @@ use crate::value::Value;
 use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use simsimd::SpatialSimilarity;
 use skein_optimizer::{
-    normalize_search_enum_value, plan_vector_search, push_search_predicates,
-    search_field_is_enum_like, OptimizerContext, QueryFamily, ResourceHints, SearchPredicate,
-    SearchPredicateOp, SearchPredicateSet, SearchScalarValue, SearchScanPredicateSupport,
-    VectorPrecision,
+    normalize_search_enum_value, push_search_predicates, search_field_is_enum_like,
+    SearchPredicate, SearchPredicateOp, SearchPredicateSet, SearchScalarValue,
+    SearchScanPredicateSupport,
 };
-use skein_plan::{VectorCandidateSource, VectorSearchLogicalPlan};
+use skein_plan::VectorCandidateSource;
 use skein_storage::{
     EnumDictionaryStats, FieldSummary, RangeBound, ScanPredicate, SegmentPruner, SegmentReadRange,
     SegmentSummary,
@@ -35,8 +34,10 @@ mod analyzer_lexicon;
 mod range_io;
 #[cfg(feature = "turbovec")]
 pub mod turbovec_projection;
+mod vector_execution;
 use analyzer_lexicon::{CORE_SEMANTIC_ALIAS_RULES, NOWLEDGE_MEMORY_SEMANTIC_ALIAS_RULES};
 pub use range_io::SearchRangeReadConfig;
+use vector_execution::{execute_search_vector_plan, SearchVectorExecutionRequest};
 
 const SEARCH_SNAPSHOT_FILE: &str = "search_projection.skein";
 const SEARCH_SEGMENT_DESCRIPTOR_FILE: &str = "search_projection_segments.skein";
@@ -386,6 +387,10 @@ pub struct SearchRetrieverReport {
     pub backend: String,
     pub available: bool,
     pub input_candidate_set: SearchCandidateSetReport,
+    pub candidate_score_source: String,
+    pub final_score_source: String,
+    pub generated_candidate_count: usize,
+    pub reranked_candidate_count: usize,
     pub candidate_count: usize,
     pub candidate_set: SearchRetrieverCandidateSetReport,
     pub fallback_reason_codes: Vec<SearchFallbackReasonCode>,
@@ -1723,31 +1728,12 @@ impl SearchIndex {
         predicate_pushdown.report.field_summaries = filtered.field_summaries;
         let filtered_documents = filtered.documents;
         let filtered_document_count = filtered_documents.len();
-        if let Some(dimension) = self.embedding_dimension {
-            let candidate_limit = limit.max(options.rank_window.unwrap_or(0)).max(1);
-            let logical = VectorSearchLogicalPlan {
-                embedding_dimension: dimension,
-                filter_fields: predicate_pushdown
-                    .predicates
-                    .predicates()
-                    .iter()
-                    .map(|predicate| predicate.field().name().to_string())
-                    .collect(),
-                candidate_source: vector_backend.candidate_source(),
-                candidate_limit,
-                top_k: limit.max(1),
-            };
-            let context = OptimizerContext::default()
-                .with_query_family(QueryFamily::VectorSearch)
-                .with_resource_hints(ResourceHints {
-                    priority: 128,
-                    max_memory_bytes: None,
-                    max_parallelism: 1,
-                });
-            let planned = plan_vector_search(&logical, &context)
-                .expect("validated search options must produce a vector physical plan");
-            debug_assert_eq!(planned.properties.precision, VectorPrecision::RawReranked);
-        }
+        let vector_filter_fields = predicate_pushdown
+            .predicates
+            .predicates()
+            .iter()
+            .map(|predicate| predicate.field().name().to_string())
+            .collect::<Vec<_>>();
         let candidate_set = SearchCandidateSetReport {
             id_space: "search_projection_document_id".to_string(),
             representation: "sorted_document_ids".to_string(),
@@ -1804,19 +1790,25 @@ impl SearchIndex {
         };
         let projection_freshness = self.projection_freshness();
 
-        let vector_scores = if vector_available && mode != SearchMode::Text {
-            vector_scores_for_backend(
-                query_embedding.expect("vector_available requires query embedding"),
-                &filtered_documents,
-                vector_backend,
+        let vector_execution = if vector_available && mode != SearchMode::Text {
+            Some(execute_search_vector_plan(SearchVectorExecutionRequest {
+                query_embedding: query_embedding
+                    .expect("vector_available requires query embedding"),
+                documents: &filtered_documents,
+                backend: vector_backend,
+                filter_fields: vector_filter_fields,
                 limit,
-                options.rank_window,
-                &mut vector_fallback_reason_codes,
-                &mut vector_fallback_reasons,
-            )
+                rank_window: options.rank_window,
+                fallback_reason_codes: &mut vector_fallback_reason_codes,
+                fallback_reasons: &mut vector_fallback_reasons,
+            })?)
         } else {
-            BTreeMap::new()
+            None
         };
+        let vector_scores = vector_execution
+            .as_ref()
+            .map(|execution| execution.scores.clone())
+            .unwrap_or_default();
         let mut text_scores = BTreeMap::new();
         for document in &filtered_documents {
             let text_score = if text_available && mode != SearchMode::Vector {
@@ -1848,11 +1840,33 @@ impl SearchIndex {
                 backend: vector_backend.report_name().to_string(),
                 available: vector_available && mode != SearchMode::Text,
                 input_candidate_set: candidate_set.clone(),
+                candidate_score_source: vector_execution
+                    .as_ref()
+                    .map(|execution| execution.report.candidate_score_source.as_str())
+                    .unwrap_or("none")
+                    .to_string(),
+                final_score_source: vector_execution
+                    .as_ref()
+                    .map(|execution| execution.report.final_score_source.as_str())
+                    .unwrap_or("none")
+                    .to_string(),
+                generated_candidate_count: vector_execution
+                    .as_ref()
+                    .map(|execution| execution.report.generated_candidate_count)
+                    .unwrap_or(0),
+                reranked_candidate_count: vector_execution
+                    .as_ref()
+                    .map(|execution| execution.report.reranked_candidate_count)
+                    .unwrap_or(0),
                 candidate_count: vector_scores.len(),
                 candidate_set: retriever_candidate_set_report(
                     vector_window_ranks.len(),
                     self.source_graph_commit_epoch,
                     options.policy_epoch,
+                    vector_execution.as_ref().is_some_and(|execution| {
+                        execution.report.candidate_score_source
+                            == skein_executor::VectorScoreSource::RawVector
+                    }),
                 ),
                 fallback_reason_codes: vector_fallback_reason_codes,
                 fallback_reasons: vector_fallback_reasons,
@@ -1864,11 +1878,26 @@ impl SearchIndex {
                 backend: "bm25_text".to_string(),
                 available: text_available && mode != SearchMode::Vector,
                 input_candidate_set: candidate_set.clone(),
+                candidate_score_source: if text_available && mode != SearchMode::Vector {
+                    "bm25"
+                } else {
+                    "none"
+                }
+                .to_string(),
+                final_score_source: if text_available && mode != SearchMode::Vector {
+                    "bm25"
+                } else {
+                    "none"
+                }
+                .to_string(),
+                generated_candidate_count: text_scores.len(),
+                reranked_candidate_count: 0,
                 candidate_count: text_scores.len(),
                 candidate_set: retriever_candidate_set_report(
                     text_window_ranks.len(),
                     self.source_graph_commit_epoch,
                     options.policy_epoch,
+                    true,
                 ),
                 fallback_reason_codes: text_fallback_reason_codes,
                 fallback_reasons: text_fallback_reasons,
@@ -2997,82 +3026,6 @@ fn value_to_projection_string(value: &Value) -> String {
     }
 }
 
-fn vector_scores_for_backend(
-    query_embedding: &[f32],
-    documents: &[&SearchDocument],
-    backend: VectorSearchBackend<'_>,
-    limit: usize,
-    rank_window: Option<usize>,
-    fallback_reason_codes: &mut Vec<SearchFallbackReasonCode>,
-    fallback_reasons: &mut Vec<String>,
-) -> BTreeMap<String, f64> {
-    #[cfg(not(feature = "turbovec"))]
-    let _ = (limit, rank_window);
-
-    match backend {
-        VectorSearchBackend::Scalar => scalar_vector_scores(query_embedding, documents),
-        VectorSearchBackend::CompressedRequiredUnavailable => {
-            fallback_reason_codes
-                .push(SearchFallbackReasonCode::CompressedVectorProjectionUnavailable);
-            fallback_reasons.push(
-                "compressed vector projection required but unavailable; scalar vector scan disabled"
-                    .to_string(),
-            );
-            BTreeMap::new()
-        }
-        #[cfg(not(feature = "turbovec"))]
-        VectorSearchBackend::_Lifetime(_) => unreachable!("lifetime marker is never constructed"),
-        #[cfg(feature = "turbovec")]
-        VectorSearchBackend::Turbovec(projection) => {
-            let allowlist = documents
-                .iter()
-                .map(|document| document.id.clone())
-                .collect::<BTreeSet<_>>();
-            let candidate_limit = limit.max(rank_window.unwrap_or(0)).max(1);
-            match projection.search(query_embedding, candidate_limit, Some(&allowlist)) {
-                Ok(hits) => {
-                    let raw_documents = documents
-                        .iter()
-                        .map(|document| (document.id.as_str(), *document))
-                        .collect::<BTreeMap<_, _>>();
-                    hits.into_iter()
-                        .filter_map(|hit| {
-                            let document = raw_documents.get(hit.id.as_str())?;
-                            let score =
-                                cosine_similarity(query_embedding, document.embedding.as_deref()?)?;
-                            (score > 0.0).then_some((hit.id, score))
-                        })
-                        .collect()
-                }
-                Err(error) => {
-                    fallback_reason_codes.push(SearchFallbackReasonCode::VectorIndexEmpty);
-                    fallback_reasons.push(format!(
-                        "compressed vector projection unavailable; fell back to scalar vector scan: {error}"
-                    ));
-                    scalar_vector_scores(query_embedding, documents)
-                }
-            }
-        }
-    }
-}
-
-fn scalar_vector_scores(
-    query_embedding: &[f32],
-    documents: &[&SearchDocument],
-) -> BTreeMap<String, f64> {
-    documents
-        .iter()
-        .filter_map(|document| {
-            document
-                .embedding
-                .as_deref()
-                .and_then(|embedding| cosine_similarity(query_embedding, embedding))
-                .filter(|score| *score > 0.0)
-                .map(|score| (document.id.clone(), score))
-        })
-        .collect()
-}
-
 fn ranked_scores(scores: &BTreeMap<String, f64>) -> BTreeMap<String, usize> {
     let mut ranked = scores
         .iter()
@@ -3196,12 +3149,13 @@ fn retriever_candidate_set_report(
     cardinality: usize,
     snapshot_source_graph_commit_epoch: Option<u64>,
     policy_epoch: Option<u64>,
+    exact: bool,
 ) -> SearchRetrieverCandidateSetReport {
     SearchRetrieverCandidateSetReport {
         id_space: "search_projection_document_id".to_string(),
         representation: "ranked_document_ids".to_string(),
         cardinality,
-        exact: true,
+        exact,
         snapshot_source_graph_commit_epoch,
         policy_epoch,
     }
@@ -5746,6 +5700,10 @@ mod tests {
         assert!(text.available);
         assert_eq!(vector.backend, "scalar_vector_scan");
         assert_eq!(text.backend, "bm25_text");
+        assert_eq!(vector.candidate_score_source, "raw_vector");
+        assert_eq!(vector.final_score_source, "raw_vector");
+        assert_eq!(vector.generated_candidate_count, 3);
+        assert_eq!(vector.reranked_candidate_count, 3);
         assert_eq!(vector.input_candidate_set, result.candidate_set);
         assert_eq!(text.input_candidate_set, result.candidate_set);
         assert_eq!(
@@ -8058,6 +8016,9 @@ mod tests {
             "compressed_vector_projection_required"
         );
         assert_eq!(result.retrievers[0].candidate_count, 0);
+        assert_eq!(result.retrievers[0].candidate_score_source, "unavailable");
+        assert_eq!(result.retrievers[0].final_score_source, "unavailable");
+        assert!(!result.retrievers[0].candidate_set.exact);
         assert!(result.retrievers[0]
             .fallback_reason_codes
             .contains(&SearchFallbackReasonCode::CompressedVectorProjectionUnavailable));
@@ -9382,6 +9343,14 @@ mod tests {
         assert_eq!(result.retrievers[0].name, "vector");
         assert_eq!(result.retrievers[0].backend, "turbovec_projection");
         assert!(result.retrievers[0].available);
+        assert_eq!(
+            result.retrievers[0].candidate_score_source,
+            "quantized_approximate"
+        );
+        assert_eq!(result.retrievers[0].final_score_source, "raw_vector");
+        assert_eq!(result.retrievers[0].generated_candidate_count, 1);
+        assert_eq!(result.retrievers[0].reranked_candidate_count, 1);
+        assert!(!result.retrievers[0].candidate_set.exact);
         assert!((result.retrievers[0].top_candidates[0].score - 0.8).abs() < 1e-6);
         assert_eq!(result.candidate_set.cardinality, 1);
         assert_eq!(result.candidate_set.filtered_out_count, 1);

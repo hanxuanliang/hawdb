@@ -1,0 +1,20 @@
+[logical]
+embedding_dimension=384
+prefilter_fields=["space_id", "unit_type"]
+residual_filter_fields=["complex_visibility"]
+initial_candidate_limit=10
+candidate_source=quantized
+candidate_limit=80
+top_k=10
+
+[physical]
+Filter
+VectorCandidateScan
+ResidualFilter
+RawVectorRerank
+TopK
+
+[properties]
+precision=raw_reranked
+max_parallelism=2
+max_memory_bytes=Some(8388608)

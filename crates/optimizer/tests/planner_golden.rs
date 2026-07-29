@@ -1,12 +1,14 @@
 use skein_cypher::parse;
 use skein_optimizer::{
-    CascadesOptimizer, LogicalPlanRoot, OptimizerCatalog, OptimizerCatalogIndexes,
-    OptimizerCatalogStatistics, OptimizerConfig,
+    plan_vector_search, CascadesOptimizer, LogicalPlanRoot, OptimizerCatalog,
+    OptimizerCatalogIndexes, OptimizerCatalogStatistics, OptimizerConfig, OptimizerContext,
+    QueryFamily, ResourceHints,
 };
-use skein_plan::plan;
+use skein_plan::{plan, VectorCandidateSource, VectorSearchLogicalPlan};
 
 const QUERY: &str = "MATCH (m:Memory) WHERE m.id = 7 RETURN m.title AS title";
 const EXPECTED: &str = include_str!("golden/indexed_memory_lookup.golden");
+const VECTOR_EXPECTED: &str = include_str!("golden/filtered_vector_pipeline.golden");
 
 #[test]
 fn indexed_memory_lookup_matches_planner_golden() {
@@ -37,6 +39,45 @@ fn indexed_memory_lookup_matches_planner_golden() {
         physical_root.trace(),
     );
     assert_eq!(actual.trim_end(), EXPECTED.trim_end());
+}
+
+#[test]
+fn filtered_vector_pipeline_matches_planner_golden() {
+    let logical = VectorSearchLogicalPlan {
+        embedding_dimension: 384,
+        filter_fields: vec!["space_id".to_string(), "unit_type".to_string()],
+        residual_filter_fields: vec!["complex_visibility".to_string()],
+        initial_candidate_limit: 10,
+        candidate_source: VectorCandidateSource::Quantized,
+        candidate_limit: 80,
+        top_k: 10,
+    };
+    let context = OptimizerContext::default()
+        .with_query_family(QueryFamily::VectorSearch)
+        .with_resource_hints(ResourceHints {
+            priority: 128,
+            max_memory_bytes: Some(8 * 1024 * 1024),
+            max_parallelism: 2,
+        });
+    let planned = plan_vector_search(&logical, &context).expect("vector golden must plan");
+    let actual = format!(
+        "[logical]\nembedding_dimension={}\nprefilter_fields={:?}\nresidual_filter_fields={:?}\ninitial_candidate_limit={}\ncandidate_source={}\ncandidate_limit={}\ntop_k={}\n\n\
+         [physical]\n{}\n\n\
+         [properties]\nprecision={}\nmax_parallelism={}\nmax_memory_bytes={:?}\n",
+        logical.embedding_dimension,
+        logical.filter_fields,
+        logical.residual_filter_fields,
+        logical.initial_candidate_limit,
+        logical.candidate_source.as_str(),
+        logical.candidate_limit,
+        logical.top_k,
+        planned.plan.operator_pipeline().join("\n"),
+        planned.properties.precision.as_str(),
+        planned.properties.max_parallelism,
+        planned.properties.max_memory_bytes,
+    );
+
+    assert_eq!(actual.trim_end(), VECTOR_EXPECTED.trim_end());
 }
 
 fn render_planner_golden(
