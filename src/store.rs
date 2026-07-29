@@ -10,16 +10,19 @@ use crate::search::{
 use crate::value::Value;
 pub use skein_storage::{
     AdjacencyDirection, AdjacencyGroupConsistencyMismatch, AdjacencyGroupKey, AdjacencyGroupStats,
-    AdjacencyLayout, ConnectedNodesCreate, DurabilityPolicy, DurableCompression, GraphMutation,
-    MatchedRelationshipCopyMerge, MatchedRelationshipCreate, MatchedRelationshipMerge,
-    MatchedRelationshipRetargetMerge, MatchedRelationshipSourceRetargetMerge, NodeId, NodeRecord,
-    NodeSetAssignment, NodeSetValue, OrderedAdjacencyEntry, ProjectedGraphDefinition,
-    ProjectedGraphStatus, PropertyFilter, PropertyIndexProjectionRebuildAction, RecoveryMode,
-    RelId, RelRecord, RelationshipDeleteRequest, RelationshipOnCreatePropertyValue,
-    RelationshipPropertiesUpdate, RelationshipPropertyUpdate, RelationshipSetAssignment,
-    RelationshipTargetNodeDelete, ScanPruningReport, ScanPruningStrategy, ScanPruningTargetKind,
-    SchemaMaintenanceAction, SchemaMaintenancePlanItem, SearchProjectionGraphChange,
-    StorageReclamationWatermark, StorageRecoveryReport, StoreStableIdMapping, WalReplayConfig,
+    AdjacencyLayout, ConnectedNodesCreate, DurabilityPolicy, DurableCompression,
+    FileSegmentRangeReader, GraphMutation, MatchedRelationshipCopyMerge, MatchedRelationshipCreate,
+    MatchedRelationshipMerge, MatchedRelationshipRetargetMerge,
+    MatchedRelationshipSourceRetargetMerge, NodeId, NodeRecord, NodeSetAssignment, NodeSetValue,
+    OrderedAdjacencyEntry, ProjectedGraphDefinition, ProjectedGraphStatus, PropertyFilter,
+    PropertyIndexProjectionRebuildAction, RecoveryMode, RelId, RelRecord,
+    RelationshipDeleteRequest, RelationshipOnCreatePropertyValue, RelationshipPropertiesUpdate,
+    RelationshipPropertyUpdate, RelationshipSetAssignment, RelationshipTargetNodeDelete,
+    ScanPruningReport, ScanPruningStrategy, ScanPruningTargetKind, SchemaMaintenanceAction,
+    SchemaMaintenancePlanItem, SearchProjectionGraphChange, SegmentRangeReader, SegmentReadError,
+    SegmentReadExecutionReport, SegmentReadExecutor, SegmentReadPayload, SegmentReadRange,
+    SegmentReadSchedule, SegmentReadScheduler, SegmentReadWave, StorageReclamationWatermark,
+    StorageRecoveryReport, StoreStableIdMapping, WalReplayConfig,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};

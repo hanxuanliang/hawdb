@@ -335,9 +335,12 @@ pub use store::{
     AdjacencyConsistencyReport, AdjacencyDirection, AdjacencyGroupConsistencyMismatch,
     AdjacencyGroupKey, AdjacencyGroupStats, AdjacencyLayout, BasicStatisticsConsistencyReport,
     DegreeStatisticsConsistencyReport, DegreeStatisticsEntry, DegreeStatisticsKey,
-    DistinctValueStatisticsConsistencyReport, DurabilityPolicy, OrderedAdjacencyEntry,
-    PropertyIndexConsistencyReport, RecoveryMode, StorageReclamationWatermark,
-    StorageRecoveryReport, WalReplayConfig, DENSE_ADJACENCY_DEGREE_THRESHOLD,
+    DistinctValueStatisticsConsistencyReport, DurabilityPolicy, FileSegmentRangeReader,
+    OrderedAdjacencyEntry, PropertyIndexConsistencyReport, RecoveryMode, SegmentRangeReader,
+    SegmentReadError, SegmentReadExecutionReport, SegmentReadExecutor, SegmentReadPayload,
+    SegmentReadRange, SegmentReadSchedule, SegmentReadScheduler, SegmentReadWave,
+    StorageReclamationWatermark, StorageRecoveryReport, WalReplayConfig,
+    DENSE_ADJACENCY_DEGREE_THRESHOLD,
 };
 #[cfg(feature = "opentelemetry")]
 pub use telemetry::OpenTelemetryMetrics;

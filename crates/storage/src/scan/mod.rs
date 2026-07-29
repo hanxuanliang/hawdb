@@ -2,11 +2,16 @@ use skein_core::{LabelId, RelTypeId};
 
 mod cursor;
 mod predicate;
+mod reader;
 mod scheduler;
 mod summary;
 
 pub use cursor::CandidateCursor;
 pub use predicate::{PruningDecision, PruningReason, RangeBound, ScanPredicate, SegmentPruner};
+pub use reader::{
+    FileSegmentRangeReader, SegmentRangeReader, SegmentReadError, SegmentReadExecutionReport,
+    SegmentReadExecutor, SegmentReadPayload,
+};
 pub use scheduler::{SegmentReadRange, SegmentReadSchedule, SegmentReadScheduler, SegmentReadWave};
 pub use summary::{
     DateTimeMinMax, EnumDictionaryStats, FieldSummary, MembershipFilterSummary, MembershipVerdict,
