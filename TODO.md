@@ -89,6 +89,17 @@ open until Mem consumes the library API and no longer depends on Kuzu/Ladybug or
 LanceDB for that path.
 
 - [ ] Add crash-recoverable dual writes for Mem mutations.
+  - [x] Dual-write shared `create_memory_core` Memory create/update requests
+    and label assignments through one process-lifetime Skein handle.
+    - Mem PR #384 persists versioned obligations before either engine applies,
+      records independent legacy/Skein acknowledgements, replays unfinished
+      work before startup and before a newer foreground mutation, and retires
+      only after both sides are durable.
+    - Real legacy/Skein tests cover prepare-only, legacy-only,
+      completed-but-unretired, and stale-obligation-before-new-write crash
+      windows.
+  - [ ] Route MCP `memory_add`, Memory lifecycle/delete, and the remaining
+    entity mutation families through the same durable coordinator.
   - Inject one long-lived writable Skein handle into Mem write resources.
   - Cover Memory create, update, lifecycle, and delete first, then Label,
     Entity, Thread, Source, and relationship mutations.
