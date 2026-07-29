@@ -77,6 +77,7 @@ mod plan_cache;
 mod query_domains;
 mod query_runtime;
 mod schema_guidance;
+mod search_projection_catch_up;
 mod system_sql;
 mod system_variables;
 
@@ -97,6 +98,10 @@ pub use canonical_snapshot::{
     GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION, GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION,
 };
 pub use plan_cache::{PlanCacheBypassReason, PlanCacheLookup, PlanCacheStats};
+pub use search_projection_catch_up::{
+    ScheduledSearchProjectionCatchUpReport, SearchProjectionCatchUpReport,
+    SearchProjectionCatchUpStopReason,
+};
 pub use system_variables::QuerySystemVariables;
 
 #[derive(Debug)]
@@ -320,18 +325,6 @@ pub struct RankedBackgroundMaintenance {
     pub plan: BackgroundWorkPlan,
     pub decision: BackgroundWorkDecision,
     pub search_projection_graph_delta: Option<SearchProjectionGraphDeltaRequest>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SearchProjectionCatchUpReport {
-    pub graph_commit_epoch: u64,
-    pub start_applied_epoch: Option<u64>,
-    pub start_durable_epoch: Option<u64>,
-    pub end_applied_epoch: Option<u64>,
-    pub end_durable_epoch: Option<u64>,
-    pub applied_batch_count: usize,
-    pub applied_operation_count: usize,
-    pub complete: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -6419,64 +6412,6 @@ impl Database {
                 .unwrap_or(0),
             max_operations,
         )
-    }
-
-    pub fn catch_up_search_projection(
-        &self,
-        search_index: &mut SearchIndex,
-        max_operations_per_batch: usize,
-        max_batches: usize,
-    ) -> Result<SearchProjectionCatchUpReport> {
-        if !search_index.is_persistent() {
-            return Err(SkeinError::Storage(
-                "durable search projection catch-up requires a persistent search index".to_string(),
-            ));
-        }
-        if max_operations_per_batch == 0 {
-            return Err(SkeinError::Semantic(
-                "search projection catch-up max_operations_per_batch must be greater than zero"
-                    .to_string(),
-            ));
-        }
-        if max_batches == 0 {
-            return Err(SkeinError::Semantic(
-                "search projection catch-up max_batches must be greater than zero".to_string(),
-            ));
-        }
-
-        let start = search_index.projection_freshness();
-        if start.has_uncheckpointed_changes {
-            search_index.checkpoint()?;
-        }
-        let graph_commit_epoch = self.store.commit_epoch();
-        let mut applied_batch_count = 0usize;
-        let mut applied_operation_count = 0usize;
-        while applied_batch_count < max_batches {
-            let Some(request) = self.build_search_projection_graph_delta_request_from_freshness(
-                search_index,
-                Some(max_operations_per_batch),
-            )?
-            else {
-                break;
-            };
-            let report = self.apply_search_projection_graph_delta(search_index, request)?;
-            search_index.checkpoint()?;
-            applied_batch_count = applied_batch_count.saturating_add(1);
-            applied_operation_count =
-                applied_operation_count.saturating_add(report.operation_count);
-        }
-
-        let end = search_index.projection_freshness();
-        Ok(SearchProjectionCatchUpReport {
-            graph_commit_epoch,
-            start_applied_epoch: start.source_graph_commit_epoch,
-            start_durable_epoch: start.durable_source_graph_commit_epoch,
-            end_applied_epoch: end.source_graph_commit_epoch,
-            end_durable_epoch: end.durable_source_graph_commit_epoch,
-            applied_batch_count,
-            applied_operation_count,
-            complete: end.durable_source_graph_commit_epoch.unwrap_or(0) == graph_commit_epoch,
-        })
     }
 
     pub fn background_maintenance_candidates(

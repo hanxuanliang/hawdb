@@ -74,9 +74,11 @@ pub use api::{
     KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphExplainOutput,
     NowledgeGraphStatement, NowledgeGraphTransactionOutput, PlanCacheBypassReason, PlanCacheLookup,
     PlanCacheStats, QueryOutput, QuerySystemVariables, RankedBackgroundMaintenance,
-    SearchProjectionCatchUpReport, SearchProjectionGraphDeltaRequest, SlowQueryLogExportOptions,
-    SlowQueryLogRecordSummary, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
-    GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION, SLOW_QUERY_LOG_EVENT_PROTOCOL,
+    ScheduledSearchProjectionCatchUpReport, SearchProjectionCatchUpReport,
+    SearchProjectionCatchUpStopReason, SearchProjectionGraphDeltaRequest,
+    SlowQueryLogExportOptions, SlowQueryLogRecordSummary,
+    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION, GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION,
+    SLOW_QUERY_LOG_EVENT_PROTOCOL,
 };
 pub use background_maintenance_evidence::nowledge_background_maintenance_evidence_json;
 pub use blackbox::{

@@ -13,9 +13,10 @@ use crate::{
     BackgroundWorkHint, BackgroundWorkPlan, Database, DatabaseConfig, KnowledgeRetrievalOutput,
     KnowledgeRetrievalRequest, LocalQosPolicy, LocalQosScheduler, LocalQosState,
     NowledgeGraphStatement, PlanCacheLookup, QueryOutput, ReadExecutionProfile, Result,
-    SearchIndex, SearchProjectionCatchUpReport, SearchProjectionDeltaReport,
-    SearchProjectionFreshness, SearchProjectionGraphDeltaRequest, SearchProjectionProbeOptions,
-    SearchResultSet, SkeinError, SlowQueryLogRecordSummary, TelemetrySink, Value,
+    ScheduledSearchProjectionCatchUpReport, SearchIndex, SearchProjectionCatchUpReport,
+    SearchProjectionDeltaReport, SearchProjectionFreshness, SearchProjectionGraphDeltaRequest,
+    SearchProjectionProbeOptions, SearchResultSet, SkeinError, SlowQueryLogRecordSummary,
+    TelemetrySink, Value,
 };
 use crate::{
     graph_route_readiness::NMEM_GRAPH_ROUTE_READINESS_PROTOCOL,
@@ -5740,6 +5741,20 @@ impl NowledgeMemEmbeddedStoreHandle {
             .catch_up_search_projection(max_operations_per_batch, max_batches)
     }
 
+    pub fn catch_up_search_projection_with_scheduler(
+        &self,
+        scheduler: &mut LocalQosScheduler,
+        max_operations_per_batch: usize,
+        max_batches: usize,
+    ) -> Result<ScheduledSearchProjectionCatchUpReport> {
+        self.write_store()?
+            .catch_up_search_projection_with_scheduler(
+                scheduler,
+                max_operations_per_batch,
+                max_batches,
+            )
+    }
+
     fn read_store(&self) -> Result<RwLockReadGuard<'_, NowledgeMemEmbeddedStore>> {
         self.inner.read().map_err(|_| {
             SkeinError::Execution("nowledge mem embedded store read lock poisoned".to_string())
@@ -5878,6 +5893,25 @@ impl NowledgeMemEmbeddedStore {
         let search_projection = require_search_projection_mut(search_projection)?;
         graph.database().catch_up_search_projection(
             search_projection.index_mut(),
+            max_operations_per_batch,
+            max_batches,
+        )
+    }
+
+    pub fn catch_up_search_projection_with_scheduler(
+        &mut self,
+        scheduler: &mut LocalQosScheduler,
+        max_operations_per_batch: usize,
+        max_batches: usize,
+    ) -> Result<ScheduledSearchProjectionCatchUpReport> {
+        let Self {
+            graph,
+            search_projection,
+        } = self;
+        let search_projection = require_search_projection_mut(search_projection)?;
+        graph.database().catch_up_search_projection_with_scheduler(
+            search_projection.index_mut(),
+            scheduler,
             max_operations_per_batch,
             max_batches,
         )
@@ -11559,6 +11593,128 @@ mod tests {
             .index()
             .document("memory:new")
             .is_none());
+    }
+
+    #[test]
+    fn embedded_store_scheduled_catch_up_reports_qos_deferral_without_applying() {
+        let root = unique_nowledge_mem_test_dir("embedded_scheduled_catch_up_deferred");
+        let search_path = root.join("search");
+        let mut graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::WritableCutover);
+        graph
+            .query("CREATE (:Memory {id: 'new', title: 'Scheduled facade'})")
+            .unwrap();
+        let projection =
+            NowledgeMemSearchProjection::from_index(SearchIndex::open(&search_path).unwrap());
+        let mut store = NowledgeMemEmbeddedStore::new(graph, Some(projection));
+        let mut scheduler = LocalQosScheduler::new(LocalQosPolicy {
+            max_total_background_operations: Some(0),
+            ..LocalQosPolicy::default()
+        });
+
+        let report = store
+            .catch_up_search_projection_with_scheduler(&mut scheduler, 4, 1)
+            .unwrap();
+
+        assert_eq!(
+            report.stop_reason,
+            crate::SearchProjectionCatchUpStopReason::Deferred(
+                crate::QosAdmissionCode::TotalBackgroundLimitExceeded
+            )
+        );
+        assert_eq!(report.catch_up.applied_batch_count, 0);
+        assert!(!report.catch_up.complete);
+        let projection = store.search_projection().unwrap();
+        assert_eq!(
+            projection
+                .index()
+                .projection_freshness()
+                .durable_source_graph_commit_epoch,
+            None
+        );
+        assert!(projection.index().document("memory:new").is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn embedded_store_handle_scheduled_catch_up_checkpoints_before_returning() {
+        let root = unique_nowledge_mem_test_dir("embedded_handle_scheduled_catch_up");
+        let search_path = root.join("search");
+        let mut graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::WritableCutover);
+        graph
+            .query("CREATE (:Memory {id: 'new', title: 'Scheduled facade'})")
+            .unwrap();
+        let projection =
+            NowledgeMemSearchProjection::from_index(SearchIndex::open(&search_path).unwrap());
+        let handle = NowledgeMemEmbeddedStoreHandle::new(NowledgeMemEmbeddedStore::new(
+            graph,
+            Some(projection),
+        ));
+        let mut scheduler = LocalQosScheduler::new(LocalQosPolicy::default());
+
+        let report = handle
+            .catch_up_search_projection_with_scheduler(&mut scheduler, 4, 1)
+            .unwrap();
+
+        assert_eq!(
+            report.stop_reason,
+            crate::SearchProjectionCatchUpStopReason::CaughtUp
+        );
+        assert!(report.catch_up.complete);
+        assert_eq!(report.catch_up.applied_batch_count, 1);
+        assert_eq!(
+            report.catch_up.end_applied_epoch,
+            report.catch_up.end_durable_epoch
+        );
+        assert_eq!(scheduler.state().running_background_operations, 0);
+        drop(handle);
+
+        let reopened = SearchIndex::open(&search_path).unwrap();
+        assert!(reopened.document("memory:new").is_some());
+        assert_eq!(
+            reopened
+                .projection_freshness()
+                .durable_source_graph_commit_epoch,
+            report.catch_up.end_durable_epoch
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn embedded_store_scheduled_catch_up_reports_batch_budget_exhaustion() {
+        let root = unique_nowledge_mem_test_dir("embedded_scheduled_catch_up_budget");
+        let search_path = root.join("search");
+        let mut graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::WritableCutover);
+        graph
+            .query("CREATE (:Memory {id: 'first', title: 'First'})")
+            .unwrap();
+        graph
+            .query("CREATE (:Memory {id: 'second', title: 'Second'})")
+            .unwrap();
+        let projection =
+            NowledgeMemSearchProjection::from_index(SearchIndex::open(&search_path).unwrap());
+        let mut store = NowledgeMemEmbeddedStore::new(graph, Some(projection));
+        let mut scheduler = LocalQosScheduler::new(LocalQosPolicy::default());
+
+        let report = store
+            .catch_up_search_projection_with_scheduler(&mut scheduler, 1, 1)
+            .unwrap();
+
+        assert_eq!(
+            report.stop_reason,
+            crate::SearchProjectionCatchUpStopReason::BatchBudgetExhausted
+        );
+        assert!(!report.catch_up.complete);
+        assert_eq!(report.catch_up.applied_batch_count, 1);
+        assert_eq!(report.catch_up.applied_operation_count, 1);
+        assert_eq!(report.catch_up.end_durable_epoch, Some(1));
+        let projection = store.search_projection().unwrap();
+        assert!(projection.index().document("memory:first").is_some());
+        assert!(projection.index().document("memory:second").is_none());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
