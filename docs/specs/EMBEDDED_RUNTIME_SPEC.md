@@ -255,6 +255,30 @@ ANN, quantized vectors, FTS, BM25, property indexes, segment summaries, and
 membership filters are rebuildable. Their corruption MUST NOT make canonical
 graph data unrecoverable.
 
+## Runtime Status
+
+The process-lifetime embedded handle MUST expose one typed runtime status
+snapshot. The snapshot MUST be collected under one store read guard so graph
+epoch, changefeed bounds, and search projection watermarks describe the same
+observable state.
+
+The status includes:
+
+- the current graph commit epoch;
+- changefeed resume floor, retained mutation bounds, retained count, and
+  restart-recoverable state;
+- search projection document count, applied source epoch, durable source epoch,
+  uncheckpointed state, rebuild and repair markers, and embedding identity;
+- derived durable projection lag and staleness.
+
+The status MUST NOT expose database paths, query text, properties, embeddings,
+credentials, or host secrets. Hosts MAY combine it with the sanitized open
+report and route ownership in their own health endpoint. A configured path or
+compiled feature is not evidence that a runtime opened successfully. A host
+MUST keep cutover readiness false when the process-lifetime handle is absent,
+the runtime status cannot be read, the required projection is stale, a rebuild
+or repair marker is active, or the changefeed is not restart-recoverable.
+
 ## OpenTelemetry
 
 OpenTelemetry support MUST be optional and disabled by default. Enabling it
