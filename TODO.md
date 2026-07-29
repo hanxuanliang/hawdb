@@ -98,8 +98,17 @@ LanceDB for that path.
     - Real legacy/Skein tests cover prepare-only, legacy-only,
       completed-but-unretired, and stale-obligation-before-new-write crash
       windows.
-  - [ ] Route MCP `memory_add`, Memory lifecycle/delete, and the remaining
-    entity mutation families through the same durable coordinator.
+  - [x] Route ordinary MCP `memory_add` create/update and label assignments
+    through the same durable coordinator.
+    - Mem PR #384 injects the process-lifetime coordinator into both external
+      and in-process MCP servers, and a real Kuzu/Skein test proves the
+      obligation retires only after both engines expose the Memory and Label.
+  - [ ] Extend the coordinator payload to cover MCP `memory_add` with an
+    `EVOLVES` directive; the current cross-author contested-write transaction
+    remains on the specialized legacy path until node, relationship, and
+    supersession side effects can replay atomically in both engines.
+  - [ ] Route Memory lifecycle/delete and the remaining entity mutation
+    families through the same durable coordinator.
   - Inject one long-lived writable Skein handle into Mem write resources.
   - Cover Memory create, update, lifecycle, and delete first, then Label,
     Entity, Thread, Source, and relationship mutations.
