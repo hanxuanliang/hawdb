@@ -117,8 +117,12 @@ LanceDB for that path.
     - [x] Generalize startup replay by durable operation kind and route REST
       archive/forget lifecycle transitions through a versioned, idempotent
       Memory lifecycle obligation (Mem PR #384 commit `6eef2c8d6`).
+    - [x] Freeze final scalar/cascade state for Memory hard delete, replay it
+      idempotently across Kuzu and Skein, and route the REST and MCP delete
+      entrypoints through the durable obligation (Mem PR #384 commit
+      `4c17aced0`; Skein commits `cc3a205` and `f004fc1`).
     - [ ] Fold supersede/deprecate EVOLVES side effects into the same lifecycle
-      obligation, then freeze and replay the full hard-delete cascade.
+      obligation.
   - Inject one long-lived writable Skein handle into Mem write resources.
   - Cover Memory create, update, lifecycle, and delete first, then Label,
     Entity, Thread, Source, and relationship mutations.
