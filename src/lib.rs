@@ -68,6 +68,8 @@ pub use api::{
     KnowledgeCandidateScoringPolicy, KnowledgeCandidateSource, KnowledgeEvidence,
     KnowledgeFallbackReasonCode, KnowledgeFanoutReasonCode, KnowledgeFanoutReasonDetail,
     KnowledgeGraphContextPath, KnowledgeGraphPath, KnowledgeGraphPathDirection, KnowledgeGraphSeed,
+    KnowledgeMemoryEvolvesCreate, KnowledgeMemoryEvolvesCreateBatchOutput,
+    KnowledgeMemoryEvolvesCreateBatchRequest, KnowledgeMemoryEvolvesCreateBatchRow,
     KnowledgeRetrievalDiagnostics, KnowledgeRetrievalEmptyReasonCode, KnowledgeRetrievalOutput,
     KnowledgeRetrievalRequest, KnowledgeRetrieverCandidate, KnowledgeRetrieverReport,
     KnowledgeTraversalDiagnostics, KnowledgeTraversalFallbackReasonCode,

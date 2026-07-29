@@ -10,10 +10,11 @@ use crate::search_projection_evidence::{
 };
 use crate::{
     cypher, BackgroundMaintenanceKind, BackgroundMaintenanceOptions, BackgroundMaintenanceSummary,
-    BackgroundWorkHint, BackgroundWorkPlan, Database, DatabaseConfig, KnowledgeRetrievalOutput,
-    KnowledgeRetrievalRequest, LocalQosPolicy, LocalQosScheduler, LocalQosState,
-    NowledgeGraphStatement, PlanCacheLookup, QueryOutput, ReadExecutionProfile, Result,
-    ScheduledSearchProjectionCatchUpReport, SearchIndex, SearchProjectionCatchUpReport,
+    BackgroundWorkHint, BackgroundWorkPlan, Database, DatabaseConfig,
+    KnowledgeMemoryEvolvesCreateBatchOutput, KnowledgeMemoryEvolvesCreateBatchRequest,
+    KnowledgeRetrievalOutput, KnowledgeRetrievalRequest, LocalQosPolicy, LocalQosScheduler,
+    LocalQosState, NowledgeGraphStatement, PlanCacheLookup, QueryOutput, ReadExecutionProfile,
+    Result, ScheduledSearchProjectionCatchUpReport, SearchIndex, SearchProjectionCatchUpReport,
     SearchProjectionChangefeedStatus, SearchProjectionDeltaReport, SearchProjectionFreshness,
     SearchProjectionGraphDeltaRequest, SearchProjectionMutationId, SearchProjectionProbeOptions,
     SearchResultSet, SkeinError, SlowQueryLogRecordSummary, TelemetrySink, Value,
@@ -5587,6 +5588,16 @@ impl NowledgeMemEmbeddedStoreHandle {
     ) -> Result<NowledgeMemQueryOutput> {
         self.write_store()?
             .query_with_params_with_report(cypher, parameters)
+    }
+
+    pub fn create_knowledge_memory_evolves_batch(
+        &self,
+        request: &KnowledgeMemoryEvolvesCreateBatchRequest,
+    ) -> Result<KnowledgeMemoryEvolvesCreateBatchOutput> {
+        self.write_store()?
+            .graph_mut()
+            .database_mut()
+            .create_knowledge_memory_evolves_batch(request)
     }
 
     pub fn query_with_params_with_report_options(
