@@ -4,6 +4,7 @@ pub mod background_maintenance_evidence;
 pub mod blackbox;
 pub mod bounded_read_evidence;
 pub mod compat;
+mod compiled_capabilities;
 pub mod cypher;
 pub mod embedded;
 pub mod executor;
@@ -117,6 +118,7 @@ pub use compat::{
     ProjectedGraphFixtureCheck, ProjectedGraphShadowOutput, EXTERNAL_SHADOW_PROTOCOL_VERSION,
     REQUIRED_EXTERNAL_SHADOW_CAPABILITIES,
 };
+pub use compiled_capabilities::compiled_runtime_capabilities;
 pub use cypher::RelationshipDirection;
 pub use embedded::{
     EmbeddedDeploymentProfile, EmbeddedRuntimeResources, SkeinEmbedded, SkeinEmbeddedOpenOptions,

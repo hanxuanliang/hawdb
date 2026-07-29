@@ -877,7 +877,7 @@ contract.
 
 ## P1: Operability
 
-- [ ] Add production deployment profiles and optional capability gates.
+- [x] Add production deployment profiles and optional capability gates.
   - [x] Expose a `DesktopBound` profile for an application-bound, in-process
     database with bounded plan cache, FTS, vector, analytics, and background
     maintenance defaults.
@@ -902,7 +902,7 @@ contract.
   - [x] Keep the durable storage format and core Cypher semantics compatible
     across profiles; return typed capability-unavailable errors instead of
     silent unbounded fallbacks.
-  - [ ] Add build-time feature gates for optional mobile capabilities after the
+  - [x] Add build-time feature gates for optional mobile capabilities after the
     runtime capability contract is stable.
 - [ ] Add optional ACL support after the embedded read/write contract is stable.
   - Keep ACL disabled by default and compile-time removable on mobile.

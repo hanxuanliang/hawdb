@@ -28,8 +28,17 @@ loom = { version = "0.7", optional = true }
 opentelemetry = { version = "0.31", default-features = false, features = ["metrics"], optional = true }
 
 [features]
-default = []
-turbovec = ["dep:turbovec"]
+default = [
+  "background-maintenance",
+  "full-text-search",
+  "graph-analytics",
+  "vector-search",
+]
+background-maintenance = []
+full-text-search = []
+graph-analytics = []
+vector-search = []
+turbovec = ["vector-search", "dep:turbovec"]
 loom-tests = ["dep:loom"]
 opentelemetry = ["dep:opentelemetry"]
 

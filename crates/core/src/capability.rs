@@ -71,6 +71,15 @@ impl RuntimeCapabilities {
         }
         self
     }
+
+    pub const fn intersection(self, available: Self) -> Self {
+        Self {
+            full_text_search: self.full_text_search && available.full_text_search,
+            vector_search: self.vector_search && available.vector_search,
+            graph_analytics: self.graph_analytics && available.graph_analytics,
+            background_maintenance: self.background_maintenance && available.background_maintenance,
+        }
+    }
 }
 
 impl Default for RuntimeCapabilities {
@@ -106,5 +115,18 @@ mod tests {
             }
         );
         assert_eq!(error.to_string(), "capability unavailable: graph_analytics");
+    }
+
+    #[test]
+    fn requested_capabilities_are_bounded_by_compiled_availability() {
+        let available = RuntimeCapabilities::desktop_bound()
+            .with(RuntimeCapability::GraphAnalytics, false)
+            .with(RuntimeCapability::BackgroundMaintenance, false);
+        let effective = RuntimeCapabilities::desktop_bound().intersection(available);
+
+        assert!(effective.full_text_search);
+        assert!(effective.vector_search);
+        assert!(!effective.graph_analytics);
+        assert!(!effective.background_maintenance);
     }
 }

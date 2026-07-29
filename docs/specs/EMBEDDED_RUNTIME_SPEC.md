@@ -82,6 +82,24 @@ switch does not migrate or rewrite the storage format. Queries that require a
 disabled optional capability fail before planning or mutation without
 invalidating the shared database.
 
+### Build-Time Capability Gates
+
+The default Cargo build enables `full-text-search`, `vector-search`,
+`graph-analytics`, and `background-maintenance`. A constrained host uses
+`--no-default-features` and adds back only required capabilities, for example:
+
+```text
+cargo build --no-default-features --features full-text-search,vector-search
+```
+
+Build-time availability is an upper bound on runtime configuration. A host
+cannot re-enable a capability omitted from the build through
+`SkeinEmbeddedOpenOptions`, `DatabaseConfig`, or `SearchIndex`; the effective
+set is `requested AND compiled`. Parser and plan contracts remain present so an
+unavailable query produces the same typed `CapabilityUnavailable` error rather
+than an unknown-syntax error. Core storage, WAL, recovery, parameterized Cypher,
+and incremental base indexes are never optional features.
+
 ## Concurrency Model
 
 Skein MUST support concurrent readers and a concurrent writer through

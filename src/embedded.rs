@@ -219,7 +219,8 @@ fn default_database_config(profile: EmbeddedDeploymentProfile) -> DatabaseConfig
             max_plan_cache_entries: Some(32),
             slow_query_log_capacity: 128,
             statement_summary_capacity: 128,
-            runtime_capabilities: RuntimeCapabilities::mobile_embedded(),
+            runtime_capabilities: RuntimeCapabilities::mobile_embedded()
+                .intersection(crate::compiled_runtime_capabilities()),
             adaptive_vector_backend_policy: AdaptiveVectorBackendPolicy {
                 flat_scan_max_documents: 512,
                 flat_scan_memory_budget_bytes: 4 * 1024 * 1024,

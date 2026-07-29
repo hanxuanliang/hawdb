@@ -166,7 +166,7 @@ impl Default for DatabaseConfig {
             slow_query_log_capacity: system_sql::DEFAULT_SLOW_QUERY_LOG_CAPACITY,
             slow_query_log_threshold_micros: system_sql::DEFAULT_SLOW_QUERY_LOG_THRESHOLD_MICROS,
             statement_summary_capacity: system_sql::DEFAULT_STATEMENT_SUMMARY_CAPACITY,
-            runtime_capabilities: skein_core::RuntimeCapabilities::default(),
+            runtime_capabilities: crate::compiled_runtime_capabilities(),
             compressed_vector_search_mode: CompressedVectorSearchMode::Disabled,
             adaptive_vector_backend_policy: skein_optimizer::AdaptiveVectorBackendPolicy::default(),
         }
@@ -5280,7 +5280,7 @@ struct ReaderPin {
 
 impl Default for Database {
     fn default() -> Self {
-        let config = DatabaseConfig::default();
+        let config = effective_database_config(DatabaseConfig::default());
         let mut store = GraphStore::default();
         store.set_max_search_projection_change_log_entries(
             config.max_search_projection_change_log_entries,
@@ -5312,6 +5312,7 @@ impl Database {
     }
 
     pub fn new_with_config(config: DatabaseConfig) -> Self {
+        let config = effective_database_config(config);
         let mut store = GraphStore::default();
         store.set_max_search_projection_change_log_entries(
             config.max_search_projection_change_log_entries,
@@ -5361,6 +5362,7 @@ impl Database {
         durability: DurabilityPolicy,
         config: DatabaseConfig,
     ) -> Result<Self> {
+        let config = effective_database_config(config);
         let mut catalog = Catalog::default();
         let replay_config = WalReplayConfig {
             recovery_mode: config.recovery_mode,
@@ -7928,6 +7930,12 @@ impl Database {
             None => ProjectedGraph::from_store(&self.store, None),
         }
     }
+}
+
+fn effective_database_config(mut config: DatabaseConfig) -> DatabaseConfig {
+    config.runtime_capabilities =
+        crate::compiled_capabilities::effective_runtime_capabilities(config.runtime_capabilities);
+    config
 }
 
 struct KnowledgeRetrievalGraphContext<'a> {

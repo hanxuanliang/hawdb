@@ -72,6 +72,65 @@ fn disabled_background_capability_precedes_qos_admission() {
     assert_capability_error(error, RuntimeCapability::BackgroundMaintenance);
 }
 
+#[test]
+fn runtime_capabilities_cannot_exceed_compiled_availability() {
+    let requested = RuntimeCapabilities::desktop_bound();
+    let db = Database::new_with_config(DatabaseConfig {
+        runtime_capabilities: requested,
+        ..DatabaseConfig::default()
+    });
+    let mut search = SearchIndex::in_memory();
+    search.set_runtime_capabilities(requested);
+
+    assert_eq!(
+        db.runtime_capabilities(),
+        crate::compiled_runtime_capabilities()
+    );
+    assert_eq!(
+        search.runtime_capabilities(),
+        crate::compiled_runtime_capabilities()
+    );
+}
+
+#[cfg(not(any(
+    feature = "background-maintenance",
+    feature = "full-text-search",
+    feature = "graph-analytics",
+    feature = "vector-search"
+)))]
+#[test]
+fn minimal_build_fails_closed_for_every_optional_capability() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        runtime_capabilities: RuntimeCapabilities::desktop_bound(),
+        ..DatabaseConfig::default()
+    });
+
+    assert_capability_error(
+        db.query("CREATE FULLTEXT INDEX ON :Memory(title)")
+            .unwrap_err(),
+        RuntimeCapability::FullTextSearch,
+    );
+    assert_capability_error(
+        db.query("CALL vector_search($embedding, topK := 1) RETURN id, score")
+            .unwrap_err(),
+        RuntimeCapability::VectorSearch,
+    );
+    assert_capability_error(
+        db.query("CALL project_graph('EntityGraph', ['Entity'], ['MENTIONS'])")
+            .unwrap_err(),
+        RuntimeCapability::GraphAnalytics,
+    );
+    assert_capability_error(
+        db.run_background_schema_maintenance(
+            &LocalQosPolicy::default(),
+            &LocalQosState::default(),
+            0,
+        )
+        .unwrap_err(),
+        RuntimeCapability::BackgroundMaintenance,
+    );
+}
+
 fn assert_capability_error(error: SkeinError, expected: RuntimeCapability) {
     assert_eq!(
         error,

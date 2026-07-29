@@ -7,6 +7,12 @@ rust_library(
     name = "skein",
     crate_name = "skein",
     crate_root = "src/lib.rs",
+    crate_features = [
+        "background-maintenance",
+        "full-text-search",
+        "graph-analytics",
+        "vector-search",
+    ],
     srcs = glob(
         ["src/**/*.rs"],
         exclude = [

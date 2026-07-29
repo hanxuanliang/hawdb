@@ -891,7 +891,7 @@ pub struct SearchProjectionDeltaReport {
     pub source_graph_commit_epoch_updated: bool,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SearchIndex {
     documents: BTreeMap<String, SearchDocument>,
     path: Option<PathBuf>,
@@ -919,18 +919,8 @@ impl SearchIndex {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         fs::create_dir_all(path.as_ref())?;
         let mut index = Self {
-            documents: BTreeMap::new(),
             path: Some(path.as_ref().to_path_buf()),
-            embedding_dimension: None,
-            embedding_manifest: None,
-            source_graph_commit_epoch: None,
-            durable_source_graph_commit_epoch: Mutex::new(None),
-            marker_lines: Mutex::new(BTreeMap::new()),
-            analyzer_lexicon: SearchAnalyzerLexicon::default(),
-            segment_descriptor: None,
-            range_read_config: SearchRangeReadConfig::default(),
-            runtime_capabilities: RuntimeCapabilities::default(),
-            telemetry: None,
+            ..Self::default()
         };
         index.load_snapshot()?;
         index.load_or_rebuild_segment_descriptor()?;
@@ -965,7 +955,8 @@ impl SearchIndex {
     }
 
     pub fn set_runtime_capabilities(&mut self, capabilities: RuntimeCapabilities) {
-        self.runtime_capabilities = capabilities;
+        self.runtime_capabilities =
+            crate::compiled_capabilities::effective_runtime_capabilities(capabilities);
     }
 
     pub fn runtime_capabilities(&self) -> RuntimeCapabilities {
@@ -2693,6 +2684,25 @@ impl SearchIndex {
             .filter(|line| !line.is_empty())
             .map(str::to_string)
             .collect())
+    }
+}
+
+impl Default for SearchIndex {
+    fn default() -> Self {
+        Self {
+            documents: BTreeMap::new(),
+            path: None,
+            embedding_dimension: None,
+            embedding_manifest: None,
+            source_graph_commit_epoch: None,
+            durable_source_graph_commit_epoch: Mutex::new(None),
+            marker_lines: Mutex::new(BTreeMap::new()),
+            analyzer_lexicon: SearchAnalyzerLexicon::default(),
+            segment_descriptor: None,
+            range_read_config: SearchRangeReadConfig::default(),
+            runtime_capabilities: crate::compiled_runtime_capabilities(),
+            telemetry: None,
+        }
     }
 }
 
