@@ -15,6 +15,37 @@ impl VectorCandidateSource {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorBackendSelectionReason {
+    CompressionDisabled,
+    RecallValidationProbe,
+    SmallFilteredCandidateSet,
+    HighFilterSelectivity,
+    RawVectorsWithinMemoryBudget,
+    QuantizedPreferred,
+    QuantizedRequired,
+    QuantizedProjectionUnavailable,
+    QuantizedProjectionCoverageIncomplete,
+}
+
+impl VectorBackendSelectionReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CompressionDisabled => "compression_disabled",
+            Self::RecallValidationProbe => "recall_validation_probe",
+            Self::SmallFilteredCandidateSet => "small_filtered_candidate_set",
+            Self::HighFilterSelectivity => "high_filter_selectivity",
+            Self::RawVectorsWithinMemoryBudget => "raw_vectors_within_memory_budget",
+            Self::QuantizedPreferred => "quantized_preferred",
+            Self::QuantizedRequired => "quantized_required",
+            Self::QuantizedProjectionUnavailable => "quantized_projection_unavailable",
+            Self::QuantizedProjectionCoverageIncomplete => {
+                "quantized_projection_coverage_incomplete"
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VectorSearchLogicalPlan {
     pub embedding_dimension: usize,
@@ -163,5 +194,50 @@ impl VectorPhysicalPlan {
             Self::Filter { fields } => format!("filter_fields={fields:?}"),
             Self::TopK { input, .. } => input.explain_details(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::VectorBackendSelectionReason;
+
+    #[test]
+    fn backend_selection_reasons_have_stable_names() {
+        assert_eq!(
+            VectorBackendSelectionReason::CompressionDisabled.as_str(),
+            "compression_disabled"
+        );
+        assert_eq!(
+            VectorBackendSelectionReason::RecallValidationProbe.as_str(),
+            "recall_validation_probe"
+        );
+        assert_eq!(
+            VectorBackendSelectionReason::SmallFilteredCandidateSet.as_str(),
+            "small_filtered_candidate_set"
+        );
+        assert_eq!(
+            VectorBackendSelectionReason::HighFilterSelectivity.as_str(),
+            "high_filter_selectivity"
+        );
+        assert_eq!(
+            VectorBackendSelectionReason::RawVectorsWithinMemoryBudget.as_str(),
+            "raw_vectors_within_memory_budget"
+        );
+        assert_eq!(
+            VectorBackendSelectionReason::QuantizedPreferred.as_str(),
+            "quantized_preferred"
+        );
+        assert_eq!(
+            VectorBackendSelectionReason::QuantizedRequired.as_str(),
+            "quantized_required"
+        );
+        assert_eq!(
+            VectorBackendSelectionReason::QuantizedProjectionUnavailable.as_str(),
+            "quantized_projection_unavailable"
+        );
+        assert_eq!(
+            VectorBackendSelectionReason::QuantizedProjectionCoverageIncomplete.as_str(),
+            "quantized_projection_coverage_incomplete"
+        );
     }
 }

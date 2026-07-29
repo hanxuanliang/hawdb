@@ -148,6 +148,27 @@ fn vector_execution_report_value(report: &skein_executor::VectorExecutionReport)
             Value::String(report.candidate_source.as_str().to_string()),
         ),
         (
+            "backend_selection_reason".to_string(),
+            report
+                .backend_selection_reason
+                .map(|reason| Value::String(reason.as_str().to_string()))
+                .unwrap_or(Value::Null),
+        ),
+        (
+            "estimated_raw_vector_bytes".to_string(),
+            report
+                .estimated_raw_vector_bytes
+                .map(u64_value)
+                .unwrap_or(Value::Null),
+        ),
+        (
+            "filter_selectivity_per_million".to_string(),
+            report
+                .filter_selectivity_per_million
+                .map(|value| u64_value(u64::from(value)))
+                .unwrap_or(Value::Null),
+        ),
+        (
             "candidate_score_source".to_string(),
             Value::String(report.candidate_score_source.as_str().to_string()),
         ),

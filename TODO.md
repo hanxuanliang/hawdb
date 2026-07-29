@@ -815,11 +815,18 @@ contract.
     - Rerank the bounded candidate window against raw vectors before returning
       scores to callers.
     - Report both approximate score source and final raw-vector score source.
-  - [ ] Add an adaptive vector backend selector.
+  - [x] Add an adaptive vector backend selector.
     - Prefer flat scan for small tables, high-filter-ratio predicates, and
       recall-validation probes.
     - Prefer compressed IVF/SQ/PQ-style projections for constrained local
       hardware when memory budgets are tight.
+    - [x] Select after metadata pruning from typed candidate count,
+      filter-selectivity, raw-vector byte estimate, host memory budget, and
+      projection coverage inputs.
+    - [x] Expose host-owned policy overrides and stable selection reasons through
+      candidate reports, explain analyze, slow logs, and blackbox summaries.
+    - [x] Keep required compressed projections fail closed when the artifact is
+      unavailable or does not cover the filtered candidate set.
     - Keep graph-heavy indexes such as HNSW optional because they can add large
       resident memory overhead.
     - Consider DiskANN-style or mmap-backed layouts only after local vector

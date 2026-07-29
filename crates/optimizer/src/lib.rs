@@ -49,6 +49,8 @@ pub use stage::{
 };
 pub use trace::{OptimizerConfig, OptimizerTrace};
 pub use vector::{
-    plan_vector_search, validate_vector_pipeline, PlannedVectorSearch, VectorPlanError,
+    plan_vector_search, select_adaptive_vector_backend, validate_vector_pipeline,
+    AdaptiveVectorBackend, AdaptiveVectorBackendDecision, AdaptiveVectorBackendInput,
+    AdaptiveVectorBackendPolicy, PlannedVectorSearch, VectorCompressionPreference, VectorPlanError,
     VectorPlanProperties,
 };

@@ -1,7 +1,7 @@
 use crate::search::{
-    CompressedVectorSearchMode, SearchCandidateSetReport, SearchFallbackReasonCode,
-    SearchFusionWeights, SearchMode, SearchQueryOptions, SearchRangeReadConfig,
-    NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
+    AdaptiveVectorSearchOptions, CompressedVectorSearchMode, SearchCandidateSetReport,
+    SearchFallbackReasonCode, SearchFusionWeights, SearchMode, SearchQueryOptions,
+    SearchRangeReadConfig, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
 };
 use crate::search_projection_evidence::{
     nowledge_search_projection_evidence_json, nowledge_search_projection_shadow_evidence_json,
@@ -27,6 +27,7 @@ use crate::{
         NowledgeGraphRouteWorkloadFixtureReport, NOWLEDGE_GRAPH_ROUTE_WORKLOAD_FIXTURE_PROTOCOL,
     },
 };
+use skein_optimizer::AdaptiveVectorBackendPolicy;
 pub use skein_readiness::{NowledgeMemReadinessAreaMap, NowledgeMemReadinessAreaSummary};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -118,6 +119,7 @@ pub struct NowledgeMemOpenOptions {
     pub search_projection_path: Option<PathBuf>,
     pub mode: NowledgeMemGraphMode,
     pub compressed_vector_search_mode: CompressedVectorSearchMode,
+    pub adaptive_vector_backend_policy: AdaptiveVectorBackendPolicy,
     pub retrieval_projection_advisor: NowledgeMemRetrievalProjectionAdvisor,
     pub search_range_read_config: Option<SearchRangeReadConfig>,
 }
@@ -134,6 +136,7 @@ impl NowledgeMemOpenOptions {
             search_projection_path: None,
             mode,
             compressed_vector_search_mode: CompressedVectorSearchMode::Disabled,
+            adaptive_vector_backend_policy: AdaptiveVectorBackendPolicy::default(),
             retrieval_projection_advisor: NowledgeMemRetrievalProjectionAdvisor::default(),
             search_range_read_config: None,
         }
@@ -149,6 +152,7 @@ impl NowledgeMemOpenOptions {
             search_projection_path: Some(search_projection_path.into()),
             mode,
             compressed_vector_search_mode: CompressedVectorSearchMode::Disabled,
+            adaptive_vector_backend_policy: AdaptiveVectorBackendPolicy::default(),
             retrieval_projection_advisor: NowledgeMemRetrievalProjectionAdvisor::default(),
             search_range_read_config: None,
         }
@@ -156,6 +160,14 @@ impl NowledgeMemOpenOptions {
 
     pub fn with_compressed_vector_search_mode(mut self, mode: CompressedVectorSearchMode) -> Self {
         self.compressed_vector_search_mode = mode;
+        self
+    }
+
+    pub fn with_adaptive_vector_backend_policy(
+        mut self,
+        policy: AdaptiveVectorBackendPolicy,
+    ) -> Self {
+        self.adaptive_vector_backend_policy = policy;
         self
     }
 
@@ -189,6 +201,7 @@ impl NowledgeMemOpenOptions {
             search_projection_configured: self.search_projection_path.is_some(),
             compressed_vector_search_mode: effective_compressed_vector_search_mode,
             requested_compressed_vector_search_mode: self.compressed_vector_search_mode,
+            adaptive_vector_backend_policy: self.adaptive_vector_backend_policy,
             retrieval_projection_advisor: self.retrieval_projection_advisor.clone(),
             retrieval_projection_advisor_blocker_codes: if self.compressed_vector_search_mode
                 == effective_compressed_vector_search_mode
@@ -242,6 +255,7 @@ pub struct NowledgeMemOpenReport {
     pub search_projection_configured: bool,
     pub compressed_vector_search_mode: CompressedVectorSearchMode,
     pub requested_compressed_vector_search_mode: CompressedVectorSearchMode,
+    pub adaptive_vector_backend_policy: AdaptiveVectorBackendPolicy,
     pub retrieval_projection_advisor: NowledgeMemRetrievalProjectionAdvisor,
     pub retrieval_projection_advisor_blocker_codes: Vec<String>,
     pub graph_opened: bool,
@@ -257,6 +271,11 @@ impl NowledgeMemOpenReport {
             "search_projection_configured": self.search_projection_configured,
             "compressed_vector_search_mode": self.compressed_vector_search_mode.as_str(),
             "requested_compressed_vector_search_mode": self.requested_compressed_vector_search_mode.as_str(),
+            "adaptive_vector_backend_policy": {
+                "flat_scan_max_documents": self.adaptive_vector_backend_policy.flat_scan_max_documents,
+                "high_filter_selectivity_per_million": self.adaptive_vector_backend_policy.high_filter_selectivity_per_million,
+                "flat_scan_memory_budget_bytes": self.adaptive_vector_backend_policy.flat_scan_memory_budget_bytes,
+            },
             "retrieval_projection_advisor": self.retrieval_projection_advisor.json(),
             "retrieval_projection_advisor_blocker_codes": self.retrieval_projection_advisor_blocker_codes,
             "graph_opened": self.graph_opened,
@@ -3676,6 +3695,8 @@ pub struct NowledgeMemSearchCandidateRequest {
     pub fusion_weights: SearchFusionWeights,
     pub metadata_filters: BTreeMap<String, String>,
     pub compressed_vector_search_mode: CompressedVectorSearchMode,
+    pub adaptive_vector_backend_policy: AdaptiveVectorBackendPolicy,
+    pub recall_validation_probe: bool,
     pub retrieval_projection_advisor: NowledgeMemRetrievalProjectionAdvisor,
 }
 
@@ -3690,6 +3711,8 @@ impl NowledgeMemSearchCandidateRequest {
             fusion_weights: SearchFusionWeights::default(),
             metadata_filters: BTreeMap::new(),
             compressed_vector_search_mode: CompressedVectorSearchMode::Disabled,
+            adaptive_vector_backend_policy: AdaptiveVectorBackendPolicy::default(),
+            recall_validation_probe: false,
             retrieval_projection_advisor: NowledgeMemRetrievalProjectionAdvisor::default(),
         }
     }
@@ -3704,6 +3727,8 @@ impl NowledgeMemSearchCandidateRequest {
             fusion_weights: SearchFusionWeights::default(),
             metadata_filters: BTreeMap::new(),
             compressed_vector_search_mode: CompressedVectorSearchMode::Disabled,
+            adaptive_vector_backend_policy: AdaptiveVectorBackendPolicy::default(),
+            recall_validation_probe: false,
             retrieval_projection_advisor: NowledgeMemRetrievalProjectionAdvisor::default(),
         }
     }
@@ -3718,6 +3743,8 @@ impl NowledgeMemSearchCandidateRequest {
             fusion_weights: SearchFusionWeights::default(),
             metadata_filters: BTreeMap::new(),
             compressed_vector_search_mode: CompressedVectorSearchMode::Disabled,
+            adaptive_vector_backend_policy: AdaptiveVectorBackendPolicy::default(),
+            recall_validation_probe: false,
             retrieval_projection_advisor: NowledgeMemRetrievalProjectionAdvisor::default(),
         }
     }
@@ -3742,6 +3769,19 @@ impl NowledgeMemSearchCandidateRequest {
         compressed_vector_search_mode: CompressedVectorSearchMode,
     ) -> Self {
         self.compressed_vector_search_mode = compressed_vector_search_mode;
+        self
+    }
+
+    pub fn with_adaptive_vector_backend_policy(
+        mut self,
+        policy: AdaptiveVectorBackendPolicy,
+    ) -> Self {
+        self.adaptive_vector_backend_policy = policy;
+        self
+    }
+
+    pub fn as_recall_validation_probe(mut self) -> Self {
+        self.recall_validation_probe = true;
         self
     }
 
@@ -3795,6 +3835,9 @@ pub struct NowledgeMemSearchCandidateReport {
     pub physical_range_read_count: usize,
     pub physical_bytes_read: u64,
     pub retriever_backends: BTreeMap<String, String>,
+    pub retriever_backend_selection_reasons: BTreeMap<String, String>,
+    pub retriever_estimated_raw_vector_bytes: BTreeMap<String, u64>,
+    pub retriever_filter_selectivity_per_million: BTreeMap<String, u32>,
     pub retriever_available: BTreeMap<String, bool>,
     pub retriever_candidate_counts: BTreeMap<String, usize>,
     pub retriever_candidate_score_sources: BTreeMap<String, String>,
@@ -3868,6 +3911,18 @@ impl NowledgeMemSearchCandidateReport {
         object.insert(
             "physical_bytes_read".to_string(),
             serde_json::json!(self.physical_bytes_read),
+        );
+        object.insert(
+            "retriever_backend_selection_reasons".to_string(),
+            serde_json::json!(self.retriever_backend_selection_reasons),
+        );
+        object.insert(
+            "retriever_estimated_raw_vector_bytes".to_string(),
+            serde_json::json!(self.retriever_estimated_raw_vector_bytes),
+        );
+        object.insert(
+            "retriever_filter_selectivity_per_million".to_string(),
+            serde_json::json!(self.retriever_filter_selectivity_per_million),
         );
         object.insert(
             "retriever_candidate_score_sources".to_string(),
@@ -5146,21 +5201,23 @@ impl NowledgeMemSearchProjection {
     ) -> NowledgeMemSearchCandidateOutput {
         let effective_compressed_vector_search_mode =
             request.effective_compressed_vector_search_mode();
-        let result = self
-            .index
-            .search_with_options_compressed_vector_projection_mode(
-                &request.query_text,
-                request.query_embedding.as_deref(),
-                request.mode,
-                SearchQueryOptions {
-                    limit: request.limit,
-                    rank_window: request.rank_window,
-                    fusion_weights: request.fusion_weights,
-                    metadata_filters: request.metadata_filters.clone(),
-                    policy_epoch: None,
-                },
-                effective_compressed_vector_search_mode,
-            );
+        let result = self.index.search_with_options_adaptive_vector_projection(
+            &request.query_text,
+            request.query_embedding.as_deref(),
+            request.mode,
+            SearchQueryOptions {
+                limit: request.limit,
+                rank_window: request.rank_window,
+                fusion_weights: request.fusion_weights,
+                metadata_filters: request.metadata_filters.clone(),
+                policy_epoch: None,
+            },
+            AdaptiveVectorSearchOptions {
+                compression_mode: effective_compressed_vector_search_mode,
+                backend_policy: request.adaptive_vector_backend_policy,
+                recall_validation_probe: request.recall_validation_probe,
+            },
+        );
         let report = nowledge_mem_search_candidate_report(
             request,
             effective_compressed_vector_search_mode,
@@ -5177,7 +5234,7 @@ impl NowledgeMemSearchProjection {
             request.effective_compressed_vector_search_mode();
         let result = self
             .index
-            .try_search_with_options_compressed_vector_projection_mode(
+            .try_search_with_options_adaptive_vector_projection(
                 &request.query_text,
                 request.query_embedding.as_deref(),
                 request.mode,
@@ -5188,7 +5245,11 @@ impl NowledgeMemSearchProjection {
                     metadata_filters: request.metadata_filters.clone(),
                     policy_epoch: None,
                 },
-                effective_compressed_vector_search_mode,
+                AdaptiveVectorSearchOptions {
+                    compression_mode: effective_compressed_vector_search_mode,
+                    backend_policy: request.adaptive_vector_backend_policy,
+                    recall_validation_probe: request.recall_validation_probe,
+                },
             )?;
         let report = nowledge_mem_search_candidate_report(
             request,
@@ -5279,6 +5340,9 @@ impl crate::executor::ExternalReadOperator for SearchProjectionExternalReadOpera
                     output.report.compressed_vector_search_mode,
                 ),
                 candidate_source: vector_plan_candidate_source(request.vector_plan)?,
+                backend_selection_reason: retriever.backend_selection_reason,
+                estimated_raw_vector_bytes: retriever.estimated_raw_vector_bytes,
+                filter_selectivity_per_million: retriever.filter_selectivity_per_million,
                 candidate_score_source,
                 final_score_source: vector_score_source(&retriever.final_score_source)?,
                 generated_candidate_count: retriever.generated_candidate_count,
@@ -5667,13 +5731,12 @@ impl NowledgeMemEmbeddedStore {
         options: NowledgeMemOpenOptions,
     ) -> Result<(Self, NowledgeMemOpenReport)> {
         let mut report = options.sanitized_report();
-        let graph = NowledgeMemGraph::open_with_config(
-            &options.graph_path,
-            nowledge_mem_graph_config_with_search_mode(
-                options.mode,
-                options.effective_compressed_vector_search_mode(),
-            ),
-        )?;
+        let mut graph_config = nowledge_mem_graph_config_with_search_mode(
+            options.mode,
+            options.effective_compressed_vector_search_mode(),
+        );
+        graph_config.adaptive_vector_backend_policy = options.adaptive_vector_backend_policy;
+        let graph = NowledgeMemGraph::open_with_config(&options.graph_path, graph_config)?;
         report.graph_opened = true;
         let search_projection = match options.search_projection_path.as_ref() {
             Some(path) => {
@@ -6327,6 +6390,9 @@ fn vector_execution_report_json(
         "backend": report.backend.as_str(),
         "compression_mode": report.compression_mode.as_str(),
         "candidate_source": report.candidate_source.as_str(),
+        "backend_selection_reason": report.backend_selection_reason.map(|reason| reason.as_str()),
+        "estimated_raw_vector_bytes": report.estimated_raw_vector_bytes,
+        "filter_selectivity_per_million": report.filter_selectivity_per_million,
         "candidate_score_source": report.candidate_score_source.as_str(),
         "final_score_source": report.final_score_source.as_str(),
         "generated_candidate_count": report.generated_candidate_count,
@@ -7723,6 +7789,33 @@ fn nowledge_mem_search_candidate_report(
             .iter()
             .map(|retriever| (retriever.name.clone(), retriever.backend.clone()))
             .collect(),
+        retriever_backend_selection_reasons: result
+            .retrievers
+            .iter()
+            .filter_map(|retriever| {
+                retriever
+                    .backend_selection_reason
+                    .map(|reason| (retriever.name.clone(), reason.as_str().to_string()))
+            })
+            .collect(),
+        retriever_estimated_raw_vector_bytes: result
+            .retrievers
+            .iter()
+            .filter_map(|retriever| {
+                retriever
+                    .estimated_raw_vector_bytes
+                    .map(|bytes| (retriever.name.clone(), bytes))
+            })
+            .collect(),
+        retriever_filter_selectivity_per_million: result
+            .retrievers
+            .iter()
+            .filter_map(|retriever| {
+                retriever
+                    .filter_selectivity_per_million
+                    .map(|selectivity| (retriever.name.clone(), selectivity))
+            })
+            .collect(),
         retriever_available: result
             .retrievers
             .iter()
@@ -8159,6 +8252,8 @@ mod tests {
     use crate::workload_fixtures::{
         nowledge_graph_route_workload_fixture_report, NowledgeGraphRouteWorkloadFixtureOptions,
     };
+    #[cfg(feature = "turbovec")]
+    use crate::AdaptiveVectorBackendPolicy;
     use crate::Value;
     use crate::{
         BackgroundMaintenanceKind, BackgroundMaintenanceOptions, BackgroundWorkHint, Database,
@@ -11010,6 +11105,10 @@ mod tests {
             report["requested_compressed_vector_search_mode"],
             "preferred"
         );
+        assert_eq!(
+            report["adaptive_vector_backend_policy"]["flat_scan_memory_budget_bytes"],
+            16 * 1024 * 1024
+        );
         assert_eq!(report["retrieval_projection_advisor"]["ready"], true);
         assert_eq!(
             report["retrieval_projection_advisor_blocker_codes"],
@@ -11540,6 +11639,18 @@ mod tests {
             skein_plan::VectorCandidateSource::Scalar
         );
         assert_eq!(
+            output.report.vector_execution_reports[0].backend_selection_reason,
+            Some(skein_plan::VectorBackendSelectionReason::CompressionDisabled)
+        );
+        assert_eq!(
+            output.report.vector_execution_reports[0].estimated_raw_vector_bytes,
+            Some(16)
+        );
+        assert_eq!(
+            output.report.vector_execution_reports[0].filter_selectivity_per_million,
+            Some(0)
+        );
+        assert_eq!(
             output.report.vector_execution_reports[0].final_score_source,
             skein_executor::VectorScoreSource::RawVector
         );
@@ -11591,6 +11702,14 @@ mod tests {
         assert_eq!(
             slow_event["vector_execution_reports"][0]["compression_mode"],
             "disabled"
+        );
+        assert_eq!(
+            slow_event["vector_execution_reports"][0]["backend_selection_reason"],
+            "compression_disabled"
+        );
+        assert_eq!(
+            slow_event["vector_execution_reports"][0]["estimated_raw_vector_bytes"],
+            16
         );
         assert_eq!(
             slow_event["vector_execution_reports"][0]["index_coverage_complete"],
@@ -12413,6 +12532,14 @@ mod tests {
             CompressedVectorSearchMode::Preferred
         );
         assert_eq!(
+            output
+                .report
+                .retriever_backend_selection_reasons
+                .get("vector")
+                .map(String::as_str),
+            Some("compression_disabled")
+        );
+        assert_eq!(
             output.report.retriever_backends.get("vector"),
             Some(&"scalar_vector_scan".to_string())
         );
@@ -12547,6 +12674,11 @@ mod tests {
             NowledgeMemGraphMode::ShadowReadOnly,
         )
         .with_compressed_vector_search_mode(CompressedVectorSearchMode::Preferred)
+        .with_adaptive_vector_backend_policy(AdaptiveVectorBackendPolicy {
+            flat_scan_max_documents: 0,
+            high_filter_selectivity_per_million: u32::MAX,
+            flat_scan_memory_budget_bytes: 0,
+        })
         .with_retrieval_projection_advisor(
             NowledgeMemRetrievalProjectionAdvisor::cold_local_with_recall_parity(),
         );

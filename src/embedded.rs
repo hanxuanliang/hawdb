@@ -3,7 +3,10 @@ use crate::nowledge_mem::{
     NowledgeMemEmbeddedStore, NowledgeMemOpenOptions, NowledgeMemOpenReport,
 };
 use crate::store::DurabilityPolicy;
-use crate::{Database, DatabaseConfig, Result, SearchIndex, SearchRangeReadConfig};
+use crate::{
+    AdaptiveVectorBackendPolicy, Database, DatabaseConfig, Result, SearchIndex,
+    SearchRangeReadConfig,
+};
 use skein_qos::{IoConcurrencyBudget, RuntimeResourceBudget};
 use skein_storage::SegmentReadScheduler;
 use std::num::NonZeroU64;
@@ -191,6 +194,11 @@ fn default_database_config(profile: EmbeddedDeploymentProfile) -> DatabaseConfig
             max_plan_cache_entries: Some(32),
             slow_query_log_capacity: 128,
             statement_summary_capacity: 128,
+            adaptive_vector_backend_policy: AdaptiveVectorBackendPolicy {
+                flat_scan_max_documents: 512,
+                flat_scan_memory_budget_bytes: 4 * 1024 * 1024,
+                ..AdaptiveVectorBackendPolicy::default()
+            },
             ..DatabaseConfig::default()
         },
     }
@@ -284,6 +292,13 @@ mod tests {
         );
         assert_eq!(options.config.max_read_result_rows, Some(512));
         assert_eq!(options.config.max_plan_cache_entries, Some(32));
+        assert_eq!(
+            options
+                .config
+                .adaptive_vector_backend_policy
+                .flat_scan_memory_budget_bytes,
+            4 * 1024 * 1024
+        );
         assert_eq!(
             options.config.max_search_projection_change_log_entries,
             Some(512)

@@ -1,4 +1,4 @@
-use skein_plan::{VectorCandidateSource, VectorPhysicalPlan};
+use skein_plan::{VectorBackendSelectionReason, VectorCandidateSource, VectorPhysicalPlan};
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::fmt::{Display, Formatter};
@@ -155,6 +155,9 @@ pub struct VectorExecutionReport {
     pub backend: VectorExecutionBackend,
     pub compression_mode: VectorCompressionMode,
     pub candidate_source: VectorCandidateSource,
+    pub backend_selection_reason: Option<VectorBackendSelectionReason>,
+    pub estimated_raw_vector_bytes: Option<u64>,
+    pub filter_selectivity_per_million: Option<u32>,
     pub candidate_score_source: VectorScoreSource,
     pub final_score_source: VectorScoreSource,
     pub generated_candidate_count: usize,
@@ -348,6 +351,9 @@ pub fn execute_vector_plan<S: VectorExecutionSource>(
             backend: VectorExecutionBackend::from_candidate_source(*candidate_source),
             compression_mode: VectorCompressionMode::Unspecified,
             candidate_source: *candidate_source,
+            backend_selection_reason: None,
+            estimated_raw_vector_bytes: None,
+            filter_selectivity_per_million: None,
             candidate_score_source: batch.score_source,
             final_score_source,
             generated_candidate_count,

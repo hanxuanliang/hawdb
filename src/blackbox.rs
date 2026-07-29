@@ -136,6 +136,9 @@ pub struct BlackboxJsonlArtifactSummary {
     pub vector_backends: Vec<String>,
     pub vector_compression_modes: Vec<String>,
     pub vector_candidate_sources: Vec<String>,
+    pub vector_backend_selection_reasons: Vec<String>,
+    pub estimated_raw_vector_bytes: u64,
+    pub max_filter_selectivity_per_million: u32,
     pub generated_candidate_count: u64,
     pub descriptor_pruned_count: u64,
     pub scalar_filtered_count: u64,
@@ -160,6 +163,9 @@ impl BlackboxJsonlArtifactSummary {
             "vector_backends": self.vector_backends,
             "vector_compression_modes": self.vector_compression_modes,
             "vector_candidate_sources": self.vector_candidate_sources,
+            "vector_backend_selection_reasons": self.vector_backend_selection_reasons,
+            "estimated_raw_vector_bytes": self.estimated_raw_vector_bytes,
+            "max_filter_selectivity_per_million": self.max_filter_selectivity_per_million,
             "generated_candidate_count": self.generated_candidate_count,
             "descriptor_pruned_count": self.descriptor_pruned_count,
             "scalar_filtered_count": self.scalar_filtered_count,
@@ -869,6 +875,9 @@ fn jsonl_artifact_summary(bytes: &[u8]) -> BlackboxJsonlArtifactSummary {
     let mut vector_backends = BTreeSet::new();
     let mut vector_compression_modes = BTreeSet::new();
     let mut vector_candidate_sources = BTreeSet::new();
+    let mut vector_backend_selection_reasons = BTreeSet::new();
+    let mut estimated_raw_vector_bytes = 0u64;
+    let mut max_filter_selectivity_per_million = 0u32;
     let mut generated_candidate_count = 0u64;
     let mut descriptor_pruned_count = 0u64;
     let mut scalar_filtered_count = 0u64;
@@ -911,6 +920,25 @@ fn jsonl_artifact_summary(bytes: &[u8]) -> BlackboxJsonlArtifactSummary {
             {
                 vector_candidate_sources.insert(source.to_string());
             }
+            if let Some(reason) = report
+                .get("backend_selection_reason")
+                .and_then(serde_json::Value::as_str)
+            {
+                vector_backend_selection_reasons.insert(reason.to_string());
+            }
+            estimated_raw_vector_bytes = estimated_raw_vector_bytes.saturating_add(
+                report
+                    .get("estimated_raw_vector_bytes")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+            );
+            max_filter_selectivity_per_million = max_filter_selectivity_per_million.max(
+                report
+                    .get("filter_selectivity_per_million")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| u32::try_from(value).ok())
+                    .unwrap_or(0),
+            );
             generated_candidate_count = generated_candidate_count.saturating_add(
                 report
                     .get("generated_candidate_count")
@@ -1000,6 +1028,9 @@ fn jsonl_artifact_summary(bytes: &[u8]) -> BlackboxJsonlArtifactSummary {
         vector_backends: vector_backends.into_iter().collect(),
         vector_compression_modes: vector_compression_modes.into_iter().collect(),
         vector_candidate_sources: vector_candidate_sources.into_iter().collect(),
+        vector_backend_selection_reasons: vector_backend_selection_reasons.into_iter().collect(),
+        estimated_raw_vector_bytes,
+        max_filter_selectivity_per_million,
         generated_candidate_count,
         descriptor_pruned_count,
         scalar_filtered_count,
@@ -1319,7 +1350,7 @@ mod tests {
     #[test]
     fn jsonl_summary_aggregates_redacted_vector_execution_metrics() {
         let summary = jsonl_artifact_summary(
-            br#"{"vector_execution_reports":[{"backend":"quantized_projection","compression_mode":"preferred","candidate_source":"quantized","generated_candidate_count":5,"descriptor_pruned_count":3,"scalar_filtered_count":2,"residual_filtered_count":1,"reranked_candidate_count":4,"returned_count":2,"raw_vector_bytes_read":128,"index_covered_document_count":8,"index_candidate_document_count":10,"index_coverage_complete":false,"fallback_reason_codes":["vector_index_empty"]}]}
+            br#"{"vector_execution_reports":[{"backend":"quantized_projection","compression_mode":"preferred","candidate_source":"quantized","backend_selection_reason":"quantized_preferred","estimated_raw_vector_bytes":307200,"filter_selectivity_per_million":800000,"generated_candidate_count":5,"descriptor_pruned_count":3,"scalar_filtered_count":2,"residual_filtered_count":1,"reranked_candidate_count":4,"returned_count":2,"raw_vector_bytes_read":128,"index_covered_document_count":8,"index_candidate_document_count":10,"index_coverage_complete":false,"fallback_reason_codes":["vector_index_empty"]}]}
 {"vector_execution_reports":[]}
 "#,
         );
@@ -1329,6 +1360,12 @@ mod tests {
         assert_eq!(summary.vector_backends, vec!["quantized_projection"]);
         assert_eq!(summary.vector_compression_modes, vec!["preferred"]);
         assert_eq!(summary.vector_candidate_sources, vec!["quantized"]);
+        assert_eq!(
+            summary.vector_backend_selection_reasons,
+            vec!["quantized_preferred"]
+        );
+        assert_eq!(summary.estimated_raw_vector_bytes, 307_200);
+        assert_eq!(summary.max_filter_selectivity_per_million, 800_000);
         assert_eq!(summary.generated_candidate_count, 5);
         assert_eq!(summary.descriptor_pruned_count, 3);
         assert_eq!(summary.scalar_filtered_count, 2);

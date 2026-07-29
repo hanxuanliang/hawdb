@@ -17,13 +17,13 @@ use crate::schema::{
     TableDescriptor,
 };
 use crate::search::{
-    projection_row_from_node, search_metadata_predicate_pushdown, CompressedVectorSearchMode,
-    MetadataRepairOptions, MetadataRepairSummary, SearchCandidateSetReport,
-    SearchDerivedArtifactReport, SearchEmptyReasonCode, SearchFallbackReasonCode,
-    SearchFusionWeights, SearchIndex, SearchMatchedSpan, SearchMode, SearchPredicatePushdownReport,
-    SearchProjectionDelta, SearchProjectionDeltaReport, SearchProjectionFreshness,
-    SearchQueryOptions, SearchRebuildOptions, SearchRebuildSummary, SearchResultSet,
-    SearchRetrieverCandidateSetReport, SearchTruncationReasonCode,
+    projection_row_from_node, search_metadata_predicate_pushdown, AdaptiveVectorSearchOptions,
+    CompressedVectorSearchMode, MetadataRepairOptions, MetadataRepairSummary,
+    SearchCandidateSetReport, SearchDerivedArtifactReport, SearchEmptyReasonCode,
+    SearchFallbackReasonCode, SearchFusionWeights, SearchIndex, SearchMatchedSpan, SearchMode,
+    SearchPredicatePushdownReport, SearchProjectionDelta, SearchProjectionDeltaReport,
+    SearchProjectionFreshness, SearchQueryOptions, SearchRebuildOptions, SearchRebuildSummary,
+    SearchResultSet, SearchRetrieverCandidateSetReport, SearchTruncationReasonCode,
 };
 use crate::store::{
     AdjacencyConsistencyReport, AdjacencyDirection, AdjacencyLayout,
@@ -146,6 +146,7 @@ pub struct DatabaseConfig {
     pub slow_query_log_threshold_micros: u128,
     pub statement_summary_capacity: usize,
     pub compressed_vector_search_mode: CompressedVectorSearchMode,
+    pub adaptive_vector_backend_policy: skein_optimizer::AdaptiveVectorBackendPolicy,
 }
 
 impl Default for DatabaseConfig {
@@ -164,6 +165,7 @@ impl Default for DatabaseConfig {
             slow_query_log_threshold_micros: system_sql::DEFAULT_SLOW_QUERY_LOG_THRESHOLD_MICROS,
             statement_summary_capacity: system_sql::DEFAULT_STATEMENT_SUMMARY_CAPACITY,
             compressed_vector_search_mode: CompressedVectorSearchMode::Disabled,
+            adaptive_vector_backend_policy: skein_optimizer::AdaptiveVectorBackendPolicy::default(),
         }
     }
 }
@@ -6716,6 +6718,7 @@ impl Database {
             catalog: &self.catalog,
             store: &self.store,
             compressed_vector_search_mode: self.config.compressed_vector_search_mode,
+            adaptive_vector_backend_policy: self.config.adaptive_vector_backend_policy,
         }
         .retrieve_knowledge(search_index, request)
     }
@@ -6729,6 +6732,7 @@ impl Database {
             catalog: &self.catalog,
             store: &self.store,
             compressed_vector_search_mode: self.config.compressed_vector_search_mode,
+            adaptive_vector_backend_policy: self.config.adaptive_vector_backend_policy,
         }
         .try_retrieve_knowledge(search_index, request)
     }
@@ -7900,6 +7904,7 @@ struct KnowledgeRetrievalGraphContext<'a> {
     catalog: &'a Catalog,
     store: &'a GraphStore,
     compressed_vector_search_mode: CompressedVectorSearchMode,
+    adaptive_vector_backend_policy: skein_optimizer::AdaptiveVectorBackendPolicy,
 }
 
 impl KnowledgeRetrievalGraphContext<'_> {
@@ -7934,20 +7939,22 @@ impl KnowledgeRetrievalGraphContext<'_> {
             policy_epoch: None,
         };
         let search = if use_physical_range_reads {
-            search_index.try_search_with_options_compressed_vector_projection_mode(
+            search_index.try_search_with_options_adaptive_vector_projection(
                 &request.query_text,
                 request.query_embedding.as_deref(),
                 request.mode,
                 search_options,
-                self.compressed_vector_search_mode,
+                AdaptiveVectorSearchOptions::new(self.compressed_vector_search_mode)
+                    .with_backend_policy(self.adaptive_vector_backend_policy),
             )?
         } else {
-            search_index.search_with_options_compressed_vector_projection_mode(
+            search_index.search_with_options_adaptive_vector_projection(
                 &request.query_text,
                 request.query_embedding.as_deref(),
                 request.mode,
                 search_options,
-                self.compressed_vector_search_mode,
+                AdaptiveVectorSearchOptions::new(self.compressed_vector_search_mode)
+                    .with_backend_policy(self.adaptive_vector_backend_policy),
             )
         };
         let graph_seed_search = self.search_knowledge_graph_seeds(
@@ -35383,6 +35390,7 @@ impl DatabaseReadTransaction {
             catalog: &self.catalog,
             store: &self.store,
             compressed_vector_search_mode: self.config.compressed_vector_search_mode,
+            adaptive_vector_backend_policy: self.config.adaptive_vector_backend_policy,
         }
         .retrieve_knowledge(search_index, request)
     }
@@ -35396,6 +35404,7 @@ impl DatabaseReadTransaction {
             catalog: &self.catalog,
             store: &self.store,
             compressed_vector_search_mode: self.config.compressed_vector_search_mode,
+            adaptive_vector_backend_policy: self.config.adaptive_vector_backend_policy,
         }
         .try_retrieve_knowledge(search_index, request)
     }

@@ -313,14 +313,14 @@ pub use schema::{
     TableKind,
 };
 pub use search::{
-    CompressedVectorSearchMode, MetadataRepairOptions, MetadataRepairSummary,
-    SearchAnalyzerLexicon, SearchCandidateSetReport, SearchDerivedArtifactReport, SearchDocument,
-    SearchEmbeddingManifest, SearchEmptyReasonCode, SearchFallbackReasonCode, SearchFusionWeights,
-    SearchHit, SearchIndex, SearchMode, SearchPredicateFieldPruningReport,
-    SearchPredicatePushdownReport, SearchProjectionDelta, SearchProjectionDeltaReport,
-    SearchProjectionFreshness, SearchProjectionKind, SearchProjectionProbeOptions,
-    SearchProjectionRow, SearchQueryOptions, SearchRangeReadConfig, SearchRebuildOptions,
-    SearchRebuildSummary, SearchResultSet, SearchRetrieverCandidateSetReport,
+    AdaptiveVectorSearchOptions, CompressedVectorSearchMode, MetadataRepairOptions,
+    MetadataRepairSummary, SearchAnalyzerLexicon, SearchCandidateSetReport,
+    SearchDerivedArtifactReport, SearchDocument, SearchEmbeddingManifest, SearchEmptyReasonCode,
+    SearchFallbackReasonCode, SearchFusionWeights, SearchHit, SearchIndex, SearchMode,
+    SearchPredicateFieldPruningReport, SearchPredicatePushdownReport, SearchProjectionDelta,
+    SearchProjectionDeltaReport, SearchProjectionFreshness, SearchProjectionKind,
+    SearchProjectionProbeOptions, SearchProjectionRow, SearchQueryOptions, SearchRangeReadConfig,
+    SearchRebuildOptions, SearchRebuildSummary, SearchResultSet, SearchRetrieverCandidateSetReport,
     SearchTruncationReasonCode, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
 };
 pub use search_candidate_shadow_evidence::parse_search_candidate_shadow_probe;
@@ -328,8 +328,8 @@ pub use search_projection_evidence::{
     nowledge_search_projection_probe_contract_json, NowledgeSearchProjectionEvidenceReport,
 };
 pub use skein_optimizer::{
-    Distribution, GroupId, Memo as OptimizerMemo, MemoGroup as OptimizerMemoGroup,
-    PhysicalProperties, RequiredProperties,
+    AdaptiveVectorBackendPolicy, Distribution, GroupId, Memo as OptimizerMemo,
+    MemoGroup as OptimizerMemoGroup, PhysicalProperties, RequiredProperties,
 };
 pub use storage_recovery_evidence::nowledge_storage_recovery_evidence_json;
 pub use store::{

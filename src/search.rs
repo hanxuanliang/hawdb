@@ -13,10 +13,11 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use simsimd::SpatialSimilarity;
 use skein_optimizer::{
     normalize_search_enum_value, push_search_predicates, search_field_is_enum_like,
-    SearchPredicate, SearchPredicateOp, SearchPredicateSet, SearchScalarValue,
-    SearchScanPredicateSupport,
+    select_adaptive_vector_backend, AdaptiveVectorBackend, AdaptiveVectorBackendDecision,
+    AdaptiveVectorBackendInput, AdaptiveVectorBackendPolicy, SearchPredicate, SearchPredicateOp,
+    SearchPredicateSet, SearchScalarValue, SearchScanPredicateSupport, VectorCompressionPreference,
 };
-use skein_plan::VectorCandidateSource;
+use skein_plan::{VectorBackendSelectionReason, VectorCandidateSource};
 use skein_storage::{
     EnumDictionaryStats, FieldSummary, RangeBound, ScanPredicate, SegmentPruner, SegmentReadRange,
     SegmentSummary,
@@ -385,6 +386,9 @@ pub struct SearchPredicateFieldPruningReport {
 pub struct SearchRetrieverReport {
     pub name: String,
     pub backend: String,
+    pub backend_selection_reason: Option<VectorBackendSelectionReason>,
+    pub estimated_raw_vector_bytes: Option<u64>,
+    pub filter_selectivity_per_million: Option<u32>,
     pub available: bool,
     pub input_candidate_set: SearchCandidateSetReport,
     pub candidate_score_source: String,
@@ -465,6 +469,63 @@ impl CompressedVectorSearchMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdaptiveVectorSearchOptions {
+    pub compression_mode: CompressedVectorSearchMode,
+    pub backend_policy: AdaptiveVectorBackendPolicy,
+    pub recall_validation_probe: bool,
+}
+
+impl AdaptiveVectorSearchOptions {
+    pub fn new(compression_mode: CompressedVectorSearchMode) -> Self {
+        Self {
+            compression_mode,
+            backend_policy: AdaptiveVectorBackendPolicy::default(),
+            recall_validation_probe: false,
+        }
+    }
+
+    pub fn with_backend_policy(mut self, policy: AdaptiveVectorBackendPolicy) -> Self {
+        self.backend_policy = policy;
+        self
+    }
+
+    pub fn as_recall_validation_probe(mut self) -> Self {
+        self.recall_validation_probe = true;
+        self
+    }
+}
+
+fn vector_compression_preference(mode: CompressedVectorSearchMode) -> VectorCompressionPreference {
+    match mode {
+        CompressedVectorSearchMode::Disabled => VectorCompressionPreference::Disabled,
+        CompressedVectorSearchMode::Preferred => VectorCompressionPreference::Preferred,
+        CompressedVectorSearchMode::Required => VectorCompressionPreference::Required,
+    }
+}
+
+fn adaptive_vector_fallback_reason(decision: AdaptiveVectorBackendDecision) -> Option<String> {
+    match decision.reason {
+        VectorBackendSelectionReason::QuantizedProjectionUnavailable => {
+            Some(if decision.backend == AdaptiveVectorBackend::RequiredProjectionUnavailable {
+                "compressed vector projection required but unavailable"
+            } else {
+                "compressed vector projection unavailable; fell back to scalar vector scan"
+            }
+            .to_string())
+        }
+        VectorBackendSelectionReason::QuantizedProjectionCoverageIncomplete => {
+            Some(if decision.backend == AdaptiveVectorBackend::RequiredProjectionUnavailable {
+                "compressed vector projection required but candidate coverage is incomplete"
+            } else {
+                "compressed vector projection candidate coverage is incomplete; fell back to scalar vector scan"
+            }
+            .to_string())
+        }
+        _ => None,
+    }
+}
+
 #[derive(Clone, Copy)]
 enum VectorSearchBackend<'a> {
     Scalar,
@@ -482,25 +543,91 @@ enum SearchPayloadAccess {
 }
 
 struct SearchExecutionStrategy<'a> {
-    vector_backend: VectorSearchBackend<'a>,
+    vector_backend: VectorSearchBackendRequest<'a>,
     vector_backend_fallback_reason: Option<String>,
     payload_access: SearchPayloadAccess,
 }
 
+#[derive(Clone, Copy)]
+enum VectorSearchBackendRequest<'a> {
+    Fixed(VectorSearchBackend<'a>),
+    Adaptive(AdaptiveVectorSearchRequest),
+}
+
+#[derive(Clone, Copy)]
+struct AdaptiveVectorSearchRequest {
+    compression_preference: VectorCompressionPreference,
+    policy: AdaptiveVectorBackendPolicy,
+    recall_validation_probe: bool,
+}
+
+struct PreparedAdaptiveVectorBackend {
+    decision: AdaptiveVectorBackendDecision,
+    fallback_reason: Option<String>,
+    #[cfg(feature = "turbovec")]
+    projection: Option<turbovec_projection::TurbovecSearchProjection>,
+}
+
 impl<'a> SearchExecutionStrategy<'a> {
-    fn new(
+    fn fixed(
         vector_backend: VectorSearchBackend<'a>,
         vector_backend_fallback_reason: Option<String>,
         use_physical_range_reads: bool,
     ) -> Self {
         Self {
-            vector_backend,
+            vector_backend: VectorSearchBackendRequest::Fixed(vector_backend),
             vector_backend_fallback_reason,
             payload_access: if use_physical_range_reads {
                 SearchPayloadAccess::PrunedRanges
             } else {
                 SearchPayloadAccess::InMemory
             },
+        }
+    }
+
+    fn adaptive(
+        compression_preference: VectorCompressionPreference,
+        policy: AdaptiveVectorBackendPolicy,
+        recall_validation_probe: bool,
+        use_physical_range_reads: bool,
+    ) -> Self {
+        Self {
+            vector_backend: VectorSearchBackendRequest::Adaptive(AdaptiveVectorSearchRequest {
+                compression_preference,
+                policy,
+                recall_validation_probe,
+            }),
+            vector_backend_fallback_reason: None,
+            payload_access: if use_physical_range_reads {
+                SearchPayloadAccess::PrunedRanges
+            } else {
+                SearchPayloadAccess::InMemory
+            },
+        }
+    }
+}
+
+impl PreparedAdaptiveVectorBackend {
+    fn backend(&self) -> VectorSearchBackend<'_> {
+        match self.decision.backend {
+            AdaptiveVectorBackend::ScalarFlat => VectorSearchBackend::Scalar,
+            AdaptiveVectorBackend::RequiredProjectionUnavailable => {
+                VectorSearchBackend::CompressedRequiredUnavailable
+            }
+            AdaptiveVectorBackend::QuantizedProjection => {
+                #[cfg(feature = "turbovec")]
+                {
+                    VectorSearchBackend::Turbovec(
+                        self.projection
+                            .as_ref()
+                            .expect("quantized backend requires a loaded projection"),
+                    )
+                }
+                #[cfg(not(feature = "turbovec"))]
+                {
+                    unreachable!("quantized backend is unavailable without turbovec")
+                }
+            }
         }
     }
 }
@@ -1497,7 +1624,7 @@ impl SearchIndex {
             query_embedding,
             mode,
             options,
-            SearchExecutionStrategy::new(VectorSearchBackend::Scalar, None, false),
+            SearchExecutionStrategy::fixed(VectorSearchBackend::Scalar, None, false),
         )
         .expect("in-memory search path does not perform fallible range I/O")
     }
@@ -1514,7 +1641,7 @@ impl SearchIndex {
             query_embedding,
             mode,
             options,
-            SearchExecutionStrategy::new(VectorSearchBackend::Scalar, None, true),
+            SearchExecutionStrategy::fixed(VectorSearchBackend::Scalar, None, true),
         )
     }
 
@@ -1547,7 +1674,7 @@ impl SearchIndex {
             query_embedding,
             mode,
             options,
-            compressed_vector_search_mode,
+            AdaptiveVectorSearchOptions::new(compressed_vector_search_mode),
             false,
         )
         .expect("in-memory search path does not perform fallible range I/O")
@@ -1566,9 +1693,46 @@ impl SearchIndex {
             query_embedding,
             mode,
             options,
-            compressed_vector_search_mode,
+            AdaptiveVectorSearchOptions::new(compressed_vector_search_mode),
             true,
         )
+    }
+
+    pub fn try_search_with_options_adaptive_vector_projection(
+        &self,
+        query_text: &str,
+        query_embedding: Option<&[f32]>,
+        mode: SearchMode,
+        options: SearchQueryOptions,
+        adaptive_options: AdaptiveVectorSearchOptions,
+    ) -> Result<SearchResultSet> {
+        self.try_search_with_options_compressed_vector_projection_mode_internal(
+            query_text,
+            query_embedding,
+            mode,
+            options,
+            adaptive_options,
+            true,
+        )
+    }
+
+    pub fn search_with_options_adaptive_vector_projection(
+        &self,
+        query_text: &str,
+        query_embedding: Option<&[f32]>,
+        mode: SearchMode,
+        options: SearchQueryOptions,
+        adaptive_options: AdaptiveVectorSearchOptions,
+    ) -> SearchResultSet {
+        self.try_search_with_options_compressed_vector_projection_mode_internal(
+            query_text,
+            query_embedding,
+            mode,
+            options,
+            adaptive_options,
+            false,
+        )
+        .expect("in-memory search path does not perform fallible range I/O")
     }
 
     fn try_search_with_options_compressed_vector_projection_mode_internal(
@@ -1577,103 +1741,100 @@ impl SearchIndex {
         query_embedding: Option<&[f32]>,
         mode: SearchMode,
         options: SearchQueryOptions,
-        compressed_vector_search_mode: CompressedVectorSearchMode,
+        adaptive_options: AdaptiveVectorSearchOptions,
         use_physical_range_reads: bool,
     ) -> Result<SearchResultSet> {
-        if compressed_vector_search_mode == CompressedVectorSearchMode::Disabled {
-            return self.try_search_with_options_using_vector_backend(
-                query_text,
-                query_embedding,
-                mode,
-                options,
-                SearchExecutionStrategy::new(
-                    VectorSearchBackend::Scalar,
-                    None,
-                    use_physical_range_reads,
-                ),
-            );
-        }
-
-        #[cfg(feature = "turbovec")]
-        {
-            if mode != SearchMode::Text && query_embedding.is_some() {
-                match self.load_turbovec_projection() {
-                    Ok(Some(projection)) => {
-                        return self.try_search_with_options_using_vector_backend(
-                            query_text,
-                            query_embedding,
-                            mode,
-                            options,
-                            SearchExecutionStrategy::new(
-                                VectorSearchBackend::Turbovec(&projection),
-                                None,
-                                use_physical_range_reads,
-                            ),
-                        );
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        if compressed_vector_search_mode == CompressedVectorSearchMode::Required {
-                            return self.try_search_with_options_using_vector_backend(
-                                query_text,
-                                query_embedding,
-                                mode,
-                                options,
-                                SearchExecutionStrategy::new(
-                                    VectorSearchBackend::CompressedRequiredUnavailable,
-                                    Some(format!(
-                                        "compressed vector projection required but unavailable: {error}"
-                                    )),
-                                    use_physical_range_reads,
-                                ),
-                            );
-                        }
-                        return self.try_search_with_options_using_vector_backend(
-                            query_text,
-                            query_embedding,
-                            mode,
-                            options,
-                            SearchExecutionStrategy::new(
-                                VectorSearchBackend::Scalar,
-                                Some(format!(
-                                    "compressed vector projection unavailable; fell back to scalar vector scan: {error}"
-                                )),
-                                use_physical_range_reads,
-                            ),
-                        );
-                    }
-                }
-            }
-        }
-
-        if compressed_vector_search_mode == CompressedVectorSearchMode::Required
-            && mode != SearchMode::Text
-            && query_embedding.is_some()
-        {
-            return self.try_search_with_options_using_vector_backend(
-                query_text,
-                query_embedding,
-                mode,
-                options,
-                SearchExecutionStrategy::new(
-                    VectorSearchBackend::CompressedRequiredUnavailable,
-                    None,
-                    use_physical_range_reads,
-                ),
-            );
-        }
-
         self.try_search_with_options_using_vector_backend(
             query_text,
             query_embedding,
             mode,
             options,
-            SearchExecutionStrategy::new(
-                VectorSearchBackend::Scalar,
-                None,
+            SearchExecutionStrategy::adaptive(
+                vector_compression_preference(adaptive_options.compression_mode),
+                adaptive_options.backend_policy,
+                adaptive_options.recall_validation_probe,
                 use_physical_range_reads,
             ),
         )
+    }
+
+    fn prepare_adaptive_vector_backend(
+        &self,
+        request: AdaptiveVectorSearchRequest,
+        filtered_documents: &[&SearchDocument],
+        embedding_dimension: usize,
+    ) -> PreparedAdaptiveVectorBackend {
+        let document_count = self
+            .documents
+            .values()
+            .filter(|document| document.embedding.is_some())
+            .count();
+        let filtered_document_count = filtered_documents
+            .iter()
+            .filter(|document| document.embedding.is_some())
+            .count();
+        let decision_input =
+            |quantized_projection_available, quantized_projection_covered_document_count| {
+                AdaptiveVectorBackendInput {
+                    compression_preference: request.compression_preference,
+                    document_count,
+                    filtered_document_count,
+                    embedding_dimension,
+                    recall_validation_probe: request.recall_validation_probe,
+                    quantized_projection_available,
+                    quantized_projection_covered_document_count,
+                }
+            };
+        let preliminary = select_adaptive_vector_backend(
+            decision_input(true, filtered_document_count),
+            request.policy,
+        );
+        if preliminary.backend == AdaptiveVectorBackend::ScalarFlat {
+            return PreparedAdaptiveVectorBackend {
+                decision: preliminary,
+                fallback_reason: None,
+                #[cfg(feature = "turbovec")]
+                projection: None,
+            };
+        }
+
+        #[cfg(feature = "turbovec")]
+        {
+            let projection = self.load_turbovec_projection().ok().flatten();
+            let covered_document_count = projection
+                .as_ref()
+                .map(|projection| {
+                    filtered_documents
+                        .iter()
+                        .filter(|document| {
+                            document.embedding.is_some()
+                                && projection.contains_document_id(document.id.as_str())
+                        })
+                        .count()
+                })
+                .unwrap_or(0);
+            let decision = select_adaptive_vector_backend(
+                decision_input(projection.is_some(), covered_document_count),
+                request.policy,
+            );
+            let fallback_reason = adaptive_vector_fallback_reason(decision);
+            PreparedAdaptiveVectorBackend {
+                projection: (decision.backend == AdaptiveVectorBackend::QuantizedProjection)
+                    .then_some(projection)
+                    .flatten(),
+                decision,
+                fallback_reason,
+            }
+        }
+
+        #[cfg(not(feature = "turbovec"))]
+        {
+            let decision = select_adaptive_vector_backend(decision_input(false, 0), request.policy);
+            PreparedAdaptiveVectorBackend {
+                decision,
+                fallback_reason: adaptive_vector_fallback_reason(decision),
+            }
+        }
     }
 
     #[cfg(feature = "turbovec")]
@@ -1690,7 +1851,7 @@ impl SearchIndex {
             query_embedding,
             mode,
             options,
-            SearchExecutionStrategy::new(VectorSearchBackend::Turbovec(projection), None, false),
+            SearchExecutionStrategy::fixed(VectorSearchBackend::Turbovec(projection), None, false),
         )
         .expect("in-memory search path does not perform fallible range I/O")
     }
@@ -1704,7 +1865,7 @@ impl SearchIndex {
         strategy: SearchExecutionStrategy<'_>,
     ) -> Result<SearchResultSet> {
         let SearchExecutionStrategy {
-            vector_backend,
+            vector_backend: vector_backend_request,
             vector_backend_fallback_reason,
             payload_access,
         } = strategy;
@@ -1758,6 +1919,38 @@ impl SearchIndex {
         predicate_pushdown.report.field_summaries = filtered.field_summaries;
         let filtered_documents = filtered.documents;
         let filtered_document_count = filtered_documents.len();
+        let mut prepared_adaptive_backend = None;
+        let vector_backend = match vector_backend_request {
+            VectorSearchBackendRequest::Fixed(backend) => backend,
+            VectorSearchBackendRequest::Adaptive(request)
+                if mode != SearchMode::Text && query_embedding.is_some() =>
+            {
+                prepared_adaptive_backend = Some(
+                    self.prepare_adaptive_vector_backend(
+                        request,
+                        &filtered_documents,
+                        self.embedding_dimension
+                            .unwrap_or_else(|| query_embedding.map_or(0, <[f32]>::len)),
+                    ),
+                );
+                prepared_adaptive_backend
+                    .as_ref()
+                    .expect("adaptive backend was prepared")
+                    .backend()
+            }
+            VectorSearchBackendRequest::Adaptive(_) => VectorSearchBackend::Scalar,
+        };
+        if let Some(reason) = prepared_adaptive_backend
+            .as_ref()
+            .and_then(|backend| backend.fallback_reason.as_ref())
+        {
+            vector_fallback_reason_codes
+                .push(SearchFallbackReasonCode::CompressedVectorProjectionUnavailable);
+            vector_fallback_reasons.push(reason.clone());
+        }
+        let vector_backend_decision = prepared_adaptive_backend
+            .as_ref()
+            .map(|backend| backend.decision);
         let vector_filter_fields = predicate_pushdown
             .predicates
             .predicates()
@@ -1870,6 +2063,11 @@ impl SearchIndex {
             SearchRetrieverReport {
                 name: "vector".to_string(),
                 backend: vector_backend.report_name().to_string(),
+                backend_selection_reason: vector_backend_decision.map(|decision| decision.reason),
+                estimated_raw_vector_bytes: vector_backend_decision
+                    .map(|decision| decision.estimated_raw_vector_bytes),
+                filter_selectivity_per_million: vector_backend_decision
+                    .map(|decision| decision.filter_selectivity_per_million),
                 available: vector_available && mode != SearchMode::Text,
                 input_candidate_set: candidate_set.clone(),
                 candidate_score_source: vector_execution
@@ -1940,6 +2138,9 @@ impl SearchIndex {
             SearchRetrieverReport {
                 name: "text".to_string(),
                 backend: "bm25_text".to_string(),
+                backend_selection_reason: None,
+                estimated_raw_vector_bytes: None,
+                filter_selectivity_per_million: None,
                 available: text_available && mode != SearchMode::Vector,
                 input_candidate_set: candidate_set.clone(),
                 candidate_score_source: if text_available && mode != SearchMode::Vector {
@@ -5685,6 +5886,14 @@ mod tests {
     use skein_storage::{FileSegmentRangeReader, SegmentReadExecutor, SegmentReadScheduler};
     use std::num::{NonZeroU64, NonZeroUsize};
 
+    fn force_quantized_policy() -> AdaptiveVectorBackendPolicy {
+        AdaptiveVectorBackendPolicy {
+            flat_scan_max_documents: 0,
+            high_filter_selectivity_per_million: u32::MAX,
+            flat_scan_memory_budget_bytes: 0,
+        }
+    }
+
     #[test]
     fn hybrid_search_combines_vector_and_text() {
         let mut index = SearchIndex::in_memory();
@@ -7948,7 +8157,7 @@ mod tests {
                 policy_epoch: None,
             },
         );
-        let automatic_result = index.search_with_options_prefer_compressed_vector_projection(
+        let automatic_result = index.search_with_options_adaptive_vector_projection(
             "",
             Some(&[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
             SearchMode::Vector,
@@ -7959,6 +8168,8 @@ mod tests {
                 metadata_filters: BTreeMap::new(),
                 policy_epoch: None,
             },
+            AdaptiveVectorSearchOptions::new(CompressedVectorSearchMode::Preferred)
+                .with_backend_policy(force_quantized_policy()),
         );
         let probe = index.nowledge_search_projection_probe_json(SearchProjectionProbeOptions {
             active_embedding_model: Some("text-embedding-3-small".to_string()),
@@ -7970,6 +8181,10 @@ mod tests {
         assert_eq!(
             automatic_result.retrievers[0].backend,
             "turbovec_projection"
+        );
+        assert_eq!(
+            automatic_result.retrievers[0].backend_selection_reason,
+            Some(VectorBackendSelectionReason::QuantizedPreferred)
         );
         assert_eq!(probe["compressed_vector_projection"]["ready"], true);
         assert_eq!(
@@ -8008,7 +8223,7 @@ mod tests {
         .unwrap();
 
         let index = SearchIndex::open(&path).unwrap();
-        let result = index.search_with_options_prefer_compressed_vector_projection(
+        let result = index.search_with_options_adaptive_vector_projection(
             "",
             Some(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
             SearchMode::Vector,
@@ -8019,6 +8234,8 @@ mod tests {
                 metadata_filters: BTreeMap::new(),
                 policy_epoch: None,
             },
+            AdaptiveVectorSearchOptions::new(CompressedVectorSearchMode::Preferred)
+                .with_backend_policy(force_quantized_policy()),
         );
 
         assert_eq!(result.hits[0].id, "memory:a");
@@ -8026,6 +8243,10 @@ mod tests {
         assert!(result.retrievers[0]
             .fallback_reason_codes
             .contains(&SearchFallbackReasonCode::CompressedVectorProjectionUnavailable));
+        assert_eq!(
+            result.retrievers[0].backend_selection_reason,
+            Some(VectorBackendSelectionReason::QuantizedProjectionUnavailable)
+        );
 
         std::fs::remove_dir_all(path).unwrap();
     }
@@ -8064,6 +8285,10 @@ mod tests {
 
         assert_eq!(result.hits[0].id, "memory:a");
         assert_eq!(result.retrievers[0].backend, "scalar_vector_scan");
+        assert_eq!(
+            result.retrievers[0].backend_selection_reason,
+            Some(VectorBackendSelectionReason::CompressionDisabled)
+        );
         assert!(result.retrievers[0].fallback_reason_codes.is_empty());
 
         std::fs::remove_dir_all(path).unwrap();
@@ -8103,6 +8328,10 @@ mod tests {
         assert_eq!(result.retrievers[0].candidate_count, 0);
         assert_eq!(result.retrievers[0].candidate_score_source, "unavailable");
         assert_eq!(result.retrievers[0].final_score_source, "unavailable");
+        assert_eq!(
+            result.retrievers[0].backend_selection_reason,
+            Some(VectorBackendSelectionReason::QuantizedProjectionUnavailable)
+        );
         assert!(!result.retrievers[0].candidate_set.exact);
         assert!(result.retrievers[0]
             .fallback_reason_codes
@@ -8110,6 +8339,70 @@ mod tests {
         assert!(result
             .fallback_reason_codes
             .contains(&SearchFallbackReasonCode::CompressedVectorProjectionUnavailable));
+    }
+
+    #[test]
+    fn adaptive_vector_backend_uses_filtered_candidate_count_and_recall_probe() {
+        let mut index = SearchIndex::in_memory();
+        for id in 0..8 {
+            let mut document = doc(
+                &format!("memory:{id}"),
+                "Adaptive vector",
+                "Filtered candidate",
+                [1.0, 0.0],
+            );
+            document.metadata.insert(
+                "space_id".to_string(),
+                if id == 0 { "selected" } else { "other" }.to_string(),
+            );
+            index.upsert(document).unwrap();
+        }
+        let options = SearchQueryOptions {
+            limit: 10,
+            rank_window: None,
+            fusion_weights: SearchFusionWeights::default(),
+            metadata_filters: BTreeMap::from([("space_id".to_string(), "selected".to_string())]),
+            policy_epoch: None,
+        };
+
+        let filtered = index.search_with_options_adaptive_vector_projection(
+            "",
+            Some(&[1.0, 0.0]),
+            SearchMode::Vector,
+            options.clone(),
+            AdaptiveVectorSearchOptions::new(CompressedVectorSearchMode::Preferred)
+                .with_backend_policy(AdaptiveVectorBackendPolicy {
+                    flat_scan_max_documents: 2,
+                    high_filter_selectivity_per_million: u32::MAX,
+                    flat_scan_memory_budget_bytes: 0,
+                }),
+        );
+        let recall_probe = index.search_with_options_adaptive_vector_projection(
+            "",
+            Some(&[1.0, 0.0]),
+            SearchMode::Vector,
+            options,
+            AdaptiveVectorSearchOptions::new(CompressedVectorSearchMode::Preferred)
+                .with_backend_policy(force_quantized_policy())
+                .as_recall_validation_probe(),
+        );
+
+        assert_eq!(filtered.hits.len(), 1);
+        assert_eq!(
+            filtered.retrievers[0].backend_selection_reason,
+            Some(VectorBackendSelectionReason::SmallFilteredCandidateSet)
+        );
+        assert_eq!(filtered.retrievers[0].estimated_raw_vector_bytes, Some(8));
+        assert_eq!(
+            filtered.retrievers[0].filter_selectivity_per_million,
+            Some(875_000)
+        );
+        assert_eq!(recall_probe.hits.len(), 1);
+        assert_eq!(
+            recall_probe.retrievers[0].backend_selection_reason,
+            Some(VectorBackendSelectionReason::RecallValidationProbe)
+        );
+        assert_eq!(recall_probe.retrievers[0].backend, "scalar_vector_scan");
     }
 
     #[test]

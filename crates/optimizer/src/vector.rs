@@ -1,6 +1,177 @@
 use crate::{OptimizerContext, VectorPrecision};
-use skein_plan::{VectorPhysicalPlan, VectorSearchLogicalPlan};
+use skein_plan::{
+    VectorBackendSelectionReason, VectorCandidateSource, VectorPhysicalPlan,
+    VectorSearchLogicalPlan,
+};
 use std::fmt::{Display, Formatter};
+
+const SELECTIVITY_SCALE: u64 = 1_000_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorCompressionPreference {
+    Disabled,
+    Preferred,
+    Required,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdaptiveVectorBackend {
+    ScalarFlat,
+    QuantizedProjection,
+    RequiredProjectionUnavailable,
+}
+
+impl AdaptiveVectorBackend {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ScalarFlat => "scalar_flat",
+            Self::QuantizedProjection => "quantized_projection",
+            Self::RequiredProjectionUnavailable => "required_projection_unavailable",
+        }
+    }
+
+    pub const fn candidate_source(self) -> VectorCandidateSource {
+        match self {
+            Self::ScalarFlat | Self::RequiredProjectionUnavailable => VectorCandidateSource::Scalar,
+            Self::QuantizedProjection => VectorCandidateSource::Quantized,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdaptiveVectorBackendPolicy {
+    pub flat_scan_max_documents: usize,
+    pub high_filter_selectivity_per_million: u32,
+    pub flat_scan_memory_budget_bytes: u64,
+}
+
+impl Default for AdaptiveVectorBackendPolicy {
+    fn default() -> Self {
+        Self {
+            flat_scan_max_documents: 4_096,
+            high_filter_selectivity_per_million: 750_000,
+            flat_scan_memory_budget_bytes: 16 * 1024 * 1024,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdaptiveVectorBackendInput {
+    pub compression_preference: VectorCompressionPreference,
+    pub document_count: usize,
+    pub filtered_document_count: usize,
+    pub embedding_dimension: usize,
+    pub recall_validation_probe: bool,
+    pub quantized_projection_available: bool,
+    pub quantized_projection_covered_document_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdaptiveVectorBackendDecision {
+    pub backend: AdaptiveVectorBackend,
+    pub reason: VectorBackendSelectionReason,
+    pub estimated_raw_vector_bytes: u64,
+    pub filter_selectivity_per_million: u32,
+    pub quantized_projection_coverage_complete: bool,
+}
+
+pub fn select_adaptive_vector_backend(
+    input: AdaptiveVectorBackendInput,
+    policy: AdaptiveVectorBackendPolicy,
+) -> AdaptiveVectorBackendDecision {
+    let estimated_raw_vector_bytes = u64::try_from(input.filtered_document_count)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(u64::try_from(input.embedding_dimension).unwrap_or(u64::MAX))
+        .saturating_mul(std::mem::size_of::<f32>() as u64);
+    let filtered_out_count = input
+        .document_count
+        .saturating_sub(input.filtered_document_count);
+    let filter_selectivity_per_million = if input.document_count == 0 {
+        0
+    } else {
+        u32::try_from(
+            u64::try_from(filtered_out_count)
+                .unwrap_or(u64::MAX)
+                .saturating_mul(SELECTIVITY_SCALE)
+                / u64::try_from(input.document_count).unwrap_or(u64::MAX),
+        )
+        .unwrap_or(u32::MAX)
+    };
+    let quantized_projection_coverage_complete = input.quantized_projection_available
+        && input.quantized_projection_covered_document_count >= input.filtered_document_count;
+    let decision = |backend, reason| AdaptiveVectorBackendDecision {
+        backend,
+        reason,
+        estimated_raw_vector_bytes,
+        filter_selectivity_per_million,
+        quantized_projection_coverage_complete,
+    };
+
+    if input.recall_validation_probe {
+        return decision(
+            AdaptiveVectorBackend::ScalarFlat,
+            VectorBackendSelectionReason::RecallValidationProbe,
+        );
+    }
+    if input.compression_preference == VectorCompressionPreference::Disabled {
+        return decision(
+            AdaptiveVectorBackend::ScalarFlat,
+            VectorBackendSelectionReason::CompressionDisabled,
+        );
+    }
+    if input.compression_preference == VectorCompressionPreference::Required {
+        if !input.quantized_projection_available {
+            return decision(
+                AdaptiveVectorBackend::RequiredProjectionUnavailable,
+                VectorBackendSelectionReason::QuantizedProjectionUnavailable,
+            );
+        }
+        if !quantized_projection_coverage_complete {
+            return decision(
+                AdaptiveVectorBackend::RequiredProjectionUnavailable,
+                VectorBackendSelectionReason::QuantizedProjectionCoverageIncomplete,
+            );
+        }
+        return decision(
+            AdaptiveVectorBackend::QuantizedProjection,
+            VectorBackendSelectionReason::QuantizedRequired,
+        );
+    }
+    if input.filtered_document_count <= policy.flat_scan_max_documents {
+        return decision(
+            AdaptiveVectorBackend::ScalarFlat,
+            VectorBackendSelectionReason::SmallFilteredCandidateSet,
+        );
+    }
+    if filter_selectivity_per_million >= policy.high_filter_selectivity_per_million {
+        return decision(
+            AdaptiveVectorBackend::ScalarFlat,
+            VectorBackendSelectionReason::HighFilterSelectivity,
+        );
+    }
+    if estimated_raw_vector_bytes <= policy.flat_scan_memory_budget_bytes {
+        return decision(
+            AdaptiveVectorBackend::ScalarFlat,
+            VectorBackendSelectionReason::RawVectorsWithinMemoryBudget,
+        );
+    }
+    if !input.quantized_projection_available {
+        return decision(
+            AdaptiveVectorBackend::ScalarFlat,
+            VectorBackendSelectionReason::QuantizedProjectionUnavailable,
+        );
+    }
+    if !quantized_projection_coverage_complete {
+        return decision(
+            AdaptiveVectorBackend::ScalarFlat,
+            VectorBackendSelectionReason::QuantizedProjectionCoverageIncomplete,
+        );
+    }
+    decision(
+        AdaptiveVectorBackend::QuantizedProjection,
+        VectorBackendSelectionReason::QuantizedPreferred,
+    )
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VectorPlanError {
@@ -208,5 +379,113 @@ mod tests {
             ]
         );
         assert_eq!(validate_vector_pipeline(&planned.plan), Ok(()));
+    }
+
+    fn adaptive_input(
+        compression_preference: VectorCompressionPreference,
+    ) -> AdaptiveVectorBackendInput {
+        AdaptiveVectorBackendInput {
+            compression_preference,
+            document_count: 100_000,
+            filtered_document_count: 100_000,
+            embedding_dimension: 768,
+            recall_validation_probe: false,
+            quantized_projection_available: true,
+            quantized_projection_covered_document_count: 100_000,
+        }
+    }
+
+    #[test]
+    fn adaptive_vector_backend_prefers_scalar_for_small_filtered_sets() {
+        let decision = select_adaptive_vector_backend(
+            AdaptiveVectorBackendInput {
+                filtered_document_count: 512,
+                quantized_projection_covered_document_count: 512,
+                ..adaptive_input(VectorCompressionPreference::Preferred)
+            },
+            AdaptiveVectorBackendPolicy::default(),
+        );
+
+        assert_eq!(decision.backend, AdaptiveVectorBackend::ScalarFlat);
+        assert_eq!(
+            decision.reason,
+            VectorBackendSelectionReason::SmallFilteredCandidateSet
+        );
+    }
+
+    #[test]
+    fn adaptive_vector_backend_prefers_scalar_after_selective_filtering() {
+        let decision = select_adaptive_vector_backend(
+            AdaptiveVectorBackendInput {
+                filtered_document_count: 10_000,
+                quantized_projection_covered_document_count: 10_000,
+                ..adaptive_input(VectorCompressionPreference::Preferred)
+            },
+            AdaptiveVectorBackendPolicy {
+                flat_scan_max_documents: 1_000,
+                flat_scan_memory_budget_bytes: 1,
+                ..AdaptiveVectorBackendPolicy::default()
+            },
+        );
+
+        assert_eq!(decision.backend, AdaptiveVectorBackend::ScalarFlat);
+        assert_eq!(
+            decision.reason,
+            VectorBackendSelectionReason::HighFilterSelectivity
+        );
+        assert_eq!(decision.filter_selectivity_per_million, 900_000);
+    }
+
+    #[test]
+    fn adaptive_vector_backend_uses_quantized_projection_over_memory_budget() {
+        let decision = select_adaptive_vector_backend(
+            adaptive_input(VectorCompressionPreference::Preferred),
+            AdaptiveVectorBackendPolicy::default(),
+        );
+
+        assert_eq!(decision.backend, AdaptiveVectorBackend::QuantizedProjection);
+        assert_eq!(
+            decision.reason,
+            VectorBackendSelectionReason::QuantizedPreferred
+        );
+        assert!(decision.estimated_raw_vector_bytes > 16 * 1024 * 1024);
+    }
+
+    #[test]
+    fn adaptive_vector_backend_keeps_recall_validation_exact() {
+        let decision = select_adaptive_vector_backend(
+            AdaptiveVectorBackendInput {
+                recall_validation_probe: true,
+                ..adaptive_input(VectorCompressionPreference::Required)
+            },
+            AdaptiveVectorBackendPolicy::default(),
+        );
+
+        assert_eq!(decision.backend, AdaptiveVectorBackend::ScalarFlat);
+        assert_eq!(
+            decision.reason,
+            VectorBackendSelectionReason::RecallValidationProbe
+        );
+    }
+
+    #[test]
+    fn adaptive_vector_backend_fails_closed_for_required_incomplete_projection() {
+        let decision = select_adaptive_vector_backend(
+            AdaptiveVectorBackendInput {
+                quantized_projection_covered_document_count: 99_999,
+                ..adaptive_input(VectorCompressionPreference::Required)
+            },
+            AdaptiveVectorBackendPolicy::default(),
+        );
+
+        assert_eq!(
+            decision.backend,
+            AdaptiveVectorBackend::RequiredProjectionUnavailable
+        );
+        assert_eq!(
+            decision.reason,
+            VectorBackendSelectionReason::QuantizedProjectionCoverageIncomplete
+        );
+        assert!(!decision.quantized_projection_coverage_complete);
     }
 }
