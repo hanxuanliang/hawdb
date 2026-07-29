@@ -5622,6 +5622,25 @@ impl NowledgeMemEmbeddedStoreHandle {
             .delete_knowledge_entity_batch(request)
     }
 
+    pub fn transaction(
+        &self,
+        statements: &[NowledgeGraphStatement],
+    ) -> Result<crate::NowledgeGraphTransactionOutput> {
+        let mut store = self.write_store()?;
+        let db = store.graph_mut().database_mut();
+        let mut transaction = db.begin_transaction();
+        let mut statement_outputs = Vec::with_capacity(statements.len());
+        for statement in statements {
+            statement_outputs
+                .push(transaction.query_with_params(&statement.cypher, &statement.parameters)?);
+        }
+        let commit_output = transaction.commit()?;
+        Ok(crate::NowledgeGraphTransactionOutput {
+            statement_outputs,
+            commit_output,
+        })
+    }
+
     pub fn query_with_params_with_report_options(
         &self,
         cypher: &str,
