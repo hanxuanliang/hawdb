@@ -5,18 +5,27 @@ fn schema_context() -> GraphRagSchemaContext {
     let mut catalog = Catalog::default();
     let memory = catalog.get_or_create_label("Memory");
     let entity = catalog.get_or_create_label("Entity");
+    let source = catalog.get_or_create_label("Source");
     let mentions = catalog.get_or_create_rel_type("MENTIONS");
+    let sourced_from = catalog.get_or_create_rel_type("SOURCED_FROM");
     let memory_table = catalog.get_or_create_table(TableKind::Node, "Memory");
     let entity_table = catalog.get_or_create_table(TableKind::Node, "Entity");
+    let source_table = catalog.get_or_create_table(TableKind::Node, "Source");
     let mentions_table = catalog.get_or_create_table(TableKind::Relationship, "MENTIONS");
+    let sourced_from_table = catalog.get_or_create_table(TableKind::Relationship, "SOURCED_FROM");
     catalog.get_or_create_property(memory_table, "id", PropertyType::String, false);
     catalog.get_or_create_property(entity_table, "name", PropertyType::String, true);
+    catalog.get_or_create_property(source_table, "uri", PropertyType::String, false);
     catalog.get_or_create_property(mentions_table, "confidence", PropertyType::Float, true);
+    catalog.get_or_create_property(sourced_from_table, "observed_at", PropertyType::Int, false);
     let statistics = GraphStatistics {
         computed_at_commit_epoch: 9,
-        label_counts: BTreeMap::from([(memory, 4), (entity, 2)]),
-        rel_type_counts: BTreeMap::from([(mentions, 3)]),
-        path_counts: BTreeMap::from([((memory, mentions, entity), 3)]),
+        label_counts: BTreeMap::from([(memory, 4), (entity, 2), (source, 1)]),
+        rel_type_counts: BTreeMap::from([(mentions, 3), (sourced_from, 2)]),
+        path_counts: BTreeMap::from([
+            ((memory, mentions, entity), 3),
+            ((entity, sourced_from, source), 2),
+        ]),
         ..GraphStatistics::default()
     };
     build_graph_rag_schema_context(
@@ -69,6 +78,94 @@ fn generates_bounded_parameterized_route_query() {
     assert_eq!(
         generated.required_parameters,
         vec!["memory_id".to_string(), "minimum_confidence".to_string()]
+    );
+}
+
+#[test]
+fn generates_schema_validated_two_hop_query() {
+    let context = schema_context();
+    let generated = context
+        .generate_query(&GraphRagQueryDraft {
+            schema_fingerprint: context.fingerprint,
+            pattern: GraphRagQueryPattern::TwoHopRoute {
+                source_label: "Memory".to_string(),
+                first_relationship_type: "MENTIONS".to_string(),
+                intermediate_label: "Entity".to_string(),
+                second_relationship_type: "SOURCED_FROM".to_string(),
+                target_label: "Source".to_string(),
+            },
+            predicates: vec![
+                GraphRagQueryPredicate {
+                    binding: GraphRagQueryBinding::Intermediate,
+                    property: "name".to_string(),
+                    operator: GraphRagQueryPredicateOperator::Eq,
+                    parameter: Some("entity_name".to_string()),
+                },
+                GraphRagQueryPredicate {
+                    binding: GraphRagQueryBinding::SecondRelationship,
+                    property: "observed_at".to_string(),
+                    operator: GraphRagQueryPredicateOperator::Gte,
+                    parameter: Some("minimum_observed_at".to_string()),
+                },
+            ],
+            projections: vec![
+                GraphRagQueryProjection {
+                    binding: GraphRagQueryBinding::Source,
+                    property: "id".to_string(),
+                    alias: "memory_id".to_string(),
+                },
+                GraphRagQueryProjection {
+                    binding: GraphRagQueryBinding::Target,
+                    property: "uri".to_string(),
+                    alias: "source_uri".to_string(),
+                },
+            ],
+            limit: 10,
+        })
+        .unwrap();
+
+    assert_eq!(
+        generated.cypher,
+        "MATCH (n0:Memory)-[r0:MENTIONS]->(n1:Entity)-[r1:SOURCED_FROM]->(n2:Source) \
+         WHERE n1.name = $entity_name AND r1.observed_at >= $minimum_observed_at \
+         RETURN n0.id AS memory_id, n2.uri AS source_uri LIMIT 10"
+    );
+    assert_eq!(
+        generated.required_parameters,
+        vec!["entity_name".to_string(), "minimum_observed_at".to_string()]
+    );
+}
+
+#[test]
+fn rejects_two_hop_draft_when_either_leg_is_unobserved() {
+    let context = schema_context();
+    let error = context
+        .generate_query(&GraphRagQueryDraft {
+            schema_fingerprint: context.fingerprint,
+            pattern: GraphRagQueryPattern::TwoHopRoute {
+                source_label: "Memory".to_string(),
+                first_relationship_type: "MENTIONS".to_string(),
+                intermediate_label: "Entity".to_string(),
+                second_relationship_type: "MENTIONS".to_string(),
+                target_label: "Source".to_string(),
+            },
+            predicates: Vec::new(),
+            projections: vec![GraphRagQueryProjection {
+                binding: GraphRagQueryBinding::Target,
+                property: "uri".to_string(),
+                alias: "source_uri".to_string(),
+            }],
+            limit: 10,
+        })
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        GraphRagQueryGenerationError::UnknownRoute {
+            source_label: "Entity".to_string(),
+            relationship_type: "MENTIONS".to_string(),
+            target_label: "Source".to_string(),
+        }
     );
 }
 

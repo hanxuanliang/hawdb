@@ -195,19 +195,17 @@ renderer tells a query generator to:
 - keep generated traversal bounded to at most two hops.
 
 For callers that can produce structured output, `GraphRagQueryDraft` is the
-preferred boundary. It describes a node or observed one-hop route, predicates,
-projections, and a bounded result limit. `GraphRagSchemaContext::generate_query`
-checks the schema fingerprint, identifiers, route, properties, binding scope,
-predicate shape, and limit before rendering parameterized Cypher. The result
-contains the required parameter names and is submitted through the normal query
-runtime.
+preferred boundary. It describes a node, an observed one-hop route, or two
+composable observed routes, plus predicates, projections, and a bounded result
+limit. `GraphRagSchemaContext::generate_query` checks the schema fingerprint,
+identifiers, every route leg, properties, binding scope, predicate shape, and
+limit before rendering parameterized Cypher. The result contains the required
+parameter names and is submitted through the normal query runtime.
 
-Typed generation intentionally does not infer a two-hop route from
-`GraphRagCommonPathSummary`: that summary does not preserve the intermediate
-node and both edge types. A caller may generate a two-hop Cypher query from the
-compact guidance, but it still passes through the normal parser and semantic
-planner. A future typed two-hop draft requires a catalog representation that
-can validate every leg without guessing.
+Typed two-hop generation validates both one-hop legs independently, including
+the shared intermediate label and both relationship types. It does not infer
+topology from `GraphRagCommonPathSummary`, because that compact summary does not
+preserve the intermediate node and both edge types.
 
 Skein does not embed an LLM and does not execute generated queries through a
 special GraphRAG interpreter. The host submits generated Cypher through the

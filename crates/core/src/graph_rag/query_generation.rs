@@ -1,201 +1,25 @@
 use super::{GraphRagPropertySubject, GraphRagSchemaContext};
 use crate::PropertyType;
-use std::collections::BTreeSet;
-use std::fmt::{Display, Formatter, Write};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write;
 
-pub const MAX_GRAPH_RAG_QUERY_LIMIT: usize = 100;
+mod model;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GraphRagQueryPattern {
-    Node {
-        label: String,
-    },
-    Route {
-        source_label: String,
-        relationship_type: String,
-        target_label: String,
-    },
+pub use model::{
+    GraphRagGeneratedQuery, GraphRagQueryBinding, GraphRagQueryDraft, GraphRagQueryGenerationError,
+    GraphRagQueryPattern, GraphRagQueryPredicate, GraphRagQueryPredicateOperator,
+    GraphRagQueryProjection, MAX_GRAPH_RAG_QUERY_LIMIT,
+};
+
+struct ResolvedBinding<'a> {
+    subject: GraphRagPropertySubject,
+    subject_name: &'a str,
+    variable: &'static str,
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GraphRagQueryBinding {
-    Source,
-    Relationship,
-    Target,
-}
-
-impl GraphRagQueryBinding {
-    const fn variable(self) -> &'static str {
-        match self {
-            Self::Source => "n0",
-            Self::Relationship => "r0",
-            Self::Target => "n1",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GraphRagQueryPredicateOperator {
-    Eq,
-    NotEq,
-    Lt,
-    Lte,
-    Gt,
-    Gte,
-    In,
-    Contains,
-    StartsWith,
-    EndsWith,
-    IsNull,
-    IsNotNull,
-}
-
-impl GraphRagQueryPredicateOperator {
-    const fn token(self) -> &'static str {
-        match self {
-            Self::Eq => "=",
-            Self::NotEq => "<>",
-            Self::Lt => "<",
-            Self::Lte => "<=",
-            Self::Gt => ">",
-            Self::Gte => ">=",
-            Self::In => "IN",
-            Self::Contains => "CONTAINS",
-            Self::StartsWith => "STARTS WITH",
-            Self::EndsWith => "ENDS WITH",
-            Self::IsNull => "IS NULL",
-            Self::IsNotNull => "IS NOT NULL",
-        }
-    }
-
-    const fn requires_parameter(self) -> bool {
-        !matches!(self, Self::IsNull | Self::IsNotNull)
-    }
-
-    const fn requires_string_property(self) -> bool {
-        matches!(self, Self::Contains | Self::StartsWith | Self::EndsWith)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GraphRagQueryPredicate {
-    pub binding: GraphRagQueryBinding,
-    pub property: String,
-    pub operator: GraphRagQueryPredicateOperator,
-    pub parameter: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GraphRagQueryProjection {
-    pub binding: GraphRagQueryBinding,
-    pub property: String,
-    pub alias: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GraphRagQueryDraft {
-    pub schema_fingerprint: u64,
-    pub pattern: GraphRagQueryPattern,
-    pub predicates: Vec<GraphRagQueryPredicate>,
-    pub projections: Vec<GraphRagQueryProjection>,
-    pub limit: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GraphRagGeneratedQuery {
-    pub cypher: String,
-    pub schema_fingerprint: u64,
-    pub required_parameters: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GraphRagQueryGenerationError {
-    SchemaFingerprintMismatch {
-        expected: u64,
-        actual: u64,
-    },
-    InvalidIdentifier {
-        kind: &'static str,
-        value: String,
-    },
-    UnknownLabel(String),
-    UnknownRoute {
-        source_label: String,
-        relationship_type: String,
-        target_label: String,
-    },
-    BindingUnavailable(GraphRagQueryBinding),
-    PropertyUnavailable {
-        binding: GraphRagQueryBinding,
-        property: String,
-    },
-    OperatorRequiresStringProperty {
-        binding: GraphRagQueryBinding,
-        property: String,
-    },
-    MissingParameter {
-        property: String,
-    },
-    UnexpectedParameter {
-        property: String,
-    },
-    EmptyProjection,
-    InvalidLimit {
-        limit: usize,
-        maximum: usize,
-    },
-}
-
-impl Display for GraphRagQueryGenerationError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::SchemaFingerprintMismatch { expected, actual } => write!(
-                formatter,
-                "schema fingerprint mismatch: expected {expected:016x}, got {actual:016x}"
-            ),
-            Self::InvalidIdentifier { kind, value } => {
-                write!(formatter, "invalid {kind} identifier: {value}")
-            }
-            Self::UnknownLabel(label) => write!(formatter, "label is not in schema context: {label}"),
-            Self::UnknownRoute {
-                source_label,
-                relationship_type,
-                target_label,
-            } => write!(
-                formatter,
-                "route is not in schema context: ({source_label})-[:{relationship_type}]->({target_label})"
-            ),
-            Self::BindingUnavailable(binding) => {
-                write!(formatter, "query binding is unavailable: {binding:?}")
-            }
-            Self::PropertyUnavailable { binding, property } => write!(
-                formatter,
-                "property is not in schema context for {binding:?}: {property}"
-            ),
-            Self::OperatorRequiresStringProperty { binding, property } => write!(
-                formatter,
-                "predicate requires a string property for {binding:?}: {property}"
-            ),
-            Self::MissingParameter { property } => {
-                write!(formatter, "predicate parameter is required for: {property}")
-            }
-            Self::UnexpectedParameter { property } => {
-                write!(formatter, "predicate parameter is not allowed for: {property}")
-            }
-            Self::EmptyProjection => formatter.write_str("at least one projection is required"),
-            Self::InvalidLimit { limit, maximum } => {
-                write!(formatter, "query limit must be between 1 and {maximum}, got {limit}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for GraphRagQueryGenerationError {}
 
 struct ResolvedPattern<'a> {
-    source_label: &'a str,
-    relationship_type: Option<&'a str>,
-    target_label: Option<&'a str>,
+    cypher: String,
+    bindings: BTreeMap<GraphRagQueryBinding, ResolvedBinding<'a>>,
 }
 
 pub(super) fn generate_query(
@@ -220,7 +44,7 @@ pub(super) fn generate_query(
 
     let pattern = resolve_pattern(context, &draft.pattern)?;
     let mut required_parameters = BTreeSet::new();
-    let mut cypher = render_match_pattern(&pattern);
+    let mut cypher = pattern.cypher.clone();
 
     if !draft.predicates.is_empty() {
         cypher.push_str(" WHERE ");
@@ -240,7 +64,7 @@ pub(super) fn generate_query(
                     },
                 );
             }
-            render_predicate(&mut cypher, predicate, &mut required_parameters)?;
+            render_predicate(&mut cypher, &pattern, predicate, &mut required_parameters)?;
         }
     }
 
@@ -251,12 +75,11 @@ pub(super) fn generate_query(
         }
         validate_property(context, &pattern, projection.binding, &projection.property)?;
         validate_identifier("projection alias", &projection.alias)?;
+        let variable = resolve_binding(&pattern, projection.binding)?.variable;
         let _ = write!(
             cypher,
             "{}.{} AS {}",
-            projection.binding.variable(),
-            projection.property,
-            projection.alias
+            variable, projection.property, projection.alias
         );
     }
     let _ = write!(cypher, " LIMIT {}", draft.limit);
@@ -277,9 +100,15 @@ fn resolve_pattern<'a>(
             validate_identifier("label", label)?;
             validate_label(context, label)?;
             Ok(ResolvedPattern {
-                source_label: label,
-                relationship_type: None,
-                target_label: None,
+                cypher: format!("MATCH (n0:{label})"),
+                bindings: BTreeMap::from([(
+                    GraphRagQueryBinding::Source,
+                    ResolvedBinding {
+                        subject: GraphRagPropertySubject::Node,
+                        subject_name: label,
+                        variable: "n0",
+                    },
+                )]),
             })
         }
         GraphRagQueryPattern::Route {
@@ -292,46 +121,161 @@ fn resolve_pattern<'a>(
             validate_identifier("target label", target_label)?;
             validate_label(context, source_label)?;
             validate_label(context, target_label)?;
-            if !context.routes.iter().any(|route| {
-                route.source_label == *source_label
-                    && route.relationship_type == *relationship_type
-                    && route.target_label == *target_label
-            }) {
-                return Err(GraphRagQueryGenerationError::UnknownRoute {
-                    source_label: source_label.clone(),
-                    relationship_type: relationship_type.clone(),
-                    target_label: target_label.clone(),
-                });
-            }
+            validate_route(context, source_label, relationship_type, target_label)?;
             Ok(ResolvedPattern {
+                cypher: format!(
+                    "MATCH (n0:{source_label})-[r0:{relationship_type}]->(n1:{target_label})"
+                ),
+                bindings: route_bindings(source_label, relationship_type, target_label),
+            })
+        }
+        GraphRagQueryPattern::TwoHopRoute {
+            source_label,
+            first_relationship_type,
+            intermediate_label,
+            second_relationship_type,
+            target_label,
+        } => {
+            validate_identifier("source label", source_label)?;
+            validate_identifier("first relationship type", first_relationship_type)?;
+            validate_identifier("intermediate label", intermediate_label)?;
+            validate_identifier("second relationship type", second_relationship_type)?;
+            validate_identifier("target label", target_label)?;
+            validate_label(context, source_label)?;
+            validate_label(context, intermediate_label)?;
+            validate_label(context, target_label)?;
+            validate_route(
+                context,
                 source_label,
-                relationship_type: Some(relationship_type),
-                target_label: Some(target_label),
+                first_relationship_type,
+                intermediate_label,
+            )?;
+            validate_route(
+                context,
+                intermediate_label,
+                second_relationship_type,
+                target_label,
+            )?;
+
+            Ok(ResolvedPattern {
+                cypher: format!(
+                    "MATCH (n0:{source_label})-[r0:{first_relationship_type}]->\
+                     (n1:{intermediate_label})-[r1:{second_relationship_type}]->\
+                     (n2:{target_label})"
+                ),
+                bindings: BTreeMap::from([
+                    (
+                        GraphRagQueryBinding::Source,
+                        ResolvedBinding {
+                            subject: GraphRagPropertySubject::Node,
+                            subject_name: source_label,
+                            variable: "n0",
+                        },
+                    ),
+                    (
+                        GraphRagQueryBinding::Relationship,
+                        ResolvedBinding {
+                            subject: GraphRagPropertySubject::Relationship,
+                            subject_name: first_relationship_type,
+                            variable: "r0",
+                        },
+                    ),
+                    (
+                        GraphRagQueryBinding::Intermediate,
+                        ResolvedBinding {
+                            subject: GraphRagPropertySubject::Node,
+                            subject_name: intermediate_label,
+                            variable: "n1",
+                        },
+                    ),
+                    (
+                        GraphRagQueryBinding::SecondRelationship,
+                        ResolvedBinding {
+                            subject: GraphRagPropertySubject::Relationship,
+                            subject_name: second_relationship_type,
+                            variable: "r1",
+                        },
+                    ),
+                    (
+                        GraphRagQueryBinding::Target,
+                        ResolvedBinding {
+                            subject: GraphRagPropertySubject::Node,
+                            subject_name: target_label,
+                            variable: "n2",
+                        },
+                    ),
+                ]),
             })
         }
     }
 }
 
-fn render_match_pattern(pattern: &ResolvedPattern<'_>) -> String {
-    match (pattern.relationship_type, pattern.target_label) {
-        (Some(relationship_type), Some(target_label)) => format!(
-            "MATCH (n0:{})-[r0:{}]->(n1:{})",
-            pattern.source_label, relationship_type, target_label
-        ),
-        _ => format!("MATCH (n0:{})", pattern.source_label),
+fn validate_route(
+    context: &GraphRagSchemaContext,
+    source_label: &str,
+    relationship_type: &str,
+    target_label: &str,
+) -> Result<(), GraphRagQueryGenerationError> {
+    if context.routes.iter().any(|route| {
+        route.source_label == source_label
+            && route.relationship_type == relationship_type
+            && route.target_label == target_label
+    }) {
+        Ok(())
+    } else {
+        Err(GraphRagQueryGenerationError::UnknownRoute {
+            source_label: source_label.to_string(),
+            relationship_type: relationship_type.to_string(),
+            target_label: target_label.to_string(),
+        })
     }
+}
+
+fn route_bindings<'a>(
+    source_label: &'a str,
+    relationship_type: &'a str,
+    target_label: &'a str,
+) -> BTreeMap<GraphRagQueryBinding, ResolvedBinding<'a>> {
+    BTreeMap::from([
+        (
+            GraphRagQueryBinding::Source,
+            ResolvedBinding {
+                subject: GraphRagPropertySubject::Node,
+                subject_name: source_label,
+                variable: "n0",
+            },
+        ),
+        (
+            GraphRagQueryBinding::Relationship,
+            ResolvedBinding {
+                subject: GraphRagPropertySubject::Relationship,
+                subject_name: relationship_type,
+                variable: "r0",
+            },
+        ),
+        (
+            GraphRagQueryBinding::Target,
+            ResolvedBinding {
+                subject: GraphRagPropertySubject::Node,
+                subject_name: target_label,
+                variable: "n1",
+            },
+        ),
+    ])
 }
 
 fn render_predicate(
     output: &mut String,
+    pattern: &ResolvedPattern<'_>,
     predicate: &GraphRagQueryPredicate,
     required_parameters: &mut BTreeSet<String>,
 ) -> Result<(), GraphRagQueryGenerationError> {
     validate_identifier("property", &predicate.property)?;
+    let variable = resolve_binding(pattern, predicate.binding)?.variable;
     let _ = write!(
         output,
         "{}.{} {}",
-        predicate.binding.variable(),
+        variable,
         predicate.property,
         predicate.operator.token()
     );
@@ -383,27 +327,13 @@ fn validate_property(
     property: &str,
 ) -> Result<PropertyType, GraphRagQueryGenerationError> {
     validate_identifier("property", property)?;
-    let (subject, subject_name) = match binding {
-        GraphRagQueryBinding::Source => (GraphRagPropertySubject::Node, pattern.source_label),
-        GraphRagQueryBinding::Relationship => (
-            GraphRagPropertySubject::Relationship,
-            pattern
-                .relationship_type
-                .ok_or(GraphRagQueryGenerationError::BindingUnavailable(binding))?,
-        ),
-        GraphRagQueryBinding::Target => (
-            GraphRagPropertySubject::Node,
-            pattern
-                .target_label
-                .ok_or(GraphRagQueryGenerationError::BindingUnavailable(binding))?,
-        ),
-    };
+    let resolved = resolve_binding(pattern, binding)?;
     context
         .properties
         .iter()
         .find(|candidate| {
-            candidate.subject == subject
-                && candidate.subject_name == subject_name
+            candidate.subject == resolved.subject
+                && candidate.subject_name == resolved.subject_name
                 && candidate.name == property
         })
         .map(|property| property.value_type)
@@ -411,6 +341,16 @@ fn validate_property(
             binding,
             property: property.to_string(),
         })
+}
+
+fn resolve_binding<'a>(
+    pattern: &'a ResolvedPattern<'_>,
+    binding: GraphRagQueryBinding,
+) -> Result<&'a ResolvedBinding<'a>, GraphRagQueryGenerationError> {
+    pattern
+        .bindings
+        .get(&binding)
+        .ok_or(GraphRagQueryGenerationError::BindingUnavailable(binding))
 }
 
 fn validate_identifier(

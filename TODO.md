@@ -895,6 +895,8 @@ contract.
       ontology, not from free-form LLM-created labels or edge types.
     - Validate typed node and observed one-hop route drafts against a pinned
       schema fingerprint before rendering bounded, parameterized Cypher.
+    - Validate typed two-hop drafts by composing two observed routes with an
+      explicit intermediate label and independently addressable edge bindings.
     - Return required parameter names and reject invented identifiers,
       unavailable bindings, properties outside the context, and stale schema
       drafts before parsing or planning.

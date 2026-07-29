@@ -81,6 +81,78 @@ fn graph_rag_schema_context_guides_queries_through_the_read_runtime() {
 }
 
 #[test]
+fn graph_rag_two_hop_draft_runs_through_the_query_runtime() {
+    let mut db = Database::new();
+    db.query("CREATE NODE TABLE Memory").unwrap();
+    db.query("CREATE NODE TABLE Entity").unwrap();
+    db.query("CREATE NODE TABLE Source").unwrap();
+    db.query("CREATE RELATIONSHIP TABLE MENTIONS").unwrap();
+    db.query("CREATE RELATIONSHIP TABLE SOURCED_FROM").unwrap();
+    db.query("CREATE PROPERTY ON NODE TABLE Memory(id) TYPE STRING NOT NULL")
+        .unwrap();
+    db.query("CREATE PROPERTY ON NODE TABLE Entity(id) TYPE STRING NOT NULL")
+        .unwrap();
+    db.query("CREATE PROPERTY ON NODE TABLE Entity(name) TYPE STRING")
+        .unwrap();
+    db.query("CREATE PROPERTY ON NODE TABLE Source(id) TYPE STRING NOT NULL")
+        .unwrap();
+    db.query("CREATE PROPERTY ON NODE TABLE Source(uri) TYPE STRING NOT NULL")
+        .unwrap();
+    db.query(
+        "CREATE (:Memory {id: 'memory-1'})-[:MENTIONS]->(:Entity {id: 'entity-1', name: 'Skein'})",
+    )
+    .unwrap();
+    db.query("CREATE (:Source {id: 'source-1', uri: 'https://example.test/skein'})")
+        .unwrap();
+    db.query(
+        "MATCH (e:Entity {id: 'entity-1'}), (s:Source {id: 'source-1'}) \
+         CREATE (e)-[:SOURCED_FROM]->(s)",
+    )
+    .unwrap();
+
+    let context = db.graph_rag_schema_context(GraphRagSchemaContextOptions::default());
+    let generated = context
+        .generate_query(&GraphRagQueryDraft {
+            schema_fingerprint: context.fingerprint,
+            pattern: GraphRagQueryPattern::TwoHopRoute {
+                source_label: "Memory".to_string(),
+                first_relationship_type: "MENTIONS".to_string(),
+                intermediate_label: "Entity".to_string(),
+                second_relationship_type: "SOURCED_FROM".to_string(),
+                target_label: "Source".to_string(),
+            },
+            predicates: vec![GraphRagQueryPredicate {
+                binding: GraphRagQueryBinding::Intermediate,
+                property: "name".to_string(),
+                operator: GraphRagQueryPredicateOperator::Eq,
+                parameter: Some("entity_name".to_string()),
+            }],
+            projections: vec![GraphRagQueryProjection {
+                binding: GraphRagQueryBinding::Target,
+                property: "uri".to_string(),
+                alias: "source_uri".to_string(),
+            }],
+            limit: 5,
+        })
+        .unwrap();
+
+    skein_cypher::parse(&generated.cypher).unwrap();
+    let output = db
+        .query_with_params(
+            &generated.cypher,
+            &BTreeMap::from([(
+                "entity_name".to_string(),
+                Value::String("Skein".to_string()),
+            )]),
+        )
+        .unwrap();
+    assert_eq!(
+        output.rows[0].get("source_uri"),
+        Some(&Value::String("https://example.test/skein".to_string()))
+    );
+}
+
+#[test]
 fn graph_rag_schema_context_is_pinned_to_the_read_snapshot() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 'memory-1'})").unwrap();
