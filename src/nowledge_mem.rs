@@ -14,9 +14,9 @@ use crate::{
     KnowledgeRetrievalRequest, LocalQosPolicy, LocalQosScheduler, LocalQosState,
     NowledgeGraphStatement, PlanCacheLookup, QueryOutput, ReadExecutionProfile, Result,
     ScheduledSearchProjectionCatchUpReport, SearchIndex, SearchProjectionCatchUpReport,
-    SearchProjectionDeltaReport, SearchProjectionFreshness, SearchProjectionGraphDeltaRequest,
-    SearchProjectionProbeOptions, SearchResultSet, SkeinError, SlowQueryLogRecordSummary,
-    TelemetrySink, Value,
+    SearchProjectionChangefeedStatus, SearchProjectionDeltaReport, SearchProjectionFreshness,
+    SearchProjectionGraphDeltaRequest, SearchProjectionMutationId, SearchProjectionProbeOptions,
+    SearchResultSet, SkeinError, SlowQueryLogRecordSummary, TelemetrySink, Value,
 };
 use crate::{
     graph_route_readiness::NMEM_GRAPH_ROUTE_READINESS_PROTOCOL,
@@ -303,7 +303,63 @@ impl NowledgeMemOpenReport {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemRuntimeStatus {
+    pub protocol: String,
+    pub graph_commit_epoch: u64,
+    pub changefeed: SearchProjectionChangefeedStatus,
+    pub projection_freshness: Option<SearchProjectionFreshness>,
+}
+
+impl NowledgeMemRuntimeStatus {
+    pub fn projection_commit_lag(&self) -> u64 {
+        self.graph_commit_epoch.saturating_sub(
+            self.projection_freshness
+                .as_ref()
+                .and_then(|freshness| freshness.durable_source_graph_commit_epoch)
+                .unwrap_or(0),
+        )
+    }
+
+    pub fn projection_stale(&self) -> bool {
+        self.projection_commit_lag() > 0
+    }
+
+    pub fn json(&self) -> serde_json::Value {
+        let freshness = self.projection_freshness.as_ref();
+        serde_json::json!({
+            "protocol": self.protocol,
+            "graph_commit_epoch": self.graph_commit_epoch,
+            "changefeed": {
+                "graph_commit_epoch": self.changefeed.graph_commit_epoch,
+                "resume_floor_commit_epoch": self.changefeed.resume_floor_commit_epoch,
+                "oldest_retained_mutation_id": self.changefeed.oldest_retained_mutation_id.map(SearchProjectionMutationId::commit_epoch),
+                "newest_retained_mutation_id": self.changefeed.newest_retained_mutation_id.map(SearchProjectionMutationId::commit_epoch),
+                "retained_mutation_count": self.changefeed.retained_mutation_count,
+                "restart_recoverable": self.changefeed.restart_recoverable,
+            },
+            "projection": {
+                "opened": freshness.is_some(),
+                "document_count": freshness.map(|freshness| freshness.document_count),
+                "source_graph_commit_epoch": freshness.and_then(|freshness| freshness.source_graph_commit_epoch),
+                "durable_source_graph_commit_epoch": freshness.and_then(|freshness| freshness.durable_source_graph_commit_epoch),
+                "has_uncheckpointed_changes": freshness.is_some_and(|freshness| freshness.has_uncheckpointed_changes),
+                "full_reindex_needed": freshness.is_some_and(|freshness| freshness.full_reindex_needed),
+                "full_reindex_reasons": freshness.map(|freshness| freshness.full_reindex_reasons.as_slice()).unwrap_or_default(),
+                "metadata_repair_needed": freshness.is_some_and(|freshness| freshness.metadata_repair_needed),
+                "metadata_repair_reasons": freshness.map(|freshness| freshness.metadata_repair_reasons.as_slice()).unwrap_or_default(),
+                "embedding_model": freshness.and_then(|freshness| freshness.embedding_model.as_deref()),
+                "embedding_version": freshness.and_then(|freshness| freshness.embedding_version.as_deref()),
+                "embedding_dimension": freshness.and_then(|freshness| freshness.embedding_dimension),
+                "commit_lag": self.projection_commit_lag(),
+                "stale": self.projection_stale(),
+            },
+        })
+    }
+}
+
 pub const NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL: &str = "skein-nowledge-mem-open-report";
+pub const NOWLEDGE_MEM_RUNTIME_STATUS_PROTOCOL: &str = "skein-nowledge-mem-runtime-status-v1";
 pub const NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL: &str = "skein-nowledge-mem-query-report-v1";
 pub const NOWLEDGE_MEM_READ_REPORT_PROTOCOL: &str = "skein-nowledge-mem-read-report";
 pub const NOWLEDGE_MEM_GRAPH_OVERVIEW_ROUTE_REPORT_PROTOCOL: &str =
@@ -5690,6 +5746,10 @@ impl NowledgeMemEmbeddedStoreHandle {
         Ok(self.read_store()?.slow_query_report_json())
     }
 
+    pub fn runtime_status(&self) -> Result<NowledgeMemRuntimeStatus> {
+        Ok(self.read_store()?.runtime_status())
+    }
+
     pub fn library_readiness(
         &self,
         options: &NowledgeMemReadinessOptions,
@@ -5837,6 +5897,19 @@ impl NowledgeMemEmbeddedStore {
 
     pub fn storage_recovery_report_json(&self) -> serde_json::Value {
         self.storage_recovery_report().json()
+    }
+
+    pub fn runtime_status(&self) -> NowledgeMemRuntimeStatus {
+        let graph_commit_epoch = self.graph.database().commit_epoch();
+        NowledgeMemRuntimeStatus {
+            protocol: NOWLEDGE_MEM_RUNTIME_STATUS_PROTOCOL.to_string(),
+            graph_commit_epoch,
+            changefeed: self.graph.database().search_projection_changefeed_status(),
+            projection_freshness: self
+                .search_projection
+                .as_ref()
+                .map(|projection| projection.index().projection_freshness()),
+        }
     }
 
     pub fn build_search_projection_graph_delta_request_from_freshness(
@@ -11414,6 +11487,52 @@ mod tests {
         let reopened = SearchIndex::open(&search_path).unwrap();
         assert!(reopened.document("memory:m1").is_some());
         assert!(reopened.document("memory:m2").is_some());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn embedded_store_handle_exposes_live_graph_and_projection_watermarks() {
+        let root = unique_nowledge_mem_test_dir("embedded_runtime_watermarks");
+        let search_path = root.join("search");
+        let mut graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::WritableCutover);
+        graph
+            .query("CREATE (:Memory {id: 'm1', title: 'Runtime status'})")
+            .unwrap();
+        let projection =
+            NowledgeMemSearchProjection::from_index(SearchIndex::open(&search_path).unwrap());
+        let handle = NowledgeMemEmbeddedStoreHandle::new(NowledgeMemEmbeddedStore::new(
+            graph,
+            Some(projection),
+        ));
+
+        let status_before = handle.runtime_status().unwrap();
+        assert_eq!(status_before.graph_commit_epoch, 1);
+        assert_eq!(status_before.changefeed.retained_mutation_count, 1);
+        assert_eq!(
+            status_before
+                .projection_freshness
+                .as_ref()
+                .unwrap()
+                .durable_source_graph_commit_epoch,
+            None
+        );
+        assert_eq!(status_before.projection_commit_lag(), 1);
+        assert!(status_before.projection_stale());
+
+        handle.catch_up_search_projection(16, 1).unwrap();
+
+        let status_after = handle.runtime_status().unwrap();
+        let after = status_after.projection_freshness.as_ref().unwrap();
+        assert_eq!(after.source_graph_commit_epoch, Some(1));
+        assert_eq!(after.durable_source_graph_commit_epoch, Some(1));
+        assert!(!after.has_uncheckpointed_changes);
+        assert_eq!(status_after.projection_commit_lag(), 0);
+        assert!(!status_after.projection_stale());
+        assert_eq!(
+            status_after.json()["projection"]["durable_source_graph_commit_epoch"],
+            1
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
