@@ -42,6 +42,12 @@ rust_library(
 rust_test(
     name = "skein_unit_tests",
     crate = ":skein",
+    crate_features = [
+        "background-maintenance",
+        "full-text-search",
+        "graph-analytics",
+        "vector-search",
+    ],
     edition = "2024",
     aliases = aliases(
         normal_dev = True,
