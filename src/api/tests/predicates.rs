@@ -288,6 +288,36 @@ fn relationship_existence_predicates_cover_nowledge_orphan_entities() {
 }
 
 #[test]
+fn deletes_only_nodes_matching_relationship_existence_predicates() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'memory-1'})").unwrap();
+    db.query("CREATE (:Entity {id: 'orphan'})").unwrap();
+    db.query("CREATE (:Entity {id: 'mentioned'})").unwrap();
+    db.query(
+        "MATCH (m:Memory {id: 'memory-1'}), (e:Entity {id: 'mentioned'})
+         CREATE (m)-[:MENTIONS]->(e)",
+    )
+    .unwrap();
+
+    db.query(
+        "MATCH (e:Entity)
+         WHERE e.id IN ['orphan', 'mentioned']
+           AND NOT (e)<-[:MENTIONS]-(:Memory)
+         DETACH DELETE e",
+    )
+    .unwrap();
+
+    let output = db
+        .query("MATCH (e:Entity) RETURN e.id AS id ORDER BY id")
+        .unwrap();
+    assert_eq!(output.rows.len(), 1);
+    assert_eq!(
+        output.rows[0].get("id"),
+        Some(&Value::String("mentioned".to_string()))
+    );
+}
+
+#[test]
 fn filters_with_or_predicates() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 1, kind: 'note', score: 3, title: 'Note'})")

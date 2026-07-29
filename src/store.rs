@@ -2248,6 +2248,27 @@ impl GraphStore {
         Ok(ids)
     }
 
+    pub(crate) fn delete_node_ids(
+        &mut self,
+        catalog: &mut Catalog,
+        ids: &[NodeId],
+        detach: bool,
+    ) -> Result<Vec<NodeId>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ops = self.delete_node_ops(ids, detach)?;
+        if let Some(durable) = &mut self.durable {
+            durable.append_batch(ops.clone())?;
+        }
+        self.record_search_projection_graph_changes_for_ops(catalog, self.commit_epoch + 1, &ops);
+        for op in ops {
+            self.apply_wal_op(catalog, op);
+        }
+        self.commit_epoch += 1;
+        Ok(ids.to_vec())
+    }
+
     pub fn delete_relationships(
         &mut self,
         catalog: &mut Catalog,

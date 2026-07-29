@@ -848,10 +848,10 @@ pub fn mutation_command(plan: &PhysicalPlan) -> Result<Option<GraphMutation>> {
 }
 
 pub fn is_mutation_plan(plan: &PhysicalPlan) -> Result<bool> {
-    if matches!(plan, PhysicalPlan::SetNodePropertiesReturn { .. }) {
-        return Ok(true);
-    }
-    mutation_command(plan).map(|mutation| mutation.is_some())
+    Ok(matches!(
+        plan.class(),
+        skein_plan::PhysicalPlanClass::Schema | skein_plan::PhysicalPlanClass::Mutation
+    ))
 }
 
 fn node_set_assignment(assignment: &crate::planner::SetAssignment) -> NodeSetAssignment {
@@ -1792,16 +1792,42 @@ fn execute_bindings_with_limit(
                 .collect())
         }
         PhysicalPlan::DeleteNode {
+            variable,
             label,
             predicate,
             detach,
-            ..
         } => {
-            let filter = predicate
+            let label_id = if label.is_empty() {
+                None
+            } else {
+                let Some(label_id) = catalog.label_id(label) else {
+                    return Ok(Vec::new());
+                };
+                Some(label_id)
+            };
+            let candidate_filter = predicate
                 .as_ref()
-                .map(property_filter_from_predicate)
-                .transpose()?;
-            let ids = store.delete_nodes(catalog, label, filter.as_ref(), *detach)?;
+                .and_then(|predicate| node_scan_filter_from_predicate(predicate, variable));
+            let ids = store
+                .scan_nodes_with_filter_pruning(label_id, candidate_filter.as_ref())
+                .nodes
+                .into_iter()
+                .filter(|node| {
+                    predicate
+                        .as_ref()
+                        .map(|predicate| {
+                            let binding = Binding {
+                                values: BTreeMap::new(),
+                                nodes: BTreeMap::from([(variable.clone(), (*node).clone())]),
+                                relationships: BTreeMap::new(),
+                            };
+                            evaluate_predicate(predicate, catalog, store, &binding)
+                        })
+                        .unwrap_or(true)
+                })
+                .map(|node| node.id)
+                .collect::<Vec<_>>();
+            let ids = store.delete_node_ids(catalog, &ids, *detach)?;
             Ok(ids
                 .into_iter()
                 .map(|id| Binding {
@@ -4689,6 +4715,26 @@ fn predicate_references_only_variable(predicate: &Predicate, variable: &str) -> 
         | Predicate::ExpressionCompare { .. }
         | Predicate::ExpressionContains { .. } => false,
     }
+}
+
+fn node_scan_filter_from_predicate(
+    predicate: &Predicate,
+    variable: &str,
+) -> Option<PropertyFilter> {
+    if let Predicate::And(predicates) = predicate {
+        let mut filters = predicates
+            .iter()
+            .filter_map(|predicate| node_scan_filter_from_predicate(predicate, variable))
+            .collect::<Vec<_>>();
+        return match filters.len() {
+            0 => None,
+            1 => filters.pop(),
+            _ => Some(PropertyFilter::And(filters)),
+        };
+    }
+    predicate_references_only_variable(predicate, variable)
+        .then(|| property_filter_from_predicate(predicate).ok())
+        .flatten()
 }
 
 fn exact_relationship_scan_filter_from_predicate(
