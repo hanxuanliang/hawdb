@@ -143,6 +143,16 @@ LanceDB for that path.
     the feature is compiled and paths are configured.
   - Include open state, route ownership, applied and durable watermarks,
     projection freshness, and active blockers in readiness.
+  - [x] Split Mem graph and search read selection into independent host
+    configuration, retain the old aggregate variable only as a compatibility
+    fallback, and fail closed with a typed graph-route blocker while graph
+    routes remain legacy-owned.
+    - Implemented in Mem PR #384 with domain-specific precedence tests and a
+      versioned runtime status payload.
+  - [ ] Bind readiness to the actual process-lifetime Skein open state rather
+    than configured paths alone.
+  - [ ] Expose graph and search route ownership, applied and durable watermarks,
+    projection freshness, and blockers through the production status surface.
   - Acceptance: partial route migration is represented as partial ownership, and
     stale or unopened stores cannot report an effective Skein cutover.
 
