@@ -17,7 +17,8 @@ use skein_optimizer::{
 };
 use skein_plan::{VectorCandidateSource, VectorSearchLogicalPlan};
 use skein_storage::{
-    EnumDictionaryStats, FieldSummary, RangeBound, ScanPredicate, SegmentPruner, SegmentSummary,
+    EnumDictionaryStats, FieldSummary, RangeBound, ScanPredicate, SegmentPruner, SegmentReadRange,
+    SegmentSummary,
 };
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -35,6 +36,8 @@ use analyzer_lexicon::{CORE_SEMANTIC_ALIAS_RULES, NOWLEDGE_MEMORY_SEMANTIC_ALIAS
 
 const SEARCH_SNAPSHOT_FILE: &str = "search_projection.skein";
 const SEARCH_SEGMENT_DESCRIPTOR_FILE: &str = "search_projection_segments.skein";
+const SEARCH_SEGMENT_PAYLOAD_FILE: &str = "search_projection_segment_payloads.skein";
+const SEARCH_SEGMENT_PAYLOAD_ARTIFACT_ID: u64 = 1;
 static QUARANTINE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "turbovec")]
 const SEARCH_TURBOVEC_PROJECTION_FILE: &str = "search_projection.tvim";
@@ -1327,14 +1330,7 @@ impl SearchIndex {
                 body.push_str(&format!("embedding_dimension\t{dimension}\n"));
             }
             for document in self.documents.values() {
-                body.push_str(&format!(
-                    "doc\t{}\t{}\t{}\t{}\t{}\n",
-                    encode_string(&document.id),
-                    encode_string(&document.title),
-                    encode_string(&document.content),
-                    encode_embedding(document.embedding.as_deref()),
-                    encode_metadata(&document.metadata),
-                ));
+                body.push_str(&encode_search_document_line(document));
             }
             let checksum = checksum_bytes(body.as_bytes());
             let data = format!("{body}checksum\t{checksum}\n");
@@ -1347,7 +1343,7 @@ impl SearchIndex {
             }
             fs::rename(tmp_path, &snapshot_path)?;
             sync_parent_dir(&snapshot_path)?;
-            self.write_segment_descriptor(path)?;
+            self.write_segment_artifacts(path)?;
             #[cfg(feature = "turbovec")]
             self.write_turbovec_projection_artifact(path)?;
             *self
@@ -1966,7 +1962,10 @@ impl SearchIndex {
             return Ok(());
         };
         self.segment_descriptor = match read_search_segment_descriptor(path) {
-            Ok(Some(descriptor)) if descriptor.matches_documents(&self.documents) => {
+            Ok(Some(descriptor))
+                if descriptor.matches_documents(&self.documents)
+                    && descriptor.payload_artifact_is_available(path) =>
+            {
                 Some(descriptor)
             }
             Ok(None) => Some(SearchSegmentDescriptor::build(&self.documents)),
@@ -1980,8 +1979,9 @@ impl SearchIndex {
         Ok(())
     }
 
-    fn write_segment_descriptor(&self, path: &Path) -> Result<()> {
-        let descriptor = SearchSegmentDescriptor::build(&self.documents);
+    fn write_segment_artifacts(&self, path: &Path) -> Result<()> {
+        let mut descriptor = SearchSegmentDescriptor::build(&self.documents);
+        write_search_segment_payloads(path, &self.documents, &mut descriptor)?;
         write_search_segment_descriptor(path, &descriptor)
     }
 
@@ -2219,6 +2219,16 @@ fn search_projection_probe_predicate_pushdown_report(index: &SearchIndex) -> ser
     let segment_document_pruning = descriptor
         .map(search_projection_probe_segment_document_pruning_report)
         .unwrap_or_default();
+    let physical_segment_range_count = descriptor
+        .map(|descriptor| descriptor.physical_read_ranges().len())
+        .unwrap_or_default();
+    let physical_segment_ranges_ready = descriptor.is_some_and(|descriptor| {
+        physical_segment_range_count == descriptor.segments.len()
+            && index
+                .path
+                .as_ref()
+                .is_some_and(|path| descriptor.payload_artifact_is_available(path))
+    });
     serde_json::json!({
         "ready": true,
         "equality_ready": true,
@@ -2230,6 +2240,8 @@ fn search_projection_probe_predicate_pushdown_report(index: &SearchIndex) -> ser
         "numeric_min_max_ready": true,
         "timestamp_min_max_ready": true,
         "persisted_segment_descriptor_ready": segment_descriptor_ready,
+        "physical_segment_ranges_ready": physical_segment_ranges_ready,
+        "physical_segment_range_count": physical_segment_range_count,
         "supported_ops": ["eq", "in", "not_in", "gt", "gte", "lt", "lte"],
         "scan_filter_fields": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
         "segment_descriptor_field_count": segment_descriptor_field_summaries.len(),
@@ -3167,10 +3179,20 @@ struct SearchSegmentDescriptor {
 
 #[derive(Debug, Clone, PartialEq)]
 struct SearchSegmentDescriptorEntry {
+    segment_id: u64,
     first_document_id: String,
     last_document_id: String,
     document_count: usize,
+    payload_range: Option<SearchSegmentPayloadRange>,
     metadata: BTreeMap<String, SearchSegmentFieldSummary>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SearchSegmentPayloadRange {
+    artifact_id: u64,
+    offset: u64,
+    length: u64,
+    checksum: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -3724,6 +3746,7 @@ impl SearchSegmentDescriptor {
             segment_documents.push(document);
             if segment_documents.len() == SEARCH_FILTER_SEGMENT_TARGET_DOCUMENTS {
                 segments.push(SearchSegmentDescriptorEntry::from_documents(
+                    segments.len() as u64,
                     &segment_documents,
                     &fields,
                 ));
@@ -3732,6 +3755,7 @@ impl SearchSegmentDescriptor {
         }
         if !segment_documents.is_empty() {
             segments.push(SearchSegmentDescriptorEntry::from_documents(
+                segments.len() as u64,
                 &segment_documents,
                 &fields,
             ));
@@ -3757,10 +3781,45 @@ impl SearchSegmentDescriptor {
                 .map(|segment| segment.last_document_id.as_str())
                 == documents.keys().next_back().map(String::as_str)
     }
+
+    fn payload_artifact_is_available(&self, path: &Path) -> bool {
+        let Some(last_range) = self
+            .segments
+            .iter()
+            .filter_map(|segment| segment.payload_range)
+            .next_back()
+        else {
+            return true;
+        };
+        fs::metadata(path.join(SEARCH_SEGMENT_PAYLOAD_FILE))
+            .ok()
+            .is_some_and(|metadata| {
+                metadata.len() >= last_range.offset.saturating_add(last_range.length)
+            })
+    }
+
+    fn physical_read_ranges(&self) -> Vec<SegmentReadRange> {
+        self.segments
+            .iter()
+            .filter_map(|segment| {
+                let range = segment.payload_range?;
+                Some(SegmentReadRange::new(
+                    range.artifact_id,
+                    segment.segment_id,
+                    range.offset,
+                    std::num::NonZeroU64::new(range.length)?,
+                ))
+            })
+            .collect()
+    }
 }
 
 impl SearchSegmentDescriptorEntry {
-    fn from_documents(documents: &[&SearchDocument], fields: &BTreeSet<String>) -> Self {
+    fn from_documents(
+        segment_id: u64,
+        documents: &[&SearchDocument],
+        fields: &BTreeSet<String>,
+    ) -> Self {
         let first_document_id = documents
             .first()
             .map(|document| document.id.clone())
@@ -3787,9 +3846,11 @@ impl SearchSegmentDescriptorEntry {
             }
         }
         Self {
+            segment_id,
             first_document_id,
             last_document_id,
             document_count: documents.len(),
+            payload_range: None,
             metadata,
         }
     }
@@ -4739,6 +4800,59 @@ fn decode_metadata(input: &str) -> Result<BTreeMap<String, String>> {
     Ok(metadata)
 }
 
+fn encode_search_document_line(document: &SearchDocument) -> String {
+    format!(
+        "doc\t{}\t{}\t{}\t{}\t{}\n",
+        encode_string(&document.id),
+        encode_string(&document.title),
+        encode_string(&document.content),
+        encode_embedding(document.embedding.as_deref()),
+        encode_metadata(&document.metadata),
+    )
+}
+
+fn write_search_segment_payloads(
+    path: &Path,
+    documents: &BTreeMap<String, SearchDocument>,
+    descriptor: &mut SearchSegmentDescriptor,
+) -> Result<()> {
+    let artifact_path = path.join(SEARCH_SEGMENT_PAYLOAD_FILE);
+    let tmp_path = artifact_path.with_extension("skein.tmp");
+    let mut offset = 0u64;
+    {
+        let mut file = File::create(&tmp_path)?;
+        for segment in &mut descriptor.segments {
+            let mut body = String::from("SKEIN_SEARCH_SEGMENT_V1\n");
+            for document in documents
+                .range(segment.first_document_id.clone()..=segment.last_document_id.clone())
+                .map(|(_, document)| document)
+            {
+                body.push_str(&encode_search_document_line(document));
+            }
+            let payload = encode_search_snapshot_text(&body)?;
+            let length = u64::try_from(payload.len()).map_err(|_| {
+                SkeinError::Storage(format!(
+                    "search segment {} payload exceeds the supported range length",
+                    segment.segment_id
+                ))
+            })?;
+            segment.payload_range = Some(SearchSegmentPayloadRange {
+                artifact_id: SEARCH_SEGMENT_PAYLOAD_ARTIFACT_ID,
+                offset,
+                length,
+                checksum: checksum_bytes(&payload),
+            });
+            file.write_all(&payload)?;
+            offset = offset.checked_add(length).ok_or_else(|| {
+                SkeinError::Storage("search segment payload artifact length overflow".to_string())
+            })?;
+        }
+        file.sync_all()?;
+    }
+    fs::rename(tmp_path, &artifact_path)?;
+    sync_parent_dir(&artifact_path)
+}
+
 fn write_search_segment_descriptor(
     path: &Path,
     descriptor: &SearchSegmentDescriptor,
@@ -4786,18 +4900,29 @@ fn read_search_segment_descriptor(path: &Path) -> Result<Option<SearchSegmentDes
 
 fn encode_search_segment_descriptor_body(descriptor: &SearchSegmentDescriptor) -> String {
     let mut body = String::new();
-    body.push_str("SKEIN_SEARCH_SEGMENTS_V2\n");
+    body.push_str("SKEIN_SEARCH_SEGMENTS_V3\n");
     body.push_str(&format!(
         "target_documents\t{}\n",
         descriptor.target_documents
     ));
     body.push_str(&format!("document_count\t{}\n", descriptor.document_count));
     for segment in &descriptor.segments {
+        let payload_range = segment.payload_range.unwrap_or(SearchSegmentPayloadRange {
+            artifact_id: 0,
+            offset: 0,
+            length: 0,
+            checksum: 0,
+        });
         body.push_str(&format!(
-            "segment\t{}\t{}\t{}\n",
+            "segment\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            segment.segment_id,
             encode_string(&segment.first_document_id),
             encode_string(&segment.last_document_id),
-            segment.document_count
+            segment.document_count,
+            payload_range.artifact_id,
+            payload_range.offset,
+            payload_range.length,
+            payload_range.checksum,
         ));
         for (field, summary) in &segment.metadata {
             let (numeric_min, numeric_max) = encode_search_numeric_range(summary.numeric_range);
@@ -4833,7 +4958,10 @@ fn decode_search_segment_descriptor_text(text: &str) -> Result<SearchSegmentDesc
     let mut current_segment = None::<SearchSegmentDescriptorEntry>;
 
     for line in body.lines() {
-        if line == "SKEIN_SEARCH_SEGMENTS_V1" || line == "SKEIN_SEARCH_SEGMENTS_V2" {
+        if line == "SKEIN_SEARCH_SEGMENTS_V1"
+            || line == "SKEIN_SEARCH_SEGMENTS_V2"
+            || line == "SKEIN_SEARCH_SEGMENTS_V3"
+        {
             continue;
         }
         let fields = line.split('\t').collect::<Vec<_>>();
@@ -4849,9 +4977,34 @@ fn decode_search_segment_descriptor_text(text: &str) -> Result<SearchSegmentDesc
                     segments.push(segment);
                 }
                 current_segment = Some(SearchSegmentDescriptorEntry {
+                    segment_id: segments.len() as u64,
                     first_document_id: decode_string(raw_first)?,
                     last_document_id: decode_string(raw_last)?,
                     document_count: parse_usize(raw_count, "search segment document count")?,
+                    payload_range: None,
+                    metadata: BTreeMap::new(),
+                });
+            }
+            ["segment", raw_segment_id, raw_first, raw_last, raw_count, raw_artifact_id, raw_offset, raw_length, raw_checksum] =>
+            {
+                if let Some(segment) = current_segment.take() {
+                    segments.push(segment);
+                }
+                let length = parse_u64(raw_length, "search segment payload length")?;
+                current_segment = Some(SearchSegmentDescriptorEntry {
+                    segment_id: parse_u64(raw_segment_id, "search segment id")?,
+                    first_document_id: decode_string(raw_first)?,
+                    last_document_id: decode_string(raw_last)?,
+                    document_count: parse_usize(raw_count, "search segment document count")?,
+                    payload_range: (length > 0).then_some(SearchSegmentPayloadRange {
+                        artifact_id: parse_u64(
+                            raw_artifact_id,
+                            "search segment payload artifact id",
+                        )?,
+                        offset: parse_u64(raw_offset, "search segment payload offset")?,
+                        length,
+                        checksum: parse_u64(raw_checksum, "search segment payload checksum")?,
+                    }),
                     metadata: BTreeMap::new(),
                 });
             }
@@ -4934,6 +5087,7 @@ fn decode_search_segment_descriptor_text(text: &str) -> Result<SearchSegmentDesc
     if let Some(segment) = current_segment.take() {
         segments.push(segment);
     }
+    validate_search_segment_payload_ranges(&segments)?;
 
     Ok(SearchSegmentDescriptor {
         target_documents: target_documents.ok_or_else(|| {
@@ -4944,6 +5098,79 @@ fn decode_search_segment_descriptor_text(text: &str) -> Result<SearchSegmentDesc
         })?,
         segments,
     })
+}
+
+fn validate_search_segment_payload_ranges(segments: &[SearchSegmentDescriptorEntry]) -> Result<()> {
+    let physical_range_count = segments
+        .iter()
+        .filter(|segment| segment.payload_range.is_some())
+        .count();
+    if physical_range_count != 0 && physical_range_count != segments.len() {
+        return Err(SkeinError::Storage(
+            "search segment descriptor has incomplete physical payload ranges".to_string(),
+        ));
+    }
+    let mut previous_end = 0u64;
+    for (expected_id, segment) in segments.iter().enumerate() {
+        if segment.segment_id != expected_id as u64 {
+            return Err(SkeinError::Storage(format!(
+                "search segment descriptor expected segment id {expected_id}, got {}",
+                segment.segment_id
+            )));
+        }
+        let Some(range) = segment.payload_range else {
+            continue;
+        };
+        if range.artifact_id != SEARCH_SEGMENT_PAYLOAD_ARTIFACT_ID {
+            return Err(SkeinError::Storage(format!(
+                "search segment {} references unsupported payload artifact {}",
+                segment.segment_id, range.artifact_id
+            )));
+        }
+        if range.offset < previous_end {
+            return Err(SkeinError::Storage(format!(
+                "search segment {} payload range overlaps the previous segment",
+                segment.segment_id
+            )));
+        }
+        previous_end = range.offset.checked_add(range.length).ok_or_else(|| {
+            SkeinError::Storage(format!(
+                "search segment {} payload range overflows",
+                segment.segment_id
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn decode_search_segment_documents(payload: &[u8]) -> Result<Vec<SearchDocument>> {
+    let text = decode_search_snapshot_text(payload)?;
+    let mut documents = Vec::new();
+    for line in text.lines() {
+        if line == "SKEIN_SEARCH_SEGMENT_V1" {
+            continue;
+        }
+        let fields = line.split('\t').collect::<Vec<_>>();
+        match fields.as_slice() {
+            ["doc", raw_id, raw_title, raw_content, raw_embedding, raw_metadata] => {
+                documents.push(SearchDocument {
+                    id: decode_string(raw_id)?,
+                    title: decode_string(raw_title)?,
+                    content: decode_string(raw_content)?,
+                    embedding: decode_embedding(raw_embedding)?,
+                    metadata: decode_metadata(raw_metadata)?,
+                });
+            }
+            [""] => {}
+            _ => {
+                return Err(SkeinError::Storage(format!(
+                    "invalid search segment payload line: {line}"
+                )));
+            }
+        }
+    }
+    Ok(documents)
 }
 
 fn encode_segment_values(values: &BTreeSet<String>) -> String {
@@ -5235,6 +5462,8 @@ mod tests {
     use super::*;
     use crate::schema::Catalog;
     use crate::store::GraphStore;
+    use skein_storage::{FileSegmentRangeReader, SegmentReadExecutor, SegmentReadScheduler};
+    use std::num::{NonZeroU64, NonZeroUsize};
 
     #[test]
     fn hybrid_search_combines_vector_and_text() {
@@ -7719,7 +7948,7 @@ mod tests {
 
         let descriptor_path = path.join(SEARCH_SEGMENT_DESCRIPTOR_FILE);
         let descriptor = std::fs::read_to_string(&descriptor_path).unwrap();
-        assert!(descriptor.contains("SKEIN_SEARCH_SEGMENTS_V2\n"));
+        assert!(descriptor.contains("SKEIN_SEARCH_SEGMENTS_V3\n"));
         assert!(descriptor.contains("segment\t"));
         assert!(descriptor.contains("field\t"));
         assert!(descriptor.contains("checksum\t"));
@@ -7794,7 +8023,7 @@ mod tests {
 
         let descriptor =
             std::fs::read_to_string(path.join(SEARCH_SEGMENT_DESCRIPTOR_FILE)).unwrap();
-        assert!(descriptor.contains("SKEIN_SEARCH_SEGMENTS_V2\n"));
+        assert!(descriptor.contains("SKEIN_SEARCH_SEGMENTS_V3\n"));
         let descriptor = decode_search_segment_descriptor_text(&descriptor).unwrap();
         assert_eq!(
             descriptor.segments[0]
@@ -7902,6 +8131,73 @@ mod tests {
     }
 
     #[test]
+    fn persisted_segment_ranges_execute_bounded_physical_reads() {
+        let path = unique_test_dir("search_segment_physical_ranges");
+        {
+            let mut index = SearchIndex::open(&path).unwrap();
+            for id in ["memory:0", "memory:1", "memory:2"] {
+                index
+                    .upsert(SearchDocument {
+                        id: id.to_string(),
+                        title: format!("Title {id}"),
+                        content: "Physical segment range".to_string(),
+                        embedding: None,
+                        metadata: BTreeMap::from([("unit_type".to_string(), "memory".to_string())]),
+                    })
+                    .unwrap();
+            }
+            index.checkpoint().unwrap();
+        }
+
+        let descriptor = read_search_segment_descriptor(&path)
+            .unwrap()
+            .expect("expected persisted segment descriptor");
+        assert_eq!(descriptor.segments.len(), 2);
+        assert!(descriptor.payload_artifact_is_available(&path));
+        let ranges = descriptor.physical_read_ranges();
+        assert_eq!(ranges.len(), descriptor.segments.len());
+        let scheduled_bytes = ranges.iter().map(|range| range.length.get()).sum::<u64>();
+        let schedule =
+            SegmentReadScheduler::new(NonZeroUsize::new(2).unwrap(), NonZeroU64::new(1).unwrap())
+                .schedule(ranges);
+        let mut reader = FileSegmentRangeReader::new();
+        reader.register(
+            SEARCH_SEGMENT_PAYLOAD_ARTIFACT_ID,
+            path.join(SEARCH_SEGMENT_PAYLOAD_FILE),
+        );
+        let mut document_ids = Vec::new();
+
+        let report = SegmentReadExecutor::new(NonZeroU64::new(scheduled_bytes).unwrap())
+            .execute(&reader, &schedule, |payload| {
+                let segment_id = payload.range.segment_ids[0] as usize;
+                let expected = descriptor.segments[segment_id]
+                    .payload_range
+                    .expect("expected physical payload range");
+                assert_eq!(checksum_bytes(&payload.bytes), expected.checksum);
+                let documents = decode_search_segment_documents(&payload.bytes)?;
+                assert_eq!(
+                    documents.len(),
+                    descriptor.segments[segment_id].document_count
+                );
+                document_ids.extend(documents.into_iter().map(|document| document.id));
+                Ok::<(), SkeinError>(())
+            })
+            .unwrap();
+
+        assert_eq!(report.range_count, 2);
+        assert_eq!(report.bytes_read, scheduled_bytes);
+        assert_eq!(
+            document_ids,
+            vec![
+                "memory:0".to_string(),
+                "memory:1".to_string(),
+                "memory:2".to_string(),
+            ]
+        );
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
     fn persisted_segment_descriptor_prunes_timestamp_range_filters() {
         let path = unique_test_dir("search_segment_descriptor_timestamp_range");
         {
@@ -7929,7 +8225,7 @@ mod tests {
 
         let descriptor =
             std::fs::read_to_string(path.join(SEARCH_SEGMENT_DESCRIPTOR_FILE)).unwrap();
-        assert!(descriptor.contains("SKEIN_SEARCH_SEGMENTS_V2\n"));
+        assert!(descriptor.contains("SKEIN_SEARCH_SEGMENTS_V3\n"));
         let descriptor = decode_search_segment_descriptor_text(&descriptor).unwrap();
         assert_eq!(
             descriptor.segments[0]

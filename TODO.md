@@ -874,9 +874,12 @@ contract.
     creates bounded SSD/NVMe I/O waves.
   - [x] Execute scheduled file ranges with bounded per-wave memory and ordered
     payload consumption.
-  - [ ] Add physical byte ranges to persisted search segments and execute the
-    scheduled reads in the storage backend while keeping WAL, manifest
-    publication, and per-index delta ordering serialized.
+  - [x] Add checksummed physical byte ranges and independent Zstandard frames to
+    persisted search segments.
+  - [ ] Execute pruned candidate ranges through the storage backend in the
+    production search path while keeping WAL, manifest publication, and
+    per-index delta ordering serialized; propagate range I/O errors without a
+    silent in-memory fallback.
   - [ ] Add platform-specific device discovery without deriving a claimed SSD
     channel count from CPU count alone.
   - [ ] Keep the durable storage format and core Cypher semantics compatible

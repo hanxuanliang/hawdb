@@ -337,9 +337,9 @@ pub use store::{
     DegreeStatisticsConsistencyReport, DegreeStatisticsEntry, DegreeStatisticsKey,
     DistinctValueStatisticsConsistencyReport, DurabilityPolicy, FileSegmentRangeReader,
     OrderedAdjacencyEntry, PropertyIndexConsistencyReport, RecoveryMode, SegmentRangeReader,
-    SegmentReadError, SegmentReadExecutionReport, SegmentReadExecutor, SegmentReadPayload,
-    SegmentReadRange, SegmentReadSchedule, SegmentReadScheduler, SegmentReadWave,
-    StorageReclamationWatermark, StorageRecoveryReport, WalReplayConfig,
+    SegmentReadError, SegmentReadExecutionError, SegmentReadExecutionReport, SegmentReadExecutor,
+    SegmentReadPayload, SegmentReadRange, SegmentReadSchedule, SegmentReadScheduler,
+    SegmentReadWave, StorageReclamationWatermark, StorageRecoveryReport, WalReplayConfig,
     DENSE_ADJACENCY_DEGREE_THRESHOLD,
 };
 #[cfg(feature = "opentelemetry")]

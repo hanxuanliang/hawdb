@@ -78,6 +78,30 @@ impl Error for SegmentReadError {
     }
 }
 
+#[derive(Debug)]
+pub enum SegmentReadExecutionError<E> {
+    Read(SegmentReadError),
+    Consume(E),
+}
+
+impl<E: Display> Display for SegmentReadExecutionError<E> {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Read(error) => Display::fmt(error, formatter),
+            Self::Consume(error) => write!(formatter, "segment payload consumer failed: {error}"),
+        }
+    }
+}
+
+impl<E: Error + 'static> Error for SegmentReadExecutionError<E> {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Read(error) => Some(error),
+            Self::Consume(error) => Some(error),
+        }
+    }
+}
+
 pub trait SegmentRangeReader: Sync {
     fn read_range(&self, range: &SegmentReadRange) -> Result<Vec<u8>, SegmentReadError>;
 }
@@ -144,15 +168,15 @@ impl SegmentReadExecutor {
         Self { max_wave_bytes }
     }
 
-    pub fn execute<R, F>(
+    pub fn execute<R, F, E>(
         self,
         reader: &R,
         schedule: &SegmentReadSchedule,
         mut consume: F,
-    ) -> Result<SegmentReadExecutionReport, SegmentReadError>
+    ) -> Result<SegmentReadExecutionReport, SegmentReadExecutionError<E>>
     where
         R: SegmentRangeReader,
-        F: FnMut(SegmentReadPayload) -> Result<(), SegmentReadError>,
+        F: FnMut(SegmentReadPayload) -> Result<(), E>,
     {
         let mut range_count = 0usize;
         let mut bytes_read = 0u64;
@@ -164,11 +188,13 @@ impl SegmentReadExecutor {
                 .map(|range| range.length.get())
                 .fold(0u64, u64::saturating_add);
             if wave_bytes > self.max_wave_bytes.get() {
-                return Err(SegmentReadError::WaveBudgetExceeded {
-                    wave_index,
-                    scheduled_bytes: wave_bytes,
-                    max_wave_bytes: self.max_wave_bytes.get(),
-                });
+                return Err(SegmentReadExecutionError::Read(
+                    SegmentReadError::WaveBudgetExceeded {
+                        wave_index,
+                        scheduled_bytes: wave_bytes,
+                        max_wave_bytes: self.max_wave_bytes.get(),
+                    },
+                ));
             }
 
             let payloads = std::thread::scope(|scope| {
@@ -195,12 +221,13 @@ impl SegmentReadExecutor {
                             .map_err(|_| SegmentReadError::WorkerPanicked { artifact_id })?
                     })
                     .collect::<Result<Vec<_>, _>>()
-            })?;
+            })
+            .map_err(SegmentReadExecutionError::Read)?;
 
             for payload in payloads {
                 range_count = range_count.saturating_add(1);
                 bytes_read = bytes_read.saturating_add(payload.range.length.get());
-                consume(payload)?;
+                consume(payload).map_err(SegmentReadExecutionError::Consume)?;
             }
             max_wave_bytes_read = max_wave_bytes_read.max(wave_bytes);
         }
@@ -246,7 +273,7 @@ mod tests {
         let report = SegmentReadExecutor::new(NonZeroU64::new(8).unwrap())
             .execute(&reader, &schedule, |payload| {
                 payloads.push(payload.bytes);
-                Ok(())
+                Ok::<(), std::convert::Infallible>(())
             })
             .unwrap();
 
@@ -269,16 +296,20 @@ mod tests {
         let reader = FileSegmentRangeReader::new();
 
         let error = SegmentReadExecutor::new(NonZeroU64::new(8).unwrap())
-            .execute(&reader, &schedule, |_| Ok(()))
+            .execute(
+                &reader,
+                &schedule,
+                |_| Ok::<_, std::convert::Infallible>(()),
+            )
             .unwrap_err();
 
         assert!(matches!(
             error,
-            SegmentReadError::WaveBudgetExceeded {
+            SegmentReadExecutionError::Read(SegmentReadError::WaveBudgetExceeded {
                 wave_index: 0,
                 scheduled_bytes: 16,
                 max_wave_bytes: 8,
-            }
+            })
         ));
     }
 

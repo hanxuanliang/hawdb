@@ -21,9 +21,9 @@ pub use skein_storage::{
     RelationshipPropertyUpdate, RelationshipSetAssignment, RelationshipTargetNodeDelete,
     ScanPruningReport, ScanPruningStrategy, ScanPruningTargetKind, SchemaMaintenanceAction,
     SchemaMaintenancePlanItem, SearchProjectionGraphChange, SegmentRangeReader, SegmentReadError,
-    SegmentReadExecutionReport, SegmentReadExecutor, SegmentReadPayload, SegmentReadRange,
-    SegmentReadSchedule, SegmentReadScheduler, SegmentReadWave, StorageReclamationWatermark,
-    StorageRecoveryReport, StoreStableIdMapping, WalReplayConfig,
+    SegmentReadExecutionError, SegmentReadExecutionReport, SegmentReadExecutor, SegmentReadPayload,
+    SegmentReadRange, SegmentReadSchedule, SegmentReadScheduler, SegmentReadWave,
+    StorageReclamationWatermark, StorageRecoveryReport, StoreStableIdMapping, WalReplayConfig,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
