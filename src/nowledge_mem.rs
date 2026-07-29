@@ -11,7 +11,9 @@ use crate::search_projection_evidence::{
 use crate::{
     cypher, BackgroundMaintenanceKind, BackgroundMaintenanceOptions, BackgroundMaintenanceSummary,
     BackgroundWorkHint, BackgroundWorkPlan, Database, DatabaseConfig,
+    KnowledgeEntityDeleteBatchOutput, KnowledgeEntityDeleteBatchRequest,
     KnowledgeMemoryEvolvesCreateBatchOutput, KnowledgeMemoryEvolvesCreateBatchRequest,
+    KnowledgeMemoryLifecycleBatchOutput, KnowledgeMemoryLifecycleBatchRequest,
     KnowledgeRetrievalOutput, KnowledgeRetrievalRequest, LocalQosPolicy, LocalQosScheduler,
     LocalQosState, NowledgeGraphStatement, PlanCacheLookup, QueryOutput, ReadExecutionProfile,
     Result, ScheduledSearchProjectionCatchUpReport, SearchIndex, SearchProjectionCatchUpReport,
@@ -5598,6 +5600,26 @@ impl NowledgeMemEmbeddedStoreHandle {
             .graph_mut()
             .database_mut()
             .create_knowledge_memory_evolves_batch(request)
+    }
+
+    pub fn update_knowledge_memory_lifecycle_batch(
+        &self,
+        request: &KnowledgeMemoryLifecycleBatchRequest,
+    ) -> Result<KnowledgeMemoryLifecycleBatchOutput> {
+        self.write_store()?
+            .graph_mut()
+            .database_mut()
+            .update_knowledge_memory_lifecycle_batch(request)
+    }
+
+    pub fn delete_knowledge_entity_batch(
+        &self,
+        request: &KnowledgeEntityDeleteBatchRequest,
+    ) -> Result<KnowledgeEntityDeleteBatchOutput> {
+        self.write_store()?
+            .graph_mut()
+            .database_mut()
+            .delete_knowledge_entity_batch(request)
     }
 
     pub fn query_with_params_with_report_options(
