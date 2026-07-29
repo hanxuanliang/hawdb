@@ -1,7 +1,8 @@
 use crate::search::{
     AdaptiveVectorSearchOptions, CompressedVectorSearchMode, SearchCandidateSetReport,
     SearchFallbackReasonCode, SearchFusionWeights, SearchMode, SearchQueryOptions,
-    SearchRangeReadConfig, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
+    SearchRangeReadConfig, VectorRecallValidationOptions, VectorRecallValidationReport,
+    NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, VECTOR_RECALL_VALIDATION_PROTOCOL,
 };
 use crate::search_projection_evidence::{
     nowledge_search_projection_evidence_json, nowledge_search_projection_shadow_evidence_json,
@@ -58,29 +59,43 @@ pub fn nowledge_mem_graph_config_with_search_mode(
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NowledgeMemRetrievalProjectionAdvisor {
     pub recall_evidence_ready: bool,
+    pub recall_evidence_protocol: Option<String>,
+    pub recall_sample_count: usize,
+    pub recall_at_k_per_million: Option<u32>,
     pub parity_evidence_ready: bool,
     pub cold_or_constrained_local_segment: bool,
 }
 
 impl NowledgeMemRetrievalProjectionAdvisor {
-    pub fn cold_local_with_recall_parity() -> Self {
+    pub fn cold_local_with_recall_parity(report: &VectorRecallValidationReport) -> Self {
         Self {
-            recall_evidence_ready: true,
+            recall_evidence_ready: report.validates_required_approximate_backend(),
+            recall_evidence_protocol: Some(report.protocol.clone()),
+            recall_sample_count: report.executed_sample_count,
+            recall_at_k_per_million: Some(report.recall_at_k_per_million),
             parity_evidence_ready: true,
             cold_or_constrained_local_segment: true,
         }
     }
 
     pub fn ready(&self) -> bool {
-        self.recall_evidence_ready
+        self.recall_evidence_present()
+            && self.recall_evidence_ready
             && self.parity_evidence_ready
             && self.cold_or_constrained_local_segment
     }
 
+    fn recall_evidence_present(&self) -> bool {
+        self.recall_evidence_protocol.as_deref() == Some(VECTOR_RECALL_VALIDATION_PROTOCOL)
+            && self.recall_sample_count > 0
+    }
+
     fn blocker_codes(&self) -> Vec<String> {
         let mut blockers = Vec::new();
-        if !self.recall_evidence_ready {
+        if !self.recall_evidence_present() {
             blockers.push("retrieval_projection_recall_evidence_missing".to_string());
+        } else if !self.recall_evidence_ready {
+            blockers.push("retrieval_projection_recall_evidence_not_ready".to_string());
         }
         if !self.parity_evidence_ready {
             blockers.push("retrieval_projection_parity_evidence_missing".to_string());
@@ -95,6 +110,9 @@ impl NowledgeMemRetrievalProjectionAdvisor {
         serde_json::json!({
             "ready": self.ready(),
             "recall_evidence_ready": self.recall_evidence_ready,
+            "recall_evidence_protocol": self.recall_evidence_protocol,
+            "recall_sample_count": self.recall_sample_count,
+            "recall_at_k_per_million": self.recall_at_k_per_million,
             "parity_evidence_ready": self.parity_evidence_ready,
             "cold_or_constrained_local_segment": self.cold_or_constrained_local_segment,
             "blocker_codes": self.blocker_codes(),
@@ -5176,6 +5194,13 @@ impl NowledgeMemSearchProjection {
         NowledgeSearchProjectionEvidenceReport::from_probe(&self.probe_json(options))
     }
 
+    pub fn validate_sampled_vector_recall(
+        &self,
+        options: VectorRecallValidationOptions,
+    ) -> VectorRecallValidationReport {
+        self.index.validate_sampled_vector_recall(options)
+    }
+
     pub fn shadow_evidence_json(
         &self,
         primary_probe: &serde_json::Value,
@@ -5608,6 +5633,13 @@ impl NowledgeMemEmbeddedStoreHandle {
         self.read_store()?.search_candidates(request)
     }
 
+    pub fn validate_sampled_vector_recall(
+        &self,
+        options: VectorRecallValidationOptions,
+    ) -> Result<VectorRecallValidationReport> {
+        self.read_store()?.validate_sampled_vector_recall(options)
+    }
+
     pub fn retrieve_knowledge(
         &self,
         request: &KnowledgeRetrievalRequest,
@@ -5884,6 +5916,15 @@ impl NowledgeMemEmbeddedStore {
         options: SearchProjectionProbeOptions,
     ) -> Result<NowledgeSearchProjectionEvidenceReport> {
         Ok(self.require_search_projection()?.evidence_report(options))
+    }
+
+    pub fn validate_sampled_vector_recall(
+        &self,
+        options: VectorRecallValidationOptions,
+    ) -> Result<VectorRecallValidationReport> {
+        Ok(self
+            .require_search_projection()?
+            .validate_sampled_vector_recall(options))
     }
 
     pub fn search_projection_shadow_evidence_json(
@@ -8261,12 +8302,36 @@ mod tests {
         LocalQosScheduler, LocalQosState, NowledgeGraphStatement, RecoveryMode,
         SearchEmbeddingManifest, SearchIndex, SearchMode, SearchProjectionDelta,
         SearchProjectionKind, SearchProjectionProbeOptions, SearchProjectionRow,
-        StorageRecoveryReport, WorkClass,
+        StorageRecoveryReport, VectorRecallValidationOptions, VectorRecallValidationReport,
+        WorkClass, VECTOR_RECALL_VALIDATION_PROTOCOL,
     };
     use std::collections::BTreeMap;
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
+
+    fn ready_vector_recall_report() -> VectorRecallValidationReport {
+        VectorRecallValidationReport {
+            protocol: VECTOR_RECALL_VALIDATION_PROTOCOL.to_string(),
+            ready: true,
+            approximate_backend: "turbovec_projection".to_string(),
+            sample_candidate_count: 2,
+            requested_sample_count: 2,
+            executed_sample_count: 2,
+            top_k: 1,
+            minimum_recall_per_million: 950_000,
+            exact_hit_count: 2,
+            approximate_hit_count: 2,
+            overlap_count: 2,
+            recall_at_k_per_million: 1_000_000,
+            overlap_at_k_per_million: 1_000_000,
+            fallback_count: 0,
+            index_coverage_incomplete_count: 0,
+            average_filter_selectivity_per_million: 1_000_000,
+            max_filter_selectivity_per_million: 1_000_000,
+            blocker_codes: Vec::new(),
+        }
+    }
 
     #[test]
     fn graph_config_tracks_shadow_vs_cutover_mode() {
@@ -10839,6 +10904,50 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "turbovec")]
+    fn embedded_store_handle_exposes_sampled_vector_recall_validation() {
+        let index = persisted_nowledge_projection_evidence_index("handle_recall_validation");
+        let projection = NowledgeMemSearchProjection::from_index(index);
+        let graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::ShadowReadOnly);
+        let handle = NowledgeMemEmbeddedStoreHandle::new(NowledgeMemEmbeddedStore::new(
+            graph,
+            Some(projection),
+        ));
+
+        let report = handle
+            .validate_sampled_vector_recall(VectorRecallValidationOptions {
+                max_samples: 2,
+                top_k: 1,
+                minimum_recall_per_million: 0,
+                metadata_filters: BTreeMap::new(),
+            })
+            .unwrap();
+
+        assert!(report.ready, "{:?}", report.blocker_codes);
+        assert_eq!(report.protocol, VECTOR_RECALL_VALIDATION_PROTOCOL);
+        assert_eq!(report.executed_sample_count, 2);
+        assert_eq!(report.approximate_backend, "turbovec_projection");
+        assert!(report.validates_required_approximate_backend());
+    }
+
+    #[test]
+    fn embedded_store_recall_validation_requires_search_projection() {
+        let graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::ShadowReadOnly);
+        let store = NowledgeMemEmbeddedStore::new(graph, None);
+
+        let error = store
+            .validate_sampled_vector_recall(VectorRecallValidationOptions::default())
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "storage error: nowledge mem search projection is not configured"
+        );
+    }
+
+    #[test]
     fn embedded_store_exposes_search_projection_replacement_evidence() {
         let index = persisted_nowledge_projection_evidence_index("replacement_evidence");
         let projection = NowledgeMemSearchProjection::from_index(index);
@@ -11088,6 +11197,7 @@ mod tests {
 
     #[test]
     fn open_options_report_allows_compressed_vector_search_with_advisor_evidence() {
+        let recall_report = ready_vector_recall_report();
         let options = NowledgeMemOpenOptions::with_search_projection(
             "redacted_graph_path",
             "redacted_search_path",
@@ -11095,7 +11205,7 @@ mod tests {
         )
         .with_compressed_vector_search_mode(CompressedVectorSearchMode::Preferred)
         .with_retrieval_projection_advisor(
-            NowledgeMemRetrievalProjectionAdvisor::cold_local_with_recall_parity(),
+            NowledgeMemRetrievalProjectionAdvisor::cold_local_with_recall_parity(&recall_report),
         );
 
         let report = options.sanitized_report().json();
@@ -11113,6 +11223,29 @@ mod tests {
         assert_eq!(
             report["retrieval_projection_advisor_blocker_codes"],
             serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn open_options_report_rejects_inconsistent_recall_evidence() {
+        let mut recall_report = ready_vector_recall_report();
+        recall_report.recall_at_k_per_million = 0;
+        let options = NowledgeMemOpenOptions::with_search_projection(
+            "redacted_graph_path",
+            "redacted_search_path",
+            NowledgeMemGraphMode::ShadowReadOnly,
+        )
+        .with_compressed_vector_search_mode(CompressedVectorSearchMode::Required)
+        .with_retrieval_projection_advisor(
+            NowledgeMemRetrievalProjectionAdvisor::cold_local_with_recall_parity(&recall_report),
+        );
+
+        let report = options.sanitized_report().json();
+
+        assert_eq!(report["compressed_vector_search_mode"], "disabled");
+        assert_eq!(
+            report["retrieval_projection_advisor_blocker_codes"],
+            serde_json::json!(["retrieval_projection_recall_evidence_not_ready"])
         );
     }
 
@@ -12652,15 +12785,26 @@ mod tests {
                 .unwrap();
             index
                 .apply_projection_delta(SearchProjectionDelta {
-                    upserts: vec![SearchProjectionRow {
-                        kind: SearchProjectionKind::Memory,
-                        external_id: "mem-vector".to_string(),
-                        title: "Vector facade".to_string(),
-                        body: "Compressed vector retrieval".to_string(),
-                        embedding: Some(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
-                        source_id: None,
-                        metadata: BTreeMap::new(),
-                    }],
+                    upserts: vec![
+                        SearchProjectionRow {
+                            kind: SearchProjectionKind::Memory,
+                            external_id: "mem-vector".to_string(),
+                            title: "Vector facade".to_string(),
+                            body: "Compressed vector retrieval".to_string(),
+                            embedding: Some(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+                            source_id: None,
+                            metadata: BTreeMap::new(),
+                        },
+                        SearchProjectionRow {
+                            kind: SearchProjectionKind::Memory,
+                            external_id: "mem-vector-neighbor".to_string(),
+                            title: "Vector neighbor".to_string(),
+                            body: "Recall validation neighbor".to_string(),
+                            embedding: Some(vec![0.9, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+                            source_id: None,
+                            metadata: BTreeMap::new(),
+                        },
+                    ],
                     deletes: Vec::new(),
                     max_operations: None,
                     source_graph_commit_epoch: Some(1),
@@ -12668,6 +12812,15 @@ mod tests {
                 .unwrap();
             index.checkpoint().unwrap();
         }
+        let recall_report = SearchIndex::open(&search_path)
+            .unwrap()
+            .validate_sampled_vector_recall(VectorRecallValidationOptions {
+                max_samples: 2,
+                top_k: 1,
+                minimum_recall_per_million: 1_000_000,
+                metadata_filters: BTreeMap::new(),
+            });
+        assert!(recall_report.ready, "{:?}", recall_report.blocker_codes);
         let options = NowledgeMemOpenOptions::with_search_projection(
             graph_path,
             search_path,
@@ -12680,7 +12833,7 @@ mod tests {
             flat_scan_memory_budget_bytes: 0,
         })
         .with_retrieval_projection_advisor(
-            NowledgeMemRetrievalProjectionAdvisor::cold_local_with_recall_parity(),
+            NowledgeMemRetrievalProjectionAdvisor::cold_local_with_recall_parity(&recall_report),
         );
 
         let (store, report) = NowledgeMemEmbeddedStore::open_with_options(options).unwrap();

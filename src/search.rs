@@ -33,11 +33,18 @@ use std::sync::{Arc, Mutex};
 
 mod analyzer_lexicon;
 mod range_io;
+mod recall_validation;
 #[cfg(feature = "turbovec")]
 pub mod turbovec_projection;
 mod vector_execution;
 use analyzer_lexicon::{CORE_SEMANTIC_ALIAS_RULES, NOWLEDGE_MEMORY_SEMANTIC_ALIAS_RULES};
 pub use range_io::SearchRangeReadConfig;
+use recall_validation::{sample_positions, VectorRecallValidationAccumulator};
+pub use recall_validation::{
+    VectorRecallValidationBlocker, VectorRecallValidationOptions, VectorRecallValidationReport,
+    MAX_VECTOR_RECALL_VALIDATION_SAMPLES, MAX_VECTOR_RECALL_VALIDATION_TOP_K,
+    VECTOR_RECALL_VALIDATION_PROTOCOL,
+};
 use vector_execution::{execute_search_vector_plan, SearchVectorExecutionRequest};
 
 const SEARCH_SNAPSHOT_FILE: &str = "search_projection.skein";
@@ -524,6 +531,20 @@ fn adaptive_vector_fallback_reason(decision: AdaptiveVectorBackendDecision) -> O
         }
         _ => None,
     }
+}
+
+fn recall_validation_hit_ids(
+    result: &SearchResultSet,
+    sampled_document_id: &str,
+    top_k: usize,
+) -> Vec<String> {
+    result
+        .hits
+        .iter()
+        .filter(|hit| hit.id != sampled_document_id)
+        .take(top_k)
+        .map(|hit| hit.id.clone())
+        .collect()
 }
 
 #[derive(Clone, Copy)]
@@ -1733,6 +1754,80 @@ impl SearchIndex {
             false,
         )
         .expect("in-memory search path does not perform fallible range I/O")
+    }
+
+    pub fn validate_sampled_vector_recall(
+        &self,
+        options: VectorRecallValidationOptions,
+    ) -> VectorRecallValidationReport {
+        let predicate_pushdown = search_metadata_predicate_pushdown(&options.metadata_filters);
+        let eligible = || {
+            self.documents.values().filter(|document| {
+                document.embedding.is_some()
+                    && search_document_matches_predicates(document, &predicate_pushdown.predicates)
+            })
+        };
+        let sample_candidate_count = eligible().count();
+        let mut accumulator =
+            VectorRecallValidationAccumulator::new(sample_candidate_count, &options);
+        if predicate_pushdown.report.parse_error.is_some() {
+            accumulator.mark_metadata_filter_invalid();
+            return accumulator.finish();
+        }
+        if accumulator.requested_sample_count() == 0 || accumulator.top_k() == 0 {
+            return accumulator.finish();
+        }
+        let sample_positions =
+            sample_positions(sample_candidate_count, accumulator.requested_sample_count())
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+        let sample_documents = eligible()
+            .enumerate()
+            .filter(|(index, _)| sample_positions.contains(index))
+            .map(|(_, document)| document)
+            .collect::<Vec<_>>();
+        let query_limit = accumulator.top_k().saturating_add(1);
+
+        for document in sample_documents {
+            let embedding = document
+                .embedding
+                .as_deref()
+                .expect("sampled vector document has an embedding");
+            let query_options = SearchQueryOptions {
+                limit: query_limit,
+                rank_window: None,
+                fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: options.metadata_filters.clone(),
+                policy_epoch: None,
+            };
+            let exact = self.search_with_options_adaptive_vector_projection(
+                "",
+                Some(embedding),
+                SearchMode::Vector,
+                query_options.clone(),
+                AdaptiveVectorSearchOptions::new(CompressedVectorSearchMode::Disabled)
+                    .as_recall_validation_probe(),
+            );
+            let approximate = self.search_with_options_adaptive_vector_projection(
+                "",
+                Some(embedding),
+                SearchMode::Vector,
+                query_options,
+                AdaptiveVectorSearchOptions::new(CompressedVectorSearchMode::Required),
+            );
+            let exact_ids =
+                recall_validation_hit_ids(&exact, document.id.as_str(), accumulator.top_k());
+            let approximate_ids =
+                recall_validation_hit_ids(&approximate, document.id.as_str(), accumulator.top_k());
+            let approximate_retriever = approximate
+                .retrievers
+                .iter()
+                .find(|retriever| retriever.name == "vector")
+                .expect("vector search always reports the vector retriever");
+            accumulator.record(&exact_ids, &approximate_ids, approximate_retriever);
+        }
+
+        accumulator.finish()
     }
 
     fn try_search_with_options_compressed_vector_projection_mode_internal(
@@ -8403,6 +8498,142 @@ mod tests {
             Some(VectorBackendSelectionReason::RecallValidationProbe)
         );
         assert_eq!(recall_probe.retrievers[0].backend, "scalar_vector_scan");
+    }
+
+    #[test]
+    #[cfg(feature = "turbovec")]
+    fn sampled_vector_recall_validates_filtered_persisted_projection() {
+        let path = unique_test_dir("sampled_vector_recall");
+        {
+            let mut index = SearchIndex::open(&path).unwrap();
+            for (id, embedding, space_id) in [
+                (
+                    "memory:a",
+                    [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    "selected",
+                ),
+                (
+                    "memory:b",
+                    [0.9, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    "selected",
+                ),
+                (
+                    "memory:c",
+                    [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    "other",
+                ),
+                (
+                    "memory:d",
+                    [0.1, 0.9, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    "other",
+                ),
+            ] {
+                let mut document = doc(id, "Recall validation", "Bounded sampled query", embedding);
+                document
+                    .metadata
+                    .insert("space_id".to_string(), space_id.to_string());
+                index.upsert(document).unwrap();
+            }
+            index.checkpoint().unwrap();
+        }
+        let index = SearchIndex::open(&path).unwrap();
+
+        let report = index.validate_sampled_vector_recall(VectorRecallValidationOptions {
+            max_samples: 2,
+            top_k: 1,
+            minimum_recall_per_million: 1_000_000,
+            metadata_filters: BTreeMap::from([("space_id".to_string(), "selected".to_string())]),
+        });
+
+        assert!(report.ready, "{:?}", report.blocker_codes);
+        assert_eq!(report.protocol, VECTOR_RECALL_VALIDATION_PROTOCOL);
+        assert_eq!(report.sample_candidate_count, 2);
+        assert_eq!(report.executed_sample_count, 2);
+        assert_eq!(report.exact_hit_count, 2);
+        assert_eq!(report.approximate_hit_count, 2);
+        assert_eq!(report.recall_at_k_per_million, 1_000_000);
+        assert_eq!(report.overlap_at_k_per_million, 1_000_000);
+        assert_eq!(report.average_filter_selectivity_per_million, 500_000);
+        assert_eq!(report.fallback_count, 0);
+        assert_eq!(report.index_coverage_incomplete_count, 0);
+        let json = report.json().to_string();
+        assert!(!json.contains("memory:a"));
+        assert!(!json.contains("Bounded sampled query"));
+
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn sampled_vector_recall_fails_closed_without_approximate_projection() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(doc(
+                "memory:a",
+                "Recall A",
+                "Missing projection",
+                [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+        index
+            .upsert(doc(
+                "memory:b",
+                "Recall B",
+                "Missing projection",
+                [0.9, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+
+        let report = index.validate_sampled_vector_recall(VectorRecallValidationOptions {
+            max_samples: 2,
+            top_k: 1,
+            minimum_recall_per_million: 1_000_000,
+            metadata_filters: BTreeMap::new(),
+        });
+
+        assert!(!report.ready);
+        assert_eq!(report.executed_sample_count, 2);
+        assert_eq!(report.exact_hit_count, 2);
+        assert_eq!(report.approximate_hit_count, 0);
+        assert_eq!(report.fallback_count, 2);
+        assert!(report
+            .blocker_codes
+            .contains(&VectorRecallValidationBlocker::ApproximateBackendUnavailable));
+        assert!(report
+            .blocker_codes
+            .contains(&VectorRecallValidationBlocker::ApproximateFallbackObserved));
+        assert!(report
+            .blocker_codes
+            .contains(&VectorRecallValidationBlocker::RecallBelowThreshold));
+    }
+
+    #[test]
+    fn sampled_vector_recall_redacts_invalid_metadata_filter() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(doc(
+                "memory:a",
+                "Recall A",
+                "Invalid filter must not leak",
+                [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+
+        let report = index.validate_sampled_vector_recall(VectorRecallValidationOptions {
+            metadata_filters: BTreeMap::from([(
+                "lifecycle_state__not_in".to_string(),
+                "sensitive malformed filter".to_string(),
+            )]),
+            ..VectorRecallValidationOptions::default()
+        });
+
+        assert!(!report.ready);
+        assert!(report
+            .blocker_codes
+            .contains(&VectorRecallValidationBlocker::MetadataFilterInvalid));
+        assert!(!report
+            .json()
+            .to_string()
+            .contains("sensitive malformed filter"));
     }
 
     #[test]

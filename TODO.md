@@ -831,7 +831,7 @@ contract.
       resident memory overhead.
     - Consider DiskANN-style or mmap-backed layouts only after local vector
       payloads exceed the configured memory budget.
-  - [ ] Add sampled recall validation for approximate vector paths.
+  - [x] Add sampled recall validation for approximate vector paths.
     - Compare ANN or compressed-vector results against scalar flat-scan
       ground truth on bounded sampled queries.
     - Track recall@k, overlap@k, fallback counts, and filter selectivity.
