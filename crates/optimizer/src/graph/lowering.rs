@@ -14,7 +14,7 @@ use super::{
 };
 use crate::{GroupId, Memo, OptimizerContext, StageTrace};
 use skein_core::Value;
-use skein_plan::LogicalPlan;
+use skein_plan::{GraphExpansionBudget, LogicalPlan};
 use std::collections::BTreeMap;
 
 mod access;
@@ -25,6 +25,10 @@ mod simple;
 mod traversal;
 
 type GraphMemo = Memo<GroupExpr>;
+
+const GRAPH_EXPANSION_FANOUT_PER_SEED_HOP: usize = 32;
+const GRAPH_EXPANSION_MAX_CANDIDATES: usize = 4_096;
+const GRAPH_EXPANSION_PAYLOAD_BYTE_LIMIT: usize = 4 * 1024 * 1024;
 
 #[derive(Debug)]
 struct GroupExpr {
@@ -303,6 +307,15 @@ impl GroupExpr {
                         max_hops: *max_hops,
                     },
                 );
+                let input = best_physical(memo, self.children[0], catalog, decisions, stage_events);
+                let graph_budget =
+                    vector_seed_top_k(&input).map(|top_k| graph_expansion_budget(top_k, *max_hops));
+                if let Some(graph_budget) = graph_budget {
+                    decisions.push(format!(
+                        "bound vector-seeded graph expansion to {} candidates and {} payload bytes",
+                        graph_budget.candidate_limit, graph_budget.payload_byte_limit
+                    ));
+                }
                 PhysicalPlan::AdjacencyExpandExec {
                     source_variable: source_variable.clone(),
                     source_label: source_label.clone(),
@@ -315,13 +328,8 @@ impl GroupExpr {
                     min_hops: *min_hops,
                     max_hops: *max_hops,
                     optional: *optional,
-                    input: Box::new(best_physical(
-                        memo,
-                        self.children[0],
-                        catalog,
-                        decisions,
-                        stage_events,
-                    )),
+                    graph_budget,
+                    input: Box::new(input),
                 }
             }
             LogicalPlan::OptionalDegree {
@@ -558,6 +566,41 @@ fn vector_seed_metadata_value(value: &Value) -> Option<String> {
     }
 }
 
+fn vector_seed_top_k(plan: &PhysicalPlan) -> Option<usize> {
+    match plan {
+        PhysicalPlan::VectorSeedScan { vector_plan, .. } => vector_plan_top_k(vector_plan),
+        PhysicalPlan::NodeColumnLookupExec { input, .. }
+        | PhysicalPlan::AdjacencyExpandExec { input, .. }
+        | PhysicalPlan::FilterExec { input, .. }
+        | PhysicalPlan::ProjectExec { input, .. }
+        | PhysicalPlan::LimitExec { input, .. } => vector_seed_top_k(input),
+        _ => None,
+    }
+}
+
+fn vector_plan_top_k(plan: &skein_plan::VectorPhysicalPlan) -> Option<usize> {
+    match plan {
+        skein_plan::VectorPhysicalPlan::TopK { limit, .. } => Some(*limit),
+        skein_plan::VectorPhysicalPlan::VectorCandidateScan { input, .. }
+        | skein_plan::VectorPhysicalPlan::ResidualFilter { input, .. }
+        | skein_plan::VectorPhysicalPlan::RawVectorRerank { input, .. } => vector_plan_top_k(input),
+        skein_plan::VectorPhysicalPlan::Filter { .. } => None,
+    }
+}
+
+fn graph_expansion_budget(top_k: usize, max_hops: usize) -> GraphExpansionBudget {
+    let candidate_limit = top_k
+        .max(1)
+        .saturating_mul(max_hops.max(1))
+        .saturating_mul(GRAPH_EXPANSION_FANOUT_PER_SEED_HOP)
+        .min(GRAPH_EXPANSION_MAX_CANDIDATES)
+        .max(top_k);
+    GraphExpansionBudget {
+        candidate_limit,
+        payload_byte_limit: GRAPH_EXPANSION_PAYLOAD_BYTE_LIMIT,
+    }
+}
+
 fn logical_group_count(logical: &LogicalPlan) -> usize {
     match logical {
         LogicalPlan::Expand { input, .. }
@@ -681,6 +724,15 @@ fn logical_to_physical_direct(
                     max_hops: *max_hops,
                 },
             );
+            let input = logical_to_physical_direct(input, catalog, decisions, stage_events);
+            let graph_budget =
+                vector_seed_top_k(&input).map(|top_k| graph_expansion_budget(top_k, *max_hops));
+            if let Some(graph_budget) = graph_budget {
+                decisions.push(format!(
+                    "bound vector-seeded graph expansion to {} candidates and {} payload bytes",
+                    graph_budget.candidate_limit, graph_budget.payload_byte_limit
+                ));
+            }
             PhysicalPlan::AdjacencyExpandExec {
                 source_variable: source_variable.clone(),
                 source_label: source_label.clone(),
@@ -693,12 +745,8 @@ fn logical_to_physical_direct(
                 min_hops: *min_hops,
                 max_hops: *max_hops,
                 optional: *optional,
-                input: Box::new(logical_to_physical_direct(
-                    input,
-                    catalog,
-                    decisions,
-                    stage_events,
-                )),
+                graph_budget,
+                input: Box::new(input),
             }
         }
         LogicalPlan::OptionalDegree {

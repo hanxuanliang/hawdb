@@ -860,7 +860,7 @@ contract.
       candidate set that can participate in `MATCH` and `WHERE`.
     - Let the optimizer choose whether descriptor-safe filters run before vector
       seed generation or after bounded candidate generation.
-  - [ ] Add graph-constrained retrieval plans.
+  - [x] Add graph-constrained retrieval plans.
     - Use vector seeds to filter the graph, then perform bounded 1-2 hop
       expansion by relation type and candidate budget.
     - Keep graph edges as first-class records in the plan instead of treating the

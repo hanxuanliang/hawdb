@@ -2944,6 +2944,7 @@ pub struct NowledgeMemQueryReport {
     pub optimizer_rule_event_count: usize,
     pub scan_pruning_reports: Vec<ScanPruningReport>,
     pub vector_execution_reports: Vec<skein_executor::VectorExecutionReport>,
+    pub graph_expansion_reports: Vec<skein_executor::GraphExpansionExecutionReport>,
     pub output_row_shape: NowledgeMemQueryOutputRowShape,
     pub api_behavior: NowledgeMemQueryApiBehavior,
 }
@@ -2982,6 +2983,8 @@ impl NowledgeMemQueryReport {
             "scan_pruning_reports": self.scan_pruning_reports.iter().map(scan_pruning_report_json).collect::<Vec<_>>(),
             "vector_execution_report_count": self.vector_execution_reports.len(),
             "vector_execution_reports": self.vector_execution_reports.iter().map(vector_execution_report_json).collect::<Vec<_>>(),
+            "graph_expansion_report_count": self.graph_expansion_reports.len(),
+            "graph_expansion_reports": self.graph_expansion_reports.iter().map(graph_expansion_report_json).collect::<Vec<_>>(),
             "output_row_shape": self.output_row_shape.json(),
             "api_behavior": self.api_behavior.json(),
         })
@@ -6421,6 +6424,10 @@ fn nowledge_mem_query_report(input: NowledgeMemQueryReportInput<'_>) -> Nowledge
             .execution_profile
             .map(|profile| profile.vector_execution_reports.clone())
             .unwrap_or_default(),
+        graph_expansion_reports: input
+            .execution_profile
+            .map(|profile| profile.graph_expansion_reports.clone())
+            .unwrap_or_default(),
         output_row_shape: NowledgeMemQueryOutputRowShape::from_output(input.output),
         api_behavior: NowledgeMemQueryApiBehavior::from_statement(input.statement),
     }
@@ -6450,6 +6457,26 @@ fn vector_execution_report_json(
         "index_candidate_document_count": report.index_candidate_document_count,
         "index_coverage_complete": report.index_coverage_complete,
         "fallback_reason_codes": report.fallback_reason_codes.iter().map(|code| code.as_str()).collect::<Vec<_>>(),
+    })
+}
+
+fn graph_expansion_report_json(
+    report: &skein_executor::GraphExpansionExecutionReport,
+) -> serde_json::Value {
+    serde_json::json!({
+        "seed_count": report.seed_count,
+        "expanded_node_count": report.expanded_node_count,
+        "expanded_edge_count": report.expanded_edge_count,
+        "relation_types": report.relation_types,
+        "min_hops": report.min_hops,
+        "max_hops": report.max_hops,
+        "reranked_seed_count": report.reranked_seed_count,
+        "candidate_limit": report.candidate_limit,
+        "payload_byte_limit": report.payload_byte_limit,
+        "payload_bytes_used": report.payload_bytes_used,
+        "returned_count": report.returned_count,
+        "truncated": report.truncated(),
+        "truncation_reason": report.truncation_reason.map(|reason| reason.as_str()),
     })
 }
 
@@ -12023,6 +12050,120 @@ mod tests {
                 .get("AdjacencyExpandExec"),
             Some(&1)
         );
+        assert_eq!(output.report.graph_expansion_reports.len(), 1);
+        let graph_report = &output.report.graph_expansion_reports[0];
+        assert_eq!(graph_report.seed_count, 1);
+        assert_eq!(graph_report.expanded_node_count, 1);
+        assert_eq!(graph_report.expanded_edge_count, 1);
+        assert_eq!(graph_report.relation_types, vec!["MENTIONS".to_string()]);
+        assert_eq!(graph_report.min_hops, 1);
+        assert_eq!(graph_report.max_hops, 1);
+        assert_eq!(graph_report.reranked_seed_count, 1);
+        assert_eq!(graph_report.returned_count, 1);
+        assert!(graph_report.payload_bytes_used > 0);
+        assert!(!graph_report.truncated());
+
+        let explain = store
+            .query_with_params_with_report(
+                "EXPLAIN ANALYZE CALL vector_search($embedding, topK := 1) YIELD id, score \
+                 MATCH (m:Memory)-[:MENTIONS]->(e:Entity) \
+                 RETURN m.id AS memory_id, e.id AS entity_id, score",
+                &parameters,
+            )
+            .unwrap();
+        let Value::List(graph_reports) = explain.output.rows[0]
+            .get("graph_expansion_reports")
+            .expect("explain analyze graph reports")
+        else {
+            panic!("expected graph expansion report list");
+        };
+        assert_eq!(graph_reports.len(), 1);
+    }
+
+    #[test]
+    fn embedded_query_runtime_bounds_vector_seed_graph_fanout() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert_projection_row(SearchProjectionRow {
+                kind: SearchProjectionKind::Memory,
+                external_id: "fanout-seed".to_string(),
+                title: "fanout seed".to_string(),
+                body: String::new(),
+                embedding: Some(vec![1.0, 0.0]),
+                source_id: None,
+                metadata: BTreeMap::new(),
+            })
+            .unwrap();
+        let projection = NowledgeMemSearchProjection::from_index(index);
+        let mut graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::WritableCutover);
+        graph.query("CREATE (:Memory {id: 'fanout-seed'})").unwrap();
+        for index in 0..40 {
+            graph
+                .query(&format!("CREATE (:Entity {{id: 'entity-{index}'}})"))
+                .unwrap();
+            graph
+                .query(&format!(
+                    "MATCH (m:Memory {{id: 'fanout-seed'}}), \
+                     (e:Entity {{id: 'entity-{index}'}}) \
+                     CREATE (m)-[:MENTIONS]->(e)"
+                ))
+                .unwrap();
+        }
+        let mut store = NowledgeMemEmbeddedStore::new(graph, Some(projection));
+        let parameters = BTreeMap::from([(
+            "embedding".to_string(),
+            Value::List(vec![Value::Float(1.0), Value::Float(0.0)]),
+        )]);
+
+        let output = store
+            .query_with_params_with_report(
+                "CALL vector_search($embedding, topK := 1) YIELD id, score \
+                 MATCH (m:Memory)-[:MENTIONS]->(e:Entity) \
+                 RETURN e.id AS entity_id",
+                &parameters,
+            )
+            .unwrap();
+
+        assert_eq!(output.output.rows.len(), 32);
+        let graph_report = &output.report.graph_expansion_reports[0];
+        assert_eq!(graph_report.candidate_limit, 32);
+        assert_eq!(graph_report.returned_count, 32);
+        assert_eq!(graph_report.expanded_node_count, 32);
+        assert_eq!(graph_report.expanded_edge_count, 32);
+        assert_eq!(
+            graph_report.truncation_reason,
+            Some(skein_executor::GraphExpansionTruncationReason::CandidateLimit)
+        );
+    }
+
+    #[test]
+    fn embedded_query_runtime_rejects_vector_seed_expansion_over_two_hops() {
+        let graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::WritableCutover);
+        let mut store = NowledgeMemEmbeddedStore::new(
+            graph,
+            Some(NowledgeMemSearchProjection::from_index(
+                SearchIndex::in_memory(),
+            )),
+        );
+        let parameters = BTreeMap::from([(
+            "embedding".to_string(),
+            Value::List(vec![Value::Float(1.0), Value::Float(0.0)]),
+        )]);
+
+        let error = store
+            .query_with_params_with_report(
+                "CALL vector_search($embedding, topK := 1) YIELD id, score \
+                 MATCH (m:Memory)-[:MENTIONS*1..3]->(e:Entity) \
+                 RETURN e.id AS entity_id",
+                &parameters,
+            )
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("vector-seeded graph expansion supports at most 2 hops"));
     }
 
     #[test]

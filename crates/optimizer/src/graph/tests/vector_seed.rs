@@ -1,6 +1,7 @@
 use super::super::{CascadesOptimizer, OptimizerCatalog};
 use crate::OptimizerConfig;
 use skein_core::Value;
+use skein_cypher::RelationshipDirection;
 use skein_plan::{LogicalPlan, PhysicalPlan, Predicate, VectorPhysicalPlan};
 
 fn vector_seed_filter(property: &str) -> LogicalPlan {
@@ -87,4 +88,51 @@ fn unsupported_filter_remains_graph_side_only() {
     };
     assert!(metadata_filters.is_empty());
     assert!(vector_filter_fields(vector_plan).is_empty());
+}
+
+#[test]
+fn vector_seeded_expand_receives_bounded_graph_budget() {
+    let logical = LogicalPlan::Expand {
+        source_variable: "m".to_string(),
+        source_label: "Memory".to_string(),
+        rel_variable: None,
+        rel_type: "MENTIONS".to_string(),
+        rel_properties: Default::default(),
+        direction: RelationshipDirection::Outgoing,
+        target_variable: "e".to_string(),
+        target_label: "Entity".to_string(),
+        min_hops: 1,
+        max_hops: 2,
+        optional: false,
+        input: Box::new(LogicalPlan::NodeColumnLookup {
+            variable: "m".to_string(),
+            label: "Memory".to_string(),
+            property: "id".to_string(),
+            column: "external_id".to_string(),
+            optional: false,
+            input: Box::new(LogicalPlan::VectorSeed {
+                embedding_parameter: "embedding".to_string(),
+                embedding_dimension: 2,
+                top_k: 8,
+                output_external_id: true,
+            }),
+        }),
+    };
+
+    let (physical, trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 16 })
+        .optimize_with_catalog(&logical, &OptimizerCatalog::default());
+
+    let PhysicalPlan::AdjacencyExpandExec {
+        graph_budget: Some(graph_budget),
+        ..
+    } = physical
+    else {
+        panic!("expected bounded adjacency expansion");
+    };
+    assert_eq!(graph_budget.candidate_limit, 512);
+    assert_eq!(graph_budget.payload_byte_limit, 4 * 1024 * 1024);
+    assert!(trace
+        .decisions
+        .iter()
+        .any(|decision| decision.contains("bound vector-seeded graph expansion")));
 }

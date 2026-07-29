@@ -12,6 +12,7 @@ pub struct ReadExecutionProfile<TScanPruningReport> {
     pub blocking_operator_kinds: Vec<String>,
     pub scan_pruning_reports: Vec<TScanPruningReport>,
     pub vector_execution_reports: Vec<crate::VectorExecutionReport>,
+    pub graph_expansion_reports: Vec<crate::GraphExpansionExecutionReport>,
 }
 
 impl<TScanPruningReport> ReadExecutionProfile<TScanPruningReport> {
@@ -40,6 +41,7 @@ mod tests {
             blocking_operator_kinds: vec!["sort".to_string(), "aggregate".to_string()],
             scan_pruning_reports: Vec::new(),
             vector_execution_reports: Vec::new(),
+            graph_expansion_reports: Vec::new(),
         };
         assert_eq!(profile.blocking_operator_count(), 2);
     }

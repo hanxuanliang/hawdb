@@ -792,6 +792,7 @@ impl PhysicalPlan {
                 min_hops,
                 max_hops,
                 optional,
+                graph_budget,
                 input,
             } => {
                 output.push_str("AdjacencyExpandExec(");
@@ -825,6 +826,12 @@ impl PhysicalPlan {
                 write_identifier(output, target_label);
                 output.push_str(",optional=");
                 output.push_str(if *optional { "true" } else { "false" });
+                if let Some(graph_budget) = graph_budget {
+                    output.push_str(",graph_budget=");
+                    output.push_str(&graph_budget.candidate_limit.to_string());
+                    output.push(':');
+                    output.push_str(&graph_budget.payload_byte_limit.to_string());
+                }
                 output.push_str(",input=");
                 input.write_fingerprint(output);
                 output.push(')');

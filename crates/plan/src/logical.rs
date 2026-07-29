@@ -14,6 +14,8 @@ use skein_cypher::{
 pub use skein_ddl::{SchemaObjectState, SchemaPropertyType, SchemaTableKind};
 use std::collections::{BTreeMap, BTreeSet};
 
+const MAX_VECTOR_SEEDED_GRAPH_HOPS: usize = 2;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum LogicalPlan {
     CreateNodeLabel {
@@ -1600,6 +1602,24 @@ pub fn plan_with_params(
             }
             if let Some(predicate) = &query.predicate {
                 validate_predicate(&scope, predicate)?;
+            }
+            let vector_seeded_max_hops = query
+                .expand
+                .as_ref()
+                .map(|expand| expand.max_hops)
+                .unwrap_or_default()
+                .saturating_add(
+                    query
+                        .post_match_expand
+                        .as_ref()
+                        .map(|expand| expand.expand.max_hops)
+                        .unwrap_or_default(),
+                );
+            if query.vector_seed.is_some() && vector_seeded_max_hops > MAX_VECTOR_SEEDED_GRAPH_HOPS
+            {
+                return Err(SkeinError::Semantic(format!(
+                    "vector-seeded graph expansion supports at most {MAX_VECTOR_SEEDED_GRAPH_HOPS} hops"
+                )));
             }
             let mut input = if let Some(search) = &query.vector_seed {
                 LogicalPlan::NodeColumnLookup {

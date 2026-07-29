@@ -34,6 +34,7 @@ type ValueRangeBounds = (Option<ValueRangeBound>, Option<ValueRangeBound>);
 thread_local! {
     static SCAN_PRUNING_REPORT_CAPTURE: RefCell<Option<Vec<ScanPruningReport>>> = const { RefCell::new(None) };
     static VECTOR_EXECUTION_REPORT_CAPTURE: RefCell<Option<Vec<VectorExecutionReport>>> = const { RefCell::new(None) };
+    static GRAPH_EXPANSION_REPORT_CAPTURE: RefCell<Option<Vec<skein_executor::GraphExpansionExecutionReport>>> = const { RefCell::new(None) };
 }
 
 pub struct VectorSeedExecutionRequest<'a> {
@@ -150,14 +151,17 @@ pub fn execute_with_row_limit_profile_and_external(
         parameters,
         external,
     };
-    let ((bindings, scan_pruning_reports), vector_execution_reports) =
-        capture_vector_execution_reports(|| {
-            capture_scan_pruning_reports(|| {
-                execute_bindings_with_limit(plan, catalog, store, &mut context, execution_limit)
+    let (((bindings, scan_pruning_reports), vector_execution_reports), graph_expansion_reports) =
+        capture_graph_expansion_reports(|| {
+            capture_vector_execution_reports(|| {
+                capture_scan_pruning_reports(|| {
+                    execute_bindings_with_limit(plan, catalog, store, &mut context, execution_limit)
+                })
             })
         })?;
     profile.scan_pruning_reports = scan_pruning_reports;
     profile.vector_execution_reports = vector_execution_reports;
+    profile.graph_expansion_reports = graph_expansion_reports;
     let rows = collect_rows(bindings, max_rows)?;
     Ok(ProfiledQueryRows { rows, profile })
 }
@@ -177,6 +181,7 @@ pub fn read_execution_profile(
         blocking_operator_kinds: blocking_operator_kinds.into_iter().collect(),
         scan_pruning_reports: Vec::new(),
         vector_execution_reports: Vec::new(),
+        graph_expansion_reports: Vec::new(),
     })
 }
 
@@ -216,6 +221,36 @@ fn record_vector_execution_report(report: VectorExecutionReport) {
             reports.push(report);
         }
     });
+}
+
+fn capture_graph_expansion_reports<T>(
+    f: impl FnOnce() -> Result<T>,
+) -> Result<(T, Vec<skein_executor::GraphExpansionExecutionReport>)> {
+    GRAPH_EXPANSION_REPORT_CAPTURE.with(|capture| {
+        let previous = capture.replace(Some(Vec::new()));
+        let result = f();
+        let captured = capture.replace(previous).unwrap_or_default();
+        result.map(|value| (value, captured))
+    })
+}
+
+fn record_graph_expansion_report(report: skein_executor::GraphExpansionExecutionReport) {
+    GRAPH_EXPANSION_REPORT_CAPTURE.with(|capture| {
+        if let Some(reports) = capture.borrow_mut().as_mut() {
+            reports.push(report);
+        }
+    });
+}
+
+fn current_vector_rerank_count() -> usize {
+    VECTOR_EXECUTION_REPORT_CAPTURE.with(|capture| {
+        capture
+            .borrow()
+            .as_ref()
+            .and_then(|reports| reports.last())
+            .map(|report| report.reranked_candidate_count)
+            .unwrap_or_default()
+    })
 }
 
 fn collect_blocking_operator_kinds(plan: &PhysicalPlan, output: &mut BTreeSet<String>) {
@@ -2629,6 +2664,7 @@ fn execute_adjacency_expand(
         min_hops,
         max_hops,
         optional,
+        graph_budget,
         ..
     } = plan
     else {
@@ -2638,10 +2674,16 @@ fn execute_adjacency_expand(
     };
 
     let input = execute_child_bindings(input, catalog, store, context)?;
+    let mut graph_expansion = GraphExpansionExecutionState::new(
+        *graph_budget,
+        input.len(),
+        current_vector_rerank_count(),
+    );
     let rel_type_id = if rel_type.is_empty() {
         None
     } else {
         let Some(rel_type_id) = catalog.rel_type_id(rel_type) else {
+            graph_expansion.record(rel_type, *min_hops, *max_hops, 0);
             return Ok(Vec::new());
         };
         Some(rel_type_id)
@@ -2679,18 +2721,23 @@ fn execute_adjacency_expand(
                 if let Some(rel_variable) = rel_variable {
                     relationships.insert(rel_variable.clone(), relationship.clone());
                 }
-                output.push(Binding {
+                let candidate = Binding {
                     values: binding.values.clone(),
                     nodes,
                     relationships,
-                });
+                };
+                if !graph_expansion.try_push(&mut output, candidate, Some(target.id), 1) {
+                    graph_expansion.record(rel_type, *min_hops, *max_hops, output.len());
+                    return Ok(output);
+                }
                 if execution_limit.is_reached(output.len()) {
+                    graph_expansion.record(rel_type, *min_hops, *max_hops, output.len());
                     return Ok(output);
                 }
             }
         } else {
             let bound_target_id = binding.nodes.get(target_variable).map(|node| node.id);
-            for target in bounded_expand_targets(
+            for (target, hop) in bounded_expand_targets(
                 store,
                 source.id,
                 rel_type_id.expect("typed bounded expand checked by planner"),
@@ -2703,12 +2750,17 @@ fn execute_adjacency_expand(
                 }
                 let mut nodes = binding.nodes.clone();
                 nodes.insert(target_variable.clone(), target.clone());
-                output.push(Binding {
+                let candidate = Binding {
                     values: binding.values.clone(),
                     nodes,
                     relationships: binding.relationships.clone(),
-                });
+                };
+                if !graph_expansion.try_push(&mut output, candidate, Some(target.id), hop) {
+                    graph_expansion.record(rel_type, *min_hops, *max_hops, output.len());
+                    return Ok(output);
+                }
                 if execution_limit.is_reached(output.len()) {
+                    graph_expansion.record(rel_type, *min_hops, *max_hops, output.len());
                     return Ok(output);
                 }
             }
@@ -2716,17 +2768,157 @@ fn execute_adjacency_expand(
         if *optional && output.len() == output_len_before {
             let mut nodes = binding.nodes.clone();
             nodes.insert(target_variable.clone(), null_lookup_node());
-            output.push(Binding {
+            let candidate = Binding {
                 values: binding.values,
                 nodes,
                 relationships: binding.relationships,
-            });
+            };
+            if !graph_expansion.try_push(&mut output, candidate, None, 0) {
+                graph_expansion.record(rel_type, *min_hops, *max_hops, output.len());
+                return Ok(output);
+            }
             if execution_limit.is_reached(output.len()) {
+                graph_expansion.record(rel_type, *min_hops, *max_hops, output.len());
                 return Ok(output);
             }
         }
     }
+    graph_expansion.record(rel_type, *min_hops, *max_hops, output.len());
     Ok(output)
+}
+
+struct GraphExpansionExecutionState {
+    budget: Option<skein_plan::GraphExpansionBudget>,
+    seed_count: usize,
+    expanded_nodes: BTreeSet<NodeId>,
+    expanded_edge_count: usize,
+    reranked_seed_count: usize,
+    payload_bytes_used: usize,
+    truncation_reason: Option<skein_executor::GraphExpansionTruncationReason>,
+}
+
+impl GraphExpansionExecutionState {
+    fn new(
+        budget: Option<skein_plan::GraphExpansionBudget>,
+        seed_count: usize,
+        reranked_seed_count: usize,
+    ) -> Self {
+        Self {
+            budget,
+            seed_count,
+            expanded_nodes: BTreeSet::new(),
+            expanded_edge_count: 0,
+            reranked_seed_count,
+            payload_bytes_used: 0,
+            truncation_reason: None,
+        }
+    }
+
+    fn try_push(
+        &mut self,
+        output: &mut Vec<Binding>,
+        candidate: Binding,
+        target_id: Option<NodeId>,
+        hop: usize,
+    ) -> bool {
+        let Some(budget) = self.budget else {
+            output.push(candidate);
+            return true;
+        };
+        if output.len() >= budget.candidate_limit {
+            self.truncation_reason =
+                Some(skein_executor::GraphExpansionTruncationReason::CandidateLimit);
+            return false;
+        }
+        let candidate_bytes = binding_payload_bytes(&candidate);
+        if self.payload_bytes_used.saturating_add(candidate_bytes) > budget.payload_byte_limit {
+            self.truncation_reason =
+                Some(skein_executor::GraphExpansionTruncationReason::PayloadByteLimit);
+            return false;
+        }
+        self.payload_bytes_used = self.payload_bytes_used.saturating_add(candidate_bytes);
+        if let Some(target_id) = target_id {
+            self.expanded_nodes.insert(target_id);
+        }
+        self.expanded_edge_count = self.expanded_edge_count.saturating_add(hop);
+        output.push(candidate);
+        true
+    }
+
+    fn record(&self, rel_type: &str, min_hops: usize, max_hops: usize, returned_count: usize) {
+        let Some(budget) = self.budget else {
+            return;
+        };
+        record_graph_expansion_report(skein_executor::GraphExpansionExecutionReport {
+            seed_count: self.seed_count,
+            expanded_node_count: self.expanded_nodes.len(),
+            expanded_edge_count: self.expanded_edge_count,
+            relation_types: if rel_type.is_empty() {
+                Vec::new()
+            } else {
+                vec![rel_type.to_string()]
+            },
+            min_hops,
+            max_hops,
+            reranked_seed_count: self.reranked_seed_count,
+            candidate_limit: budget.candidate_limit,
+            payload_byte_limit: budget.payload_byte_limit,
+            payload_bytes_used: self.payload_bytes_used,
+            returned_count,
+            truncation_reason: self.truncation_reason,
+        });
+    }
+}
+
+fn binding_payload_bytes(binding: &Binding) -> usize {
+    map_payload_bytes(&binding.values)
+        .saturating_add(binding.nodes.iter().fold(0usize, |total, (name, node)| {
+            total
+                .saturating_add(name.len())
+                .saturating_add(std::mem::size_of_val(&node.id))
+                .saturating_add(
+                    node.labels
+                        .len()
+                        .saturating_mul(std::mem::size_of::<crate::schema::LabelId>()),
+                )
+                .saturating_add(map_payload_bytes(&node.properties))
+        }))
+        .saturating_add(
+            binding
+                .relationships
+                .iter()
+                .fold(0usize, |total, (name, relationship)| {
+                    total
+                        .saturating_add(name.len())
+                        .saturating_add(std::mem::size_of_val(&relationship.id))
+                        .saturating_add(std::mem::size_of_val(&relationship.source))
+                        .saturating_add(std::mem::size_of_val(&relationship.target))
+                        .saturating_add(std::mem::size_of_val(&relationship.rel_type))
+                        .saturating_add(map_payload_bytes(&relationship.properties))
+                }),
+        )
+}
+
+fn map_payload_bytes(values: &BTreeMap<String, Value>) -> usize {
+    values.iter().fold(0usize, |total, (name, value)| {
+        total
+            .saturating_add(name.len())
+            .saturating_add(value_payload_bytes(value))
+    })
+}
+
+fn value_payload_bytes(value: &Value) -> usize {
+    match value {
+        Value::Null => 0,
+        Value::Bool(_) => std::mem::size_of::<bool>(),
+        Value::Int(_) => std::mem::size_of::<i64>(),
+        Value::Float(_) => std::mem::size_of::<f64>(),
+        Value::String(value) => value.len(),
+        Value::List(values) => values.iter().fold(0usize, |total, value| {
+            total.saturating_add(value_payload_bytes(value))
+        }),
+        Value::Map(values) => map_payload_bytes(values),
+    }
 }
 
 fn execute_aggregate(
@@ -3834,7 +4026,7 @@ fn bounded_expand_targets<'a>(
     target_label_ids: Option<&[crate::schema::LabelId]>,
     min_hops: usize,
     max_hops: usize,
-) -> Vec<&'a NodeRecord> {
+) -> Vec<(&'a NodeRecord, usize)> {
     let mut targets = Vec::new();
     BoundedExpand {
         store,
@@ -3856,12 +4048,12 @@ struct BoundedExpand<'a> {
 }
 
 impl<'a> BoundedExpand<'a> {
-    fn collect(&self, current: NodeId, depth: usize, targets: &mut Vec<&'a NodeRecord>) {
+    fn collect(&self, current: NodeId, depth: usize, targets: &mut Vec<(&'a NodeRecord, usize)>) {
         if depth >= self.min_hops
             && let Some(node) = self.store.node(current)
             && node_matches_label_pattern(node, self.target_label_ids.as_deref())
         {
-            targets.push(node);
+            targets.push((node, depth));
         }
         if depth == self.max_hops {
             return;
@@ -4687,6 +4879,46 @@ mod tests {
             .expect("nested projection expression should evaluate");
 
         assert_eq!(value, Value::String("ske".to_string()));
+    }
+
+    #[test]
+    fn graph_expansion_state_enforces_candidate_and_payload_budgets_before_push() {
+        let binding = Binding {
+            values: BTreeMap::from([("value".to_string(), Value::String("payload".to_string()))]),
+            nodes: BTreeMap::new(),
+            relationships: BTreeMap::new(),
+        };
+        let mut candidate_limited = GraphExpansionExecutionState::new(
+            Some(skein_plan::GraphExpansionBudget {
+                candidate_limit: 1,
+                payload_byte_limit: usize::MAX,
+            }),
+            1,
+            1,
+        );
+        let mut output = Vec::new();
+        assert!(candidate_limited.try_push(&mut output, binding.clone(), None, 1));
+        assert!(!candidate_limited.try_push(&mut output, binding.clone(), None, 1));
+        assert_eq!(
+            candidate_limited.truncation_reason,
+            Some(skein_executor::GraphExpansionTruncationReason::CandidateLimit)
+        );
+
+        let mut payload_limited = GraphExpansionExecutionState::new(
+            Some(skein_plan::GraphExpansionBudget {
+                candidate_limit: 2,
+                payload_byte_limit: binding_payload_bytes(&binding).saturating_sub(1),
+            }),
+            1,
+            1,
+        );
+        let mut output = Vec::new();
+        assert!(!payload_limited.try_push(&mut output, binding, None, 1));
+        assert!(output.is_empty());
+        assert_eq!(
+            payload_limited.truncation_reason,
+            Some(skein_executor::GraphExpansionTruncationReason::PayloadByteLimit)
+        );
     }
 
     #[test]

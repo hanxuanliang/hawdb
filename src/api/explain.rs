@@ -123,6 +123,20 @@ pub(super) fn explain_analyze_output_row(
         ),
     );
     row.insert(
+        "graph_expansion_report_count".to_string(),
+        usize_value(profile.graph_expansion_reports.len()),
+    );
+    row.insert(
+        "graph_expansion_reports".to_string(),
+        Value::List(
+            profile
+                .graph_expansion_reports
+                .iter()
+                .map(graph_expansion_report_value)
+                .collect(),
+        ),
+    );
+    row.insert(
         "row_limit_enforced_before_output".to_string(),
         Value::Bool(profile.row_limit_enforced_before_output),
     );
@@ -131,6 +145,61 @@ pub(super) fn explain_analyze_output_row(
         Value::Bool(profile.operator_row_cap_enabled),
     );
     row
+}
+
+fn graph_expansion_report_value(report: &skein_executor::GraphExpansionExecutionReport) -> Value {
+    Value::Map(BTreeMap::from([
+        ("seed_count".to_string(), usize_value(report.seed_count)),
+        (
+            "expanded_node_count".to_string(),
+            usize_value(report.expanded_node_count),
+        ),
+        (
+            "expanded_edge_count".to_string(),
+            usize_value(report.expanded_edge_count),
+        ),
+        (
+            "relation_types".to_string(),
+            Value::List(
+                report
+                    .relation_types
+                    .iter()
+                    .cloned()
+                    .map(Value::String)
+                    .collect(),
+            ),
+        ),
+        ("min_hops".to_string(), usize_value(report.min_hops)),
+        ("max_hops".to_string(), usize_value(report.max_hops)),
+        (
+            "reranked_seed_count".to_string(),
+            usize_value(report.reranked_seed_count),
+        ),
+        (
+            "candidate_limit".to_string(),
+            usize_value(report.candidate_limit),
+        ),
+        (
+            "payload_byte_limit".to_string(),
+            usize_value(report.payload_byte_limit),
+        ),
+        (
+            "payload_bytes_used".to_string(),
+            usize_value(report.payload_bytes_used),
+        ),
+        (
+            "returned_count".to_string(),
+            usize_value(report.returned_count),
+        ),
+        ("truncated".to_string(), Value::Bool(report.truncated())),
+        (
+            "truncation_reason".to_string(),
+            report
+                .truncation_reason
+                .map(|reason| Value::String(reason.as_str().to_string()))
+                .unwrap_or(Value::Null),
+        ),
+    ]))
 }
 
 fn vector_execution_report_value(report: &skein_executor::VectorExecutionReport) -> Value {
@@ -251,6 +320,7 @@ pub(super) fn empty_read_execution_profile() -> executor::ReadExecutionProfile {
         blocking_operator_kinds: Vec::new(),
         scan_pruning_reports: Vec::new(),
         vector_execution_reports: Vec::new(),
+        graph_expansion_reports: Vec::new(),
     }
 }
 

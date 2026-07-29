@@ -380,6 +380,7 @@ impl PhysicalPlan {
                 max_hops,
                 rel_properties,
                 optional,
+                graph_budget,
                 input,
             } => {
                 let arrow = match direction {
@@ -391,8 +392,16 @@ impl PhysicalPlan {
                     .as_ref()
                     .map(|variable| format!(" rel={variable}:{rel_type}"))
                     .unwrap_or_else(|| format!(" rel_type={rel_type}"));
+                let budget = graph_budget
+                    .map(|budget| {
+                        format!(
+                            " graph_candidate_limit={} graph_payload_byte_limit={}",
+                            budget.candidate_limit, budget.payload_byte_limit
+                        )
+                    })
+                    .unwrap_or_default();
                 format!(
-                    "{pad}AdjacencyExpandExec source={source_variable}:{source_label}{rel} direction={arrow} properties={rel_properties:?} hops={min_hops}..{max_hops} optional={optional} target={target_variable}:{target_label}\n{}",
+                    "{pad}AdjacencyExpandExec source={source_variable}:{source_label}{rel} direction={arrow} properties={rel_properties:?} hops={min_hops}..{max_hops} optional={optional}{budget} target={target_variable}:{target_label}\n{}",
                     input.explain(indent + 2)
                 )
             }

@@ -21,6 +21,12 @@ pub use metadata::{
 };
 pub use plan_node::PhysicalPlanChildren;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GraphExpansionBudget {
+    pub candidate_limit: usize,
+    pub payload_byte_limit: usize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum PhysicalPlan {
     CreateNodeLabel {
@@ -317,6 +323,7 @@ pub enum PhysicalPlan {
         min_hops: usize,
         max_hops: usize,
         optional: bool,
+        graph_budget: Option<GraphExpansionBudget>,
         input: Box<PhysicalPlan>,
     },
     OptionalDegreeExec {
