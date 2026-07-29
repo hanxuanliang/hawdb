@@ -89,6 +89,11 @@ pub enum LogicalPlan {
         options: GraphAlgorithmOptions,
         score_column: String,
     },
+    VectorSeed {
+        embedding_parameter: String,
+        embedding_dimension: usize,
+        top_k: usize,
+    },
     CreateNode {
         label: String,
         properties: BTreeMap<String, Value>,
@@ -816,6 +821,26 @@ pub fn plan_with_params(
             options: bind_graph_algorithm_options(&algorithm.options, parameters)?,
             score_column: algorithm.score_column.clone(),
         }),
+        Statement::VectorSearch(search) => {
+            let (embedding_parameter, embedding_dimension) =
+                bind_vector_embedding(&search.embedding, parameters)?;
+            let top_k = search
+                .top_k
+                .as_ref()
+                .map(|value| bind_non_negative_usize(value, parameters, "topK"))
+                .transpose()?
+                .unwrap_or(10);
+            if top_k == 0 {
+                return Err(SkeinError::Semantic(
+                    "vector search topK must be greater than zero".to_string(),
+                ));
+            }
+            Ok(LogicalPlan::VectorSeed {
+                embedding_parameter,
+                embedding_dimension,
+                top_k,
+            })
+        }
         Statement::CreateNode(node) => Ok(LogicalPlan::CreateNode {
             label: node.label.clone(),
             properties: bind_properties(&node.properties, parameters)?,
@@ -3281,6 +3306,37 @@ fn bind_graph_algorithm_options(
             .map(|value| bind_non_negative_usize(value, parameters, "maxLevels"))
             .transpose()?,
     })
+}
+
+fn bind_vector_embedding(
+    expression: &ValueExpression,
+    parameters: &BTreeMap<String, Value>,
+) -> Result<(String, usize)> {
+    let ValueExpression::Parameter(name) = expression else {
+        return Err(SkeinError::Semantic(
+            "vector search embedding must be a parameter".to_string(),
+        ));
+    };
+    let Some(Value::List(values)) = parameters.get(name) else {
+        return Err(SkeinError::Semantic(format!(
+            "vector search parameter '${name}' must be a numeric list"
+        )));
+    };
+    if values.is_empty() {
+        return Err(SkeinError::Semantic(
+            "vector search embedding must not be empty".to_string(),
+        ));
+    }
+    if values.iter().any(|value| match value {
+        Value::Float(value) => !value.is_finite(),
+        Value::Int(_) => false,
+        _ => true,
+    }) {
+        return Err(SkeinError::Semantic(format!(
+            "vector search parameter '${name}' must contain finite numbers"
+        )));
+    }
+    Ok((name.clone(), values.len()))
 }
 
 fn bind_properties(

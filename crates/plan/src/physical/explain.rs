@@ -95,6 +95,13 @@ impl PhysicalPlan {
                     "{pad}GraphAlgorithm algorithm={algorithm:?} graph={graph_name} options={options:?} score_column={score_column}"
                 )
             }
+            PhysicalPlan::VectorSeedScan {
+                embedding_parameter,
+                vector_plan,
+            } => format!(
+                "{pad}VectorSeedScan embedding=${embedding_parameter} {}",
+                vector_plan.explain_summary()
+            ),
             PhysicalPlan::CreateNode { label, .. } => {
                 format!("{pad}CreateNode label={label}")
             }

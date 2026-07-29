@@ -21,7 +21,7 @@ use crate::store::{
 };
 use crate::value::Value;
 use skein_ddl::{object_state_to_core, property_type_to_core, table_kind_to_core};
-use skein_executor::ExecutionLimit;
+use skein_executor::{ExecutionLimit, VectorExecutionReport};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -33,6 +33,42 @@ type ValueRangeBounds = (Option<ValueRangeBound>, Option<ValueRangeBound>);
 
 thread_local! {
     static SCAN_PRUNING_REPORT_CAPTURE: RefCell<Option<Vec<ScanPruningReport>>> = const { RefCell::new(None) };
+    static VECTOR_EXECUTION_REPORT_CAPTURE: RefCell<Option<Vec<VectorExecutionReport>>> = const { RefCell::new(None) };
+}
+
+pub struct VectorSeedExecutionRequest<'a> {
+    pub embedding: &'a [f32],
+    pub vector_plan: &'a skein_plan::VectorPhysicalPlan,
+}
+
+pub struct VectorSeedExecutionRow {
+    pub id: String,
+    pub score: f64,
+}
+
+pub struct VectorSeedExecutionOutput {
+    pub rows: Vec<VectorSeedExecutionRow>,
+    pub report: VectorExecutionReport,
+}
+
+pub trait ExternalReadOperator {
+    fn execute_vector_seed(
+        &mut self,
+        request: VectorSeedExecutionRequest<'_>,
+    ) -> Result<VectorSeedExecutionOutput>;
+}
+
+pub(crate) struct NoExternalReadOperator;
+
+impl ExternalReadOperator for NoExternalReadOperator {
+    fn execute_vector_seed(
+        &mut self,
+        _request: VectorSeedExecutionRequest<'_>,
+    ) -> Result<VectorSeedExecutionOutput> {
+        Err(SkeinError::Execution(
+            "vector search capability is unavailable without a search projection".to_string(),
+        ))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,7 +101,15 @@ pub fn execute_with_row_limit(
     max_rows: Option<usize>,
 ) -> Result<Vec<Row>> {
     let execution_limit = ExecutionLimit::from_user_max_rows(max_rows)?;
-    let bindings = execute_bindings_with_limit(plan, catalog, store, execution_limit)?;
+    let mut external = NoExternalReadOperator;
+    let bindings = execute_bindings_with_limit(
+        plan,
+        catalog,
+        store,
+        &BTreeMap::new(),
+        &mut external,
+        execution_limit,
+    )?;
     collect_rows(bindings, max_rows)
 }
 
@@ -75,12 +119,42 @@ pub fn execute_with_row_limit_profile(
     store: &mut GraphStore,
     max_rows: Option<usize>,
 ) -> Result<ProfiledQueryRows> {
+    let mut external = NoExternalReadOperator;
+    execute_with_row_limit_profile_and_external(
+        plan,
+        catalog,
+        store,
+        &BTreeMap::new(),
+        &mut external,
+        max_rows,
+    )
+}
+
+pub fn execute_with_row_limit_profile_and_external(
+    plan: &PhysicalPlan,
+    catalog: &mut Catalog,
+    store: &mut GraphStore,
+    parameters: &BTreeMap<String, Value>,
+    external: &mut dyn ExternalReadOperator,
+    max_rows: Option<usize>,
+) -> Result<ProfiledQueryRows> {
     let execution_limit = ExecutionLimit::from_user_max_rows(max_rows)?;
     let mut profile = read_execution_profile(plan, max_rows)?;
-    let (bindings, scan_pruning_reports) = capture_scan_pruning_reports(|| {
-        execute_bindings_with_limit(plan, catalog, store, execution_limit)
-    })?;
+    let ((bindings, scan_pruning_reports), vector_execution_reports) =
+        capture_vector_execution_reports(|| {
+            capture_scan_pruning_reports(|| {
+                execute_bindings_with_limit(
+                    plan,
+                    catalog,
+                    store,
+                    parameters,
+                    external,
+                    execution_limit,
+                )
+            })
+        })?;
     profile.scan_pruning_reports = scan_pruning_reports;
+    profile.vector_execution_reports = vector_execution_reports;
     let rows = collect_rows(bindings, max_rows)?;
     Ok(ProfiledQueryRows { rows, profile })
 }
@@ -99,6 +173,7 @@ pub fn read_execution_profile(
         operator_row_cap_enabled: execution_limit.output_rows.is_some(),
         blocking_operator_kinds: blocking_operator_kinds.into_iter().collect(),
         scan_pruning_reports: Vec::new(),
+        vector_execution_reports: Vec::new(),
     })
 }
 
@@ -121,10 +196,29 @@ fn record_scan_pruning_report(report: ScanPruningReport) {
     });
 }
 
+fn capture_vector_execution_reports<T>(
+    f: impl FnOnce() -> Result<T>,
+) -> Result<(T, Vec<VectorExecutionReport>)> {
+    VECTOR_EXECUTION_REPORT_CAPTURE.with(|capture| {
+        let previous = capture.replace(Some(Vec::new()));
+        let result = f();
+        let captured = capture.replace(previous).unwrap_or_default();
+        result.map(|value| (value, captured))
+    })
+}
+
+fn record_vector_execution_report(report: VectorExecutionReport) {
+    VECTOR_EXECUTION_REPORT_CAPTURE.with(|capture| {
+        if let Some(reports) = capture.borrow_mut().as_mut() {
+            reports.push(report);
+        }
+    });
+}
+
 fn collect_blocking_operator_kinds(plan: &PhysicalPlan, output: &mut BTreeSet<String>) {
     match plan {
-        PhysicalPlan::GraphAlgorithm { .. } => {
-            output.insert("GraphAlgorithm".to_string());
+        PhysicalPlan::GraphAlgorithm { .. } | PhysicalPlan::VectorSeedScan { .. } => {
+            output.insert(plan.kind().as_str().to_string());
         }
         PhysicalPlan::ShortestPathExec { .. } => {
             output.insert("ShortestPathExec".to_string());
@@ -171,6 +265,62 @@ fn collect_rows(bindings: Vec<Binding>, max_rows: Option<usize>) -> Result<Vec<R
         rows.push(binding.values);
     }
     Ok(rows)
+}
+
+fn vector_embedding_parameter(
+    parameters: &BTreeMap<String, Value>,
+    name: &str,
+    vector_plan: &skein_plan::VectorPhysicalPlan,
+) -> Result<Vec<f32>> {
+    let Some(Value::List(values)) = parameters.get(name) else {
+        return Err(SkeinError::Semantic(format!(
+            "vector search parameter '${name}' must be a numeric list"
+        )));
+    };
+    let embedding = values
+        .iter()
+        .map(|value| match value {
+            Value::Float(value) if value.is_finite() => {
+                let value = *value as f32;
+                if value.is_finite() {
+                    Ok(value)
+                } else {
+                    Err(SkeinError::Semantic(format!(
+                        "vector search parameter '${name}' exceeds f32 range"
+                    )))
+                }
+            }
+            Value::Int(value) => Ok(*value as f32),
+            _ => Err(SkeinError::Semantic(format!(
+                "vector search parameter '${name}' must contain finite numbers"
+            ))),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let expected_dimension = vector_plan_embedding_dimension(vector_plan);
+    if embedding.len() != expected_dimension {
+        return Err(SkeinError::Semantic(format!(
+            "vector search parameter '${name}' dimension changed after planning"
+        )));
+    }
+    Ok(embedding)
+}
+
+fn vector_plan_embedding_dimension(plan: &skein_plan::VectorPhysicalPlan) -> usize {
+    match plan {
+        skein_plan::VectorPhysicalPlan::VectorCandidateScan {
+            embedding_dimension,
+            ..
+        }
+        | skein_plan::VectorPhysicalPlan::RawVectorRerank {
+            embedding_dimension,
+            ..
+        } => *embedding_dimension,
+        skein_plan::VectorPhysicalPlan::ResidualFilter { input, .. }
+        | skein_plan::VectorPhysicalPlan::TopK { input, .. } => {
+            vector_plan_embedding_dimension(input)
+        }
+        skein_plan::VectorPhysicalPlan::Filter { .. } => 0,
+    }
 }
 
 pub fn mutation_command(plan: &PhysicalPlan) -> Result<Option<GraphMutation>> {
@@ -654,7 +804,8 @@ pub fn mutation_command(plan: &PhysicalPlan) -> Result<Option<GraphMutation>> {
         | PhysicalPlan::LimitExec { .. }
         | PhysicalPlan::SetNodePropertiesReturn { .. }
         | PhysicalPlan::ProjectGraph { .. }
-        | PhysicalPlan::GraphAlgorithm { .. } => Ok(None),
+        | PhysicalPlan::GraphAlgorithm { .. }
+        | PhysicalPlan::VectorSeedScan { .. } => Ok(None),
     }
 }
 
@@ -734,13 +885,23 @@ fn execute_bindings(
     catalog: &mut Catalog,
     store: &mut GraphStore,
 ) -> Result<Vec<Binding>> {
-    execute_bindings_with_limit(plan, catalog, store, ExecutionLimit::unlimited())
+    let mut external = NoExternalReadOperator;
+    execute_bindings_with_limit(
+        plan,
+        catalog,
+        store,
+        &BTreeMap::new(),
+        &mut external,
+        ExecutionLimit::unlimited(),
+    )
 }
 
 fn execute_bindings_with_limit(
     plan: &PhysicalPlan,
     catalog: &mut Catalog,
     store: &mut GraphStore,
+    parameters: &BTreeMap<String, Value>,
+    external: &mut dyn ExternalReadOperator,
     execution_limit: ExecutionLimit,
 ) -> Result<Vec<Binding>> {
     match plan {
@@ -1089,6 +1250,30 @@ fn execute_bindings_with_limit(
                     })
                     .collect(),
             })
+        }
+        PhysicalPlan::VectorSeedScan {
+            embedding_parameter,
+            vector_plan,
+        } => {
+            let embedding =
+                vector_embedding_parameter(parameters, embedding_parameter, vector_plan)?;
+            let output = external.execute_vector_seed(VectorSeedExecutionRequest {
+                embedding: &embedding,
+                vector_plan,
+            })?;
+            record_vector_execution_report(output.report);
+            Ok(output
+                .rows
+                .into_iter()
+                .map(|row| Binding {
+                    values: BTreeMap::from([
+                        ("id".to_string(), Value::String(row.id)),
+                        ("score".to_string(), Value::Float(row.score)),
+                    ]),
+                    nodes: BTreeMap::new(),
+                    relationships: BTreeMap::new(),
+                })
+                .collect())
         }
         PhysicalPlan::CreateNode { label, properties } => {
             let id = store.create_node(catalog, label, properties.clone())?;
@@ -2135,7 +2320,14 @@ fn execute_bindings_with_limit(
             Ok(output)
         }
         PhysicalPlan::ProjectExec { items, input } => {
-            let input = execute_bindings_with_limit(input, catalog, store, execution_limit)?;
+            let input = execute_bindings_with_limit(
+                input,
+                catalog,
+                store,
+                parameters,
+                external,
+                execution_limit,
+            )?;
             let mut output = Vec::new();
             for binding in input {
                 let mut values = BTreeMap::new();
@@ -2177,7 +2369,14 @@ fn execute_bindings_with_limit(
             input,
         } => {
             let child_limit = execution_limit.child_for_limit(*offset, *query_limit);
-            let input = execute_bindings_with_limit(input, catalog, store, child_limit)?;
+            let input = execute_bindings_with_limit(
+                input,
+                catalog,
+                store,
+                parameters,
+                external,
+                child_limit,
+            )?;
             let rows = input
                 .into_iter()
                 .skip(*offset)

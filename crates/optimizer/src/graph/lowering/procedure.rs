@@ -1,5 +1,6 @@
 use super::super::PhysicalPlan;
-use skein_plan::LogicalPlan;
+use crate::{plan_vector_search, OptimizerContext};
+use skein_plan::{LogicalPlan, VectorCandidateSource, VectorSearchLogicalPlan};
 
 pub(super) fn lower(logical: &LogicalPlan) -> Option<PhysicalPlan> {
     match logical {
@@ -23,6 +24,27 @@ pub(super) fn lower(logical: &LogicalPlan) -> Option<PhysicalPlan> {
             options: *options,
             score_column: score_column.clone(),
         }),
+        LogicalPlan::VectorSeed {
+            embedding_parameter,
+            embedding_dimension,
+            top_k,
+        } => {
+            let logical = VectorSearchLogicalPlan {
+                embedding_dimension: *embedding_dimension,
+                filter_fields: Vec::new(),
+                residual_filter_fields: Vec::new(),
+                initial_candidate_limit: *top_k,
+                candidate_source: VectorCandidateSource::Scalar,
+                candidate_limit: *top_k,
+                top_k: *top_k,
+            };
+            Some(PhysicalPlan::VectorSeedScan {
+                embedding_parameter: embedding_parameter.clone(),
+                vector_plan: plan_vector_search(&logical, &OptimizerContext::default())
+                    .ok()?
+                    .plan,
+            })
+        }
         LogicalPlan::ThreadRepairStats {
             label,
             identity_label,

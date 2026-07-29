@@ -28,6 +28,18 @@ pub(crate) struct SlowQueryRecord {
     pub(crate) success: bool,
     pub(crate) error: Option<String>,
     pub(crate) slow_log_candidate: bool,
+    pub(crate) vector_execution_reports: Vec<skein_executor::VectorExecutionReport>,
+}
+
+pub(crate) struct SlowQueryCompletion<'a> {
+    pub(crate) query_language: &'a str,
+    pub(crate) query_text: &'a str,
+    pub(crate) elapsed_micros: u128,
+    pub(crate) row_count: usize,
+    pub(crate) success: bool,
+    pub(crate) error: Option<String>,
+    pub(crate) slow_log_candidate: bool,
+    pub(crate) vector_execution_reports: Vec<skein_executor::VectorExecutionReport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,25 +114,18 @@ enum SystemTable {
 }
 
 impl SlowQueryRecord {
-    pub(crate) fn completed(
-        query_language: &str,
-        query_text: &str,
-        elapsed_micros: u128,
-        row_count: usize,
-        success: bool,
-        error: Option<String>,
-        slow_log_candidate: bool,
-    ) -> Self {
+    pub(crate) fn completed(completion: SlowQueryCompletion<'_>) -> Self {
         Self {
             sequence: 0,
-            query_language: query_language.to_string(),
-            query_text: truncate_utf8(query_text, MAX_SLOW_QUERY_TEXT_BYTES),
+            query_language: completion.query_language.to_string(),
+            query_text: truncate_utf8(completion.query_text, MAX_SLOW_QUERY_TEXT_BYTES),
             started_unix_micros: unix_now_micros(),
-            elapsed_micros: saturating_i64_from_u128(elapsed_micros),
-            row_count: i64::try_from(row_count).unwrap_or(i64::MAX),
-            success,
-            error,
-            slow_log_candidate,
+            elapsed_micros: saturating_i64_from_u128(completion.elapsed_micros),
+            row_count: i64::try_from(completion.row_count).unwrap_or(i64::MAX),
+            success: completion.success,
+            error: completion.error,
+            slow_log_candidate: completion.slow_log_candidate,
+            vector_execution_reports: completion.vector_execution_reports,
         }
     }
 }
@@ -210,7 +215,32 @@ fn slow_query_record_json(record: &SlowQueryRecord, include_query_text: bool) ->
         object["error"] =
             serde_json::Value::String(truncate_utf8(error, MAX_STATEMENT_ERROR_BYTES));
     }
+    object["vector_execution_report_count"] =
+        serde_json::json!(record.vector_execution_reports.len());
+    object["vector_execution_reports"] = serde_json::Value::Array(
+        record
+            .vector_execution_reports
+            .iter()
+            .map(vector_execution_report_json)
+            .collect(),
+    );
     object
+}
+
+fn vector_execution_report_json(
+    report: &skein_executor::VectorExecutionReport,
+) -> serde_json::Value {
+    serde_json::json!({
+        "candidate_source": report.candidate_source.as_str(),
+        "candidate_score_source": report.candidate_score_source.as_str(),
+        "final_score_source": report.final_score_source.as_str(),
+        "generated_candidate_count": report.generated_candidate_count,
+        "residual_filtered_count": report.residual_filtered_count,
+        "candidate_scan_rounds": report.candidate_scan_rounds,
+        "reranked_candidate_count": report.reranked_candidate_count,
+        "returned_count": report.returned_count,
+        "raw_vector_bytes_read": report.raw_vector_bytes_read,
+    })
 }
 
 impl StatementExecution {
@@ -900,6 +930,7 @@ mod tests {
                 success: true,
                 error: None,
                 slow_log_candidate: false,
+                vector_execution_reports: Vec::new(),
             },
             SlowQueryRecord {
                 sequence: 2,
@@ -911,6 +942,7 @@ mod tests {
                 success: true,
                 error: None,
                 slow_log_candidate: true,
+                vector_execution_reports: Vec::new(),
             },
             SlowQueryRecord {
                 sequence: 3,
@@ -922,6 +954,7 @@ mod tests {
                 success: true,
                 error: None,
                 slow_log_candidate: true,
+                vector_execution_reports: Vec::new(),
             },
         ];
 
@@ -958,7 +991,7 @@ mod tests {
 
 #[cfg(all(test, feature = "loom-tests"))]
 pub(crate) mod loom_tests {
-    use super::{SlowQueryLog, SlowQueryRecord};
+    use super::{SlowQueryCompletion, SlowQueryLog, SlowQueryRecord};
     use loom::sync::{Arc, Mutex};
     use loom::thread;
 
@@ -993,9 +1026,18 @@ pub(crate) mod loom_tests {
         query_text: &'static str,
     ) -> thread::JoinHandle<()> {
         thread::spawn(move || {
-            log.lock().unwrap().push(SlowQueryRecord::completed(
-                "cypher", query_text, 1, 1, true, None, true,
-            ));
+            log.lock()
+                .unwrap()
+                .push(SlowQueryRecord::completed(SlowQueryCompletion {
+                    query_language: "cypher",
+                    query_text,
+                    elapsed_micros: 1,
+                    row_count: 1,
+                    success: true,
+                    error: None,
+                    slow_log_candidate: true,
+                    vector_execution_reports: Vec::new(),
+                }));
         })
     }
 

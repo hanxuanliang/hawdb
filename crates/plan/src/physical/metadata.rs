@@ -22,6 +22,7 @@ pub enum PhysicalPlanKind {
     CreateRelationshipPropertyExistsConstraint,
     ProjectGraph,
     GraphAlgorithm,
+    VectorSeedScan,
     CreateNode,
     MergeNode,
     MergeRelationship,
@@ -109,6 +110,7 @@ impl PhysicalPlanKind {
             PhysicalPlanKind::CreateRelationshipPropertyExistsConstraint,
             PhysicalPlanKind::ProjectGraph,
             PhysicalPlanKind::GraphAlgorithm,
+            PhysicalPlanKind::VectorSeedScan,
             PhysicalPlanKind::CreateNode,
             PhysicalPlanKind::MergeNode,
             PhysicalPlanKind::MergeRelationship,
@@ -174,6 +176,7 @@ impl PhysicalPlanKind {
             }
             PhysicalPlanKind::ProjectGraph => "ProjectGraph",
             PhysicalPlanKind::GraphAlgorithm => "GraphAlgorithm",
+            PhysicalPlanKind::VectorSeedScan => "VectorSeedScan",
             PhysicalPlanKind::CreateNode => "CreateNode",
             PhysicalPlanKind::MergeNode => "MergeNode",
             PhysicalPlanKind::MergeRelationship => "MergeRelationship",
@@ -277,6 +280,7 @@ impl PhysicalPlanKind {
             | PhysicalPlanKind::LimitExec => PhysicalPlanClass::Relational,
             PhysicalPlanKind::ProjectGraph
             | PhysicalPlanKind::GraphAlgorithm
+            | PhysicalPlanKind::VectorSeedScan
             | PhysicalPlanKind::ThreadRepairStatsExec => PhysicalPlanClass::Procedure,
         }
     }

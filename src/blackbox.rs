@@ -1,4 +1,5 @@
 use crate::{Result, SkeinError};
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -130,6 +131,14 @@ impl BlackboxJsonArtifactSummary {
 pub struct BlackboxJsonlArtifactSummary {
     pub line_count: usize,
     pub nonempty_line_count: usize,
+    pub vector_query_count: usize,
+    pub vector_execution_report_count: usize,
+    pub vector_candidate_sources: Vec<String>,
+    pub generated_candidate_count: u64,
+    pub residual_filtered_count: u64,
+    pub reranked_candidate_count: u64,
+    pub returned_count: u64,
+    pub raw_vector_bytes_read: u64,
 }
 
 impl BlackboxJsonlArtifactSummary {
@@ -137,6 +146,14 @@ impl BlackboxJsonlArtifactSummary {
         serde_json::json!({
             "line_count": self.line_count,
             "nonempty_line_count": self.nonempty_line_count,
+            "vector_query_count": self.vector_query_count,
+            "vector_execution_report_count": self.vector_execution_report_count,
+            "vector_candidate_sources": self.vector_candidate_sources,
+            "generated_candidate_count": self.generated_candidate_count,
+            "residual_filtered_count": self.residual_filtered_count,
+            "reranked_candidate_count": self.reranked_candidate_count,
+            "returned_count": self.returned_count,
+            "raw_vector_bytes_read": self.raw_vector_bytes_read,
         })
     }
 }
@@ -829,9 +846,78 @@ fn jsonl_artifact_summary(bytes: &[u8]) -> BlackboxJsonlArtifactSummary {
     let text = String::from_utf8_lossy(bytes);
     let line_count = text.lines().count();
     let nonempty_line_count = text.lines().filter(|line| !line.trim().is_empty()).count();
+    let mut vector_query_count = 0usize;
+    let mut vector_execution_report_count = 0usize;
+    let mut vector_candidate_sources = BTreeSet::new();
+    let mut generated_candidate_count = 0u64;
+    let mut residual_filtered_count = 0u64;
+    let mut reranked_candidate_count = 0u64;
+    let mut returned_count = 0u64;
+    let mut raw_vector_bytes_read = 0u64;
+    for value in text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+    {
+        let Some(reports) = value
+            .get("vector_execution_reports")
+            .and_then(serde_json::Value::as_array)
+        else {
+            continue;
+        };
+        if !reports.is_empty() {
+            vector_query_count += 1;
+        }
+        vector_execution_report_count = vector_execution_report_count.saturating_add(reports.len());
+        for report in reports {
+            if let Some(source) = report
+                .get("candidate_source")
+                .and_then(serde_json::Value::as_str)
+            {
+                vector_candidate_sources.insert(source.to_string());
+            }
+            generated_candidate_count = generated_candidate_count.saturating_add(
+                report
+                    .get("generated_candidate_count")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+            );
+            residual_filtered_count = residual_filtered_count.saturating_add(
+                report
+                    .get("residual_filtered_count")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+            );
+            reranked_candidate_count = reranked_candidate_count.saturating_add(
+                report
+                    .get("reranked_candidate_count")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+            );
+            returned_count = returned_count.saturating_add(
+                report
+                    .get("returned_count")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+            );
+            raw_vector_bytes_read = raw_vector_bytes_read.saturating_add(
+                report
+                    .get("raw_vector_bytes_read")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+            );
+        }
+    }
     BlackboxJsonlArtifactSummary {
         line_count,
         nonempty_line_count,
+        vector_query_count,
+        vector_execution_report_count,
+        vector_candidate_sources: vector_candidate_sources.into_iter().collect(),
+        generated_candidate_count,
+        residual_filtered_count,
+        reranked_candidate_count,
+        returned_count,
+        raw_vector_bytes_read,
     }
 }
 
@@ -1134,6 +1220,24 @@ mod tests {
         assert!(!rendered.contains("MATCH"));
         assert!(!rendered.contains("secret-token"));
         assert!(!rendered.contains(root.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn jsonl_summary_aggregates_redacted_vector_execution_metrics() {
+        let summary = jsonl_artifact_summary(
+            br#"{"vector_execution_reports":[{"candidate_source":"scalar","generated_candidate_count":5,"residual_filtered_count":1,"reranked_candidate_count":4,"returned_count":2,"raw_vector_bytes_read":128}]}
+{"vector_execution_reports":[]}
+"#,
+        );
+
+        assert_eq!(summary.vector_query_count, 1);
+        assert_eq!(summary.vector_execution_report_count, 1);
+        assert_eq!(summary.vector_candidate_sources, vec!["scalar"]);
+        assert_eq!(summary.generated_candidate_count, 5);
+        assert_eq!(summary.residual_filtered_count, 1);
+        assert_eq!(summary.reranked_candidate_count, 4);
+        assert_eq!(summary.returned_count, 2);
+        assert_eq!(summary.raw_vector_bytes_read, 128);
     }
 
     #[test]

@@ -832,11 +832,21 @@ contract.
       a required approximate backend.
   - [ ] Extend vector observability in explain, explain analyze, slow log, and
     blackbox reports.
+    - [x] Carry typed execution counters for candidate scan rounds,
+      descriptor-pruned and scalar-filtered candidates, raw-vector bytes read,
+      and index coverage through the search retriever report.
+    - [x] Propagate typed vector execution reports through `EXPLAIN ANALYZE`,
+      query reports, redacted slow-query events, and aggregate blackbox JSONL
+      summaries for optimizer-owned vector queries.
     - Include vector backend, compressed projection mode, candidate count,
       descriptor-pruned count, scalar-filtered count, rerank count, raw-vector
       bytes read, index coverage, and fallback reason codes.
     - Keep reports compact and never copy raw embedding values.
   - [ ] Add vector seed as a graph query operator.
+    - [x] Add parameterized `CALL vector_search($embedding, topK := n)` as an
+      optimizer-visible exact scalar `VectorSeedScan`, with plan-cache bypass,
+      embedded search-projection injection, and fail-closed graph-only
+      execution.
     - Model semantic search as a bounded candidate-producing operator, not as a
       standalone answer path.
     - Feed seed document, entity, or memory ids into graph plans as a typed

@@ -77,6 +77,10 @@ pub trait VectorExecutionSource {
         &mut self,
         request: VectorRawRerankRequest<'_>,
     ) -> Result<Vec<VectorRawScore>, Self::Error>;
+
+    fn raw_vector_bytes_read(&self) -> u64 {
+        0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +93,7 @@ pub struct VectorExecutionReport {
     pub candidate_scan_rounds: usize,
     pub reranked_candidate_count: usize,
     pub returned_count: usize,
+    pub raw_vector_bytes_read: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -273,6 +278,7 @@ pub fn execute_vector_plan<S: VectorExecutionSource>(
             candidate_scan_rounds,
             reranked_candidate_count,
             returned_count: raw_scores.len(),
+            raw_vector_bytes_read: source.raw_vector_bytes_read(),
         },
         scores: raw_scores,
     })

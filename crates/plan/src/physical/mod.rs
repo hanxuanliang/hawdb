@@ -96,6 +96,10 @@ pub enum PhysicalPlan {
         options: GraphAlgorithmOptions,
         score_column: String,
     },
+    VectorSeedScan {
+        embedding_parameter: String,
+        vector_plan: crate::VectorPhysicalPlan,
+    },
     CreateNode {
         label: String,
         properties: BTreeMap<String, Value>,

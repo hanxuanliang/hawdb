@@ -2905,6 +2905,7 @@ pub struct NowledgeMemQueryReport {
     pub optimizer_decision_count: usize,
     pub optimizer_rule_event_count: usize,
     pub scan_pruning_reports: Vec<ScanPruningReport>,
+    pub vector_execution_reports: Vec<skein_executor::VectorExecutionReport>,
     pub output_row_shape: NowledgeMemQueryOutputRowShape,
     pub api_behavior: NowledgeMemQueryApiBehavior,
 }
@@ -2941,6 +2942,8 @@ impl NowledgeMemQueryReport {
             "optimizer_rule_event_count": self.optimizer_rule_event_count,
             "scan_pruning_report_count": self.scan_pruning_reports.len(),
             "scan_pruning_reports": self.scan_pruning_reports.iter().map(scan_pruning_report_json).collect::<Vec<_>>(),
+            "vector_execution_report_count": self.vector_execution_reports.len(),
+            "vector_execution_reports": self.vector_execution_reports.iter().map(vector_execution_report_json).collect::<Vec<_>>(),
             "output_row_shape": self.output_row_shape.json(),
             "api_behavior": self.api_behavior.json(),
         })
@@ -4166,10 +4169,29 @@ impl NowledgeMemGraph {
         parameters: &BTreeMap<String, Value>,
         options: NowledgeMemQueryReportOptions,
     ) -> Result<NowledgeMemQueryOutput> {
+        let mut external = crate::executor::NoExternalReadOperator;
+        self.query_with_params_with_report_options_and_external(
+            cypher,
+            parameters,
+            options,
+            &mut external,
+        )
+    }
+
+    fn query_with_params_with_report_options_and_external(
+        &mut self,
+        cypher: &str,
+        parameters: &BTreeMap<String, Value>,
+        options: NowledgeMemQueryReportOptions,
+        external: &mut dyn crate::executor::ExternalReadOperator,
+    ) -> Result<NowledgeMemQueryOutput> {
         let started = Instant::now();
-        let (output, execution_trace) =
-            self.db
-                .query_with_params_trace(cypher, parameters, options.capture_physical_plan)?;
+        let (output, execution_trace) = self.db.query_with_params_trace_and_external(
+            cypher,
+            parameters,
+            options.capture_physical_plan,
+            external,
+        )?;
         let elapsed_micros = started.elapsed().as_micros();
         let report = nowledge_mem_query_report(NowledgeMemQueryReportInput {
             mode: self.mode,
@@ -5213,6 +5235,92 @@ impl NowledgeMemSearchProjection {
     }
 }
 
+struct SearchProjectionExternalReadOperator<'a> {
+    projection: Option<&'a NowledgeMemSearchProjection>,
+}
+
+impl crate::executor::ExternalReadOperator for SearchProjectionExternalReadOperator<'_> {
+    fn execute_vector_seed(
+        &mut self,
+        request: crate::executor::VectorSeedExecutionRequest<'_>,
+    ) -> Result<crate::executor::VectorSeedExecutionOutput> {
+        let projection = self
+            .projection
+            .ok_or_else(missing_search_projection_error)?;
+        let top_k = vector_plan_top_k(request.vector_plan)?;
+        let output = projection.try_search_candidates_with_report(
+            &NowledgeMemSearchCandidateRequest::vector(request.embedding.to_vec(), top_k),
+        )?;
+        let retriever = output
+            .result
+            .retrievers
+            .iter()
+            .find(|retriever| retriever.name == "vector")
+            .ok_or_else(|| {
+                SkeinError::Execution(
+                    "vector search did not produce a vector retriever report".to_string(),
+                )
+            })?;
+        Ok(crate::executor::VectorSeedExecutionOutput {
+            rows: output
+                .result
+                .hits
+                .into_iter()
+                .map(|hit| crate::executor::VectorSeedExecutionRow {
+                    id: hit.id,
+                    score: hit.vector_score,
+                })
+                .collect(),
+            report: skein_executor::VectorExecutionReport {
+                candidate_source: vector_plan_candidate_source(request.vector_plan)?,
+                candidate_score_source: vector_score_source(&retriever.candidate_score_source)?,
+                final_score_source: vector_score_source(&retriever.final_score_source)?,
+                generated_candidate_count: retriever.generated_candidate_count,
+                residual_filtered_count: retriever.scalar_filtered_count,
+                candidate_scan_rounds: retriever.candidate_scan_rounds,
+                reranked_candidate_count: retriever.reranked_candidate_count,
+                returned_count: retriever.candidate_count,
+                raw_vector_bytes_read: retriever.raw_vector_bytes_read,
+            },
+        })
+    }
+}
+
+fn vector_plan_top_k(plan: &skein_plan::VectorPhysicalPlan) -> Result<usize> {
+    match plan {
+        skein_plan::VectorPhysicalPlan::TopK { limit, .. } => Ok(*limit),
+        _ => Err(SkeinError::Execution(
+            "vector seed physical plan is missing TopK".to_string(),
+        )),
+    }
+}
+
+fn vector_plan_candidate_source(
+    plan: &skein_plan::VectorPhysicalPlan,
+) -> Result<skein_plan::VectorCandidateSource> {
+    match plan {
+        skein_plan::VectorPhysicalPlan::VectorCandidateScan { source, .. } => Ok(*source),
+        skein_plan::VectorPhysicalPlan::ResidualFilter { input, .. }
+        | skein_plan::VectorPhysicalPlan::RawVectorRerank { input, .. }
+        | skein_plan::VectorPhysicalPlan::TopK { input, .. } => vector_plan_candidate_source(input),
+        skein_plan::VectorPhysicalPlan::Filter { .. } => Err(SkeinError::Execution(
+            "vector seed physical plan is missing VectorCandidateScan".to_string(),
+        )),
+    }
+}
+
+fn vector_score_source(value: &str) -> Result<skein_executor::VectorScoreSource> {
+    match value {
+        "unavailable" | "none" => Ok(skein_executor::VectorScoreSource::Unavailable),
+        "raw_vector" => Ok(skein_executor::VectorScoreSource::RawVector),
+        "ann_approximate" => Ok(skein_executor::VectorScoreSource::AnnApproximate),
+        "quantized_approximate" => Ok(skein_executor::VectorScoreSource::QuantizedApproximate),
+        _ => Err(SkeinError::Execution(
+            "vector search returned an unsupported score source".to_string(),
+        )),
+    }
+}
+
 #[derive(Debug)]
 pub struct NowledgeMemEmbeddedStore {
     graph: NowledgeMemGraph,
@@ -5721,7 +5829,11 @@ impl NowledgeMemEmbeddedStore {
     }
 
     pub fn query_with_report(&mut self, cypher: &str) -> Result<NowledgeMemQueryOutput> {
-        self.graph.query_with_report(cypher)
+        self.query_with_params_with_report_options(
+            cypher,
+            &BTreeMap::new(),
+            NowledgeMemQueryReportOptions::default(),
+        )
     }
 
     pub fn query_with_report_options(
@@ -5729,7 +5841,7 @@ impl NowledgeMemEmbeddedStore {
         cypher: &str,
         options: NowledgeMemQueryReportOptions,
     ) -> Result<NowledgeMemQueryOutput> {
-        self.graph.query_with_report_options(cypher, options)
+        self.query_with_params_with_report_options(cypher, &BTreeMap::new(), options)
     }
 
     pub fn query_with_params_with_report(
@@ -5737,7 +5849,11 @@ impl NowledgeMemEmbeddedStore {
         cypher: &str,
         parameters: &BTreeMap<String, Value>,
     ) -> Result<NowledgeMemQueryOutput> {
-        self.graph.query_with_params_with_report(cypher, parameters)
+        self.query_with_params_with_report_options(
+            cypher,
+            parameters,
+            NowledgeMemQueryReportOptions::default(),
+        )
     }
 
     pub fn query_with_params_with_report_options(
@@ -5746,8 +5862,19 @@ impl NowledgeMemEmbeddedStore {
         parameters: &BTreeMap<String, Value>,
         options: NowledgeMemQueryReportOptions,
     ) -> Result<NowledgeMemQueryOutput> {
-        self.graph
-            .query_with_params_with_report_options(cypher, parameters, options)
+        let Self {
+            graph,
+            search_projection,
+        } = self;
+        let mut external = SearchProjectionExternalReadOperator {
+            projection: search_projection.as_ref(),
+        };
+        graph.query_with_params_with_report_options_and_external(
+            cypher,
+            parameters,
+            options,
+            &mut external,
+        )
     }
 
     pub fn query_runtime_preflight(
@@ -6119,9 +6246,29 @@ fn nowledge_mem_query_report(input: NowledgeMemQueryReportInput<'_>) -> Nowledge
             .execution_profile
             .map(|profile| profile.scan_pruning_reports.clone())
             .unwrap_or_default(),
+        vector_execution_reports: input
+            .execution_profile
+            .map(|profile| profile.vector_execution_reports.clone())
+            .unwrap_or_default(),
         output_row_shape: NowledgeMemQueryOutputRowShape::from_output(input.output),
         api_behavior: NowledgeMemQueryApiBehavior::from_statement(input.statement),
     }
+}
+
+fn vector_execution_report_json(
+    report: &skein_executor::VectorExecutionReport,
+) -> serde_json::Value {
+    serde_json::json!({
+        "candidate_source": report.candidate_source.as_str(),
+        "candidate_score_source": report.candidate_score_source.as_str(),
+        "final_score_source": report.final_score_source.as_str(),
+        "generated_candidate_count": report.generated_candidate_count,
+        "residual_filtered_count": report.residual_filtered_count,
+        "candidate_scan_rounds": report.candidate_scan_rounds,
+        "reranked_candidate_count": report.reranked_candidate_count,
+        "returned_count": report.returned_count,
+        "raw_vector_bytes_read": report.raw_vector_bytes_read,
+    })
 }
 
 fn scan_pruning_report_json(report: &ScanPruningReport) -> serde_json::Value {
@@ -11253,6 +11400,116 @@ mod tests {
             true
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn embedded_query_runtime_executes_vector_seed_with_observability() {
+        let mut index = SearchIndex::in_memory();
+        for (external_id, embedding) in [("nearest", vec![1.0, 0.0]), ("farther", vec![0.0, 1.0])] {
+            index
+                .upsert_projection_row(SearchProjectionRow {
+                    kind: SearchProjectionKind::Memory,
+                    external_id: external_id.to_string(),
+                    title: external_id.to_string(),
+                    body: String::new(),
+                    embedding: Some(embedding),
+                    source_id: None,
+                    metadata: BTreeMap::new(),
+                })
+                .unwrap();
+        }
+        let projection = NowledgeMemSearchProjection::from_index(index);
+        let graph = NowledgeMemGraph::from_database(
+            Database::new_with_config(DatabaseConfig {
+                slow_query_log_threshold_micros: 0,
+                ..DatabaseConfig::default()
+            }),
+            NowledgeMemGraphMode::WritableCutover,
+        );
+        let mut store = NowledgeMemEmbeddedStore::new(graph, Some(projection));
+        let parameters = BTreeMap::from([(
+            "embedding".to_string(),
+            Value::List(vec![Value::Float(1.0), Value::Float(0.0)]),
+        )]);
+
+        let output = store
+            .query_with_params_with_report_options(
+                "CALL vector_search($embedding, topK := 1) RETURN id, score",
+                &parameters,
+                NowledgeMemQueryReportOptions {
+                    capture_physical_plan: true,
+                    slow_log_threshold_micros: Some(0),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            output.output.rows[0].get("id"),
+            Some(&Value::String("memory:nearest".to_string()))
+        );
+        assert_eq!(output.report.statement_kind, "vector_search");
+        assert_eq!(
+            output.report.physical_operator_counts.get("VectorSeedScan"),
+            Some(&1)
+        );
+        assert_eq!(output.report.plan_cache_lookup.as_deref(), Some("bypass"));
+        assert_eq!(output.report.vector_execution_reports.len(), 1);
+        assert_eq!(
+            output.report.vector_execution_reports[0].candidate_source,
+            skein_plan::VectorCandidateSource::Scalar
+        );
+        assert_eq!(
+            output.report.vector_execution_reports[0].final_score_source,
+            skein_executor::VectorScoreSource::RawVector
+        );
+        assert!(output.report.vector_execution_reports[0].raw_vector_bytes_read > 0);
+
+        let explain = store
+            .query_with_params_with_report(
+                "EXPLAIN ANALYZE CALL vector_search($embedding, topK := 1) RETURN id, score",
+                &parameters,
+            )
+            .unwrap();
+        let Value::List(vector_reports) = explain.output.rows[0]
+            .get("vector_execution_reports")
+            .expect("explain analyze vector reports")
+        else {
+            panic!("expected vector execution report list");
+        };
+        assert_eq!(vector_reports.len(), 1);
+        let Some(Value::String(plan)) = explain.output.rows[0].get("plan") else {
+            panic!("expected explain plan");
+        };
+        assert!(plan.contains("VectorSeedScan embedding=$embedding"));
+        assert!(plan.contains("Filter->VectorCandidateScan->RawVectorRerank->TopK"));
+        assert!(!plan.contains("[1"));
+
+        let slow_log = store.graph().database().slow_query_log_jsonl().unwrap();
+        let slow_event: serde_json::Value =
+            serde_json::from_str(slow_log.lines().next().unwrap()).unwrap();
+        assert_eq!(slow_event["vector_execution_report_count"], 1);
+        assert!(slow_event.get("query_text").is_none());
+        assert!(!slow_log.contains("1.0"));
+    }
+
+    #[test]
+    fn graph_only_query_runtime_rejects_vector_seed_capability() {
+        let graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::WritableCutover);
+        let mut store = NowledgeMemEmbeddedStore::new(graph, None);
+        let parameters = BTreeMap::from([(
+            "embedding".to_string(),
+            Value::List(vec![Value::Float(1.0), Value::Float(0.0)]),
+        )]);
+
+        let error = store
+            .query_with_params_with_report(
+                "CALL vector_search($embedding, topK := 1) RETURN id, score",
+                &parameters,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("search projection"));
     }
 
     #[test]

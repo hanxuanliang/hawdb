@@ -390,7 +390,14 @@ pub struct SearchRetrieverReport {
     pub candidate_score_source: String,
     pub final_score_source: String,
     pub generated_candidate_count: usize,
+    pub candidate_scan_rounds: usize,
+    pub descriptor_pruned_count: usize,
+    pub scalar_filtered_count: usize,
     pub reranked_candidate_count: usize,
+    pub raw_vector_bytes_read: u64,
+    pub index_covered_document_count: usize,
+    pub index_candidate_document_count: usize,
+    pub index_coverage_complete: bool,
     pub candidate_count: usize,
     pub candidate_set: SearchRetrieverCandidateSetReport,
     pub fallback_reason_codes: Vec<SearchFallbackReasonCode>,
@@ -517,6 +524,28 @@ impl VectorSearchBackend<'_> {
             #[cfg(feature = "turbovec")]
             Self::Turbovec(_) => VectorCandidateSource::Quantized,
         }
+    }
+
+    fn index_coverage(self, documents: &[&SearchDocument]) -> (usize, usize) {
+        let candidate_count = documents
+            .iter()
+            .filter(|document| document.embedding.is_some())
+            .count();
+        let covered_count = match self {
+            Self::Scalar => candidate_count,
+            Self::CompressedRequiredUnavailable => 0,
+            #[cfg(not(feature = "turbovec"))]
+            Self::_Lifetime(_) => candidate_count,
+            #[cfg(feature = "turbovec")]
+            Self::Turbovec(projection) => documents
+                .iter()
+                .filter(|document| {
+                    document.embedding.is_some()
+                        && projection.contains_document_id(document.id.as_str())
+                })
+                .count(),
+        };
+        (covered_count, candidate_count)
     }
 }
 
@@ -1789,6 +1818,8 @@ impl SearchIndex {
             None
         };
         let projection_freshness = self.projection_freshness();
+        let (vector_index_covered_document_count, vector_index_candidate_document_count) =
+            vector_backend.index_coverage(&filtered_documents);
 
         let vector_execution = if vector_available && mode != SearchMode::Text {
             Some(execute_search_vector_plan(SearchVectorExecutionRequest {
@@ -1854,10 +1885,38 @@ impl SearchIndex {
                     .as_ref()
                     .map(|execution| execution.report.generated_candidate_count)
                     .unwrap_or(0),
+                candidate_scan_rounds: vector_execution
+                    .as_ref()
+                    .map(|execution| execution.report.candidate_scan_rounds)
+                    .unwrap_or(0),
+                descriptor_pruned_count: candidate_set
+                    .metadata_predicate_pushdown
+                    .segment_pruned_document_count,
+                scalar_filtered_count: candidate_set
+                    .filtered_out_count
+                    .saturating_sub(
+                        candidate_set
+                            .metadata_predicate_pushdown
+                            .segment_pruned_document_count,
+                    )
+                    .saturating_add(
+                        vector_execution
+                            .as_ref()
+                            .map(|execution| execution.report.residual_filtered_count)
+                            .unwrap_or(0),
+                    ),
                 reranked_candidate_count: vector_execution
                     .as_ref()
                     .map(|execution| execution.report.reranked_candidate_count)
                     .unwrap_or(0),
+                raw_vector_bytes_read: vector_execution
+                    .as_ref()
+                    .map(|execution| execution.report.raw_vector_bytes_read)
+                    .unwrap_or(0),
+                index_covered_document_count: vector_index_covered_document_count,
+                index_candidate_document_count: vector_index_candidate_document_count,
+                index_coverage_complete: vector_index_covered_document_count
+                    == vector_index_candidate_document_count,
                 candidate_count: vector_scores.len(),
                 candidate_set: retriever_candidate_set_report(
                     vector_window_ranks.len(),
@@ -1891,7 +1950,20 @@ impl SearchIndex {
                 }
                 .to_string(),
                 generated_candidate_count: text_scores.len(),
+                candidate_scan_rounds: 0,
+                descriptor_pruned_count: candidate_set
+                    .metadata_predicate_pushdown
+                    .segment_pruned_document_count,
+                scalar_filtered_count: candidate_set.filtered_out_count.saturating_sub(
+                    candidate_set
+                        .metadata_predicate_pushdown
+                        .segment_pruned_document_count,
+                ),
                 reranked_candidate_count: 0,
+                raw_vector_bytes_read: 0,
+                index_covered_document_count: 0,
+                index_candidate_document_count: 0,
+                index_coverage_complete: true,
                 candidate_count: text_scores.len(),
                 candidate_set: retriever_candidate_set_report(
                     text_window_ranks.len(),
@@ -5703,7 +5775,14 @@ mod tests {
         assert_eq!(vector.candidate_score_source, "raw_vector");
         assert_eq!(vector.final_score_source, "raw_vector");
         assert_eq!(vector.generated_candidate_count, 3);
+        assert_eq!(vector.candidate_scan_rounds, 1);
+        assert_eq!(vector.descriptor_pruned_count, 0);
+        assert_eq!(vector.scalar_filtered_count, 0);
         assert_eq!(vector.reranked_candidate_count, 3);
+        assert_eq!(vector.raw_vector_bytes_read, 48);
+        assert_eq!(vector.index_covered_document_count, 3);
+        assert_eq!(vector.index_candidate_document_count, 3);
+        assert!(vector.index_coverage_complete);
         assert_eq!(vector.input_candidate_set, result.candidate_set);
         assert_eq!(text.input_candidate_set, result.candidate_set);
         assert_eq!(
@@ -9349,7 +9428,14 @@ mod tests {
         );
         assert_eq!(result.retrievers[0].final_score_source, "raw_vector");
         assert_eq!(result.retrievers[0].generated_candidate_count, 1);
+        assert_eq!(result.retrievers[0].candidate_scan_rounds, 1);
+        assert_eq!(result.retrievers[0].descriptor_pruned_count, 0);
+        assert_eq!(result.retrievers[0].scalar_filtered_count, 1);
         assert_eq!(result.retrievers[0].reranked_candidate_count, 1);
+        assert_eq!(result.retrievers[0].raw_vector_bytes_read, 32);
+        assert_eq!(result.retrievers[0].index_covered_document_count, 1);
+        assert_eq!(result.retrievers[0].index_candidate_document_count, 1);
+        assert!(result.retrievers[0].index_coverage_complete);
         assert!(!result.retrievers[0].candidate_set.exact);
         assert!((result.retrievers[0].top_candidates[0].score - 0.8).abs() < 1e-6);
         assert_eq!(result.candidate_set.cardinality, 1);

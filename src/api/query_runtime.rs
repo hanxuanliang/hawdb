@@ -29,13 +29,29 @@ impl Database {
         parameters: &BTreeMap<String, Value>,
         capture_trace: bool,
     ) -> Result<(QueryOutput, QueryExecutionTrace)> {
+        let mut external = executor::NoExternalReadOperator;
+        self.query_with_params_trace_and_external(
+            cypher_text,
+            parameters,
+            capture_trace,
+            &mut external,
+        )
+    }
+
+    pub(crate) fn query_with_params_trace_and_external(
+        &mut self,
+        cypher_text: &str,
+        parameters: &BTreeMap<String, Value>,
+        capture_trace: bool,
+        external: &mut dyn executor::ExternalReadOperator,
+    ) -> Result<(QueryOutput, QueryExecutionTrace)> {
         let started = std::time::Instant::now();
         let statement = cypher::parse(cypher_text)?;
         let body = statement_body(&statement);
         let statement_kind_name = statement_kind(&statement);
         if let cypher::Statement::Explain(explain) = &statement {
             let query_result = self
-                .execute_explain_statement(cypher_text, explain, parameters)
+                .execute_explain_statement(cypher_text, explain, parameters, external)
                 .map(|output| (output, QueryExecutionTrace::uncached(statement)));
             let statement_result = match &query_result {
                 Ok((output, _)) => Ok(output),
@@ -47,6 +63,7 @@ impl Database {
                 statement_kind_name,
                 started,
                 statement_result,
+                None,
             );
             return query_result;
         }
@@ -86,10 +103,12 @@ impl Database {
                     None,
                 )
             } else {
-                let profiled = executor::execute_with_row_limit_profile(
+                let profiled = executor::execute_with_row_limit_profile_and_external(
                     &optimized.physical_plan,
                     &mut self.catalog,
                     &mut self.store,
+                    parameters,
+                    external,
                     self.config.max_read_result_rows,
                 )?;
                 (profiled.rows, Some(profiled.profile))
@@ -108,12 +127,17 @@ impl Database {
             Ok((output, _)) => Ok(output),
             Err(error) => Err(error),
         };
+        let execution_profile = query_result
+            .as_ref()
+            .ok()
+            .and_then(|(_, trace)| trace.execution_profile.as_ref());
         self.record_statement_execution(
             "cypher",
             cypher_text,
             statement_kind_name,
             started,
             statement_result,
+            execution_profile,
         );
         query_result
     }
@@ -123,6 +147,7 @@ impl Database {
         cypher_text: &str,
         explain: &cypher::Explain,
         parameters: &BTreeMap<String, Value>,
+        external: &mut dyn executor::ExternalReadOperator,
     ) -> Result<QueryOutput> {
         let work_request =
             query_work_request_for_statement(&self.system_variables, &explain.statement)?;
@@ -134,10 +159,12 @@ impl Database {
                     "EXPLAIN ANALYZE only supports read queries".to_string(),
                 ));
             }
-            let profiled = executor::execute_with_row_limit_profile(
+            let profiled = executor::execute_with_row_limit_profile_and_external(
                 &optimized.physical_plan,
                 &mut self.catalog,
                 &mut self.store,
+                parameters,
+                external,
                 self.config.max_read_result_rows,
             )?;
             return Ok(QueryOutput {

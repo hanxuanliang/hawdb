@@ -133,6 +133,7 @@ impl PhysicalPlan {
             }
             PhysicalPlan::ProjectGraph { .. }
             | PhysicalPlan::GraphAlgorithm { .. }
+            | PhysicalPlan::VectorSeedScan { .. }
             | PhysicalPlan::ThreadRepairStatsExec { .. } => {
                 PhysicalPlanDomainRef::Procedure(ProcedurePhysicalPlanRef::new(self))
             }

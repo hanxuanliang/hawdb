@@ -187,6 +187,16 @@ impl PhysicalPlan {
                 write_identifier(output, score_column);
                 output.push(')');
             }
+            PhysicalPlan::VectorSeedScan {
+                embedding_parameter,
+                vector_plan,
+            } => {
+                output.push_str("VectorSeedScan(");
+                write_identifier(output, embedding_parameter);
+                output.push(':');
+                output.push_str(&vector_plan.fingerprint());
+                output.push(')');
+            }
             PhysicalPlan::CreateNode { label, properties } => {
                 output.push_str("CreateNode(");
                 write_identifier(output, label);

@@ -72,6 +72,7 @@ pub(super) fn execute_search_vector_plan(
         backend,
         fallback_reason_codes,
         fallback_reasons,
+        raw_vector_bytes_read: 0,
     };
     let output = execute_vector_plan(&planned.plan, &mut source).map_err(|error| {
         SkeinError::Storage(format!("vector physical execution failed: {error}"))
@@ -93,6 +94,7 @@ struct SearchVectorSource<'a, 'b> {
     backend: VectorSearchBackend<'a>,
     fallback_reason_codes: &'b mut Vec<SearchFallbackReasonCode>,
     fallback_reasons: &'b mut Vec<String>,
+    raw_vector_bytes_read: u64,
 }
 
 impl VectorExecutionSource for SearchVectorSource<'_, '_> {
@@ -105,9 +107,7 @@ impl VectorExecutionSource for SearchVectorSource<'_, '_> {
         debug_assert_eq!(request.source, self.backend.candidate_source());
         debug_assert_eq!(request.embedding_dimension, self.query_embedding.len());
         match self.backend {
-            VectorSearchBackend::Scalar => {
-                Ok(raw_vector_candidates(self.query_embedding, self.documents))
-            }
+            VectorSearchBackend::Scalar => Ok(self.raw_vector_candidates()),
             VectorSearchBackend::CompressedRequiredUnavailable => {
                 self.fallback_reason_codes
                     .push(SearchFallbackReasonCode::CompressedVectorProjectionUnavailable);
@@ -152,7 +152,7 @@ impl VectorExecutionSource for SearchVectorSource<'_, '_> {
                         self.fallback_reasons.push(format!(
                             "compressed vector projection unavailable; fell back to scalar vector scan: {error}"
                         ));
-                        Ok(raw_vector_candidates(self.query_embedding, self.documents))
+                        Ok(self.raw_vector_candidates())
                     }
                 }
             }
@@ -166,19 +166,29 @@ impl VectorExecutionSource for SearchVectorSource<'_, '_> {
             .iter()
             .map(|document| (document.id.as_str(), *document))
             .collect::<BTreeMap<_, _>>();
-        Ok(request
-            .candidates
-            .iter()
-            .filter_map(|candidate| {
-                let document = documents.get(candidate.id.as_str())?;
-                let score =
-                    cosine_similarity(self.query_embedding, document.embedding.as_deref()?)?;
-                Some(VectorRawScore {
-                    id: candidate.id.clone(),
-                    score,
-                })
-            })
-            .collect())
+        let mut scores = Vec::with_capacity(request.candidates.len());
+        for candidate in request.candidates {
+            let Some(document) = documents.get(candidate.id.as_str()) else {
+                continue;
+            };
+            let Some(embedding) = document.embedding.as_deref() else {
+                continue;
+            };
+            if embedding.len() != self.query_embedding.len() || embedding.is_empty() {
+                continue;
+            }
+            self.raw_vector_bytes_read = self
+                .raw_vector_bytes_read
+                .saturating_add(vector_bytes(embedding.len()));
+            let Some(score) = cosine_similarity(self.query_embedding, embedding) else {
+                continue;
+            };
+            scores.push(VectorRawScore {
+                id: candidate.id.clone(),
+                score,
+            });
+        }
+        Ok(scores)
     }
 
     fn filter_residual(
@@ -191,23 +201,42 @@ impl VectorExecutionSource for SearchVectorSource<'_, '_> {
         );
         Ok(request.candidates)
     }
+
+    fn raw_vector_bytes_read(&self) -> u64 {
+        self.raw_vector_bytes_read
+    }
 }
 
-fn raw_vector_candidates(
-    query_embedding: &[f32],
-    documents: &[&SearchDocument],
-) -> VectorCandidateBatch {
-    VectorCandidateBatch {
-        score_source: VectorScoreSource::RawVector,
-        candidates: documents
-            .iter()
-            .filter_map(|document| {
-                let score = cosine_similarity(query_embedding, document.embedding.as_deref()?)?;
-                Some(VectorCandidate {
-                    id: document.id.clone(),
-                    score,
-                })
-            })
-            .collect(),
+impl SearchVectorSource<'_, '_> {
+    fn raw_vector_candidates(&mut self) -> VectorCandidateBatch {
+        let mut candidates = Vec::with_capacity(self.documents.len());
+        for document in self.documents {
+            let Some(embedding) = document.embedding.as_deref() else {
+                continue;
+            };
+            if embedding.len() != self.query_embedding.len() || embedding.is_empty() {
+                continue;
+            }
+            self.raw_vector_bytes_read = self
+                .raw_vector_bytes_read
+                .saturating_add(vector_bytes(embedding.len()));
+            let Some(score) = cosine_similarity(self.query_embedding, embedding) else {
+                continue;
+            };
+            candidates.push(VectorCandidate {
+                id: document.id.clone(),
+                score,
+            });
+        }
+        VectorCandidateBatch {
+            score_source: VectorScoreSource::RawVector,
+            candidates,
+        }
     }
+}
+
+fn vector_bytes(dimension: usize) -> u64 {
+    u64::try_from(dimension)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(std::mem::size_of::<f32>() as u64)
 }

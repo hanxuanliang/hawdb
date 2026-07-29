@@ -25,6 +25,7 @@ pub enum Statement {
     CreateRelationshipPropertyExistsConstraint(CreateIndex),
     ProjectGraph(ProjectGraph),
     GraphAlgorithm(GraphAlgorithm),
+    VectorSearch(VectorSearch),
     CreateNode(CreateNode),
     CreateRelationship(CreateRelationship),
     MergeNode(MergeNode),
@@ -138,6 +139,12 @@ pub struct GraphAlgorithm {
     pub graph_name: String,
     pub options: GraphAlgorithmOptions,
     pub score_column: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VectorSearch {
+    pub embedding: ValueExpression,
+    pub top_k: Option<ValueExpression>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

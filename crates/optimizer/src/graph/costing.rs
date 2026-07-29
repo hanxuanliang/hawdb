@@ -59,6 +59,13 @@ pub(super) fn estimate_physical_plan_cost(
                 cost: estimate_node_full_scan_cost(rows),
             }
         }
+        PhysicalPlan::VectorSeedScan { vector_plan, .. } => {
+            let rows = vector_top_k(vector_plan) as u64;
+            PlanCost {
+                estimated_rows: rows,
+                cost: rows.saturating_mul(10).max(1),
+            }
+        }
         PhysicalPlan::NodeCartesianProductExec { left, right } => {
             let left_cost = estimate_physical_plan_cost(left, catalog);
             let right_cost = estimate_physical_plan_cost(right, catalog);
@@ -321,6 +328,10 @@ pub(super) fn estimate_physical_plan_cost_breakdown(
             let rows = catalog.label_count(label);
             PlanCostBreakdown::new(rows, 0, 0, estimate_node_full_scan_cost(rows), 0)
         }
+        PhysicalPlan::VectorSeedScan { vector_plan, .. } => {
+            let rows = vector_top_k(vector_plan) as u64;
+            PlanCostBreakdown::new(rows, rows.saturating_mul(10).max(1), 0, 0, rows)
+        }
         PhysicalPlan::NodeCartesianProductExec { left, right } => {
             let left_cost = estimate_physical_plan_cost_breakdown(left, catalog);
             let right_cost = estimate_physical_plan_cost_breakdown(right, catalog);
@@ -571,6 +582,13 @@ pub(super) fn estimate_physical_plan_cost_breakdown(
         | PhysicalPlan::DeleteRelationship { .. }
         | PhysicalPlan::DeleteRelationshipTargetNodes { .. }
         | PhysicalPlan::CreateRelationship { .. } => PlanCostBreakdown::new(1, 1, 0, 0, 0),
+    }
+}
+
+fn vector_top_k(plan: &skein_plan::VectorPhysicalPlan) -> usize {
+    match plan {
+        skein_plan::VectorPhysicalPlan::TopK { limit, .. } => *limit,
+        _ => 1,
     }
 }
 

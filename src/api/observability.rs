@@ -14,6 +14,7 @@ impl Database {
         statement_kind: &str,
         started: std::time::Instant,
         result: std::result::Result<&QueryOutput, &SkeinError>,
+        execution_profile: Option<&crate::executor::ReadExecutionProfile>,
     ) {
         let elapsed_micros = started.elapsed().as_micros();
         let execution = match result {
@@ -53,13 +54,18 @@ impl Database {
         self.slow_query_log
             .borrow_mut()
             .push(system_sql::SlowQueryRecord::completed(
-                query_language,
-                query_text,
-                elapsed_micros,
-                output.rows.len(),
-                true,
-                None,
-                slow_log_candidate,
+                system_sql::SlowQueryCompletion {
+                    query_language,
+                    query_text,
+                    elapsed_micros,
+                    row_count: output.rows.len(),
+                    success: true,
+                    error: None,
+                    slow_log_candidate,
+                    vector_execution_reports: execution_profile
+                        .map(|profile| profile.vector_execution_reports.clone())
+                        .unwrap_or_default(),
+                },
             ));
     }
 

@@ -7,8 +7,11 @@ impl Parser<'_> {
     pub(super) fn parse_call_statement(&mut self) -> Result<Statement> {
         let procedure = self.parse_ident()?;
         self.expect_char('(')?;
-        let graph_name = self.parse_string()?;
         let lower = procedure.to_ascii_lowercase();
+        if lower == "vector_search" {
+            return self.parse_vector_search();
+        }
+        let graph_name = self.parse_string()?;
         if lower == "project_graph" {
             self.expect_char(',')?;
             let node_labels = self.parse_string_list()?;
@@ -35,6 +38,39 @@ impl Parser<'_> {
             options,
             score_column,
         }))
+    }
+
+    fn parse_vector_search(&mut self) -> Result<Statement> {
+        let embedding = self.parse_value()?;
+        let mut top_k = None;
+        loop {
+            self.skip_ws();
+            if self.consume_char(')') {
+                break;
+            }
+            self.expect_char(',')?;
+            let name = self.parse_ident()?;
+            self.expect_token(":=")?;
+            if name.eq_ignore_ascii_case("topK") || name.eq_ignore_ascii_case("limit") {
+                if top_k.is_some() {
+                    return Err(self.error("duplicate vector search topK option"));
+                }
+                top_k = Some(self.parse_value()?);
+            } else {
+                return Err(self.error("unsupported vector search option"));
+            }
+        }
+        self.skip_ws();
+        if self.consume_keyword("RETURN") {
+            self.skip_ws();
+            let id = self.parse_ident()?;
+            self.expect_char(',')?;
+            let score = self.parse_ident()?;
+            if !id.eq_ignore_ascii_case("id") || !score.eq_ignore_ascii_case("score") {
+                return Err(self.error("vector search RETURN must be id, score"));
+            }
+        }
+        Ok(Statement::VectorSearch(VectorSearch { embedding, top_k }))
     }
 
     pub(super) fn parse_string_list(&mut self) -> Result<Vec<String>> {

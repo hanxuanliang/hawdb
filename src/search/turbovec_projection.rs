@@ -272,6 +272,10 @@ impl TurbovecSearchProjection {
         self.document_to_numeric_id.keys().cloned().collect()
     }
 
+    pub fn contains_document_id(&self, document_id: &str) -> bool {
+        self.document_to_numeric_id.contains_key(document_id)
+    }
+
     pub fn manifest_path_for(index_path: &Path) -> PathBuf {
         let file_name = index_path
             .file_name()

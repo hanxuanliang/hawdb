@@ -5475,6 +5475,7 @@ impl Database {
             statement_kind(body),
             started,
             query_result.as_ref(),
+            None,
         );
         query_result
     }
@@ -34778,6 +34779,7 @@ pub(crate) fn statement_kind(statement: &cypher::Statement) -> &'static str {
             }
         }
         cypher::Statement::GraphAlgorithm(_) => "graph_algorithm",
+        cypher::Statement::VectorSearch(_) => "vector_search",
         cypher::Statement::MatchCreateRelationship(_) => "match_create_relationship",
         cypher::Statement::MatchDelete(_) => "match_delete",
         cypher::Statement::MatchExpandMatchMergeRelationship(_) => {

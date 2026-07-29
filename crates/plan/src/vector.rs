@@ -83,4 +83,85 @@ impl VectorPhysicalPlan {
         operators.reverse();
         operators
     }
+
+    pub fn explain_summary(&self) -> String {
+        match self {
+            Self::TopK { limit, input } => format!(
+                "pipeline={} top_k={limit} {}",
+                self.operator_pipeline().join("->"),
+                input.explain_details()
+            ),
+            _ => format!("pipeline={}", self.operator_pipeline().join("->")),
+        }
+    }
+
+    pub fn fingerprint(&self) -> String {
+        match self {
+            Self::Filter { fields } => format!("Filter({})", fields.join(",")),
+            Self::VectorCandidateScan {
+                source,
+                embedding_dimension,
+                candidate_limit,
+                input,
+            } => format!(
+                "VectorCandidateScan({}:{}:{}:{})",
+                source.as_str(),
+                embedding_dimension,
+                candidate_limit,
+                input.fingerprint()
+            ),
+            Self::ResidualFilter {
+                fields,
+                initial_candidate_limit,
+                input,
+            } => format!(
+                "ResidualFilter({}:{}:{})",
+                fields.join(","),
+                initial_candidate_limit,
+                input.fingerprint()
+            ),
+            Self::RawVectorRerank {
+                embedding_dimension,
+                input,
+            } => format!(
+                "RawVectorRerank({embedding_dimension}:{})",
+                input.fingerprint()
+            ),
+            Self::TopK { limit, input } => {
+                format!("TopK({limit}:{})", input.fingerprint())
+            }
+        }
+    }
+
+    fn explain_details(&self) -> String {
+        match self {
+            Self::RawVectorRerank {
+                embedding_dimension,
+                input,
+            } => format!(
+                "dimension={embedding_dimension} {}",
+                input.explain_details()
+            ),
+            Self::ResidualFilter {
+                fields,
+                initial_candidate_limit,
+                input,
+            } => format!(
+                "residual_fields={fields:?} initial_candidates={initial_candidate_limit} {}",
+                input.explain_details()
+            ),
+            Self::VectorCandidateScan {
+                source,
+                candidate_limit,
+                input,
+                ..
+            } => format!(
+                "source={} candidates={candidate_limit} {}",
+                source.as_str(),
+                input.explain_details()
+            ),
+            Self::Filter { fields } => format!("filter_fields={fields:?}"),
+            Self::TopK { input, .. } => input.explain_details(),
+        }
+    }
 }

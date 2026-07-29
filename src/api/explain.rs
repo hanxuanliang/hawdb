@@ -109,6 +109,20 @@ pub(super) fn explain_analyze_output_row(
         ),
     );
     row.insert(
+        "vector_execution_report_count".to_string(),
+        usize_value(profile.vector_execution_reports.len()),
+    );
+    row.insert(
+        "vector_execution_reports".to_string(),
+        Value::List(
+            profile
+                .vector_execution_reports
+                .iter()
+                .map(vector_execution_report_value)
+                .collect(),
+        ),
+    );
+    row.insert(
         "row_limit_enforced_before_output".to_string(),
         Value::Bool(profile.row_limit_enforced_before_output),
     );
@@ -119,6 +133,47 @@ pub(super) fn explain_analyze_output_row(
     row
 }
 
+fn vector_execution_report_value(report: &skein_executor::VectorExecutionReport) -> Value {
+    Value::Map(BTreeMap::from([
+        (
+            "candidate_source".to_string(),
+            Value::String(report.candidate_source.as_str().to_string()),
+        ),
+        (
+            "candidate_score_source".to_string(),
+            Value::String(report.candidate_score_source.as_str().to_string()),
+        ),
+        (
+            "final_score_source".to_string(),
+            Value::String(report.final_score_source.as_str().to_string()),
+        ),
+        (
+            "generated_candidate_count".to_string(),
+            usize_value(report.generated_candidate_count),
+        ),
+        (
+            "residual_filtered_count".to_string(),
+            usize_value(report.residual_filtered_count),
+        ),
+        (
+            "candidate_scan_rounds".to_string(),
+            usize_value(report.candidate_scan_rounds),
+        ),
+        (
+            "reranked_candidate_count".to_string(),
+            usize_value(report.reranked_candidate_count),
+        ),
+        (
+            "returned_count".to_string(),
+            usize_value(report.returned_count),
+        ),
+        (
+            "raw_vector_bytes_read".to_string(),
+            u64_value(report.raw_vector_bytes_read),
+        ),
+    ]))
+}
+
 pub(super) fn empty_read_execution_profile() -> executor::ReadExecutionProfile {
     executor::ReadExecutionProfile {
         max_rows: None,
@@ -127,6 +182,7 @@ pub(super) fn empty_read_execution_profile() -> executor::ReadExecutionProfile {
         operator_row_cap_enabled: false,
         blocking_operator_kinds: Vec::new(),
         scan_pruning_reports: Vec::new(),
+        vector_execution_reports: Vec::new(),
     }
 }
 

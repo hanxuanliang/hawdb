@@ -30,6 +30,7 @@ impl PhysicalPlan {
             }
             PhysicalPlan::ProjectGraph { .. } => PhysicalPlanKind::ProjectGraph,
             PhysicalPlan::GraphAlgorithm { .. } => PhysicalPlanKind::GraphAlgorithm,
+            PhysicalPlan::VectorSeedScan { .. } => PhysicalPlanKind::VectorSeedScan,
             PhysicalPlan::CreateNode { .. } => PhysicalPlanKind::CreateNode,
             PhysicalPlan::MergeNode { .. } => PhysicalPlanKind::MergeNode,
             PhysicalPlan::MergeRelationship { .. } => PhysicalPlanKind::MergeRelationship,

@@ -3,8 +3,8 @@ use super::{
     CreateProperty, GraphAlgorithm, GraphAlgorithmKind, GraphAlgorithmOptions, OrderDirection,
     OrderExpression, ProjectGraph, PropertyPredicate, RelationshipDirection, ReturnExpression,
     ReturnValueExpression, SchemaObjectState, SchemaPropertyType, SchemaTableKind,
-    SetValueExpression, Statement, ValueExpression, WithAliasFilter, WithAliasFilterExpression,
-    WithAliasFilterOp,
+    SetValueExpression, Statement, ValueExpression, VectorSearch, WithAliasFilter,
+    WithAliasFilterExpression, WithAliasFilterOp,
 };
 use skein_core::Value;
 
@@ -575,6 +575,17 @@ fn parses_graph_algorithm_calls() {
                 max_levels: None,
             },
             score_column: "pagerank_score".to_string(),
+        })
+    );
+}
+
+#[test]
+fn parses_parameterized_vector_search() {
+    assert_eq!(
+        parse("CALL vector_search($embedding, topK := 20) RETURN id, score").unwrap(),
+        Statement::VectorSearch(VectorSearch {
+            embedding: ValueExpression::Parameter("embedding".to_string()),
+            top_k: Some(ValueExpression::Literal(Value::Int(20))),
         })
     );
 }
