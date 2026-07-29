@@ -103,10 +103,15 @@ LanceDB for that path.
     - Mem PR #384 injects the process-lifetime coordinator into both external
       and in-process MCP servers, and a real Kuzu/Skein test proves the
       obligation retires only after both engines expose the Memory and Label.
-  - [ ] Extend the coordinator payload to cover MCP `memory_add` with an
-    `EVOLVES` directive; the current cross-author contested-write transaction
-    remains on the specialized legacy path until node, relationship, and
-    supersession side effects can replay atomically in both engines.
+  - [x] Extend the coordinator payload to cover MCP `memory_add` with an
+    `EVOLVES` directive.
+    - Mem PR #384 freezes the resolved cross-author contested decision in the
+      versioned obligation, preserves the legacy node/relationship transaction,
+      uses Skein's typed Memory `EVOLVES` batch API, and replays latest-state,
+      inherited-label, and contested-metadata side effects idempotently.
+    - Real legacy/Skein tests cover normal replacement, a crash after the
+      legacy transaction commits but before acknowledgement, and contested
+      replacement downgraded to `challenges` in both graphs.
   - [ ] Route Memory lifecycle/delete and the remaining entity mutation
     families through the same durable coordinator.
   - Inject one long-lived writable Skein handle into Mem write resources.
