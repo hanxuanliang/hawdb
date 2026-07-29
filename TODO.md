@@ -165,8 +165,11 @@ LanceDB for that path.
   - [x] Resume from the search projection's durable source-graph watermark,
     keep one graph commit indivisible across bounded batches, and advance the
     durable watermark only after a successful projection checkpoint.
-  - [ ] Wire the Mem-owned background scheduler to the long-lived graph and
+  - [x] Wire the Mem-owned background scheduler to the long-lived graph and
     search handles so production catch-up consumes this stream.
+    - Implemented in Mem PR #384 with a process-lifetime runtime, persistent
+      QoS scheduler, bounded batches, typed stop reasons, and host shutdown.
+      The parent remains open until the integration is merged and shipped.
   - Acceptance: restart, bounded-log truncation, and stale upsert/delete
     sequences converge without losing or splitting a committed graph mutation.
 
