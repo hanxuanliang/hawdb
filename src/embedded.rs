@@ -3,7 +3,7 @@ use crate::nowledge_mem::{
     NowledgeMemEmbeddedStore, NowledgeMemOpenOptions, NowledgeMemOpenReport,
 };
 use crate::store::DurabilityPolicy;
-use crate::{Database, DatabaseConfig, Result};
+use crate::{Database, DatabaseConfig, Result, SearchIndex, SearchRangeReadConfig};
 use skein_qos::{IoConcurrencyBudget, RuntimeResourceBudget};
 use skein_storage::SegmentReadScheduler;
 use std::num::NonZeroU64;
@@ -140,6 +140,18 @@ impl SkeinEmbedded {
 
     pub fn database_mut(&mut self) -> &mut Database {
         &mut self.database
+    }
+
+    pub fn configure_search_index(&self, search_index: &mut SearchIndex) {
+        let config = match self.deployment_profile {
+            EmbeddedDeploymentProfile::DesktopBound => {
+                SearchRangeReadConfig::desktop_bound(self.runtime_resources.storage_io)
+            }
+            EmbeddedDeploymentProfile::MobileEmbedded => {
+                SearchRangeReadConfig::mobile_embedded(self.runtime_resources.storage_io)
+            }
+        };
+        search_index.set_range_read_config(config);
     }
 
     pub fn into_database(self) -> Database {
@@ -305,6 +317,13 @@ mod tests {
                 .io_depth
                 .get(),
             7
+        );
+        let mut search_index = SearchIndex::in_memory();
+        engine.configure_search_index(&mut search_index);
+        assert_eq!(search_index.range_read_config().io_depth.get(), 7);
+        assert_eq!(
+            search_index.range_read_config().max_wave_bytes.get(),
+            2 * 1024 * 1024
         );
     }
 

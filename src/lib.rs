@@ -286,8 +286,9 @@ pub use previous_wrapper_preflight::{
 pub use qos::{
     BackgroundWorkDecision, BackgroundWorkHint, BackgroundWorkPlan, BackgroundWorkReasonCode,
     LocalQosClassSnapshot, LocalQosPermit, LocalQosPolicy, LocalQosScheduler, LocalQosSnapshot,
-    LocalQosState, QosAdmission, QosAdmissionCode, QosSnapshotBlockerCode, RankedBackgroundWork,
-    WorkClass, WorkPriority, WorkRequest, WORK_CLASS_COUNT,
+    LocalQosState, QosAdmission, QosAdmissionCode, QosSnapshotBlockerCode, QosTelemetryEvent,
+    QosTelemetryOutcome, QosTelemetryPhase, QosTelemetrySink, RankedBackgroundWork, WorkClass,
+    WorkPriority, WorkRequest, WORK_CLASS_COUNT,
 };
 pub use query_family_evidence::nowledge_query_family_evidence_json;
 pub use query_runtime_preflight::{
@@ -318,9 +319,9 @@ pub use search::{
     SearchHit, SearchIndex, SearchMode, SearchPredicateFieldPruningReport,
     SearchPredicatePushdownReport, SearchProjectionDelta, SearchProjectionDeltaReport,
     SearchProjectionFreshness, SearchProjectionKind, SearchProjectionProbeOptions,
-    SearchProjectionRow, SearchQueryOptions, SearchRebuildOptions, SearchRebuildSummary,
-    SearchResultSet, SearchRetrieverCandidateSetReport, SearchTruncationReasonCode,
-    NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
+    SearchProjectionRow, SearchQueryOptions, SearchRangeReadConfig, SearchRebuildOptions,
+    SearchRebuildSummary, SearchResultSet, SearchRetrieverCandidateSetReport,
+    SearchTruncationReasonCode, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
 };
 pub use search_candidate_shadow_evidence::parse_search_candidate_shadow_probe;
 pub use search_projection_evidence::{
@@ -344,7 +345,9 @@ pub use store::{
 };
 #[cfg(feature = "opentelemetry")]
 pub use telemetry::OpenTelemetryMetrics;
-pub use telemetry::{KernelTelemetry, KernelTelemetryOperation, QueryTelemetry, TelemetrySink};
+pub use telemetry::{
+    qos_telemetry_sink, KernelTelemetry, KernelTelemetryOperation, QueryTelemetry, TelemetrySink,
+};
 pub use value::Value;
 pub use workload_fixtures::{
     nowledge_graph_route_workload_fixture_queries, nowledge_graph_route_workload_fixture_report,

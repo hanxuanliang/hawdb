@@ -5,7 +5,9 @@ use crate::qos::{
 };
 use crate::schema::Catalog;
 use crate::store::{GraphStore, NodeId, NodeRecord};
-use crate::telemetry::{KernelTelemetry, KernelTelemetryOperation, TelemetrySink};
+use crate::telemetry::{
+    qos_telemetry_sink, KernelTelemetry, KernelTelemetryOperation, TelemetrySink,
+};
 use crate::value::Value;
 use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use simsimd::SpatialSimilarity;
@@ -30,9 +32,11 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 
 mod analyzer_lexicon;
+mod range_io;
 #[cfg(feature = "turbovec")]
 pub mod turbovec_projection;
 use analyzer_lexicon::{CORE_SEMANTIC_ALIAS_RULES, NOWLEDGE_MEMORY_SEMANTIC_ALIAS_RULES};
+pub use range_io::SearchRangeReadConfig;
 
 const SEARCH_SNAPSHOT_FILE: &str = "search_projection.skein";
 const SEARCH_SEGMENT_DESCRIPTOR_FILE: &str = "search_projection_segments.skein";
@@ -358,6 +362,8 @@ pub struct SearchPredicatePushdownReport {
     pub segment_pruned_document_count: usize,
     pub segment_scanned_document_count: usize,
     pub persisted_segment_descriptor_used: bool,
+    pub physical_range_read_count: usize,
+    pub physical_bytes_read: u64,
     pub field_summaries: Vec<SearchPredicateFieldPruningReport>,
 }
 
@@ -454,6 +460,36 @@ enum VectorSearchBackend<'a> {
     _Lifetime(std::marker::PhantomData<&'a ()>),
     #[cfg(feature = "turbovec")]
     Turbovec(&'a turbovec_projection::TurbovecSearchProjection),
+}
+
+#[derive(Clone, Copy)]
+enum SearchPayloadAccess {
+    InMemory,
+    PrunedRanges,
+}
+
+struct SearchExecutionStrategy<'a> {
+    vector_backend: VectorSearchBackend<'a>,
+    vector_backend_fallback_reason: Option<String>,
+    payload_access: SearchPayloadAccess,
+}
+
+impl<'a> SearchExecutionStrategy<'a> {
+    fn new(
+        vector_backend: VectorSearchBackend<'a>,
+        vector_backend_fallback_reason: Option<String>,
+        use_physical_range_reads: bool,
+    ) -> Self {
+        Self {
+            vector_backend,
+            vector_backend_fallback_reason,
+            payload_access: if use_physical_range_reads {
+                SearchPayloadAccess::PrunedRanges
+            } else {
+                SearchPayloadAccess::InMemory
+            },
+        }
+    }
 }
 
 impl VectorSearchBackend<'_> {
@@ -682,6 +718,7 @@ pub struct SearchIndex {
     marker_lines: Mutex<BTreeMap<String, Vec<String>>>,
     analyzer_lexicon: SearchAnalyzerLexicon,
     segment_descriptor: Option<SearchSegmentDescriptor>,
+    range_read_config: SearchRangeReadConfig,
     telemetry: Option<Arc<dyn TelemetrySink>>,
 }
 
@@ -706,6 +743,7 @@ impl SearchIndex {
             marker_lines: Mutex::new(BTreeMap::new()),
             analyzer_lexicon: SearchAnalyzerLexicon::default(),
             segment_descriptor: None,
+            range_read_config: SearchRangeReadConfig::default(),
             telemetry: None,
         };
         index.load_snapshot()?;
@@ -724,6 +762,20 @@ impl SearchIndex {
 
     pub fn set_telemetry_sink(&mut self, telemetry: Option<Arc<dyn TelemetrySink>>) {
         self.telemetry = telemetry;
+    }
+
+    fn configure_qos_scheduler_telemetry(&self, scheduler: &mut LocalQosScheduler) {
+        if let Some(telemetry) = &self.telemetry {
+            scheduler.set_telemetry_sink(Some(qos_telemetry_sink(telemetry.clone())));
+        }
+    }
+
+    pub fn set_range_read_config(&mut self, config: SearchRangeReadConfig) {
+        self.range_read_config = config;
+    }
+
+    pub fn range_read_config(&self) -> SearchRangeReadConfig {
+        self.range_read_config
     }
 
     pub fn upsert(&mut self, document: SearchDocument) -> Result<()> {
@@ -846,6 +898,7 @@ impl SearchIndex {
         scheduler: &mut LocalQosScheduler,
         delta: SearchProjectionDelta,
     ) -> Result<SearchProjectionDeltaReport> {
+        self.configure_qos_scheduler_telemetry(scheduler);
         let permit = match scheduler.try_start(delta.background_work_request()) {
             Ok(permit) => permit,
             Err(QosAdmission::Defer { reason, .. }) => {
@@ -862,7 +915,7 @@ impl SearchIndex {
         };
 
         let result = self.apply_projection_delta(delta);
-        scheduler.finish(permit);
+        scheduler.finish_with_outcome(permit, result.is_ok());
         result
     }
 
@@ -1165,6 +1218,7 @@ impl SearchIndex {
             WorkClass::Projection,
             self.rebuild_estimated_operations(store),
         );
+        self.configure_qos_scheduler_telemetry(scheduler);
         let permit = match scheduler.try_start(request) {
             Ok(permit) => permit,
             Err(QosAdmission::Defer { reason, .. }) => {
@@ -1181,7 +1235,7 @@ impl SearchIndex {
         };
 
         let result = self.rebuild_derived_artifacts(catalog, store, options);
-        scheduler.finish(permit);
+        scheduler.finish_with_outcome(permit, result.is_ok());
         result
     }
 
@@ -1282,6 +1336,7 @@ impl SearchIndex {
         estimated_operations: usize,
     ) -> Result<MetadataRepairSummary> {
         let request = WorkRequest::background(WorkClass::Projection, estimated_operations);
+        self.configure_qos_scheduler_telemetry(scheduler);
         let permit = match scheduler.try_start(request) {
             Ok(permit) => permit,
             Err(QosAdmission::Defer { reason, .. }) => {
@@ -1298,7 +1353,7 @@ impl SearchIndex {
         };
 
         let result = self.repair_metadata_from_graph(catalog, store, options);
-        scheduler.finish(permit);
+        scheduler.finish_with_outcome(permit, result.is_ok());
         result
     }
 
@@ -1402,13 +1457,29 @@ impl SearchIndex {
         mode: SearchMode,
         options: SearchQueryOptions,
     ) -> SearchResultSet {
-        self.search_with_options_using_vector_backend(
+        self.try_search_with_options_using_vector_backend(
             query_text,
             query_embedding,
             mode,
             options,
-            VectorSearchBackend::Scalar,
-            None,
+            SearchExecutionStrategy::new(VectorSearchBackend::Scalar, None, false),
+        )
+        .expect("in-memory search path does not perform fallible range I/O")
+    }
+
+    pub fn try_search_with_options(
+        &self,
+        query_text: &str,
+        query_embedding: Option<&[f32]>,
+        mode: SearchMode,
+        options: SearchQueryOptions,
+    ) -> Result<SearchResultSet> {
+        self.try_search_with_options_using_vector_backend(
+            query_text,
+            query_embedding,
+            mode,
+            options,
+            SearchExecutionStrategy::new(VectorSearchBackend::Scalar, None, true),
         )
     }
 
@@ -1436,14 +1507,55 @@ impl SearchIndex {
         options: SearchQueryOptions,
         compressed_vector_search_mode: CompressedVectorSearchMode,
     ) -> SearchResultSet {
+        self.try_search_with_options_compressed_vector_projection_mode_internal(
+            query_text,
+            query_embedding,
+            mode,
+            options,
+            compressed_vector_search_mode,
+            false,
+        )
+        .expect("in-memory search path does not perform fallible range I/O")
+    }
+
+    pub fn try_search_with_options_compressed_vector_projection_mode(
+        &self,
+        query_text: &str,
+        query_embedding: Option<&[f32]>,
+        mode: SearchMode,
+        options: SearchQueryOptions,
+        compressed_vector_search_mode: CompressedVectorSearchMode,
+    ) -> Result<SearchResultSet> {
+        self.try_search_with_options_compressed_vector_projection_mode_internal(
+            query_text,
+            query_embedding,
+            mode,
+            options,
+            compressed_vector_search_mode,
+            true,
+        )
+    }
+
+    fn try_search_with_options_compressed_vector_projection_mode_internal(
+        &self,
+        query_text: &str,
+        query_embedding: Option<&[f32]>,
+        mode: SearchMode,
+        options: SearchQueryOptions,
+        compressed_vector_search_mode: CompressedVectorSearchMode,
+        use_physical_range_reads: bool,
+    ) -> Result<SearchResultSet> {
         if compressed_vector_search_mode == CompressedVectorSearchMode::Disabled {
-            return self.search_with_options_using_vector_backend(
+            return self.try_search_with_options_using_vector_backend(
                 query_text,
                 query_embedding,
                 mode,
                 options,
-                VectorSearchBackend::Scalar,
-                None,
+                SearchExecutionStrategy::new(
+                    VectorSearchBackend::Scalar,
+                    None,
+                    use_physical_range_reads,
+                ),
             );
         }
 
@@ -1452,38 +1564,47 @@ impl SearchIndex {
             if mode != SearchMode::Text && query_embedding.is_some() {
                 match self.load_turbovec_projection() {
                     Ok(Some(projection)) => {
-                        return self.search_with_options_using_vector_backend(
+                        return self.try_search_with_options_using_vector_backend(
                             query_text,
                             query_embedding,
                             mode,
                             options,
-                            VectorSearchBackend::Turbovec(&projection),
-                            None,
+                            SearchExecutionStrategy::new(
+                                VectorSearchBackend::Turbovec(&projection),
+                                None,
+                                use_physical_range_reads,
+                            ),
                         );
                     }
                     Ok(None) => {}
                     Err(error) => {
                         if compressed_vector_search_mode == CompressedVectorSearchMode::Required {
-                            return self.search_with_options_using_vector_backend(
+                            return self.try_search_with_options_using_vector_backend(
                                 query_text,
                                 query_embedding,
                                 mode,
                                 options,
-                                VectorSearchBackend::CompressedRequiredUnavailable,
-                                Some(format!(
-                                    "compressed vector projection required but unavailable: {error}"
-                                )),
+                                SearchExecutionStrategy::new(
+                                    VectorSearchBackend::CompressedRequiredUnavailable,
+                                    Some(format!(
+                                        "compressed vector projection required but unavailable: {error}"
+                                    )),
+                                    use_physical_range_reads,
+                                ),
                             );
                         }
-                        return self.search_with_options_using_vector_backend(
+                        return self.try_search_with_options_using_vector_backend(
                             query_text,
                             query_embedding,
                             mode,
                             options,
-                            VectorSearchBackend::Scalar,
-                            Some(format!(
-                                "compressed vector projection unavailable; fell back to scalar vector scan: {error}"
-                            )),
+                            SearchExecutionStrategy::new(
+                                VectorSearchBackend::Scalar,
+                                Some(format!(
+                                    "compressed vector projection unavailable; fell back to scalar vector scan: {error}"
+                                )),
+                                use_physical_range_reads,
+                            ),
                         );
                     }
                 }
@@ -1494,23 +1615,29 @@ impl SearchIndex {
             && mode != SearchMode::Text
             && query_embedding.is_some()
         {
-            return self.search_with_options_using_vector_backend(
+            return self.try_search_with_options_using_vector_backend(
                 query_text,
                 query_embedding,
                 mode,
                 options,
-                VectorSearchBackend::CompressedRequiredUnavailable,
-                None,
+                SearchExecutionStrategy::new(
+                    VectorSearchBackend::CompressedRequiredUnavailable,
+                    None,
+                    use_physical_range_reads,
+                ),
             );
         }
 
-        self.search_with_options_using_vector_backend(
+        self.try_search_with_options_using_vector_backend(
             query_text,
             query_embedding,
             mode,
             options,
-            VectorSearchBackend::Scalar,
-            None,
+            SearchExecutionStrategy::new(
+                VectorSearchBackend::Scalar,
+                None,
+                use_physical_range_reads,
+            ),
         )
     }
 
@@ -1523,25 +1650,29 @@ impl SearchIndex {
         mode: SearchMode,
         options: SearchQueryOptions,
     ) -> SearchResultSet {
-        self.search_with_options_using_vector_backend(
+        self.try_search_with_options_using_vector_backend(
             query_text,
             query_embedding,
             mode,
             options,
-            VectorSearchBackend::Turbovec(projection),
-            None,
+            SearchExecutionStrategy::new(VectorSearchBackend::Turbovec(projection), None, false),
         )
+        .expect("in-memory search path does not perform fallible range I/O")
     }
 
-    fn search_with_options_using_vector_backend(
+    fn try_search_with_options_using_vector_backend(
         &self,
         query_text: &str,
         query_embedding: Option<&[f32]>,
         mode: SearchMode,
         options: SearchQueryOptions,
-        vector_backend: VectorSearchBackend<'_>,
-        vector_backend_fallback_reason: Option<String>,
-    ) -> SearchResultSet {
+        strategy: SearchExecutionStrategy<'_>,
+    ) -> Result<SearchResultSet> {
+        let SearchExecutionStrategy {
+            vector_backend,
+            vector_backend_fallback_reason,
+            payload_access,
+        } = strategy;
         let query_terms = tokenize(query_text, &self.analyzer_lexicon);
         let mut vector_fallback_reason_codes = Vec::new();
         let mut vector_fallback_reasons = Vec::new();
@@ -1553,11 +1684,25 @@ impl SearchIndex {
         let limit = options.limit;
         let document_count = self.documents.len();
         let mut predicate_pushdown = search_metadata_predicate_pushdown(&options.metadata_filters);
-        let filtered = filter_search_documents_with_segment_pruning(
-            &self.documents,
-            &predicate_pushdown.predicates,
-            self.segment_descriptor.as_ref(),
-        );
+        let range_read = if matches!(payload_access, SearchPayloadAccess::PrunedRanges) {
+            self.read_pruned_search_segments(&predicate_pushdown.predicates)?
+        } else {
+            None
+        };
+        let filtered = match &range_read {
+            Some(range_read) => filter_search_documents_with_persisted_segments(
+                &range_read.documents,
+                &predicate_pushdown.predicates,
+                self.segment_descriptor
+                    .as_ref()
+                    .expect("range reads require a persisted segment descriptor"),
+            ),
+            None => filter_search_documents_with_segment_pruning(
+                &self.documents,
+                &predicate_pushdown.predicates,
+                self.segment_descriptor.as_ref(),
+            ),
+        };
         predicate_pushdown.report.segment_count = filtered.segment_count;
         predicate_pushdown.report.pruned_segment_count = filtered.pruned_segment_count;
         predicate_pushdown.report.scanned_segment_count = filtered.scanned_segment_count;
@@ -1571,6 +1716,10 @@ impl SearchIndex {
             filtered.segment_scanned_document_count;
         predicate_pushdown.report.persisted_segment_descriptor_used =
             filtered.persisted_segment_descriptor_used;
+        if let Some(range_read) = &range_read {
+            predicate_pushdown.report.physical_range_read_count = range_read.range_count;
+            predicate_pushdown.report.physical_bytes_read = range_read.bytes_read;
+        }
         predicate_pushdown.report.field_summaries = filtered.field_summaries;
         let filtered_documents = filtered.documents;
         let filtered_document_count = filtered_documents.len();
@@ -1814,7 +1963,7 @@ impl SearchIndex {
             filtered_document_count,
             total_hits,
         );
-        SearchResultSet {
+        Ok(SearchResultSet {
             hits,
             total_hits,
             limit,
@@ -1832,7 +1981,7 @@ impl SearchIndex {
             document_count,
             filtered_document_count,
             projection_freshness,
-        }
+        })
     }
 
     pub fn mark_full_reindex_needed(&self, reason: &str) -> Result<()> {
@@ -3116,6 +3265,8 @@ pub(crate) fn search_metadata_predicate_pushdown(
         segment_pruned_document_count: 0,
         segment_scanned_document_count: 0,
         persisted_segment_descriptor_used: false,
+        physical_range_read_count: 0,
+        physical_bytes_read: 0,
         field_summaries: Vec::new(),
     };
     SearchMetadataPredicatePushdown {
@@ -3193,6 +3344,13 @@ struct SearchSegmentPayloadRange {
     offset: u64,
     length: u64,
     checksum: u64,
+}
+
+#[derive(Debug, Default)]
+struct SearchPhysicalRangeRead {
+    documents: BTreeMap<String, SearchDocument>,
+    range_count: usize,
+    bytes_read: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -5143,7 +5301,6 @@ fn validate_search_segment_payload_ranges(segments: &[SearchSegmentDescriptorEnt
     Ok(())
 }
 
-#[cfg(test)]
 fn decode_search_segment_documents(payload: &[u8]) -> Result<Vec<SearchDocument>> {
     let text = decode_search_snapshot_text(payload)?;
     let mut documents = Vec::new();
@@ -5171,6 +5328,37 @@ fn decode_search_segment_documents(payload: &[u8]) -> Result<Vec<SearchDocument>
         }
     }
     Ok(documents)
+}
+
+fn validate_search_segment_documents(
+    segment: &SearchSegmentDescriptorEntry,
+    documents: &[SearchDocument],
+) -> Result<()> {
+    if documents.len() != segment.document_count {
+        return Err(SkeinError::Storage(format!(
+            "search segment {} decoded {} documents, expected {}",
+            segment.segment_id,
+            documents.len(),
+            segment.document_count
+        )));
+    }
+    let first = documents.first().map(|document| document.id.as_str());
+    let last = documents.last().map(|document| document.id.as_str());
+    if first != Some(segment.first_document_id.as_str())
+        || last != Some(segment.last_document_id.as_str())
+    {
+        return Err(SkeinError::Storage(format!(
+            "search segment {} document bounds do not match its descriptor",
+            segment.segment_id
+        )));
+    }
+    if documents.windows(2).any(|pair| pair[0].id >= pair[1].id) {
+        return Err(SkeinError::Storage(format!(
+            "search segment {} documents are not strictly ordered",
+            segment.segment_id
+        )));
+    }
+    Ok(())
 }
 
 fn encode_segment_values(values: &BTreeSet<String>) -> String {
@@ -8135,14 +8323,21 @@ mod tests {
         let path = unique_test_dir("search_segment_physical_ranges");
         {
             let mut index = SearchIndex::open(&path).unwrap();
-            for id in ["memory:0", "memory:1", "memory:2"] {
+            for (id, space_id) in [
+                ("memory:0", "space-a"),
+                ("memory:1", "space-a"),
+                ("memory:2", "space-b"),
+            ] {
                 index
                     .upsert(SearchDocument {
                         id: id.to_string(),
                         title: format!("Title {id}"),
                         content: "Physical segment range".to_string(),
                         embedding: None,
-                        metadata: BTreeMap::from([("unit_type".to_string(), "memory".to_string())]),
+                        metadata: BTreeMap::from([
+                            ("unit_type".to_string(), "memory".to_string()),
+                            ("space_id".to_string(), space_id.to_string()),
+                        ]),
                     })
                     .unwrap();
             }
@@ -8194,6 +8389,126 @@ mod tests {
                 "memory:2".to_string(),
             ]
         );
+
+        let index = SearchIndex::open(&path).unwrap();
+        let result = index
+            .try_search_with_options(
+                "physical segment range",
+                None,
+                SearchMode::Text,
+                SearchQueryOptions {
+                    limit: 10,
+                    rank_window: None,
+                    fusion_weights: SearchFusionWeights::default(),
+                    metadata_filters: BTreeMap::from([(
+                        "space_id".to_string(),
+                        "space-b".to_string(),
+                    )]),
+                    policy_epoch: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            result
+                .hits
+                .iter()
+                .map(|hit| hit.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["memory:2"]
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .physical_range_read_count,
+            1
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .physical_bytes_read,
+            descriptor.segments[1].payload_range.unwrap().length
+        );
+
+        let mut artifact = std::fs::read(path.join(SEARCH_SEGMENT_PAYLOAD_FILE)).unwrap();
+        let corrupt_offset = descriptor.segments[1].payload_range.unwrap().offset as usize;
+        artifact[corrupt_offset] ^= 0xff;
+        std::fs::write(path.join(SEARCH_SEGMENT_PAYLOAD_FILE), artifact).unwrap();
+        let error = index
+            .try_search_with_options(
+                "physical segment range",
+                None,
+                SearchMode::Text,
+                SearchQueryOptions {
+                    limit: 10,
+                    rank_window: None,
+                    fusion_weights: SearchFusionWeights::default(),
+                    metadata_filters: BTreeMap::from([(
+                        "space_id".to_string(),
+                        "space-b".to_string(),
+                    )]),
+                    policy_epoch: None,
+                },
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("payload checksum mismatch"));
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn fallible_search_rejects_pruned_reads_without_physical_ranges() {
+        let path = unique_test_dir("search_segment_physical_ranges_missing");
+        {
+            let mut index = SearchIndex::open(&path).unwrap();
+            for (id, space_id) in [
+                ("memory:0", "space-a"),
+                ("memory:1", "space-a"),
+                ("memory:2", "space-b"),
+            ] {
+                index
+                    .upsert(SearchDocument {
+                        id: id.to_string(),
+                        title: format!("Title {id}"),
+                        content: "Physical segment range".to_string(),
+                        embedding: None,
+                        metadata: BTreeMap::from([("space_id".to_string(), space_id.to_string())]),
+                    })
+                    .unwrap();
+            }
+            index.checkpoint().unwrap();
+        }
+        let mut index = SearchIndex::open(&path).unwrap();
+        for segment in &mut index
+            .segment_descriptor
+            .as_mut()
+            .expect("persisted segment descriptor")
+            .segments
+        {
+            segment.payload_range = None;
+        }
+
+        let error = index
+            .try_search_with_options(
+                "physical segment range",
+                None,
+                SearchMode::Text,
+                SearchQueryOptions {
+                    limit: 10,
+                    rank_window: None,
+                    fusion_weights: SearchFusionWeights::default(),
+                    metadata_filters: BTreeMap::from([(
+                        "space_id".to_string(),
+                        "space-b".to_string(),
+                    )]),
+                    policy_epoch: None,
+                },
+            )
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("physical ranges are unavailable"));
         std::fs::remove_dir_all(path).unwrap();
     }
 

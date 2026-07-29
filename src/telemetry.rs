@@ -1,4 +1,6 @@
+use crate::qos::{QosTelemetryEvent, QosTelemetrySink};
 use std::fmt::Debug;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueryTelemetry<'a> {
@@ -43,6 +45,23 @@ pub trait TelemetrySink: Debug + Send + Sync {
     fn record_query(&self, event: QueryTelemetry<'_>);
 
     fn record_kernel(&self, _event: KernelTelemetry) {}
+
+    fn record_qos(&self, _event: QosTelemetryEvent) {}
+}
+
+#[derive(Debug)]
+struct HostQosTelemetrySink {
+    telemetry: Arc<dyn TelemetrySink>,
+}
+
+impl QosTelemetrySink for HostQosTelemetrySink {
+    fn record_qos(&self, event: QosTelemetryEvent) {
+        self.telemetry.record_qos(event);
+    }
+}
+
+pub fn qos_telemetry_sink(telemetry: Arc<dyn TelemetrySink>) -> Arc<dyn QosTelemetrySink> {
+    Arc::new(HostQosTelemetrySink { telemetry })
 }
 
 #[cfg(feature = "opentelemetry")]
@@ -114,12 +133,37 @@ impl TelemetrySink for OpenTelemetryMetrics {
         self.kernel_operation_items
             .record(event.item_count as u64, &attributes);
     }
+
+    fn record_qos(&self, event: QosTelemetryEvent) {
+        use opentelemetry::KeyValue;
+
+        let attributes = [
+            KeyValue::new("db.system", "skein"),
+            KeyValue::new("db.operation.name", "background_qos"),
+            KeyValue::new("skein.qos.phase", event.phase.as_str()),
+            KeyValue::new("skein.qos.outcome", event.outcome.as_str()),
+            KeyValue::new("skein.work.class", event.class.as_str()),
+            KeyValue::new(
+                "skein.qos.admission_code",
+                event.admission_code.map(|code| code.as_str()).unwrap_or(""),
+            ),
+        ];
+        self.kernel_operation_count.add(1, &attributes);
+        self.kernel_operation_duration_micros
+            .record(event.elapsed_micros, &attributes);
+        self.kernel_operation_items
+            .record(event.estimated_operations as u64, &attributes);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Database, SearchDocument, SearchIndex};
+    use crate::qos::{QosTelemetryOutcome, QosTelemetryPhase};
+    use crate::{
+        Database, LocalQosPolicy, LocalQosScheduler, SearchDocument, SearchIndex,
+        SearchProjectionDelta, SearchProjectionKind, SearchProjectionRow,
+    };
     use std::collections::BTreeMap;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -130,6 +174,7 @@ mod tests {
     struct RecordingSink {
         events: Mutex<Vec<(bool, u64, usize)>>,
         kernel_events: Mutex<Vec<KernelTelemetry>>,
+        qos_events: Mutex<Vec<QosTelemetryEvent>>,
     }
 
     impl TelemetrySink for RecordingSink {
@@ -143,6 +188,10 @@ mod tests {
 
         fn record_kernel(&self, event: KernelTelemetry) {
             self.kernel_events.lock().unwrap().push(event);
+        }
+
+        fn record_qos(&self, event: QosTelemetryEvent) {
+            self.qos_events.lock().unwrap().push(event);
         }
     }
 
@@ -179,6 +228,66 @@ mod tests {
                 item_count: 4,
             }]
         );
+    }
+
+    #[test]
+    fn qos_adapter_forwards_only_typed_bounded_fields() {
+        let sink = Arc::new(RecordingSink::default());
+        let adapter = qos_telemetry_sink(sink.clone());
+
+        adapter.record_qos(QosTelemetryEvent {
+            phase: QosTelemetryPhase::Admission,
+            outcome: QosTelemetryOutcome::Deferred,
+            class: crate::qos::WorkClass::Projection,
+            estimated_operations: 8,
+            elapsed_micros: 0,
+            admission_code: Some(crate::qos::QosAdmissionCode::PerWorkLimitExceeded),
+        });
+
+        assert_eq!(
+            *sink.qos_events.lock().unwrap(),
+            vec![QosTelemetryEvent {
+                phase: QosTelemetryPhase::Admission,
+                outcome: QosTelemetryOutcome::Deferred,
+                class: crate::qos::WorkClass::Projection,
+                estimated_operations: 8,
+                elapsed_micros: 0,
+                admission_code: Some(crate::qos::QosAdmissionCode::PerWorkLimitExceeded),
+            }]
+        );
+    }
+
+    #[test]
+    fn scheduled_search_work_uses_the_host_telemetry_sink_automatically() {
+        let sink = Arc::new(RecordingSink::default());
+        let mut index = SearchIndex::in_memory();
+        index.set_telemetry_sink(Some(sink.clone()));
+        let mut scheduler = LocalQosScheduler::new(LocalQosPolicy::default());
+
+        index
+            .apply_scheduled_background_projection_delta(
+                &mut scheduler,
+                SearchProjectionDelta {
+                    upserts: vec![SearchProjectionRow {
+                        kind: SearchProjectionKind::Memory,
+                        external_id: "qos-telemetry".to_string(),
+                        title: "QoS telemetry".to_string(),
+                        body: "Scheduled projection".to_string(),
+                        embedding: None,
+                        source_id: None,
+                        metadata: BTreeMap::new(),
+                    }],
+                    ..SearchProjectionDelta::default()
+                },
+            )
+            .unwrap();
+
+        let events = sink.qos_events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].phase, QosTelemetryPhase::Admission);
+        assert_eq!(events[0].outcome, QosTelemetryOutcome::Admitted);
+        assert_eq!(events[1].phase, QosTelemetryPhase::Completion);
+        assert_eq!(events[1].outcome, QosTelemetryOutcome::Completed);
     }
 
     #[test]

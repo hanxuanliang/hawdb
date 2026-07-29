@@ -876,7 +876,7 @@ contract.
     payload consumption.
   - [x] Add checksummed physical byte ranges and independent Zstandard frames to
     persisted search segments.
-  - [ ] Execute pruned candidate ranges through the storage backend in the
+  - [x] Execute pruned candidate ranges through the storage backend in the
     production search path while keeping WAL, manifest publication, and
     per-index delta ordering serialized; propagate range I/O errors without a
     silent in-memory fallback.
@@ -913,14 +913,14 @@ contract.
     durable-before-publish behavior.
   - [x] Prove overlapping pinned query execution while commits remain serialized and
     durable-before-publish.
-- [ ] Complete host-owned OpenTelemetry coverage.
+- [x] Complete host-owned OpenTelemetry coverage.
   - [x] Provide an optional OpenTelemetry metrics adapter that accepts a
     host-provided `Meter` and never initializes global telemetry state.
   - [x] Emit low-cardinality query count, duration, row count, success, language,
     and statement-kind metrics without query text or parameters.
   - [x] Add typed, low-cardinality WAL, checkpoint, recovery, and search
     checkpoint metrics with bounded exporter behavior owned by the host.
-  - [ ] Add background QoS admission and completion metrics without coupling
+  - [x] Add background QoS admission and completion metrics without coupling
     the scheduler crate to a global telemetry provider.
 - [x] Complete durable incremental-index catch-up.
   - [x] Distinguish the applied source graph epoch from the durable checkpoint

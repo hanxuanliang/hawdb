@@ -1,6 +1,9 @@
 mod resource;
 
+use std::fmt::Debug;
 use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Instant;
 
 pub use resource::{IoConcurrencyBudget, RuntimeResourceBudget};
 
@@ -18,6 +21,56 @@ pub enum WorkClass {
     Import,
     Analytics,
     Shadow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QosTelemetryPhase {
+    Admission,
+    Completion,
+}
+
+impl QosTelemetryPhase {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Admission => "admission",
+            Self::Completion => "completion",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QosTelemetryOutcome {
+    Admitted,
+    Deferred,
+    Rejected,
+    Completed,
+    Failed,
+}
+
+impl QosTelemetryOutcome {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Admitted => "admitted",
+            Self::Deferred => "deferred",
+            Self::Rejected => "rejected",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QosTelemetryEvent {
+    pub phase: QosTelemetryPhase,
+    pub outcome: QosTelemetryOutcome,
+    pub class: WorkClass,
+    pub estimated_operations: usize,
+    pub elapsed_micros: u64,
+    pub admission_code: Option<QosAdmissionCode>,
+}
+
+pub trait QosTelemetrySink: Debug + Send + Sync {
+    fn record_qos(&self, event: QosTelemetryEvent);
 }
 
 impl WorkPriority {
@@ -271,16 +324,34 @@ impl FromStr for QosAdmissionCode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct LocalQosPermit {
     request: WorkRequest,
+    started_at: Instant,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct LocalQosScheduler {
     policy: LocalQosPolicy,
     state: LocalQosState,
+    telemetry: Option<Arc<dyn QosTelemetrySink>>,
 }
+
+impl PartialEq for LocalQosPermit {
+    fn eq(&self, other: &Self) -> bool {
+        self.request == other.request
+    }
+}
+
+impl Eq for LocalQosPermit {}
+
+impl PartialEq for LocalQosScheduler {
+    fn eq(&self, other: &Self) -> bool {
+        self.policy == other.policy && self.state == other.state
+    }
+}
+
+impl Eq for LocalQosScheduler {}
 
 impl Default for LocalQosPolicy {
     fn default() -> Self {
@@ -673,7 +744,12 @@ impl LocalQosScheduler {
         Self {
             policy,
             state: LocalQosState::default(),
+            telemetry: None,
         }
+    }
+
+    pub fn set_telemetry_sink(&mut self, telemetry: Option<Arc<dyn QosTelemetrySink>>) {
+        self.telemetry = telemetry;
     }
 
     pub fn policy(&self) -> &LocalQosPolicy {
@@ -716,13 +792,41 @@ impl LocalQosScheduler {
                         self.state.running_background_operations_by_class[class_index]
                             .saturating_add(request.estimated_operations);
                 }
-                Ok(LocalQosPermit { request })
+                self.record_background_event(
+                    &request,
+                    QosTelemetryPhase::Admission,
+                    QosTelemetryOutcome::Admitted,
+                    None,
+                    0,
+                );
+                Ok(LocalQosPermit {
+                    request,
+                    started_at: Instant::now(),
+                })
             }
-            admission => Err(admission),
+            admission => {
+                let outcome = match admission {
+                    QosAdmission::Admit => unreachable!("admitted work returns a permit"),
+                    QosAdmission::Defer { .. } => QosTelemetryOutcome::Deferred,
+                    QosAdmission::Reject { .. } => QosTelemetryOutcome::Rejected,
+                };
+                self.record_background_event(
+                    &request,
+                    QosTelemetryPhase::Admission,
+                    outcome,
+                    admission.code(),
+                    0,
+                );
+                Err(admission)
+            }
         }
     }
 
     pub fn finish(&mut self, permit: LocalQosPermit) {
+        self.finish_with_outcome(permit, true);
+    }
+
+    pub fn finish_with_outcome(&mut self, permit: LocalQosPermit, success: bool) {
         if permit.request.priority == WorkPriority::Background {
             self.state.running_background_operations = self
                 .state
@@ -732,6 +836,45 @@ impl LocalQosScheduler {
             self.state.running_background_operations_by_class[class_index] =
                 self.state.running_background_operations_by_class[class_index]
                     .saturating_sub(permit.request.estimated_operations);
+        }
+        let elapsed_micros = permit
+            .started_at
+            .elapsed()
+            .as_micros()
+            .min(u128::from(u64::MAX)) as u64;
+        self.record_background_event(
+            &permit.request,
+            QosTelemetryPhase::Completion,
+            if success {
+                QosTelemetryOutcome::Completed
+            } else {
+                QosTelemetryOutcome::Failed
+            },
+            None,
+            elapsed_micros,
+        );
+    }
+
+    fn record_background_event(
+        &self,
+        request: &WorkRequest,
+        phase: QosTelemetryPhase,
+        outcome: QosTelemetryOutcome,
+        admission_code: Option<QosAdmissionCode>,
+        elapsed_micros: u64,
+    ) {
+        if request.priority != WorkPriority::Background {
+            return;
+        }
+        if let Some(telemetry) = &self.telemetry {
+            telemetry.record_qos(QosTelemetryEvent {
+                phase,
+                outcome,
+                class: request.class,
+                estimated_operations: request.estimated_operations,
+                elapsed_micros,
+                admission_code,
+            });
         }
     }
 }
@@ -775,8 +918,21 @@ mod tests {
     use super::{
         BackgroundWorkHint, BackgroundWorkPlan, BackgroundWorkReasonCode, LocalQosPolicy,
         LocalQosScheduler, LocalQosState, QosAdmission, QosAdmissionCode, QosSnapshotBlockerCode,
-        WorkClass, WorkPriority, WorkRequest,
+        QosTelemetryEvent, QosTelemetryOutcome, QosTelemetryPhase, QosTelemetrySink, WorkClass,
+        WorkPriority, WorkRequest,
     };
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Debug, Default)]
+    struct RecordingQosTelemetry {
+        events: Mutex<Vec<QosTelemetryEvent>>,
+    }
+
+    impl QosTelemetrySink for RecordingQosTelemetry {
+        fn record_qos(&self, event: QosTelemetryEvent) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
 
     #[test]
     fn work_priorities_have_stable_string_encodings() {
@@ -791,6 +947,66 @@ mod tests {
             Ok(WorkPriority::Background)
         );
         assert!("foreground_work".parse::<WorkPriority>().is_err());
+    }
+
+    #[test]
+    fn background_scheduler_records_admission_and_completion() {
+        let telemetry = Arc::new(RecordingQosTelemetry::default());
+        let mut scheduler = LocalQosScheduler::new(LocalQosPolicy::default());
+        scheduler.set_telemetry_sink(Some(telemetry.clone()));
+
+        let permit = scheduler
+            .try_start(WorkRequest::background(WorkClass::Projection, 3))
+            .unwrap();
+        scheduler.finish_with_outcome(permit, false);
+
+        let events = telemetry.events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].phase, QosTelemetryPhase::Admission);
+        assert_eq!(events[0].outcome, QosTelemetryOutcome::Admitted);
+        assert_eq!(events[0].class, WorkClass::Projection);
+        assert_eq!(events[0].estimated_operations, 3);
+        assert_eq!(events[1].phase, QosTelemetryPhase::Completion);
+        assert_eq!(events[1].outcome, QosTelemetryOutcome::Failed);
+        assert_eq!(events[1].admission_code, None);
+    }
+
+    #[test]
+    fn background_scheduler_records_bounded_defer_code() {
+        let telemetry = Arc::new(RecordingQosTelemetry::default());
+        let mut scheduler = LocalQosScheduler::new(LocalQosPolicy {
+            max_background_operations: Some(1),
+            ..LocalQosPolicy::default()
+        });
+        scheduler.set_telemetry_sink(Some(telemetry.clone()));
+
+        let admission = scheduler
+            .try_start(WorkRequest::background(WorkClass::Import, 2))
+            .unwrap_err();
+
+        assert!(matches!(admission, QosAdmission::Defer { .. }));
+        let events = telemetry.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].phase, QosTelemetryPhase::Admission);
+        assert_eq!(events[0].outcome, QosTelemetryOutcome::Deferred);
+        assert_eq!(
+            events[0].admission_code,
+            Some(QosAdmissionCode::PerWorkLimitExceeded)
+        );
+    }
+
+    #[test]
+    fn foreground_scheduler_does_not_emit_background_metrics() {
+        let telemetry = Arc::new(RecordingQosTelemetry::default());
+        let mut scheduler = LocalQosScheduler::new(LocalQosPolicy::default());
+        scheduler.set_telemetry_sink(Some(telemetry.clone()));
+
+        let permit = scheduler
+            .try_start(WorkRequest::foreground(WorkClass::Query, 1))
+            .unwrap();
+        scheduler.finish(permit);
+
+        assert!(telemetry.events.lock().unwrap().is_empty());
     }
 
     #[test]

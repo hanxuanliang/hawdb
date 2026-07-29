@@ -539,6 +539,7 @@ impl Database {
             return Ok(None);
         };
 
+        self.configure_qos_scheduler_telemetry(scheduler);
         let permit = match scheduler.try_start(job.background_work_request(estimated_operations)) {
             Ok(permit) => permit,
             Err(QosAdmission::Defer { reason, .. }) => {
@@ -555,7 +556,7 @@ impl Database {
         };
 
         let result = self.run_next_derived_artifact_job();
-        scheduler.finish(permit);
+        scheduler.finish_with_outcome(permit, result.is_ok());
         result
     }
 
@@ -619,6 +620,7 @@ impl Database {
             return Ok(None);
         };
 
+        self.configure_qos_scheduler_telemetry(scheduler);
         let permit = match scheduler.try_start(
             self.derived_artifact_jobs[index].background_work_request(estimated_operations),
         ) {
@@ -637,7 +639,7 @@ impl Database {
         };
 
         let result = self.run_external_content_artifact_job_at_index(index, &mut runtime);
-        scheduler.finish(permit);
+        scheduler.finish_with_outcome(permit, result.is_ok());
         result
     }
 
@@ -723,6 +725,7 @@ impl Database {
             return Ok(None);
         };
 
+        self.configure_qos_scheduler_telemetry(scheduler);
         let permit = match scheduler.try_start(
             self.derived_artifact_jobs[index].background_work_request(estimated_operations),
         ) {
@@ -741,7 +744,7 @@ impl Database {
         };
 
         let result = self.run_external_content_artifact_job_at_index(index, &mut runtime);
-        scheduler.finish(permit);
+        scheduler.finish_with_outcome(permit, result.is_ok());
         result
     }
 
@@ -791,6 +794,7 @@ impl Database {
             return Ok(None);
         };
 
+        self.configure_qos_scheduler_telemetry(scheduler);
         let permit = match scheduler.try_start(
             self.derived_artifact_jobs[index]
                 .background_work_request(manifest.estimated_operations),
@@ -810,7 +814,7 @@ impl Database {
         };
 
         let result = self.run_external_content_artifact_job_at_index(index, &mut runtime);
-        scheduler.finish(permit);
+        scheduler.finish_with_outcome(permit, result.is_ok());
         result
     }
 
@@ -1018,6 +1022,7 @@ impl Database {
             return Ok(None);
         };
 
+        self.configure_qos_scheduler_telemetry(scheduler);
         let permit = match scheduler.try_start(
             self.derived_artifact_jobs[index].background_work_request(estimated_operations),
         ) {
@@ -1036,7 +1041,7 @@ impl Database {
         };
 
         let result = self.run_external_content_artifact_job_at_index(index, &mut runtime);
-        scheduler.finish(permit);
+        scheduler.finish_with_outcome(permit, result.is_ok());
         result
     }
 

@@ -33,7 +33,9 @@ use crate::store::{
     PropertyIndexProjectionRebuildAction, RecoveryMode, RelRecord, SchemaMaintenanceAction,
     StorageReclamationWatermark, StorageRecoveryReport, WalReplayConfig,
 };
-use crate::telemetry::{KernelTelemetry, KernelTelemetryOperation, TelemetrySink};
+use crate::telemetry::{
+    qos_telemetry_sink, KernelTelemetry, KernelTelemetryOperation, TelemetrySink,
+};
 use crate::value::Value;
 use canonical_snapshot::export_canonical_graph_snapshot_for;
 use explain::{empty_read_execution_profile, explain_analyze_output_row, explain_output_row};
@@ -5417,6 +5419,12 @@ impl Database {
         self.telemetry = telemetry;
     }
 
+    fn configure_qos_scheduler_telemetry(&self, scheduler: &mut LocalQosScheduler) {
+        if let Some(telemetry) = &self.telemetry {
+            scheduler.set_telemetry_sink(Some(qos_telemetry_sink(telemetry.clone())));
+        }
+    }
+
     pub fn system_variables(&self) -> &QuerySystemVariables {
         &self.system_variables
     }
@@ -5706,6 +5714,7 @@ impl Database {
         if estimated_operations == 0 {
             return self.prepare_graph_lightning_bootstrap_export();
         }
+        self.configure_qos_scheduler_telemetry(scheduler);
         let permit = match scheduler.try_start(WorkRequest::background(
             WorkClass::Import,
             estimated_operations,
@@ -5725,7 +5734,7 @@ impl Database {
         };
 
         let result = self.prepare_graph_lightning_bootstrap_export();
-        scheduler.finish(permit);
+        scheduler.finish_with_outcome(permit, result.is_ok());
         result
     }
 
@@ -5851,6 +5860,7 @@ impl Database {
         if estimated_operations == 0 {
             return Ok(self.rebuild_bounded_property_index_projections(max_estimated_operations));
         }
+        self.configure_qos_scheduler_telemetry(scheduler);
         let permit = match scheduler.try_start(WorkRequest::background(
             WorkClass::Projection,
             estimated_operations,
@@ -5870,7 +5880,7 @@ impl Database {
         };
 
         let result = Ok(self.rebuild_bounded_property_index_projections(max_estimated_operations));
-        scheduler.finish(permit);
+        scheduler.finish_with_outcome(permit, result.is_ok());
         result
     }
 
@@ -6025,6 +6035,7 @@ impl Database {
         scheduler: &mut LocalQosScheduler,
         estimated_operations: usize,
     ) -> Result<QueryOutput> {
+        self.configure_qos_scheduler_telemetry(scheduler);
         let permit = match scheduler.try_start(WorkRequest::background(
             WorkClass::Mutation,
             estimated_operations,
@@ -6044,7 +6055,7 @@ impl Database {
         };
 
         let result = self.run_schema_maintenance();
-        scheduler.finish(permit);
+        scheduler.finish_with_outcome(permit, result.is_ok());
         result
     }
 
@@ -6058,6 +6069,7 @@ impl Database {
         if estimated_operations == 0 {
             return self.run_bounded_schema_maintenance(max_estimated_operations);
         }
+        self.configure_qos_scheduler_telemetry(scheduler);
         let permit = match scheduler.try_start(WorkRequest::background(
             WorkClass::Mutation,
             estimated_operations,
@@ -6077,7 +6089,7 @@ impl Database {
         };
 
         let result = self.run_bounded_schema_maintenance(max_estimated_operations);
-        scheduler.finish(permit);
+        scheduler.finish_with_outcome(permit, result.is_ok());
         result
     }
 
@@ -6673,6 +6685,7 @@ impl Database {
         scheduler: &mut LocalQosScheduler,
         request: SearchProjectionGraphDeltaRequest,
     ) -> Result<SearchProjectionDeltaReport> {
+        self.configure_qos_scheduler_telemetry(scheduler);
         let permit = match scheduler.try_start(request.background_work_request()) {
             Ok(permit) => permit,
             Err(QosAdmission::Defer { reason, .. }) => {
@@ -6689,7 +6702,7 @@ impl Database {
         };
 
         let result = self.apply_search_projection_graph_delta(search_index, request);
-        scheduler.finish(permit);
+        scheduler.finish_with_outcome(permit, result.is_ok());
         result
     }
 
@@ -6704,6 +6717,19 @@ impl Database {
             compressed_vector_search_mode: self.config.compressed_vector_search_mode,
         }
         .retrieve_knowledge(search_index, request)
+    }
+
+    pub fn try_retrieve_knowledge(
+        &self,
+        search_index: &SearchIndex,
+        request: &KnowledgeRetrievalRequest,
+    ) -> Result<KnowledgeRetrievalOutput> {
+        KnowledgeRetrievalGraphContext {
+            catalog: &self.catalog,
+            store: &self.store,
+            compressed_vector_search_mode: self.config.compressed_vector_search_mode,
+        }
+        .try_retrieve_knowledge(search_index, request)
     }
 
     pub fn knowledge_entity(
@@ -7881,19 +7907,48 @@ impl KnowledgeRetrievalGraphContext<'_> {
         search_index: &SearchIndex,
         request: &KnowledgeRetrievalRequest,
     ) -> KnowledgeRetrievalOutput {
-        let search = search_index.search_with_options_compressed_vector_projection_mode(
-            &request.query_text,
-            request.query_embedding.as_deref(),
-            request.mode,
-            SearchQueryOptions {
-                limit: request.limit,
-                rank_window: request.rank_window,
-                fusion_weights: request.search_fusion_weights,
-                metadata_filters: request.metadata_filters.clone(),
-                policy_epoch: None,
-            },
-            self.compressed_vector_search_mode,
-        );
+        self.retrieve_knowledge_internal(search_index, request, false)
+            .expect("in-memory retrieval path does not perform fallible range I/O")
+    }
+
+    fn try_retrieve_knowledge(
+        &self,
+        search_index: &SearchIndex,
+        request: &KnowledgeRetrievalRequest,
+    ) -> Result<KnowledgeRetrievalOutput> {
+        self.retrieve_knowledge_internal(search_index, request, true)
+    }
+
+    fn retrieve_knowledge_internal(
+        &self,
+        search_index: &SearchIndex,
+        request: &KnowledgeRetrievalRequest,
+        use_physical_range_reads: bool,
+    ) -> Result<KnowledgeRetrievalOutput> {
+        let search_options = SearchQueryOptions {
+            limit: request.limit,
+            rank_window: request.rank_window,
+            fusion_weights: request.search_fusion_weights,
+            metadata_filters: request.metadata_filters.clone(),
+            policy_epoch: None,
+        };
+        let search = if use_physical_range_reads {
+            search_index.try_search_with_options_compressed_vector_projection_mode(
+                &request.query_text,
+                request.query_embedding.as_deref(),
+                request.mode,
+                search_options,
+                self.compressed_vector_search_mode,
+            )?
+        } else {
+            search_index.search_with_options_compressed_vector_projection_mode(
+                &request.query_text,
+                request.query_embedding.as_deref(),
+                request.mode,
+                search_options,
+                self.compressed_vector_search_mode,
+            )
+        };
         let graph_seed_search = self.search_knowledge_graph_seeds(
             &request.query_text,
             request.graph_seed_limit,
@@ -7975,7 +8030,7 @@ impl KnowledgeRetrievalGraphContext<'_> {
                 candidate_total_count,
             },
         );
-        KnowledgeRetrievalOutput {
+        Ok(KnowledgeRetrievalOutput {
             graph_commit_epoch,
             projection_freshness,
             search,
@@ -7988,7 +8043,7 @@ impl KnowledgeRetrievalGraphContext<'_> {
             fanout_reason_codes,
             fanout_reason_details,
             fanout_reasons,
-        }
+        })
     }
 
     fn expand_knowledge_context(
@@ -34808,6 +34863,14 @@ impl<'a> NowledgeGraphAdapter<'a> {
     ) -> KnowledgeRetrievalOutput {
         self.db.retrieve_knowledge(search_index, request)
     }
+
+    pub fn try_retrieve_knowledge(
+        &self,
+        search_index: &SearchIndex,
+        request: &KnowledgeRetrievalRequest,
+    ) -> Result<KnowledgeRetrievalOutput> {
+        self.db.try_retrieve_knowledge(search_index, request)
+    }
 }
 
 impl DatabaseTransaction<'_> {
@@ -35320,6 +35383,19 @@ impl DatabaseReadTransaction {
             compressed_vector_search_mode: self.config.compressed_vector_search_mode,
         }
         .retrieve_knowledge(search_index, request)
+    }
+
+    pub fn try_retrieve_knowledge(
+        &self,
+        search_index: &SearchIndex,
+        request: &KnowledgeRetrievalRequest,
+    ) -> Result<KnowledgeRetrievalOutput> {
+        KnowledgeRetrievalGraphContext {
+            catalog: &self.catalog,
+            store: &self.store,
+            compressed_vector_search_mode: self.config.compressed_vector_search_mode,
+        }
+        .try_retrieve_knowledge(search_index, request)
     }
 
     pub fn knowledge_entity(&self, request: &KnowledgeEntityRequest) -> KnowledgeEntityOutput {

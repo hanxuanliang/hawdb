@@ -1,6 +1,6 @@
 use crate::search::{
     CompressedVectorSearchMode, SearchCandidateSetReport, SearchFusionWeights, SearchMode,
-    SearchQueryOptions, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
+    SearchQueryOptions, SearchRangeReadConfig, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
 };
 use crate::search_projection_evidence::{
     nowledge_search_projection_evidence_json, nowledge_search_projection_shadow_evidence_json,
@@ -118,6 +118,7 @@ pub struct NowledgeMemOpenOptions {
     pub mode: NowledgeMemGraphMode,
     pub compressed_vector_search_mode: CompressedVectorSearchMode,
     pub retrieval_projection_advisor: NowledgeMemRetrievalProjectionAdvisor,
+    pub search_range_read_config: Option<SearchRangeReadConfig>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -133,6 +134,7 @@ impl NowledgeMemOpenOptions {
             mode,
             compressed_vector_search_mode: CompressedVectorSearchMode::Disabled,
             retrieval_projection_advisor: NowledgeMemRetrievalProjectionAdvisor::default(),
+            search_range_read_config: None,
         }
     }
 
@@ -147,6 +149,7 @@ impl NowledgeMemOpenOptions {
             mode,
             compressed_vector_search_mode: CompressedVectorSearchMode::Disabled,
             retrieval_projection_advisor: NowledgeMemRetrievalProjectionAdvisor::default(),
+            search_range_read_config: None,
         }
     }
 
@@ -160,6 +163,11 @@ impl NowledgeMemOpenOptions {
         advisor: NowledgeMemRetrievalProjectionAdvisor,
     ) -> Self {
         self.retrieval_projection_advisor = advisor;
+        self
+    }
+
+    pub fn with_search_range_read_config(mut self, config: SearchRangeReadConfig) -> Self {
+        self.search_range_read_config = Some(config);
         self
     }
 
@@ -3780,6 +3788,8 @@ pub struct NowledgeMemSearchCandidateReport {
     pub segment_pruned_document_count: usize,
     pub segment_scanned_document_count: usize,
     pub persisted_segment_descriptor_used: bool,
+    pub physical_range_read_count: usize,
+    pub physical_bytes_read: u64,
     pub retriever_backends: BTreeMap<String, String>,
     pub retriever_available: BTreeMap<String, bool>,
     pub retriever_candidate_counts: BTreeMap<String, usize>,
@@ -3840,13 +3850,19 @@ impl NowledgeMemSearchCandidateReport {
             "projection_embedding_version": self.projection_embedding_version,
             "projection_embedding_dimension": self.projection_embedding_dimension,
         });
-        value
-            .as_object_mut()
-            .expect("report JSON is an object")
-            .insert(
-                "projection_durable_source_graph_commit_epoch".to_string(),
-                serde_json::json!(self.projection_durable_source_graph_commit_epoch),
-            );
+        let object = value.as_object_mut().expect("report JSON is an object");
+        object.insert(
+            "projection_durable_source_graph_commit_epoch".to_string(),
+            serde_json::json!(self.projection_durable_source_graph_commit_epoch),
+        );
+        object.insert(
+            "physical_range_read_count".to_string(),
+            serde_json::json!(self.physical_range_read_count),
+        );
+        object.insert(
+            "physical_bytes_read".to_string(),
+            serde_json::json!(self.physical_bytes_read),
+        );
         value
     }
 }
@@ -5037,6 +5053,10 @@ impl NowledgeMemSearchProjection {
         Self { index }
     }
 
+    pub fn set_range_read_config(&mut self, config: SearchRangeReadConfig) {
+        self.index.set_range_read_config(config);
+    }
+
     pub fn index(&self) -> &SearchIndex {
         &self.index
     }
@@ -5114,6 +5134,35 @@ impl NowledgeMemSearchProjection {
             &result,
         );
         NowledgeMemSearchCandidateOutput { result, report }
+    }
+
+    pub fn try_search_candidates_with_report(
+        &self,
+        request: &NowledgeMemSearchCandidateRequest,
+    ) -> Result<NowledgeMemSearchCandidateOutput> {
+        let effective_compressed_vector_search_mode =
+            request.effective_compressed_vector_search_mode();
+        let result = self
+            .index
+            .try_search_with_options_compressed_vector_projection_mode(
+                &request.query_text,
+                request.query_embedding.as_deref(),
+                request.mode,
+                SearchQueryOptions {
+                    limit: request.limit,
+                    rank_window: request.rank_window,
+                    fusion_weights: request.fusion_weights,
+                    metadata_filters: request.metadata_filters.clone(),
+                    policy_epoch: None,
+                },
+                effective_compressed_vector_search_mode,
+            )?;
+        let report = nowledge_mem_search_candidate_report(
+            request,
+            effective_compressed_vector_search_mode,
+            &result,
+        );
+        Ok(NowledgeMemSearchCandidateOutput { result, report })
     }
 
     pub fn search_candidate_readiness(
@@ -5445,7 +5494,10 @@ impl NowledgeMemEmbeddedStore {
         report.graph_opened = true;
         let search_projection = match options.search_projection_path.as_ref() {
             Some(path) => {
-                let projection = NowledgeMemSearchProjection::open(path)?;
+                let mut projection = NowledgeMemSearchProjection::open(path)?;
+                if let Some(config) = options.search_range_read_config {
+                    projection.set_range_read_config(config);
+                }
                 report.search_projection_opened = true;
                 Some(projection)
             }
@@ -5602,9 +5654,8 @@ impl NowledgeMemEmbeddedStore {
         &self,
         request: &NowledgeMemSearchCandidateRequest,
     ) -> Result<NowledgeMemSearchCandidateOutput> {
-        Ok(self
-            .require_search_projection()?
-            .search_candidates_with_report(request))
+        self.require_search_projection()?
+            .try_search_candidates_with_report(request)
     }
 
     pub fn search_candidate_readiness(
@@ -5646,7 +5697,7 @@ impl NowledgeMemEmbeddedStore {
         let output = self
             .graph
             .database()
-            .retrieve_knowledge(search_projection.index(), request);
+            .try_retrieve_knowledge(search_projection.index(), request)?;
         let report = nowledge_mem_retrieval_report(
             self.graph.mode(),
             self.graph.database().config().compressed_vector_search_mode,
@@ -7435,6 +7486,8 @@ fn nowledge_mem_search_candidate_report(
         segment_pruned_document_count: pushdown.segment_pruned_document_count,
         segment_scanned_document_count: pushdown.segment_scanned_document_count,
         persisted_segment_descriptor_used: pushdown.persisted_segment_descriptor_used,
+        physical_range_read_count: pushdown.physical_range_read_count,
+        physical_bytes_read: pushdown.physical_bytes_read,
         retriever_backends: result
             .retrievers
             .iter()
@@ -7606,6 +7659,8 @@ fn search_predicate_pushdown_report_json(
         "segment_pruned_document_count": report.segment_pruned_document_count,
         "segment_scanned_document_count": report.segment_scanned_document_count,
         "persisted_segment_descriptor_used": report.persisted_segment_descriptor_used,
+        "physical_range_read_count": report.physical_range_read_count,
+        "physical_bytes_read": report.physical_bytes_read,
         "field_summaries": report.field_summaries.iter().map(search_predicate_field_pruning_report_json).collect::<Vec<_>>(),
     })
 }
@@ -11111,6 +11166,8 @@ mod tests {
         assert_eq!(output.report.pruned_segment_count, 1);
         assert_eq!(output.report.scanned_segment_count, 1);
         assert!(output.report.persisted_segment_descriptor_used);
+        assert_eq!(output.report.physical_range_read_count, 1);
+        assert!(output.report.physical_bytes_read > 0);
         assert_eq!(output.report.filtered_out_count, 2);
         assert_eq!(
             output.report.json()["candidate_set"]["metadata_predicate_pushdown"]["field_summaries"]
@@ -11241,6 +11298,8 @@ mod tests {
         assert_eq!(output.report.segment_count, 2);
         assert_eq!(output.report.pruned_segment_count, 1);
         assert_eq!(output.report.scanned_segment_count, 1);
+        assert_eq!(output.report.physical_range_read_count, 1);
+        assert!(output.report.physical_bytes_read > 0);
         assert_eq!(output.report.filtered_out_count, 2);
         assert!(output
             .report
