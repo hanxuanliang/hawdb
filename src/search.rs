@@ -9,6 +9,7 @@ use crate::telemetry::{
     qos_telemetry_sink, KernelTelemetry, KernelTelemetryOperation, TelemetrySink,
 };
 use crate::value::Value;
+use crate::{RuntimeCapabilities, RuntimeCapability};
 use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use simsimd::SpatialSimilarity;
 use skein_optimizer::{
@@ -902,6 +903,7 @@ pub struct SearchIndex {
     analyzer_lexicon: SearchAnalyzerLexicon,
     segment_descriptor: Option<SearchSegmentDescriptor>,
     range_read_config: SearchRangeReadConfig,
+    runtime_capabilities: RuntimeCapabilities,
     telemetry: Option<Arc<dyn TelemetrySink>>,
 }
 
@@ -927,6 +929,7 @@ impl SearchIndex {
             analyzer_lexicon: SearchAnalyzerLexicon::default(),
             segment_descriptor: None,
             range_read_config: SearchRangeReadConfig::default(),
+            runtime_capabilities: RuntimeCapabilities::default(),
             telemetry: None,
         };
         index.load_snapshot()?;
@@ -959,6 +962,14 @@ impl SearchIndex {
 
     pub fn range_read_config(&self) -> SearchRangeReadConfig {
         self.range_read_config
+    }
+
+    pub fn set_runtime_capabilities(&mut self, capabilities: RuntimeCapabilities) {
+        self.runtime_capabilities = capabilities;
+    }
+
+    pub fn runtime_capabilities(&self) -> RuntimeCapabilities {
+        self.runtime_capabilities
     }
 
     pub fn upsert(&mut self, document: SearchDocument) -> Result<()> {
@@ -1065,6 +1076,8 @@ impl SearchIndex {
         state: &LocalQosState,
         delta: SearchProjectionDelta,
     ) -> Result<SearchProjectionDeltaReport> {
+        self.runtime_capabilities
+            .require(RuntimeCapability::BackgroundMaintenance)?;
         match policy.admit(state, &delta.background_work_request()) {
             QosAdmission::Admit => self.apply_projection_delta(delta),
             QosAdmission::Defer { reason, .. } => Err(SkeinError::Storage(format!(
@@ -1081,6 +1094,8 @@ impl SearchIndex {
         scheduler: &mut LocalQosScheduler,
         delta: SearchProjectionDelta,
     ) -> Result<SearchProjectionDeltaReport> {
+        self.runtime_capabilities
+            .require(RuntimeCapability::BackgroundMaintenance)?;
         self.configure_qos_scheduler_telemetry(scheduler);
         let permit = match scheduler.try_start(delta.background_work_request()) {
             Ok(permit) => permit,
@@ -1375,6 +1390,8 @@ impl SearchIndex {
         store: &GraphStore,
         options: SearchRebuildOptions,
     ) -> Result<SearchDerivedArtifactReport> {
+        self.runtime_capabilities
+            .require(RuntimeCapability::BackgroundMaintenance)?;
         let request = WorkRequest::background(
             WorkClass::Projection,
             self.rebuild_estimated_operations(store),
@@ -1397,6 +1414,8 @@ impl SearchIndex {
         store: &GraphStore,
         options: SearchRebuildOptions,
     ) -> Result<SearchDerivedArtifactReport> {
+        self.runtime_capabilities
+            .require(RuntimeCapability::BackgroundMaintenance)?;
         let request = WorkRequest::background(
             WorkClass::Projection,
             self.rebuild_estimated_operations(store),
@@ -1498,6 +1517,8 @@ impl SearchIndex {
         options: MetadataRepairOptions,
         estimated_operations: usize,
     ) -> Result<MetadataRepairSummary> {
+        self.runtime_capabilities
+            .require(RuntimeCapability::BackgroundMaintenance)?;
         let request = WorkRequest::background(WorkClass::Projection, estimated_operations);
         match policy.admit(state, &request) {
             QosAdmission::Admit => self.repair_metadata_from_graph(catalog, store, options),
@@ -1518,6 +1539,8 @@ impl SearchIndex {
         options: MetadataRepairOptions,
         estimated_operations: usize,
     ) -> Result<MetadataRepairSummary> {
+        self.runtime_capabilities
+            .require(RuntimeCapability::BackgroundMaintenance)?;
         let request = WorkRequest::background(WorkClass::Projection, estimated_operations);
         self.configure_qos_scheduler_telemetry(scheduler);
         let permit = match scheduler.try_start(request) {
@@ -1959,6 +1982,7 @@ impl SearchIndex {
         options: SearchQueryOptions,
         strategy: SearchExecutionStrategy<'_>,
     ) -> Result<SearchResultSet> {
+        self.require_search_capabilities(mode)?;
         let SearchExecutionStrategy {
             vector_backend: vector_backend_request,
             vector_backend_fallback_reason,
@@ -2385,6 +2409,18 @@ impl SearchIndex {
             filtered_document_count,
             projection_freshness,
         })
+    }
+
+    fn require_search_capabilities(&self, mode: SearchMode) -> Result<()> {
+        if matches!(mode, SearchMode::Text | SearchMode::Hybrid) {
+            self.runtime_capabilities
+                .require(RuntimeCapability::FullTextSearch)?;
+        }
+        if matches!(mode, SearchMode::Vector | SearchMode::Hybrid) {
+            self.runtime_capabilities
+                .require(RuntimeCapability::VectorSearch)?;
+        }
+        Ok(())
     }
 
     pub fn mark_full_reindex_needed(&self, reason: &str) -> Result<()> {

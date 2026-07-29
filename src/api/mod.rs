@@ -146,6 +146,7 @@ pub struct DatabaseConfig {
     pub slow_query_log_capacity: usize,
     pub slow_query_log_threshold_micros: u128,
     pub statement_summary_capacity: usize,
+    pub runtime_capabilities: skein_core::RuntimeCapabilities,
     pub compressed_vector_search_mode: CompressedVectorSearchMode,
     pub adaptive_vector_backend_policy: skein_optimizer::AdaptiveVectorBackendPolicy,
 }
@@ -165,6 +166,7 @@ impl Default for DatabaseConfig {
             slow_query_log_capacity: system_sql::DEFAULT_SLOW_QUERY_LOG_CAPACITY,
             slow_query_log_threshold_micros: system_sql::DEFAULT_SLOW_QUERY_LOG_THRESHOLD_MICROS,
             statement_summary_capacity: system_sql::DEFAULT_STATEMENT_SUMMARY_CAPACITY,
+            runtime_capabilities: skein_core::RuntimeCapabilities::default(),
             compressed_vector_search_mode: CompressedVectorSearchMode::Disabled,
             adaptive_vector_backend_policy: skein_optimizer::AdaptiveVectorBackendPolicy::default(),
         }
@@ -5406,6 +5408,17 @@ impl Database {
         &self.config
     }
 
+    pub fn runtime_capabilities(&self) -> skein_core::RuntimeCapabilities {
+        self.config.runtime_capabilities
+    }
+
+    pub(super) fn ensure_runtime_capability(
+        &self,
+        capability: skein_core::RuntimeCapability,
+    ) -> Result<()> {
+        self.config.runtime_capabilities.require(capability)
+    }
+
     pub fn set_telemetry_sink(&mut self, telemetry: Option<Arc<dyn TelemetrySink>>) {
         if let Some(telemetry) = &telemetry {
             let recovery = self.store.storage_recovery_report();
@@ -5694,6 +5707,7 @@ impl Database {
         policy: &LocalQosPolicy,
         state: &LocalQosState,
     ) -> Result<GraphLightningBootstrapExport> {
+        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
         let estimated_operations = self.graph_lightning_bootstrap_export_estimated_operations();
         if estimated_operations == 0 {
             return self.prepare_graph_lightning_bootstrap_export();
@@ -5714,6 +5728,7 @@ impl Database {
         &mut self,
         scheduler: &mut LocalQosScheduler,
     ) -> Result<GraphLightningBootstrapExport> {
+        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
         let estimated_operations = self.graph_lightning_bootstrap_export_estimated_operations();
         if estimated_operations == 0 {
             return self.prepare_graph_lightning_bootstrap_export();
@@ -5827,6 +5842,7 @@ impl Database {
         state: &LocalQosState,
         max_estimated_operations: usize,
     ) -> Result<QueryOutput> {
+        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
         let estimated_operations = self
             .store
             .bounded_property_index_projection_estimated_operations(
@@ -5855,6 +5871,7 @@ impl Database {
         scheduler: &mut LocalQosScheduler,
         max_estimated_operations: usize,
     ) -> Result<QueryOutput> {
+        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
         let estimated_operations = self
             .store
             .bounded_property_index_projection_estimated_operations(
@@ -5987,6 +6004,7 @@ impl Database {
         state: &LocalQosState,
         estimated_operations: usize,
     ) -> Result<QueryOutput> {
+        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
         let request = WorkRequest::background(WorkClass::Mutation, estimated_operations);
         match policy.admit(state, &request) {
             QosAdmission::Admit => self.run_schema_maintenance(),
@@ -6005,6 +6023,7 @@ impl Database {
         state: &LocalQosState,
         max_estimated_operations: usize,
     ) -> Result<QueryOutput> {
+        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
         let estimated_operations =
             self.bounded_schema_maintenance_estimated_operations(max_estimated_operations);
         if estimated_operations == 0 {
@@ -6039,6 +6058,7 @@ impl Database {
         scheduler: &mut LocalQosScheduler,
         estimated_operations: usize,
     ) -> Result<QueryOutput> {
+        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
         self.configure_qos_scheduler_telemetry(scheduler);
         let permit = match scheduler.try_start(WorkRequest::background(
             WorkClass::Mutation,
@@ -6068,6 +6088,7 @@ impl Database {
         scheduler: &mut LocalQosScheduler,
         max_estimated_operations: usize,
     ) -> Result<QueryOutput> {
+        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
         let estimated_operations =
             self.bounded_schema_maintenance_estimated_operations(max_estimated_operations);
         if estimated_operations == 0 {
@@ -6164,6 +6185,7 @@ impl Database {
         state: &LocalQosState,
         options: SearchRebuildOptions,
     ) -> Result<SearchDerivedArtifactReport> {
+        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
         search_index.rebuild_background_derived_artifacts(
             policy,
             state,
@@ -6179,6 +6201,7 @@ impl Database {
         scheduler: &mut LocalQosScheduler,
         options: SearchRebuildOptions,
     ) -> Result<SearchDerivedArtifactReport> {
+        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
         search_index.rebuild_scheduled_background_derived_artifacts(
             scheduler,
             &self.catalog,
@@ -6211,6 +6234,7 @@ impl Database {
         options: MetadataRepairOptions,
         estimated_operations: usize,
     ) -> Result<MetadataRepairSummary> {
+        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
         search_index.repair_background_metadata_from_graph(
             policy,
             state,
@@ -6228,6 +6252,7 @@ impl Database {
         options: MetadataRepairOptions,
         estimated_operations: usize,
     ) -> Result<MetadataRepairSummary> {
+        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
         search_index.repair_scheduled_background_metadata_from_graph(
             scheduler,
             &self.catalog,
@@ -6653,6 +6678,7 @@ impl Database {
         state: &LocalQosState,
         delta: SearchProjectionDelta,
     ) -> Result<SearchProjectionDeltaReport> {
+        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
         search_index.apply_background_projection_delta(policy, state, delta)
     }
 
@@ -6663,6 +6689,7 @@ impl Database {
         state: &LocalQosState,
         request: SearchProjectionGraphDeltaRequest,
     ) -> Result<SearchProjectionDeltaReport> {
+        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
         match policy.admit(state, &request.background_work_request()) {
             QosAdmission::Admit => self.apply_search_projection_graph_delta(search_index, request),
             QosAdmission::Defer { reason, .. } => Err(SkeinError::Storage(format!(
@@ -6680,6 +6707,7 @@ impl Database {
         scheduler: &mut LocalQosScheduler,
         delta: SearchProjectionDelta,
     ) -> Result<SearchProjectionDeltaReport> {
+        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
         search_index.apply_scheduled_background_projection_delta(scheduler, delta)
     }
 
@@ -6689,6 +6717,7 @@ impl Database {
         scheduler: &mut LocalQosScheduler,
         request: SearchProjectionGraphDeltaRequest,
     ) -> Result<SearchProjectionDeltaReport> {
+        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
         self.configure_qos_scheduler_telemetry(scheduler);
         let permit = match scheduler.try_start(request.background_work_request()) {
             Ok(permit) => permit,

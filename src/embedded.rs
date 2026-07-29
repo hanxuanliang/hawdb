@@ -4,8 +4,8 @@ use crate::nowledge_mem::{
 };
 use crate::store::DurabilityPolicy;
 use crate::{
-    AdaptiveVectorBackendPolicy, Database, DatabaseConfig, Result, SearchIndex,
-    SearchRangeReadConfig,
+    AdaptiveVectorBackendPolicy, Database, DatabaseConfig, Result, RuntimeCapabilities,
+    SearchIndex, SearchRangeReadConfig,
 };
 use skein_qos::{IoConcurrencyBudget, RuntimeResourceBudget};
 use skein_storage::SegmentReadScheduler;
@@ -90,6 +90,11 @@ impl SkeinEmbeddedOpenOptions {
         self
     }
 
+    pub fn with_runtime_capabilities(mut self, capabilities: RuntimeCapabilities) -> Self {
+        self.config.runtime_capabilities = capabilities;
+        self
+    }
+
     pub fn with_storage_io_budget(mut self, storage_io: IoConcurrencyBudget) -> Self {
         self.storage_io = Some(storage_io);
         self
@@ -137,6 +142,10 @@ impl SkeinEmbedded {
         self.runtime_resources
     }
 
+    pub fn runtime_capabilities(&self) -> RuntimeCapabilities {
+        self.database.runtime_capabilities()
+    }
+
     pub fn database(&self) -> &Database {
         &self.database
     }
@@ -146,6 +155,7 @@ impl SkeinEmbedded {
     }
 
     pub fn configure_search_index(&self, search_index: &mut SearchIndex) {
+        search_index.set_runtime_capabilities(self.runtime_capabilities());
         let config = match self.deployment_profile {
             EmbeddedDeploymentProfile::DesktopBound => {
                 SearchRangeReadConfig::desktop_bound(self.runtime_resources.storage_io)
@@ -194,6 +204,7 @@ fn default_database_config(profile: EmbeddedDeploymentProfile) -> DatabaseConfig
             max_plan_cache_entries: Some(32),
             slow_query_log_capacity: 128,
             statement_summary_capacity: 128,
+            runtime_capabilities: RuntimeCapabilities::mobile_embedded(),
             adaptive_vector_backend_policy: AdaptiveVectorBackendPolicy {
                 flat_scan_max_documents: 512,
                 flat_scan_memory_budget_bytes: 4 * 1024 * 1024,
@@ -303,6 +314,21 @@ mod tests {
             options.config.max_search_projection_change_log_entries,
             Some(512)
         );
+        assert!(options.config.runtime_capabilities.full_text_search);
+        assert!(options.config.runtime_capabilities.vector_search);
+        assert!(!options.config.runtime_capabilities.graph_analytics);
+        assert!(!options.config.runtime_capabilities.background_maintenance);
+    }
+
+    #[test]
+    fn host_can_override_mobile_runtime_capabilities() {
+        let options = SkeinEmbeddedOpenOptions::mobile("mobile.db").with_runtime_capabilities(
+            RuntimeCapabilities::mobile_embedded()
+                .with(crate::RuntimeCapability::GraphAnalytics, true),
+        );
+
+        assert!(options.config.runtime_capabilities.graph_analytics);
+        assert!(!options.config.runtime_capabilities.background_maintenance);
     }
 
     #[test]
@@ -335,6 +361,10 @@ mod tests {
         );
         let mut search_index = SearchIndex::in_memory();
         engine.configure_search_index(&mut search_index);
+        assert_eq!(
+            search_index.runtime_capabilities(),
+            RuntimeCapabilities::mobile_embedded()
+        );
         assert_eq!(search_index.range_read_config().io_depth.get(), 7);
         assert_eq!(
             search_index.range_read_config().max_wave_bytes.get(),

@@ -280,6 +280,7 @@ fn skein_error_class(error: &SkeinError) -> &'static str {
         SkeinError::Semantic(_) => "semantic",
         SkeinError::Execution(_) => "execution",
         SkeinError::Storage(_) => "storage",
+        SkeinError::CapabilityUnavailable { .. } => "capability_unavailable",
     }
 }
 

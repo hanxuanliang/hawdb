@@ -191,6 +191,7 @@ mod query_observability;
 mod read_transactions;
 mod relationship_patterns;
 mod relationship_property_mutations;
+mod runtime_capabilities;
 mod schema_indexes;
 mod schema_migrations;
 mod search_projection_delta_facade;

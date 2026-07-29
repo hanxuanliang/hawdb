@@ -1,3 +1,4 @@
+use crate::RuntimeCapability;
 use std::fmt::{Display, Formatter};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6,6 +7,7 @@ pub enum SkeinError {
     Semantic(String),
     Storage(String),
     Execution(String),
+    CapabilityUnavailable { capability: RuntimeCapability },
 }
 
 impl Display for SkeinError {
@@ -15,6 +17,9 @@ impl Display for SkeinError {
             SkeinError::Semantic(message) => write!(f, "semantic error: {message}"),
             SkeinError::Storage(message) => write!(f, "storage error: {message}"),
             SkeinError::Execution(message) => write!(f, "execution error: {message}"),
+            SkeinError::CapabilityUnavailable { capability } => {
+                write!(f, "capability unavailable: {}", capability.as_str())
+            }
         }
     }
 }

@@ -50,6 +50,30 @@ parallelism, and predictable battery and thermal behavior.
 Explicit configuration overrides MAY further lower resource limits. Raising a
 mobile limit is allowed only through an explicit host decision.
 
+### Runtime Capability Gates
+
+Runtime capability checks are independent from resource admission. The default
+capability matrix is:
+
+| Capability | DesktopBound | MobileEmbedded |
+| --- | --- | --- |
+| Full-text search | enabled | enabled |
+| Vector search | enabled | enabled |
+| Graph analytics | enabled | disabled |
+| Background maintenance | enabled | disabled |
+
+The host MAY override this matrix through `SkeinEmbeddedOpenOptions`. Query
+capabilities MUST be checked before plan-cache lookup or catalog mutation.
+Background capabilities MUST be checked before QoS admission or artifact
+mutation. Search capability checks MUST happen before selecting a retriever and
+MUST NOT silently substitute a different search mode.
+
+Profile-aware hosts MUST use fallible query and search entry points. A disabled
+operation returns `SkeinError::CapabilityUnavailable` with a typed
+`RuntimeCapability`; non-fallible search convenience methods are intended only
+for hosts that keep the corresponding capability enabled. Capability settings
+do not alter the durable format, WAL contract, or core Cypher semantics.
+
 ## Concurrency Model
 
 Skein MUST support concurrent readers and a concurrent writer through

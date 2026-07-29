@@ -883,7 +883,7 @@ contract.
     maintenance defaults.
   - [x] Expose a `MobileEmbedded` profile with strict memory, result, plan-cache,
     replay, and incremental-change-log defaults.
-  - [ ] Disable optional heavy mobile capabilities through typed runtime
+  - [x] Disable optional heavy mobile capabilities through typed runtime
     capability gates before adding compile-time feature removal.
   - [x] Give each profile separate CPU and storage I/O budgets with explicit host
     I/O-depth overrides.

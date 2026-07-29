@@ -419,6 +419,9 @@ fn json_error_from_skein(error: SkeinError) -> serde_json::Value {
         SkeinError::Semantic(message) => json_error("semantic", message),
         SkeinError::Storage(message) => json_error("storage", message),
         SkeinError::Execution(message) => json_error("execution", message),
+        SkeinError::CapabilityUnavailable { capability } => {
+            json_error("capability_unavailable", capability.as_str())
+        }
     }
 }
 

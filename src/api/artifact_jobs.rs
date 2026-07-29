@@ -507,6 +507,7 @@ impl Database {
         state: &LocalQosState,
         estimated_operations: usize,
     ) -> Result<Option<DerivedArtifactJobReport>> {
+        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
         let Some(job) = self
             .derived_artifact_jobs
             .iter()
@@ -531,6 +532,7 @@ impl Database {
         scheduler: &mut LocalQosScheduler,
         estimated_operations: usize,
     ) -> Result<Option<DerivedArtifactJobReport>> {
+        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
         let Some(job) = self
             .derived_artifact_jobs
             .iter()
@@ -582,6 +584,7 @@ impl Database {
         mut runtime: impl FnMut(&DerivedArtifactJob) -> Result<QueryOutput>,
         estimated_operations: usize,
     ) -> Result<Option<DerivedArtifactJobReport>> {
+        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
         self.ensure_writable()?;
         let Some(index) = self.derived_artifact_jobs.iter().position(|job| {
             job.status == DerivedArtifactJobStatus::Pending
@@ -612,6 +615,7 @@ impl Database {
         mut runtime: impl FnMut(&DerivedArtifactJob) -> Result<QueryOutput>,
         estimated_operations: usize,
     ) -> Result<Option<DerivedArtifactJobReport>> {
+        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
         self.ensure_writable()?;
         let Some(index) = self.derived_artifact_jobs.iter().position(|job| {
             job.status == DerivedArtifactJobStatus::Pending
@@ -684,6 +688,7 @@ impl Database {
         mut runtime: impl FnMut(&DerivedArtifactJob) -> Result<QueryOutput>,
         estimated_operations: usize,
     ) -> Result<Option<DerivedArtifactJobReport>> {
+        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
         self.ensure_writable()?;
         let Some(index) = self.derived_artifact_jobs.iter().position(|job| {
             job.status == DerivedArtifactJobStatus::Pending
@@ -716,6 +721,7 @@ impl Database {
         mut runtime: impl FnMut(&DerivedArtifactJob) -> Result<QueryOutput>,
         estimated_operations: usize,
     ) -> Result<Option<DerivedArtifactJobReport>> {
+        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
         self.ensure_writable()?;
         let Some(index) = self.derived_artifact_jobs.iter().position(|job| {
             job.status == DerivedArtifactJobStatus::Pending
@@ -755,6 +761,7 @@ impl Database {
         manifest: &ExternalContentArtifactRuntimeManifest,
         mut runtime: impl FnMut(&DerivedArtifactJob) -> Result<QueryOutput>,
     ) -> Result<Option<DerivedArtifactJobReport>> {
+        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
         self.ensure_writable()?;
         let Some(index) = self.derived_artifact_jobs.iter().position(|job| {
             job.status == DerivedArtifactJobStatus::Pending
@@ -786,6 +793,7 @@ impl Database {
         manifest: &ExternalContentArtifactRuntimeManifest,
         mut runtime: impl FnMut(&DerivedArtifactJob) -> Result<QueryOutput>,
     ) -> Result<Option<DerivedArtifactJobReport>> {
+        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
         self.ensure_writable()?;
         let Some(index) = self.derived_artifact_jobs.iter().position(|job| {
             job.status == DerivedArtifactJobStatus::Pending
@@ -981,6 +989,7 @@ impl Database {
         mut runtime: impl FnMut(&DerivedArtifactJob) -> Result<QueryOutput>,
         estimated_operations: usize,
     ) -> Result<Option<DerivedArtifactJobReport>> {
+        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
         self.ensure_writable()?;
         let Some(index) = self.derived_artifact_jobs.iter().position(|job| {
             job.id == job_id
@@ -1013,6 +1022,7 @@ impl Database {
         mut runtime: impl FnMut(&DerivedArtifactJob) -> Result<QueryOutput>,
         estimated_operations: usize,
     ) -> Result<Option<DerivedArtifactJobReport>> {
+        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
         self.ensure_writable()?;
         let Some(index) = self.derived_artifact_jobs.iter().position(|job| {
             job.id == job_id

@@ -1,9 +1,11 @@
+pub mod capability;
 pub mod error;
 pub mod graph_rag;
 pub mod regex;
 pub mod schema;
 pub mod value;
 
+pub use capability::{RuntimeCapabilities, RuntimeCapability};
 pub use error::{Result, SkeinError};
 pub use graph_rag::{
     build_graph_rag_schema_context, GraphRagCommonPathSummary, GraphRagLabelSummary,

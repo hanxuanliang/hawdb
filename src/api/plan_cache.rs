@@ -100,6 +100,9 @@ pub(super) fn optimized_query_plan_for(
     cache_mode: PlanCacheMode,
     context: PlanCacheContext<'_>,
 ) -> Result<OptimizedQueryPlan> {
+    if let Some(capability) = required_runtime_capability(statement_body(statement)) {
+        context.config.runtime_capabilities.require(capability)?;
+    }
     let effective_max_optimizer_groups =
         optimizer_config_from_database_config(context.config).max_groups;
     let key = (cache_mode == PlanCacheMode::Use).then(|| PlanCacheKey {
@@ -164,6 +167,24 @@ pub(super) fn optimized_query_plan_for(
         });
     }
     unreachable!("plan cache mode must be either use or bypass")
+}
+
+fn required_runtime_capability(
+    statement: &cypher::Statement,
+) -> Option<skein_core::RuntimeCapability> {
+    match statement {
+        cypher::Statement::CreateFullTextIndex(_) => {
+            Some(skein_core::RuntimeCapability::FullTextSearch)
+        }
+        cypher::Statement::VectorSearch(_) => Some(skein_core::RuntimeCapability::VectorSearch),
+        cypher::Statement::MatchReturn(query) if query.vector_seed.is_some() => {
+            Some(skein_core::RuntimeCapability::VectorSearch)
+        }
+        cypher::Statement::ProjectGraph(_) | cypher::Statement::GraphAlgorithm(_) => {
+            Some(skein_core::RuntimeCapability::GraphAnalytics)
+        }
+        _ => None,
+    }
 }
 
 pub(super) fn statement_uses_plan_cache(statement: &cypher::Statement) -> bool {

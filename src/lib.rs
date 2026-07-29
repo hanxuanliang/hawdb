@@ -334,9 +334,10 @@ pub use skein_core::{
     GraphRagCommonPathSummary, GraphRagLabelSummary, GraphRagPropertySubject,
     GraphRagPropertySummary, GraphRagRelationshipTypeSummary, GraphRagRouteSummary,
     GraphRagSchemaContext, GraphRagSchemaContextOptions, GraphRagSchemaContextTruncation,
-    DEFAULT_GRAPH_RAG_MAX_COMMON_PATHS, DEFAULT_GRAPH_RAG_MAX_LABELS,
-    DEFAULT_GRAPH_RAG_MAX_PROPERTIES_PER_SUBJECT, DEFAULT_GRAPH_RAG_MAX_RELATIONSHIP_TYPES,
-    DEFAULT_GRAPH_RAG_MAX_ROUTES, GRAPH_RAG_SCHEMA_CONTEXT_PROTOCOL,
+    RuntimeCapabilities, RuntimeCapability, DEFAULT_GRAPH_RAG_MAX_COMMON_PATHS,
+    DEFAULT_GRAPH_RAG_MAX_LABELS, DEFAULT_GRAPH_RAG_MAX_PROPERTIES_PER_SUBJECT,
+    DEFAULT_GRAPH_RAG_MAX_RELATIONSHIP_TYPES, DEFAULT_GRAPH_RAG_MAX_ROUTES,
+    GRAPH_RAG_SCHEMA_CONTEXT_PROTOCOL,
 };
 pub use skein_optimizer::{
     AdaptiveVectorBackendPolicy, Distribution, GroupId, Memo as OptimizerMemo,

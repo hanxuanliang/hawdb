@@ -183,6 +183,7 @@ fn expected_error_contract_json(error: ExpectedErrorClass) -> &'static str {
         ExpectedErrorClass::Semantic => "semantic",
         ExpectedErrorClass::Storage => "storage",
         ExpectedErrorClass::Execution => "execution",
+        ExpectedErrorClass::CapabilityUnavailable => "capability_unavailable",
     }
 }
 

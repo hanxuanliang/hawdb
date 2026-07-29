@@ -89,6 +89,7 @@ pub enum ExpectedErrorClass {
     Semantic,
     Storage,
     Execution,
+    CapabilityUnavailable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -380,6 +381,7 @@ impl ExpectedErrorClass {
             SkeinError::Semantic(_) => Self::Semantic,
             SkeinError::Storage(_) => Self::Storage,
             SkeinError::Execution(_) => Self::Execution,
+            SkeinError::CapabilityUnavailable { .. } => Self::CapabilityUnavailable,
         }
     }
 }
