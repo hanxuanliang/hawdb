@@ -872,6 +872,8 @@ contract.
     I/O-depth overrides.
   - [x] Add a storage-facing range scheduler that coalesces adjacent reads and
     creates bounded SSD/NVMe I/O waves.
+  - [x] Execute scheduled file ranges with bounded per-wave memory and ordered
+    payload consumption.
   - [ ] Add physical byte ranges to persisted search segments and execute the
     scheduled reads in the storage backend while keeping WAL, manifest
     publication, and per-index delta ordering serialized.
@@ -913,8 +915,10 @@ contract.
     host-provided `Meter` and never initializes global telemetry state.
   - [x] Emit low-cardinality query count, duration, row count, success, language,
     and statement-kind metrics without query text or parameters.
-  - [ ] Add WAL, checkpoint, recovery, index maintenance, and background QoS
-    metrics with bounded exporter behavior owned by the host.
+  - [x] Add typed, low-cardinality WAL, checkpoint, recovery, and search
+    checkpoint metrics with bounded exporter behavior owned by the host.
+  - [ ] Add background QoS admission and completion metrics without coupling
+    the scheduler crate to a global telemetry provider.
 - [x] Complete durable incremental-index catch-up.
   - [x] Distinguish the applied source graph epoch from the durable checkpoint
     watermark and report uncheckpointed changes.

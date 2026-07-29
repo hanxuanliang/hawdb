@@ -5,6 +5,7 @@ use crate::qos::{
 };
 use crate::schema::Catalog;
 use crate::store::{GraphStore, NodeId, NodeRecord};
+use crate::telemetry::{KernelTelemetry, KernelTelemetryOperation, TelemetrySink};
 use crate::value::Value;
 use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use simsimd::SpatialSimilarity;
@@ -25,7 +26,7 @@ use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 mod analyzer_lexicon;
 #[cfg(feature = "turbovec")]
@@ -678,6 +679,7 @@ pub struct SearchIndex {
     marker_lines: Mutex<BTreeMap<String, Vec<String>>>,
     analyzer_lexicon: SearchAnalyzerLexicon,
     segment_descriptor: Option<SearchSegmentDescriptor>,
+    telemetry: Option<Arc<dyn TelemetrySink>>,
 }
 
 impl SearchIndex {
@@ -701,6 +703,7 @@ impl SearchIndex {
             marker_lines: Mutex::new(BTreeMap::new()),
             analyzer_lexicon: SearchAnalyzerLexicon::default(),
             segment_descriptor: None,
+            telemetry: None,
         };
         index.load_snapshot()?;
         index.load_or_rebuild_segment_descriptor()?;
@@ -714,6 +717,10 @@ impl SearchIndex {
 
     pub fn set_analyzer_lexicon(&mut self, analyzer_lexicon: SearchAnalyzerLexicon) {
         self.analyzer_lexicon = analyzer_lexicon;
+    }
+
+    pub fn set_telemetry_sink(&mut self, telemetry: Option<Arc<dyn TelemetrySink>>) {
+        self.telemetry = telemetry;
     }
 
     pub fn upsert(&mut self, document: SearchDocument) -> Result<()> {
@@ -1300,52 +1307,64 @@ impl SearchIndex {
         let Some(path) = &self.path else {
             return Ok(());
         };
-        let snapshot_path = path.join(SEARCH_SNAPSHOT_FILE);
-        let mut body = String::new();
-        body.push_str("SKEIN_SEARCH_PROJECTION_V1\n");
-        if let Some(epoch) = self.source_graph_commit_epoch {
-            body.push_str(&format!("source_graph_commit_epoch\t{epoch}\n"));
+        let started = std::time::Instant::now();
+        let result = (|| {
+            let snapshot_path = path.join(SEARCH_SNAPSHOT_FILE);
+            let mut body = String::new();
+            body.push_str("SKEIN_SEARCH_PROJECTION_V1\n");
+            if let Some(epoch) = self.source_graph_commit_epoch {
+                body.push_str(&format!("source_graph_commit_epoch\t{epoch}\n"));
+            }
+            if let Some(manifest) = &self.embedding_manifest {
+                body.push_str(&format!(
+                    "embedding_manifest\t{}\t{}\t{}\n",
+                    encode_string(&manifest.model),
+                    encode_string(manifest.version.as_deref().unwrap_or_default()),
+                    manifest.dimension
+                ));
+            }
+            if let Some(dimension) = self.embedding_dimension {
+                body.push_str(&format!("embedding_dimension\t{dimension}\n"));
+            }
+            for document in self.documents.values() {
+                body.push_str(&format!(
+                    "doc\t{}\t{}\t{}\t{}\t{}\n",
+                    encode_string(&document.id),
+                    encode_string(&document.title),
+                    encode_string(&document.content),
+                    encode_embedding(document.embedding.as_deref()),
+                    encode_metadata(&document.metadata),
+                ));
+            }
+            let checksum = checksum_bytes(body.as_bytes());
+            let data = format!("{body}checksum\t{checksum}\n");
+            let tmp_path = snapshot_path.with_extension("skein.tmp");
+            {
+                let mut file = File::create(&tmp_path)?;
+                let encoded = encode_search_snapshot_text(&data)?;
+                file.write_all(&encoded)?;
+                file.sync_all()?;
+            }
+            fs::rename(tmp_path, &snapshot_path)?;
+            sync_parent_dir(&snapshot_path)?;
+            self.write_segment_descriptor(path)?;
+            #[cfg(feature = "turbovec")]
+            self.write_turbovec_projection_artifact(path)?;
+            *self
+                .durable_source_graph_commit_epoch
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = self.source_graph_commit_epoch;
+            Ok(())
+        })();
+        if let Some(telemetry) = &self.telemetry {
+            telemetry.record_kernel(KernelTelemetry {
+                operation: KernelTelemetryOperation::SearchCheckpoint,
+                success: result.is_ok(),
+                elapsed_micros: elapsed_micros(started),
+                item_count: self.documents.len(),
+            });
         }
-        if let Some(manifest) = &self.embedding_manifest {
-            body.push_str(&format!(
-                "embedding_manifest\t{}\t{}\t{}\n",
-                encode_string(&manifest.model),
-                encode_string(manifest.version.as_deref().unwrap_or_default()),
-                manifest.dimension
-            ));
-        }
-        if let Some(dimension) = self.embedding_dimension {
-            body.push_str(&format!("embedding_dimension\t{dimension}\n"));
-        }
-        for document in self.documents.values() {
-            body.push_str(&format!(
-                "doc\t{}\t{}\t{}\t{}\t{}\n",
-                encode_string(&document.id),
-                encode_string(&document.title),
-                encode_string(&document.content),
-                encode_embedding(document.embedding.as_deref()),
-                encode_metadata(&document.metadata),
-            ));
-        }
-        let checksum = checksum_bytes(body.as_bytes());
-        let data = format!("{body}checksum\t{checksum}\n");
-        let tmp_path = snapshot_path.with_extension("skein.tmp");
-        {
-            let mut file = File::create(&tmp_path)?;
-            let encoded = encode_search_snapshot_text(&data)?;
-            file.write_all(&encoded)?;
-            file.sync_all()?;
-        }
-        fs::rename(tmp_path, &snapshot_path)?;
-        sync_parent_dir(&snapshot_path)?;
-        self.write_segment_descriptor(path)?;
-        #[cfg(feature = "turbovec")]
-        self.write_turbovec_projection_artifact(path)?;
-        *self
-            .durable_source_graph_commit_epoch
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = self.source_graph_commit_epoch;
-        Ok(())
+        result
     }
 
     pub fn search(
@@ -5187,6 +5206,10 @@ fn checksum_bytes(bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
+}
+
+fn elapsed_micros(started: std::time::Instant) -> u64 {
+    started.elapsed().as_micros().min(u64::MAX as u128) as u64
 }
 
 fn parse_u64(input: &str, name: &str) -> Result<u64> {

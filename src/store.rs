@@ -7,6 +7,7 @@ use crate::schema::{
 use crate::search::{
     search_projection_document_id_for_label_and_properties, search_projection_document_id_for_node,
 };
+use crate::telemetry::{KernelTelemetry, KernelTelemetryOperation, TelemetrySink};
 use crate::value::Value;
 pub use skein_storage::{
     AdjacencyDirection, AdjacencyGroupConsistencyMismatch, AdjacencyGroupKey, AdjacencyGroupStats,
@@ -28,6 +29,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Cursor, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 const STORAGE_VERSION: &str = "skein-storage-v1";
 const CHECKPOINT_FILE: &str = "checkpoint.skein";
@@ -4116,6 +4118,12 @@ impl GraphStore {
         self.trim_search_projection_graph_change_log();
     }
 
+    pub fn set_telemetry_sink(&mut self, telemetry: Option<Arc<dyn TelemetrySink>>) {
+        if let Some(durable) = &mut self.durable {
+            durable.telemetry = telemetry;
+        }
+    }
+
     pub fn stable_id_mapping(&self) -> StoreStableIdMapping {
         self.stable_id_mapping.clone()
     }
@@ -6825,6 +6833,7 @@ struct DurableStore {
     next_lsn: u64,
     durability: DurabilityPolicy,
     read_only: bool,
+    telemetry: Option<Arc<dyn TelemetrySink>>,
 }
 
 struct CheckpointImage<'a> {
@@ -6884,6 +6893,7 @@ impl DurableStore {
             next_lsn: manifest.next_lsn,
             durability,
             read_only,
+            telemetry: None,
         })
     }
 
@@ -6893,19 +6903,14 @@ impl DurableStore {
         label: &str,
         properties: &BTreeMap<String, Value>,
     ) -> Result<()> {
-        let entry = WalEntry {
-            lsn: self.next_lsn,
-            op: WalOp::CreateNode {
+        self.append_entry(
+            WalOp::CreateNode {
                 id,
                 label: label.to_string(),
                 properties: properties.clone(),
             },
-        };
-        let (mut file, created) = self.open_wal_append()?;
-        writeln!(file, "{}", entry.encode())?;
-        self.finish_wal_append(&mut file, created)?;
-        self.next_lsn += 1;
-        Ok(())
+            1,
+        )
     }
 
     fn append_create_relationship(
@@ -6916,33 +6921,21 @@ impl DurableStore {
         rel_type: &str,
         properties: &BTreeMap<String, Value>,
     ) -> Result<()> {
-        let entry = WalEntry {
-            lsn: self.next_lsn,
-            op: WalOp::CreateRelationship {
+        self.append_entry(
+            WalOp::CreateRelationship {
                 id,
                 source,
                 target,
                 rel_type: rel_type.to_string(),
                 properties: properties.clone(),
             },
-        };
-        let (mut file, created) = self.open_wal_append()?;
-        writeln!(file, "{}", entry.encode())?;
-        self.finish_wal_append(&mut file, created)?;
-        self.next_lsn += 1;
-        Ok(())
+            1,
+        )
     }
 
     fn append_batch(&mut self, ops: Vec<WalOp>) -> Result<()> {
-        let entry = WalEntry {
-            lsn: self.next_lsn,
-            op: WalOp::Batch(ops),
-        };
-        let (mut file, created) = self.open_wal_append()?;
-        writeln!(file, "{}", entry.encode())?;
-        self.finish_wal_append(&mut file, created)?;
-        self.next_lsn += 1;
-        Ok(())
+        let operation_count = ops.len();
+        self.append_entry(WalOp::Batch(ops), operation_count)
     }
 
     fn append_project_graph(
@@ -6950,19 +6943,39 @@ impl DurableStore {
         name: &str,
         definition: &ProjectedGraphDefinition,
     ) -> Result<()> {
-        let entry = WalEntry {
-            lsn: self.next_lsn,
-            op: WalOp::ProjectGraph {
+        self.append_entry(
+            WalOp::ProjectGraph {
                 name: name.to_string(),
                 node_labels: definition.node_labels.clone(),
                 rel_types: definition.rel_types.clone(),
             },
+            1,
+        )
+    }
+
+    fn append_entry(&mut self, op: WalOp, operation_count: usize) -> Result<()> {
+        let entry = WalEntry {
+            lsn: self.next_lsn,
+            op,
         };
-        let (mut file, created) = self.open_wal_append()?;
-        writeln!(file, "{}", entry.encode())?;
-        self.finish_wal_append(&mut file, created)?;
-        self.next_lsn += 1;
-        Ok(())
+        let started = std::time::Instant::now();
+        let result = (|| {
+            let (mut file, created) = self.open_wal_append()?;
+            writeln!(file, "{}", entry.encode())?;
+            self.finish_wal_append(&mut file, created)
+        })();
+        if let Some(telemetry) = &self.telemetry {
+            telemetry.record_kernel(KernelTelemetry {
+                operation: KernelTelemetryOperation::WalAppend,
+                success: result.is_ok(),
+                elapsed_micros: elapsed_micros(started),
+                item_count: operation_count,
+            });
+        }
+        if result.is_ok() {
+            self.next_lsn += 1;
+        }
+        result
     }
 
     fn open_wal_append(&self) -> Result<(File, bool)> {
@@ -10671,6 +10684,10 @@ fn checksum_bytes(bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
+}
+
+fn elapsed_micros(started: std::time::Instant) -> u64 {
+    started.elapsed().as_micros().min(u64::MAX as u128) as u64
 }
 
 fn parse_u64(input: &str, name: &str) -> Result<u64> {

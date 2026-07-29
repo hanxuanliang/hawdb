@@ -344,7 +344,7 @@ pub use store::{
 };
 #[cfg(feature = "opentelemetry")]
 pub use telemetry::OpenTelemetryMetrics;
-pub use telemetry::{QueryTelemetry, TelemetrySink};
+pub use telemetry::{KernelTelemetry, KernelTelemetryOperation, QueryTelemetry, TelemetrySink};
 pub use value::Value;
 pub use workload_fixtures::{
     nowledge_graph_route_workload_fixture_queries, nowledge_graph_route_workload_fixture_report,

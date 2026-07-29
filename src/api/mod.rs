@@ -33,7 +33,7 @@ use crate::store::{
     PropertyIndexProjectionRebuildAction, RecoveryMode, RelRecord, SchemaMaintenanceAction,
     StorageReclamationWatermark, StorageRecoveryReport, WalReplayConfig,
 };
-use crate::telemetry::TelemetrySink;
+use crate::telemetry::{KernelTelemetry, KernelTelemetryOperation, TelemetrySink};
 use crate::value::Value;
 use canonical_snapshot::export_canonical_graph_snapshot_for;
 use explain::{empty_read_execution_profile, explain_analyze_output_row, explain_output_row};
@@ -5402,6 +5402,18 @@ impl Database {
     }
 
     pub fn set_telemetry_sink(&mut self, telemetry: Option<Arc<dyn TelemetrySink>>) {
+        if let Some(telemetry) = &telemetry {
+            let recovery = self.store.storage_recovery_report();
+            if recovery.durable {
+                telemetry.record_kernel(KernelTelemetry {
+                    operation: KernelTelemetryOperation::Recovery,
+                    success: true,
+                    elapsed_micros: 0,
+                    item_count: recovery.replayed_wal_entries,
+                });
+            }
+        }
+        self.store.set_telemetry_sink(telemetry.clone());
         self.telemetry = telemetry;
     }
 
@@ -5588,13 +5600,25 @@ impl Database {
 
     pub fn checkpoint(&mut self) -> Result<()> {
         self.ensure_writable()?;
+        let started = std::time::Instant::now();
+        let durable = self.store.storage_recovery_report().durable;
         let oldest_reader_epoch = self
             .reader_pins
             .lock()
             .expect("database reader pins lock should not be poisoned")
             .oldest_epoch();
-        self.store
-            .checkpoint_with_reader_epoch(&self.catalog, oldest_reader_epoch)
+        let result = self
+            .store
+            .checkpoint_with_reader_epoch(&self.catalog, oldest_reader_epoch);
+        if durable && let Some(telemetry) = &self.telemetry {
+            telemetry.record_kernel(KernelTelemetry {
+                operation: KernelTelemetryOperation::Checkpoint,
+                success: result.is_ok(),
+                elapsed_micros: elapsed_micros(started),
+                item_count: 1,
+            });
+        }
+        result
     }
 
     pub fn storage_reclamation_watermark(&self) -> StorageReclamationWatermark {
@@ -34303,6 +34327,10 @@ impl ReaderPins {
     fn oldest_epoch(&self) -> Option<u64> {
         self.active_epochs.values().min().copied()
     }
+}
+
+fn elapsed_micros(started: std::time::Instant) -> u64 {
+    started.elapsed().as_micros().min(u64::MAX as u128) as u64
 }
 
 impl ReaderPin {

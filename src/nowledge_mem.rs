@@ -13,7 +13,7 @@ use crate::{
     NowledgeGraphStatement, PlanCacheLookup, QueryOutput, ReadExecutionProfile, Result,
     SearchIndex, SearchProjectionCatchUpReport, SearchProjectionDeltaReport,
     SearchProjectionFreshness, SearchProjectionGraphDeltaRequest, SearchProjectionProbeOptions,
-    SearchResultSet, SkeinError, SlowQueryLogRecordSummary, Value,
+    SearchResultSet, SkeinError, SlowQueryLogRecordSummary, TelemetrySink, Value,
 };
 use crate::{
     graph_route_readiness::NMEM_GRAPH_ROUTE_READINESS_PROTOCOL,
@@ -5045,6 +5045,10 @@ impl NowledgeMemSearchProjection {
         &mut self.index
     }
 
+    pub fn set_telemetry_sink(&mut self, telemetry: Option<Arc<dyn TelemetrySink>>) {
+        self.index.set_telemetry_sink(telemetry);
+    }
+
     pub fn into_index(self) -> SearchIndex {
         self.index
     }
@@ -5177,6 +5181,11 @@ impl NowledgeMemEmbeddedStoreHandle {
 
     pub fn query_with_report(&self, cypher: &str) -> Result<NowledgeMemQueryOutput> {
         self.write_store()?.query_with_report(cypher)
+    }
+
+    pub fn set_telemetry_sink(&self, telemetry: Option<Arc<dyn TelemetrySink>>) -> Result<()> {
+        self.write_store()?.set_telemetry_sink(telemetry);
+        Ok(())
     }
 
     pub fn query_with_report_options(
@@ -5459,6 +5468,15 @@ impl NowledgeMemEmbeddedStore {
 
     pub fn search_projection_mut(&mut self) -> Option<&mut NowledgeMemSearchProjection> {
         self.search_projection.as_mut()
+    }
+
+    pub fn set_telemetry_sink(&mut self, telemetry: Option<Arc<dyn TelemetrySink>>) {
+        self.graph
+            .database_mut()
+            .set_telemetry_sink(telemetry.clone());
+        if let Some(search_projection) = &mut self.search_projection {
+            search_projection.set_telemetry_sink(telemetry);
+        }
     }
 
     pub fn storage_recovery_report(&self) -> NowledgeMemStorageRecoveryReport {
