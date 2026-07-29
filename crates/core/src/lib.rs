@@ -8,13 +8,15 @@ pub mod value;
 pub use capability::{RuntimeCapabilities, RuntimeCapability};
 pub use error::{Result, SkeinError};
 pub use graph_rag::{
-    build_graph_rag_schema_context, GraphRagCommonPathSummary, GraphRagLabelSummary,
-    GraphRagPropertySubject, GraphRagPropertySummary, GraphRagRelationshipTypeSummary,
+    build_graph_rag_schema_context, GraphRagCommonPathSummary, GraphRagGeneratedQuery,
+    GraphRagLabelSummary, GraphRagPropertySubject, GraphRagPropertySummary, GraphRagQueryBinding,
+    GraphRagQueryDraft, GraphRagQueryGenerationError, GraphRagQueryPattern, GraphRagQueryPredicate,
+    GraphRagQueryPredicateOperator, GraphRagQueryProjection, GraphRagRelationshipTypeSummary,
     GraphRagRouteSummary, GraphRagSchemaContext, GraphRagSchemaContextOptions,
     GraphRagSchemaContextTruncation, DEFAULT_GRAPH_RAG_MAX_COMMON_PATHS,
     DEFAULT_GRAPH_RAG_MAX_LABELS, DEFAULT_GRAPH_RAG_MAX_PROPERTIES_PER_SUBJECT,
     DEFAULT_GRAPH_RAG_MAX_RELATIONSHIP_TYPES, DEFAULT_GRAPH_RAG_MAX_ROUTES,
-    GRAPH_RAG_SCHEMA_CONTEXT_PROTOCOL,
+    GRAPH_RAG_SCHEMA_CONTEXT_PROTOCOL, MAX_GRAPH_RAG_QUERY_LIMIT,
 };
 pub use regex::ValidatedRegex;
 pub use schema::{

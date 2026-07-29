@@ -333,13 +333,15 @@ pub use search_projection_evidence::{
     nowledge_search_projection_probe_contract_json, NowledgeSearchProjectionEvidenceReport,
 };
 pub use skein_core::{
-    GraphRagCommonPathSummary, GraphRagLabelSummary, GraphRagPropertySubject,
-    GraphRagPropertySummary, GraphRagRelationshipTypeSummary, GraphRagRouteSummary,
-    GraphRagSchemaContext, GraphRagSchemaContextOptions, GraphRagSchemaContextTruncation,
-    RuntimeCapabilities, RuntimeCapability, DEFAULT_GRAPH_RAG_MAX_COMMON_PATHS,
-    DEFAULT_GRAPH_RAG_MAX_LABELS, DEFAULT_GRAPH_RAG_MAX_PROPERTIES_PER_SUBJECT,
-    DEFAULT_GRAPH_RAG_MAX_RELATIONSHIP_TYPES, DEFAULT_GRAPH_RAG_MAX_ROUTES,
-    GRAPH_RAG_SCHEMA_CONTEXT_PROTOCOL,
+    GraphRagCommonPathSummary, GraphRagGeneratedQuery, GraphRagLabelSummary,
+    GraphRagPropertySubject, GraphRagPropertySummary, GraphRagQueryBinding, GraphRagQueryDraft,
+    GraphRagQueryGenerationError, GraphRagQueryPattern, GraphRagQueryPredicate,
+    GraphRagQueryPredicateOperator, GraphRagQueryProjection, GraphRagRelationshipTypeSummary,
+    GraphRagRouteSummary, GraphRagSchemaContext, GraphRagSchemaContextOptions,
+    GraphRagSchemaContextTruncation, RuntimeCapabilities, RuntimeCapability,
+    DEFAULT_GRAPH_RAG_MAX_COMMON_PATHS, DEFAULT_GRAPH_RAG_MAX_LABELS,
+    DEFAULT_GRAPH_RAG_MAX_PROPERTIES_PER_SUBJECT, DEFAULT_GRAPH_RAG_MAX_RELATIONSHIP_TYPES,
+    DEFAULT_GRAPH_RAG_MAX_ROUTES, GRAPH_RAG_SCHEMA_CONTEXT_PROTOCOL, MAX_GRAPH_RAG_QUERY_LIMIT,
 };
 pub use skein_optimizer::{
     AdaptiveVectorBackendPolicy, Distribution, GroupId, Memo as OptimizerMemo,

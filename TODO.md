@@ -875,6 +875,11 @@ contract.
       catalog summaries for LLM-assisted Cypher generation.
     - Keep schema context generated from stable graph metadata and Nowledge
       ontology, not from free-form LLM-created labels or edge types.
+    - Validate typed node and observed one-hop route drafts against a pinned
+      schema fingerprint before rendering bounded, parameterized Cypher.
+    - Return required parameter names and reject invented identifiers,
+      unavailable bindings, properties outside the context, and stale schema
+      drafts before parsing or planning.
     - Run generated queries through the normal parser, optimizer, execution
       profile, and slow-query/blackbox reporting path.
 

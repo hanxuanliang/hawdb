@@ -3,9 +3,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
 mod fingerprint;
+mod query_generation;
 mod topology;
 
 use fingerprint::schema_context_fingerprint;
+pub use query_generation::{
+    GraphRagGeneratedQuery, GraphRagQueryBinding, GraphRagQueryDraft, GraphRagQueryGenerationError,
+    GraphRagQueryPattern, GraphRagQueryPredicate, GraphRagQueryPredicateOperator,
+    GraphRagQueryProjection, MAX_GRAPH_RAG_QUERY_LIMIT,
+};
 use topology::{common_path_summaries, route_summaries};
 
 pub const GRAPH_RAG_SCHEMA_CONTEXT_PROTOCOL: &str = "skein-graph-rag-schema-context-v1";
@@ -130,6 +136,13 @@ pub struct GraphRagSchemaContext {
 }
 
 impl GraphRagSchemaContext {
+    pub fn generate_query(
+        &self,
+        draft: &GraphRagQueryDraft,
+    ) -> Result<GraphRagGeneratedQuery, GraphRagQueryGenerationError> {
+        query_generation::generate_query(self, draft)
+    }
+
     pub fn render_compact_cypher_guidance(&self) -> String {
         let mut output = String::new();
         let _ = writeln!(
@@ -476,5 +489,7 @@ fn optional_count(count: Option<u64>) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+#[cfg(test)]
+mod query_generation_tests;
 #[cfg(test)]
 mod tests;

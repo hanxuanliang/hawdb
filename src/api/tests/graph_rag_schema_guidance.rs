@@ -1,5 +1,8 @@
 use super::*;
-use crate::GraphRagSchemaContextOptions;
+use crate::{
+    GraphRagQueryBinding, GraphRagQueryDraft, GraphRagQueryPattern, GraphRagQueryPredicate,
+    GraphRagQueryPredicateOperator, GraphRagQueryProjection, GraphRagSchemaContextOptions,
+};
 
 #[test]
 fn graph_rag_schema_context_guides_queries_through_the_read_runtime() {
@@ -35,16 +38,32 @@ fn graph_rag_schema_context_guides_queries_through_the_read_runtime() {
     assert!(guidance.contains("ROUTE (Memory)-[:MENTIONS]->(Entity)"));
     assert!(!guidance.contains("do-not-render"));
 
-    let route = &context.routes[0];
-    let query = format!(
-        "MATCH (source:{})-[:{}]->(target:{}) \
-         WHERE source.id = $id RETURN target.name AS name LIMIT 5",
-        route.source_label, route.relationship_type, route.target_label
-    );
+    let generated = context
+        .generate_query(&GraphRagQueryDraft {
+            schema_fingerprint: context.fingerprint,
+            pattern: GraphRagQueryPattern::Route {
+                source_label: "Memory".to_string(),
+                relationship_type: "MENTIONS".to_string(),
+                target_label: "Entity".to_string(),
+            },
+            predicates: vec![GraphRagQueryPredicate {
+                binding: GraphRagQueryBinding::Source,
+                property: "id".to_string(),
+                operator: GraphRagQueryPredicateOperator::Eq,
+                parameter: Some("id".to_string()),
+            }],
+            projections: vec![GraphRagQueryProjection {
+                binding: GraphRagQueryBinding::Target,
+                property: "name".to_string(),
+                alias: "name".to_string(),
+            }],
+            limit: 5,
+        })
+        .unwrap();
     let slow_query_count = db.slow_query_log_snapshot().len();
     let output = db
         .query_with_params(
-            &query,
+            &generated.cypher,
             &BTreeMap::from([("id".to_string(), Value::String("memory-1".to_string()))]),
         )
         .unwrap();
@@ -76,4 +95,57 @@ fn graph_rag_schema_context_is_pinned_to_the_read_snapshot() {
     assert_ne!(pinned.fingerprint, latest.fingerprint);
     assert_eq!(pinned.labels.len(), 1);
     assert_eq!(latest.labels.len(), 2);
+}
+
+#[test]
+fn graph_rag_generated_predicates_follow_the_cypher_parser_contract() {
+    let mut db = Database::new();
+    db.query("CREATE NODE TABLE Memory").unwrap();
+    db.query("CREATE PROPERTY ON NODE TABLE Memory(title) TYPE STRING")
+        .unwrap();
+    let context = db.graph_rag_schema_context(GraphRagSchemaContextOptions::default());
+    let operators = [
+        GraphRagQueryPredicateOperator::Eq,
+        GraphRagQueryPredicateOperator::NotEq,
+        GraphRagQueryPredicateOperator::Lt,
+        GraphRagQueryPredicateOperator::Lte,
+        GraphRagQueryPredicateOperator::Gt,
+        GraphRagQueryPredicateOperator::Gte,
+        GraphRagQueryPredicateOperator::In,
+        GraphRagQueryPredicateOperator::Contains,
+        GraphRagQueryPredicateOperator::StartsWith,
+        GraphRagQueryPredicateOperator::EndsWith,
+        GraphRagQueryPredicateOperator::IsNull,
+        GraphRagQueryPredicateOperator::IsNotNull,
+    ];
+
+    for operator in operators {
+        let parameter = (!matches!(
+            operator,
+            GraphRagQueryPredicateOperator::IsNull | GraphRagQueryPredicateOperator::IsNotNull
+        ))
+        .then(|| "value".to_string());
+        let generated = context
+            .generate_query(&GraphRagQueryDraft {
+                schema_fingerprint: context.fingerprint,
+                pattern: GraphRagQueryPattern::Node {
+                    label: "Memory".to_string(),
+                },
+                predicates: vec![GraphRagQueryPredicate {
+                    binding: GraphRagQueryBinding::Source,
+                    property: "title".to_string(),
+                    operator,
+                    parameter,
+                }],
+                projections: vec![GraphRagQueryProjection {
+                    binding: GraphRagQueryBinding::Source,
+                    property: "title".to_string(),
+                    alias: "title".to_string(),
+                }],
+                limit: 5,
+            })
+            .unwrap();
+
+        skein_cypher::parse(&generated.cypher).unwrap();
+    }
 }
