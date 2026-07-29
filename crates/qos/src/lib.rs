@@ -1,3 +1,4 @@
+mod device;
 mod resource;
 
 use std::fmt::Debug;
@@ -5,6 +6,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 
+pub use device::{StorageDeviceDiscoverySource, StorageDeviceProfile, StorageMediaKind};
 pub use resource::{IoConcurrencyBudget, RuntimeResourceBudget};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

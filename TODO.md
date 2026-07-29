@@ -897,7 +897,7 @@ contract.
     production search path while keeping WAL, manifest publication, and
     per-index delta ordering serialized; propagate range I/O errors without a
     silent in-memory fallback.
-  - [ ] Add platform-specific device discovery without deriving a claimed SSD
+  - [x] Add platform-specific device discovery without deriving a claimed SSD
     channel count from CPU count alone.
   - [ ] Keep the durable storage format and core Cypher semantics compatible
     across profiles; return typed capability-unavailable errors instead of

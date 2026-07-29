@@ -1,3 +1,4 @@
+use crate::{StorageDeviceProfile, StorageMediaKind};
 use std::num::NonZeroUsize;
 #[cfg(target_os = "linux")]
 use std::path::Path;
@@ -60,18 +61,41 @@ impl RuntimeResourceBudget {
 }
 
 impl IoConcurrencyBudget {
-    pub fn desktop_bound(cpu: RuntimeResourceBudget) -> Self {
-        let foreground = cpu
-            .effective_parallelism
-            .get()
-            .saturating_mul(2)
-            .clamp(4, 32);
+    pub fn desktop_bound(_cpu: RuntimeResourceBudget) -> Self {
+        Self::desktop_bound_for_device(StorageDeviceProfile::default())
+    }
+
+    pub fn desktop_bound_for_device(device: StorageDeviceProfile) -> Self {
+        let foreground = match device.media_kind {
+            StorageMediaKind::Rotational => 2,
+            StorageMediaKind::NonRotational => device
+                .queue_depth_hint
+                .map(NonZeroUsize::get)
+                .unwrap_or(8)
+                .clamp(4, 32),
+            StorageMediaKind::Memory => 8,
+            StorageMediaKind::Network | StorageMediaKind::Virtual | StorageMediaKind::Unknown => 4,
+        };
         let background = (foreground / 4).clamp(1, 4);
         Self::new(foreground, background)
     }
 
-    pub fn mobile_embedded(cpu: RuntimeResourceBudget) -> Self {
-        let foreground = cpu.effective_parallelism.get().clamp(1, 4);
+    pub fn mobile_embedded(_cpu: RuntimeResourceBudget) -> Self {
+        Self::mobile_embedded_for_device(StorageDeviceProfile::default())
+    }
+
+    pub fn mobile_embedded_for_device(device: StorageDeviceProfile) -> Self {
+        let foreground = match device.media_kind {
+            StorageMediaKind::Rotational
+            | StorageMediaKind::Network
+            | StorageMediaKind::Virtual => 1,
+            StorageMediaKind::NonRotational | StorageMediaKind::Memory => device
+                .queue_depth_hint
+                .map(NonZeroUsize::get)
+                .unwrap_or(4)
+                .clamp(1, 4),
+            StorageMediaKind::Unknown => 2,
+        };
         Self::new(foreground, 1)
     }
 
@@ -177,18 +201,40 @@ mod tests {
     }
 
     #[test]
-    fn desktop_io_budget_uses_multiple_bounded_channels() {
-        let cpu = RuntimeResourceBudget::from_limits(NonZeroUsize::new(12).unwrap(), None, None);
-        let io = IoConcurrencyBudget::desktop_bound(cpu);
-        assert_eq!(io.foreground_depth.get(), 24);
-        assert_eq!(io.background_depth.get(), 4);
+    fn desktop_io_budget_uses_device_evidence_instead_of_cpu_count() {
+        let device = StorageDeviceProfile::host_provided(
+            StorageMediaKind::NonRotational,
+            NonZeroUsize::new(12),
+        );
+        let io = IoConcurrencyBudget::desktop_bound_for_device(device);
+        assert_eq!(io.foreground_depth.get(), 12);
+        assert_eq!(io.background_depth.get(), 3);
     }
 
     #[test]
     fn mobile_io_budget_stays_conservative() {
-        let cpu = RuntimeResourceBudget::from_limits(NonZeroUsize::new(12).unwrap(), None, None);
-        let io = IoConcurrencyBudget::mobile_embedded(cpu);
+        let device = StorageDeviceProfile::host_provided(
+            StorageMediaKind::NonRotational,
+            NonZeroUsize::new(32),
+        );
+        let io = IoConcurrencyBudget::mobile_embedded_for_device(device);
         assert_eq!(io.foreground_depth.get(), 4);
         assert_eq!(io.background_depth.get(), 1);
+    }
+
+    #[test]
+    fn unknown_device_budget_is_not_derived_from_cpu_count() {
+        let low_cpu = RuntimeResourceBudget::from_limits(NonZeroUsize::new(2).unwrap(), None, None);
+        let high_cpu =
+            RuntimeResourceBudget::from_limits(NonZeroUsize::new(64).unwrap(), None, None);
+
+        assert_eq!(
+            IoConcurrencyBudget::desktop_bound(low_cpu),
+            IoConcurrencyBudget::desktop_bound(high_cpu)
+        );
+        assert_eq!(
+            IoConcurrencyBudget::mobile_embedded(low_cpu),
+            IoConcurrencyBudget::mobile_embedded(high_cpu)
+        );
     }
 }

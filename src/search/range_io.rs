@@ -4,7 +4,7 @@ use super::{
     SEARCH_SEGMENT_PAYLOAD_FILE,
 };
 use crate::error::{Result, SkeinError};
-use skein_qos::{IoConcurrencyBudget, RuntimeResourceBudget};
+use skein_qos::{IoConcurrencyBudget, StorageDeviceProfile};
 use skein_storage::{
     FileSegmentRangeReader, SegmentReadExecutor, SegmentReadRange, SegmentReadScheduler,
 };
@@ -52,8 +52,8 @@ impl SearchRangeReadConfig {
 
 impl Default for SearchRangeReadConfig {
     fn default() -> Self {
-        Self::desktop_bound(IoConcurrencyBudget::desktop_bound(
-            RuntimeResourceBudget::detect(),
+        Self::desktop_bound(IoConcurrencyBudget::desktop_bound_for_device(
+            StorageDeviceProfile::default(),
         ))
     }
 }

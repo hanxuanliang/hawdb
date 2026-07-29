@@ -7,7 +7,7 @@ use crate::{
     AdaptiveVectorBackendPolicy, Database, DatabaseConfig, Result, RuntimeCapabilities,
     SearchIndex, SearchRangeReadConfig,
 };
-use skein_qos::{IoConcurrencyBudget, RuntimeResourceBudget};
+use skein_qos::{IoConcurrencyBudget, RuntimeResourceBudget, StorageDeviceProfile};
 use skein_storage::SegmentReadScheduler;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
@@ -22,6 +22,7 @@ pub enum EmbeddedDeploymentProfile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EmbeddedRuntimeResources {
     pub cpu: RuntimeResourceBudget,
+    pub storage_device: StorageDeviceProfile,
     pub storage_io: IoConcurrencyBudget,
 }
 
@@ -47,6 +48,7 @@ pub struct SkeinEmbeddedOpenOptions {
     pub config: DatabaseConfig,
     pub durability: DurabilityPolicy,
     pub deployment_profile: EmbeddedDeploymentProfile,
+    pub storage_device: Option<StorageDeviceProfile>,
     pub storage_io: Option<IoConcurrencyBudget>,
 }
 
@@ -76,6 +78,7 @@ impl SkeinEmbeddedOpenOptions {
             config: default_database_config(deployment_profile),
             durability: DurabilityPolicy::default(),
             deployment_profile,
+            storage_device: None,
             storage_io: None,
         }
     }
@@ -99,6 +102,11 @@ impl SkeinEmbeddedOpenOptions {
         self.storage_io = Some(storage_io);
         self
     }
+
+    pub fn with_storage_device_profile(mut self, storage_device: StorageDeviceProfile) -> Self {
+        self.storage_device = Some(storage_device);
+        self
+    }
 }
 
 impl SkeinEmbedded {
@@ -108,9 +116,12 @@ impl SkeinEmbedded {
 
     pub fn open_with_options(options: SkeinEmbeddedOpenOptions) -> Result<Self> {
         let cpu = RuntimeResourceBudget::detect();
+        let storage_device = options
+            .storage_device
+            .unwrap_or_else(|| StorageDeviceProfile::detect(&options.path));
         let storage_io = options
             .storage_io
-            .unwrap_or_else(|| default_io_budget(options.deployment_profile, cpu));
+            .unwrap_or_else(|| default_io_budget(options.deployment_profile, storage_device));
         let database = Database::open_with_durability_and_config(
             &options.path,
             options.durability,
@@ -120,7 +131,11 @@ impl SkeinEmbedded {
             path: options.path,
             database,
             deployment_profile: options.deployment_profile,
-            runtime_resources: EmbeddedRuntimeResources { cpu, storage_io },
+            runtime_resources: EmbeddedRuntimeResources {
+                cpu,
+                storage_device,
+                storage_io,
+            },
         })
     }
 
@@ -217,11 +232,15 @@ fn default_database_config(profile: EmbeddedDeploymentProfile) -> DatabaseConfig
 
 fn default_io_budget(
     profile: EmbeddedDeploymentProfile,
-    cpu: RuntimeResourceBudget,
+    device: StorageDeviceProfile,
 ) -> IoConcurrencyBudget {
     match profile {
-        EmbeddedDeploymentProfile::DesktopBound => IoConcurrencyBudget::desktop_bound(cpu),
-        EmbeddedDeploymentProfile::MobileEmbedded => IoConcurrencyBudget::mobile_embedded(cpu),
+        EmbeddedDeploymentProfile::DesktopBound => {
+            IoConcurrencyBudget::desktop_bound_for_device(device)
+        }
+        EmbeddedDeploymentProfile::MobileEmbedded => {
+            IoConcurrencyBudget::mobile_embedded_for_device(device)
+        }
     }
 }
 
@@ -232,6 +251,7 @@ mod tests {
         NowledgeMemGraphMode, NowledgeMemReadinessOptions, Value,
         NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
     };
+    use std::num::NonZeroUsize;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -334,7 +354,12 @@ mod tests {
     #[test]
     fn explicit_storage_io_budget_overrides_profile_default() {
         let root = unique_test_dir("embedded-io-budget");
+        let storage_device = StorageDeviceProfile::host_provided(
+            skein_qos::StorageMediaKind::Rotational,
+            NonZeroUsize::new(1),
+        );
         let options = SkeinEmbeddedOpenOptions::mobile(root.join("graph"))
+            .with_storage_device_profile(storage_device)
             .with_storage_io_budget(IoConcurrencyBudget::new(7, 2));
         let engine = SkeinEmbedded::open_with_options(options).unwrap();
 
@@ -342,6 +367,7 @@ mod tests {
             engine.deployment_profile(),
             EmbeddedDeploymentProfile::MobileEmbedded
         );
+        assert_eq!(engine.runtime_resources().storage_device, storage_device);
         assert_eq!(
             engine.runtime_resources().storage_io.foreground_depth.get(),
             7
@@ -369,6 +395,26 @@ mod tests {
         assert_eq!(
             search_index.range_read_config().max_wave_bytes.get(),
             2 * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn device_profile_drives_default_io_budget_without_cpu_inference() {
+        let root = unique_test_dir("embedded-device-profile");
+        let storage_device = StorageDeviceProfile::host_provided(
+            skein_qos::StorageMediaKind::NonRotational,
+            NonZeroUsize::new(12),
+        );
+        let engine = SkeinEmbedded::open_with_options(
+            SkeinEmbeddedOpenOptions::new(root.join("graph"))
+                .with_storage_device_profile(storage_device),
+        )
+        .unwrap();
+
+        assert_eq!(engine.runtime_resources().storage_device, storage_device);
+        assert_eq!(
+            engine.runtime_resources().storage_io,
+            IoConcurrencyBudget::new(12, 3)
         );
     }
 

@@ -343,6 +343,10 @@ pub use skein_optimizer::{
     AdaptiveVectorBackendPolicy, Distribution, GroupId, Memo as OptimizerMemo,
     MemoGroup as OptimizerMemoGroup, PhysicalProperties, RequiredProperties,
 };
+pub use skein_qos::{
+    IoConcurrencyBudget, RuntimeResourceBudget, StorageDeviceDiscoverySource, StorageDeviceProfile,
+    StorageMediaKind,
+};
 pub use storage_recovery_evidence::nowledge_storage_recovery_evidence_json;
 pub use store::{
     AdjacencyConsistencyReport, AdjacencyDirection, AdjacencyGroupConsistencyMismatch,

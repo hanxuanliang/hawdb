@@ -123,6 +123,20 @@ independent segment reads concurrently up to a bounded I/O depth.
 - The host MAY override I/O depth using device-specific knowledge. The library
   MUST NOT infer a precise hardware queue count from CPU count alone.
 
+Device discovery is path-specific and evidence preserving:
+
+- Linux MAY read the database path's block-device `rotational` and
+  `nr_requests` sysfs attributes. A partition must inherit evidence only from
+  its actual parent block-device queue.
+- Apple platforms MAY classify memory, network, or virtual filesystems. APFS,
+  HFS, or another filesystem name does not prove SSD media and MUST remain
+  `Unknown` unless the host provides native device evidence.
+- Unsupported or unreadable platform metadata yields an `Unknown` device with
+  conservative I/O depth. It MUST NOT fall back to a CPU-derived channel count.
+- Runtime reports expose only typed media, discovery source, and bounded queue
+  hints. Device names, mount paths, and database paths are not included.
+- An explicit host profile or I/O budget takes precedence over discovery.
+
 Future async or platform-specific backends MAY use `io_uring`, IOCP, or native
 mobile APIs behind the same bounded storage-facing contract. Correctness MUST
 not depend on a specific async runtime.
