@@ -150,10 +150,14 @@ LanceDB for that path.
     - Implemented in Mem PR #384 with domain-specific precedence tests and a
       versioned runtime status payload that reports partial ownership without
       claiming either complete engine.
-  - [ ] Bind readiness to the actual process-lifetime Skein open state rather
+  - [x] Bind readiness to the actual process-lifetime Skein open state rather
     than configured paths alone.
-  - [ ] Expose graph and search route ownership, applied and durable watermarks,
+  - [x] Expose graph and search route ownership, applied and durable watermarks,
     projection freshness, and blockers through the production status surface.
+    - Implemented in Mem PR #384 using Skein runtime status protocol
+      `skein-nowledge-mem-runtime-status-v1`. The health payload reads the live
+      process-owned handle and fails closed on unopened state, projection lag,
+      repair/reindex markers, or non-recoverable changefeed state.
   - Acceptance: partial route migration is represented as partial ownership, and
     stale or unopened stores cannot report an effective Skein cutover.
 
