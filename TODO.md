@@ -190,7 +190,16 @@ LanceDB for that path.
       - Real Kuzu/Skein tests cover normal convergence, prepare-only replay,
         replay after an unacknowledged Kuzu commit, payload tampering, exact
         retry, and production REST/MCP routing.
-    - [ ] Cover Entity, Thread, and Source node mutation families.
+    - [x] Cover the Entity node mutation family.
+      - Entity extraction create/reuse, delete, and merge now use frozen,
+        replayable graph obligations.
+    - [ ] Cover the Thread node mutation family.
+      - [x] Route Thread and ThreadIdentity create, failed-content
+        compensation, and REST/MCP delete through one versioned, replayable
+        graph obligation (Mem PR #384).
+      - [ ] Route metadata, favorite, space, and denormalized message-count
+        updates through frozen Thread mutation payloads.
+    - [ ] Cover the Source node mutation family.
   - Inject one long-lived writable Skein handle into Mem write resources.
   - Cover Memory create, update, lifecycle, and delete first, then Label,
     Entity, Thread, Source, and relationship mutations.
