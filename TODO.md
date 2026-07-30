@@ -178,6 +178,18 @@ LanceDB for that path.
         production REST/MCP routing.
       - Search projection cleanup remains a separately recoverable projection
         obligation and does not weaken the durable graph mutation boundary.
+    - [x] Route Entity merge through one versioned composite obligation
+      (Mem PR #384 commit `f739baa18`).
+      - Freeze both Entity states, all transferred relationship properties,
+        duplicate-resolution decisions, the final target state, mutation
+        result, and governance receipt before either graph applies.
+      - Kuzu revalidates the complete snapshot and commits the merge with its
+        receipt in one transaction; Skein applies relationship transfer,
+        target finalization, source deletion, projection invalidation, and the
+        receipt in one grouped transaction.
+      - Real Kuzu/Skein tests cover normal convergence, prepare-only replay,
+        replay after an unacknowledged Kuzu commit, payload tampering, exact
+        retry, and production REST/MCP routing.
     - [ ] Cover Entity, Thread, and Source node mutation families.
   - Inject one long-lived writable Skein handle into Mem write resources.
   - Cover Memory create, update, lifecycle, and delete first, then Label,
