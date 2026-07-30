@@ -165,6 +165,19 @@ LanceDB for that path.
       - Real Kuzu/Skein tests cover normal convergence, prepare-only replay,
         replay after an unacknowledged Kuzu commit, exact retry, and production
         REST/MCP routing.
+    - [x] Route Entity delete through a versioned durable obligation
+      (Mem PR #384 commit `a5cc5acf5`).
+      - Freeze the Entity summary, incident-edge counts, result, and plan
+        fingerprint before either graph applies the delete.
+      - Kuzu revalidates the frozen plan and persists the governance receipt in
+        the same transaction as the detached delete; Skein deletes the Entity,
+        invalidates graph projections, and persists the receipt in one grouped
+        transaction.
+      - Real Kuzu/Skein tests cover normal convergence, prepare-only replay,
+        replay after an unacknowledged Kuzu commit, stale-plan rejection, and
+        production REST/MCP routing.
+      - Search projection cleanup remains a separately recoverable projection
+        obligation and does not weaken the durable graph mutation boundary.
     - [ ] Cover Entity, Thread, and Source node mutation families.
   - Inject one long-lived writable Skein handle into Mem write resources.
   - Cover Memory create, update, lifecycle, and delete first, then Label,
