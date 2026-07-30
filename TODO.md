@@ -208,8 +208,14 @@ LanceDB for that path.
       - [x] Define versioned, replayable Source patch/delete obligations with
         grouped Kuzu/Skein apply and crash-window tests (Mem PR #384 commit
         `9ae06454d`).
-      - [ ] Route Source ingest/create, lifecycle, metadata, space, and delete
-        entrypoints through the Source mutation obligation.
+      - [x] Route standalone lifecycle, OCR metadata, space move/rollback, and
+        graph delete entrypoints through the Source mutation obligation (Mem
+        PR #384 commit `94e287bff`).
+        - Retain the durable storage-cleanup intent when Kuzu commits the graph
+          delete before Skein converges.
+      - [ ] Route Source ingest/create, content refresh/reparse, indexed
+        transition, revision edges, and search-projection effects through a
+        frozen composite Source obligation.
   - Inject one long-lived writable Skein handle into Mem write resources.
   - Cover Memory create, update, lifecycle, and delete first, then Label,
     Entity, Thread, Source, and relationship mutations.
