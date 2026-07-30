@@ -1006,6 +1006,9 @@ contract.
     - Execute validated generated queries through the read transaction's
       canonical parser, optimizer, plan cache, profiler, and executor path;
       do not add a GraphRAG-specific interpreter.
+    - [x] Expose schema context and bounded generated-query execution through
+      the `NowledgeMemEmbeddedStoreHandle` library API so application-bound
+      callers do not need direct `Database` ownership.
     - Return required parameter names and reject invented identifiers,
       unavailable bindings, properties outside the context, and stale schema
       drafts before parsing or planning.

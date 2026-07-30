@@ -1,4 +1,4 @@
-use super::{Database, DatabaseReadTransaction, QueryOutput};
+use super::{BoundedReadQueryOutput, Database, DatabaseReadTransaction, QueryOutput};
 use crate::error::{Result, SkeinError};
 use crate::value::Value;
 use skein_core::{
@@ -29,6 +29,21 @@ impl DatabaseReadTransaction {
         query: &GraphRagGeneratedQuery,
         parameters: &BTreeMap<String, Value>,
     ) -> Result<QueryOutput> {
+        Ok(self
+            .query_generated_graph_rag_bounded_profile(
+                query,
+                parameters,
+                self.config.max_read_result_rows,
+            )?
+            .output)
+    }
+
+    pub fn query_generated_graph_rag_bounded_profile(
+        &mut self,
+        query: &GraphRagGeneratedQuery,
+        parameters: &BTreeMap<String, Value>,
+        max_rows: Option<usize>,
+    ) -> Result<BoundedReadQueryOutput> {
         let pinned_epoch = self.store.statistics().computed_at_commit_epoch;
         if query.context_commit_epoch != pinned_epoch {
             return Err(SkeinError::Semantic(format!(
@@ -39,6 +54,6 @@ impl DatabaseReadTransaction {
         query
             .validate_parameters(parameters)
             .map_err(|error| SkeinError::Semantic(error.to_string()))?;
-        self.query_with_params(&query.cypher, parameters)
+        self.query_with_params_bounded_profile(&query.cypher, parameters, max_rows)
     }
 }

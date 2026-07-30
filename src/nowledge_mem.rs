@@ -10,7 +10,8 @@ use crate::search_projection_evidence::{
 };
 use crate::{
     cypher, BackgroundMaintenanceKind, BackgroundMaintenanceOptions, BackgroundMaintenanceSummary,
-    BackgroundWorkHint, BackgroundWorkPlan, Database, DatabaseConfig,
+    BackgroundWorkHint, BackgroundWorkPlan, BoundedReadQueryOutput, Database, DatabaseConfig,
+    GraphRagGeneratedQuery, GraphRagSchemaContext, GraphRagSchemaContextOptions,
     KnowledgeEntityDeleteBatchOutput, KnowledgeEntityDeleteBatchRequest,
     KnowledgeMemoryEvolvesCreateBatchOutput, KnowledgeMemoryEvolvesCreateBatchRequest,
     KnowledgeMemoryLifecycleBatchOutput, KnowledgeMemoryLifecycleBatchRequest,
@@ -4379,30 +4380,27 @@ impl NowledgeMemGraph {
             .db
             .begin_read_transaction()
             .query_with_params_bounded_profile(cypher, parameters, options.max_rows)?;
-        let report = nowledge_mem_read_report(
-            self.mode,
-            &bounded.output,
-            options,
-            &bounded.execution_profile,
-        );
-        if report.row_budget_exceeded {
-            return Err(SkeinError::Execution(format!(
-                "nowledge mem read query returned {} rows, exceeding max_rows {}",
-                report.row_count,
-                report.max_rows.unwrap_or_default()
-            )));
-        }
-        if report.payload_budget_exceeded {
-            return Err(SkeinError::Execution(format!(
-                "nowledge mem read query estimated {} payload bytes, exceeding max_estimated_payload_bytes {}",
-                report.estimated_payload_bytes,
-                report.max_estimated_payload_bytes.unwrap_or_default()
-            )));
-        }
-        Ok(NowledgeMemReadOutput {
-            output: bounded.output,
-            report,
-        })
+        bounded_nowledge_mem_read_output(self.mode, bounded, options)
+    }
+
+    pub fn graph_rag_schema_context(
+        &self,
+        options: GraphRagSchemaContextOptions,
+    ) -> GraphRagSchemaContext {
+        self.db.graph_rag_schema_context(options)
+    }
+
+    pub fn read_generated_graph_rag(
+        &self,
+        query: &GraphRagGeneratedQuery,
+        parameters: &BTreeMap<String, Value>,
+        options: &NowledgeMemReadOptions,
+    ) -> Result<NowledgeMemReadOutput> {
+        let bounded = self
+            .db
+            .begin_read_transaction()
+            .query_generated_graph_rag_bounded_profile(query, parameters, options.max_rows)?;
+        bounded_nowledge_mem_read_output(self.mode, bounded, options)
     }
 
     pub fn read_graph_overview(
@@ -5669,6 +5667,23 @@ impl NowledgeMemEmbeddedStoreHandle {
             .read_query_with_params(cypher, parameters, options)
     }
 
+    pub fn graph_rag_schema_context(
+        &self,
+        options: GraphRagSchemaContextOptions,
+    ) -> Result<GraphRagSchemaContext> {
+        Ok(self.read_store()?.graph_rag_schema_context(options))
+    }
+
+    pub fn read_generated_graph_rag(
+        &self,
+        query: &GraphRagGeneratedQuery,
+        parameters: &BTreeMap<String, Value>,
+        options: &NowledgeMemReadOptions,
+    ) -> Result<NowledgeMemReadOutput> {
+        self.read_store()?
+            .read_generated_graph_rag(query, parameters, options)
+    }
+
     pub fn read_graph_overview(
         &self,
         options: &NowledgeMemGraphOverviewOptions,
@@ -6248,6 +6263,23 @@ impl NowledgeMemEmbeddedStore {
     ) -> Result<NowledgeMemReadOutput> {
         self.graph
             .read_query_with_params(cypher, parameters, options)
+    }
+
+    pub fn graph_rag_schema_context(
+        &self,
+        options: GraphRagSchemaContextOptions,
+    ) -> GraphRagSchemaContext {
+        self.graph.graph_rag_schema_context(options)
+    }
+
+    pub fn read_generated_graph_rag(
+        &self,
+        query: &GraphRagGeneratedQuery,
+        parameters: &BTreeMap<String, Value>,
+        options: &NowledgeMemReadOptions,
+    ) -> Result<NowledgeMemReadOutput> {
+        self.graph
+            .read_generated_graph_rag(query, parameters, options)
     }
 
     pub fn read_graph_overview(
@@ -8385,6 +8417,33 @@ fn nowledge_mem_read_report(
     }
 }
 
+fn bounded_nowledge_mem_read_output(
+    mode: NowledgeMemGraphMode,
+    bounded: BoundedReadQueryOutput,
+    options: &NowledgeMemReadOptions,
+) -> Result<NowledgeMemReadOutput> {
+    let report =
+        nowledge_mem_read_report(mode, &bounded.output, options, &bounded.execution_profile);
+    if report.row_budget_exceeded {
+        return Err(SkeinError::Execution(format!(
+            "nowledge mem read query returned {} rows, exceeding max_rows {}",
+            report.row_count,
+            report.max_rows.unwrap_or_default()
+        )));
+    }
+    if report.payload_budget_exceeded {
+        return Err(SkeinError::Execution(format!(
+            "nowledge mem read query estimated {} payload bytes, exceeding max_estimated_payload_bytes {}",
+            report.estimated_payload_bytes,
+            report.max_estimated_payload_bytes.unwrap_or_default()
+        )));
+    }
+    Ok(NowledgeMemReadOutput {
+        output: bounded.output,
+        report,
+    })
+}
+
 fn estimate_query_output_payload_bytes(output: &QueryOutput) -> usize {
     output
         .rows
@@ -8487,8 +8546,10 @@ mod tests {
     use crate::Value;
     use crate::{
         BackgroundMaintenanceKind, BackgroundMaintenanceOptions, BackgroundWorkHint, Database,
-        DatabaseConfig, KnowledgeCandidateScoringPolicy, KnowledgeRetrievalRequest, LocalQosPolicy,
-        LocalQosScheduler, LocalQosState, NowledgeGraphStatement, RecoveryMode,
+        DatabaseConfig, GraphRagQueryBinding, GraphRagQueryDraft, GraphRagQueryPattern,
+        GraphRagQueryPredicate, GraphRagQueryPredicateOperator, GraphRagQueryProjection,
+        GraphRagSchemaContextOptions, KnowledgeCandidateScoringPolicy, KnowledgeRetrievalRequest,
+        LocalQosPolicy, LocalQosScheduler, LocalQosState, NowledgeGraphStatement, RecoveryMode,
         SearchEmbeddingManifest, SearchIndex, SearchMode, SearchProjectionDelta,
         SearchProjectionKind, SearchProjectionProbeOptions, SearchProjectionRow,
         StorageRecoveryReport, VectorRecallValidationOptions, VectorRecallValidationReport,
@@ -8555,6 +8616,82 @@ mod tests {
 
         assert_eq!(output.rows.len(), 1);
         assert_eq!(graph.mode(), NowledgeMemGraphMode::WritableCutover);
+    }
+
+    #[test]
+    fn embedded_handle_generates_and_executes_bounded_schema_guided_graph_rag() {
+        let mut graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::WritableCutover);
+        graph
+            .query(
+                "CREATE (:Memory {id: 'memory-1'})\
+                 -[:MENTIONS]->(:Entity {id: 'entity-1', name: 'Skein'})",
+            )
+            .unwrap();
+        let handle =
+            NowledgeMemEmbeddedStoreHandle::new(NowledgeMemEmbeddedStore::new(graph, None));
+        let context = handle
+            .graph_rag_schema_context(GraphRagSchemaContextOptions::default())
+            .unwrap();
+        let generated = context
+            .generate_query(&GraphRagQueryDraft {
+                schema_fingerprint: context.fingerprint,
+                pattern: GraphRagQueryPattern::Route {
+                    source_label: "Memory".to_string(),
+                    relationship_type: "MENTIONS".to_string(),
+                    target_label: "Entity".to_string(),
+                },
+                predicates: vec![GraphRagQueryPredicate {
+                    binding: GraphRagQueryBinding::Source,
+                    property: "id".to_string(),
+                    operator: GraphRagQueryPredicateOperator::Eq,
+                    parameter: Some("memory_id".to_string()),
+                }],
+                projections: vec![GraphRagQueryProjection {
+                    binding: GraphRagQueryBinding::Target,
+                    property: "name".to_string(),
+                    alias: "entity_name".to_string(),
+                }],
+                limit: 2,
+            })
+            .unwrap();
+        let output = handle
+            .read_generated_graph_rag(
+                &generated,
+                &BTreeMap::from([(
+                    "memory_id".to_string(),
+                    Value::String("memory-1".to_string()),
+                )]),
+                &NowledgeMemReadOptions {
+                    max_rows: Some(2),
+                    max_estimated_payload_bytes: Some(256),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            output.output.rows[0].get("entity_name"),
+            Some(&Value::String("Skein".to_string()))
+        );
+        assert_eq!(output.report.max_rows, Some(2));
+        assert!(output.report.row_limit_enforced_before_output);
+
+        handle
+            .query_with_report("CREATE (:Source {id: 'source-1'})")
+            .unwrap();
+        let error = handle
+            .read_generated_graph_rag(
+                &generated,
+                &BTreeMap::from([(
+                    "memory_id".to_string(),
+                    Value::String("memory-1".to_string()),
+                )]),
+                &NowledgeMemReadOptions::default(),
+            )
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("GraphRAG schema context is stale"));
     }
 
     #[test]

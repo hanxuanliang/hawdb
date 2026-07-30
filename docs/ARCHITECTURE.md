@@ -205,6 +205,14 @@ parameter names and schema-derived scalar or list type requirements.
 context snapshots and invalid parameter maps before submitting the generated
 Cypher through the normal query runtime.
 
+Application-bound hosts use the same contract through
+`NowledgeMemEmbeddedStoreHandle::graph_rag_schema_context` and
+`read_generated_graph_rag`. The handle releases its read lock while the host or
+LLM prepares a draft, then opens a fresh pinned read transaction for execution.
+An intervening graph commit therefore fails closed as a stale schema context.
+The generated query remains subject to `NowledgeMemReadOptions` row and payload
+budgets.
+
 Typed two-hop generation validates both one-hop legs independently, including
 the shared intermediate label and both relationship types. It does not infer
 topology from `GraphRagCommonPathSummary`, because that compact summary does not
