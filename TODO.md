@@ -130,6 +130,17 @@ LanceDB for that path.
       - Coordinator tests cover normal convergence and replay after the Kuzu
         transaction commits but before its acknowledgement; REST and MCP route
         tests prove the production entrypoints retire the same obligation.
+    - [x] Route Label create/update/delete through versioned durable
+      obligations (Mem PR #384 commit `fb3e0d473`).
+      - Freeze canonical deduplication and complete scalar state without the
+        legacy resolver's pre-obligation canonical-name backfill.
+      - Startup and foreground replay now dispatch Memory and Label mutations
+        through one operation-kind-aware path.
+      - Real Kuzu/Skein tests cover prepare-only and legacy-applied crash
+        windows, and an Axum route test proves the production CRUD handlers use
+        the durable path.
+    - [ ] Cover Label merge and `HAS_LABEL` relationship mutations, then
+      Entity, Thread, and Source mutation families.
   - Inject one long-lived writable Skein handle into Mem write resources.
   - Cover Memory create, update, lifecycle, and delete first, then Label,
     Entity, Thread, Source, and relationship mutations.
