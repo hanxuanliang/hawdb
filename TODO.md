@@ -205,6 +205,11 @@ LanceDB for that path.
         Memory/Source/Thread obligation; do not decompose it into independent
         Thread patches.
     - [ ] Cover the Source node mutation family.
+      - [x] Define versioned, replayable Source patch/delete obligations with
+        grouped Kuzu/Skein apply and crash-window tests (Mem PR #384 commit
+        `9ae06454d`).
+      - [ ] Route Source ingest/create, lifecycle, metadata, space, and delete
+        entrypoints through the Source mutation obligation.
   - Inject one long-lived writable Skein handle into Mem write resources.
   - Cover Memory create, update, lifecycle, and delete first, then Label,
     Entity, Thread, Source, and relationship mutations.
