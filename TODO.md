@@ -139,8 +139,16 @@ LanceDB for that path.
       - Real Kuzu/Skein tests cover prepare-only and legacy-applied crash
         windows, and an Axum route test proves the production CRUD handlers use
         the durable path.
-    - [ ] Cover Label merge and `HAS_LABEL` relationship mutations, then
-      Entity, Thread, and Source mutation families.
+    - [x] Route Memory `HAS_LABEL` assign/remove through versioned obligations
+      (Mem PR #384 commit `f7a643ef8`).
+      - Endpoint validation happens before prepare; Skein endpoint validation
+        and the idempotent relationship mutation run through the canonical
+        query runtime before the obligation can retire.
+      - Core tests cover assign/remove convergence and replay after an
+        unacknowledged Kuzu commit; an Axum route test covers the production
+        POST/DELETE endpoints.
+    - [ ] Cover Source `HAS_LABEL` relationship mutations and Label merge, then
+      Entity, Thread, and Source node mutation families.
   - Inject one long-lived writable Skein handle into Mem write resources.
   - Cover Memory create, update, lifecycle, and delete first, then Label,
     Entity, Thread, Source, and relationship mutations.
