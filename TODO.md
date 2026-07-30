@@ -121,8 +121,15 @@ LanceDB for that path.
       idempotently across Kuzu and Skein, and route the REST and MCP delete
       entrypoints through the durable obligation (Mem PR #384 commit
       `4c17aced0`; Skein commits `cc3a205` and `f004fc1`).
-    - [ ] Fold supersede/deprecate EVOLVES side effects into the same lifecycle
+    - [x] Fold supersede/deprecate EVOLVES side effects into the same lifecycle
       obligation.
+      - Mem PR #384 freezes the replacement endpoint, cleaned metadata, edge
+        audit fields, and final lifecycle state in a versioned payload. Kuzu and
+        Skein each apply the relationship, latest-state, label inheritance, and
+        lifecycle update in one engine-local transaction.
+      - Coordinator tests cover normal convergence and replay after the Kuzu
+        transaction commits but before its acknowledgement; REST and MCP route
+        tests prove the production entrypoints retire the same obligation.
   - Inject one long-lived writable Skein handle into Mem write resources.
   - Cover Memory create, update, lifecycle, and delete first, then Label,
     Entity, Thread, Source, and relationship mutations.
