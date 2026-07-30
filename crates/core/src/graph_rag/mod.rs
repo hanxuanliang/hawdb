@@ -9,8 +9,9 @@ mod topology;
 use fingerprint::schema_context_fingerprint;
 pub use query_generation::{
     GraphRagGeneratedQuery, GraphRagQueryBinding, GraphRagQueryDraft, GraphRagQueryGenerationError,
-    GraphRagQueryPattern, GraphRagQueryPredicate, GraphRagQueryPredicateOperator,
-    GraphRagQueryProjection, MAX_GRAPH_RAG_QUERY_LIMIT,
+    GraphRagQueryParameterCardinality, GraphRagQueryParameterError,
+    GraphRagQueryParameterRequirement, GraphRagQueryPattern, GraphRagQueryPredicate,
+    GraphRagQueryPredicateOperator, GraphRagQueryProjection, MAX_GRAPH_RAG_QUERY_LIMIT,
 };
 use topology::{common_path_summaries, route_summaries};
 

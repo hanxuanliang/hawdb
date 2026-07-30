@@ -221,3 +221,91 @@ fn graph_rag_generated_predicates_follow_the_cypher_parser_contract() {
         skein_cypher::parse(&generated.cypher).unwrap();
     }
 }
+
+#[test]
+fn generated_graph_rag_query_validates_parameters_before_canonical_execution() {
+    let mut db = Database::new();
+    db.query("CREATE NODE TABLE Memory").unwrap();
+    db.query("CREATE PROPERTY ON NODE TABLE Memory(id) TYPE STRING NOT NULL")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'memory-1'})").unwrap();
+    let context = db.graph_rag_schema_context(GraphRagSchemaContextOptions::default());
+    let generated = context
+        .generate_query(&GraphRagQueryDraft {
+            schema_fingerprint: context.fingerprint,
+            pattern: GraphRagQueryPattern::Node {
+                label: "Memory".to_string(),
+            },
+            predicates: vec![GraphRagQueryPredicate {
+                binding: GraphRagQueryBinding::Source,
+                property: "id".to_string(),
+                operator: GraphRagQueryPredicateOperator::Eq,
+                parameter: Some("memory_id".to_string()),
+            }],
+            projections: vec![GraphRagQueryProjection {
+                binding: GraphRagQueryBinding::Source,
+                property: "id".to_string(),
+                alias: "id".to_string(),
+            }],
+            limit: 5,
+        })
+        .unwrap();
+
+    let mut read = db.begin_read_transaction();
+    let output = read
+        .query_generated_graph_rag(
+            &generated,
+            &BTreeMap::from([(
+                "memory_id".to_string(),
+                Value::String("memory-1".to_string()),
+            )]),
+        )
+        .unwrap();
+    assert_eq!(
+        output.rows[0].get("id"),
+        Some(&Value::String("memory-1".to_string()))
+    );
+
+    let error = read
+        .query_generated_graph_rag(
+            &generated,
+            &BTreeMap::from([("memory_id".to_string(), Value::Int(1))]),
+        )
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("GraphRAG query parameter memory_id must be string"));
+}
+
+#[test]
+fn generated_graph_rag_query_rejects_a_newer_pinned_schema_epoch() {
+    let mut db = Database::new();
+    db.query("CREATE NODE TABLE Memory").unwrap();
+    db.query("CREATE PROPERTY ON NODE TABLE Memory(id) TYPE STRING NOT NULL")
+        .unwrap();
+    let context = db.graph_rag_schema_context(GraphRagSchemaContextOptions::default());
+    let generated = context
+        .generate_query(&GraphRagQueryDraft {
+            schema_fingerprint: context.fingerprint,
+            pattern: GraphRagQueryPattern::Node {
+                label: "Memory".to_string(),
+            },
+            predicates: Vec::new(),
+            projections: vec![GraphRagQueryProjection {
+                binding: GraphRagQueryBinding::Source,
+                property: "id".to_string(),
+                alias: "id".to_string(),
+            }],
+            limit: 5,
+        })
+        .unwrap();
+
+    db.query("CREATE (:Memory {id: 'memory-1'})").unwrap();
+    let mut newer_read = db.begin_read_transaction();
+    let error = newer_read
+        .query_generated_graph_rag(&generated, &BTreeMap::new())
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("GraphRAG schema context is stale"));
+}

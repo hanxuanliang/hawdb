@@ -1,7 +1,11 @@
-use super::{Database, DatabaseReadTransaction};
+use super::{Database, DatabaseReadTransaction, QueryOutput};
+use crate::error::{Result, SkeinError};
+use crate::value::Value;
 use skein_core::{
-    build_graph_rag_schema_context, GraphRagSchemaContext, GraphRagSchemaContextOptions,
+    build_graph_rag_schema_context, GraphRagGeneratedQuery, GraphRagSchemaContext,
+    GraphRagSchemaContextOptions,
 };
+use std::collections::BTreeMap;
 
 impl Database {
     pub fn graph_rag_schema_context(
@@ -18,5 +22,23 @@ impl DatabaseReadTransaction {
         options: GraphRagSchemaContextOptions,
     ) -> GraphRagSchemaContext {
         build_graph_rag_schema_context(&self.catalog, &self.store.statistics(), options)
+    }
+
+    pub fn query_generated_graph_rag(
+        &mut self,
+        query: &GraphRagGeneratedQuery,
+        parameters: &BTreeMap<String, Value>,
+    ) -> Result<QueryOutput> {
+        let pinned_epoch = self.store.statistics().computed_at_commit_epoch;
+        if query.context_commit_epoch != pinned_epoch {
+            return Err(SkeinError::Semantic(format!(
+                "GraphRAG schema context is stale: generated at graph epoch {}, pinned at {}",
+                query.context_commit_epoch, pinned_epoch
+            )));
+        }
+        query
+            .validate_parameters(parameters)
+            .map_err(|error| SkeinError::Semantic(error.to_string()))?;
+        self.query_with_params(&query.cypher, parameters)
     }
 }

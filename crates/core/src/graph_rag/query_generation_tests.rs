@@ -1,5 +1,6 @@
 use super::*;
 use crate::schema::{PropertyType, TableKind};
+use crate::Value;
 
 fn schema_context() -> GraphRagSchemaContext {
     let mut catalog = Catalog::default();
@@ -226,5 +227,143 @@ fn rejects_unavailable_bindings_and_unbounded_limits() {
     assert!(matches!(
         context.generate_query(&unbounded),
         Err(GraphRagQueryGenerationError::InvalidLimit { .. })
+    ));
+}
+
+#[test]
+fn validates_generated_query_parameter_shapes() {
+    let context = schema_context();
+    let generated = context
+        .generate_query(&GraphRagQueryDraft {
+            schema_fingerprint: context.fingerprint,
+            pattern: GraphRagQueryPattern::Route {
+                source_label: "Memory".to_string(),
+                relationship_type: "MENTIONS".to_string(),
+                target_label: "Entity".to_string(),
+            },
+            predicates: vec![
+                GraphRagQueryPredicate {
+                    binding: GraphRagQueryBinding::Source,
+                    property: "id".to_string(),
+                    operator: GraphRagQueryPredicateOperator::In,
+                    parameter: Some("memory_ids".to_string()),
+                },
+                GraphRagQueryPredicate {
+                    binding: GraphRagQueryBinding::Relationship,
+                    property: "confidence".to_string(),
+                    operator: GraphRagQueryPredicateOperator::Gte,
+                    parameter: Some("minimum_confidence".to_string()),
+                },
+            ],
+            projections: vec![GraphRagQueryProjection {
+                binding: GraphRagQueryBinding::Target,
+                property: "name".to_string(),
+                alias: "entity_name".to_string(),
+            }],
+            limit: 5,
+        })
+        .unwrap();
+
+    assert_eq!(generated.context_commit_epoch, 9);
+    assert_eq!(
+        generated.parameter_requirements,
+        vec![
+            GraphRagQueryParameterRequirement {
+                name: "memory_ids".to_string(),
+                value_type: PropertyType::String,
+                cardinality: GraphRagQueryParameterCardinality::List,
+            },
+            GraphRagQueryParameterRequirement {
+                name: "minimum_confidence".to_string(),
+                value_type: PropertyType::Float,
+                cardinality: GraphRagQueryParameterCardinality::Scalar,
+            },
+        ]
+    );
+    generated
+        .validate_parameters(&BTreeMap::from([
+            (
+                "memory_ids".to_string(),
+                Value::List(vec![Value::String("memory-1".to_string())]),
+            ),
+            ("minimum_confidence".to_string(), Value::Int(1)),
+        ]))
+        .unwrap();
+
+    assert!(matches!(
+        generated.validate_parameters(&BTreeMap::from([(
+            "memory_ids".to_string(),
+            Value::List(vec![Value::String("memory-1".to_string())]),
+        )])),
+        Err(GraphRagQueryParameterError::Missing { parameter })
+            if parameter == "minimum_confidence"
+    ));
+    assert!(matches!(
+        generated.validate_parameters(&BTreeMap::from([(
+            "memory_ids".to_string(),
+            Value::String("memory-1".to_string()),
+        )])),
+        Err(GraphRagQueryParameterError::TypeMismatch {
+            parameter,
+            actual: "string",
+            ..
+        }) if parameter == "memory_ids"
+    ));
+    assert!(matches!(
+        generated.validate_parameters(&BTreeMap::from([
+            (
+                "memory_ids".to_string(),
+                Value::List(vec![Value::String("memory-1".to_string())]),
+            ),
+            ("minimum_confidence".to_string(), Value::Float(0.5)),
+            ("invented".to_string(), Value::Bool(true)),
+        ])),
+        Err(GraphRagQueryParameterError::Unexpected { parameter })
+            if parameter == "invented"
+    ));
+}
+
+#[test]
+fn rejects_reused_parameter_with_conflicting_schema_types() {
+    let context = schema_context();
+    let error = context
+        .generate_query(&GraphRagQueryDraft {
+            schema_fingerprint: context.fingerprint,
+            pattern: GraphRagQueryPattern::TwoHopRoute {
+                source_label: "Memory".to_string(),
+                first_relationship_type: "MENTIONS".to_string(),
+                intermediate_label: "Entity".to_string(),
+                second_relationship_type: "SOURCED_FROM".to_string(),
+                target_label: "Source".to_string(),
+            },
+            predicates: vec![
+                GraphRagQueryPredicate {
+                    binding: GraphRagQueryBinding::Source,
+                    property: "id".to_string(),
+                    operator: GraphRagQueryPredicateOperator::Eq,
+                    parameter: Some("value".to_string()),
+                },
+                GraphRagQueryPredicate {
+                    binding: GraphRagQueryBinding::SecondRelationship,
+                    property: "observed_at".to_string(),
+                    operator: GraphRagQueryPredicateOperator::Gte,
+                    parameter: Some("value".to_string()),
+                },
+            ],
+            projections: vec![GraphRagQueryProjection {
+                binding: GraphRagQueryBinding::Target,
+                property: "uri".to_string(),
+                alias: "source_uri".to_string(),
+            }],
+            limit: 5,
+        })
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        GraphRagQueryGenerationError::ConflictingParameterRequirement {
+            parameter,
+            ..
+        } if parameter == "value"
     ));
 }

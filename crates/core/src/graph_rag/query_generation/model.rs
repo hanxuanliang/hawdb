@@ -1,3 +1,5 @@
+use crate::{PropertyType, Value};
+use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 
 pub const MAX_GRAPH_RAG_QUERY_LIMIT: usize = 100;
@@ -101,7 +103,150 @@ pub struct GraphRagQueryDraft {
 pub struct GraphRagGeneratedQuery {
     pub cypher: String,
     pub schema_fingerprint: u64,
+    pub context_commit_epoch: u64,
     pub required_parameters: Vec<String>,
+    pub parameter_requirements: Vec<GraphRagQueryParameterRequirement>,
+}
+
+impl GraphRagGeneratedQuery {
+    pub fn validate_parameters(
+        &self,
+        parameters: &BTreeMap<String, Value>,
+    ) -> Result<(), GraphRagQueryParameterError> {
+        for requirement in &self.parameter_requirements {
+            let value = parameters.get(&requirement.name).ok_or_else(|| {
+                GraphRagQueryParameterError::Missing {
+                    parameter: requirement.name.clone(),
+                }
+            })?;
+            if !requirement.accepts(value) {
+                return Err(GraphRagQueryParameterError::TypeMismatch {
+                    parameter: requirement.name.clone(),
+                    expected: requirement.clone(),
+                    actual: value_type_name(value),
+                });
+            }
+        }
+        if let Some(parameter) = parameters
+            .keys()
+            .find(|parameter| !self.required_parameters.contains(parameter))
+        {
+            return Err(GraphRagQueryParameterError::Unexpected {
+                parameter: parameter.clone(),
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphRagQueryParameterCardinality {
+    Scalar,
+    List,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphRagQueryParameterRequirement {
+    pub name: String,
+    pub value_type: PropertyType,
+    pub cardinality: GraphRagQueryParameterCardinality,
+}
+
+impl GraphRagQueryParameterRequirement {
+    fn accepts(&self, value: &Value) -> bool {
+        match self.cardinality {
+            GraphRagQueryParameterCardinality::Scalar => {
+                value_matches_property_type(value, self.value_type)
+            }
+            GraphRagQueryParameterCardinality::List => match value {
+                Value::List(values) => values
+                    .iter()
+                    .all(|value| value_matches_property_type(value, self.value_type)),
+                _ => false,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GraphRagQueryParameterError {
+    Missing {
+        parameter: String,
+    },
+    Unexpected {
+        parameter: String,
+    },
+    TypeMismatch {
+        parameter: String,
+        expected: GraphRagQueryParameterRequirement,
+        actual: &'static str,
+    },
+}
+
+impl Display for GraphRagQueryParameterError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing { parameter } => {
+                write!(formatter, "missing GraphRAG query parameter: {parameter}")
+            }
+            Self::Unexpected { parameter } => {
+                write!(
+                    formatter,
+                    "unexpected GraphRAG query parameter: {parameter}"
+                )
+            }
+            Self::TypeMismatch {
+                parameter,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "GraphRAG query parameter {parameter} must be {}, got {actual}",
+                parameter_requirement_name(expected)
+            ),
+        }
+    }
+}
+
+impl std::error::Error for GraphRagQueryParameterError {}
+
+fn value_matches_property_type(value: &Value, value_type: PropertyType) -> bool {
+    matches!(value, Value::Null)
+        || match value_type {
+            PropertyType::Any => true,
+            PropertyType::Bool => matches!(value, Value::Bool(_)),
+            PropertyType::Int => matches!(value, Value::Int(_)),
+            PropertyType::Float => matches!(value, Value::Int(_) | Value::Float(_)),
+            PropertyType::String => matches!(value, Value::String(_)),
+            PropertyType::List => matches!(value, Value::List(_)),
+        }
+}
+
+fn value_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Int(_) => "int",
+        Value::Float(_) => "float",
+        Value::String(_) => "string",
+        Value::List(_) => "list",
+        Value::Map(_) => "map",
+    }
+}
+
+fn parameter_requirement_name(requirement: &GraphRagQueryParameterRequirement) -> String {
+    let value_type = match requirement.value_type {
+        PropertyType::Any => "any",
+        PropertyType::Bool => "bool",
+        PropertyType::Int => "int",
+        PropertyType::Float => "float",
+        PropertyType::String => "string",
+        PropertyType::List => "list",
+    };
+    match requirement.cardinality {
+        GraphRagQueryParameterCardinality::Scalar => value_type.to_string(),
+        GraphRagQueryParameterCardinality::List => format!("list<{value_type}>"),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,6 +279,11 @@ pub enum GraphRagQueryGenerationError {
     },
     UnexpectedParameter {
         property: String,
+    },
+    ConflictingParameterRequirement {
+        parameter: String,
+        first: GraphRagQueryParameterRequirement,
+        second: GraphRagQueryParameterRequirement,
     },
     EmptyProjection,
     InvalidLimit {
@@ -178,6 +328,16 @@ impl Display for GraphRagQueryGenerationError {
             Self::UnexpectedParameter { property } => {
                 write!(formatter, "predicate parameter is not allowed for: {property}")
             }
+            Self::ConflictingParameterRequirement {
+                parameter,
+                first,
+                second,
+            } => write!(
+                formatter,
+                "parameter {parameter} has conflicting requirements: {} and {}",
+                parameter_requirement_name(first),
+                parameter_requirement_name(second)
+            ),
             Self::EmptyProjection => formatter.write_str("at least one projection is required"),
             Self::InvalidLimit { limit, maximum } => {
                 write!(formatter, "query limit must be between 1 and {maximum}, got {limit}")

@@ -343,7 +343,8 @@ pub use search_projection_evidence::{
 pub use skein_core::{
     GraphRagCommonPathSummary, GraphRagGeneratedQuery, GraphRagLabelSummary,
     GraphRagPropertySubject, GraphRagPropertySummary, GraphRagQueryBinding, GraphRagQueryDraft,
-    GraphRagQueryGenerationError, GraphRagQueryPattern, GraphRagQueryPredicate,
+    GraphRagQueryGenerationError, GraphRagQueryParameterCardinality, GraphRagQueryParameterError,
+    GraphRagQueryParameterRequirement, GraphRagQueryPattern, GraphRagQueryPredicate,
     GraphRagQueryPredicateOperator, GraphRagQueryProjection, GraphRagRelationshipTypeSummary,
     GraphRagRouteSummary, GraphRagSchemaContext, GraphRagSchemaContextOptions,
     GraphRagSchemaContextTruncation, RuntimeCapabilities, RuntimeCapability,

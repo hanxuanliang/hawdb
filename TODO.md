@@ -938,6 +938,13 @@ contract.
       schema fingerprint before rendering bounded, parameterized Cypher.
     - Validate typed two-hop drafts by composing two observed routes with an
       explicit intermediate label and independently addressable edge bindings.
+    - Carry schema-derived scalar/list parameter requirements into generated
+      queries, reject missing, unexpected, incompatible, or conflicting
+      bindings before execution, and reject a query generated for a different
+      pinned graph epoch.
+    - Execute validated generated queries through the read transaction's
+      canonical parser, optimizer, plan cache, profiler, and executor path;
+      do not add a GraphRAG-specific interpreter.
     - Return required parameter names and reject invented identifiers,
       unavailable bindings, properties outside the context, and stale schema
       drafts before parsing or planning.

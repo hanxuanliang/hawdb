@@ -1,14 +1,15 @@
 use super::{GraphRagPropertySubject, GraphRagSchemaContext};
 use crate::PropertyType;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt::Write;
 
 mod model;
 
 pub use model::{
     GraphRagGeneratedQuery, GraphRagQueryBinding, GraphRagQueryDraft, GraphRagQueryGenerationError,
-    GraphRagQueryPattern, GraphRagQueryPredicate, GraphRagQueryPredicateOperator,
-    GraphRagQueryProjection, MAX_GRAPH_RAG_QUERY_LIMIT,
+    GraphRagQueryParameterCardinality, GraphRagQueryParameterError,
+    GraphRagQueryParameterRequirement, GraphRagQueryPattern, GraphRagQueryPredicate,
+    GraphRagQueryPredicateOperator, GraphRagQueryProjection, MAX_GRAPH_RAG_QUERY_LIMIT,
 };
 
 struct ResolvedBinding<'a> {
@@ -43,7 +44,7 @@ pub(super) fn generate_query(
     }
 
     let pattern = resolve_pattern(context, &draft.pattern)?;
-    let mut required_parameters = BTreeSet::new();
+    let mut parameter_requirements = BTreeMap::new();
     let mut cypher = pattern.cypher.clone();
 
     if !draft.predicates.is_empty() {
@@ -64,7 +65,13 @@ pub(super) fn generate_query(
                     },
                 );
             }
-            render_predicate(&mut cypher, &pattern, predicate, &mut required_parameters)?;
+            render_predicate(
+                &mut cypher,
+                &pattern,
+                predicate,
+                value_type,
+                &mut parameter_requirements,
+            )?;
         }
     }
 
@@ -87,7 +94,9 @@ pub(super) fn generate_query(
     Ok(GraphRagGeneratedQuery {
         cypher,
         schema_fingerprint: context.fingerprint,
-        required_parameters: required_parameters.into_iter().collect(),
+        context_commit_epoch: context.computed_at_commit_epoch,
+        required_parameters: parameter_requirements.keys().cloned().collect(),
+        parameter_requirements: parameter_requirements.into_values().collect(),
     })
 }
 
@@ -268,7 +277,8 @@ fn render_predicate(
     output: &mut String,
     pattern: &ResolvedPattern<'_>,
     predicate: &GraphRagQueryPredicate,
-    required_parameters: &mut BTreeSet<String>,
+    value_type: PropertyType,
+    parameter_requirements: &mut BTreeMap<String, GraphRagQueryParameterRequirement>,
 ) -> Result<(), GraphRagQueryGenerationError> {
     validate_identifier("property", &predicate.property)?;
     let variable = resolve_binding(pattern, predicate.binding)?.variable;
@@ -286,7 +296,28 @@ fn render_predicate(
         (true, Some(parameter)) => {
             validate_identifier("parameter", parameter)?;
             let _ = write!(output, " ${parameter}");
-            required_parameters.insert(parameter.to_string());
+            let requirement = GraphRagQueryParameterRequirement {
+                name: parameter.to_string(),
+                value_type,
+                cardinality: if predicate.operator == GraphRagQueryPredicateOperator::In {
+                    GraphRagQueryParameterCardinality::List
+                } else {
+                    GraphRagQueryParameterCardinality::Scalar
+                },
+            };
+            if let Some(first) = parameter_requirements.get(parameter) {
+                if first != &requirement {
+                    return Err(
+                        GraphRagQueryGenerationError::ConflictingParameterRequirement {
+                            parameter: parameter.to_string(),
+                            first: first.clone(),
+                            second: requirement,
+                        },
+                    );
+                }
+            } else {
+                parameter_requirements.insert(parameter.to_string(), requirement);
+            }
         }
         (true, None) => {
             return Err(GraphRagQueryGenerationError::MissingParameter {
