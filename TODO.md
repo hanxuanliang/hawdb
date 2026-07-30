@@ -147,8 +147,14 @@ LanceDB for that path.
       - Core tests cover assign/remove convergence and replay after an
         unacknowledged Kuzu commit; an Axum route test covers the production
         POST/DELETE endpoints.
-    - [ ] Cover Source `HAS_LABEL` relationship mutations and Label merge, then
-      Entity, Thread, and Source node mutation families.
+    - [x] Route Source `HAS_LABEL` assign/remove through versioned obligations
+      (Mem PR #384 commit `af67babff`).
+      - Freeze endpoint existence before prepare and preserve the existing
+        relationship properties in idempotent Kuzu/Skein apply queries.
+      - Core tests cover convergence and replay after an unacknowledged Kuzu
+        commit; an Axum route test covers the production POST/DELETE endpoints.
+    - [ ] Cover Label merge, then Entity, Thread, and Source node mutation
+      families.
   - Inject one long-lived writable Skein handle into Mem write resources.
   - Cover Memory create, update, lifecycle, and delete first, then Label,
     Entity, Thread, Source, and relationship mutations.
