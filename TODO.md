@@ -193,12 +193,17 @@ LanceDB for that path.
     - [x] Cover the Entity node mutation family.
       - Entity extraction create/reuse, delete, and merge now use frozen,
         replayable graph obligations.
-    - [ ] Cover the Thread node mutation family.
+    - [x] Cover the Thread node mutation family.
       - [x] Route Thread and ThreadIdentity create, failed-content
         compensation, and REST/MCP delete through one versioned, replayable
         graph obligation (Mem PR #384).
-      - [ ] Route metadata, favorite, space, and denormalized message-count
-        updates through frozen Thread mutation payloads.
+      - [x] Route metadata, favorite, bulk space move, denormalized
+        message-count, skill-use markers, and scheduler title/summary updates
+        through frozen Thread mutation payloads (Mem PR #384 commit
+        `5ef1d287f`).
+      - The cross-domain Space merge remains a separate composite
+        Memory/Source/Thread obligation; do not decompose it into independent
+        Thread patches.
     - [ ] Cover the Source node mutation family.
   - Inject one long-lived writable Skein handle into Mem write resources.
   - Cover Memory create, update, lifecycle, and delete first, then Label,
