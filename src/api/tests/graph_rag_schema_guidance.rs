@@ -63,7 +63,7 @@ fn graph_rag_schema_context_guides_queries_through_the_read_runtime() {
     let slow_query_count = db.slow_query_log_snapshot().len();
     let output = db
         .query_with_params(
-            &generated.cypher,
+            generated.cypher(),
             &BTreeMap::from([("id".to_string(), Value::String("memory-1".to_string()))]),
         )
         .unwrap();
@@ -136,10 +136,10 @@ fn graph_rag_two_hop_draft_runs_through_the_query_runtime() {
         })
         .unwrap();
 
-    skein_cypher::parse(&generated.cypher).unwrap();
+    skein_cypher::parse(generated.cypher()).unwrap();
     let output = db
         .query_with_params(
-            &generated.cypher,
+            generated.cypher(),
             &BTreeMap::from([(
                 "entity_name".to_string(),
                 Value::String("Skein".to_string()),
@@ -218,7 +218,7 @@ fn graph_rag_generated_predicates_follow_the_cypher_parser_contract() {
             })
             .unwrap();
 
-        skein_cypher::parse(&generated.cypher).unwrap();
+        skein_cypher::parse(generated.cypher()).unwrap();
     }
 }
 

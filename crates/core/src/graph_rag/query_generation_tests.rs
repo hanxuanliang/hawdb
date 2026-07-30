@@ -71,14 +71,14 @@ fn generates_bounded_parameterized_route_query() {
         .unwrap();
 
     assert_eq!(
-        generated.cypher,
+        generated.cypher(),
         "MATCH (n0:Memory)-[r0:MENTIONS]->(n1:Entity) \
          WHERE n0.id = $memory_id AND r0.confidence >= $minimum_confidence \
          RETURN n1.name AS entity_name LIMIT 5"
     );
     assert_eq!(
-        generated.required_parameters,
-        vec!["memory_id".to_string(), "minimum_confidence".to_string()]
+        generated.required_parameters(),
+        ["memory_id".to_string(), "minimum_confidence".to_string()]
     );
 }
 
@@ -126,14 +126,14 @@ fn generates_schema_validated_two_hop_query() {
         .unwrap();
 
     assert_eq!(
-        generated.cypher,
+        generated.cypher(),
         "MATCH (n0:Memory)-[r0:MENTIONS]->(n1:Entity)-[r1:SOURCED_FROM]->(n2:Source) \
          WHERE n1.name = $entity_name AND r1.observed_at >= $minimum_observed_at \
          RETURN n0.id AS memory_id, n2.uri AS source_uri LIMIT 10"
     );
     assert_eq!(
-        generated.required_parameters,
-        vec!["entity_name".to_string(), "minimum_observed_at".to_string()]
+        generated.required_parameters(),
+        ["entity_name".to_string(), "minimum_observed_at".to_string()]
     );
 }
 
@@ -202,6 +202,46 @@ fn rejects_stale_schema_and_invented_identifiers() {
 }
 
 #[test]
+fn rejects_mutated_schema_context_before_generation() {
+    let mut context = schema_context();
+    let fingerprint = context.fingerprint;
+    context.routes.push(GraphRagRouteSummary {
+        source_label: "Memory".to_string(),
+        relationship_type: "INVENTED".to_string(),
+        target_label: "Source".to_string(),
+        observed_count: 1,
+        distinct_source_count: 1,
+        distinct_target_count: 1,
+    });
+
+    let error = context
+        .generate_query(&GraphRagQueryDraft {
+            schema_fingerprint: fingerprint,
+            pattern: GraphRagQueryPattern::Route {
+                source_label: "Memory".to_string(),
+                relationship_type: "INVENTED".to_string(),
+                target_label: "Source".to_string(),
+            },
+            predicates: Vec::new(),
+            projections: vec![GraphRagQueryProjection {
+                binding: GraphRagQueryBinding::Target,
+                property: "uri".to_string(),
+                alias: "source_uri".to_string(),
+            }],
+            limit: 5,
+        })
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        GraphRagQueryGenerationError::SchemaContextIntegrityMismatch {
+            expected,
+            actual
+        } if expected == fingerprint && actual != fingerprint
+    ));
+}
+
+#[test]
 fn rejects_unavailable_bindings_and_unbounded_limits() {
     let context = schema_context();
     let draft = GraphRagQueryDraft {
@@ -264,10 +304,10 @@ fn validates_generated_query_parameter_shapes() {
         })
         .unwrap();
 
-    assert_eq!(generated.context_commit_epoch, 9);
+    assert_eq!(generated.context_commit_epoch(), 9);
     assert_eq!(
-        generated.parameter_requirements,
-        vec![
+        generated.parameter_requirements(),
+        [
             GraphRagQueryParameterRequirement {
                 name: "memory_ids".to_string(),
                 value_type: PropertyType::String,

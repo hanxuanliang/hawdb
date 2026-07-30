@@ -1008,6 +1008,9 @@ contract.
       schema fingerprint before rendering bounded, parameterized Cypher.
     - Validate typed two-hop drafts by composing two observed routes with an
       explicit intermediate label and independently addressable edge bindings.
+    - [x] Seal generated queries and verify schema-context integrity before
+      generation so callers cannot bypass draft validation with invented
+      identifiers.
     - Carry schema-derived scalar/list parameter requirements into generated
       queries, reject missing, unexpected, incompatible, or conflicting
       bindings before execution, and reject a query generated for a different

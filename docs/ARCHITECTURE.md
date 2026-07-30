@@ -200,7 +200,10 @@ composable observed routes, plus predicates, projections, and a bounded result
 limit. `GraphRagSchemaContext::generate_query` checks the schema fingerprint,
 identifiers, every route leg, properties, binding scope, predicate shape, and
 limit before rendering parameterized Cypher. The result contains the required
-parameter names and schema-derived scalar or list type requirements.
+parameter names and schema-derived scalar or list type requirements. Generated
+queries are opaque outside the core crate, and generation recomputes the
+context fingerprint so callers cannot mutate a returned schema context and
+smuggle invented identifiers into the execution boundary.
 `DatabaseReadTransaction::query_generated_graph_rag` rejects stale schema
 context snapshots and invalid parameter maps before submitting the generated
 Cypher through the normal query runtime.

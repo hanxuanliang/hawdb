@@ -45,15 +45,16 @@ impl DatabaseReadTransaction {
         max_rows: Option<usize>,
     ) -> Result<BoundedReadQueryOutput> {
         let pinned_epoch = self.store.statistics().computed_at_commit_epoch;
-        if query.context_commit_epoch != pinned_epoch {
+        if query.context_commit_epoch() != pinned_epoch {
             return Err(SkeinError::Semantic(format!(
                 "GraphRAG schema context is stale: generated at graph epoch {}, pinned at {}",
-                query.context_commit_epoch, pinned_epoch
+                query.context_commit_epoch(),
+                pinned_epoch
             )));
         }
         query
             .validate_parameters(parameters)
             .map_err(|error| SkeinError::Semantic(error.to_string()))?;
-        self.query_with_params_bounded_profile(&query.cypher, parameters, max_rows)
+        self.query_with_params_bounded_profile(query.cypher(), parameters, max_rows)
     }
 }

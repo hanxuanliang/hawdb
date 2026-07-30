@@ -27,6 +27,15 @@ pub(super) fn generate_query(
     context: &GraphRagSchemaContext,
     draft: &GraphRagQueryDraft,
 ) -> Result<GraphRagGeneratedQuery, GraphRagQueryGenerationError> {
+    let actual_fingerprint = super::schema_context_fingerprint(context);
+    if actual_fingerprint != context.fingerprint {
+        return Err(
+            GraphRagQueryGenerationError::SchemaContextIntegrityMismatch {
+                expected: context.fingerprint,
+                actual: actual_fingerprint,
+            },
+        );
+    }
     if draft.schema_fingerprint != context.fingerprint {
         return Err(GraphRagQueryGenerationError::SchemaFingerprintMismatch {
             expected: context.fingerprint,

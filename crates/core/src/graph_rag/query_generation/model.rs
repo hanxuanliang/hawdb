@@ -101,14 +101,34 @@ pub struct GraphRagQueryDraft {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphRagGeneratedQuery {
-    pub cypher: String,
-    pub schema_fingerprint: u64,
-    pub context_commit_epoch: u64,
-    pub required_parameters: Vec<String>,
-    pub parameter_requirements: Vec<GraphRagQueryParameterRequirement>,
+    pub(super) cypher: String,
+    pub(super) schema_fingerprint: u64,
+    pub(super) context_commit_epoch: u64,
+    pub(super) required_parameters: Vec<String>,
+    pub(super) parameter_requirements: Vec<GraphRagQueryParameterRequirement>,
 }
 
 impl GraphRagGeneratedQuery {
+    pub fn cypher(&self) -> &str {
+        &self.cypher
+    }
+
+    pub const fn schema_fingerprint(&self) -> u64 {
+        self.schema_fingerprint
+    }
+
+    pub const fn context_commit_epoch(&self) -> u64 {
+        self.context_commit_epoch
+    }
+
+    pub fn required_parameters(&self) -> &[String] {
+        &self.required_parameters
+    }
+
+    pub fn parameter_requirements(&self) -> &[GraphRagQueryParameterRequirement] {
+        &self.parameter_requirements
+    }
+
     pub fn validate_parameters(
         &self,
         parameters: &BTreeMap<String, Value>,
@@ -251,6 +271,10 @@ fn parameter_requirement_name(requirement: &GraphRagQueryParameterRequirement) -
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GraphRagQueryGenerationError {
+    SchemaContextIntegrityMismatch {
+        expected: u64,
+        actual: u64,
+    },
     SchemaFingerprintMismatch {
         expected: u64,
         actual: u64,
@@ -295,6 +319,10 @@ pub enum GraphRagQueryGenerationError {
 impl Display for GraphRagQueryGenerationError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::SchemaContextIntegrityMismatch { expected, actual } => write!(
+                formatter,
+                "schema context integrity mismatch: expected {expected:016x}, got {actual:016x}"
+            ),
             Self::SchemaFingerprintMismatch { expected, actual } => write!(
                 formatter,
                 "schema fingerprint mismatch: expected {expected:016x}, got {actual:016x}"
