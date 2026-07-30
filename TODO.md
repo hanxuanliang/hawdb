@@ -153,8 +153,19 @@ LanceDB for that path.
         relationship properties in idempotent Kuzu/Skein apply queries.
       - Core tests cover convergence and replay after an unacknowledged Kuzu
         commit; an Axum route test covers the production POST/DELETE endpoints.
-    - [ ] Cover Label merge, then Entity, Thread, and Source node mutation
-      families.
+    - [x] Route Label merge through one versioned composite obligation
+      (Mem PR #384 commit `507fc875a`).
+      - Freeze Memory, Source, Entity, and Thread assignments with their
+        relationship properties, the final target metadata, mutation result,
+        and governance receipt before either engine applies.
+      - Apply assignment transfer, target finalization, source deletion, and
+        receipt creation through one grouped Skein transaction; all REST, MCP,
+        compatibility, and background consolidation entrypoints share the same
+        coordinator.
+      - Real Kuzu/Skein tests cover normal convergence, prepare-only replay,
+        replay after an unacknowledged Kuzu commit, exact retry, and production
+        REST/MCP routing.
+    - [ ] Cover Entity, Thread, and Source node mutation families.
   - Inject one long-lived writable Skein handle into Mem write resources.
   - Cover Memory create, update, lifecycle, and delete first, then Label,
     Entity, Thread, Source, and relationship mutations.
