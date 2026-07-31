@@ -369,6 +369,11 @@ LanceDB for that path.
     active search route ownership inputs, emit replacement-summary alignment
     reports for both, and fail the integration readiness gate when either live
     ownership evidence diverges from the replacement summary.
+  - [x] Expose active search route read readiness as a typed library contract
+    and require it in the library search-route readiness area, so ownership
+    alone cannot pass cutover unless every active route also proves Skein
+    candidate reads, metadata pushdown, ranking, fail-soft behavior, and no
+    LanceDB handle requirement.
   - Cover thread/message FTS, entity/community discovery, source and source
     chunk recall, `/fs/recall`, MCP search, and deep-search graph expansion.
   - Preserve embedding identity, zero-vector semantics, CJK tokenization,

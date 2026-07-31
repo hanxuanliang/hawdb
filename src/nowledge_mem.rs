@@ -32,7 +32,9 @@ use crate::{
     route_ownership::NowledgeMemRouteOwnershipReadinessReport,
     search_route_ownership::{
         NowledgeMemActiveSearchRouteOwnershipReadinessReport,
+        NowledgeMemActiveSearchRouteReadinessReport,
         NowledgeMemSearchRouteOwnershipReadinessReport,
+        NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_READINESS_PROTOCOL,
         NOWLEDGE_MEM_SEARCH_ROUTE_OWNERSHIP_PROTOCOL, REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES,
         REQUIRED_NOWLEDGE_MEM_SEARCH_ROUTES,
     },
@@ -3615,6 +3617,7 @@ pub struct NowledgeMemReadinessOptions {
     pub graph_route_readiness: Option<NowledgeMemRouteReadinessSummary>,
     pub search_route_ownership: Option<NowledgeMemSearchRouteOwnershipReadinessReport>,
     pub active_search_route_ownership: Option<NowledgeMemActiveSearchRouteOwnershipReadinessReport>,
+    pub active_search_route_readiness: Option<NowledgeMemActiveSearchRouteReadinessReport>,
     pub replacement_readiness_by_query_family: Option<serde_json::Value>,
     pub read_options: NowledgeMemReadOptions,
     pub search_projection_evidence: Option<serde_json::Value>,
@@ -3645,6 +3648,7 @@ pub struct NowledgeMemLibraryReadinessReport {
     pub graph_route_readiness: serde_json::Value,
     pub search_route_ownership: serde_json::Value,
     pub active_search_route_ownership: serde_json::Value,
+    pub active_search_route_readiness: serde_json::Value,
     pub bounded_read_evidence: serde_json::Value,
     pub storage_recovery: serde_json::Value,
     pub background_maintenance: serde_json::Value,
@@ -3682,6 +3686,7 @@ impl NowledgeMemLibraryReadinessReport {
             "graph_route_readiness": self.graph_route_readiness,
             "search_route_ownership": self.search_route_ownership,
             "active_search_route_ownership": self.active_search_route_ownership,
+            "active_search_route_readiness": self.active_search_route_readiness,
             "bounded_read_evidence": self.bounded_read_evidence,
             "storage_recovery": self.storage_recovery,
             "background_maintenance": self.background_maintenance,
@@ -7221,6 +7226,11 @@ impl NowledgeMemEmbeddedStore {
             .as_ref()
             .map(NowledgeMemActiveSearchRouteOwnershipReadinessReport::json)
             .unwrap_or_else(missing_active_search_route_ownership_json);
+        let active_search_route_readiness = options
+            .active_search_route_readiness
+            .as_ref()
+            .map(NowledgeMemActiveSearchRouteReadinessReport::json)
+            .unwrap_or_else(missing_active_search_route_readiness_json);
         let search_projection_evidence =
             options
                 .search_projection_evidence
@@ -7264,6 +7274,7 @@ impl NowledgeMemEmbeddedStore {
             graph_route_readiness: &graph_route_readiness,
             search_route_ownership: &search_route_ownership,
             active_search_route_ownership: &active_search_route_ownership,
+            active_search_route_readiness: &active_search_route_readiness,
             search_projection_evidence: &search_projection_evidence,
             search_projection_shadow_evidence: &search_projection_shadow_evidence,
             search_candidate_shadow_evidence: &search_candidate_shadow_evidence,
@@ -7296,6 +7307,7 @@ impl NowledgeMemEmbeddedStore {
             graph_route_readiness,
             search_route_ownership,
             active_search_route_ownership,
+            active_search_route_readiness,
             bounded_read_evidence,
             storage_recovery,
             background_maintenance,
@@ -8240,6 +8252,34 @@ fn missing_active_search_route_ownership_json() -> serde_json::Value {
     })
 }
 
+fn missing_active_search_route_readiness_json() -> serde_json::Value {
+    serde_json::json!({
+        "protocol": NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_READINESS_PROTOCOL,
+        "ready": false,
+        "production_cutover_ready": false,
+        "require_all_skein": true,
+        "required_route_count": REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES.len(),
+        "evidence_route_count": 0,
+        "ready_route_count": 0,
+        "skein_route_count": 0,
+        "lancedb_handle_required_route_count": 0,
+        "routes": [],
+        "ready_routes": [],
+        "missing_required_routes": REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES,
+        "unknown_routes": [],
+        "duplicate_routes": [],
+        "invalid_projection_routes": [],
+        "non_skein_routes": [],
+        "lancedb_handle_required_routes": [],
+        "candidate_not_ready_routes": [],
+        "candidate_identity_not_ready_routes": [],
+        "metadata_pushdown_not_ready_routes": [],
+        "ranking_not_ready_routes": [],
+        "fail_soft_not_ready_routes": [],
+        "blocker_codes": ["active_search_route_readiness_missing"],
+    })
+}
+
 fn search_route_ownership_ready(evidence: &serde_json::Value) -> bool {
     evidence.get("protocol").and_then(serde_json::Value::as_str)
         == Some(NOWLEDGE_MEM_SEARCH_ROUTE_OWNERSHIP_PROTOCOL)
@@ -8276,6 +8316,24 @@ fn active_search_route_ownership_ready(evidence: &serde_json::Value) -> bool {
             .is_some_and(Vec::is_empty)
 }
 
+fn active_search_route_readiness_ready(evidence: &serde_json::Value) -> bool {
+    evidence.get("protocol").and_then(serde_json::Value::as_str)
+        == Some(NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_READINESS_PROTOCOL)
+        && evidence.get("ready").and_then(serde_json::Value::as_bool) == Some(true)
+        && evidence
+            .get("production_cutover_ready")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        && evidence
+            .get("lancedb_handle_required_route_count")
+            .and_then(serde_json::Value::as_u64)
+            == Some(0)
+        && evidence
+            .get("blocker_codes")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(Vec::is_empty)
+}
+
 struct LibraryReadinessEvidence<'a> {
     bounded_read_evidence: &'a serde_json::Value,
     storage_recovery: &'a serde_json::Value,
@@ -8284,6 +8342,7 @@ struct LibraryReadinessEvidence<'a> {
     graph_route_readiness: &'a serde_json::Value,
     search_route_ownership: &'a serde_json::Value,
     active_search_route_ownership: &'a serde_json::Value,
+    active_search_route_readiness: &'a serde_json::Value,
     search_projection_evidence: &'a serde_json::Value,
     search_projection_shadow_evidence: &'a serde_json::Value,
     search_candidate_shadow_evidence: &'a serde_json::Value,
@@ -8328,6 +8387,9 @@ fn library_readiness_blocker_codes(evidence: &LibraryReadinessEvidence<'_>) -> V
     if !active_search_route_ownership_ready(evidence.active_search_route_ownership) {
         blockers.push("active_search_route_ownership_not_ready");
     }
+    if !active_search_route_readiness_ready(evidence.active_search_route_readiness) {
+        blockers.push("active_search_route_readiness_not_ready");
+    }
     if !search_projection_evidence_ready(evidence.search_projection_evidence) {
         blockers.push("search_projection_evidence_not_ready");
     }
@@ -8362,6 +8424,7 @@ fn library_readiness_by_area(
         search_route_ownership: search_route_ownership_readiness_area(
             evidence.search_route_ownership,
             evidence.active_search_route_ownership,
+            evidence.active_search_route_readiness,
         ),
         storage: readiness_area(
             "storage",
@@ -8388,9 +8451,11 @@ fn bounded_read_readiness_area(evidence: &serde_json::Value) -> NowledgeMemReadi
 fn search_route_ownership_readiness_area(
     evidence: &serde_json::Value,
     active_route_evidence: &serde_json::Value,
+    active_read_evidence: &serde_json::Value,
 ) -> NowledgeMemReadinessAreaSummary {
     let ready = search_route_ownership_ready(evidence)
-        && active_search_route_ownership_ready(active_route_evidence);
+        && active_search_route_ownership_ready(active_route_evidence)
+        && active_search_route_readiness_ready(active_read_evidence);
     let blocker_codes = if ready {
         Vec::new()
     } else {
@@ -8407,6 +8472,15 @@ fn search_route_ownership_readiness_area(
             .unwrap_or_default();
         codes.extend(
             active_route_evidence
+                .get("blocker_codes")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string),
+        );
+        codes.extend(
+            active_read_evidence
                 .get("blocker_codes")
                 .and_then(serde_json::Value::as_array)
                 .into_iter()
@@ -9624,10 +9698,12 @@ mod tests {
     use crate::search_route_ownership::{
         nowledge_mem_active_search_route_ownership_all_skein,
         nowledge_mem_active_search_route_ownership_readiness,
-        nowledge_mem_search_route_ownership_all_skein,
+        nowledge_mem_active_search_route_read_evidence_all_skein_ready,
+        nowledge_mem_active_search_route_readiness, nowledge_mem_search_route_ownership_all_skein,
         nowledge_mem_search_route_ownership_readiness,
         NowledgeMemActiveSearchRouteOwnershipReadinessReport,
-        NowledgeMemSearchRouteOwnershipPolicy, NowledgeMemSearchRouteOwnershipReadinessReport,
+        NowledgeMemActiveSearchRouteReadinessReport, NowledgeMemSearchRouteOwnershipPolicy,
+        NowledgeMemSearchRouteOwnershipReadinessReport,
     };
     use crate::workload_fixtures::{
         nowledge_graph_route_workload_fixture_report, NowledgeGraphRouteWorkloadFixtureOptions,
@@ -11772,7 +11848,8 @@ mod tests {
             readiness["readiness_by_area"]["search_route_ownership"]["blocker_codes"],
             serde_json::json!([
                 "search_route_ownership_missing",
-                "active_search_route_ownership_missing"
+                "active_search_route_ownership_missing",
+                "active_search_route_readiness_missing"
             ])
         );
         assert_eq!(
@@ -11850,7 +11927,8 @@ mod tests {
                 .blocker_codes,
             vec![
                 "search_route_ownership_missing".to_string(),
-                "active_search_route_ownership_missing".to_string()
+                "active_search_route_ownership_missing".to_string(),
+                "active_search_route_readiness_missing".to_string()
             ]
         );
         assert!(!report.readiness_by_area.workload_fixture.ready);
@@ -11888,6 +11966,10 @@ mod tests {
             .blocker_codes
             .iter()
             .any(|code| code == "active_search_route_ownership_not_ready"));
+        assert!(report
+            .blocker_codes
+            .iter()
+            .any(|code| code == "active_search_route_readiness_not_ready"));
         assert_eq!(json["ready"], false);
         assert_eq!(json["redaction"]["ready"], true);
         assert_eq!(json["redaction"]["query_text_copied"], false);
@@ -11919,6 +12001,49 @@ mod tests {
             json["active_search_route_ownership"]["blocker_codes"],
             serde_json::json!(["active_search_route_ownership_missing"])
         );
+        assert_eq!(
+            json["active_search_route_readiness"]["blocker_codes"],
+            serde_json::json!(["active_search_route_readiness_missing"])
+        );
+    }
+
+    #[test]
+    fn embedded_store_library_readiness_requires_active_search_route_read_evidence() {
+        let db = Database::new();
+        let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::ShadowReadOnly);
+        let store = NowledgeMemEmbeddedStore::new(graph, None);
+
+        let readiness = store.library_readiness_json(&NowledgeMemReadinessOptions {
+            search_route_ownership: Some(ready_search_route_ownership()),
+            active_search_route_ownership: Some(ready_active_search_route_ownership()),
+            ..NowledgeMemReadinessOptions::default()
+        });
+
+        assert_eq!(
+            readiness["search_route_ownership"]["ready"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            readiness["active_search_route_ownership"]["ready"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            readiness["active_search_route_readiness"]["blocker_codes"],
+            serde_json::json!(["active_search_route_readiness_missing"])
+        );
+        assert_eq!(
+            readiness["readiness_by_area"]["search_route_ownership"]["ready"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            readiness["readiness_by_area"]["search_route_ownership"]["blocker_codes"],
+            serde_json::json!(["active_search_route_readiness_missing"])
+        );
+        assert!(readiness["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "active_search_route_readiness_not_ready"));
     }
 
     #[test]
@@ -12185,9 +12310,9 @@ mod tests {
         );
         assert_eq!(dashboard.mode, NowledgeMemGraphMode::ShadowReadOnly);
         assert!(!dashboard.ready);
-        assert_eq!(dashboard.area_count, 11);
+        assert_eq!(dashboard.area_count, 12);
         assert_eq!(dashboard.ready_area_count, 3);
-        assert_eq!(dashboard.blocked_area_count, 8);
+        assert_eq!(dashboard.blocked_area_count, 9);
         assert_eq!(
             dashboard.storage_lifecycle_action,
             NowledgeMemStorageLifecycleActionKind::OpenReadOnlyInspect
@@ -12538,6 +12663,7 @@ mod tests {
             graph_route_readiness: Some(ready_route_readiness_summary()),
             search_route_ownership: Some(ready_search_route_ownership()),
             active_search_route_ownership: Some(ready_active_search_route_ownership()),
+            active_search_route_readiness: Some(ready_active_search_route_readiness()),
             replacement_readiness_by_query_family: Some(ready_query_family_replacement()),
             ..NowledgeMemReadinessOptions::default()
         });
@@ -12599,6 +12725,10 @@ mod tests {
             0
         );
         assert_eq!(
+            readiness["active_search_route_readiness"]["lancedb_handle_required_route_count"],
+            0
+        );
+        assert_eq!(
             readiness["graph_route_readiness"]["primary_ready_route_count"],
             REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len()
         );
@@ -12632,6 +12762,7 @@ mod tests {
             graph_route_readiness: Some(ready_route_readiness_summary()),
             search_route_ownership: Some(ready_search_route_ownership()),
             active_search_route_ownership: Some(ready_active_search_route_ownership()),
+            active_search_route_readiness: Some(ready_active_search_route_readiness()),
             replacement_readiness_by_query_family: Some(ready_query_family_replacement()),
             ..NowledgeMemReadinessOptions::default()
         });
@@ -15731,6 +15862,13 @@ mod tests {
     {
         nowledge_mem_active_search_route_ownership_readiness(
             &nowledge_mem_active_search_route_ownership_all_skein(),
+            NowledgeMemSearchRouteOwnershipPolicy::production_cutover(),
+        )
+    }
+
+    fn ready_active_search_route_readiness() -> NowledgeMemActiveSearchRouteReadinessReport {
+        nowledge_mem_active_search_route_readiness(
+            &nowledge_mem_active_search_route_read_evidence_all_skein_ready(),
             NowledgeMemSearchRouteOwnershipPolicy::production_cutover(),
         )
     }
