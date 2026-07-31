@@ -486,6 +486,24 @@ pub struct GraphLightningInitialImportCutoverCatchUpReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphLightningInitialImportSessionBundleReadiness {
+    pub ready: bool,
+    pub resumable: bool,
+    pub ready_for_cutover: bool,
+    pub source_bundle_ready: bool,
+    pub session_ready_for_graph_import: bool,
+    pub session_ready_for_cutover: bool,
+    pub durable_state_present: bool,
+    pub durable_state_source_matches_manifest: bool,
+    pub catch_up_required: bool,
+    pub catch_up_present: bool,
+    pub catch_up_ready: bool,
+    pub cutover_watermark: Option<u64>,
+    pub next_action: GraphLightningInitialImportResumeAction,
+    pub blocker_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalGraphSnapshotValidation {
     pub is_valid: bool,
     pub is_import_ready: bool,
@@ -1773,6 +1791,71 @@ pub fn graph_lightning_initial_import_cutover_catch_up_report(
         live_projection_checkpointed,
         live_projection_healthy,
         cutover_watermark,
+        blocker_codes: blocker_codes.into_iter().collect(),
+    }
+}
+
+pub fn graph_lightning_initial_import_session_bundle_readiness(
+    source_bundle: &GraphLightningInitialImportSourceBundleReadiness,
+    session: &GraphLightningInitialImportSessionReport,
+    catch_up: Option<&GraphLightningInitialImportCutoverCatchUpReport>,
+) -> GraphLightningInitialImportSessionBundleReadiness {
+    let catch_up_required = session.ready_for_cutover;
+    let catch_up_present = catch_up.is_some();
+    let catch_up_ready = catch_up.is_some_and(|report| report.ready);
+    let cutover_watermark = catch_up.and_then(|report| report.cutover_watermark);
+    let resumable = source_bundle.ready
+        && session.ready_for_graph_import
+        && session.durable_state_present
+        && session.durable_state_source_matches_manifest
+        && session.next_action.kind != GraphLightningInitialImportResumeActionKind::Quarantine;
+    let ready_for_cutover = resumable && session.ready_for_cutover && catch_up_ready;
+    let mut blocker_codes = BTreeSet::new();
+    if !source_bundle.ready {
+        blocker_codes.extend(source_bundle.blocker_codes.iter().cloned());
+        blocker_codes.insert("initial_import_session_bundle_source_not_ready".to_string());
+    }
+    if !session.ready_for_graph_import {
+        blocker_codes.insert("initial_import_session_bundle_graph_import_not_ready".to_string());
+    }
+    if !session.durable_state_present {
+        blocker_codes.insert("initial_import_session_bundle_durable_state_missing".to_string());
+    }
+    if !session.durable_state_source_matches_manifest {
+        blocker_codes.insert("initial_import_session_bundle_source_mismatch".to_string());
+    }
+    if session.next_action.kind == GraphLightningInitialImportResumeActionKind::Quarantine {
+        blocker_codes.insert("initial_import_session_bundle_quarantine_required".to_string());
+    }
+    blocker_codes.extend(session.blocker_codes.iter().cloned());
+    if catch_up_required {
+        if !catch_up_present {
+            blocker_codes
+                .insert("initial_import_session_bundle_cutover_catch_up_missing".to_string());
+        } else if !catch_up_ready {
+            blocker_codes
+                .insert("initial_import_session_bundle_cutover_catch_up_not_ready".to_string());
+        }
+    }
+    if let Some(report) = catch_up
+        && !report.ready
+    {
+        blocker_codes.extend(report.blocker_codes.iter().cloned());
+    }
+    GraphLightningInitialImportSessionBundleReadiness {
+        ready: blocker_codes.is_empty(),
+        resumable,
+        ready_for_cutover,
+        source_bundle_ready: source_bundle.ready,
+        session_ready_for_graph_import: session.ready_for_graph_import,
+        session_ready_for_cutover: session.ready_for_cutover,
+        durable_state_present: session.durable_state_present,
+        durable_state_source_matches_manifest: session.durable_state_source_matches_manifest,
+        catch_up_required,
+        catch_up_present,
+        catch_up_ready,
+        cutover_watermark,
+        next_action: session.next_action.clone(),
         blocker_codes: blocker_codes.into_iter().collect(),
     }
 }

@@ -9,6 +9,7 @@ use crate::{
     graph_lightning_initial_import_durable_state_report,
     graph_lightning_initial_import_search_projection_batch_report,
     graph_lightning_initial_import_search_projection_batch_report_with_document_identities,
+    graph_lightning_initial_import_session_bundle_readiness,
     graph_lightning_initial_import_session_report,
     graph_lightning_initial_import_source_bundle_readiness,
     parse_graph_lightning_graph_stream_export, CanonicalGraphSnapshotExport,
@@ -1379,6 +1380,126 @@ fn graph_lightning_initial_import_cutover_catch_up_accepts_matching_live_waterma
         Some(export.manifest.graph_commit_epoch)
     );
     assert!(report.blocker_codes.is_empty());
+}
+
+#[test]
+fn graph_lightning_initial_import_session_bundle_readiness_accepts_cutover_ready_session() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+    let checkpoint = GraphLightningInitialImportCheckpoint {
+        completed_batches: 1,
+        total_batches: 1,
+        ..test_graph_lightning_checkpoint(&export.manifest)
+    };
+    let delta = SearchProjectionDelta {
+        upserts: all_initial_import_projection_rows(),
+        deletes: Vec::new(),
+        max_operations: Some(6),
+        source_graph_commit_epoch: Some(export.manifest.graph_commit_epoch),
+    };
+    let source_bundle = graph_lightning_initial_import_source_bundle_readiness(
+        &export.manifest,
+        Some(&checkpoint),
+        &[delta],
+    );
+    let durable_state = graph_lightning_initial_import_durable_state_report(
+        &export.manifest,
+        &checkpoint,
+        &all_initial_import_document_identities(),
+    )
+    .state
+    .expect("expected persistable durable state");
+    let freshness = initial_import_projection_freshness(&export.manifest);
+    let session = graph_lightning_initial_import_session_report(
+        &export.graph_stream.encoded,
+        &export.manifest,
+        export.manifest.graph_commit_epoch,
+        Some(&freshness),
+        Some(&durable_state),
+    );
+    let catch_up = graph_lightning_initial_import_cutover_catch_up_report(
+        &session,
+        export.manifest.graph_commit_epoch,
+        Some(&freshness),
+    );
+
+    let readiness = graph_lightning_initial_import_session_bundle_readiness(
+        &source_bundle,
+        &session,
+        Some(&catch_up),
+    );
+
+    assert!(readiness.ready);
+    assert!(readiness.resumable);
+    assert!(readiness.ready_for_cutover);
+    assert!(readiness.source_bundle_ready);
+    assert!(readiness.session_ready_for_cutover);
+    assert!(readiness.catch_up_required);
+    assert!(readiness.catch_up_present);
+    assert!(readiness.catch_up_ready);
+    assert_eq!(
+        readiness.cutover_watermark,
+        Some(export.manifest.graph_commit_epoch)
+    );
+    assert_eq!(
+        readiness.next_action.kind,
+        GraphLightningInitialImportResumeActionKind::ReadyForCutover
+    );
+    assert!(readiness.blocker_codes.is_empty());
+}
+
+#[test]
+fn graph_lightning_initial_import_session_bundle_readiness_requires_catch_up_for_cutover() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+    let checkpoint = GraphLightningInitialImportCheckpoint {
+        completed_batches: 1,
+        total_batches: 1,
+        ..test_graph_lightning_checkpoint(&export.manifest)
+    };
+    let delta = SearchProjectionDelta {
+        upserts: all_initial_import_projection_rows(),
+        deletes: Vec::new(),
+        max_operations: Some(6),
+        source_graph_commit_epoch: Some(export.manifest.graph_commit_epoch),
+    };
+    let source_bundle = graph_lightning_initial_import_source_bundle_readiness(
+        &export.manifest,
+        Some(&checkpoint),
+        &[delta],
+    );
+    let durable_state = graph_lightning_initial_import_durable_state_report(
+        &export.manifest,
+        &checkpoint,
+        &all_initial_import_document_identities(),
+    )
+    .state
+    .expect("expected persistable durable state");
+    let freshness = initial_import_projection_freshness(&export.manifest);
+    let session = graph_lightning_initial_import_session_report(
+        &export.graph_stream.encoded,
+        &export.manifest,
+        export.manifest.graph_commit_epoch,
+        Some(&freshness),
+        Some(&durable_state),
+    );
+
+    let readiness =
+        graph_lightning_initial_import_session_bundle_readiness(&source_bundle, &session, None);
+
+    assert!(!readiness.ready);
+    assert!(readiness.resumable);
+    assert!(!readiness.ready_for_cutover);
+    assert!(readiness.catch_up_required);
+    assert!(!readiness.catch_up_present);
+    assert!(!readiness.catch_up_ready);
+    assert!(readiness
+        .blocker_codes
+        .contains(&"initial_import_session_bundle_cutover_catch_up_missing".to_string()));
 }
 
 #[test]

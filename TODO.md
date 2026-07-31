@@ -347,6 +347,10 @@ LanceDB for that path.
       controls, integration readiness, and final previous-wrapper preflight, so
       active initial import remains blocked by default but can pass read cutover
       only when the library-owned catch-up proof is ready.
+    - [x] Expose a typed initial-import session-bundle readiness helper that
+      combines source-bundle readiness, durable session state, resume action,
+      and optional live cutover catch-up proof so Mem startup can fail closed
+      without duplicating readiness logic.
   - Acceptance: restart resumes from the last durable checkpoint and read
     cutover remains blocked until imported state and live mutations reach the
     same durable watermark.

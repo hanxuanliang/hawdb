@@ -108,6 +108,7 @@ pub use canonical_snapshot::{
     graph_lightning_initial_import_readiness, graph_lightning_initial_import_resume_action,
     graph_lightning_initial_import_search_projection_batch_report,
     graph_lightning_initial_import_search_projection_batch_report_with_document_identities,
+    graph_lightning_initial_import_session_bundle_readiness,
     graph_lightning_initial_import_session_report,
     graph_lightning_initial_import_source_bundle_readiness,
     graph_lightning_initial_import_source_fingerprint, parse_graph_lightning_graph_stream_export,
@@ -128,9 +129,9 @@ pub use canonical_snapshot::{
     GraphLightningInitialImportPlan, GraphLightningInitialImportReadiness,
     GraphLightningInitialImportResumeAction, GraphLightningInitialImportResumeActionKind,
     GraphLightningInitialImportSearchProjectionBatchReport,
-    GraphLightningInitialImportSessionReport, GraphLightningInitialImportSourceBundleReadiness,
-    GraphLightningInitialImportSourceFingerprint, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
-    GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION,
+    GraphLightningInitialImportSessionBundleReadiness, GraphLightningInitialImportSessionReport,
+    GraphLightningInitialImportSourceBundleReadiness, GraphLightningInitialImportSourceFingerprint,
+    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION, GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION,
 };
 pub use plan_cache::{PlanCacheBypassReason, PlanCacheLookup, PlanCacheStats};
 pub use search_projection_catch_up::{
@@ -5987,6 +5988,15 @@ impl Database {
             self.store.commit_epoch(),
             live_projection_freshness,
         )
+    }
+
+    pub fn graph_lightning_initial_import_session_bundle_readiness(
+        &self,
+        source_bundle: &GraphLightningInitialImportSourceBundleReadiness,
+        session: &GraphLightningInitialImportSessionReport,
+        catch_up: Option<&GraphLightningInitialImportCutoverCatchUpReport>,
+    ) -> GraphLightningInitialImportSessionBundleReadiness {
+        graph_lightning_initial_import_session_bundle_readiness(source_bundle, session, catch_up)
     }
 
     pub fn graph_lightning_initial_import_plan(
