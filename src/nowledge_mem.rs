@@ -1254,6 +1254,10 @@ m.schema_version AS schema_version, \
 m.community_detection_computed_at AS community_detection_computed_at, \
 m.pagerank_computed_at AS pagerank_computed_at \
 LIMIT 1";
+pub const NOWLEDGE_MEM_GRAPH_AUGMENTATION_ENTITY_ASSIGNMENT_COUNT_QUERY: &str =
+    "MATCH (e:Entity) WHERE e.community_id >= 0 RETURN count(e) AS total";
+pub const NOWLEDGE_MEM_GRAPH_AUGMENTATION_MEMORY_ASSIGNMENT_COUNT_QUERY: &str =
+    "MATCH (m:Memory) WHERE m.community_id >= 0 RETURN count(m) AS total";
 pub const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ROUTE: &str = "/graph/augmentation/pagerank/plan";
 pub const NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_GRAPH_META_QUERY: &str = "\
 MATCH (m:GraphMeta {meta_id: 'main'}) \
@@ -3437,6 +3441,7 @@ pub struct NowledgeMemGraphAugmentationStateRouteReport {
     pub route_catalog_digest: String,
     pub row_count: usize,
     pub read_report: NowledgeMemReadReport,
+    pub assignment_read_reports: Vec<NowledgeMemReadReport>,
 }
 
 impl NowledgeMemGraphAugmentationStateRouteReport {
@@ -3449,6 +3454,7 @@ impl NowledgeMemGraphAugmentationStateRouteReport {
             "route_catalog_digest": self.route_catalog_digest,
             "row_count": self.row_count,
             "read_report": self.read_report.json(),
+            "assignment_read_reports": self.assignment_read_reports.iter().map(NowledgeMemReadReport::json).collect::<Vec<_>>(),
         })
     }
 }
@@ -3456,6 +3462,7 @@ impl NowledgeMemGraphAugmentationStateRouteReport {
 #[derive(Debug, Clone, PartialEq)]
 pub struct NowledgeMemGraphAugmentationStateOutput {
     pub state: Option<NowledgeMemGraphAugmentationStateRow>,
+    pub community_assignment_count: usize,
     pub report: NowledgeMemGraphAugmentationStateRouteReport,
 }
 
@@ -3463,6 +3470,7 @@ impl NowledgeMemGraphAugmentationStateOutput {
     pub fn json(&self) -> serde_json::Value {
         serde_json::json!({
             "state": self.state.as_ref().map(NowledgeMemGraphAugmentationStateRow::json),
+            "community_assignment_count": self.community_assignment_count,
             "report": self.report.json(),
         })
     }
@@ -5609,6 +5617,16 @@ impl NowledgeMemGraph {
             .first()
             .map(decode_graph_augmentation_state_row)
             .transpose()?;
+        let (entity_assignment_count, entity_assignment_report) = self
+            .read_graph_augmentation_assignment_count(
+                NOWLEDGE_MEM_GRAPH_AUGMENTATION_ENTITY_ASSIGNMENT_COUNT_QUERY,
+                options,
+            )?;
+        let (memory_assignment_count, memory_assignment_report) = self
+            .read_graph_augmentation_assignment_count(
+                NOWLEDGE_MEM_GRAPH_AUGMENTATION_MEMORY_ASSIGNMENT_COUNT_QUERY,
+                options,
+            )?;
         let report = NowledgeMemGraphAugmentationStateRouteReport {
             protocol: NOWLEDGE_MEM_GRAPH_AUGMENTATION_STATE_ROUTE_REPORT_PROTOCOL.to_string(),
             route: NOWLEDGE_MEM_GRAPH_AUGMENTATION_STATE_ROUTE.to_string(),
@@ -5617,8 +5635,33 @@ impl NowledgeMemGraph {
             route_catalog_digest: nowledge_mem_graph_read_route_catalog_digest(),
             row_count: usize::from(state.is_some()),
             read_report: read.report,
+            assignment_read_reports: vec![entity_assignment_report, memory_assignment_report],
         };
-        Ok(NowledgeMemGraphAugmentationStateOutput { state, report })
+        Ok(NowledgeMemGraphAugmentationStateOutput {
+            state,
+            community_assignment_count: entity_assignment_count + memory_assignment_count,
+            report,
+        })
+    }
+
+    fn read_graph_augmentation_assignment_count(
+        &self,
+        query: &str,
+        options: &NowledgeMemGraphAugmentationStateOptions,
+    ) -> Result<(usize, NowledgeMemReadReport)> {
+        let read = self.read_query_with_params(
+            query,
+            &BTreeMap::new(),
+            &graph_augmentation_state_read_options(options),
+        )?;
+        let count = read
+            .output
+            .rows
+            .first()
+            .map(|row| required_usize_field(row, "total"))
+            .transpose()?
+            .unwrap_or(0);
+        Ok((count, read.report))
     }
 
     pub fn read_graph_pagerank_plan(
@@ -10736,6 +10779,7 @@ mod tests {
         assert_eq!(state.pagerank_algorithm.as_deref(), Some("pagerank"));
         assert_eq!(state.community_count, Some(Value::Int(12)));
         assert_eq!(state.pagerank_iterations, Some(Value::Int(20)));
+        assert_eq!(output.community_assignment_count, 2);
         assert_eq!(
             output.report.protocol,
             NOWLEDGE_MEM_GRAPH_AUGMENTATION_STATE_ROUTE_REPORT_PROTOCOL
@@ -10747,6 +10791,12 @@ mod tests {
         assert_eq!(output.report.row_count, 1);
         assert_eq!(output.report.read_report.row_count, 1);
         assert!(output.report.read_report.row_limit_enforced_before_output);
+        assert_eq!(output.report.assignment_read_reports.len(), 2);
+        assert!(output
+            .report
+            .assignment_read_reports
+            .iter()
+            .all(|report| report.row_limit_enforced_before_output));
         assert_eq!(output.json()["report"]["read_engine"], "skein");
         assert_eq!(output.json()["state"]["pagerank_applied"], true);
     }
@@ -16577,6 +16627,12 @@ mod tests {
     fn seed_graph_augmentation_state(graph: &mut NowledgeMemGraph) {
         graph
             .query("CREATE (:GraphMeta {meta_id: 'main', community_detection_applied: true, pagerank_applied: true, community_algorithm: 'louvain', community_resolution: 1.0, community_count: 12, pagerank_algorithm: 'pagerank', pagerank_damping: 0.85, pagerank_iterations: 20, last_augmentation_at: 1000, schema_version: 2, community_detection_computed_at: 900, pagerank_computed_at: 950})")
+            .unwrap();
+        graph
+            .query("CREATE (:Entity {id: 'augmentation-entity', community_id: 12})")
+            .unwrap();
+        graph
+            .query("CREATE (:Memory {id: 'augmentation-memory', community_id: 12})")
             .unwrap();
     }
 
