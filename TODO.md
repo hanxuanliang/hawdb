@@ -234,6 +234,12 @@ LanceDB for that path.
           summary, library readiness, and final preflight gates so missing
           atomic Source-ingest projection evidence blocks cutover instead of
           being hidden behind generic workload readiness.
+        - [x] Expose a typed Source mutation family dual-write readiness
+          contract that covers Source patch/delete, lifecycle, graph delete,
+          ingest/create, content refresh/reparse, indexed transition, revision
+          edges, and search-projection effects with frozen payload,
+          independent legacy/Skein acknowledgements, independent watermarks,
+          replay idempotency, and projection-payload requirements.
         - Mem still needs to freeze and replay the full Source ingest/create,
           refresh/reparse, indexed transition, revision-edge, and
           search-projection payload through its durable dual-write coordinator
