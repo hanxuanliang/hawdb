@@ -386,9 +386,13 @@ LanceDB for that path.
   - [ ] Migrate `/graph/community-members/{community_id}` only after adding
     explicit pagination or a bounded compatibility contract. The legacy route
     is unbounded, so Skein must not silently truncate its response.
-  - [ ] Add pagination or an explicit bounded compatibility contract for
-    `/graph/orphans`; Skein must not turn an embedded read into an unbounded
-    materialization just to preserve the legacy response.
+  - [x] Add keyset pagination for `/graph/orphans` in the embedded contract.
+    Each page reads at most `limit + 1` rows to derive `has_more` and a stable
+    `next_cursor`; insufficient row budget fails closed rather than reporting
+    a truncated page as complete.
+  - [ ] Migrate `/graph/orphans` only after the REST response accepts explicit
+    `limit` and `cursor` parameters. The legacy route is unbounded, so Skein
+    must not silently truncate its response.
   - Move REST, MCP, read-batch, export, and background-maintenance reads from
     direct `KuzuClient` calls to parameterized Cypher through the embedded query
     runtime.

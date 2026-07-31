@@ -1313,6 +1313,23 @@ e.confidence AS confidence, \
 e.pagerank_score AS pagerank_score \
 ORDER BY e.id ASC \
 LIMIT $limit";
+pub const NOWLEDGE_MEM_GRAPH_ORPHAN_ENTITIES_AFTER_QUERY: &str = "\
+MATCH (e:Entity) \
+WHERE NOT (e)<-[:MENTIONS]-(:Memory) \
+AND NOT (e)-[:RELATES_TO]-() \
+AND NOT (e)-[:HAS_LABEL]-() \
+AND e.id > $after_entity_id \
+RETURN e.id AS entity_id, \
+id(e) AS node_id, \
+COALESCE(e.name, e.id) AS label, \
+e.name AS name, \
+e.entity_type AS entity_type, \
+e.description AS description, \
+e.community_id AS community_id, \
+e.confidence AS confidence, \
+e.pagerank_score AS pagerank_score \
+ORDER BY e.id ASC \
+LIMIT $limit";
 pub const NOWLEDGE_MEM_SEARCH_ROUTE: &str = "/graph/search";
 pub const REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES: &[&str] = &[
     "/communities",
@@ -3628,6 +3645,7 @@ impl NowledgeMemGraphPageRankPlanOutput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NowledgeMemGraphOrphansOptions {
     pub limit: usize,
+    pub after_entity_id: Option<String>,
     pub read_options: NowledgeMemReadOptions,
 }
 
@@ -3635,6 +3653,7 @@ impl Default for NowledgeMemGraphOrphansOptions {
     fn default() -> Self {
         Self {
             limit: 64,
+            after_entity_id: None,
             read_options: NowledgeMemReadOptions::default(),
         }
     }
@@ -3697,6 +3716,8 @@ impl NowledgeMemGraphOrphansRouteReport {
 #[derive(Debug, Clone, PartialEq)]
 pub struct NowledgeMemGraphOrphansOutput {
     pub rows: Vec<NowledgeMemGraphOrphanEntityRow>,
+    pub has_more: bool,
+    pub next_cursor: Option<String>,
     pub report: NowledgeMemGraphOrphansRouteReport,
 }
 
@@ -3704,6 +3725,8 @@ impl NowledgeMemGraphOrphansOutput {
     pub fn json(&self) -> serde_json::Value {
         serde_json::json!({
             "rows": self.rows.iter().map(NowledgeMemGraphOrphanEntityRow::json).collect::<Vec<_>>(),
+            "has_more": self.has_more,
+            "next_cursor": self.next_cursor,
             "report": self.report.json(),
         })
     }
@@ -5934,26 +5957,48 @@ impl NowledgeMemGraph {
         &self,
         options: &NowledgeMemGraphOrphansOptions,
     ) -> Result<NowledgeMemGraphOrphansOutput> {
-        let limit = i64::try_from(options.limit).map_err(|_| {
+        let scan_limit = graph_orphans_scan_limit(options)?;
+        let limit = i64::try_from(scan_limit).map_err(|_| {
             SkeinError::Semantic("graph orphans limit exceeds supported range".to_string())
         })?;
-        if limit <= 0 {
-            return Err(SkeinError::Semantic(
-                "graph orphans limit must be greater than zero".to_string(),
-            ));
-        }
-        let parameters = BTreeMap::from([("limit".to_string(), Value::Int(limit))]);
+        let mut parameters = BTreeMap::from([("limit".to_string(), Value::Int(limit))]);
+        let query = match options.after_entity_id.as_ref() {
+            Some(after_entity_id) => {
+                parameters.insert(
+                    "after_entity_id".to_string(),
+                    Value::String(after_entity_id.clone()),
+                );
+                NOWLEDGE_MEM_GRAPH_ORPHAN_ENTITIES_AFTER_QUERY
+            }
+            None => NOWLEDGE_MEM_GRAPH_ORPHAN_ENTITIES_QUERY,
+        };
         let read = self.read_query_with_params(
-            NOWLEDGE_MEM_GRAPH_ORPHAN_ENTITIES_QUERY,
+            query,
             &parameters,
-            &graph_orphans_read_options(options),
+            &graph_orphans_read_options(options, scan_limit),
         )?;
-        let rows = read
+        let mut rows = read
             .output
             .rows
             .iter()
             .map(decode_graph_orphan_entity_row)
             .collect::<Result<Vec<_>>>()?;
+        let has_more = rows.len() > options.limit;
+        if has_more {
+            rows.pop();
+        }
+        let next_cursor = if has_more {
+            rows.last()
+                .and_then(|row| row.entity_id.clone())
+                .ok_or_else(|| {
+                    SkeinError::Semantic(
+                        "graph orphan pagination requires a stable entity id".to_string(),
+                    )
+                })
+                .map(Some)?
+        } else {
+            None
+        };
         let report = NowledgeMemGraphOrphansRouteReport {
             protocol: NOWLEDGE_MEM_GRAPH_ORPHANS_ROUTE_REPORT_PROTOCOL.to_string(),
             route: NOWLEDGE_MEM_GRAPH_ORPHANS_ROUTE.to_string(),
@@ -5963,7 +6008,12 @@ impl NowledgeMemGraph {
             row_count: rows.len(),
             read_report: read.report,
         };
-        Ok(NowledgeMemGraphOrphansOutput { rows, report })
+        Ok(NowledgeMemGraphOrphansOutput {
+            rows,
+            has_more,
+            next_cursor,
+            report,
+        })
     }
 }
 
@@ -6075,11 +6125,33 @@ fn graph_pagerank_plan_read_options(
     read_options
 }
 
-fn graph_orphans_read_options(options: &NowledgeMemGraphOrphansOptions) -> NowledgeMemReadOptions {
+fn graph_orphans_scan_limit(options: &NowledgeMemGraphOrphansOptions) -> Result<usize> {
+    if options.limit == 0 {
+        return Err(SkeinError::Semantic(
+            "graph orphans limit must be greater than zero".to_string(),
+        ));
+    }
+    let scan_limit = options.limit.checked_add(1).ok_or_else(|| {
+        SkeinError::Semantic("graph orphans limit exceeds supported range".to_string())
+    })?;
+    if let Some(max_rows) = options.read_options.max_rows {
+        if max_rows < scan_limit {
+            return Err(SkeinError::Semantic(format!(
+                "graph orphan pagination requires max_rows of at least {scan_limit}"
+            )));
+        }
+    }
+    Ok(scan_limit)
+}
+
+fn graph_orphans_read_options(
+    options: &NowledgeMemGraphOrphansOptions,
+    scan_limit: usize,
+) -> NowledgeMemReadOptions {
     let mut read_options = options.read_options.clone();
     read_options.max_rows = Some(match read_options.max_rows {
-        Some(max_rows) => max_rows.min(options.limit),
-        None => options.limit,
+        Some(max_rows) => max_rows.min(scan_limit),
+        None => scan_limit,
     });
     read_options
 }
@@ -11092,24 +11164,27 @@ mod tests {
         let output = graph
             .read_graph_orphans(&NowledgeMemGraphOrphansOptions {
                 limit: 10,
+                after_entity_id: None,
                 read_options: NowledgeMemReadOptions::default(),
             })
             .unwrap();
 
-        assert_eq!(output.rows.len(), 1);
-        assert_eq!(output.rows[0].entity_id.as_deref(), Some("orphan-entity"));
-        assert_eq!(output.rows[0].label.as_deref(), Some("Orphan Entity"));
+        assert_eq!(output.rows.len(), 3);
+        assert_eq!(output.rows[0].entity_id.as_deref(), Some("orphan-entity-a"));
+        assert_eq!(output.rows[0].label.as_deref(), Some("Orphan Entity A"));
         assert_eq!(output.rows[0].entity_type.as_deref(), Some("concept"));
+        assert!(!output.has_more);
+        assert!(output.next_cursor.is_none());
         assert_eq!(
             output.report.protocol,
             NOWLEDGE_MEM_GRAPH_ORPHANS_ROUTE_REPORT_PROTOCOL
         );
         assert_eq!(output.report.route, NOWLEDGE_MEM_GRAPH_ORPHANS_ROUTE);
-        assert_eq!(output.report.row_count, 1);
-        assert_eq!(output.report.read_report.row_count, 1);
+        assert_eq!(output.report.row_count, 3);
+        assert_eq!(output.report.read_report.row_count, 3);
         assert!(output.report.read_report.row_limit_enforced_before_output);
         assert_eq!(output.json()["report"]["read_engine"], "skein");
-        assert_eq!(output.json()["rows"][0]["entity_id"], "orphan-entity");
+        assert_eq!(output.json()["rows"][0]["entity_id"], "orphan-entity-a");
     }
 
     #[test]
@@ -11123,13 +11198,77 @@ mod tests {
         let output = handle
             .read_graph_orphans(&NowledgeMemGraphOrphansOptions {
                 limit: 1,
+                after_entity_id: None,
                 read_options: NowledgeMemReadOptions::default(),
             })
             .unwrap();
 
         assert_eq!(output.rows.len(), 1);
-        assert_eq!(output.rows[0].entity_id.as_deref(), Some("orphan-entity"));
+        assert_eq!(output.rows[0].entity_id.as_deref(), Some("orphan-entity-a"));
+        assert!(output.has_more);
+        assert_eq!(output.next_cursor.as_deref(), Some("orphan-entity-a"));
         assert_eq!(output.report.route, NOWLEDGE_MEM_GRAPH_ORPHANS_ROUTE);
+    }
+
+    #[test]
+    fn graph_orphans_route_uses_keyset_pagination_with_a_scan_sentinel() {
+        let db = Database::new();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        seed_graph_orphan_entities(&mut graph);
+
+        let first_page = graph
+            .read_graph_orphans(&NowledgeMemGraphOrphansOptions {
+                limit: 2,
+                after_entity_id: None,
+                read_options: NowledgeMemReadOptions::default(),
+            })
+            .unwrap();
+
+        assert_eq!(first_page.rows.len(), 2);
+        assert_eq!(
+            first_page.rows[1].entity_id.as_deref(),
+            Some("orphan-entity-b")
+        );
+        assert!(first_page.has_more);
+        assert_eq!(first_page.next_cursor.as_deref(), Some("orphan-entity-b"));
+        assert_eq!(first_page.report.read_report.row_count, 3);
+
+        let second_page = graph
+            .read_graph_orphans(&NowledgeMemGraphOrphansOptions {
+                limit: 2,
+                after_entity_id: first_page.next_cursor,
+                read_options: NowledgeMemReadOptions::default(),
+            })
+            .unwrap();
+
+        assert_eq!(second_page.rows.len(), 1);
+        assert_eq!(
+            second_page.rows[0].entity_id.as_deref(),
+            Some("orphan-entity-c")
+        );
+        assert!(!second_page.has_more);
+        assert!(second_page.next_cursor.is_none());
+    }
+
+    #[test]
+    fn graph_orphans_route_rejects_insufficient_scan_budget_for_pagination() {
+        let db = Database::new();
+        let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+
+        let error = graph
+            .read_graph_orphans(&NowledgeMemGraphOrphansOptions {
+                limit: 2,
+                after_entity_id: None,
+                read_options: NowledgeMemReadOptions {
+                    max_rows: Some(2),
+                    ..NowledgeMemReadOptions::default()
+                },
+            })
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("graph orphan pagination requires max_rows of at least 3"));
     }
 
     #[test]
@@ -16872,7 +17011,13 @@ mod tests {
 
     fn seed_graph_orphan_entities(graph: &mut NowledgeMemGraph) {
         graph
-            .query("CREATE (:Entity {id: 'orphan-entity', name: 'Orphan Entity', entity_type: 'concept', description: 'orphan'})")
+            .query("CREATE (:Entity {id: 'orphan-entity-a', name: 'Orphan Entity A', entity_type: 'concept', description: 'orphan'})")
+            .unwrap();
+        graph
+            .query("CREATE (:Entity {id: 'orphan-entity-b', name: 'Orphan Entity B', entity_type: 'concept', description: 'orphan'})")
+            .unwrap();
+        graph
+            .query("CREATE (:Entity {id: 'orphan-entity-c', name: 'Orphan Entity C', entity_type: 'concept', description: 'orphan'})")
             .unwrap();
         graph
             .query("CREATE (:Entity {id: 'mentioned-entity', name: 'Mentioned Entity', entity_type: 'concept'})")
