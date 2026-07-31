@@ -10,8 +10,9 @@ use crate::{
     NOWLEDGE_MEM_ROUTE_OWNERSHIP_PROTOCOL, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
     NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE, NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE,
     NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL, NOWLEDGE_MEM_SEARCH_ROUTE,
+    NOWLEDGE_MEM_SOURCE_MUTATION_DUAL_WRITE_READINESS_PROTOCOL,
     NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
-    REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
+    REQUIRED_NOWLEDGE_MEM_SOURCE_MUTATION_FAMILIES, REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -356,6 +357,13 @@ pub struct GraphReplacementCutoverReadiness {
     pub dual_engine_evidence_present: bool,
     pub dual_engine_evidence_ready: bool,
     pub dual_engine_evidence_consistent: bool,
+    pub source_mutation_protocol_matches: bool,
+    pub source_mutation_ready: bool,
+    pub source_mutation_required_family_count_matches: bool,
+    pub source_mutation_evidence_family_count_matches: bool,
+    pub source_mutation_ready_family_count_matches: bool,
+    pub source_mutation_missing_required_families_empty: bool,
+    pub source_mutation_blocker_codes_empty: bool,
     pub blocker_codes: Vec<String>,
 }
 
@@ -780,6 +788,13 @@ impl GraphReplacementCutoverReadiness {
             && self.dual_engine_evidence_present
             && self.dual_engine_evidence_ready
             && self.dual_engine_evidence_consistent
+            && self.source_mutation_protocol_matches
+            && self.source_mutation_ready
+            && self.source_mutation_required_family_count_matches
+            && self.source_mutation_evidence_family_count_matches
+            && self.source_mutation_ready_family_count_matches
+            && self.source_mutation_missing_required_families_empty
+            && self.source_mutation_blocker_codes_empty
     }
 }
 
@@ -3072,6 +3087,72 @@ pub fn graph_replacement_cutover_readiness(
             bundle,
             &["replacement_summary", "dual_engine_evidence", "consistent"],
         ) == Some(true),
+        source_mutation_protocol_matches: str_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "source_mutation_dual_write_readiness",
+                "protocol",
+            ],
+        ) == Some(
+            NOWLEDGE_MEM_SOURCE_MUTATION_DUAL_WRITE_READINESS_PROTOCOL,
+        ),
+        source_mutation_ready: bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "source_mutation_dual_write_readiness",
+                "ready",
+            ],
+        ) == Some(true),
+        source_mutation_required_family_count_matches: u64_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "source_mutation_dual_write_readiness",
+                "required_family_count",
+            ],
+        ) == Some(
+            REQUIRED_NOWLEDGE_MEM_SOURCE_MUTATION_FAMILIES.len() as u64,
+        ),
+        source_mutation_evidence_family_count_matches: u64_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "source_mutation_dual_write_readiness",
+                "evidence_family_count",
+            ],
+        ) == Some(
+            REQUIRED_NOWLEDGE_MEM_SOURCE_MUTATION_FAMILIES.len() as u64,
+        ),
+        source_mutation_ready_family_count_matches: u64_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "source_mutation_dual_write_readiness",
+                "ready_family_count",
+            ],
+        ) == Some(
+            REQUIRED_NOWLEDGE_MEM_SOURCE_MUTATION_FAMILIES.len() as u64,
+        ),
+        source_mutation_missing_required_families_empty: string_array_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "source_mutation_dual_write_readiness",
+                "missing_required_families",
+            ],
+        )
+        .is_empty(),
+        source_mutation_blocker_codes_empty: string_array_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "source_mutation_dual_write_readiness",
+                "blocker_codes",
+            ],
+        )
+        .is_empty(),
         blocker_codes: blocker_codes(
             bundle,
             &[
@@ -3080,6 +3161,11 @@ pub fn graph_replacement_cutover_readiness(
                 &[
                     "replacement_summary",
                     "dual_engine_evidence",
+                    "blocker_codes",
+                ][..],
+                &[
+                    "replacement_summary",
+                    "source_mutation_dual_write_readiness",
                     "blocker_codes",
                 ][..],
             ],
@@ -3110,6 +3196,34 @@ fn graph_replacement_cutover_conditions(
         (
             "replacement_summary.dual_engine_evidence.consistent",
             readiness.dual_engine_evidence_consistent,
+        ),
+        (
+            "replacement_summary.source_mutation_dual_write_readiness.protocol",
+            readiness.source_mutation_protocol_matches,
+        ),
+        (
+            "replacement_summary.source_mutation_dual_write_readiness.ready",
+            readiness.source_mutation_ready,
+        ),
+        (
+            "replacement_summary.source_mutation_dual_write_readiness.required_family_count",
+            readiness.source_mutation_required_family_count_matches,
+        ),
+        (
+            "replacement_summary.source_mutation_dual_write_readiness.evidence_family_count",
+            readiness.source_mutation_evidence_family_count_matches,
+        ),
+        (
+            "replacement_summary.source_mutation_dual_write_readiness.ready_family_count",
+            readiness.source_mutation_ready_family_count_matches,
+        ),
+        (
+            "replacement_summary.source_mutation_dual_write_readiness.missing_required_families",
+            readiness.source_mutation_missing_required_families_empty,
+        ),
+        (
+            "replacement_summary.source_mutation_dual_write_readiness.blocker_codes",
+            readiness.source_mutation_blocker_codes_empty,
         ),
     ]
 }
@@ -6454,8 +6568,9 @@ mod tests {
         NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_EVIDENCE_SOURCE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_PRIMARY_ENGINE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_SHADOW_ENGINE,
+        NOWLEDGE_MEM_SOURCE_MUTATION_DUAL_WRITE_READINESS_PROTOCOL,
         NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES,
-        REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+        REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES, REQUIRED_NOWLEDGE_MEM_SOURCE_MUTATION_FAMILIES,
     };
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -6960,6 +7075,70 @@ mod tests {
             .unwrap()
             .iter()
             .any(|action| action["action"] == "run_previous_wrapper_preflight"));
+    }
+
+    #[test]
+    fn graph_replacement_requires_source_mutation_dual_write_readiness() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary"]["production_cutover_ready"] = serde_json::json!(false);
+        bundle["replacement_summary"]["source_mutation_dual_write_readiness"]["ready"] =
+            serde_json::json!(false);
+        bundle["replacement_summary"]["source_mutation_dual_write_readiness"]
+            ["ready_family_count"] =
+            serde_json::json!(REQUIRED_NOWLEDGE_MEM_SOURCE_MUTATION_FAMILIES.len() - 1);
+        bundle["replacement_summary"]["source_mutation_dual_write_readiness"]
+            ["missing_required_families"] = serde_json::json!(["source_ingest_create"]);
+        bundle["replacement_summary"]["source_mutation_dual_write_readiness"]["blocker_codes"] =
+            serde_json::json!(["source_mutation_dual_write_missing_required_families"]);
+        bundle["replacement_summary"]["blocking_categories"] =
+            serde_json::json!(["source_mutation_dual_write_readiness"]);
+        bundle["replacement_summary"]["missing_evidence"] =
+            serde_json::json!(["source_mutation_dual_write_readiness_ready"]);
+
+        let typed = super::graph_replacement_cutover_readiness(&bundle);
+        assert!(!typed.evidence_ready());
+        assert!(!typed.production_cutover_ready);
+        assert!(!typed.source_mutation_ready);
+        assert!(!typed.source_mutation_ready_family_count_matches);
+        assert!(!typed.source_mutation_missing_required_families_empty);
+        assert_eq!(
+            typed.blocker_codes,
+            vec![
+                "source_mutation_dual_write_missing_required_families".to_string(),
+                "source_mutation_dual_write_readiness".to_string(),
+                "source_mutation_dual_write_readiness_ready".to_string()
+            ]
+        );
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+        let check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "graph_replacement_evidence")
+            .unwrap();
+        assert_eq!(check["ready"], false);
+        assert!(
+            check["failed_evidence_fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field
+                    == "replacement_summary.source_mutation_dual_write_readiness.ready")
+        );
+        assert!(check["failed_evidence_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field
+                == "replacement_summary.source_mutation_dual_write_readiness.ready_family_count"));
+
+        let final_report = super::nowledge_mem_final_cutover_preflight(&bundle);
+        assert!(!final_report.production_cutover_ready);
+        assert!(!final_report.graph_replacement_ready);
+        assert!(final_report
+            .blocking_categories
+            .contains(&"graph_replacement".to_string()));
     }
 
     #[test]
@@ -11111,6 +11290,8 @@ mod tests {
                 }
             }
         });
+        bundle["replacement_summary"]["source_mutation_dual_write_readiness"] =
+            ready_source_mutation_dual_write_readiness();
         bundle["replacement_summary"]["cutover_evidence"]
             ["storage_recovery_replay_boundary_consistent"] = serde_json::json!(true);
         bundle["replacement_summary"]["replacement_boundaries"] = serde_json::json!({
@@ -11689,6 +11870,20 @@ mod tests {
             "route_coverage_ready": true,
             "route_coverage_blocker_codes": [],
             "probe_details_ready": true,
+            "blocker_codes": []
+        })
+    }
+
+    fn ready_source_mutation_dual_write_readiness() -> serde_json::Value {
+        serde_json::json!({
+            "protocol": NOWLEDGE_MEM_SOURCE_MUTATION_DUAL_WRITE_READINESS_PROTOCOL,
+            "ready": true,
+            "required_family_count": REQUIRED_NOWLEDGE_MEM_SOURCE_MUTATION_FAMILIES.len(),
+            "evidence_family_count": REQUIRED_NOWLEDGE_MEM_SOURCE_MUTATION_FAMILIES.len(),
+            "ready_family_count": REQUIRED_NOWLEDGE_MEM_SOURCE_MUTATION_FAMILIES.len(),
+            "missing_required_families": [],
+            "unknown_families": [],
+            "duplicate_families": [],
             "blocker_codes": []
         })
     }

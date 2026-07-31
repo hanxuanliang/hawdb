@@ -240,6 +240,10 @@ LanceDB for that path.
           edges, and search-projection effects with frozen payload,
           independent legacy/Skein acknowledgements, independent watermarks,
           replay idempotency, and projection-payload requirements.
+        - [x] Consume Source mutation dual-write readiness in replacement
+          summary, integration readiness, and final cutover preflight so
+          missing composite Source mutation evidence blocks graph replacement
+          cutover explicitly.
         - Mem still needs to freeze and replay the full Source ingest/create,
           refresh/reparse, indexed transition, revision-edge, and
           search-projection payload through its durable dual-write coordinator

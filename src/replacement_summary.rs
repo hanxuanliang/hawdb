@@ -9,9 +9,11 @@ use crate::{
     NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE,
     NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE,
     NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
-    NOWLEDGE_MEM_SEARCH_ROUTE_OWNERSHIP_PROTOCOL, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
-    REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
-    REQUIRED_NOWLEDGE_MEM_SEARCH_ROUTES, REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
+    NOWLEDGE_MEM_SEARCH_ROUTE_OWNERSHIP_PROTOCOL,
+    NOWLEDGE_MEM_SOURCE_MUTATION_DUAL_WRITE_READINESS_PROTOCOL,
+    NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES,
+    REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES, REQUIRED_NOWLEDGE_MEM_SEARCH_ROUTES,
+    REQUIRED_NOWLEDGE_MEM_SOURCE_MUTATION_FAMILIES, REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -125,6 +127,8 @@ pub fn nowledge_replacement_summary_json_with_options(
     let query_runtime_preflight_ready = query_runtime_preflight.ready;
     let workload_fixture_evidence = workload_fixture_evidence_summary(bundle);
     let workload_fixture_evidence_ready = workload_fixture_evidence.ready;
+    let source_mutation_readiness = source_mutation_dual_write_readiness_summary(bundle);
+    let source_mutation_readiness_ready = source_mutation_readiness.ready;
     let storage_recovery_evidence_ready =
         !storage_recovery_required(bundle) || storage_recovery_raw_evidence_ready(bundle);
     let background_graph_delta_evidence_missing =
@@ -150,6 +154,7 @@ pub fn nowledge_replacement_summary_json_with_options(
         && graph_route_readiness_ready
         && query_runtime_preflight_ready
         && workload_fixture_evidence_ready
+        && source_mutation_readiness_ready
         && storage_recovery_evidence_ready
         && !background_graph_delta_evidence_missing
         && family_evidence_ready
@@ -184,6 +189,7 @@ pub fn nowledge_replacement_summary_json_with_options(
             graph_route_readiness_ready,
             query_runtime_preflight_ready,
             workload_fixture_evidence_ready,
+            source_mutation_readiness_ready,
             background_graph_delta_evidence_missing,
             family_evidence_ready,
         },
@@ -218,6 +224,7 @@ pub fn nowledge_replacement_summary_json_with_options(
             graph_route_readiness_ready,
             query_runtime_preflight_ready,
             workload_fixture_evidence_ready,
+            source_mutation_readiness_ready,
             background_graph_delta_evidence_missing,
             family_evidence_ready,
             production_cutover_ready,
@@ -428,6 +435,7 @@ pub fn nowledge_replacement_summary_json_with_options(
     summary["search_route_ownership"] = search_route_ownership.json();
     summary["active_search_route_ownership"] = active_search_route_ownership.json();
     summary["active_search_route_readiness"] = active_search_route_readiness.json();
+    summary["source_mutation_dual_write_readiness"] = source_mutation_readiness.json();
     summary["cutover_evidence"]["storage_recovery_replay_boundary_consistent"] =
         json_get_bool_path(
             bundle,
@@ -673,6 +681,7 @@ struct ReplacementReadinessInputs<'a> {
     graph_route_readiness_ready: bool,
     query_runtime_preflight_ready: bool,
     workload_fixture_evidence_ready: bool,
+    source_mutation_readiness_ready: bool,
     background_graph_delta_evidence_missing: bool,
     family_evidence_ready: bool,
 }
@@ -700,6 +709,7 @@ struct NextActionInputs<'a> {
     graph_route_readiness_ready: bool,
     query_runtime_preflight_ready: bool,
     workload_fixture_evidence_ready: bool,
+    source_mutation_readiness_ready: bool,
     background_graph_delta_evidence_missing: bool,
     family_evidence_ready: bool,
     production_cutover_ready: bool,
@@ -1037,6 +1047,36 @@ struct WorkloadFixtureEvidenceSummary {
     failed_source_projection_probe_count: Option<u64>,
     source_projection_reports: serde_json::Value,
     blocker_codes: serde_json::Value,
+}
+
+struct SourceMutationDualWriteReadinessSummary {
+    protocol: Option<String>,
+    present: bool,
+    ready: bool,
+    required_family_count: Option<u64>,
+    evidence_family_count: Option<u64>,
+    ready_family_count: Option<u64>,
+    missing_required_families: Vec<String>,
+    unknown_families: Vec<String>,
+    duplicate_families: Vec<String>,
+    blocker_codes: serde_json::Value,
+}
+
+impl SourceMutationDualWriteReadinessSummary {
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": self.protocol,
+            "present": self.present,
+            "ready": self.ready,
+            "required_family_count": self.required_family_count,
+            "evidence_family_count": self.evidence_family_count,
+            "ready_family_count": self.ready_family_count,
+            "missing_required_families": self.missing_required_families,
+            "unknown_families": self.unknown_families,
+            "duplicate_families": self.duplicate_families,
+            "blocker_codes": self.blocker_codes,
+        })
+    }
 }
 
 fn shadow_evidence_summary(bundle: &serde_json::Value) -> ShadowEvidenceSummary<'_> {
@@ -2670,6 +2710,55 @@ fn workload_fixture_evidence_summary(bundle: &serde_json::Value) -> WorkloadFixt
     }
 }
 
+fn source_mutation_dual_write_readiness_summary(
+    bundle: &serde_json::Value,
+) -> SourceMutationDualWriteReadinessSummary {
+    let path = if json_get_path(bundle, &["source_mutation_dual_write_readiness"]).is_some() {
+        &["source_mutation_dual_write_readiness"][..]
+    } else {
+        &["cutover_evidence", "source_mutation_dual_write_readiness"][..]
+    };
+    let present = json_get_path(bundle, path).is_some();
+    let protocol = json_get_str_path_from_dynamic(bundle, path, "protocol").map(str::to_string);
+    let required_family_count =
+        json_get_u64_path_from_dynamic(bundle, path, "required_family_count");
+    let evidence_family_count =
+        json_get_u64_path_from_dynamic(bundle, path, "evidence_family_count");
+    let ready_family_count = json_get_u64_path_from_dynamic(bundle, path, "ready_family_count");
+    let missing_required_families =
+        json_get_string_array_path_from_dynamic(bundle, path, "missing_required_families");
+    let unknown_families =
+        json_get_string_array_path_from_dynamic(bundle, path, "unknown_families");
+    let duplicate_families =
+        json_get_string_array_path_from_dynamic(bundle, path, "duplicate_families");
+    let blocker_codes = json_get_array_path_from_dynamic(bundle, path, "blocker_codes");
+    let required_count = REQUIRED_NOWLEDGE_MEM_SOURCE_MUTATION_FAMILIES.len() as u64;
+    let ready = present
+        && protocol.as_deref() == Some(NOWLEDGE_MEM_SOURCE_MUTATION_DUAL_WRITE_READINESS_PROTOCOL)
+        && json_get_bool_path_from_dynamic(bundle, path, "ready") == Some(true)
+        && required_family_count == Some(required_count)
+        && evidence_family_count == Some(required_count)
+        && ready_family_count == Some(required_count)
+        && missing_required_families.is_empty()
+        && unknown_families.is_empty()
+        && duplicate_families.is_empty()
+        && blocker_codes
+            .as_array()
+            .is_some_and(|blockers| blockers.is_empty());
+    SourceMutationDualWriteReadinessSummary {
+        protocol,
+        present,
+        ready,
+        required_family_count,
+        evidence_family_count,
+        ready_family_count,
+        missing_required_families,
+        unknown_families,
+        duplicate_families,
+        blocker_codes,
+    }
+}
+
 fn graph_rag_workload_report_ready(report: &serde_json::Value) -> bool {
     json_get_bool_path(report, &["ready"]) == Some(true)
         && json_get_str_path(report, &["schema_protocol"])
@@ -2873,6 +2962,9 @@ fn nowledge_replacement_blocking_categories(
     if !inputs.workload_fixture_evidence_ready {
         categories.insert("workload_fixture_evidence".to_string());
     }
+    if !inputs.source_mutation_readiness_ready {
+        categories.insert("source_mutation_dual_write_readiness".to_string());
+    }
     if storage_recovery_required(bundle) && !storage_recovery_raw_evidence_ready(bundle) {
         categories.insert("storage_recovery".to_string());
     }
@@ -2997,6 +3089,21 @@ fn nowledge_replacement_next_actions(
                 "dual_engine_evidence.matched_check_count",
                 "dual_engine_evidence.primary_only_check_count",
                 "dual_engine_evidence.matched_per_million",
+            ],
+        ));
+    }
+    if !inputs.source_mutation_readiness_ready {
+        actions.push(next_action(
+            "attach_source_mutation_dual_write_readiness",
+            "Source ingest/create, refresh/reparse, indexed transition, revision edges, and search-projection effects must be covered by durable dual-write readiness",
+            [
+                "source_mutation_dual_write_readiness.protocol",
+                "source_mutation_dual_write_readiness.ready",
+                "source_mutation_dual_write_readiness.required_family_count",
+                "source_mutation_dual_write_readiness.evidence_family_count",
+                "source_mutation_dual_write_readiness.ready_family_count",
+                "source_mutation_dual_write_readiness.missing_required_families",
+                "source_mutation_dual_write_readiness.blocker_codes",
             ],
         ));
     }
@@ -3361,6 +3468,17 @@ fn nowledge_replacement_missing_evidence(bundle: &serde_json::Value) -> Vec<Stri
     {
         missing.push("dual_engine_evidence".to_string());
     }
+    if bundle.get("source_mutation_dual_write_readiness").is_none()
+        && json_get_path(
+            bundle,
+            &["cutover_evidence", "source_mutation_dual_write_readiness"],
+        )
+        .is_none()
+    {
+        missing.push("source_mutation_dual_write_readiness".to_string());
+    } else if !source_mutation_dual_write_readiness_summary(bundle).ready {
+        missing.push("source_mutation_dual_write_readiness_ready".to_string());
+    }
     if bundle.get("search_projection_evidence").is_none()
         && json_get_path(bundle, &["cutover_evidence", "search_projection_evidence"]).is_none()
     {
@@ -3554,6 +3672,12 @@ fn nowledge_replacement_blockers(bundle: &serde_json::Value) -> Vec<String> {
             "search_candidate_shadow_evidence",
             "blocker_codes",
         ][..],
+        &["source_mutation_dual_write_readiness", "blocker_codes"][..],
+        &[
+            "cutover_evidence",
+            "source_mutation_dual_write_readiness",
+            "blocker_codes",
+        ][..],
         &["search_route_ownership", "blocker_codes"][..],
         &[
             "cutover_evidence",
@@ -3720,6 +3844,8 @@ mod tests {
         NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_EVIDENCE_SOURCE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_PRIMARY_ENGINE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_SHADOW_ENGINE,
+        NOWLEDGE_MEM_SOURCE_MUTATION_DUAL_WRITE_READINESS_PROTOCOL,
+        REQUIRED_NOWLEDGE_MEM_SOURCE_MUTATION_FAMILIES,
     };
 
     #[test]
@@ -5046,6 +5172,76 @@ mod tests {
             .unwrap()
             .iter()
             .any(|action| action["action"] == "run_search_candidate_shadow_evidence"));
+    }
+
+    #[test]
+    fn replacement_summary_blocks_production_without_source_mutation_readiness() {
+        let mut bundle = production_ready_bundle();
+        bundle
+            .as_object_mut()
+            .unwrap()
+            .remove("source_mutation_dual_write_readiness");
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(
+            summary["source_mutation_dual_write_readiness"]["present"],
+            false
+        );
+        assert_eq!(
+            summary["source_mutation_dual_write_readiness"]["ready"],
+            false
+        );
+        assert!(summary["blocking_categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "source_mutation_dual_write_readiness"));
+        assert!(summary["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "source_mutation_dual_write_readiness"));
+        assert!(summary["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "attach_source_mutation_dual_write_readiness"));
+    }
+
+    #[test]
+    fn replacement_summary_blocks_production_when_source_mutation_readiness_is_incomplete() {
+        let mut bundle = production_ready_bundle();
+        bundle["source_mutation_dual_write_readiness"]["ready"] = serde_json::json!(false);
+        bundle["source_mutation_dual_write_readiness"]["ready_family_count"] =
+            serde_json::json!(REQUIRED_NOWLEDGE_MEM_SOURCE_MUTATION_FAMILIES.len() - 1);
+        bundle["source_mutation_dual_write_readiness"]["missing_required_families"] =
+            serde_json::json!(["source_ingest_create"]);
+        bundle["source_mutation_dual_write_readiness"]["blocker_codes"] =
+            serde_json::json!(["source_mutation_dual_write_missing_required_families"]);
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(
+            summary["source_mutation_dual_write_readiness"]["ready"],
+            false
+        );
+        assert_eq!(
+            summary["source_mutation_dual_write_readiness"]["missing_required_families"],
+            serde_json::json!(["source_ingest_create"])
+        );
+        assert!(summary["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "source_mutation_dual_write_readiness_ready"));
+        assert!(summary["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| { item == "source_mutation_dual_write_missing_required_families" }));
     }
 
     #[test]
@@ -7064,6 +7260,7 @@ mod tests {
                 "covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
                 "blocker_codes": []
             },
+            "source_mutation_dual_write_readiness": ready_source_mutation_dual_write_readiness(),
             "workload_fixture_evidence": ready_workload_fixture_evidence(),
             "graph_route_readiness": ready_graph_route_readiness(),
             "query_runtime_preflight": query_runtime_preflight,
@@ -7184,6 +7381,20 @@ mod tests {
             "metadata_pushdown_not_ready_routes": [],
             "ranking_not_ready_routes": [],
             "fail_soft_not_ready_routes": [],
+            "blocker_codes": []
+        })
+    }
+
+    fn ready_source_mutation_dual_write_readiness() -> serde_json::Value {
+        serde_json::json!({
+            "protocol": NOWLEDGE_MEM_SOURCE_MUTATION_DUAL_WRITE_READINESS_PROTOCOL,
+            "ready": true,
+            "required_family_count": REQUIRED_NOWLEDGE_MEM_SOURCE_MUTATION_FAMILIES.len(),
+            "evidence_family_count": REQUIRED_NOWLEDGE_MEM_SOURCE_MUTATION_FAMILIES.len(),
+            "ready_family_count": REQUIRED_NOWLEDGE_MEM_SOURCE_MUTATION_FAMILIES.len(),
+            "missing_required_families": [],
+            "unknown_families": [],
+            "duplicate_families": [],
             "blocker_codes": []
         })
     }
