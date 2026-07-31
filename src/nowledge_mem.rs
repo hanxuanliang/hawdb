@@ -11,8 +11,9 @@ use crate::search_projection_evidence::{
 use crate::{
     cypher, BackgroundMaintenanceKind, BackgroundMaintenanceOptions, BackgroundMaintenanceSummary,
     BackgroundWorkHint, BackgroundWorkPlan, BoundedReadQueryOutput, Database, DatabaseConfig,
-    GraphLightningInitialImportCutoverCatchUpReport, GraphRagGeneratedQuery, GraphRagSchemaContext,
-    GraphRagSchemaContextOptions, KnowledgeEntityDeleteBatchOutput,
+    GraphLightningInitialImportCutoverCatchUpReport,
+    GraphLightningInitialImportRecoveryReadinessReport, GraphRagGeneratedQuery,
+    GraphRagSchemaContext, GraphRagSchemaContextOptions, KnowledgeEntityDeleteBatchOutput,
     KnowledgeEntityDeleteBatchRequest, KnowledgeMemoryEvolvesCreateBatchOutput,
     KnowledgeMemoryEvolvesCreateBatchRequest, KnowledgeMemoryLifecycleBatchOutput,
     KnowledgeMemoryLifecycleBatchRequest, KnowledgeRetrievalOutput, KnowledgeRetrievalRequest,
@@ -6773,6 +6774,21 @@ impl NowledgeMemEmbeddedStoreHandle {
             ))
     }
 
+    pub fn cutover_controls_report_with_initial_import_recovery(
+        &self,
+        controls: NowledgeMemCutoverControls,
+        route_ownership: Option<&NowledgeMemRouteOwnershipReadinessReport>,
+        initial_import_recovery: Option<&GraphLightningInitialImportRecoveryReadinessReport>,
+    ) -> Result<NowledgeMemCutoverControlsReport> {
+        Ok(self
+            .read_store()?
+            .cutover_controls_report_with_initial_import_recovery(
+                controls,
+                route_ownership,
+                initial_import_recovery,
+            ))
+    }
+
     pub fn cutover_controls_report_json(
         &self,
         controls: NowledgeMemCutoverControls,
@@ -7033,6 +7049,40 @@ impl NowledgeMemEmbeddedStore {
             self.production_status(route_ownership),
             initial_import_cutover_catch_up,
         )
+    }
+
+    pub fn cutover_controls_report_with_initial_import_recovery(
+        &self,
+        controls: NowledgeMemCutoverControls,
+        route_ownership: Option<&NowledgeMemRouteOwnershipReadinessReport>,
+        initial_import_recovery: Option<&GraphLightningInitialImportRecoveryReadinessReport>,
+    ) -> NowledgeMemCutoverControlsReport {
+        let recovery_ready = initial_import_recovery.is_some_and(|report| {
+            report.ready
+                && report.startup.readiness.ready_for_cutover
+                && report
+                    .startup
+                    .cutover_catch_up
+                    .as_ref()
+                    .is_some_and(|catch_up| catch_up.ready)
+        });
+        let catch_up = recovery_ready.then(|| {
+            initial_import_recovery.and_then(|report| report.startup.cutover_catch_up.as_ref())
+        });
+        let mut report = self.cutover_controls_report_with_initial_import_cutover_catch_up(
+            controls,
+            route_ownership,
+            catch_up.flatten(),
+        );
+        if report.initial_import_enabled && !recovery_ready {
+            report.ready = false;
+            report
+                .blocker_codes
+                .push("initial_import_recovery_not_ready".to_string());
+            report.blocker_codes.sort();
+            report.blocker_codes.dedup();
+        }
+        report
     }
 
     pub fn cutover_controls_report_json(
@@ -10009,15 +10059,17 @@ mod tests {
     use crate::Value;
     use crate::{
         BackgroundMaintenanceKind, BackgroundMaintenanceOptions, BackgroundWorkHint, Database,
-        DatabaseConfig, GraphLightningInitialImportCutoverCatchUpReport, GraphRagQueryBinding,
-        GraphRagQueryDraft, GraphRagQueryPattern, GraphRagQueryPredicate,
-        GraphRagQueryPredicateOperator, GraphRagQueryProjection, GraphRagSchemaContextOptions,
-        KnowledgeCandidateScoringPolicy, KnowledgeRetrievalRequest, LocalQosPolicy,
-        LocalQosScheduler, LocalQosState, NowledgeGraphStatement, RecoveryMode,
-        SearchEmbeddingManifest, SearchIndex, SearchMode, SearchProjectionDelta,
-        SearchProjectionKind, SearchProjectionProbeOptions, SearchProjectionRow,
-        StorageRecoveryReport, VectorRecallValidationOptions, VectorRecallValidationReport,
-        WorkClass, VECTOR_RECALL_VALIDATION_PROTOCOL,
+        DatabaseConfig, GraphLightningInitialImportCheckpoint,
+        GraphLightningInitialImportCutoverCatchUpReport,
+        GraphLightningInitialImportDocumentIdentity, GraphRagQueryBinding, GraphRagQueryDraft,
+        GraphRagQueryPattern, GraphRagQueryPredicate, GraphRagQueryPredicateOperator,
+        GraphRagQueryProjection, GraphRagSchemaContextOptions, KnowledgeCandidateScoringPolicy,
+        KnowledgeRetrievalRequest, LocalQosPolicy, LocalQosScheduler, LocalQosState,
+        NowledgeGraphStatement, RecoveryMode, SearchEmbeddingManifest, SearchIndex, SearchMode,
+        SearchProjectionDelta, SearchProjectionFreshness, SearchProjectionKind,
+        SearchProjectionProbeOptions, SearchProjectionRow, StorageRecoveryReport,
+        VectorRecallValidationOptions, VectorRecallValidationReport, WorkClass,
+        VECTOR_RECALL_VALIDATION_PROTOCOL,
     };
     use std::collections::BTreeMap;
     use std::sync::mpsc;
@@ -13930,6 +13982,97 @@ mod tests {
         }
     }
 
+    fn ready_initial_import_recovery_report(
+    ) -> crate::GraphLightningInitialImportRecoveryReadinessReport {
+        let mut source = Database::new();
+        source
+            .query("CREATE (:Memory {id: 'import-root'})-[:LINKS {id: 'import-rel'}]->(:Entity {id: 'import-entity'})")
+            .unwrap();
+        let export = source.prepare_graph_lightning_bootstrap_export().unwrap();
+        let checkpoint = GraphLightningInitialImportCheckpoint {
+            protocol_version: 1,
+            import_id: "import-controls".to_string(),
+            task_id: "import-controls-task".to_string(),
+            fencing_token: "import-controls-fence".to_string(),
+            object_digest: "import-controls-digest".to_string(),
+            schema_checksum: export.manifest.schema_checksum,
+            graph_stream_checksum: export.manifest.graph_stream_checksum,
+            graph_stream_byte_len: export.manifest.graph_stream_byte_len,
+            manifest_graph_commit_epoch: export.manifest.graph_commit_epoch,
+            applied_graph_commit_epoch: export.manifest.graph_commit_epoch,
+            applied_search_projection_commit_epoch: Some(export.manifest.graph_commit_epoch),
+            durable_search_projection_commit_epoch: Some(export.manifest.graph_commit_epoch),
+            completed_batches: 1,
+            total_batches: 1,
+            document_identity_count: 6,
+        };
+        let identities = [
+            SearchProjectionKind::Memory,
+            SearchProjectionKind::Message,
+            SearchProjectionKind::Entity,
+            SearchProjectionKind::Source,
+            SearchProjectionKind::SourceChunk,
+            SearchProjectionKind::Community,
+        ]
+        .into_iter()
+        .map(|kind| GraphLightningInitialImportDocumentIdentity {
+            kind,
+            document_id: format!("{}:import", kind.as_str()),
+        })
+        .collect::<Vec<_>>();
+        let durable_state = crate::graph_lightning_initial_import_durable_state_report(
+            &export.manifest,
+            &checkpoint,
+            &identities,
+        )
+        .state
+        .expect("expected persistable durable state");
+        let durable_state_payload =
+            crate::graph_lightning_initial_import_encode_durable_state(&durable_state).unwrap();
+        let projection_rows = identities
+            .iter()
+            .map(|identity| SearchProjectionRow {
+                kind: identity.kind,
+                external_id: identity.document_id.clone(),
+                title: "initial import".to_string(),
+                body: "initial import".to_string(),
+                embedding: None,
+                source_id: None,
+                metadata: BTreeMap::new(),
+            })
+            .collect::<Vec<_>>();
+        let projection_delta = SearchProjectionDelta {
+            upserts: projection_rows,
+            deletes: Vec::new(),
+            max_operations: Some(6),
+            source_graph_commit_epoch: Some(export.manifest.graph_commit_epoch),
+        };
+        let freshness = SearchProjectionFreshness {
+            document_count: 6,
+            source_graph_commit_epoch: Some(export.manifest.graph_commit_epoch),
+            durable_source_graph_commit_epoch: Some(export.manifest.graph_commit_epoch),
+            has_uncheckpointed_changes: false,
+            full_reindex_needed: false,
+            full_reindex_reasons: Vec::new(),
+            metadata_repair_needed: false,
+            metadata_repair_reasons: Vec::new(),
+            embedding_model: None,
+            embedding_version: None,
+            embedding_dimension: None,
+        };
+
+        let recovery = source.graph_lightning_initial_import_recovery_readiness(
+            &export.graph_stream.encoded,
+            &export.manifest,
+            &[projection_delta],
+            Some(&freshness),
+            Some(&freshness),
+            Some(&durable_state_payload),
+        );
+        assert!(recovery.ready);
+        recovery
+    }
+
     #[test]
     fn cutover_controls_accept_active_initial_import_with_cutover_catch_up_proof() {
         let root = unique_nowledge_mem_test_dir("cutover_controls_initial_import_catch_up");
@@ -13974,6 +14117,69 @@ mod tests {
             report.json()["work"]["initial_import_safe_for_read_cutover"],
             true
         );
+    }
+
+    #[test]
+    fn cutover_controls_require_recovery_proof_for_active_initial_import() {
+        let graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::WritableCutover);
+        let store = NowledgeMemEmbeddedStore::new(graph, None);
+        let controls = NowledgeMemCutoverControls {
+            dual_writes: NowledgeMemWorkControl::Enabled,
+            initial_import: NowledgeMemWorkControl::Enabled,
+            ..NowledgeMemCutoverControls::legacy()
+        };
+
+        let report =
+            store.cutover_controls_report_with_initial_import_recovery(controls, None, None);
+
+        assert!(!report.ready);
+        assert!(report
+            .blocker_codes
+            .contains(&"initial_import_recovery_not_ready".to_string()));
+        assert!(report
+            .blocker_codes
+            .contains(&"initial_import_active_blocks_read_cutover".to_string()));
+    }
+
+    #[test]
+    fn cutover_controls_accept_active_initial_import_with_recovery_proof() {
+        let root = unique_nowledge_mem_test_dir("cutover_controls_initial_import_recovery");
+        let graph_path = root.join("graph");
+        let search_path = root.join("search");
+        let mut graph =
+            NowledgeMemGraph::open(&graph_path, NowledgeMemGraphMode::WritableCutover).unwrap();
+        graph
+            .query("CREATE (:Memory {id: 'controls-recovery-m1', title: 'Import recovery'})")
+            .unwrap();
+        let projection =
+            NowledgeMemSearchProjection::from_index(SearchIndex::open(&search_path).unwrap());
+        let mut store = NowledgeMemEmbeddedStore::new(graph, Some(projection));
+        store.catch_up_search_projection(16, 1).unwrap();
+        let route_ownership = nowledge_mem_route_ownership_readiness(
+            &nowledge_mem_route_ownership_all_skein(),
+            Some(&ready_route_readiness_summary()),
+            NowledgeMemRouteOwnershipPolicy::production_cutover(),
+        );
+        let controls = NowledgeMemCutoverControls {
+            dual_writes: NowledgeMemWorkControl::Enabled,
+            initial_import: NowledgeMemWorkControl::Enabled,
+            projection_catch_up: NowledgeMemWorkControl::Enabled,
+            graph_reads: super::NowledgeMemReadControl::Skein,
+            search_reads: super::NowledgeMemReadControl::Skein,
+        };
+        let recovery = ready_initial_import_recovery_report();
+
+        let report = store.cutover_controls_report_with_initial_import_recovery(
+            controls,
+            Some(&route_ownership),
+            Some(&recovery),
+        );
+
+        assert!(report.ready);
+        assert!(report.initial_import_cutover_catch_up_ready);
+        assert!(report.initial_import_safe_for_read_cutover);
+        assert!(report.blocker_codes.is_empty());
     }
 
     #[test]

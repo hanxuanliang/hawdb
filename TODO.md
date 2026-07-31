@@ -363,6 +363,10 @@ LanceDB for that path.
       host-persisted durable-state payload directly, decodes it fail-closed,
       and returns an explicit quarantine action for malformed or mismatched
       state instead of letting Mem hand-roll decode/start/resume decisions.
+    - [x] Expose recovery-backed cutover controls that accept the typed recovery
+      report directly and require its own ready catch-up proof before an active
+      import can permit read cutover; the legacy catch-up-only overload remains
+      available only for compatibility.
   - Acceptance: restart resumes from the last durable checkpoint and read
     cutover remains blocked until imported state and live mutations reach the
     same durable watermark.
