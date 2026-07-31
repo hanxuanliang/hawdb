@@ -373,6 +373,19 @@ LanceDB for that path.
 
 - [ ] Migrate the complete Mem graph read route inventory.
   - Treat the shared route catalog as an inventory, not proof of live ownership.
+  - [x] Route `/graph/augmentation/state` through the embedded runtime with
+    GraphMeta and bounded community-assignment count reads.
+  - [x] Route `/graph/augmentation/pagerank/plan` through the embedded runtime
+    and derive the changed-count cutoff from canonical GraphMeta state.
+  - [x] Route `/library/community/{community_id}/recent-memories` through the
+    embedded runtime with the existing bounded ordering and response shape.
+  - [ ] Add a bounded community-members graph contract that returns Entity and
+    Memory members plus member-internal edges before moving
+    `/graph/community-members/{community_id}`. The legacy route is unbounded,
+    so migration must add explicit pagination rather than silently truncating.
+  - [ ] Add pagination or an explicit bounded compatibility contract for
+    `/graph/orphans`; Skein must not turn an embedded read into an unbounded
+    materialization just to preserve the legacy response.
   - Move REST, MCP, read-batch, export, and background-maintenance reads from
     direct `KuzuClient` calls to parameterized Cypher through the embedded query
     runtime.
