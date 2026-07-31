@@ -323,6 +323,10 @@ LanceDB for that path.
       fingerprint, checkpoint, document identities, coverage report, checkpoint
       readiness, and resume action, while keeping partial progress persistable
       and cutover readiness fail-closed.
+    - [x] Expose a stable library durable-state codec that serializes the
+      source fingerprint, checkpoint, document identities, and recomputed
+      coverage into a host-persistable payload, and decodes only after
+      protocol, manifest fingerprint, and persistability checks pass.
   - Keep foreground dual writes active while import catches up, and make retries
     idempotent.
     - [x] Expose a typed durable-state batch advance helper that merges

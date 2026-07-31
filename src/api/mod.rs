@@ -102,8 +102,10 @@ pub use canonical_snapshot::{
     graph_lightning_initial_import_advance_durable_state_with_search_projection_batch,
     graph_lightning_initial_import_checkpoint_readiness,
     graph_lightning_initial_import_cutover_catch_up_report,
+    graph_lightning_initial_import_decode_durable_state,
     graph_lightning_initial_import_document_identity_coverage,
-    graph_lightning_initial_import_durable_state_report, graph_lightning_initial_import_plan,
+    graph_lightning_initial_import_durable_state_report,
+    graph_lightning_initial_import_encode_durable_state, graph_lightning_initial_import_plan,
     graph_lightning_initial_import_plan_with_document_identities,
     graph_lightning_initial_import_readiness, graph_lightning_initial_import_resume_action,
     graph_lightning_initial_import_search_projection_batch_report,
@@ -126,6 +128,7 @@ pub use canonical_snapshot::{
     GraphLightningInitialImportDocumentIdentityCoverage,
     GraphLightningInitialImportDocumentIdentityKindReport,
     GraphLightningInitialImportDurableBatchAdvanceReport, GraphLightningInitialImportDurableState,
+    GraphLightningInitialImportDurableStateCodecReport,
     GraphLightningInitialImportDurableStateReport, GraphLightningInitialImportIdempotencyKey,
     GraphLightningInitialImportPlan, GraphLightningInitialImportReadiness,
     GraphLightningInitialImportResumeAction, GraphLightningInitialImportResumeActionKind,
@@ -134,6 +137,7 @@ pub use canonical_snapshot::{
     GraphLightningInitialImportSourceBundleReadiness, GraphLightningInitialImportSourceFingerprint,
     GraphLightningInitialImportStartupReadinessReport, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
     GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION,
+    GRAPH_LIGHTNING_INITIAL_IMPORT_DURABLE_STATE_PROTOCOL,
 };
 pub use plan_cache::{PlanCacheBypassReason, PlanCacheLookup, PlanCacheStats};
 pub use search_projection_catch_up::{
@@ -5999,6 +6003,14 @@ impl Database {
         catch_up: Option<&GraphLightningInitialImportCutoverCatchUpReport>,
     ) -> GraphLightningInitialImportSessionBundleReadiness {
         graph_lightning_initial_import_session_bundle_readiness(source_bundle, session, catch_up)
+    }
+
+    pub fn graph_lightning_initial_import_decode_durable_state(
+        &self,
+        manifest: &GraphLightningBootstrapManifest,
+        raw: &str,
+    ) -> Result<GraphLightningInitialImportDurableStateCodecReport> {
+        graph_lightning_initial_import_decode_durable_state(manifest, raw)
     }
 
     pub fn graph_lightning_initial_import_startup_readiness(

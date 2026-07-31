@@ -5,8 +5,10 @@ use crate::{
     graph_lightning_initial_import_advance_durable_state_with_search_projection_batch,
     graph_lightning_initial_import_checkpoint_readiness,
     graph_lightning_initial_import_cutover_catch_up_report,
+    graph_lightning_initial_import_decode_durable_state,
     graph_lightning_initial_import_document_identity_coverage,
     graph_lightning_initial_import_durable_state_report,
+    graph_lightning_initial_import_encode_durable_state,
     graph_lightning_initial_import_search_projection_batch_report,
     graph_lightning_initial_import_search_projection_batch_report_with_document_identities,
     graph_lightning_initial_import_session_bundle_readiness,
@@ -1240,6 +1242,100 @@ fn graph_lightning_initial_import_durable_state_reports_cutover_ready_checkpoint
     assert_eq!(
         state.source_fingerprint.schema_checksum,
         export.manifest.schema_checksum
+    );
+}
+
+#[test]
+fn graph_lightning_initial_import_durable_state_codec_round_trips_json_string() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+    let checkpoint = GraphLightningInitialImportCheckpoint {
+        completed_batches: 1,
+        total_batches: 1,
+        document_identity_count: 6,
+        applied_search_projection_commit_epoch: Some(export.manifest.graph_commit_epoch),
+        durable_search_projection_commit_epoch: Some(export.manifest.graph_commit_epoch),
+        ..test_graph_lightning_checkpoint(&export.manifest)
+    };
+    let state = graph_lightning_initial_import_durable_state_report(
+        &export.manifest,
+        &checkpoint,
+        &all_initial_import_document_identities(),
+    )
+    .state
+    .expect("expected persistable durable state");
+
+    let encoded = graph_lightning_initial_import_encode_durable_state(&state).unwrap();
+    let decoded = db
+        .graph_lightning_initial_import_decode_durable_state(&export.manifest, &encoded)
+        .unwrap();
+
+    assert!(decoded.ready);
+    assert!(decoded.source_fingerprint_matches_manifest);
+    assert_eq!(decoded.state, Some(state));
+    assert!(decoded.blocker_codes.is_empty());
+}
+
+#[test]
+fn graph_lightning_initial_import_durable_state_codec_blocks_source_mismatch() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+    let checkpoint = GraphLightningInitialImportCheckpoint {
+        completed_batches: 1,
+        total_batches: 1,
+        document_identity_count: 6,
+        applied_search_projection_commit_epoch: Some(export.manifest.graph_commit_epoch),
+        durable_search_projection_commit_epoch: Some(export.manifest.graph_commit_epoch),
+        ..test_graph_lightning_checkpoint(&export.manifest)
+    };
+    let state = graph_lightning_initial_import_durable_state_report(
+        &export.manifest,
+        &checkpoint,
+        &all_initial_import_document_identities(),
+    )
+    .state
+    .expect("expected persistable durable state");
+    let mut encoded = graph_lightning_initial_import_encode_durable_state(&state).unwrap();
+    let mut value = serde_json::from_str::<serde_json::Value>(&encoded).unwrap();
+    value["source_fingerprint"]["schema_checksum"] = serde_json::json!(0);
+    encoded = serde_json::to_string(&value).unwrap();
+
+    let decoded = graph_lightning_initial_import_decode_durable_state(
+        &export.manifest,
+        &serde_json::to_string(&value).unwrap(),
+    )
+    .unwrap();
+    let decoded_from_string = db
+        .graph_lightning_initial_import_decode_durable_state(&export.manifest, &encoded)
+        .unwrap();
+
+    assert!(!decoded.ready);
+    assert_eq!(decoded.state, None);
+    assert!(!decoded.source_fingerprint_matches_manifest);
+    assert!(decoded
+        .blocker_codes
+        .contains(&"initial_import_durable_state_codec_source_mismatch".to_string()));
+    assert_eq!(decoded_from_string.blocker_codes, decoded.blocker_codes);
+}
+
+#[test]
+fn graph_lightning_initial_import_durable_state_codec_redacts_malformed_json() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})").unwrap();
+    let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+
+    let error = db
+        .graph_lightning_initial_import_decode_durable_state(&export.manifest, "{")
+        .unwrap_err()
+        .to_string();
+
+    assert_eq!(
+        error,
+        "semantic error: initial import durable state parse failed: invalid_json"
     );
 }
 

@@ -164,6 +164,8 @@ impl GraphLightningGraphStream {
 
 pub const GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION: u64 = 1;
 pub const GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION: u64 = 1;
+pub const GRAPH_LIGHTNING_INITIAL_IMPORT_DURABLE_STATE_PROTOCOL: &str =
+    "skein-graph-lightning-initial-import-durable-state-v1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphLightningBootstrapExport {
@@ -510,6 +512,15 @@ pub struct GraphLightningInitialImportStartupReadinessReport {
     pub session: GraphLightningInitialImportSessionReport,
     pub cutover_catch_up: Option<GraphLightningInitialImportCutoverCatchUpReport>,
     pub readiness: GraphLightningInitialImportSessionBundleReadiness,
+    pub blocker_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphLightningInitialImportDurableStateCodecReport {
+    pub ready: bool,
+    pub protocol: String,
+    pub source_fingerprint_matches_manifest: bool,
+    pub state: Option<GraphLightningInitialImportDurableState>,
     pub blocker_codes: Vec<String>,
 }
 
@@ -1569,6 +1580,87 @@ pub fn graph_lightning_initial_import_durable_state_report(
     }
 }
 
+fn graph_lightning_initial_import_durable_state_json(
+    state: &GraphLightningInitialImportDurableState,
+) -> serde_json::Value {
+    serde_json::json!({
+        "protocol": GRAPH_LIGHTNING_INITIAL_IMPORT_DURABLE_STATE_PROTOCOL,
+        "source_fingerprint": graph_lightning_initial_import_source_fingerprint_json(&state.source_fingerprint),
+        "checkpoint": graph_lightning_initial_import_checkpoint_json(&state.checkpoint),
+        "document_identities": state
+            .document_identities
+            .iter()
+            .map(graph_lightning_initial_import_document_identity_json)
+            .collect::<Vec<_>>(),
+        "document_identity_coverage": graph_lightning_initial_import_document_identity_coverage_json(&state.document_identity_coverage),
+    })
+}
+
+pub fn graph_lightning_initial_import_encode_durable_state(
+    state: &GraphLightningInitialImportDurableState,
+) -> Result<String> {
+    serde_json::to_string(&graph_lightning_initial_import_durable_state_json(state)).map_err(|_| {
+        SkeinError::Execution(
+            "initial import durable state serialization failed: invalid_json".to_string(),
+        )
+    })
+}
+
+fn graph_lightning_initial_import_decode_durable_state_value(
+    manifest: &GraphLightningBootstrapManifest,
+    value: &serde_json::Value,
+) -> Result<GraphLightningInitialImportDurableStateCodecReport> {
+    let mut blocker_codes = BTreeSet::new();
+    let protocol = required_json_string(value, "protocol")?.to_string();
+    if protocol != GRAPH_LIGHTNING_INITIAL_IMPORT_DURABLE_STATE_PROTOCOL {
+        blocker_codes.insert("initial_import_durable_state_codec_protocol_mismatch".to_string());
+    }
+    let source_fingerprint = parse_graph_lightning_initial_import_source_fingerprint(
+        required_json_object(value, "source_fingerprint")?,
+    )?;
+    let source_fingerprint_matches_manifest =
+        source_fingerprint == graph_lightning_initial_import_source_fingerprint(manifest);
+    if !source_fingerprint_matches_manifest {
+        blocker_codes.insert("initial_import_durable_state_codec_source_mismatch".to_string());
+    }
+    let checkpoint = parse_graph_lightning_initial_import_checkpoint(required_json_object(
+        value,
+        "checkpoint",
+    )?)?;
+    let document_identities = parse_graph_lightning_initial_import_document_identities(
+        required_json_array(value, "document_identities")?,
+    )?;
+    let state_report = graph_lightning_initial_import_durable_state_report(
+        manifest,
+        &checkpoint,
+        &document_identities,
+    );
+    if !state_report.persistable {
+        blocker_codes.extend(state_report.blocker_codes.iter().cloned());
+    }
+    let ready = blocker_codes.is_empty();
+    let state = (ready && source_fingerprint_matches_manifest)
+        .then_some(state_report.state)
+        .flatten();
+    Ok(GraphLightningInitialImportDurableStateCodecReport {
+        ready,
+        protocol,
+        source_fingerprint_matches_manifest,
+        state,
+        blocker_codes: blocker_codes.into_iter().collect(),
+    })
+}
+
+pub fn graph_lightning_initial_import_decode_durable_state(
+    manifest: &GraphLightningBootstrapManifest,
+    raw: &str,
+) -> Result<GraphLightningInitialImportDurableStateCodecReport> {
+    let value = serde_json::from_str::<serde_json::Value>(raw).map_err(|_| {
+        SkeinError::Semantic("initial import durable state parse failed: invalid_json".to_string())
+    })?;
+    graph_lightning_initial_import_decode_durable_state_value(manifest, &value)
+}
+
 pub fn graph_lightning_initial_import_advance_durable_state_with_search_projection_batch(
     manifest: &GraphLightningBootstrapManifest,
     state: &GraphLightningInitialImportDurableState,
@@ -1912,6 +2004,221 @@ pub fn graph_lightning_initial_import_startup_readiness(
         cutover_catch_up,
         readiness,
     }
+}
+
+fn graph_lightning_initial_import_source_fingerprint_json(
+    fingerprint: &GraphLightningInitialImportSourceFingerprint,
+) -> serde_json::Value {
+    serde_json::json!({
+        "protocol_version": fingerprint.protocol_version,
+        "graph_commit_epoch": fingerprint.graph_commit_epoch,
+        "logical_checksum": fingerprint.logical_checksum,
+        "graph_stream_checksum": fingerprint.graph_stream_checksum,
+        "graph_stream_byte_len": fingerprint.graph_stream_byte_len,
+        "schema_checksum": fingerprint.schema_checksum,
+        "node_count": fingerprint.node_count,
+        "relationship_count": fingerprint.relationship_count,
+    })
+}
+
+fn graph_lightning_initial_import_checkpoint_json(
+    checkpoint: &GraphLightningInitialImportCheckpoint,
+) -> serde_json::Value {
+    serde_json::json!({
+        "protocol_version": checkpoint.protocol_version,
+        "import_id": checkpoint.import_id,
+        "task_id": checkpoint.task_id,
+        "fencing_token": checkpoint.fencing_token,
+        "object_digest": checkpoint.object_digest,
+        "schema_checksum": checkpoint.schema_checksum,
+        "graph_stream_checksum": checkpoint.graph_stream_checksum,
+        "graph_stream_byte_len": checkpoint.graph_stream_byte_len,
+        "manifest_graph_commit_epoch": checkpoint.manifest_graph_commit_epoch,
+        "applied_graph_commit_epoch": checkpoint.applied_graph_commit_epoch,
+        "applied_search_projection_commit_epoch": checkpoint.applied_search_projection_commit_epoch,
+        "durable_search_projection_commit_epoch": checkpoint.durable_search_projection_commit_epoch,
+        "completed_batches": checkpoint.completed_batches,
+        "total_batches": checkpoint.total_batches,
+        "document_identity_count": checkpoint.document_identity_count,
+    })
+}
+
+fn graph_lightning_initial_import_document_identity_json(
+    identity: &GraphLightningInitialImportDocumentIdentity,
+) -> serde_json::Value {
+    serde_json::json!({
+        "kind": identity.kind.as_str(),
+        "document_id": identity.document_id,
+    })
+}
+
+fn graph_lightning_initial_import_document_identity_coverage_json(
+    coverage: &GraphLightningInitialImportDocumentIdentityCoverage,
+) -> serde_json::Value {
+    serde_json::json!({
+        "ready": coverage.ready,
+        "document_identity_count": coverage.document_identity_count,
+        "unique_document_identity_count": coverage.unique_document_identity_count,
+        "expected_kinds": coverage
+            .expected_kinds
+            .iter()
+            .map(|kind| kind.as_str())
+            .collect::<Vec<_>>(),
+        "observed_kinds": coverage
+            .observed_kinds
+            .iter()
+            .map(|kind| kind.as_str())
+            .collect::<Vec<_>>(),
+        "kind_reports": coverage
+            .kind_reports
+            .iter()
+            .map(|report| {
+                serde_json::json!({
+                    "kind": report.kind.as_str(),
+                    "document_count": report.document_count,
+                })
+            })
+            .collect::<Vec<_>>(),
+        "missing_kinds": coverage
+            .missing_kinds
+            .iter()
+            .map(|kind| kind.as_str())
+            .collect::<Vec<_>>(),
+        "empty_document_id_count": coverage.empty_document_id_count,
+        "blocker_codes": coverage.blocker_codes,
+    })
+}
+
+fn parse_graph_lightning_initial_import_source_fingerprint(
+    value: &serde_json::Value,
+) -> Result<GraphLightningInitialImportSourceFingerprint> {
+    Ok(GraphLightningInitialImportSourceFingerprint {
+        protocol_version: required_json_u64(value, "protocol_version")?,
+        graph_commit_epoch: required_json_u64(value, "graph_commit_epoch")?,
+        logical_checksum: required_json_u64(value, "logical_checksum")?,
+        graph_stream_checksum: required_json_u64(value, "graph_stream_checksum")?,
+        graph_stream_byte_len: required_json_usize(value, "graph_stream_byte_len")?,
+        schema_checksum: required_json_u64(value, "schema_checksum")?,
+        node_count: required_json_usize(value, "node_count")?,
+        relationship_count: required_json_usize(value, "relationship_count")?,
+    })
+}
+
+fn parse_graph_lightning_initial_import_checkpoint(
+    value: &serde_json::Value,
+) -> Result<GraphLightningInitialImportCheckpoint> {
+    Ok(GraphLightningInitialImportCheckpoint {
+        protocol_version: required_json_u64(value, "protocol_version")?,
+        import_id: required_json_string(value, "import_id")?.to_string(),
+        task_id: required_json_string(value, "task_id")?.to_string(),
+        fencing_token: required_json_string(value, "fencing_token")?.to_string(),
+        object_digest: required_json_string(value, "object_digest")?.to_string(),
+        schema_checksum: required_json_u64(value, "schema_checksum")?,
+        graph_stream_checksum: required_json_u64(value, "graph_stream_checksum")?,
+        graph_stream_byte_len: required_json_usize(value, "graph_stream_byte_len")?,
+        manifest_graph_commit_epoch: required_json_u64(value, "manifest_graph_commit_epoch")?,
+        applied_graph_commit_epoch: required_json_u64(value, "applied_graph_commit_epoch")?,
+        applied_search_projection_commit_epoch: optional_json_u64(
+            value,
+            "applied_search_projection_commit_epoch",
+        )?,
+        durable_search_projection_commit_epoch: optional_json_u64(
+            value,
+            "durable_search_projection_commit_epoch",
+        )?,
+        completed_batches: required_json_u64(value, "completed_batches")?,
+        total_batches: required_json_u64(value, "total_batches")?,
+        document_identity_count: required_json_usize(value, "document_identity_count")?,
+    })
+}
+
+fn parse_graph_lightning_initial_import_document_identities(
+    items: &[serde_json::Value],
+) -> Result<Vec<GraphLightningInitialImportDocumentIdentity>> {
+    items
+        .iter()
+        .map(|value| {
+            Ok(GraphLightningInitialImportDocumentIdentity {
+                kind: parse_search_projection_kind(required_json_string(value, "kind")?)?,
+                document_id: required_json_string(value, "document_id")?.to_string(),
+            })
+        })
+        .collect()
+}
+
+fn parse_search_projection_kind(raw: &str) -> Result<SearchProjectionKind> {
+    match raw {
+        "memory" => Ok(SearchProjectionKind::Memory),
+        "message" => Ok(SearchProjectionKind::Message),
+        "entity" => Ok(SearchProjectionKind::Entity),
+        "source" => Ok(SearchProjectionKind::Source),
+        "source_chunk" => Ok(SearchProjectionKind::SourceChunk),
+        "community" => Ok(SearchProjectionKind::Community),
+        _ => Err(SkeinError::Semantic(
+            "initial import durable state field kind is invalid".to_string(),
+        )),
+    }
+}
+
+fn required_json_object<'a>(
+    value: &'a serde_json::Value,
+    field: &str,
+) -> Result<&'a serde_json::Value> {
+    let item = value
+        .get(field)
+        .ok_or_else(|| durable_state_codec_invalid_field(field, "object"))?;
+    if item.is_object() {
+        Ok(item)
+    } else {
+        Err(durable_state_codec_invalid_field(field, "object"))
+    }
+}
+
+fn required_json_array<'a>(
+    value: &'a serde_json::Value,
+    field: &str,
+) -> Result<&'a [serde_json::Value]> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .ok_or_else(|| durable_state_codec_invalid_field(field, "array"))
+}
+
+fn required_json_string<'a>(value: &'a serde_json::Value, field: &str) -> Result<&'a str> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| durable_state_codec_invalid_field(field, "string"))
+}
+
+fn required_json_u64(value: &serde_json::Value, field: &str) -> Result<u64> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| durable_state_codec_invalid_field(field, "u64"))
+}
+
+fn required_json_usize(value: &serde_json::Value, field: &str) -> Result<usize> {
+    required_json_u64(value, field)?
+        .try_into()
+        .map_err(|_| durable_state_codec_invalid_field(field, "usize"))
+}
+
+fn optional_json_u64(value: &serde_json::Value, field: &str) -> Result<Option<u64>> {
+    match value.get(field) {
+        Some(serde_json::Value::Null) | None => Ok(None),
+        Some(item) => item
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| durable_state_codec_invalid_field(field, "optional_u64")),
+    }
+}
+
+fn durable_state_codec_invalid_field(field: &str, expected: &str) -> SkeinError {
+    SkeinError::Semantic(format!(
+        "initial import durable state field {field} is invalid: expected_{expected}"
+    ))
 }
 
 pub fn graph_lightning_initial_import_source_fingerprint(
