@@ -351,6 +351,10 @@ LanceDB for that path.
       combines source-bundle readiness, durable session state, resume action,
       and optional live cutover catch-up proof so Mem startup can fail closed
       without duplicating readiness logic.
+    - [x] Expose a typed initial-import startup readiness report that builds
+      source-bundle readiness, session readiness, optional catch-up proof, and
+      final session-bundle readiness from one library call, keeping target
+      projection freshness separate from live dual-write catch-up freshness.
   - Acceptance: restart resumes from the last durable checkpoint and read
     cutover remains blocked until imported state and live mutations reach the
     same durable watermark.

@@ -504,6 +504,16 @@ pub struct GraphLightningInitialImportSessionBundleReadiness {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphLightningInitialImportStartupReadinessReport {
+    pub ready: bool,
+    pub source_bundle: GraphLightningInitialImportSourceBundleReadiness,
+    pub session: GraphLightningInitialImportSessionReport,
+    pub cutover_catch_up: Option<GraphLightningInitialImportCutoverCatchUpReport>,
+    pub readiness: GraphLightningInitialImportSessionBundleReadiness,
+    pub blocker_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalGraphSnapshotValidation {
     pub is_valid: bool,
     pub is_import_ready: bool,
@@ -1857,6 +1867,50 @@ pub fn graph_lightning_initial_import_session_bundle_readiness(
         cutover_watermark,
         next_action: session.next_action.clone(),
         blocker_codes: blocker_codes.into_iter().collect(),
+    }
+}
+
+pub fn graph_lightning_initial_import_startup_readiness(
+    encoded_graph_stream: &str,
+    manifest: &GraphLightningBootstrapManifest,
+    target_graph_commit_epoch: u64,
+    projection_batches: &[SearchProjectionDelta],
+    target_projection_freshness: Option<&SearchProjectionFreshness>,
+    live_projection_freshness: Option<&SearchProjectionFreshness>,
+    durable_state: Option<&GraphLightningInitialImportDurableState>,
+) -> GraphLightningInitialImportStartupReadinessReport {
+    let checkpoint = durable_state.map(|state| &state.checkpoint);
+    let source_bundle = graph_lightning_initial_import_source_bundle_readiness(
+        manifest,
+        checkpoint,
+        projection_batches,
+    );
+    let session = graph_lightning_initial_import_session_report(
+        encoded_graph_stream,
+        manifest,
+        target_graph_commit_epoch,
+        target_projection_freshness,
+        durable_state,
+    );
+    let cutover_catch_up = session.ready_for_cutover.then(|| {
+        graph_lightning_initial_import_cutover_catch_up_report(
+            &session,
+            target_graph_commit_epoch,
+            live_projection_freshness,
+        )
+    });
+    let readiness = graph_lightning_initial_import_session_bundle_readiness(
+        &source_bundle,
+        &session,
+        cutover_catch_up.as_ref(),
+    );
+    GraphLightningInitialImportStartupReadinessReport {
+        ready: readiness.ready,
+        blocker_codes: readiness.blocker_codes.clone(),
+        source_bundle,
+        session,
+        cutover_catch_up,
+        readiness,
     }
 }
 

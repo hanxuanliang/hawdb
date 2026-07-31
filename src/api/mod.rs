@@ -111,7 +111,8 @@ pub use canonical_snapshot::{
     graph_lightning_initial_import_session_bundle_readiness,
     graph_lightning_initial_import_session_report,
     graph_lightning_initial_import_source_bundle_readiness,
-    graph_lightning_initial_import_source_fingerprint, parse_graph_lightning_graph_stream_export,
+    graph_lightning_initial_import_source_fingerprint,
+    graph_lightning_initial_import_startup_readiness, parse_graph_lightning_graph_stream_export,
     validate_graph_lightning_graph_stream, CanonicalGraphSnapshotExport,
     CanonicalGraphSnapshotValidation, CanonicalSnapshotEndpointViolation,
     CanonicalSnapshotIdentityAudit, CanonicalSnapshotNode, CanonicalSnapshotRelationship,
@@ -131,7 +132,8 @@ pub use canonical_snapshot::{
     GraphLightningInitialImportSearchProjectionBatchReport,
     GraphLightningInitialImportSessionBundleReadiness, GraphLightningInitialImportSessionReport,
     GraphLightningInitialImportSourceBundleReadiness, GraphLightningInitialImportSourceFingerprint,
-    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION, GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION,
+    GraphLightningInitialImportStartupReadinessReport, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION,
 };
 pub use plan_cache::{PlanCacheBypassReason, PlanCacheLookup, PlanCacheStats};
 pub use search_projection_catch_up::{
@@ -5997,6 +5999,26 @@ impl Database {
         catch_up: Option<&GraphLightningInitialImportCutoverCatchUpReport>,
     ) -> GraphLightningInitialImportSessionBundleReadiness {
         graph_lightning_initial_import_session_bundle_readiness(source_bundle, session, catch_up)
+    }
+
+    pub fn graph_lightning_initial_import_startup_readiness(
+        &self,
+        encoded_graph_stream: &str,
+        manifest: &GraphLightningBootstrapManifest,
+        projection_batches: &[SearchProjectionDelta],
+        target_projection_freshness: Option<&SearchProjectionFreshness>,
+        live_projection_freshness: Option<&SearchProjectionFreshness>,
+        durable_state: Option<&GraphLightningInitialImportDurableState>,
+    ) -> GraphLightningInitialImportStartupReadinessReport {
+        graph_lightning_initial_import_startup_readiness(
+            encoded_graph_stream,
+            manifest,
+            self.store.commit_epoch(),
+            projection_batches,
+            target_projection_freshness,
+            live_projection_freshness,
+            durable_state,
+        )
     }
 
     pub fn graph_lightning_initial_import_plan(
