@@ -211,9 +211,15 @@ pub struct NowledgeMemActiveSearchRouteReadEvidence {
     pub read_engine: NowledgeMemSearchReadEngine,
     pub candidate_readiness_ready: bool,
     pub candidate_identity_ready: bool,
+    pub embedding_identity_ready: bool,
+    pub zero_vector_semantics_ready: bool,
+    pub cjk_tokenization_ready: bool,
     pub metadata_pushdown_ready: bool,
+    pub ranking_window_ready: bool,
     pub ranking_ready: bool,
     pub fail_soft_ready: bool,
+    pub fail_soft_reason_codes_ready: bool,
+    pub repair_rebuild_markers_ready: bool,
     pub lancedb_handle_required: bool,
 }
 
@@ -236,9 +242,15 @@ impl NowledgeMemActiveSearchRouteReadEvidence {
             read_engine,
             candidate_readiness_ready,
             candidate_identity_ready,
+            embedding_identity_ready: true,
+            zero_vector_semantics_ready: true,
+            cjk_tokenization_ready: true,
             metadata_pushdown_ready,
+            ranking_window_ready: true,
             ranking_ready,
             fail_soft_ready,
+            fail_soft_reason_codes_ready: true,
+            repair_rebuild_markers_ready: true,
             lancedb_handle_required,
         }
     }
@@ -279,9 +291,15 @@ pub struct NowledgeMemActiveSearchRouteReadinessReport {
     pub lancedb_handle_required_routes: Vec<String>,
     pub candidate_not_ready_routes: Vec<String>,
     pub candidate_identity_not_ready_routes: Vec<String>,
+    pub embedding_identity_not_ready_routes: Vec<String>,
+    pub zero_vector_semantics_not_ready_routes: Vec<String>,
+    pub cjk_tokenization_not_ready_routes: Vec<String>,
     pub metadata_pushdown_not_ready_routes: Vec<String>,
+    pub ranking_window_not_ready_routes: Vec<String>,
     pub ranking_not_ready_routes: Vec<String>,
     pub fail_soft_not_ready_routes: Vec<String>,
+    pub fail_soft_reason_codes_not_ready_routes: Vec<String>,
+    pub repair_rebuild_markers_not_ready_routes: Vec<String>,
     pub blocker_codes: Vec<String>,
 }
 
@@ -307,9 +325,15 @@ impl NowledgeMemActiveSearchRouteReadinessReport {
             "lancedb_handle_required_routes": self.lancedb_handle_required_routes,
             "candidate_not_ready_routes": self.candidate_not_ready_routes,
             "candidate_identity_not_ready_routes": self.candidate_identity_not_ready_routes,
+            "embedding_identity_not_ready_routes": self.embedding_identity_not_ready_routes,
+            "zero_vector_semantics_not_ready_routes": self.zero_vector_semantics_not_ready_routes,
+            "cjk_tokenization_not_ready_routes": self.cjk_tokenization_not_ready_routes,
             "metadata_pushdown_not_ready_routes": self.metadata_pushdown_not_ready_routes,
+            "ranking_window_not_ready_routes": self.ranking_window_not_ready_routes,
             "ranking_not_ready_routes": self.ranking_not_ready_routes,
             "fail_soft_not_ready_routes": self.fail_soft_not_ready_routes,
+            "fail_soft_reason_codes_not_ready_routes": self.fail_soft_reason_codes_not_ready_routes,
+            "repair_rebuild_markers_not_ready_routes": self.repair_rebuild_markers_not_ready_routes,
             "blocker_codes": self.blocker_codes,
         })
     }
@@ -599,12 +623,24 @@ pub fn nowledge_mem_active_search_route_readiness(
         active_search_read_routes_where(evidence, |route| !route.candidate_readiness_ready);
     let candidate_identity_not_ready_routes =
         active_search_read_routes_where(evidence, |route| !route.candidate_identity_ready);
+    let embedding_identity_not_ready_routes =
+        active_search_read_routes_where(evidence, |route| !route.embedding_identity_ready);
+    let zero_vector_semantics_not_ready_routes =
+        active_search_read_routes_where(evidence, |route| !route.zero_vector_semantics_ready);
+    let cjk_tokenization_not_ready_routes =
+        active_search_read_routes_where(evidence, |route| !route.cjk_tokenization_ready);
     let metadata_pushdown_not_ready_routes =
         active_search_read_routes_where(evidence, |route| !route.metadata_pushdown_ready);
+    let ranking_window_not_ready_routes =
+        active_search_read_routes_where(evidence, |route| !route.ranking_window_ready);
     let ranking_not_ready_routes =
         active_search_read_routes_where(evidence, |route| !route.ranking_ready);
     let fail_soft_not_ready_routes =
         active_search_read_routes_where(evidence, |route| !route.fail_soft_ready);
+    let fail_soft_reason_codes_not_ready_routes =
+        active_search_read_routes_where(evidence, |route| !route.fail_soft_reason_codes_ready);
+    let repair_rebuild_markers_not_ready_routes =
+        active_search_read_routes_where(evidence, |route| !route.repair_rebuild_markers_ready);
     let ready_routes = active_search_read_routes_where(evidence, active_search_read_evidence_ready);
     let skein_route_count = evidence
         .iter()
@@ -639,14 +675,36 @@ pub fn nowledge_mem_active_search_route_readiness(
         blocker_codes
             .push("active_search_route_readiness_candidate_identity_not_ready".to_string());
     }
+    if !embedding_identity_not_ready_routes.is_empty() {
+        blocker_codes
+            .push("active_search_route_readiness_embedding_identity_not_ready".to_string());
+    }
+    if !zero_vector_semantics_not_ready_routes.is_empty() {
+        blocker_codes
+            .push("active_search_route_readiness_zero_vector_semantics_not_ready".to_string());
+    }
+    if !cjk_tokenization_not_ready_routes.is_empty() {
+        blocker_codes.push("active_search_route_readiness_cjk_tokenization_not_ready".to_string());
+    }
     if !metadata_pushdown_not_ready_routes.is_empty() {
         blocker_codes.push("active_search_route_readiness_metadata_pushdown_not_ready".to_string());
+    }
+    if !ranking_window_not_ready_routes.is_empty() {
+        blocker_codes.push("active_search_route_readiness_ranking_window_not_ready".to_string());
     }
     if !ranking_not_ready_routes.is_empty() {
         blocker_codes.push("active_search_route_readiness_ranking_not_ready".to_string());
     }
     if !fail_soft_not_ready_routes.is_empty() {
         blocker_codes.push("active_search_route_readiness_fail_soft_not_ready".to_string());
+    }
+    if !fail_soft_reason_codes_not_ready_routes.is_empty() {
+        blocker_codes
+            .push("active_search_route_readiness_fail_soft_reason_codes_not_ready".to_string());
+    }
+    if !repair_rebuild_markers_not_ready_routes.is_empty() {
+        blocker_codes
+            .push("active_search_route_readiness_repair_rebuild_markers_not_ready".to_string());
     }
 
     let ready = blocker_codes.is_empty();
@@ -670,9 +728,15 @@ pub fn nowledge_mem_active_search_route_readiness(
         lancedb_handle_required_routes,
         candidate_not_ready_routes,
         candidate_identity_not_ready_routes,
+        embedding_identity_not_ready_routes,
+        zero_vector_semantics_not_ready_routes,
+        cjk_tokenization_not_ready_routes,
         metadata_pushdown_not_ready_routes,
+        ranking_window_not_ready_routes,
         ranking_not_ready_routes,
         fail_soft_not_ready_routes,
+        fail_soft_reason_codes_not_ready_routes,
+        repair_rebuild_markers_not_ready_routes,
         blocker_codes,
     }
 }
@@ -779,9 +843,15 @@ fn active_search_read_evidence_ready(route: &NowledgeMemActiveSearchRouteReadEvi
     route.read_engine == NowledgeMemSearchReadEngine::Skein
         && route.candidate_readiness_ready
         && route.candidate_identity_ready
+        && route.embedding_identity_ready
+        && route.zero_vector_semantics_ready
+        && route.cjk_tokenization_ready
         && route.metadata_pushdown_ready
+        && route.ranking_window_ready
         && route.ranking_ready
         && route.fail_soft_ready
+        && route.fail_soft_reason_codes_ready
+        && route.repair_rebuild_markers_ready
         && !route.lancedb_handle_required
         && route.projection_route == required_projection_route_for_active_search_route(&route.route)
 }
@@ -812,9 +882,15 @@ fn active_search_route_read_evidence_json(
         "read_engine": route.read_engine.as_str(),
         "candidate_readiness_ready": route.candidate_readiness_ready,
         "candidate_identity_ready": route.candidate_identity_ready,
+        "embedding_identity_ready": route.embedding_identity_ready,
+        "zero_vector_semantics_ready": route.zero_vector_semantics_ready,
+        "cjk_tokenization_ready": route.cjk_tokenization_ready,
         "metadata_pushdown_ready": route.metadata_pushdown_ready,
+        "ranking_window_ready": route.ranking_window_ready,
         "ranking_ready": route.ranking_ready,
         "fail_soft_ready": route.fail_soft_ready,
+        "fail_soft_reason_codes_ready": route.fail_soft_reason_codes_ready,
+        "repair_rebuild_markers_ready": route.repair_rebuild_markers_ready,
         "lancedb_handle_required": route.lancedb_handle_required,
     })
 }
@@ -1018,6 +1094,74 @@ mod tests {
             NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_READINESS_PROTOCOL
         );
         assert_eq!(report.json()["lancedb_handle_required_route_count"], 0);
+    }
+
+    #[test]
+    fn active_search_route_readiness_preserves_business_search_semantics() {
+        let mut evidence = nowledge_mem_active_search_route_read_evidence_all_skein_ready();
+        let mcp_search = evidence
+            .iter_mut()
+            .find(|route| route.route == NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_MCP_SEARCH)
+            .unwrap();
+        mcp_search.embedding_identity_ready = false;
+        mcp_search.zero_vector_semantics_ready = false;
+        mcp_search.cjk_tokenization_ready = false;
+        mcp_search.ranking_window_ready = false;
+        mcp_search.fail_soft_reason_codes_ready = false;
+        mcp_search.repair_rebuild_markers_ready = false;
+
+        let report = nowledge_mem_active_search_route_readiness(
+            &evidence,
+            NowledgeMemSearchRouteOwnershipPolicy::production_cutover(),
+        );
+
+        assert!(!report.ready);
+        assert_eq!(
+            report.ready_route_count,
+            REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES.len() - 1
+        );
+        assert_eq!(
+            report.embedding_identity_not_ready_routes,
+            vec![NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_MCP_SEARCH.to_string()]
+        );
+        assert_eq!(
+            report.zero_vector_semantics_not_ready_routes,
+            vec![NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_MCP_SEARCH.to_string()]
+        );
+        assert_eq!(
+            report.cjk_tokenization_not_ready_routes,
+            vec![NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_MCP_SEARCH.to_string()]
+        );
+        assert_eq!(
+            report.ranking_window_not_ready_routes,
+            vec![NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_MCP_SEARCH.to_string()]
+        );
+        assert_eq!(
+            report.fail_soft_reason_codes_not_ready_routes,
+            vec![NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_MCP_SEARCH.to_string()]
+        );
+        assert_eq!(
+            report.repair_rebuild_markers_not_ready_routes,
+            vec![NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_MCP_SEARCH.to_string()]
+        );
+        assert!(report
+            .blocker_codes
+            .contains(&"active_search_route_readiness_embedding_identity_not_ready".to_string()));
+        assert!(report.blocker_codes.contains(
+            &"active_search_route_readiness_zero_vector_semantics_not_ready".to_string()
+        ));
+        assert!(report
+            .blocker_codes
+            .contains(&"active_search_route_readiness_cjk_tokenization_not_ready".to_string()));
+        assert!(report
+            .blocker_codes
+            .contains(&"active_search_route_readiness_ranking_window_not_ready".to_string()));
+        assert!(report.blocker_codes.contains(
+            &"active_search_route_readiness_fail_soft_reason_codes_not_ready".to_string()
+        ));
+        assert!(report.blocker_codes.contains(
+            &"active_search_route_readiness_repair_rebuild_markers_not_ready".to_string()
+        ));
     }
 
     #[test]

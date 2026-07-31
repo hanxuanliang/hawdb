@@ -380,8 +380,10 @@ LanceDB for that path.
     lacks candidate-read evidence.
   - Cover thread/message FTS, entity/community discovery, source and source
     chunk recall, `/fs/recall`, MCP search, and deep-search graph expansion.
-  - Preserve embedding identity, zero-vector semantics, CJK tokenization,
-    ranking windows, fail-soft reason codes, and repair/rebuild markers.
+  - [x] Preserve embedding identity, zero-vector semantics, CJK tokenization,
+    ranking windows, fail-soft reason codes, and repair/rebuild markers in the
+    active search route read evidence, replacement summary, and integration
+    readiness alignment gate.
   - Acceptance: no active search route requires a LanceDB handle when the Skein
     search engine is selected.
 

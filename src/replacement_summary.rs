@@ -841,9 +841,16 @@ struct ActiveSearchRouteReadinessSummary {
     non_skein_routes: Vec<String>,
     lancedb_handle_required_routes: Vec<String>,
     candidate_not_ready_routes: Vec<String>,
+    candidate_identity_not_ready_routes: Vec<String>,
+    embedding_identity_not_ready_routes: Vec<String>,
+    zero_vector_semantics_not_ready_routes: Vec<String>,
+    cjk_tokenization_not_ready_routes: Vec<String>,
     metadata_pushdown_not_ready_routes: Vec<String>,
+    ranking_window_not_ready_routes: Vec<String>,
     ranking_not_ready_routes: Vec<String>,
     fail_soft_not_ready_routes: Vec<String>,
+    fail_soft_reason_codes_not_ready_routes: Vec<String>,
+    repair_rebuild_markers_not_ready_routes: Vec<String>,
     blocker_codes: serde_json::Value,
 }
 
@@ -864,9 +871,16 @@ impl ActiveSearchRouteReadinessSummary {
             "non_skein_routes": self.non_skein_routes,
             "lancedb_handle_required_routes": self.lancedb_handle_required_routes,
             "candidate_not_ready_routes": self.candidate_not_ready_routes,
+            "candidate_identity_not_ready_routes": self.candidate_identity_not_ready_routes,
+            "embedding_identity_not_ready_routes": self.embedding_identity_not_ready_routes,
+            "zero_vector_semantics_not_ready_routes": self.zero_vector_semantics_not_ready_routes,
+            "cjk_tokenization_not_ready_routes": self.cjk_tokenization_not_ready_routes,
             "metadata_pushdown_not_ready_routes": self.metadata_pushdown_not_ready_routes,
+            "ranking_window_not_ready_routes": self.ranking_window_not_ready_routes,
             "ranking_not_ready_routes": self.ranking_not_ready_routes,
             "fail_soft_not_ready_routes": self.fail_soft_not_ready_routes,
+            "fail_soft_reason_codes_not_ready_routes": self.fail_soft_reason_codes_not_ready_routes,
+            "repair_rebuild_markers_not_ready_routes": self.repair_rebuild_markers_not_ready_routes,
             "blocker_codes": self.blocker_codes,
         })
     }
@@ -1625,15 +1639,50 @@ fn active_search_route_readiness_summary(
     );
     let candidate_not_ready_routes =
         json_get_string_array_path_from_dynamic(bundle, &path_refs, "candidate_not_ready_routes");
+    let candidate_identity_not_ready_routes = json_get_string_array_path_from_dynamic(
+        bundle,
+        &path_refs,
+        "candidate_identity_not_ready_routes",
+    );
+    let embedding_identity_not_ready_routes = json_get_string_array_path_from_dynamic(
+        bundle,
+        &path_refs,
+        "embedding_identity_not_ready_routes",
+    );
+    let zero_vector_semantics_not_ready_routes = json_get_string_array_path_from_dynamic(
+        bundle,
+        &path_refs,
+        "zero_vector_semantics_not_ready_routes",
+    );
+    let cjk_tokenization_not_ready_routes = json_get_string_array_path_from_dynamic(
+        bundle,
+        &path_refs,
+        "cjk_tokenization_not_ready_routes",
+    );
     let metadata_pushdown_not_ready_routes = json_get_string_array_path_from_dynamic(
         bundle,
         &path_refs,
         "metadata_pushdown_not_ready_routes",
     );
+    let ranking_window_not_ready_routes = json_get_string_array_path_from_dynamic(
+        bundle,
+        &path_refs,
+        "ranking_window_not_ready_routes",
+    );
     let ranking_not_ready_routes =
         json_get_string_array_path_from_dynamic(bundle, &path_refs, "ranking_not_ready_routes");
     let fail_soft_not_ready_routes =
         json_get_string_array_path_from_dynamic(bundle, &path_refs, "fail_soft_not_ready_routes");
+    let fail_soft_reason_codes_not_ready_routes = json_get_string_array_path_from_dynamic(
+        bundle,
+        &path_refs,
+        "fail_soft_reason_codes_not_ready_routes",
+    );
+    let repair_rebuild_markers_not_ready_routes = json_get_string_array_path_from_dynamic(
+        bundle,
+        &path_refs,
+        "repair_rebuild_markers_not_ready_routes",
+    );
     let blocker_codes = json_get_array_path_from_dynamic(bundle, &path_refs, "blocker_codes");
     let expected_route_count = REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES.len() as u64;
     let ready = present
@@ -1649,9 +1698,16 @@ fn active_search_route_readiness_summary(
         && non_skein_routes.is_empty()
         && lancedb_handle_required_routes.is_empty()
         && candidate_not_ready_routes.is_empty()
+        && candidate_identity_not_ready_routes.is_empty()
+        && embedding_identity_not_ready_routes.is_empty()
+        && zero_vector_semantics_not_ready_routes.is_empty()
+        && cjk_tokenization_not_ready_routes.is_empty()
         && metadata_pushdown_not_ready_routes.is_empty()
+        && ranking_window_not_ready_routes.is_empty()
         && ranking_not_ready_routes.is_empty()
         && fail_soft_not_ready_routes.is_empty()
+        && fail_soft_reason_codes_not_ready_routes.is_empty()
+        && repair_rebuild_markers_not_ready_routes.is_empty()
         && blocker_codes.as_array().is_some_and(Vec::is_empty);
 
     ActiveSearchRouteReadinessSummary {
@@ -1669,9 +1725,16 @@ fn active_search_route_readiness_summary(
         non_skein_routes,
         lancedb_handle_required_routes,
         candidate_not_ready_routes,
+        candidate_identity_not_ready_routes,
+        embedding_identity_not_ready_routes,
+        zero_vector_semantics_not_ready_routes,
+        cjk_tokenization_not_ready_routes,
         metadata_pushdown_not_ready_routes,
+        ranking_window_not_ready_routes,
         ranking_not_ready_routes,
         fail_soft_not_ready_routes,
+        fail_soft_reason_codes_not_ready_routes,
+        repair_rebuild_markers_not_ready_routes,
         blocker_codes,
     }
 }
@@ -3081,9 +3144,16 @@ fn nowledge_replacement_next_actions(
                 "active_search_route_readiness.non_skein_routes",
                 "active_search_route_readiness.lancedb_handle_required_routes",
                 "active_search_route_readiness.candidate_not_ready_routes",
+                "active_search_route_readiness.candidate_identity_not_ready_routes",
+                "active_search_route_readiness.embedding_identity_not_ready_routes",
+                "active_search_route_readiness.zero_vector_semantics_not_ready_routes",
+                "active_search_route_readiness.cjk_tokenization_not_ready_routes",
                 "active_search_route_readiness.metadata_pushdown_not_ready_routes",
+                "active_search_route_readiness.ranking_window_not_ready_routes",
                 "active_search_route_readiness.ranking_not_ready_routes",
                 "active_search_route_readiness.fail_soft_not_ready_routes",
+                "active_search_route_readiness.fail_soft_reason_codes_not_ready_routes",
+                "active_search_route_readiness.repair_rebuild_markers_not_ready_routes",
                 "active_search_route_readiness.blocker_codes",
             ],
         ));
@@ -6609,9 +6679,16 @@ mod tests {
                         "active_search_route_readiness.non_skein_routes",
                         "active_search_route_readiness.lancedb_handle_required_routes",
                         "active_search_route_readiness.candidate_not_ready_routes",
+                        "active_search_route_readiness.candidate_identity_not_ready_routes",
+                        "active_search_route_readiness.embedding_identity_not_ready_routes",
+                        "active_search_route_readiness.zero_vector_semantics_not_ready_routes",
+                        "active_search_route_readiness.cjk_tokenization_not_ready_routes",
                         "active_search_route_readiness.metadata_pushdown_not_ready_routes",
+                        "active_search_route_readiness.ranking_window_not_ready_routes",
                         "active_search_route_readiness.ranking_not_ready_routes",
                         "active_search_route_readiness.fail_soft_not_ready_routes",
+                        "active_search_route_readiness.fail_soft_reason_codes_not_ready_routes",
+                        "active_search_route_readiness.repair_rebuild_markers_not_ready_routes",
                         "active_search_route_readiness.blocker_codes"
                     ]
                 },

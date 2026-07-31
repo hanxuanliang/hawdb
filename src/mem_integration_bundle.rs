@@ -1133,12 +1133,26 @@ fn active_search_route_readiness_alignment_json(
         empty_string_set_matches(evidence, summary, "lancedb_handle_required_routes");
     let candidate_not_ready_routes_matches =
         empty_string_set_matches(evidence, summary, "candidate_not_ready_routes");
+    let candidate_identity_not_ready_routes_matches =
+        empty_string_set_matches(evidence, summary, "candidate_identity_not_ready_routes");
+    let embedding_identity_not_ready_routes_matches =
+        empty_string_set_matches(evidence, summary, "embedding_identity_not_ready_routes");
+    let zero_vector_semantics_not_ready_routes_matches =
+        empty_string_set_matches(evidence, summary, "zero_vector_semantics_not_ready_routes");
+    let cjk_tokenization_not_ready_routes_matches =
+        empty_string_set_matches(evidence, summary, "cjk_tokenization_not_ready_routes");
     let metadata_pushdown_not_ready_routes_matches =
         empty_string_set_matches(evidence, summary, "metadata_pushdown_not_ready_routes");
+    let ranking_window_not_ready_routes_matches =
+        empty_string_set_matches(evidence, summary, "ranking_window_not_ready_routes");
     let ranking_not_ready_routes_matches =
         empty_string_set_matches(evidence, summary, "ranking_not_ready_routes");
     let fail_soft_not_ready_routes_matches =
         empty_string_set_matches(evidence, summary, "fail_soft_not_ready_routes");
+    let fail_soft_reason_codes_not_ready_routes_matches =
+        empty_string_set_matches(evidence, summary, "fail_soft_reason_codes_not_ready_routes");
+    let repair_rebuild_markers_not_ready_routes_matches =
+        empty_string_set_matches(evidence, summary, "repair_rebuild_markers_not_ready_routes");
     let blocker_codes_match = string_set_path(evidence, &["blocker_codes"])
         == string_set_path(summary, &["blocker_codes"])
         && string_set_path(evidence, &["blocker_codes"]).is_empty();
@@ -1201,8 +1215,28 @@ fn active_search_route_readiness_alignment_json(
             candidate_not_ready_routes_matches,
         ),
         (
+            "active_search_route_readiness_candidate_identity_routes_mismatch",
+            candidate_identity_not_ready_routes_matches,
+        ),
+        (
+            "active_search_route_readiness_embedding_identity_routes_mismatch",
+            embedding_identity_not_ready_routes_matches,
+        ),
+        (
+            "active_search_route_readiness_zero_vector_semantics_routes_mismatch",
+            zero_vector_semantics_not_ready_routes_matches,
+        ),
+        (
+            "active_search_route_readiness_cjk_tokenization_routes_mismatch",
+            cjk_tokenization_not_ready_routes_matches,
+        ),
+        (
             "active_search_route_readiness_metadata_pushdown_routes_mismatch",
             metadata_pushdown_not_ready_routes_matches,
+        ),
+        (
+            "active_search_route_readiness_ranking_window_routes_mismatch",
+            ranking_window_not_ready_routes_matches,
         ),
         (
             "active_search_route_readiness_ranking_routes_mismatch",
@@ -1211,6 +1245,14 @@ fn active_search_route_readiness_alignment_json(
         (
             "active_search_route_readiness_fail_soft_routes_mismatch",
             fail_soft_not_ready_routes_matches,
+        ),
+        (
+            "active_search_route_readiness_fail_soft_reason_codes_routes_mismatch",
+            fail_soft_reason_codes_not_ready_routes_matches,
+        ),
+        (
+            "active_search_route_readiness_repair_rebuild_markers_routes_mismatch",
+            repair_rebuild_markers_not_ready_routes_matches,
         ),
         (
             "active_search_route_readiness_blocker_codes_mismatch",
@@ -1238,9 +1280,16 @@ fn active_search_route_readiness_alignment_json(
         "non_skein_routes_matches": non_skein_routes_matches,
         "lancedb_handle_routes_matches": lancedb_handle_routes_matches,
         "candidate_not_ready_routes_matches": candidate_not_ready_routes_matches,
+        "candidate_identity_not_ready_routes_matches": candidate_identity_not_ready_routes_matches,
+        "embedding_identity_not_ready_routes_matches": embedding_identity_not_ready_routes_matches,
+        "zero_vector_semantics_not_ready_routes_matches": zero_vector_semantics_not_ready_routes_matches,
+        "cjk_tokenization_not_ready_routes_matches": cjk_tokenization_not_ready_routes_matches,
         "metadata_pushdown_not_ready_routes_matches": metadata_pushdown_not_ready_routes_matches,
+        "ranking_window_not_ready_routes_matches": ranking_window_not_ready_routes_matches,
         "ranking_not_ready_routes_matches": ranking_not_ready_routes_matches,
         "fail_soft_not_ready_routes_matches": fail_soft_not_ready_routes_matches,
+        "fail_soft_reason_codes_not_ready_routes_matches": fail_soft_reason_codes_not_ready_routes_matches,
+        "repair_rebuild_markers_not_ready_routes_matches": repair_rebuild_markers_not_ready_routes_matches,
         "blocker_codes_match": blocker_codes_match,
         "evidence_lancedb_handle_required_routes": string_set_path(evidence, &["lancedb_handle_required_routes"]),
         "summary_lancedb_handle_required_routes": string_set_path(summary, &["lancedb_handle_required_routes"]),

@@ -599,9 +599,16 @@ pub struct ActiveSearchRouteReadinessAlignmentCutoverReadiness {
     pub non_skein_routes_matches: bool,
     pub lancedb_handle_routes_matches: bool,
     pub candidate_not_ready_routes_matches: bool,
+    pub candidate_identity_not_ready_routes_matches: bool,
+    pub embedding_identity_not_ready_routes_matches: bool,
+    pub zero_vector_semantics_not_ready_routes_matches: bool,
+    pub cjk_tokenization_not_ready_routes_matches: bool,
     pub metadata_pushdown_not_ready_routes_matches: bool,
+    pub ranking_window_not_ready_routes_matches: bool,
     pub ranking_not_ready_routes_matches: bool,
     pub fail_soft_not_ready_routes_matches: bool,
+    pub fail_soft_reason_codes_not_ready_routes_matches: bool,
+    pub repair_rebuild_markers_not_ready_routes_matches: bool,
     pub blocker_codes_match: bool,
     pub blocker_codes: Vec<String>,
 }
@@ -992,9 +999,16 @@ impl ActiveSearchRouteReadinessAlignmentCutoverReadiness {
             && self.non_skein_routes_matches
             && self.lancedb_handle_routes_matches
             && self.candidate_not_ready_routes_matches
+            && self.candidate_identity_not_ready_routes_matches
+            && self.embedding_identity_not_ready_routes_matches
+            && self.zero_vector_semantics_not_ready_routes_matches
+            && self.cjk_tokenization_not_ready_routes_matches
             && self.metadata_pushdown_not_ready_routes_matches
+            && self.ranking_window_not_ready_routes_matches
             && self.ranking_not_ready_routes_matches
             && self.fail_soft_not_ready_routes_matches
+            && self.fail_soft_reason_codes_not_ready_routes_matches
+            && self.repair_rebuild_markers_not_ready_routes_matches
             && self.blocker_codes_match
     }
 }
@@ -2131,12 +2145,24 @@ fn next_actions(
                 "active_search_route_readiness.production_cutover_ready",
                 "active_search_route_readiness.lancedb_handle_required_route_count",
                 "active_search_route_readiness.lancedb_handle_required_routes",
+                "active_search_route_readiness.embedding_identity_not_ready_routes",
+                "active_search_route_readiness.zero_vector_semantics_not_ready_routes",
+                "active_search_route_readiness.cjk_tokenization_not_ready_routes",
+                "active_search_route_readiness.ranking_window_not_ready_routes",
+                "active_search_route_readiness.fail_soft_reason_codes_not_ready_routes",
+                "active_search_route_readiness.repair_rebuild_markers_not_ready_routes",
                 "replacement_summary.active_search_route_readiness.ready",
                 "replacement_summary_active_search_route_readiness_alignment.ready",
                 "replacement_summary_active_search_route_readiness_alignment.evidence_present",
                 "replacement_summary_active_search_route_readiness_alignment.summary_present",
                 "replacement_summary_active_search_route_readiness_alignment.lancedb_handle_count_matches",
                 "replacement_summary_active_search_route_readiness_alignment.lancedb_handle_routes_matches",
+                "replacement_summary_active_search_route_readiness_alignment.embedding_identity_not_ready_routes_matches",
+                "replacement_summary_active_search_route_readiness_alignment.zero_vector_semantics_not_ready_routes_matches",
+                "replacement_summary_active_search_route_readiness_alignment.cjk_tokenization_not_ready_routes_matches",
+                "replacement_summary_active_search_route_readiness_alignment.ranking_window_not_ready_routes_matches",
+                "replacement_summary_active_search_route_readiness_alignment.fail_soft_reason_codes_not_ready_routes_matches",
+                "replacement_summary_active_search_route_readiness_alignment.repair_rebuild_markers_not_ready_routes_matches",
                 "replacement_summary_active_search_route_readiness_alignment.blocker_codes",
             ],
         ));
@@ -2790,9 +2816,29 @@ pub fn active_search_route_readiness_alignment_cutover_readiness(
             bundle,
             &[FIELD, "candidate_not_ready_routes_matches"],
         ) == Some(true),
+        candidate_identity_not_ready_routes_matches: bool_path(
+            bundle,
+            &[FIELD, "candidate_identity_not_ready_routes_matches"],
+        ) == Some(true),
+        embedding_identity_not_ready_routes_matches: bool_path(
+            bundle,
+            &[FIELD, "embedding_identity_not_ready_routes_matches"],
+        ) == Some(true),
+        zero_vector_semantics_not_ready_routes_matches: bool_path(
+            bundle,
+            &[FIELD, "zero_vector_semantics_not_ready_routes_matches"],
+        ) == Some(true),
+        cjk_tokenization_not_ready_routes_matches: bool_path(
+            bundle,
+            &[FIELD, "cjk_tokenization_not_ready_routes_matches"],
+        ) == Some(true),
         metadata_pushdown_not_ready_routes_matches: bool_path(
             bundle,
             &[FIELD, "metadata_pushdown_not_ready_routes_matches"],
+        ) == Some(true),
+        ranking_window_not_ready_routes_matches: bool_path(
+            bundle,
+            &[FIELD, "ranking_window_not_ready_routes_matches"],
         ) == Some(true),
         ranking_not_ready_routes_matches: bool_path(
             bundle,
@@ -2801,6 +2847,14 @@ pub fn active_search_route_readiness_alignment_cutover_readiness(
         fail_soft_not_ready_routes_matches: bool_path(
             bundle,
             &[FIELD, "fail_soft_not_ready_routes_matches"],
+        ) == Some(true),
+        fail_soft_reason_codes_not_ready_routes_matches: bool_path(
+            bundle,
+            &[FIELD, "fail_soft_reason_codes_not_ready_routes_matches"],
+        ) == Some(true),
+        repair_rebuild_markers_not_ready_routes_matches: bool_path(
+            bundle,
+            &[FIELD, "repair_rebuild_markers_not_ready_routes_matches"],
         ) == Some(true),
         blocker_codes_match: bool_path(bundle, &[FIELD, "blocker_codes_match"]) == Some(true),
         blocker_codes: blocker_codes(bundle, &[&[FIELD, "blocker_codes"][..]]),
@@ -2876,8 +2930,28 @@ fn active_search_route_readiness_alignment_cutover_conditions(
             readiness.candidate_not_ready_routes_matches,
         ),
         (
+            "replacement_summary_active_search_route_readiness_alignment.candidate_identity_not_ready_routes_matches",
+            readiness.candidate_identity_not_ready_routes_matches,
+        ),
+        (
+            "replacement_summary_active_search_route_readiness_alignment.embedding_identity_not_ready_routes_matches",
+            readiness.embedding_identity_not_ready_routes_matches,
+        ),
+        (
+            "replacement_summary_active_search_route_readiness_alignment.zero_vector_semantics_not_ready_routes_matches",
+            readiness.zero_vector_semantics_not_ready_routes_matches,
+        ),
+        (
+            "replacement_summary_active_search_route_readiness_alignment.cjk_tokenization_not_ready_routes_matches",
+            readiness.cjk_tokenization_not_ready_routes_matches,
+        ),
+        (
             "replacement_summary_active_search_route_readiness_alignment.metadata_pushdown_not_ready_routes_matches",
             readiness.metadata_pushdown_not_ready_routes_matches,
+        ),
+        (
+            "replacement_summary_active_search_route_readiness_alignment.ranking_window_not_ready_routes_matches",
+            readiness.ranking_window_not_ready_routes_matches,
         ),
         (
             "replacement_summary_active_search_route_readiness_alignment.ranking_not_ready_routes_matches",
@@ -2886,6 +2960,14 @@ fn active_search_route_readiness_alignment_cutover_conditions(
         (
             "replacement_summary_active_search_route_readiness_alignment.fail_soft_not_ready_routes_matches",
             readiness.fail_soft_not_ready_routes_matches,
+        ),
+        (
+            "replacement_summary_active_search_route_readiness_alignment.fail_soft_reason_codes_not_ready_routes_matches",
+            readiness.fail_soft_reason_codes_not_ready_routes_matches,
+        ),
+        (
+            "replacement_summary_active_search_route_readiness_alignment.repair_rebuild_markers_not_ready_routes_matches",
+            readiness.repair_rebuild_markers_not_ready_routes_matches,
         ),
         (
             "replacement_summary_active_search_route_readiness_alignment.blocker_codes_match",
@@ -11437,9 +11519,16 @@ mod tests {
             "non_skein_routes_matches": true,
             "lancedb_handle_routes_matches": true,
             "candidate_not_ready_routes_matches": true,
+            "candidate_identity_not_ready_routes_matches": true,
+            "embedding_identity_not_ready_routes_matches": true,
+            "zero_vector_semantics_not_ready_routes_matches": true,
+            "cjk_tokenization_not_ready_routes_matches": true,
             "metadata_pushdown_not_ready_routes_matches": true,
+            "ranking_window_not_ready_routes_matches": true,
             "ranking_not_ready_routes_matches": true,
             "fail_soft_not_ready_routes_matches": true,
+            "fail_soft_reason_codes_not_ready_routes_matches": true,
+            "repair_rebuild_markers_not_ready_routes_matches": true,
             "blocker_codes_match": true,
             "evidence_lancedb_handle_required_routes": [],
             "summary_lancedb_handle_required_routes": [],
