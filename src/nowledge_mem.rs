@@ -11,7 +11,9 @@ use crate::search_projection_evidence::{
 use crate::{
     cypher, BackgroundMaintenanceKind, BackgroundMaintenanceOptions, BackgroundMaintenanceSummary,
     BackgroundWorkHint, BackgroundWorkPlan, BoundedReadQueryOutput, Database, DatabaseConfig,
-    GraphLightningInitialImportCutoverCatchUpReport,
+    GraphLightningBootstrapManifest, GraphLightningInitialImportApplyReport,
+    GraphLightningInitialImportCheckpoint, GraphLightningInitialImportCutoverCatchUpReport,
+    GraphLightningInitialImportDocumentIdentity,
     GraphLightningInitialImportRecoveryReadinessReport, GraphRagGeneratedQuery,
     GraphRagSchemaContext, GraphRagSchemaContextOptions, KnowledgeEntityDeleteBatchOutput,
     KnowledgeEntityDeleteBatchRequest, KnowledgeMemoryEvolvesCreateBatchOutput,
@@ -6555,6 +6557,26 @@ impl NowledgeMemEmbeddedStoreHandle {
             statement_outputs,
             commit_output,
         })
+    }
+
+    pub fn graph_lightning_initial_import_apply_with_document_identities(
+        &self,
+        encoded_graph_stream: &str,
+        manifest: &GraphLightningBootstrapManifest,
+        projection_freshness: Option<&SearchProjectionFreshness>,
+        checkpoint: Option<&GraphLightningInitialImportCheckpoint>,
+        document_identities: &[GraphLightningInitialImportDocumentIdentity],
+    ) -> Result<GraphLightningInitialImportApplyReport> {
+        self.write_store()?
+            .graph_mut()
+            .database_mut()
+            .graph_lightning_initial_import_apply_with_document_identities(
+                encoded_graph_stream,
+                manifest,
+                projection_freshness,
+                checkpoint,
+                document_identities,
+            )
     }
 
     pub fn query_with_params_with_report_options(
