@@ -385,9 +385,11 @@ LanceDB for that path.
     can be disabled with `max_edges = 0`. Each member scan reads one sentinel
     row and exposes a per-kind truncation signal instead of silently presenting
     a partial community as complete.
-  - [ ] Migrate `/graph/community-members/{community_id}` only after adding
-    explicit pagination or a bounded compatibility contract. The legacy route
-    is unbounded, so Skein must not silently truncate its response.
+  - [x] Migrate `/graph/community-members/{community_id}` through the embedded
+    runtime under an explicit bounded compatibility contract. Skein mode
+    requires `limit`; REST returns per-kind truncation signals and accepts a
+    bounded `max_edges`, so it cannot silently present a partial community as
+    complete.
   - [x] Add keyset pagination for `/graph/orphans` in the embedded contract.
     Each page reads at most `limit + 1` rows to derive `has_more` and a stable
     `next_cursor`; insufficient row budget fails closed rather than reporting
