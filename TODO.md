@@ -335,6 +335,10 @@ LanceDB for that path.
       protocol, manifest fingerprint, and persistability checks pass.
   - Keep foreground dual writes active while import catches up, and make retries
     idempotent.
+    - [x] Provide Mem with a server-owned typed session that freezes the legacy
+      graph epoch and six LanceDB table versions, applies the graph stage,
+      advances one projection page, and recovers from persisted partial state
+      after reopening the embedded runtime.
     - [ ] Wire the Mem startup session to extract and import the six active
       LanceDB projection kinds, persist each accepted projection-batch advance,
       and use the typed session/catch-up report before enabling read cutover.
