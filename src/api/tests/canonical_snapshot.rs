@@ -9,12 +9,13 @@ use crate::{
     graph_lightning_initial_import_durable_state_report,
     graph_lightning_initial_import_search_projection_batch_report,
     graph_lightning_initial_import_search_projection_batch_report_with_document_identities,
-    graph_lightning_initial_import_session_report, parse_graph_lightning_graph_stream_export,
-    CanonicalGraphSnapshotExport, CanonicalSnapshotIdentityAudit, CanonicalSnapshotNode,
-    CanonicalSnapshotRelationship, GraphLightningBootstrapManifest,
-    GraphLightningInitialImportCheckpoint, GraphLightningInitialImportCheckpointProgress,
-    GraphLightningInitialImportDocumentIdentity, GraphLightningInitialImportIdempotencyKey,
-    GraphLightningInitialImportResumeActionKind,
+    graph_lightning_initial_import_session_report,
+    graph_lightning_initial_import_source_bundle_readiness,
+    parse_graph_lightning_graph_stream_export, CanonicalGraphSnapshotExport,
+    CanonicalSnapshotIdentityAudit, CanonicalSnapshotNode, CanonicalSnapshotRelationship,
+    GraphLightningBootstrapManifest, GraphLightningInitialImportCheckpoint,
+    GraphLightningInitialImportCheckpointProgress, GraphLightningInitialImportDocumentIdentity,
+    GraphLightningInitialImportIdempotencyKey, GraphLightningInitialImportResumeActionKind,
 };
 use crate::{SearchProjectionDelta, SearchProjectionRow};
 
@@ -1798,6 +1799,89 @@ fn graph_lightning_initial_import_search_projection_batch_rejects_checkpoint_tot
     assert!(report.checkpoint_progress_readiness.is_none());
     assert!(report.checkpoint_resume_action.is_none());
     assert!(report.checkpoint_progress_blocker_codes.is_empty());
+}
+
+#[test]
+fn graph_lightning_initial_import_source_bundle_accepts_graph_and_projection_sources() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+    let checkpoint = GraphLightningInitialImportCheckpoint {
+        completed_batches: 0,
+        total_batches: 1,
+        document_identity_count: 0,
+        applied_search_projection_commit_epoch: None,
+        durable_search_projection_commit_epoch: None,
+        ..test_graph_lightning_checkpoint(&export.manifest)
+    };
+    let projection_batches = vec![SearchProjectionDelta {
+        upserts: all_initial_import_projection_rows(),
+        deletes: Vec::new(),
+        max_operations: Some(6),
+        source_graph_commit_epoch: Some(export.manifest.graph_commit_epoch),
+    }];
+
+    let report = graph_lightning_initial_import_source_bundle_readiness(
+        &export.manifest,
+        Some(&checkpoint),
+        &projection_batches,
+    );
+
+    assert!(report.ready);
+    assert!(report.graph_source_import_ready);
+    assert!(report.checkpoint_present);
+    assert_eq!(report.projection_batch_count, 1);
+    assert_eq!(report.ready_projection_batch_count, 1);
+    assert_eq!(report.total_batches, 1);
+    assert_eq!(
+        report.source_fingerprint.graph_commit_epoch,
+        export.manifest.graph_commit_epoch
+    );
+    assert!(report.document_identity_coverage.ready);
+    assert_eq!(report.document_identity_coverage.document_identity_count, 6);
+    assert_eq!(report.batch_reports.len(), 1);
+    assert!(report.batch_reports[0].checkpoint_progress_accepted);
+}
+
+#[test]
+fn graph_lightning_initial_import_source_bundle_fails_closed_for_source_gaps() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+    let projection_batches = vec![SearchProjectionDelta {
+        upserts: vec![
+            initial_import_projection_row(SearchProjectionKind::Memory, "1"),
+            initial_import_projection_row(SearchProjectionKind::Message, "1"),
+        ],
+        deletes: Vec::new(),
+        max_operations: Some(2),
+        source_graph_commit_epoch: Some(export.manifest.graph_commit_epoch + 1),
+    }];
+
+    let report = graph_lightning_initial_import_source_bundle_readiness(
+        &export.manifest,
+        None,
+        &projection_batches,
+    );
+
+    assert!(!report.ready);
+    assert!(!report.checkpoint_present);
+    assert_eq!(report.projection_batch_count, 1);
+    assert_eq!(report.ready_projection_batch_count, 0);
+    assert!(report
+        .blocker_codes
+        .contains(&"initial_import_source_bundle_checkpoint_missing".to_string()));
+    assert!(report
+        .blocker_codes
+        .contains(&"initial_import_search_projection_batch_checkpoint_missing".to_string()));
+    assert!(report
+        .blocker_codes
+        .contains(&"initial_import_search_projection_batch_epoch_mismatch".to_string()));
+    assert!(report
+        .blocker_codes
+        .contains(&"initial_import_document_identity_kind_missing".to_string()));
 }
 
 #[test]

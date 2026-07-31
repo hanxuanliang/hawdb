@@ -301,6 +301,12 @@ LanceDB for that path.
   - Import canonical graph state from Kuzu/Ladybug and rebuild or import all six
     search projection kinds: Memory, Message, Community, Entity, Source, and
     SourceChunk.
+    - [x] Expose a typed initial-import source bundle readiness contract that
+      validates the Graph Lightning graph source and the full set of LanceDB
+      search-projection batches together, requiring a matching checkpoint,
+      manifest graph epoch, delete-free projection batches, and cumulative
+      document identity coverage for all six projection kinds before the host
+      starts or resumes import work.
   - Persist source schema/version fingerprints, batch checkpoints, document
     identities, and graph/search watermarks.
     - [x] Expose a typed durable-state envelope that packages the source

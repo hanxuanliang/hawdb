@@ -109,6 +109,7 @@ pub use canonical_snapshot::{
     graph_lightning_initial_import_search_projection_batch_report,
     graph_lightning_initial_import_search_projection_batch_report_with_document_identities,
     graph_lightning_initial_import_session_report,
+    graph_lightning_initial_import_source_bundle_readiness,
     graph_lightning_initial_import_source_fingerprint, parse_graph_lightning_graph_stream_export,
     validate_graph_lightning_graph_stream, CanonicalGraphSnapshotExport,
     CanonicalGraphSnapshotValidation, CanonicalSnapshotEndpointViolation,
@@ -127,8 +128,9 @@ pub use canonical_snapshot::{
     GraphLightningInitialImportPlan, GraphLightningInitialImportReadiness,
     GraphLightningInitialImportResumeAction, GraphLightningInitialImportResumeActionKind,
     GraphLightningInitialImportSearchProjectionBatchReport,
-    GraphLightningInitialImportSessionReport, GraphLightningInitialImportSourceFingerprint,
-    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION, GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION,
+    GraphLightningInitialImportSessionReport, GraphLightningInitialImportSourceBundleReadiness,
+    GraphLightningInitialImportSourceFingerprint, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION,
 };
 pub use plan_cache::{PlanCacheBypassReason, PlanCacheLookup, PlanCacheStats};
 pub use search_projection_catch_up::{

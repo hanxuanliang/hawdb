@@ -402,6 +402,20 @@ pub struct GraphLightningInitialImportSearchProjectionBatchReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphLightningInitialImportSourceBundleReadiness {
+    pub ready: bool,
+    pub graph_source_import_ready: bool,
+    pub checkpoint_present: bool,
+    pub projection_batch_count: usize,
+    pub ready_projection_batch_count: usize,
+    pub total_batches: u64,
+    pub source_fingerprint: GraphLightningInitialImportSourceFingerprint,
+    pub document_identity_coverage: GraphLightningInitialImportDocumentIdentityCoverage,
+    pub batch_reports: Vec<GraphLightningInitialImportSearchProjectionBatchReport>,
+    pub blocker_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphLightningInitialImportSourceFingerprint {
     pub protocol_version: u64,
     pub graph_commit_epoch: u64,
@@ -1270,6 +1284,74 @@ pub fn graph_lightning_initial_import_search_projection_batch_report(
         total_batches,
         &document_identities,
     )
+}
+
+pub fn graph_lightning_initial_import_source_bundle_readiness(
+    manifest: &GraphLightningBootstrapManifest,
+    checkpoint: Option<&GraphLightningInitialImportCheckpoint>,
+    projection_batches: &[SearchProjectionDelta],
+) -> GraphLightningInitialImportSourceBundleReadiness {
+    let source_fingerprint = graph_lightning_initial_import_source_fingerprint(manifest);
+    let total_batches = projection_batches.len() as u64;
+    let document_identities = projection_batches
+        .iter()
+        .flat_map(search_projection_delta_document_identities)
+        .collect::<Vec<_>>();
+    let document_identity_coverage =
+        graph_lightning_initial_import_document_identity_coverage(&document_identities);
+    let batch_reports = projection_batches
+        .iter()
+        .enumerate()
+        .map(|(batch_index, delta)| {
+            graph_lightning_initial_import_search_projection_batch_report_with_document_identities(
+                manifest,
+                checkpoint,
+                delta,
+                batch_index as u64,
+                total_batches,
+                &document_identities,
+            )
+        })
+        .collect::<Vec<_>>();
+    let ready_projection_batch_count = batch_reports.iter().filter(|report| report.ready).count();
+    let graph_source_import_ready = manifest.validation.is_import_ready;
+    let checkpoint_present = checkpoint.is_some();
+    let mut blocker_codes = BTreeSet::new();
+    if !graph_source_import_ready {
+        blocker_codes.insert("initial_import_source_bundle_graph_not_import_ready".to_string());
+    }
+    if !checkpoint_present {
+        blocker_codes.insert("initial_import_source_bundle_checkpoint_missing".to_string());
+    }
+    if projection_batches.is_empty() {
+        blocker_codes.insert("initial_import_source_bundle_projection_batches_missing".to_string());
+    }
+    if !document_identity_coverage.ready {
+        blocker_codes.extend(document_identity_coverage.blocker_codes.iter().cloned());
+    }
+    for report in &batch_reports {
+        blocker_codes.extend(report.blocker_codes.iter().cloned());
+        blocker_codes.extend(report.checkpoint_progress_blocker_codes.iter().cloned());
+    }
+    let blocker_codes = blocker_codes.into_iter().collect::<Vec<_>>();
+    let ready = blocker_codes.is_empty()
+        && graph_source_import_ready
+        && checkpoint_present
+        && !projection_batches.is_empty()
+        && ready_projection_batch_count == projection_batches.len();
+
+    GraphLightningInitialImportSourceBundleReadiness {
+        ready,
+        graph_source_import_ready,
+        checkpoint_present,
+        projection_batch_count: projection_batches.len(),
+        ready_projection_batch_count,
+        total_batches,
+        source_fingerprint,
+        document_identity_coverage,
+        batch_reports,
+        blocker_codes,
+    }
 }
 
 pub fn graph_lightning_initial_import_search_projection_batch_report_with_document_identities(
