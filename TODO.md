@@ -379,10 +379,13 @@ LanceDB for that path.
     and derive the changed-count cutoff from canonical GraphMeta state.
   - [x] Route `/library/community/{community_id}/recent-memories` through the
     embedded runtime with the existing bounded ordering and response shape.
-  - [ ] Add a bounded community-members graph contract that returns Entity and
-    Memory members plus member-internal edges before moving
-    `/graph/community-members/{community_id}`. The legacy route is unbounded,
-    so migration must add explicit pagination rather than silently truncating.
+  - [x] Add a bounded community-members graph contract that returns Entity and
+    Memory members plus member-internal edges. Entity and Memory reads are
+    separately bounded; edges are read only for the returned member IDs and
+    can be disabled with `max_edges = 0`.
+  - [ ] Migrate `/graph/community-members/{community_id}` only after adding
+    explicit pagination or a bounded compatibility contract. The legacy route
+    is unbounded, so Skein must not silently truncate its response.
   - [ ] Add pagination or an explicit bounded compatibility contract for
     `/graph/orphans`; Skein must not turn an embedded read into an unbounded
     materialization just to preserve the legacy response.

@@ -1117,7 +1117,7 @@ m.source AS source, \
 m.event_start AS event_start, \
 m.event_end AS event_end, \
 m.importance AS importance \
-ORDER BY COALESCE(m.pagerank_score, m.importance, 0.5) DESC \
+ORDER BY COALESCE(m.pagerank_score, m.importance, 0.5) DESC, m.id ASC \
 LIMIT $limit";
 pub const NOWLEDGE_MEM_GRAPH_SAMPLE_ROUTE: &str = "/graph/sample";
 pub const NOWLEDGE_MEM_GRAPH_SAMPLE_MEMORY_QUERY: &str = "\
@@ -1183,6 +1183,24 @@ m.event_end AS event_end, \
 m.importance AS importance \
 ORDER BY COALESCE(m.pagerank_score, m.importance, 0.5) DESC \
 LIMIT $limit";
+pub const NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ENTITY_QUERY: &str = "\
+MATCH (e:Entity) \
+WHERE e.community_id = $community_id \
+RETURN e.id AS member_id, \
+COALESCE(e.name, e.id) AS label, \
+COALESCE(e.pagerank_score, e.confidence, 0.5) AS importance \
+ORDER BY COALESCE(e.pagerank_score, e.confidence, 0.5) DESC, e.id ASC \
+LIMIT $limit";
+pub const NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_EDGE_QUERY: &str = "\
+MATCH (a)-[r]->(b) \
+WHERE a.id IN $member_ids \
+AND b.id IN $member_ids \
+RETURN a.id AS source_id, \
+b.id AS target_id, \
+label(r) AS relationship_type, \
+COALESCE(r.strength, r.confidence, 0.5) AS weight \
+ORDER BY source_id ASC, target_id ASC, relationship_type ASC \
+LIMIT $max_edges";
 pub const NOWLEDGE_MEM_GRAPH_COMMUNITY_RECENT_MEMORIES_ROUTE: &str =
     "/library/community/{community_id}/recent-memories";
 pub const NOWLEDGE_MEM_GRAPH_COMMUNITY_RECENT_MEMORIES_QUERY: &str = "\
@@ -3132,6 +3150,7 @@ impl NowledgeMemGraphNodeDetailsOutput {
 pub struct NowledgeMemGraphCommunityMembersOptions {
     pub community_id: i64,
     pub limit: usize,
+    pub max_edges: usize,
     pub read_options: NowledgeMemReadOptions,
 }
 
@@ -3140,6 +3159,7 @@ impl NowledgeMemGraphCommunityMembersOptions {
         Self {
             community_id,
             limit,
+            max_edges: limit.saturating_mul(4),
             read_options: NowledgeMemReadOptions::default(),
         }
     }
@@ -3155,6 +3175,8 @@ pub struct NowledgeMemGraphCommunityMembersRouteReport {
     pub community_id: i64,
     pub row_count: usize,
     pub read_report: NowledgeMemReadReport,
+    pub entity_read_report: NowledgeMemReadReport,
+    pub edge_read_report: Option<NowledgeMemReadReport>,
 }
 
 impl NowledgeMemGraphCommunityMembersRouteReport {
@@ -3168,6 +3190,44 @@ impl NowledgeMemGraphCommunityMembersRouteReport {
             "community_id": self.community_id,
             "row_count": self.row_count,
             "read_report": self.read_report.json(),
+            "entity_read_report": self.entity_read_report.json(),
+            "edge_read_report": self.edge_read_report.as_ref().map(NowledgeMemReadReport::json),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemGraphCommunityMemberEntityRow {
+    pub entity_id: Option<String>,
+    pub label: Option<String>,
+    pub importance: Option<Value>,
+}
+
+impl NowledgeMemGraphCommunityMemberEntityRow {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "entity_id": self.entity_id,
+            "label": self.label,
+            "importance": self.importance.as_ref().map(nowledge_value_json),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemGraphCommunityMemberEdgeRow {
+    pub source_id: Option<String>,
+    pub target_id: Option<String>,
+    pub relationship_type: Option<String>,
+    pub weight: Option<Value>,
+}
+
+impl NowledgeMemGraphCommunityMemberEdgeRow {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "source_id": self.source_id,
+            "target_id": self.target_id,
+            "relationship_type": self.relationship_type,
+            "weight": self.weight.as_ref().map(nowledge_value_json),
         })
     }
 }
@@ -3175,6 +3235,8 @@ impl NowledgeMemGraphCommunityMembersRouteReport {
 #[derive(Debug, Clone, PartialEq)]
 pub struct NowledgeMemGraphCommunityMembersOutput {
     pub rows: Vec<NowledgeMemGraphOverviewRow>,
+    pub entities: Vec<NowledgeMemGraphCommunityMemberEntityRow>,
+    pub edges: Vec<NowledgeMemGraphCommunityMemberEdgeRow>,
     pub report: NowledgeMemGraphCommunityMembersRouteReport,
 }
 
@@ -3182,6 +3244,8 @@ impl NowledgeMemGraphCommunityMembersOutput {
     pub fn json(&self) -> serde_json::Value {
         serde_json::json!({
             "rows": self.rows.iter().map(NowledgeMemGraphOverviewRow::json).collect::<Vec<_>>(),
+            "entities": self.entities.iter().map(NowledgeMemGraphCommunityMemberEntityRow::json).collect::<Vec<_>>(),
+            "edges": self.edges.iter().map(NowledgeMemGraphCommunityMemberEdgeRow::json).collect::<Vec<_>>(),
             "report": self.report.json(),
         })
     }
@@ -5463,6 +5527,50 @@ impl NowledgeMemGraph {
             .iter()
             .map(decode_graph_overview_row)
             .collect::<Result<Vec<_>>>()?;
+        let entity_read = self.read_query_with_params(
+            NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ENTITY_QUERY,
+            &parameters,
+            &graph_community_members_read_options(options),
+        )?;
+        let entities = entity_read
+            .output
+            .rows
+            .iter()
+            .map(decode_graph_community_member_entity_row)
+            .collect::<Result<Vec<_>>>()?;
+        let member_ids = rows
+            .iter()
+            .filter_map(|row| row.memory_id.clone())
+            .chain(entities.iter().filter_map(|row| row.entity_id.clone()))
+            .collect::<Vec<_>>();
+        let (edges, edge_read_report) = if member_ids.is_empty() || options.max_edges == 0 {
+            (Vec::new(), None)
+        } else {
+            let max_edges = i64::try_from(options.max_edges).map_err(|_| {
+                SkeinError::Semantic(
+                    "graph community members max_edges exceeds supported range".to_string(),
+                )
+            })?;
+            let edge_parameters = BTreeMap::from([
+                (
+                    "member_ids".to_string(),
+                    Value::List(member_ids.into_iter().map(Value::String).collect()),
+                ),
+                ("max_edges".to_string(), Value::Int(max_edges)),
+            ]);
+            let edge_read = self.read_query_with_params(
+                NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_EDGE_QUERY,
+                &edge_parameters,
+                &graph_community_members_edge_read_options(options),
+            )?;
+            let edges = edge_read
+                .output
+                .rows
+                .iter()
+                .map(decode_graph_community_member_edge_row)
+                .collect::<Result<Vec<_>>>()?;
+            (edges, Some(edge_read.report))
+        };
         let report = NowledgeMemGraphCommunityMembersRouteReport {
             protocol: NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ROUTE_REPORT_PROTOCOL.to_string(),
             route: NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ROUTE.to_string(),
@@ -5470,10 +5578,17 @@ impl NowledgeMemGraph {
             route_catalog_version: NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION.to_string(),
             route_catalog_digest: nowledge_mem_graph_read_route_catalog_digest(),
             community_id: options.community_id,
-            row_count: rows.len(),
+            row_count: rows.len() + entities.len(),
             read_report: read.report,
+            entity_read_report: entity_read.report,
+            edge_read_report,
         };
-        Ok(NowledgeMemGraphCommunityMembersOutput { rows, report })
+        Ok(NowledgeMemGraphCommunityMembersOutput {
+            rows,
+            entities,
+            edges,
+            report,
+        })
     }
 
     pub fn read_graph_community_recent_memories(
@@ -5894,6 +6009,17 @@ fn graph_community_members_read_options(
     read_options
 }
 
+fn graph_community_members_edge_read_options(
+    options: &NowledgeMemGraphCommunityMembersOptions,
+) -> NowledgeMemReadOptions {
+    let mut read_options = options.read_options.clone();
+    read_options.max_rows = Some(match read_options.max_rows {
+        Some(max_rows) => max_rows.min(options.max_edges),
+        None => options.max_edges,
+    });
+    read_options
+}
+
 fn graph_community_recent_memories_read_options(
     options: &NowledgeMemGraphCommunityRecentMemoriesOptions,
 ) -> NowledgeMemReadOptions {
@@ -5974,6 +6100,27 @@ fn decode_graph_overview_row(row: &BTreeMap<String, Value>) -> Result<NowledgeMe
         event_start: optional_value_field(row, "event_start"),
         event_end: optional_value_field(row, "event_end"),
         importance: optional_value_field(row, "importance"),
+    })
+}
+
+fn decode_graph_community_member_entity_row(
+    row: &BTreeMap<String, Value>,
+) -> Result<NowledgeMemGraphCommunityMemberEntityRow> {
+    Ok(NowledgeMemGraphCommunityMemberEntityRow {
+        entity_id: optional_string_field(row, "member_id")?,
+        label: optional_string_field(row, "label")?,
+        importance: optional_value_field(row, "importance"),
+    })
+}
+
+fn decode_graph_community_member_edge_row(
+    row: &BTreeMap<String, Value>,
+) -> Result<NowledgeMemGraphCommunityMemberEdgeRow> {
+    Ok(NowledgeMemGraphCommunityMemberEdgeRow {
+        source_id: optional_string_field(row, "source_id")?,
+        target_id: optional_string_field(row, "target_id")?,
+        relationship_type: optional_string_field(row, "relationship_type")?,
+        weight: optional_value_field(row, "weight"),
     })
 }
 
@@ -10519,6 +10666,7 @@ mod tests {
             .read_graph_community_members(&NowledgeMemGraphCommunityMembersOptions {
                 community_id: 42,
                 limit: 2,
+                max_edges: 8,
                 read_options: NowledgeMemReadOptions::default(),
             })
             .unwrap();
@@ -10538,6 +10686,29 @@ mod tests {
             .rows
             .iter()
             .all(|row| row.community_id.as_ref() == Some(&Value::Int(42))));
+        assert_eq!(output.entities.len(), 1);
+        assert_eq!(
+            output.entities[0].entity_id.as_deref(),
+            Some("community-entity")
+        );
+        assert_eq!(
+            output.entities[0].label.as_deref(),
+            Some("Community Entity")
+        );
+        assert_eq!(output.entities[0].importance, Some(Value::Float(2.0)));
+        assert_eq!(output.edges.len(), 2);
+        assert!(output.edges.iter().any(|edge| {
+            edge.source_id.as_deref() == Some("community-memory-high")
+                && edge.target_id.as_deref() == Some("community-entity")
+                && edge.relationship_type.as_deref() == Some("MENTIONS")
+                && edge.weight == Some(Value::Float(0.7))
+        }));
+        assert!(output.edges.iter().any(|edge| {
+            edge.source_id.as_deref() == Some("community-memory-high")
+                && edge.target_id.as_deref() == Some("community-memory-low")
+                && edge.relationship_type.as_deref() == Some("MEMORY_RELATES_TO")
+                && edge.weight == Some(Value::Float(0.8))
+        }));
         assert_eq!(
             output.report.protocol,
             NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ROUTE_REPORT_PROTOCOL
@@ -10547,9 +10718,19 @@ mod tests {
             NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ROUTE
         );
         assert_eq!(output.report.community_id, 42);
-        assert_eq!(output.report.row_count, 2);
+        assert_eq!(output.report.row_count, 3);
         assert_eq!(output.report.read_report.row_count, 2);
         assert!(output.report.read_report.row_limit_enforced_before_output);
+        assert_eq!(output.report.entity_read_report.row_count, 1);
+        assert!(
+            output
+                .report
+                .entity_read_report
+                .row_limit_enforced_before_output
+        );
+        let edge_read_report = output.report.edge_read_report.as_ref().unwrap();
+        assert_eq!(edge_read_report.row_count, 2);
+        assert!(edge_read_report.row_limit_enforced_before_output);
         assert_eq!(output.json()["report"]["read_engine"], "skein");
         assert_eq!(
             output.json()["rows"][0]["memory_id"],
@@ -10584,6 +10765,27 @@ mod tests {
             .unwrap();
         assert!(missing.rows.is_empty());
         assert_eq!(missing.report.row_count, 0);
+    }
+
+    #[test]
+    fn graph_community_members_can_skip_internal_edge_scan() {
+        let db = Database::new();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        seed_graph_community_members_memories(&mut graph);
+
+        let output = graph
+            .read_graph_community_members(&NowledgeMemGraphCommunityMembersOptions {
+                community_id: 42,
+                limit: 2,
+                max_edges: 0,
+                read_options: NowledgeMemReadOptions::default(),
+            })
+            .unwrap();
+
+        assert_eq!(output.rows.len(), 2);
+        assert_eq!(output.entities.len(), 1);
+        assert!(output.edges.is_empty());
+        assert!(output.report.edge_read_report.is_none());
     }
 
     #[test]
@@ -16555,6 +16757,15 @@ mod tests {
             .unwrap();
         graph
             .query("CREATE (:Memory {id: 'community-memory-other', title: 'Community Other', content: 'other body', pagerank_score: 10.0, community_id: 7, space_id: 'default', created_at: 103, updated_at: 203, source: 'community'})")
+            .unwrap();
+        graph
+            .query("CREATE (:Entity {id: 'community-entity', name: 'Community Entity', community_id: 42, pagerank_score: 2.0})")
+            .unwrap();
+        graph
+            .query("MATCH (m:Memory {id: 'community-memory-high'}), (e:Entity {id: 'community-entity'}) CREATE (m)-[:MENTIONS {confidence: 0.7}]->(e)")
+            .unwrap();
+        graph
+            .query("MATCH (a:Memory {id: 'community-memory-high'}), (b:Memory {id: 'community-memory-low'}) CREATE (a)-[:MEMORY_RELATES_TO {strength: 0.8}]->(b)")
             .unwrap();
     }
 
