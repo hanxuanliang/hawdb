@@ -22,9 +22,10 @@ use crate::{
     LocalQosPolicy, LocalQosScheduler, LocalQosState, NowledgeGraphStatement, PlanCacheLookup,
     QueryOutput, ReadExecutionProfile, Result, ScheduledSearchProjectionCatchUpReport, SearchIndex,
     SearchProjectionCatchUpReport, SearchProjectionChangefeedReadiness,
-    SearchProjectionChangefeedStatus, SearchProjectionDeltaReport, SearchProjectionFreshness,
-    SearchProjectionGraphDeltaRequest, SearchProjectionMutationId, SearchProjectionProbeOptions,
-    SearchResultSet, SkeinError, SlowQueryLogRecordSummary, TelemetrySink, Value,
+    SearchProjectionChangefeedStatus, SearchProjectionDelta, SearchProjectionDeltaReport,
+    SearchProjectionFreshness, SearchProjectionGraphDeltaRequest, SearchProjectionMutationId,
+    SearchProjectionProbeOptions, SearchResultSet, SkeinError, SlowQueryLogRecordSummary,
+    TelemetrySink, Value,
 };
 use crate::{
     graph_route_readiness::NMEM_GRAPH_ROUTE_READINESS_PROTOCOL,
@@ -6873,6 +6874,17 @@ impl NowledgeMemEmbeddedStoreHandle {
             )
     }
 
+    /// Applies an externally materialized projection batch and makes it
+    /// durable before returning. This is the library boundary used when Mem
+    /// imports a legacy LanceDB projection without rebuilding embeddings.
+    pub fn apply_search_projection_delta_and_checkpoint(
+        &self,
+        delta: SearchProjectionDelta,
+    ) -> Result<SearchProjectionDeltaReport> {
+        self.write_store()?
+            .apply_search_projection_delta_and_checkpoint(delta)
+    }
+
     pub fn query_with_params_with_report_options(
         &self,
         cypher: &str,
@@ -7281,6 +7293,19 @@ impl NowledgeMemEmbeddedStore {
 
     pub fn search_projection_mut(&mut self) -> Option<&mut NowledgeMemSearchProjection> {
         self.search_projection.as_mut()
+    }
+
+    /// Applies a projection delta and checkpoints it before acknowledging
+    /// success to the host. A checkpoint failure is returned to the caller,
+    /// leaving the host free to retry its idempotent batch.
+    pub fn apply_search_projection_delta_and_checkpoint(
+        &mut self,
+        delta: SearchProjectionDelta,
+    ) -> Result<SearchProjectionDeltaReport> {
+        let projection = require_search_projection_mut(&mut self.search_projection)?;
+        let report = projection.index_mut().apply_projection_delta(delta)?;
+        projection.index().checkpoint()?;
+        Ok(report)
     }
 
     pub fn set_telemetry_sink(&mut self, telemetry: Option<Arc<dyn TelemetrySink>>) {
@@ -15229,6 +15254,43 @@ mod tests {
             direct_evidence["filter_pushdown"]["field_capabilities_ready"],
             true
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn embedded_store_handle_checkpoints_external_projection_delta_before_returning() {
+        let root = unique_nowledge_mem_test_dir("external_projection_delta_checkpoint");
+        let graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::WritableCutover);
+        let projection = NowledgeMemSearchProjection::open(&root).unwrap();
+        let handle = NowledgeMemEmbeddedStoreHandle::new(NowledgeMemEmbeddedStore::new(
+            graph,
+            Some(projection),
+        ));
+
+        let report = handle
+            .apply_search_projection_delta_and_checkpoint(SearchProjectionDelta {
+                upserts: vec![SearchProjectionRow {
+                    kind: SearchProjectionKind::Memory,
+                    external_id: "memory-1".to_string(),
+                    title: "Imported memory".to_string(),
+                    body: "Preserved legacy projection payload".to_string(),
+                    embedding: Some(vec![0.25, 0.75]),
+                    source_id: Some("source-1".to_string()),
+                    metadata: BTreeMap::from([("space_id".to_string(), "default".to_string())]),
+                }],
+                deletes: Vec::new(),
+                max_operations: Some(1),
+                source_graph_commit_epoch: Some(7),
+            })
+            .unwrap();
+        assert_eq!(report.upserted_documents, 1);
+        drop(handle);
+
+        let reopened = SearchIndex::open(&root).unwrap();
+        let freshness = reopened.projection_freshness();
+        assert_eq!(freshness.document_count, 1);
+        assert_eq!(freshness.source_graph_commit_epoch, Some(7));
         std::fs::remove_dir_all(root).unwrap();
     }
 
