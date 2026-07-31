@@ -91,6 +91,25 @@ fn all_initial_import_projection_rows() -> Vec<SearchProjectionRow> {
     ]
 }
 
+#[test]
+fn canonical_snapshot_from_rows_derives_checksum_and_identity_audit() {
+    let snapshot = CanonicalGraphSnapshotExport::from_rows(
+        7,
+        vec![CanonicalSnapshotNode {
+            node_id: 1,
+            stable_id: Some(Value::String("legacy:node:1".to_string())),
+            labels: vec!["Memory".to_string()],
+            properties: BTreeMap::from([("id".to_string(), Value::String("m1".to_string()))]),
+        }],
+        vec![],
+    );
+
+    assert_eq!(snapshot.graph_commit_epoch, 7);
+    assert_ne!(snapshot.logical_checksum, 0);
+    assert!(!snapshot.stable_identity.requires_stable_id_mapping);
+    assert!(snapshot.validate().is_import_ready);
+}
+
 fn initial_import_projection_freshness(
     manifest: &GraphLightningBootstrapManifest,
 ) -> SearchProjectionFreshness {

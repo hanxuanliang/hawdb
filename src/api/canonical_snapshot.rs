@@ -15,6 +15,27 @@ pub struct CanonicalGraphSnapshotExport {
 }
 
 impl CanonicalGraphSnapshotExport {
+    /// Build a canonical snapshot at a host-owned source watermark.
+    ///
+    /// Importers use this at the boundary where a foreign graph has already
+    /// been read consistently. Keeping checksum and stable-identity derivation
+    /// here prevents each host integration from reimplementing that contract.
+    pub fn from_rows(
+        graph_commit_epoch: u64,
+        nodes: Vec<CanonicalSnapshotNode>,
+        relationships: Vec<CanonicalSnapshotRelationship>,
+    ) -> Self {
+        let stable_identity = canonical_snapshot_identity_audit(&nodes, &relationships);
+        let logical_checksum = canonical_graph_snapshot_checksum(&nodes, &relationships);
+        Self {
+            graph_commit_epoch,
+            logical_checksum,
+            stable_identity,
+            nodes,
+            relationships,
+        }
+    }
+
     pub fn with_stable_id_mapping(&self, mapping: &CanonicalStableIdMapping) -> Self {
         let mut export = self.clone();
         for node in &mut export.nodes {
@@ -638,15 +659,7 @@ pub(super) fn export_canonical_graph_snapshot_for(
         })
         .collect::<Vec<_>>();
     let graph_commit_epoch = store.commit_epoch();
-    let stable_identity = canonical_snapshot_identity_audit(&nodes, &relationships);
-    let logical_checksum = canonical_graph_snapshot_checksum(&nodes, &relationships);
-    CanonicalGraphSnapshotExport {
-        graph_commit_epoch,
-        logical_checksum,
-        stable_identity,
-        nodes,
-        relationships,
-    }
+    CanonicalGraphSnapshotExport::from_rows(graph_commit_epoch, nodes, relationships)
 }
 
 fn canonical_stable_id(properties: &BTreeMap<String, Value>) -> Option<Value> {
