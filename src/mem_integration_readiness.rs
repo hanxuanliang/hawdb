@@ -60,6 +60,7 @@ const ROUTE_COVERAGE_CHECKS: &[&str] = &[
     "route_ownership",
     "search_route_ownership_alignment",
     "active_search_route_ownership_alignment",
+    "active_search_route_readiness_alignment",
     "query_runtime_preflight",
     "query_runtime_preflight_alignment",
 ];
@@ -581,6 +582,31 @@ pub struct SearchRouteOwnershipAlignmentCutoverReadiness {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveSearchRouteReadinessAlignmentCutoverReadiness {
+    pub ready: bool,
+    pub evidence_ready: bool,
+    pub summary_ready: bool,
+    pub protocol_matches: bool,
+    pub readiness_matches: bool,
+    pub production_cutover_ready_matches: bool,
+    pub require_all_skein_matches: bool,
+    pub required_route_count_matches: bool,
+    pub evidence_route_count_matches: bool,
+    pub ready_route_count_matches: bool,
+    pub skein_route_count_matches: bool,
+    pub lancedb_handle_count_matches: bool,
+    pub missing_required_routes_matches: bool,
+    pub non_skein_routes_matches: bool,
+    pub lancedb_handle_routes_matches: bool,
+    pub candidate_not_ready_routes_matches: bool,
+    pub metadata_pushdown_not_ready_routes_matches: bool,
+    pub ranking_not_ready_routes_matches: bool,
+    pub fail_soft_not_ready_routes_matches: bool,
+    pub blocker_codes_match: bool,
+    pub blocker_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryRuntimePreflightCutoverReadiness {
     pub protocol_matches: bool,
     pub ready: bool,
@@ -948,6 +974,31 @@ impl SearchRouteOwnershipAlignmentCutoverReadiness {
     }
 }
 
+impl ActiveSearchRouteReadinessAlignmentCutoverReadiness {
+    pub fn evidence_ready(&self) -> bool {
+        self.ready
+            && self.evidence_ready
+            && self.summary_ready
+            && self.protocol_matches
+            && self.readiness_matches
+            && self.production_cutover_ready_matches
+            && self.require_all_skein_matches
+            && self.required_route_count_matches
+            && self.evidence_route_count_matches
+            && self.ready_route_count_matches
+            && self.skein_route_count_matches
+            && self.lancedb_handle_count_matches
+            && self.missing_required_routes_matches
+            && self.non_skein_routes_matches
+            && self.lancedb_handle_routes_matches
+            && self.candidate_not_ready_routes_matches
+            && self.metadata_pushdown_not_ready_routes_matches
+            && self.ranking_not_ready_routes_matches
+            && self.fail_soft_not_ready_routes_matches
+            && self.blocker_codes_match
+    }
+}
+
 impl RouteOwnershipCutoverReadiness {
     pub fn evidence_ready(&self) -> bool {
         self.protocol_matches
@@ -1266,6 +1317,8 @@ pub fn nowledge_mem_integration_readiness(
             bundle,
             "replacement_summary_active_search_route_ownership_alignment",
         );
+    let active_search_route_readiness_alignment_readiness =
+        active_search_route_readiness_alignment_cutover_readiness(bundle);
     let query_runtime_readiness = query_runtime_preflight_cutover_readiness(bundle);
     let query_runtime_alignment_readiness =
         query_runtime_preflight_alignment_cutover_readiness(bundle);
@@ -1378,6 +1431,15 @@ pub fn nowledge_mem_integration_readiness(
                 .clone(),
         ),
         check_named_conditions(
+            "active_search_route_readiness_alignment",
+            active_search_route_readiness_alignment_cutover_conditions(
+                &active_search_route_readiness_alignment_readiness,
+            ),
+            active_search_route_readiness_alignment_readiness
+                .blocker_codes
+                .clone(),
+        ),
+        check_named_conditions(
             "query_runtime_preflight",
             query_runtime_preflight_cutover_conditions(&query_runtime_readiness),
             query_runtime_readiness.blocker_codes.clone(),
@@ -1467,6 +1529,8 @@ pub fn nowledge_mem_integration_readiness(
                 search_route_ownership_alignment: &search_route_ownership_alignment_readiness,
                 active_search_route_ownership_alignment:
                     &active_search_route_ownership_alignment_readiness,
+                active_search_route_readiness_alignment:
+                    &active_search_route_readiness_alignment_readiness,
                 query_runtime: &query_runtime_readiness,
                 query_runtime_alignment: &query_runtime_alignment_readiness,
                 blackbox: &blackbox_readiness,
@@ -1734,6 +1798,8 @@ struct IntegrationGateReadiness<'a> {
     route_ownership: &'a RouteOwnershipCutoverReadiness,
     search_route_ownership_alignment: &'a SearchRouteOwnershipAlignmentCutoverReadiness,
     active_search_route_ownership_alignment: &'a SearchRouteOwnershipAlignmentCutoverReadiness,
+    active_search_route_readiness_alignment:
+        &'a ActiveSearchRouteReadinessAlignmentCutoverReadiness,
     query_runtime: &'a QueryRuntimePreflightCutoverReadiness,
     query_runtime_alignment: &'a QueryRuntimePreflightAlignmentCutoverReadiness,
     blackbox: &'a BlackboxReadinessReport,
@@ -2050,6 +2116,28 @@ fn next_actions(
                 "replacement_summary_active_search_route_ownership_alignment.lancedb_route_count_matches",
                 "replacement_summary_active_search_route_ownership_alignment.lancedb_routes_matches",
                 "replacement_summary_active_search_route_ownership_alignment.blocker_codes",
+            ],
+        ));
+    }
+    if !readiness
+        .active_search_route_readiness_alignment
+        .evidence_ready()
+    {
+        actions.push(next_action(
+            "regenerate_active_search_route_readiness_alignment",
+            "live active search route read evidence must match the replacement summary before Mem cutover",
+            [
+                "active_search_route_readiness.ready",
+                "active_search_route_readiness.production_cutover_ready",
+                "active_search_route_readiness.lancedb_handle_required_route_count",
+                "active_search_route_readiness.lancedb_handle_required_routes",
+                "replacement_summary.active_search_route_readiness.ready",
+                "replacement_summary_active_search_route_readiness_alignment.ready",
+                "replacement_summary_active_search_route_readiness_alignment.evidence_present",
+                "replacement_summary_active_search_route_readiness_alignment.summary_present",
+                "replacement_summary_active_search_route_readiness_alignment.lancedb_handle_count_matches",
+                "replacement_summary_active_search_route_readiness_alignment.lancedb_handle_routes_matches",
+                "replacement_summary_active_search_route_readiness_alignment.blocker_codes",
             ],
         ));
     }
@@ -2662,6 +2750,148 @@ fn search_route_ownership_alignment_condition_fields(
             blocker_codes_match: "unknown_search_route_ownership_alignment.blocker_codes_match",
         },
     }
+}
+
+pub fn active_search_route_readiness_alignment_cutover_readiness(
+    bundle: &serde_json::Value,
+) -> ActiveSearchRouteReadinessAlignmentCutoverReadiness {
+    const FIELD: &str = "replacement_summary_active_search_route_readiness_alignment";
+    ActiveSearchRouteReadinessAlignmentCutoverReadiness {
+        ready: bool_path(bundle, &[FIELD, "ready"]) == Some(true),
+        evidence_ready: bool_path(bundle, &[FIELD, "evidence_present"]) == Some(true),
+        summary_ready: bool_path(bundle, &[FIELD, "summary_present"]) == Some(true),
+        protocol_matches: bool_path(bundle, &[FIELD, "protocol_matches"]) == Some(true),
+        readiness_matches: bool_path(bundle, &[FIELD, "ready_matches"]) == Some(true),
+        production_cutover_ready_matches: bool_path(
+            bundle,
+            &[FIELD, "production_cutover_ready_matches"],
+        ) == Some(true),
+        require_all_skein_matches: bool_path(bundle, &[FIELD, "require_all_skein_matches"])
+            == Some(true),
+        required_route_count_matches: bool_path(bundle, &[FIELD, "required_route_count_matches"])
+            == Some(true),
+        evidence_route_count_matches: bool_path(bundle, &[FIELD, "evidence_route_count_matches"])
+            == Some(true),
+        ready_route_count_matches: bool_path(bundle, &[FIELD, "ready_route_count_matches"])
+            == Some(true),
+        skein_route_count_matches: bool_path(bundle, &[FIELD, "skein_route_count_matches"])
+            == Some(true),
+        lancedb_handle_count_matches: bool_path(bundle, &[FIELD, "lancedb_handle_count_matches"])
+            == Some(true),
+        missing_required_routes_matches: bool_path(
+            bundle,
+            &[FIELD, "missing_required_routes_matches"],
+        ) == Some(true),
+        non_skein_routes_matches: bool_path(bundle, &[FIELD, "non_skein_routes_matches"])
+            == Some(true),
+        lancedb_handle_routes_matches: bool_path(bundle, &[FIELD, "lancedb_handle_routes_matches"])
+            == Some(true),
+        candidate_not_ready_routes_matches: bool_path(
+            bundle,
+            &[FIELD, "candidate_not_ready_routes_matches"],
+        ) == Some(true),
+        metadata_pushdown_not_ready_routes_matches: bool_path(
+            bundle,
+            &[FIELD, "metadata_pushdown_not_ready_routes_matches"],
+        ) == Some(true),
+        ranking_not_ready_routes_matches: bool_path(
+            bundle,
+            &[FIELD, "ranking_not_ready_routes_matches"],
+        ) == Some(true),
+        fail_soft_not_ready_routes_matches: bool_path(
+            bundle,
+            &[FIELD, "fail_soft_not_ready_routes_matches"],
+        ) == Some(true),
+        blocker_codes_match: bool_path(bundle, &[FIELD, "blocker_codes_match"]) == Some(true),
+        blocker_codes: blocker_codes(bundle, &[&[FIELD, "blocker_codes"][..]]),
+    }
+}
+
+fn active_search_route_readiness_alignment_cutover_conditions(
+    readiness: &ActiveSearchRouteReadinessAlignmentCutoverReadiness,
+) -> Vec<(&'static str, bool)> {
+    vec![
+        (
+            "replacement_summary_active_search_route_readiness_alignment.ready",
+            readiness.ready,
+        ),
+        (
+            "replacement_summary_active_search_route_readiness_alignment.evidence_present",
+            readiness.evidence_ready,
+        ),
+        (
+            "replacement_summary_active_search_route_readiness_alignment.summary_present",
+            readiness.summary_ready,
+        ),
+        (
+            "replacement_summary_active_search_route_readiness_alignment.protocol_matches",
+            readiness.protocol_matches,
+        ),
+        (
+            "replacement_summary_active_search_route_readiness_alignment.ready_matches",
+            readiness.readiness_matches,
+        ),
+        (
+            "replacement_summary_active_search_route_readiness_alignment.production_cutover_ready_matches",
+            readiness.production_cutover_ready_matches,
+        ),
+        (
+            "replacement_summary_active_search_route_readiness_alignment.require_all_skein_matches",
+            readiness.require_all_skein_matches,
+        ),
+        (
+            "replacement_summary_active_search_route_readiness_alignment.required_route_count_matches",
+            readiness.required_route_count_matches,
+        ),
+        (
+            "replacement_summary_active_search_route_readiness_alignment.evidence_route_count_matches",
+            readiness.evidence_route_count_matches,
+        ),
+        (
+            "replacement_summary_active_search_route_readiness_alignment.ready_route_count_matches",
+            readiness.ready_route_count_matches,
+        ),
+        (
+            "replacement_summary_active_search_route_readiness_alignment.skein_route_count_matches",
+            readiness.skein_route_count_matches,
+        ),
+        (
+            "replacement_summary_active_search_route_readiness_alignment.lancedb_handle_count_matches",
+            readiness.lancedb_handle_count_matches,
+        ),
+        (
+            "replacement_summary_active_search_route_readiness_alignment.missing_required_routes_matches",
+            readiness.missing_required_routes_matches,
+        ),
+        (
+            "replacement_summary_active_search_route_readiness_alignment.non_skein_routes_matches",
+            readiness.non_skein_routes_matches,
+        ),
+        (
+            "replacement_summary_active_search_route_readiness_alignment.lancedb_handle_routes_matches",
+            readiness.lancedb_handle_routes_matches,
+        ),
+        (
+            "replacement_summary_active_search_route_readiness_alignment.candidate_not_ready_routes_matches",
+            readiness.candidate_not_ready_routes_matches,
+        ),
+        (
+            "replacement_summary_active_search_route_readiness_alignment.metadata_pushdown_not_ready_routes_matches",
+            readiness.metadata_pushdown_not_ready_routes_matches,
+        ),
+        (
+            "replacement_summary_active_search_route_readiness_alignment.ranking_not_ready_routes_matches",
+            readiness.ranking_not_ready_routes_matches,
+        ),
+        (
+            "replacement_summary_active_search_route_readiness_alignment.fail_soft_not_ready_routes_matches",
+            readiness.fail_soft_not_ready_routes_matches,
+        ),
+        (
+            "replacement_summary_active_search_route_readiness_alignment.blocker_codes_match",
+            readiness.blocker_codes_match,
+        ),
+    ]
 }
 
 #[derive(Debug, Default)]
@@ -6127,9 +6357,11 @@ mod tests {
     use crate::{
         nowledge_mem_active_search_route_ownership_all_skein,
         nowledge_mem_active_search_route_ownership_readiness,
-        nowledge_mem_graph_read_route_catalog_digest, nowledge_mem_graph_read_route_spec,
-        nowledge_mem_graph_read_route_specs_json, nowledge_mem_route_ownership_all_skein,
-        nowledge_mem_route_ownership_readiness, nowledge_mem_search_candidate_shadow_evidence_json,
+        nowledge_mem_active_search_route_read_evidence_all_skein_ready,
+        nowledge_mem_active_search_route_readiness, nowledge_mem_graph_read_route_catalog_digest,
+        nowledge_mem_graph_read_route_spec, nowledge_mem_graph_read_route_specs_json,
+        nowledge_mem_route_ownership_all_skein, nowledge_mem_route_ownership_readiness,
+        nowledge_mem_search_candidate_shadow_evidence_json,
         nowledge_mem_search_route_ownership_all_skein,
         nowledge_mem_search_route_ownership_readiness, NowledgeMemRouteOwnershipPolicy,
         NowledgeMemRouteReadinessSummary, NowledgeMemSearchCandidateShadowAccumulator,
@@ -6140,7 +6372,8 @@ mod tests {
         NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_EVIDENCE_SOURCE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_PRIMARY_ENGINE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_SHADOW_ENGINE,
-        NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+        NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES,
+        REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
     };
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -6748,6 +6981,68 @@ mod tests {
             .unwrap()
             .iter()
             .any(|action| action["action"] == "attach_route_ownership_evidence"));
+    }
+
+    #[test]
+    fn integration_readiness_blocks_active_search_reads_that_still_require_lancedb() {
+        let mut bundle = ready_bundle();
+        bundle["active_search_route_readiness"]["ready"] = serde_json::json!(false);
+        bundle["active_search_route_readiness"]["production_cutover_ready"] =
+            serde_json::json!(false);
+        bundle["active_search_route_readiness"]["ready_route_count"] =
+            serde_json::json!(REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES.len() - 1);
+        bundle["active_search_route_readiness"]["lancedb_handle_required_route_count"] =
+            serde_json::json!(1);
+        bundle["active_search_route_readiness"]["lancedb_handle_required_routes"] =
+            serde_json::json!([REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES[0]]);
+        bundle["active_search_route_readiness"]["blocker_codes"] =
+            serde_json::json!(["active_search_route_readiness_lancedb_handle_required"]);
+        bundle["replacement_summary_active_search_route_readiness_alignment"]["ready"] =
+            serde_json::json!(false);
+        bundle["replacement_summary_active_search_route_readiness_alignment"]
+            ["ready_route_count_matches"] = serde_json::json!(false);
+        bundle["replacement_summary_active_search_route_readiness_alignment"]
+            ["lancedb_handle_count_matches"] = serde_json::json!(false);
+        bundle["replacement_summary_active_search_route_readiness_alignment"]
+            ["lancedb_handle_routes_matches"] = serde_json::json!(false);
+        bundle["replacement_summary_active_search_route_readiness_alignment"]
+            ["blocker_codes_match"] = serde_json::json!(false);
+        bundle["replacement_summary_active_search_route_readiness_alignment"]["blocker_codes"] =
+            serde_json::json!([
+                "active_search_route_readiness_ready_count_mismatch",
+                "active_search_route_readiness_lancedb_handle_count_mismatch",
+                "active_search_route_readiness_lancedb_handle_routes_mismatch",
+                "active_search_route_readiness_blocker_codes_mismatch"
+            ]);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert!(report["failed_checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check == "active_search_route_readiness_alignment"));
+        let check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "active_search_route_readiness_alignment")
+            .unwrap();
+        assert!(check["failed_evidence_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field
+                == "replacement_summary_active_search_route_readiness_alignment.lancedb_handle_count_matches"));
+        assert!(
+            report["next_actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|action| action["action"]
+                    == "regenerate_active_search_route_readiness_alignment")
+        );
     }
 
     #[test]
@@ -10886,13 +11181,18 @@ mod tests {
         bundle["route_ownership"] = ready_route_ownership();
         bundle["search_route_ownership"] = ready_search_route_ownership();
         bundle["active_search_route_ownership"] = ready_active_search_route_ownership();
+        bundle["active_search_route_readiness"] = ready_active_search_route_readiness();
         bundle["replacement_summary"]["search_route_ownership"] = ready_search_route_ownership();
         bundle["replacement_summary"]["active_search_route_ownership"] =
             ready_active_search_route_ownership();
+        bundle["replacement_summary"]["active_search_route_readiness"] =
+            ready_active_search_route_readiness();
         bundle["replacement_summary_search_route_ownership_alignment"] =
             ready_search_route_ownership_alignment();
         bundle["replacement_summary_active_search_route_ownership_alignment"] =
             ready_search_route_ownership_alignment();
+        bundle["replacement_summary_active_search_route_readiness_alignment"] =
+            ready_active_search_route_readiness_alignment();
         bundle["graph_route_parity_alignment"] = serde_json::json!({
             "ready": true,
             "required_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
@@ -11089,6 +11389,14 @@ mod tests {
         .json()
     }
 
+    fn ready_active_search_route_readiness() -> serde_json::Value {
+        nowledge_mem_active_search_route_readiness(
+            &nowledge_mem_active_search_route_read_evidence_all_skein_ready(),
+            NowledgeMemSearchRouteOwnershipPolicy::production_cutover(),
+        )
+        .json()
+    }
+
     fn ready_search_route_ownership_alignment() -> serde_json::Value {
         serde_json::json!({
             "ready": true,
@@ -11107,6 +11415,34 @@ mod tests {
             "blocker_codes_match": true,
             "evidence_lancedb_routes": [],
             "summary_lancedb_routes": [],
+            "blocker_codes": []
+        })
+    }
+
+    fn ready_active_search_route_readiness_alignment() -> serde_json::Value {
+        serde_json::json!({
+            "ready": true,
+            "evidence_present": true,
+            "summary_present": true,
+            "protocol_matches": true,
+            "ready_matches": true,
+            "production_cutover_ready_matches": true,
+            "require_all_skein_matches": true,
+            "required_route_count_matches": true,
+            "evidence_route_count_matches": true,
+            "ready_route_count_matches": true,
+            "skein_route_count_matches": true,
+            "lancedb_handle_count_matches": true,
+            "missing_required_routes_matches": true,
+            "non_skein_routes_matches": true,
+            "lancedb_handle_routes_matches": true,
+            "candidate_not_ready_routes_matches": true,
+            "metadata_pushdown_not_ready_routes_matches": true,
+            "ranking_not_ready_routes_matches": true,
+            "fail_soft_not_ready_routes_matches": true,
+            "blocker_codes_match": true,
+            "evidence_lancedb_handle_required_routes": [],
+            "summary_lancedb_handle_required_routes": [],
             "blocker_codes": []
         })
     }

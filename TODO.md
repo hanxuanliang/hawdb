@@ -374,6 +374,10 @@ LanceDB for that path.
     alone cannot pass cutover unless every active route also proves Skein
     candidate reads, metadata pushdown, ranking, fail-soft behavior, and no
     LanceDB handle requirement.
+  - [x] Carry active search route read readiness through the replacement
+    summary and Mem integration bundle alignment gate, so final cutover
+    evidence fails closed when any active search route still needs LanceDB or
+    lacks candidate-read evidence.
   - Cover thread/message FTS, entity/community discovery, source and source
     chunk recall, `/fs/recall`, MCP search, and deep-search graph expansion.
   - Preserve embedding identity, zero-vector semantics, CJK tokenization,
