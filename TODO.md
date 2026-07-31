@@ -394,9 +394,10 @@ LanceDB for that path.
     Each page reads at most `limit + 1` rows to derive `has_more` and a stable
     `next_cursor`; insufficient row budget fails closed rather than reporting
     a truncated page as complete.
-  - [ ] Migrate `/graph/orphans` only after the REST response accepts explicit
-    `limit` and `cursor` parameters. The legacy route is unbounded, so Skein
-    must not silently truncate its response.
+  - [x] Migrate `/graph/orphans` through the embedded runtime with explicit
+    `limit` and keyset `cursor` parameters. Skein mode rejects an unbounded
+    request and returns `has_more` plus `next_cursor` instead of silently
+    truncating the legacy response.
   - Move REST, MCP, read-batch, export, and background-maintenance reads from
     direct `KuzuClient` calls to parameterized Cypher through the embedded query
     runtime.
