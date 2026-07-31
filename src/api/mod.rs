@@ -150,6 +150,23 @@ pub use search_projection_catch_up::{
 };
 pub use system_variables::QuerySystemVariables;
 
+fn graph_lightning_initial_import_source_fingerprint_key(
+    manifest: &GraphLightningBootstrapManifest,
+) -> String {
+    let fingerprint = graph_lightning_initial_import_source_fingerprint(manifest);
+    format!(
+        "v{}:{}:{}:{}:{}:{}:{}:{}",
+        fingerprint.protocol_version,
+        fingerprint.graph_commit_epoch,
+        fingerprint.logical_checksum,
+        fingerprint.graph_stream_checksum,
+        fingerprint.graph_stream_byte_len,
+        fingerprint.schema_checksum,
+        fingerprint.node_count,
+        fingerprint.relationship_count,
+    )
+}
+
 #[derive(Debug)]
 pub struct Database {
     catalog: Catalog,
@@ -6145,6 +6162,22 @@ impl Database {
         if !plan.ready_for_graph_import {
             blocker_codes.insert("graph_lightning_graph_stream_not_import_ready".to_string());
         }
+        let source_fingerprint = graph_lightning_initial_import_source_fingerprint_key(manifest);
+        if let Some(imported_source_fingerprint) = self.store.initial_import_source_fingerprint() {
+            if imported_source_fingerprint == source_fingerprint {
+                return Ok(GraphLightningInitialImportApplyReport {
+                    applied: false,
+                    ready_for_cutover: plan.ready_for_cutover,
+                    graph_commit_epoch: self.store.commit_epoch(),
+                    node_count: self.store.scan_nodes(None).count(),
+                    relationship_count: self.store.scan_relationships(None).count(),
+                    plan,
+                    blocker_codes: Vec::new(),
+                });
+            }
+            blocker_codes
+                .insert("graph_lightning_initial_import_source_fingerprint_mismatch".to_string());
+        }
         let target_empty = self.store.scan_nodes(None).next().is_none()
             && self.store.scan_relationships(None).next().is_none();
         if !target_empty {
@@ -6225,9 +6258,14 @@ impl Database {
                 ))
             })
             .collect::<Result<Vec<GraphSnapshotRelationshipImport>>>()?;
-        self.store.replace_stable_id_mapping(stable_id_mapping)?;
         self.store
-            .import_graph_snapshot_rows(&mut self.catalog, node_rows, relationship_rows)?;
+            .import_graph_snapshot_rows_with_source_fingerprint(
+                &mut self.catalog,
+                stable_id_mapping,
+                source_fingerprint,
+                node_rows,
+                relationship_rows,
+            )?;
         let updated_plan = graph_lightning_initial_import_plan_with_document_identities(
             encoded_graph_stream,
             manifest,

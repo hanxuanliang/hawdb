@@ -2537,6 +2537,53 @@ fn graph_lightning_initial_import_apply_imports_graph_state_into_empty_target() 
 
         assert_eq!(imported.logical_checksum, export.snapshot.logical_checksum);
         assert_eq!(imported.stable_identity, export.snapshot.stable_identity);
+
+        let retry = reopened
+            .graph_lightning_initial_import_apply(
+                &export.graph_stream.encoded,
+                &export.manifest,
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(!retry.applied);
+        assert!(retry.blocker_codes.is_empty());
+        assert_eq!(retry.node_count, export.manifest.node_count);
+        assert_eq!(retry.relationship_count, export.manifest.relationship_count);
+        reopened.checkpoint().unwrap();
+    }
+    {
+        let mut reopened = Database::open(&path).unwrap();
+        let retry = reopened
+            .graph_lightning_initial_import_apply(
+                &export.graph_stream.encoded,
+                &export.manifest,
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(!retry.applied);
+        assert!(retry.blocker_codes.is_empty());
+
+        let mut different_source = Database::new();
+        different_source
+            .query("CREATE (:Memory {id: 'other'})")
+            .unwrap();
+        let different_export = different_source
+            .prepare_graph_lightning_bootstrap_export()
+            .unwrap();
+        let mismatch = reopened
+            .graph_lightning_initial_import_apply(
+                &different_export.graph_stream.encoded,
+                &different_export.manifest,
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(!mismatch.applied);
+        assert!(mismatch
+            .blocker_codes
+            .contains(&"graph_lightning_initial_import_source_fingerprint_mismatch".to_string()));
     }
 }
 

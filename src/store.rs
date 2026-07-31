@@ -435,6 +435,7 @@ pub struct GraphStore {
     projected_graphs: BTreeMap<String, ProjectedGraphDefinition>,
     projected_graph_artifacts: BTreeMap<String, ProjectedGraphArtifact>,
     stable_id_mapping: StoreStableIdMapping,
+    initial_import_source_fingerprint: Option<String>,
     search_projection_change_log_start_epoch: u64,
     search_projection_graph_changes: Vec<SearchProjectionGraphChange>,
     max_search_projection_change_log_entries: Option<usize>,
@@ -594,6 +595,7 @@ impl GraphStore {
             projected_graphs: BTreeMap::new(),
             projected_graph_artifacts: BTreeMap::new(),
             stable_id_mapping: StoreStableIdMapping::default(),
+            initial_import_source_fingerprint: None,
             search_projection_change_log_start_epoch: 0,
             search_projection_graph_changes: Vec::new(),
             max_search_projection_change_log_entries: None,
@@ -1663,6 +1665,109 @@ impl GraphStore {
                 ),
         );
         self.validate_constraints_for_ops(&working_catalog, &ops)?;
+        if let Some(durable) = &mut self.durable {
+            durable.append_batch(ops.clone())?;
+        }
+        self.record_search_projection_graph_changes_for_ops(
+            &working_catalog,
+            self.commit_epoch + 1,
+            &ops,
+        );
+        for op in ops {
+            self.apply_wal_op(catalog, op);
+        }
+        self.commit_epoch += 1;
+        Ok(())
+    }
+
+    pub fn import_graph_snapshot_rows_with_source_fingerprint(
+        &mut self,
+        catalog: &mut Catalog,
+        stable_id_mapping: StoreStableIdMapping,
+        source_fingerprint: String,
+        nodes: Vec<GraphSnapshotNodeImport>,
+        relationships: Vec<GraphSnapshotRelationshipImport>,
+    ) -> Result<()> {
+        if self.initial_import_source_fingerprint.is_some()
+            || !self.nodes.is_empty()
+            || !self.relationships.is_empty()
+        {
+            return Err(SkeinError::Storage(
+                "graph lightning initial import requires an empty target graph".to_string(),
+            ));
+        }
+
+        let mut node_ids = BTreeSet::new();
+        for (id, label, _) in &nodes {
+            if label.is_empty() {
+                return Err(SkeinError::Storage(
+                    "graph lightning initial import node label is empty".to_string(),
+                ));
+            }
+            if !node_ids.insert(*id) {
+                return Err(SkeinError::Storage(format!(
+                    "graph lightning initial import duplicate node id {}",
+                    id.0
+                )));
+            }
+        }
+        let mut relationship_ids = BTreeSet::new();
+        for (id, source, target, rel_type, _) in &relationships {
+            if rel_type.is_empty() {
+                return Err(SkeinError::Storage(
+                    "graph lightning initial import relationship type is empty".to_string(),
+                ));
+            }
+            if !relationship_ids.insert(*id) {
+                return Err(SkeinError::Storage(format!(
+                    "graph lightning initial import duplicate relationship id {}",
+                    id.0
+                )));
+            }
+            if !node_ids.contains(source) || !node_ids.contains(target) {
+                return Err(SkeinError::Storage(format!(
+                    "graph lightning initial import relationship {} references a missing endpoint",
+                    id.0
+                )));
+            }
+        }
+
+        let mut working_catalog = catalog.clone();
+        for (_, label, _) in &nodes {
+            working_catalog.get_or_create_label(label);
+        }
+        for (_, _, _, rel_type, _) in &relationships {
+            working_catalog.get_or_create_rel_type(rel_type);
+        }
+        let mut ops = Vec::with_capacity(nodes.len() + relationships.len() + 1);
+        ops.push(WalOp::MarkInitialImportSource { source_fingerprint });
+        ops.extend(
+            nodes
+                .iter()
+                .map(|(id, label, properties)| WalOp::CreateNode {
+                    id: *id,
+                    label: label.clone(),
+                    properties: properties.clone(),
+                }),
+        );
+        ops.extend(
+            relationships
+                .iter()
+                .map(
+                    |(id, source, target, rel_type, properties)| WalOp::CreateRelationship {
+                        id: *id,
+                        source: *source,
+                        target: *target,
+                        rel_type: rel_type.clone(),
+                        properties: properties.clone(),
+                    },
+                ),
+        );
+        self.validate_constraints_for_ops(&working_catalog, &ops)?;
+
+        // The mapping is durable before the WAL batch; recovery never observes imported
+        // graph rows without the stable identities required to address them.
+        self.replace_stable_id_mapping(stable_id_mapping)?;
         if let Some(durable) = &mut self.durable {
             durable.append_batch(ops.clone())?;
         }
@@ -4350,6 +4455,7 @@ impl GraphStore {
             nodes: &self.nodes,
             relationships: &self.relationships,
             projected_graphs: &self.projected_graphs,
+            initial_import_source_fingerprint: self.initial_import_source_fingerprint.as_deref(),
         })?;
         durable.truncate_wal()?;
         durable.publish_checkpoint_manifest(self.commit_epoch, oldest_reader_commit_epoch)?;
@@ -4422,6 +4528,10 @@ impl GraphStore {
 
     pub fn stable_id_mapping(&self) -> StoreStableIdMapping {
         self.stable_id_mapping.clone()
+    }
+
+    pub fn initial_import_source_fingerprint(&self) -> Option<&str> {
+        self.initial_import_source_fingerprint.as_deref()
     }
 
     pub fn replace_stable_id_mapping(&mut self, mapping: StoreStableIdMapping) -> Result<()> {
@@ -4606,6 +4716,7 @@ impl GraphStore {
             projected_graphs: self.projected_graphs.clone(),
             projected_graph_artifacts: self.projected_graph_artifacts.clone(),
             stable_id_mapping: self.stable_id_mapping.clone(),
+            initial_import_source_fingerprint: self.initial_import_source_fingerprint.clone(),
             search_projection_change_log_start_epoch: self.search_projection_change_log_start_epoch,
             search_projection_graph_changes: self.search_projection_graph_changes.clone(),
             max_search_projection_change_log_entries: self.max_search_projection_change_log_entries,
@@ -4795,7 +4906,8 @@ impl GraphStore {
                 | WalOp::CreateRelationshipUniqueConstraint { .. }
                 | WalOp::CreateRelationshipPropertyExistsConstraint { .. }
                 | WalOp::SetRelationshipProperty { .. }
-                | WalOp::ProjectGraph { .. } => {}
+                | WalOp::ProjectGraph { .. }
+                | WalOp::MarkInitialImportSource { .. } => {}
             }
         }
     }
@@ -6793,6 +6905,15 @@ impl GraphStore {
                     loaded_search_projection_change_log_start_epoch = Some(start_epoch);
                     self.search_projection_change_log_start_epoch = start_epoch;
                 }
+                ["initial_import_source_fingerprint", raw] => {
+                    if self.initial_import_source_fingerprint.is_some() {
+                        return Err(SkeinError::Storage(
+                            "checkpoint contains duplicate initial import source fingerprint"
+                                .to_string(),
+                        ));
+                    }
+                    self.initial_import_source_fingerprint = Some(decode_string(raw)?);
+                }
                 ["search_projection_change", raw_commit_epoch, raw_upsert_node_ids, raw_delete_document_ids] =>
                 {
                     self.search_projection_graph_changes
@@ -7261,6 +7382,9 @@ impl GraphStore {
                     },
                 );
             }
+            WalOp::MarkInitialImportSource { source_fingerprint } => {
+                self.initial_import_source_fingerprint = Some(source_fingerprint);
+            }
             WalOp::Batch(ops) => {
                 for op in ops {
                     self.apply_wal_op(catalog, op);
@@ -7298,6 +7422,7 @@ struct CheckpointImage<'a> {
     nodes: &'a BTreeMap<NodeId, NodeRecord>,
     relationships: &'a BTreeMap<RelId, RelRecord>,
     projected_graphs: &'a BTreeMap<String, ProjectedGraphDefinition>,
+    initial_import_source_fingerprint: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7466,6 +7591,12 @@ impl DurableStore {
             "search_projection_change_log_start_epoch\t{}\n",
             image.search_projection_change_log_start_epoch
         ));
+        if let Some(source_fingerprint) = image.initial_import_source_fingerprint {
+            body.push_str(&format!(
+                "initial_import_source_fingerprint\t{}\n",
+                encode_string(source_fingerprint)
+            ));
+        }
         for change in image.search_projection_graph_changes {
             body.push_str(&format!(
                 "search_projection_change\t{}\t{}\t{}\n",
@@ -8098,6 +8229,9 @@ enum WalOp {
         node_labels: Vec<String>,
         rel_types: Vec<String>,
     },
+    MarkInitialImportSource {
+        source_fingerprint: String,
+    },
     Batch(Vec<WalOp>),
 }
 
@@ -8266,6 +8400,10 @@ impl WalEntry {
                 encode_string(name),
                 encode_string_vec(node_labels),
                 encode_string_vec(rel_types)
+            ),
+            WalOp::MarkInitialImportSource { source_fingerprint } => format!(
+                "mark_initial_import_source\t{}",
+                encode_string(source_fingerprint)
             ),
             WalOp::Batch(ops) => format!(
                 "batch\t{}",
@@ -8511,6 +8649,14 @@ impl WalEntry {
                     },
                 }))
             }
+            [raw_lsn, "mark_initial_import_source", raw_source_fingerprint] => {
+                Ok(WalDecodeResult::Entry(WalEntry {
+                    lsn: parse_u64(raw_lsn, "wal lsn")?,
+                    op: WalOp::MarkInitialImportSource {
+                        source_fingerprint: decode_string(raw_source_fingerprint)?,
+                    },
+                }))
+            }
             [raw_lsn, "batch", raw_ops] => Ok(WalDecodeResult::Entry(WalEntry {
                 lsn: parse_u64(raw_lsn, "wal lsn")?,
                 op: WalOp::Batch(decode_wal_batch(raw_ops)?),
@@ -8703,6 +8849,10 @@ fn encode_wal_op_for_batch(op: &WalOp) -> String {
             encode_string_vec(node_labels),
             encode_string_vec(rel_types)
         ),
+        WalOp::MarkInitialImportSource { source_fingerprint } => format!(
+            "mark_initial_import_source,{}",
+            encode_string(source_fingerprint)
+        ),
         WalOp::Batch(_) => unreachable!("nested wal batches are not encoded"),
     }
 }
@@ -8839,6 +8989,11 @@ fn decode_wal_op_from_batch(input: &str) -> Result<WalOp> {
             node_labels: decode_string_vec(raw_node_labels)?,
             rel_types: decode_string_vec(raw_rel_types)?,
         }),
+        ["mark_initial_import_source", raw_source_fingerprint] => {
+            Ok(WalOp::MarkInitialImportSource {
+                source_fingerprint: decode_string(raw_source_fingerprint)?,
+            })
+        }
         _ => Err(SkeinError::Storage(format!(
             "invalid batch wal op: {input}"
         ))),
@@ -9109,7 +9264,8 @@ fn apply_wal_op_to_snapshot(
         | WalOp::CreateNodePropertyExistsConstraint { .. }
         | WalOp::CreateRelationshipUniqueConstraint { .. }
         | WalOp::CreateRelationshipPropertyExistsConstraint { .. }
-        | WalOp::ProjectGraph { .. } => {}
+        | WalOp::ProjectGraph { .. }
+        | WalOp::MarkInitialImportSource { .. } => {}
     }
 }
 
