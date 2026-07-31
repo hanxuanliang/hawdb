@@ -1721,8 +1721,10 @@ mod tests {
         NowledgeMemRouteReadinessSummary, NowledgeMemSearchCandidateShadowAccumulator,
         NowledgeMemSearchRouteOwnershipPolicy, NOWLEDGE_MEM_CUTOVER_CONTROLS_PROTOCOL,
         NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION, NOWLEDGE_MEM_OPERATIONS_READINESS_PROTOCOL,
+        NOWLEDGE_MEM_SOURCE_MUTATION_DUAL_WRITE_READINESS_PROTOCOL,
         NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES,
         REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES, REQUIRED_NOWLEDGE_MEM_SEARCH_ROUTES,
+        REQUIRED_NOWLEDGE_MEM_SOURCE_MUTATION_FAMILIES,
     };
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2322,6 +2324,15 @@ mod tests {
                 "present": true,
                 "ready": true,
                 "consistent": true
+            },
+            "source_mutation_dual_write_readiness": {
+                "protocol": NOWLEDGE_MEM_SOURCE_MUTATION_DUAL_WRITE_READINESS_PROTOCOL,
+                "ready": true,
+                "required_family_count": REQUIRED_NOWLEDGE_MEM_SOURCE_MUTATION_FAMILIES.len(),
+                "evidence_family_count": REQUIRED_NOWLEDGE_MEM_SOURCE_MUTATION_FAMILIES.len(),
+                "ready_family_count": REQUIRED_NOWLEDGE_MEM_SOURCE_MUTATION_FAMILIES.len(),
+                "missing_required_families": [],
+                "blocker_codes": []
             },
             "replacement_readiness_family_summary": {
                 "min_replacement_readiness_per_million": 1_000_000,

@@ -3894,6 +3894,7 @@ mod tests {
                 "search_projection_shadow_evidence",
                 "search_route_ownership",
                 "shadow_parity",
+                "source_mutation_dual_write_readiness",
                 "workload_fixture_evidence"
             ])
         );
@@ -6639,6 +6640,7 @@ mod tests {
                 "search_projection_shadow_evidence",
                 "search_route_ownership",
                 "shadow_parity",
+                "source_mutation_dual_write_readiness",
                 "storage_recovery",
                 "workload_fixture_evidence"
             ])
@@ -6652,6 +6654,7 @@ mod tests {
                 "previous_wrapper_contract_evidence",
                 "full_contract_evidence",
                 "dual_engine_evidence",
+                "source_mutation_dual_write_readiness",
                 "search_projection_evidence",
                 "search_projection_shadow_evidence",
                 "search_candidate_shadow_evidence",
@@ -6740,6 +6743,19 @@ mod tests {
                         "dual_engine_evidence.matched_check_count",
                         "dual_engine_evidence.primary_only_check_count",
                         "dual_engine_evidence.matched_per_million"
+                    ]
+                },
+                {
+                    "action": "attach_source_mutation_dual_write_readiness",
+                    "reason": "Source ingest/create, refresh/reparse, indexed transition, revision edges, and search-projection effects must be covered by durable dual-write readiness",
+                    "evidence_fields": [
+                        "source_mutation_dual_write_readiness.protocol",
+                        "source_mutation_dual_write_readiness.ready",
+                        "source_mutation_dual_write_readiness.required_family_count",
+                        "source_mutation_dual_write_readiness.evidence_family_count",
+                        "source_mutation_dual_write_readiness.ready_family_count",
+                        "source_mutation_dual_write_readiness.missing_required_families",
+                        "source_mutation_dual_write_readiness.blocker_codes"
                     ]
                 },
                 {
