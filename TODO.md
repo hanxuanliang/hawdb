@@ -319,6 +319,12 @@ LanceDB for that path.
       starts or resumes import work.
   - Persist source schema/version fingerprints, batch checkpoints, document
     identities, and graph/search watermarks.
+    - [x] Consume the graph import path from Mem through typed Rust library
+      APIs: export one bounded Ladybug snapshot, derive its manifest and stream
+      together, apply it through a host-owned coordinator, and persist a
+      validated sidecar receipt only after Skein applies successfully. A retry
+      with the same manifest returns the durable receipt instead of importing
+      into a non-empty target.
     - [x] Expose a typed durable-state envelope that packages the source
       fingerprint, checkpoint, document identities, coverage report, checkpoint
       readiness, and resume action, while keeping partial progress persistable
@@ -329,6 +335,9 @@ LanceDB for that path.
       protocol, manifest fingerprint, and persistability checks pass.
   - Keep foreground dual writes active while import catches up, and make retries
     idempotent.
+    - [ ] Wire the Mem startup session to extract and import the six active
+      LanceDB projection kinds, persist each accepted projection-batch advance,
+      and use the typed session/catch-up report before enabling read cutover.
     - [x] Expose a typed durable-state batch advance helper that merges
       projection document identities idempotently, advances checkpoint progress
       through the same monotonic checkpoint path, reports completed-batch
