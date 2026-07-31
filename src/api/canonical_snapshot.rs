@@ -525,6 +525,16 @@ pub struct GraphLightningInitialImportDurableStateCodecReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphLightningInitialImportRecoveryReadinessReport {
+    pub ready: bool,
+    pub durable_state_payload_present: bool,
+    pub durable_state_codec: Option<GraphLightningInitialImportDurableStateCodecReport>,
+    pub startup: GraphLightningInitialImportStartupReadinessReport,
+    pub next_action: GraphLightningInitialImportResumeAction,
+    pub blocker_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalGraphSnapshotValidation {
     pub is_valid: bool,
     pub is_import_ready: bool,
@@ -2003,6 +2013,75 @@ pub fn graph_lightning_initial_import_startup_readiness(
         session,
         cutover_catch_up,
         readiness,
+    }
+}
+
+pub fn graph_lightning_initial_import_recovery_readiness(
+    encoded_graph_stream: &str,
+    manifest: &GraphLightningBootstrapManifest,
+    target_graph_commit_epoch: u64,
+    projection_batches: &[SearchProjectionDelta],
+    target_projection_freshness: Option<&SearchProjectionFreshness>,
+    live_projection_freshness: Option<&SearchProjectionFreshness>,
+    durable_state_payload: Option<&str>,
+) -> GraphLightningInitialImportRecoveryReadinessReport {
+    let durable_state_payload_present = durable_state_payload.is_some();
+    let mut decode_blocker_codes = BTreeSet::new();
+    let durable_state_codec = durable_state_payload.and_then(|payload| {
+        match graph_lightning_initial_import_decode_durable_state(manifest, payload) {
+            Ok(report) => {
+                if !report.ready {
+                    decode_blocker_codes.extend(report.blocker_codes.iter().cloned());
+                }
+                Some(report)
+            }
+            Err(_) => {
+                decode_blocker_codes
+                    .insert("initial_import_durable_state_codec_decode_failed".to_string());
+                None
+            }
+        }
+    });
+    let durable_state = durable_state_codec
+        .as_ref()
+        .filter(|report| report.ready)
+        .and_then(|report| report.state.as_ref());
+    let startup = graph_lightning_initial_import_startup_readiness(
+        encoded_graph_stream,
+        manifest,
+        target_graph_commit_epoch,
+        projection_batches,
+        target_projection_freshness,
+        live_projection_freshness,
+        durable_state,
+    );
+    let invalid_payload = durable_state_payload_present && durable_state.is_none();
+    let next_action = if invalid_payload {
+        GraphLightningInitialImportResumeAction {
+            kind: GraphLightningInitialImportResumeActionKind::Quarantine,
+            next_batch: None,
+            idempotency_key: None,
+            completed_batches: 0,
+            total_batches: 0,
+            blocker_codes: decode_blocker_codes.iter().cloned().collect(),
+        }
+    } else {
+        startup.readiness.next_action.clone()
+    };
+    let mut blocker_codes = BTreeSet::new();
+    blocker_codes.extend(startup.blocker_codes.iter().cloned());
+    blocker_codes.extend(decode_blocker_codes);
+    if invalid_payload {
+        blocker_codes
+            .insert("initial_import_recovery_durable_state_quarantine_required".to_string());
+    }
+    GraphLightningInitialImportRecoveryReadinessReport {
+        ready: !invalid_payload && startup.ready,
+        durable_state_payload_present,
+        durable_state_codec,
+        startup,
+        next_action,
+        blocker_codes: blocker_codes.into_iter().collect(),
     }
 }
 

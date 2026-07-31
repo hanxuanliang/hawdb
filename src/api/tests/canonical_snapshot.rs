@@ -1698,6 +1698,135 @@ fn graph_lightning_initial_import_startup_readiness_blocks_live_projection_lag()
 }
 
 #[test]
+fn graph_lightning_initial_import_recovery_readiness_resumes_encoded_state() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+    let checkpoint = GraphLightningInitialImportCheckpoint {
+        completed_batches: 1,
+        total_batches: 1,
+        ..test_graph_lightning_checkpoint(&export.manifest)
+    };
+    let durable_state = graph_lightning_initial_import_durable_state_report(
+        &export.manifest,
+        &checkpoint,
+        &all_initial_import_document_identities(),
+    )
+    .state
+    .expect("expected persistable durable state");
+    let encoded = graph_lightning_initial_import_encode_durable_state(&durable_state).unwrap();
+    let delta = SearchProjectionDelta {
+        upserts: all_initial_import_projection_rows(),
+        deletes: Vec::new(),
+        max_operations: Some(6),
+        source_graph_commit_epoch: Some(export.manifest.graph_commit_epoch),
+    };
+    let freshness = initial_import_projection_freshness(&export.manifest);
+
+    let report = db.graph_lightning_initial_import_recovery_readiness(
+        &export.graph_stream.encoded,
+        &export.manifest,
+        &[delta],
+        Some(&freshness),
+        Some(&freshness),
+        Some(&encoded),
+    );
+
+    assert!(report.ready);
+    assert!(report.durable_state_payload_present);
+    assert!(report
+        .durable_state_codec
+        .as_ref()
+        .is_some_and(|codec| codec.ready));
+    assert_eq!(
+        report.next_action.kind,
+        GraphLightningInitialImportResumeActionKind::ReadyForCutover
+    );
+    assert!(report.blocker_codes.is_empty());
+}
+
+#[test]
+fn graph_lightning_initial_import_recovery_readiness_quarantines_invalid_payload() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})").unwrap();
+    let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+
+    let report = db.graph_lightning_initial_import_recovery_readiness(
+        &export.graph_stream.encoded,
+        &export.manifest,
+        &[],
+        None,
+        None,
+        Some("{"),
+    );
+
+    assert!(!report.ready);
+    assert!(report.durable_state_payload_present);
+    assert_eq!(report.durable_state_codec, None);
+    assert_eq!(
+        report.next_action.kind,
+        GraphLightningInitialImportResumeActionKind::Quarantine
+    );
+    assert!(report
+        .blocker_codes
+        .contains(&"initial_import_durable_state_codec_decode_failed".to_string()));
+    assert!(report
+        .blocker_codes
+        .contains(&"initial_import_recovery_durable_state_quarantine_required".to_string()));
+}
+
+#[test]
+fn graph_lightning_initial_import_recovery_readiness_quarantines_source_mismatch() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})").unwrap();
+    let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+    let checkpoint = GraphLightningInitialImportCheckpoint {
+        completed_batches: 1,
+        total_batches: 1,
+        document_identity_count: 6,
+        applied_search_projection_commit_epoch: Some(export.manifest.graph_commit_epoch),
+        durable_search_projection_commit_epoch: Some(export.manifest.graph_commit_epoch),
+        ..test_graph_lightning_checkpoint(&export.manifest)
+    };
+    let durable_state = graph_lightning_initial_import_durable_state_report(
+        &export.manifest,
+        &checkpoint,
+        &all_initial_import_document_identities(),
+    )
+    .state
+    .expect("expected persistable durable state");
+    let mut value = serde_json::from_str::<serde_json::Value>(
+        &graph_lightning_initial_import_encode_durable_state(&durable_state).unwrap(),
+    )
+    .unwrap();
+    value["source_fingerprint"]["schema_checksum"] = serde_json::json!(0);
+    let encoded = serde_json::to_string(&value).unwrap();
+
+    let report = db.graph_lightning_initial_import_recovery_readiness(
+        &export.graph_stream.encoded,
+        &export.manifest,
+        &[],
+        None,
+        None,
+        Some(&encoded),
+    );
+
+    assert!(!report.ready);
+    assert!(report
+        .durable_state_codec
+        .as_ref()
+        .is_some_and(|codec| !codec.ready));
+    assert_eq!(
+        report.next_action.kind,
+        GraphLightningInitialImportResumeActionKind::Quarantine
+    );
+    assert!(report
+        .blocker_codes
+        .contains(&"initial_import_durable_state_codec_source_mismatch".to_string()));
+}
+
+#[test]
 fn graph_lightning_initial_import_cutover_catch_up_blocks_live_mutation_lag() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")

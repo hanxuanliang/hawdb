@@ -107,7 +107,8 @@ pub use canonical_snapshot::{
     graph_lightning_initial_import_durable_state_report,
     graph_lightning_initial_import_encode_durable_state, graph_lightning_initial_import_plan,
     graph_lightning_initial_import_plan_with_document_identities,
-    graph_lightning_initial_import_readiness, graph_lightning_initial_import_resume_action,
+    graph_lightning_initial_import_readiness, graph_lightning_initial_import_recovery_readiness,
+    graph_lightning_initial_import_resume_action,
     graph_lightning_initial_import_search_projection_batch_report,
     graph_lightning_initial_import_search_projection_batch_report_with_document_identities,
     graph_lightning_initial_import_session_bundle_readiness,
@@ -131,7 +132,8 @@ pub use canonical_snapshot::{
     GraphLightningInitialImportDurableStateCodecReport,
     GraphLightningInitialImportDurableStateReport, GraphLightningInitialImportIdempotencyKey,
     GraphLightningInitialImportPlan, GraphLightningInitialImportReadiness,
-    GraphLightningInitialImportResumeAction, GraphLightningInitialImportResumeActionKind,
+    GraphLightningInitialImportRecoveryReadinessReport, GraphLightningInitialImportResumeAction,
+    GraphLightningInitialImportResumeActionKind,
     GraphLightningInitialImportSearchProjectionBatchReport,
     GraphLightningInitialImportSessionBundleReadiness, GraphLightningInitialImportSessionReport,
     GraphLightningInitialImportSourceBundleReadiness, GraphLightningInitialImportSourceFingerprint,
@@ -6030,6 +6032,26 @@ impl Database {
             target_projection_freshness,
             live_projection_freshness,
             durable_state,
+        )
+    }
+
+    pub fn graph_lightning_initial_import_recovery_readiness(
+        &self,
+        encoded_graph_stream: &str,
+        manifest: &GraphLightningBootstrapManifest,
+        projection_batches: &[SearchProjectionDelta],
+        target_projection_freshness: Option<&SearchProjectionFreshness>,
+        live_projection_freshness: Option<&SearchProjectionFreshness>,
+        durable_state_payload: Option<&str>,
+    ) -> GraphLightningInitialImportRecoveryReadinessReport {
+        graph_lightning_initial_import_recovery_readiness(
+            encoded_graph_stream,
+            manifest,
+            self.store.commit_epoch(),
+            projection_batches,
+            target_projection_freshness,
+            live_projection_freshness,
+            durable_state_payload,
         )
     }
 

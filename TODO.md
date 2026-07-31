@@ -359,6 +359,10 @@ LanceDB for that path.
       source-bundle readiness, session readiness, optional catch-up proof, and
       final session-bundle readiness from one library call, keeping target
       projection freshness separate from live dual-write catch-up freshness.
+    - [x] Expose a typed recovery readiness report that accepts the
+      host-persisted durable-state payload directly, decodes it fail-closed,
+      and returns an explicit quarantine action for malformed or mismatched
+      state instead of letting Mem hand-roll decode/start/resume decisions.
   - Acceptance: restart resumes from the last durable checkpoint and read
     cutover remains blocked until imported state and live mutations reach the
     same durable watermark.
