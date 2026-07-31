@@ -2,6 +2,7 @@ use super::*;
 use crate::search::{SearchProjectionFreshness, SearchProjectionKind};
 use crate::{
     graph_lightning_initial_import_advance_checkpoint,
+    graph_lightning_initial_import_advance_durable_state_streaming,
     graph_lightning_initial_import_advance_durable_state_with_search_projection_batch,
     graph_lightning_initial_import_checkpoint_readiness,
     graph_lightning_initial_import_cutover_catch_up_report,
@@ -2016,6 +2017,78 @@ fn graph_lightning_initial_import_durable_state_advances_with_search_projection_
     );
     assert_eq!(state.checkpoint.document_identity_count, 6);
     assert_eq!(state.document_identities.len(), 6);
+}
+
+#[test]
+fn graph_lightning_initial_import_streaming_batches_advance_before_final_coverage() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+    let checkpoint = GraphLightningInitialImportCheckpoint {
+        completed_batches: 0,
+        total_batches: 2,
+        document_identity_count: 0,
+        applied_search_projection_commit_epoch: None,
+        durable_search_projection_commit_epoch: Some(export.manifest.graph_commit_epoch),
+        ..test_graph_lightning_checkpoint(&export.manifest)
+    };
+    let initial =
+        graph_lightning_initial_import_durable_state_report(&export.manifest, &checkpoint, &[])
+            .state
+            .expect("expected persistable initial durable state");
+    let mut rows = all_initial_import_projection_rows();
+    let first = SearchProjectionDelta {
+        upserts: vec![rows.remove(0)],
+        deletes: Vec::new(),
+        max_operations: Some(1),
+        source_graph_commit_epoch: Some(export.manifest.graph_commit_epoch),
+    };
+
+    let first_report = graph_lightning_initial_import_advance_durable_state_streaming(
+        &export.manifest,
+        &initial,
+        &first,
+        0,
+        2,
+    );
+
+    assert!(first_report.accepted);
+    assert!(!first_report.completed);
+    assert!(!first_report.ready_for_cutover);
+    let after_first = first_report
+        .durable_state_report
+        .state
+        .expect("expected persisted partial state");
+    assert_eq!(after_first.checkpoint.completed_batches, 1);
+    assert_eq!(after_first.document_identities.len(), 1);
+
+    let second = SearchProjectionDelta {
+        upserts: rows,
+        deletes: Vec::new(),
+        max_operations: Some(5),
+        source_graph_commit_epoch: Some(export.manifest.graph_commit_epoch),
+    };
+    let second_report = graph_lightning_initial_import_advance_durable_state_streaming(
+        &export.manifest,
+        &after_first,
+        &second,
+        1,
+        2,
+    );
+
+    assert!(second_report.accepted);
+    assert!(second_report.completed);
+    assert!(second_report.ready_for_cutover);
+    assert_eq!(
+        second_report
+            .durable_state_report
+            .state
+            .expect("expected final durable state")
+            .document_identities
+            .len(),
+        6
+    );
 }
 
 #[test]

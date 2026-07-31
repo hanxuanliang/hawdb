@@ -56,6 +56,7 @@ pub use analytics::{
 };
 pub use api::{
     graph_lightning_initial_import_advance_checkpoint,
+    graph_lightning_initial_import_advance_durable_state_streaming,
     graph_lightning_initial_import_advance_durable_state_with_search_projection_batch,
     graph_lightning_initial_import_checkpoint_readiness,
     graph_lightning_initial_import_cutover_catch_up_report,
@@ -99,7 +100,8 @@ pub use api::{
     GraphLightningInitialImportSearchProjectionBatchReport,
     GraphLightningInitialImportSessionBundleReadiness, GraphLightningInitialImportSessionReport,
     GraphLightningInitialImportSourceBundleReadiness, GraphLightningInitialImportSourceFingerprint,
-    GraphLightningInitialImportStartupReadinessReport, KnowledgeCandidate,
+    GraphLightningInitialImportStartupReadinessReport,
+    GraphLightningInitialImportStreamingBatchAdvanceReport, KnowledgeCandidate,
     KnowledgeCandidateScoreBreakdown, KnowledgeCandidateScoringPolicy, KnowledgeCandidateSource,
     KnowledgeEntityDeleteBatchOutput, KnowledgeEntityDeleteBatchRequest, KnowledgeEvidence,
     KnowledgeFallbackReasonCode, KnowledgeFanoutReasonCode, KnowledgeFanoutReasonDetail,

@@ -477,6 +477,23 @@ pub struct GraphLightningInitialImportDurableBatchAdvanceReport {
     pub blocker_codes: Vec<String>,
 }
 
+/// Result of accepting one bounded projection page during initial import.
+///
+/// Unlike [`GraphLightningInitialImportDurableBatchAdvanceReport`], this
+/// report does not require six-kind document coverage before every page. That
+/// coverage remains mandatory for `ready_for_cutover`, while `accepted`
+/// permits a host to persist bounded progress without buffering a complete
+/// LanceDB projection in memory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphLightningInitialImportStreamingBatchAdvanceReport {
+    pub accepted: bool,
+    pub idempotent_replay: bool,
+    pub completed: bool,
+    pub ready_for_cutover: bool,
+    pub durable_state_report: GraphLightningInitialImportDurableStateReport,
+    pub blocker_codes: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphLightningInitialImportSessionReport {
     pub ready_for_graph_import: bool,
@@ -1757,6 +1774,119 @@ pub fn graph_lightning_initial_import_advance_durable_state_with_search_projecti
         batch_report,
         durable_state_report,
         blocker_codes,
+    }
+}
+
+/// Advances a durable initial-import checkpoint from one bounded projection
+/// page. It deliberately separates page admission from final six-kind
+/// coverage: a page can be durably accepted before every projection kind has
+/// been scanned, but read cutover remains blocked until the accumulated state
+/// satisfies the normal coverage and checkpoint checks.
+pub fn graph_lightning_initial_import_advance_durable_state_streaming(
+    manifest: &GraphLightningBootstrapManifest,
+    state: &GraphLightningInitialImportDurableState,
+    delta: &SearchProjectionDelta,
+    batch_index: u64,
+    total_batches: u64,
+) -> GraphLightningInitialImportStreamingBatchAdvanceReport {
+    let checkpoint_readiness =
+        graph_lightning_initial_import_checkpoint_readiness(manifest, &state.checkpoint);
+    let mut blocker_codes = BTreeSet::new();
+    if !checkpoint_readiness.idempotency_key_present {
+        blocker_codes.insert("initial_import_streaming_batch_idempotency_missing".to_string());
+    }
+    if !checkpoint_readiness.checkpoint_matches_manifest {
+        blocker_codes.insert("initial_import_streaming_batch_checkpoint_mismatch".to_string());
+    }
+    if state.checkpoint.total_batches != total_batches {
+        blocker_codes.insert("initial_import_streaming_batch_total_mismatch".to_string());
+    }
+    if delta.source_graph_commit_epoch != Some(manifest.graph_commit_epoch) {
+        blocker_codes.insert("initial_import_streaming_batch_epoch_mismatch".to_string());
+    }
+    if total_batches == 0 || batch_index >= total_batches {
+        blocker_codes.insert("initial_import_streaming_batch_position_invalid".to_string());
+    }
+    if delta.operation_count() == 0 {
+        blocker_codes.insert("initial_import_streaming_batch_empty".to_string());
+    }
+    if !delta.deletes.is_empty() {
+        blocker_codes.insert("initial_import_streaming_batch_has_deletes".to_string());
+    }
+    if delta
+        .max_operations
+        .is_some_and(|limit| delta.operation_count() > limit)
+    {
+        blocker_codes.insert("initial_import_streaming_batch_limit_exceeded".to_string());
+    }
+
+    let idempotent_replay = batch_index < state.checkpoint.completed_batches;
+    if !blocker_codes.is_empty() {
+        let durable_state_report = graph_lightning_initial_import_durable_state_report(
+            manifest,
+            &state.checkpoint,
+            &state.document_identities,
+        );
+        return GraphLightningInitialImportStreamingBatchAdvanceReport {
+            accepted: false,
+            idempotent_replay,
+            completed: state.checkpoint.completed_batches == state.checkpoint.total_batches,
+            ready_for_cutover: durable_state_report.ready_for_cutover,
+            durable_state_report,
+            blocker_codes: blocker_codes.into_iter().collect(),
+        };
+    }
+
+    let document_identities = merge_initial_import_document_identities(
+        &state.document_identities,
+        &search_projection_delta_document_identities(delta),
+    );
+    let progress = GraphLightningInitialImportCheckpointProgress {
+        applied_graph_commit_epoch: state
+            .checkpoint
+            .applied_graph_commit_epoch
+            .max(manifest.graph_commit_epoch),
+        applied_search_projection_commit_epoch: Some(manifest.graph_commit_epoch),
+        durable_search_projection_commit_epoch: Some(manifest.graph_commit_epoch),
+        completed_batches: state
+            .checkpoint
+            .completed_batches
+            .max(batch_index.saturating_add(1)),
+        total_batches,
+        document_identity_count: state
+            .checkpoint
+            .document_identity_count
+            .max(document_identities.len()),
+    };
+    let progress_report =
+        graph_lightning_initial_import_advance_checkpoint(manifest, &state.checkpoint, progress);
+    if !progress_report.accepted {
+        return GraphLightningInitialImportStreamingBatchAdvanceReport {
+            accepted: false,
+            idempotent_replay,
+            completed: state.checkpoint.completed_batches == state.checkpoint.total_batches,
+            ready_for_cutover: false,
+            durable_state_report: graph_lightning_initial_import_durable_state_report(
+                manifest,
+                &state.checkpoint,
+                &state.document_identities,
+            ),
+            blocker_codes: progress_report.blocker_codes,
+        };
+    }
+    let durable_state_report = graph_lightning_initial_import_durable_state_report(
+        manifest,
+        &progress_report.checkpoint,
+        &document_identities,
+    );
+    let completed = progress_report.checkpoint.completed_batches == total_batches;
+    GraphLightningInitialImportStreamingBatchAdvanceReport {
+        accepted: durable_state_report.persistable,
+        idempotent_replay,
+        completed,
+        ready_for_cutover: completed && durable_state_report.ready_for_cutover,
+        durable_state_report,
+        blocker_codes: Vec::new(),
     }
 }
 
