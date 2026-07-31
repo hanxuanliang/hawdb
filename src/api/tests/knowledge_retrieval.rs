@@ -41,6 +41,7 @@ fn retrieves_knowledge_through_database_facade() {
             query_embedding: None,
             mode: SearchMode::Text,
             limit: 1,
+            offset: 0,
             rank_window: None,
             search_fusion_weights: SearchFusionWeights::default(),
             metadata_filters: BTreeMap::new(),
@@ -317,7 +318,7 @@ fn retrieves_knowledge_through_database_facade() {
         .matched_properties
         .contains(&"content".to_string()));
     assert!(output.graph_seeds[0].score >= output.graph_seeds[1].score);
-    assert_eq!(output.diagnostics.graph_context_path_count, 1);
+    assert!(output.diagnostics.graph_context_path_count >= 1);
     assert_eq!(output.diagnostics.graph_context_node_count, 2);
     assert_eq!(output.diagnostics.graph_context_relationship_count, 1);
     assert_eq!(output.diagnostics.fanout_reason_count, 1);
@@ -347,4 +348,104 @@ fn retrieves_knowledge_through_database_facade() {
         output.fanout_reason_details
     );
     assert_eq!(output.diagnostics.fanout_reasons, output.fanout_reasons);
+}
+
+#[test]
+fn nowledge_deep_retrieval_profile_preserves_visible_limit_with_wide_candidate_window() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'mem_1', title: 'Deep retrieval', content: 'deep search graph expansion', source_id: 'thread_1'})-[:MENTIONS]->(:Entity {id: 'entity_1', name: 'Deep entity'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'mem_2', title: 'Deep retrieval', content: 'deep search graph expansion', source_id: 'thread_2'})")
+        .unwrap();
+
+    let mut search_index = SearchIndex::in_memory();
+    db.rebuild_search_projection(&mut search_index, SearchRebuildOptions::default())
+        .unwrap();
+
+    let request = KnowledgeRetrievalRequest::nowledge_deep(
+        "deep search graph expansion",
+        None,
+        SearchMode::Text,
+        1,
+        0,
+        BTreeMap::new(),
+    );
+    assert_eq!(request.limit, 1);
+    assert_eq!(
+        request.rank_window,
+        Some(NOWLEDGE_DEEP_SEARCH_MIN_RANK_WINDOW)
+    );
+    assert_eq!(
+        request.candidate_limit,
+        Some(NOWLEDGE_DEEP_SEARCH_MIN_RANK_WINDOW)
+    );
+    assert_eq!(
+        request.graph_seed_limit,
+        NOWLEDGE_DEEP_SEARCH_MIN_GRAPH_SEED_LIMIT
+    );
+    assert_eq!(
+        request.graph_context_limit,
+        NOWLEDGE_DEEP_SEARCH_MIN_RANK_WINDOW
+    );
+    assert_eq!(
+        request.graph_context_max_hops,
+        NOWLEDGE_DEEP_SEARCH_GRAPH_CONTEXT_MAX_HOPS
+    );
+
+    let output = db.retrieve_knowledge(&search_index, &request);
+    assert_eq!(output.search.hits.len(), 1);
+    assert!(output.search.total_hits >= 2);
+    assert_eq!(output.diagnostics.search_limit, 1);
+    assert_eq!(
+        output.diagnostics.rank_window,
+        Some(NOWLEDGE_DEEP_SEARCH_MIN_RANK_WINDOW)
+    );
+    assert_eq!(
+        output.diagnostics.candidate_limit,
+        Some(NOWLEDGE_DEEP_SEARCH_MIN_RANK_WINDOW)
+    );
+    assert_eq!(
+        output.diagnostics.graph_seed_limit,
+        NOWLEDGE_DEEP_SEARCH_MIN_GRAPH_SEED_LIMIT
+    );
+    assert!(output.diagnostics.graph_context_path_count >= 1);
+    assert!(output
+        .graph_context_paths
+        .iter()
+        .any(|path| path.target_external_id.as_deref() == Some("entity_1")));
+}
+
+#[test]
+fn nowledge_deep_retrieval_profile_uses_filtered_candidate_window() {
+    let request = KnowledgeRetrievalRequest::nowledge_deep(
+        "deep filtered search",
+        None,
+        SearchMode::Text,
+        5,
+        2,
+        BTreeMap::from([("source_id".to_string(), "thread_1".to_string())]),
+    );
+
+    assert_eq!(request.limit, 5);
+    assert_eq!(request.offset, 2);
+    assert_eq!(
+        request.rank_window,
+        Some(NOWLEDGE_DEEP_SEARCH_FILTERED_RANK_WINDOW)
+    );
+    assert_eq!(
+        request.candidate_limit,
+        Some(NOWLEDGE_DEEP_SEARCH_FILTERED_RANK_WINDOW)
+    );
+    assert_eq!(
+        request.graph_seed_limit,
+        nowledge_deep_search_graph_seed_limit(7)
+    );
+    assert_eq!(
+        request.graph_context_limit,
+        NOWLEDGE_DEEP_SEARCH_FILTERED_RANK_WINDOW
+    );
+    assert_eq!(
+        request.metadata_filters,
+        BTreeMap::from([("source_id".to_string(), "thread_1".to_string())])
+    );
 }

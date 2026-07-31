@@ -90,6 +90,7 @@ impl PhysicalPlan {
                 graph_name,
                 options,
                 score_column,
+                ..
             } => {
                 format!(
                     "{pad}GraphAlgorithm algorithm={algorithm:?} graph={graph_name} options={options:?} score_column={score_column}"

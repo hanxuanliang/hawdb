@@ -1,0 +1,683 @@
+use std::collections::{BTreeMap, BTreeSet};
+
+pub const NOWLEDGE_MEM_SEARCH_ROUTE_OWNERSHIP_PROTOCOL: &str =
+    "skein-nowledge-mem-search-route-ownership-v1";
+
+pub const NOWLEDGE_MEM_SEARCH_ROUTE_MEMORY: &str = "memory";
+pub const NOWLEDGE_MEM_SEARCH_ROUTE_MESSAGE: &str = "message";
+pub const NOWLEDGE_MEM_SEARCH_ROUTE_COMMUNITY: &str = "community";
+pub const NOWLEDGE_MEM_SEARCH_ROUTE_ENTITY: &str = "entity";
+pub const NOWLEDGE_MEM_SEARCH_ROUTE_SOURCE: &str = "source";
+pub const NOWLEDGE_MEM_SEARCH_ROUTE_SOURCE_CHUNK: &str = "source_chunk";
+
+pub const REQUIRED_NOWLEDGE_MEM_SEARCH_ROUTES: &[&str] = &[
+    NOWLEDGE_MEM_SEARCH_ROUTE_MEMORY,
+    NOWLEDGE_MEM_SEARCH_ROUTE_MESSAGE,
+    NOWLEDGE_MEM_SEARCH_ROUTE_COMMUNITY,
+    NOWLEDGE_MEM_SEARCH_ROUTE_ENTITY,
+    NOWLEDGE_MEM_SEARCH_ROUTE_SOURCE,
+    NOWLEDGE_MEM_SEARCH_ROUTE_SOURCE_CHUNK,
+];
+
+pub const NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_THREAD_MESSAGE_FTS: &str = "thread_message_fts";
+pub const NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_ENTITY_DISCOVERY: &str = "entity_discovery";
+pub const NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_COMMUNITY_DISCOVERY: &str = "community_discovery";
+pub const NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_SOURCE_RECALL: &str = "source_recall";
+pub const NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_SOURCE_CHUNK_RECALL: &str = "source_chunk_recall";
+pub const NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_FS_RECALL: &str = "fs_recall";
+pub const NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_MCP_SEARCH: &str = "mcp_search";
+pub const NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_DEEP_SEARCH_GRAPH_EXPANSION: &str =
+    "deep_search_graph_expansion";
+
+pub const REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES: &[&str] = &[
+    NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_THREAD_MESSAGE_FTS,
+    NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_ENTITY_DISCOVERY,
+    NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_COMMUNITY_DISCOVERY,
+    NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_SOURCE_RECALL,
+    NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_SOURCE_CHUNK_RECALL,
+    NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_FS_RECALL,
+    NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_MCP_SEARCH,
+    NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_DEEP_SEARCH_GRAPH_EXPANSION,
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NowledgeMemSearchRouteOwnershipPolicy {
+    pub require_all_skein: bool,
+}
+
+impl NowledgeMemSearchRouteOwnershipPolicy {
+    pub const fn migration() -> Self {
+        Self {
+            require_all_skein: false,
+        }
+    }
+
+    pub const fn production_cutover() -> Self {
+        Self {
+            require_all_skein: true,
+        }
+    }
+}
+
+impl Default for NowledgeMemSearchRouteOwnershipPolicy {
+    fn default() -> Self {
+        Self::migration()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum NowledgeMemSearchReadEngine {
+    LanceDb,
+    Skein,
+}
+
+impl NowledgeMemSearchReadEngine {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LanceDb => "lancedb",
+            Self::Skein => "skein",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemSearchRouteOwnership {
+    pub route: String,
+    pub read_engine: NowledgeMemSearchReadEngine,
+}
+
+impl NowledgeMemSearchRouteOwnership {
+    pub fn new(route: impl Into<String>, read_engine: NowledgeMemSearchReadEngine) -> Self {
+        Self {
+            route: route.into(),
+            read_engine,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemActiveSearchRouteOwnership {
+    pub route: String,
+    pub projection_route: String,
+    pub read_engine: NowledgeMemSearchReadEngine,
+}
+
+impl NowledgeMemActiveSearchRouteOwnership {
+    pub fn new(
+        route: impl Into<String>,
+        projection_route: impl Into<String>,
+        read_engine: NowledgeMemSearchReadEngine,
+    ) -> Self {
+        Self {
+            route: route.into(),
+            projection_route: projection_route.into(),
+            read_engine,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemSearchRouteOwnershipReadinessReport {
+    pub protocol: String,
+    pub ready: bool,
+    pub production_cutover_ready: bool,
+    pub require_all_skein: bool,
+    pub required_route_count: usize,
+    pub explicit_route_count: usize,
+    pub skein_route_count: usize,
+    pub lancedb_route_count: usize,
+    pub routes: Vec<NowledgeMemSearchRouteOwnership>,
+    pub skein_routes: Vec<String>,
+    pub lancedb_routes: Vec<String>,
+    pub missing_required_routes: Vec<String>,
+    pub unknown_routes: Vec<String>,
+    pub duplicate_routes: Vec<String>,
+    pub conflicting_routes: Vec<String>,
+    pub blocker_codes: Vec<String>,
+}
+
+impl NowledgeMemSearchRouteOwnershipReadinessReport {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": self.protocol,
+            "ready": self.ready,
+            "production_cutover_ready": self.production_cutover_ready,
+            "require_all_skein": self.require_all_skein,
+            "required_route_count": self.required_route_count,
+            "explicit_route_count": self.explicit_route_count,
+            "skein_route_count": self.skein_route_count,
+            "lancedb_route_count": self.lancedb_route_count,
+            "routes": self.routes.iter().map(search_route_ownership_json).collect::<Vec<_>>(),
+            "skein_routes": self.skein_routes,
+            "lancedb_routes": self.lancedb_routes,
+            "missing_required_routes": self.missing_required_routes,
+            "unknown_routes": self.unknown_routes,
+            "duplicate_routes": self.duplicate_routes,
+            "conflicting_routes": self.conflicting_routes,
+            "blocker_codes": self.blocker_codes,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemActiveSearchRouteOwnershipReadinessReport {
+    pub protocol: String,
+    pub ready: bool,
+    pub production_cutover_ready: bool,
+    pub require_all_skein: bool,
+    pub required_route_count: usize,
+    pub explicit_route_count: usize,
+    pub skein_route_count: usize,
+    pub lancedb_route_count: usize,
+    pub routes: Vec<NowledgeMemActiveSearchRouteOwnership>,
+    pub skein_routes: Vec<String>,
+    pub lancedb_routes: Vec<String>,
+    pub missing_required_routes: Vec<String>,
+    pub unknown_routes: Vec<String>,
+    pub duplicate_routes: Vec<String>,
+    pub invalid_projection_routes: Vec<String>,
+    pub blocker_codes: Vec<String>,
+}
+
+impl NowledgeMemActiveSearchRouteOwnershipReadinessReport {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": NOWLEDGE_MEM_SEARCH_ROUTE_OWNERSHIP_PROTOCOL,
+            "ready": self.ready,
+            "production_cutover_ready": self.production_cutover_ready,
+            "require_all_skein": self.require_all_skein,
+            "required_route_count": self.required_route_count,
+            "explicit_route_count": self.explicit_route_count,
+            "skein_route_count": self.skein_route_count,
+            "lancedb_route_count": self.lancedb_route_count,
+            "routes": self.routes.iter().map(active_search_route_ownership_json).collect::<Vec<_>>(),
+            "skein_routes": self.skein_routes,
+            "lancedb_routes": self.lancedb_routes,
+            "missing_required_routes": self.missing_required_routes,
+            "unknown_routes": self.unknown_routes,
+            "duplicate_routes": self.duplicate_routes,
+            "invalid_projection_routes": self.invalid_projection_routes,
+            "blocker_codes": self.blocker_codes,
+        })
+    }
+}
+
+pub fn nowledge_mem_search_route_ownership_all_lancedb() -> Vec<NowledgeMemSearchRouteOwnership> {
+    nowledge_mem_search_route_ownership_for_engine(NowledgeMemSearchReadEngine::LanceDb)
+}
+
+pub fn nowledge_mem_search_route_ownership_all_skein() -> Vec<NowledgeMemSearchRouteOwnership> {
+    nowledge_mem_search_route_ownership_for_engine(NowledgeMemSearchReadEngine::Skein)
+}
+
+pub fn nowledge_mem_search_route_ownership_for_engine(
+    read_engine: NowledgeMemSearchReadEngine,
+) -> Vec<NowledgeMemSearchRouteOwnership> {
+    REQUIRED_NOWLEDGE_MEM_SEARCH_ROUTES
+        .iter()
+        .map(|route| NowledgeMemSearchRouteOwnership::new(*route, read_engine))
+        .collect()
+}
+
+pub fn nowledge_mem_active_search_route_ownership_all_lancedb(
+) -> Vec<NowledgeMemActiveSearchRouteOwnership> {
+    nowledge_mem_active_search_route_ownership_for_engine(NowledgeMemSearchReadEngine::LanceDb)
+}
+
+pub fn nowledge_mem_active_search_route_ownership_all_skein(
+) -> Vec<NowledgeMemActiveSearchRouteOwnership> {
+    nowledge_mem_active_search_route_ownership_for_engine(NowledgeMemSearchReadEngine::Skein)
+}
+
+pub fn nowledge_mem_active_search_route_ownership_for_engine(
+    read_engine: NowledgeMemSearchReadEngine,
+) -> Vec<NowledgeMemActiveSearchRouteOwnership> {
+    REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES
+        .iter()
+        .map(|route| {
+            NowledgeMemActiveSearchRouteOwnership::new(
+                *route,
+                required_projection_route_for_active_search_route(route),
+                read_engine,
+            )
+        })
+        .collect()
+}
+
+pub fn nowledge_mem_search_route_ownership_readiness(
+    routes: &[NowledgeMemSearchRouteOwnership],
+    policy: NowledgeMemSearchRouteOwnershipPolicy,
+) -> NowledgeMemSearchRouteOwnershipReadinessReport {
+    let required_routes = REQUIRED_NOWLEDGE_MEM_SEARCH_ROUTES
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let mut route_counts = BTreeMap::<&str, usize>::new();
+    let mut route_engines = BTreeMap::<&str, BTreeSet<NowledgeMemSearchReadEngine>>::new();
+    for route in routes {
+        *route_counts.entry(route.route.as_str()).or_default() += 1;
+        route_engines
+            .entry(route.route.as_str())
+            .or_default()
+            .insert(route.read_engine);
+    }
+
+    let explicit_required_routes = route_counts
+        .keys()
+        .copied()
+        .filter(|route| required_routes.contains(route))
+        .collect::<BTreeSet<_>>();
+    let missing_required_routes = REQUIRED_NOWLEDGE_MEM_SEARCH_ROUTES
+        .iter()
+        .copied()
+        .filter(|route| !explicit_required_routes.contains(route))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let unknown_routes = route_counts
+        .keys()
+        .copied()
+        .filter(|route| !required_routes.contains(route))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let duplicate_routes = route_counts
+        .iter()
+        .filter(|(_, count)| **count > 1)
+        .map(|(route, _)| (*route).to_string())
+        .collect::<Vec<_>>();
+    let conflicting_routes = route_engines
+        .iter()
+        .filter(|(_, engines)| engines.len() > 1)
+        .map(|(route, _)| (*route).to_string())
+        .collect::<Vec<_>>();
+    let skein_routes = search_routes_by_engine(routes, NowledgeMemSearchReadEngine::Skein);
+    let lancedb_routes = search_routes_by_engine(routes, NowledgeMemSearchReadEngine::LanceDb);
+
+    let mut blocker_codes = Vec::new();
+    if !missing_required_routes.is_empty() {
+        blocker_codes.push("search_route_ownership_missing_required_routes".to_string());
+    }
+    if !unknown_routes.is_empty() {
+        blocker_codes.push("search_route_ownership_unknown_routes".to_string());
+    }
+    if !duplicate_routes.is_empty() {
+        blocker_codes.push("search_route_ownership_duplicate_routes".to_string());
+    }
+    if !conflicting_routes.is_empty() {
+        blocker_codes.push("search_route_ownership_conflicting_routes".to_string());
+    }
+    if policy.require_all_skein && !lancedb_routes.is_empty() {
+        blocker_codes.push("search_route_ownership_lancedb_routes_remaining".to_string());
+    }
+
+    let ready = blocker_codes.is_empty();
+    NowledgeMemSearchRouteOwnershipReadinessReport {
+        protocol: NOWLEDGE_MEM_SEARCH_ROUTE_OWNERSHIP_PROTOCOL.to_string(),
+        ready,
+        production_cutover_ready: ready && policy.require_all_skein,
+        require_all_skein: policy.require_all_skein,
+        required_route_count: REQUIRED_NOWLEDGE_MEM_SEARCH_ROUTES.len(),
+        explicit_route_count: explicit_required_routes.len(),
+        skein_route_count: skein_routes.len(),
+        lancedb_route_count: lancedb_routes.len(),
+        routes: normalized_search_routes(routes),
+        skein_routes,
+        lancedb_routes,
+        missing_required_routes,
+        unknown_routes,
+        duplicate_routes,
+        conflicting_routes,
+        blocker_codes,
+    }
+}
+
+pub fn nowledge_mem_active_search_route_ownership_readiness(
+    routes: &[NowledgeMemActiveSearchRouteOwnership],
+    policy: NowledgeMemSearchRouteOwnershipPolicy,
+) -> NowledgeMemActiveSearchRouteOwnershipReadinessReport {
+    let required_routes = REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let required_projection_routes = REQUIRED_NOWLEDGE_MEM_SEARCH_ROUTES
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let mut route_counts = BTreeMap::<&str, usize>::new();
+    for route in routes {
+        *route_counts.entry(route.route.as_str()).or_default() += 1;
+    }
+
+    let explicit_required_routes = route_counts
+        .keys()
+        .copied()
+        .filter(|route| required_routes.contains(route))
+        .collect::<BTreeSet<_>>();
+    let missing_required_routes = REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES
+        .iter()
+        .copied()
+        .filter(|route| !explicit_required_routes.contains(route))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let unknown_routes = route_counts
+        .keys()
+        .copied()
+        .filter(|route| !required_routes.contains(route))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let duplicate_routes = route_counts
+        .iter()
+        .filter(|(_, count)| **count > 1)
+        .map(|(route, _)| (*route).to_string())
+        .collect::<Vec<_>>();
+    let invalid_projection_routes = routes
+        .iter()
+        .filter(|route| !required_projection_routes.contains(route.projection_route.as_str()))
+        .map(|route| route.route.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let skein_routes = active_search_routes_by_engine(routes, NowledgeMemSearchReadEngine::Skein);
+    let lancedb_routes =
+        active_search_routes_by_engine(routes, NowledgeMemSearchReadEngine::LanceDb);
+
+    let mut blocker_codes = Vec::new();
+    if !missing_required_routes.is_empty() {
+        blocker_codes.push("active_search_route_ownership_missing_required_routes".to_string());
+    }
+    if !unknown_routes.is_empty() {
+        blocker_codes.push("active_search_route_ownership_unknown_routes".to_string());
+    }
+    if !duplicate_routes.is_empty() {
+        blocker_codes.push("active_search_route_ownership_duplicate_routes".to_string());
+    }
+    if !invalid_projection_routes.is_empty() {
+        blocker_codes.push("active_search_route_ownership_invalid_projection_routes".to_string());
+    }
+    if policy.require_all_skein && !lancedb_routes.is_empty() {
+        blocker_codes.push("active_search_route_ownership_lancedb_routes_remaining".to_string());
+    }
+
+    let ready = blocker_codes.is_empty();
+    NowledgeMemActiveSearchRouteOwnershipReadinessReport {
+        protocol: NOWLEDGE_MEM_SEARCH_ROUTE_OWNERSHIP_PROTOCOL.to_string(),
+        ready,
+        production_cutover_ready: ready && policy.require_all_skein,
+        require_all_skein: policy.require_all_skein,
+        required_route_count: REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES.len(),
+        explicit_route_count: explicit_required_routes.len(),
+        skein_route_count: skein_routes.len(),
+        lancedb_route_count: lancedb_routes.len(),
+        routes: normalized_active_search_routes(routes),
+        skein_routes,
+        lancedb_routes,
+        missing_required_routes,
+        unknown_routes,
+        duplicate_routes,
+        invalid_projection_routes,
+        blocker_codes,
+    }
+}
+
+pub fn required_projection_route_for_active_search_route(route: &str) -> &'static str {
+    match route {
+        NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_THREAD_MESSAGE_FTS => NOWLEDGE_MEM_SEARCH_ROUTE_MESSAGE,
+        NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_ENTITY_DISCOVERY => NOWLEDGE_MEM_SEARCH_ROUTE_ENTITY,
+        NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_COMMUNITY_DISCOVERY => NOWLEDGE_MEM_SEARCH_ROUTE_COMMUNITY,
+        NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_SOURCE_RECALL => NOWLEDGE_MEM_SEARCH_ROUTE_SOURCE,
+        NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_SOURCE_CHUNK_RECALL => {
+            NOWLEDGE_MEM_SEARCH_ROUTE_SOURCE_CHUNK
+        }
+        NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_FS_RECALL => NOWLEDGE_MEM_SEARCH_ROUTE_SOURCE_CHUNK,
+        NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_MCP_SEARCH => NOWLEDGE_MEM_SEARCH_ROUTE_MEMORY,
+        NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_DEEP_SEARCH_GRAPH_EXPANSION => {
+            NOWLEDGE_MEM_SEARCH_ROUTE_MEMORY
+        }
+        _ => "",
+    }
+}
+
+fn search_routes_by_engine(
+    routes: &[NowledgeMemSearchRouteOwnership],
+    read_engine: NowledgeMemSearchReadEngine,
+) -> Vec<String> {
+    let mut matching = routes
+        .iter()
+        .filter(|route| route.read_engine == read_engine)
+        .map(|route| route.route.clone())
+        .collect::<Vec<_>>();
+    matching.sort();
+    matching.dedup();
+    matching
+}
+
+fn active_search_routes_by_engine(
+    routes: &[NowledgeMemActiveSearchRouteOwnership],
+    read_engine: NowledgeMemSearchReadEngine,
+) -> Vec<String> {
+    let mut matching = routes
+        .iter()
+        .filter(|route| route.read_engine == read_engine)
+        .map(|route| route.route.clone())
+        .collect::<Vec<_>>();
+    matching.sort();
+    matching.dedup();
+    matching
+}
+
+fn normalized_search_routes(
+    routes: &[NowledgeMemSearchRouteOwnership],
+) -> Vec<NowledgeMemSearchRouteOwnership> {
+    let mut normalized = routes.to_vec();
+    normalized.sort_by(|left, right| {
+        left.route
+            .cmp(&right.route)
+            .then(left.read_engine.cmp(&right.read_engine))
+    });
+    normalized
+}
+
+fn normalized_active_search_routes(
+    routes: &[NowledgeMemActiveSearchRouteOwnership],
+) -> Vec<NowledgeMemActiveSearchRouteOwnership> {
+    let mut normalized = routes.to_vec();
+    normalized.sort_by(|left, right| {
+        left.route
+            .cmp(&right.route)
+            .then(left.projection_route.cmp(&right.projection_route))
+            .then(left.read_engine.cmp(&right.read_engine))
+    });
+    normalized
+}
+
+fn search_route_ownership_json(route: &NowledgeMemSearchRouteOwnership) -> serde_json::Value {
+    serde_json::json!({
+        "route": route.route,
+        "read_engine": route.read_engine.as_str(),
+    })
+}
+
+fn active_search_route_ownership_json(
+    route: &NowledgeMemActiveSearchRouteOwnership,
+) -> serde_json::Value {
+    serde_json::json!({
+        "route": route.route,
+        "projection_route": route.projection_route,
+        "read_engine": route.read_engine.as_str(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_route_ownership_accepts_all_skein_for_cutover() {
+        let report = nowledge_mem_search_route_ownership_readiness(
+            &nowledge_mem_search_route_ownership_all_skein(),
+            NowledgeMemSearchRouteOwnershipPolicy::production_cutover(),
+        );
+
+        assert!(report.ready);
+        assert!(report.production_cutover_ready);
+        assert_eq!(
+            report.skein_route_count,
+            REQUIRED_NOWLEDGE_MEM_SEARCH_ROUTES.len()
+        );
+        assert_eq!(report.lancedb_route_count, 0);
+        assert!(report.blocker_codes.is_empty());
+    }
+
+    #[test]
+    fn search_route_ownership_blocks_lancedb_routes_for_cutover() {
+        let report = nowledge_mem_search_route_ownership_readiness(
+            &nowledge_mem_search_route_ownership_all_lancedb(),
+            NowledgeMemSearchRouteOwnershipPolicy::production_cutover(),
+        );
+
+        assert!(!report.ready);
+        assert!(!report.production_cutover_ready);
+        assert_eq!(
+            report.blocker_codes,
+            vec!["search_route_ownership_lancedb_routes_remaining".to_string()]
+        );
+        let mut expected_lancedb_routes = REQUIRED_NOWLEDGE_MEM_SEARCH_ROUTES
+            .iter()
+            .map(|route| (*route).to_string())
+            .collect::<Vec<_>>();
+        expected_lancedb_routes.sort();
+        assert_eq!(report.lancedb_routes, expected_lancedb_routes);
+    }
+
+    #[test]
+    fn search_route_ownership_fails_closed_on_missing_unknown_and_conflicting_routes() {
+        let routes = vec![
+            NowledgeMemSearchRouteOwnership::new(
+                NOWLEDGE_MEM_SEARCH_ROUTE_MEMORY,
+                NowledgeMemSearchReadEngine::Skein,
+            ),
+            NowledgeMemSearchRouteOwnership::new(
+                NOWLEDGE_MEM_SEARCH_ROUTE_MEMORY,
+                NowledgeMemSearchReadEngine::LanceDb,
+            ),
+            NowledgeMemSearchRouteOwnership::new("unknown", NowledgeMemSearchReadEngine::Skein),
+        ];
+
+        let report = nowledge_mem_search_route_ownership_readiness(
+            &routes,
+            NowledgeMemSearchRouteOwnershipPolicy::migration(),
+        );
+
+        assert!(!report.ready);
+        assert!(report
+            .blocker_codes
+            .contains(&"search_route_ownership_missing_required_routes".to_string()));
+        assert!(report
+            .blocker_codes
+            .contains(&"search_route_ownership_unknown_routes".to_string()));
+        assert!(report
+            .blocker_codes
+            .contains(&"search_route_ownership_duplicate_routes".to_string()));
+        assert!(report
+            .blocker_codes
+            .contains(&"search_route_ownership_conflicting_routes".to_string()));
+        assert_eq!(report.unknown_routes, vec!["unknown".to_string()]);
+        assert_eq!(
+            report.conflicting_routes,
+            vec![NOWLEDGE_MEM_SEARCH_ROUTE_MEMORY.to_string()]
+        );
+    }
+
+    #[test]
+    fn active_search_route_ownership_accepts_all_skein_for_cutover() {
+        let report = nowledge_mem_active_search_route_ownership_readiness(
+            &nowledge_mem_active_search_route_ownership_all_skein(),
+            NowledgeMemSearchRouteOwnershipPolicy::production_cutover(),
+        );
+
+        assert!(report.ready);
+        assert!(report.production_cutover_ready);
+        assert_eq!(
+            report.skein_route_count,
+            REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES.len()
+        );
+        assert_eq!(report.lancedb_route_count, 0);
+        assert!(report.blocker_codes.is_empty());
+        assert!(report.routes.iter().any(|route| {
+            route.route == NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_THREAD_MESSAGE_FTS
+                && route.projection_route == NOWLEDGE_MEM_SEARCH_ROUTE_MESSAGE
+        }));
+    }
+
+    #[test]
+    fn active_search_route_ownership_blocks_lancedb_routes_for_cutover() {
+        let report = nowledge_mem_active_search_route_ownership_readiness(
+            &nowledge_mem_active_search_route_ownership_all_lancedb(),
+            NowledgeMemSearchRouteOwnershipPolicy::production_cutover(),
+        );
+
+        assert!(!report.ready);
+        assert!(!report.production_cutover_ready);
+        assert_eq!(
+            report.blocker_codes,
+            vec!["active_search_route_ownership_lancedb_routes_remaining".to_string()]
+        );
+        let mut expected_lancedb_routes = REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES
+            .iter()
+            .map(|route| (*route).to_string())
+            .collect::<Vec<_>>();
+        expected_lancedb_routes.sort();
+        assert_eq!(report.lancedb_routes, expected_lancedb_routes);
+    }
+
+    #[test]
+    fn active_search_route_ownership_fails_closed_for_inventory_gaps() {
+        let routes = vec![
+            NowledgeMemActiveSearchRouteOwnership::new(
+                NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_THREAD_MESSAGE_FTS,
+                NOWLEDGE_MEM_SEARCH_ROUTE_MESSAGE,
+                NowledgeMemSearchReadEngine::Skein,
+            ),
+            NowledgeMemActiveSearchRouteOwnership::new(
+                NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_THREAD_MESSAGE_FTS,
+                "invalid_projection",
+                NowledgeMemSearchReadEngine::Skein,
+            ),
+            NowledgeMemActiveSearchRouteOwnership::new(
+                "unknown_active_route",
+                NOWLEDGE_MEM_SEARCH_ROUTE_MEMORY,
+                NowledgeMemSearchReadEngine::Skein,
+            ),
+        ];
+
+        let report = nowledge_mem_active_search_route_ownership_readiness(
+            &routes,
+            NowledgeMemSearchRouteOwnershipPolicy::migration(),
+        );
+
+        assert!(!report.ready);
+        assert!(report
+            .blocker_codes
+            .contains(&"active_search_route_ownership_missing_required_routes".to_string()));
+        assert!(report
+            .blocker_codes
+            .contains(&"active_search_route_ownership_unknown_routes".to_string()));
+        assert!(report
+            .blocker_codes
+            .contains(&"active_search_route_ownership_duplicate_routes".to_string()));
+        assert!(report
+            .blocker_codes
+            .contains(&"active_search_route_ownership_invalid_projection_routes".to_string()));
+        assert_eq!(
+            report.duplicate_routes,
+            vec![NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_THREAD_MESSAGE_FTS.to_string()]
+        );
+        assert_eq!(
+            report.unknown_routes,
+            vec!["unknown_active_route".to_string()]
+        );
+        assert_eq!(
+            report.invalid_projection_routes,
+            vec![NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_THREAD_MESSAGE_FTS.to_string()]
+        );
+    }
+}

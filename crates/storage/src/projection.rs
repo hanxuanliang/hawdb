@@ -112,6 +112,19 @@ pub struct SearchProjectionChangefeedStatus {
     pub restart_recoverable: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchProjectionChangefeedReadiness {
+    pub ready: bool,
+    pub incremental_ready: bool,
+    pub graph_commit_epoch: u64,
+    pub projection_source_graph_commit_epoch: Option<u64>,
+    pub durable_projection_source_graph_commit_epoch: Option<u64>,
+    pub resume_floor_commit_epoch: u64,
+    pub restart_recoverable: bool,
+    pub max_operations: Option<usize>,
+    pub blocker_codes: Vec<String>,
+}
+
 impl SearchProjectionChangefeedStatus {
     pub const fn can_resume_after(self, source_graph_commit_epoch: u64) -> bool {
         source_graph_commit_epoch >= self.resume_floor_commit_epoch
@@ -120,5 +133,45 @@ impl SearchProjectionChangefeedStatus {
 
     pub const fn requires_rebuild_after(self, source_graph_commit_epoch: u64) -> bool {
         source_graph_commit_epoch < self.resume_floor_commit_epoch
+    }
+
+    pub fn readiness_after(
+        self,
+        projection_source_graph_commit_epoch: Option<u64>,
+        durable_projection_source_graph_commit_epoch: Option<u64>,
+        require_restart_recoverable: bool,
+        max_operations: Option<usize>,
+    ) -> SearchProjectionChangefeedReadiness {
+        let resume_epoch = projection_source_graph_commit_epoch.unwrap_or(0);
+        let mut blocker_codes = Vec::new();
+        if self.requires_rebuild_after(resume_epoch) {
+            blocker_codes.push("search_projection_changefeed_resume_floor_expired".to_string());
+        }
+        if resume_epoch > self.graph_commit_epoch {
+            blocker_codes.push("search_projection_source_graph_epoch_ahead".to_string());
+        }
+        if require_restart_recoverable && !self.restart_recoverable {
+            blocker_codes.push("search_projection_changefeed_not_restart_recoverable".to_string());
+        }
+        if let Some(durable_epoch) = durable_projection_source_graph_commit_epoch
+            && durable_epoch > self.graph_commit_epoch
+        {
+            blocker_codes.push("search_projection_durable_source_graph_epoch_ahead".to_string());
+        }
+        if let Some(0) = max_operations {
+            blocker_codes.push("search_projection_changefeed_batch_limit_zero".to_string());
+        }
+        let incremental_ready = blocker_codes.is_empty();
+        SearchProjectionChangefeedReadiness {
+            ready: incremental_ready,
+            incremental_ready,
+            graph_commit_epoch: self.graph_commit_epoch,
+            projection_source_graph_commit_epoch,
+            durable_projection_source_graph_commit_epoch,
+            resume_floor_commit_epoch: self.resume_floor_commit_epoch,
+            restart_recoverable: self.restart_recoverable,
+            max_operations,
+            blocker_codes,
+        }
     }
 }

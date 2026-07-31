@@ -4,6 +4,7 @@ pub struct NowledgeMemReadinessAreaMap {
     pub query: NowledgeMemReadinessAreaSummary,
     pub query_family: NowledgeMemReadinessAreaSummary,
     pub graph_route: NowledgeMemReadinessAreaSummary,
+    pub search_route_ownership: NowledgeMemReadinessAreaSummary,
     pub storage: NowledgeMemReadinessAreaSummary,
     pub search_projection: NowledgeMemReadinessAreaSummary,
     pub search_projection_shadow: NowledgeMemReadinessAreaSummary,
@@ -19,6 +20,7 @@ impl NowledgeMemReadinessAreaMap {
             self.query.clone(),
             self.query_family.clone(),
             self.graph_route.clone(),
+            self.search_route_ownership.clone(),
             self.storage.clone(),
             self.search_projection.clone(),
             self.search_projection_shadow.clone(),
@@ -36,6 +38,7 @@ impl NowledgeMemReadinessAreaMap {
             "background": self.background.state_json(),
             "query_family": self.query_family.state_json(),
             "graph_route": self.graph_route.state_json(),
+            "search_route_ownership": self.search_route_ownership.state_json(),
             "search_projection": self.search_projection.state_json(),
             "search_projection_shadow": self.search_projection_shadow.state_json(),
             "search_candidate_shadow": self.search_candidate_shadow.state_json(),
@@ -95,6 +98,11 @@ mod tests {
             ),
             query_family: NowledgeMemReadinessAreaSummary::new("query_family", true, Vec::new()),
             graph_route: NowledgeMemReadinessAreaSummary::new("graph_route", true, Vec::new()),
+            search_route_ownership: NowledgeMemReadinessAreaSummary::new(
+                "search_route_ownership",
+                true,
+                Vec::new(),
+            ),
             storage: NowledgeMemReadinessAreaSummary::new("storage", true, Vec::new()),
             search_projection: NowledgeMemReadinessAreaSummary::new(
                 "search_projection",
@@ -119,7 +127,7 @@ mod tests {
             background: NowledgeMemReadinessAreaSummary::new("background", true, Vec::new()),
         };
 
-        assert_eq!(map.areas().len(), 10);
+        assert_eq!(map.areas().len(), 11);
         assert_eq!(
             map.json()["query"],
             serde_json::json!({

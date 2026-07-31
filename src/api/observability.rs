@@ -1,5 +1,6 @@
 use super::{
     system_sql, Database, QueryOutput, SlowQueryLogExportOptions, SlowQueryLogRecordSummary,
+    StatementExecutionContext,
 };
 use crate::error::{Result, SkeinError};
 use crate::telemetry::QueryTelemetry;
@@ -14,7 +15,7 @@ impl Database {
         statement_kind: &str,
         started: std::time::Instant,
         result: std::result::Result<&QueryOutput, &SkeinError>,
-        execution_profile: Option<&crate::executor::ReadExecutionProfile>,
+        context: StatementExecutionContext<'_>,
     ) {
         let elapsed_micros = started.elapsed().as_micros();
         let execution = match result {
@@ -62,7 +63,11 @@ impl Database {
                     success: true,
                     error: None,
                     slow_log_candidate,
-                    vector_execution_reports: execution_profile
+                    access_control_policy_epoch: context
+                        .access_control
+                        .map(super::QueryAccessControlContext::policy_epoch),
+                    vector_execution_reports: context
+                        .execution_profile
                         .map(|profile| profile.vector_execution_reports.clone())
                         .unwrap_or_default(),
                 },

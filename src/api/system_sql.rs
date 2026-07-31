@@ -28,6 +28,7 @@ pub(crate) struct SlowQueryRecord {
     pub(crate) success: bool,
     pub(crate) error: Option<String>,
     pub(crate) slow_log_candidate: bool,
+    pub(crate) access_control_policy_epoch: Option<u64>,
     pub(crate) vector_execution_reports: Vec<skein_executor::VectorExecutionReport>,
 }
 
@@ -39,6 +40,7 @@ pub(crate) struct SlowQueryCompletion<'a> {
     pub(crate) success: bool,
     pub(crate) error: Option<String>,
     pub(crate) slow_log_candidate: bool,
+    pub(crate) access_control_policy_epoch: Option<u64>,
     pub(crate) vector_execution_reports: Vec<skein_executor::VectorExecutionReport>,
 }
 
@@ -125,6 +127,7 @@ impl SlowQueryRecord {
             success: completion.success,
             error: completion.error,
             slow_log_candidate: completion.slow_log_candidate,
+            access_control_policy_epoch: completion.access_control_policy_epoch,
             vector_execution_reports: completion.vector_execution_reports,
         }
     }
@@ -184,6 +187,7 @@ pub(crate) fn slow_query_record_summary(
         row_count: record.row_count,
         success: record.success,
         slow_log_candidate: record.slow_log_candidate,
+        access_control_policy_epoch: record.access_control_policy_epoch,
     }
 }
 
@@ -203,9 +207,11 @@ fn slow_query_record_json(record: &SlowQueryRecord, include_query_text: bool) ->
         "row_count": record.row_count,
         "success": record.success,
         "slow_log_candidate": record.slow_log_candidate,
+        "access_control_policy_epoch": record.access_control_policy_epoch,
         "redaction": {
             "query_text_copied": include_query_text,
-            "parameters_copied": false
+            "parameters_copied": false,
+            "access_control_policy_inputs_copied": false
         }
     });
     if include_query_text {
@@ -580,6 +586,13 @@ fn slow_query_rows(records: &[SlowQueryRecord]) -> Vec<Row> {
                     "slow_log_candidate".to_string(),
                     Value::Bool(record.slow_log_candidate),
                 ),
+                (
+                    "access_control_policy_epoch".to_string(),
+                    record
+                        .access_control_policy_epoch
+                        .map(u64_value)
+                        .unwrap_or(Value::Null),
+                ),
             ])
         })
         .collect()
@@ -808,6 +821,7 @@ fn table_columns(table: SystemTable) -> &'static [&'static str] {
             "success",
             "error",
             "slow_log_candidate",
+            "access_control_policy_epoch",
         ],
         SystemTable::StatementSummary => &[
             "digest",
@@ -941,6 +955,7 @@ mod tests {
                 success: true,
                 error: None,
                 slow_log_candidate: false,
+                access_control_policy_epoch: None,
                 vector_execution_reports: Vec::new(),
             },
             SlowQueryRecord {
@@ -953,6 +968,7 @@ mod tests {
                 success: true,
                 error: None,
                 slow_log_candidate: true,
+                access_control_policy_epoch: None,
                 vector_execution_reports: Vec::new(),
             },
             SlowQueryRecord {
@@ -965,6 +981,7 @@ mod tests {
                 success: true,
                 error: None,
                 slow_log_candidate: true,
+                access_control_policy_epoch: None,
                 vector_execution_reports: Vec::new(),
             },
         ];
@@ -1047,6 +1064,7 @@ pub(crate) mod loom_tests {
                     success: true,
                     error: None,
                     slow_log_candidate: true,
+                    access_control_policy_epoch: None,
                     vector_execution_reports: Vec::new(),
                 }));
         })

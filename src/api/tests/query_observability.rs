@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(feature = "acl")]
+use crate::{QueryAccessControlContext, RuntimeCapabilities, RuntimeCapability};
 
 #[test]
 fn explains_query_with_optimizer_trace() {
@@ -968,6 +970,54 @@ fn slow_query_jsonl_export_is_redacted_by_default() {
     assert!(!jsonl.contains("MATCH"));
     assert!(!jsonl.contains("secret-id"));
     assert!(!jsonl.contains("Sensitive title"));
+}
+
+#[cfg(feature = "acl")]
+#[test]
+fn slow_query_log_records_acl_epoch_without_policy_inputs() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        slow_query_log_threshold_micros: 0,
+        slow_query_log_capacity: 8,
+        runtime_capabilities: RuntimeCapabilities::default()
+            .with(RuntimeCapability::AccessControl, true),
+        ..DatabaseConfig::default()
+    });
+
+    db.query("CREATE (:Memory {id: 'visible', title: 'Visible', secret_space_id: 'secret_space'})")
+        .unwrap();
+    db.query_with_params_access_control(
+        "MATCH (m:Memory) RETURN m.id AS id",
+        &BTreeMap::new(),
+        QueryAccessControlContext::visibility_scope(11, "secret_space_id", "secret_space"),
+    )
+    .unwrap();
+
+    let acl_record = db
+        .slow_query_log_snapshot()
+        .into_iter()
+        .find(|record| record.access_control_policy_epoch == Some(11))
+        .expect("ACL slow-query record");
+    assert_eq!(acl_record.access_control_policy_epoch, Some(11));
+
+    let output = db
+        .query_sql(
+            "SELECT access_control_policy_epoch FROM system.slow_queries \
+             WHERE access_control_policy_epoch = 11",
+        )
+        .unwrap();
+    assert_eq!(
+        output.rows,
+        vec![BTreeMap::from([(
+            "access_control_policy_epoch".to_string(),
+            Value::Int(11)
+        )])]
+    );
+
+    let jsonl = db.slow_query_log_jsonl().unwrap();
+    assert!(jsonl.contains("\"access_control_policy_epoch\":11"));
+    assert!(jsonl.contains("\"access_control_policy_inputs_copied\":false"));
+    assert!(!jsonl.contains("secret_space_id"));
+    assert!(!jsonl.contains("secret_space"));
 }
 
 #[test]

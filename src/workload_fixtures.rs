@@ -7,9 +7,13 @@ use crate::{
     nowledge_mem_graph_pagerank_plan_route_query, nowledge_mem_graph_sample_route_query, Database,
     KnowledgeCandidateScoringPolicy, KnowledgeFanoutReasonCode, KnowledgeRetrievalRequest,
     NowledgeMemGraph, NowledgeMemGraphMode, NowledgeMemQueryExecutionPath,
-    NowledgeMemQueryReportOptions, Result, RouteQuery, SearchFusionWeights, SearchIndex,
-    SearchMode, SearchPredicatePushdownReport, SearchQueryOptions, SearchRebuildOptions,
-    DENSE_ADJACENCY_DEGREE_THRESHOLD,
+    NowledgeMemQueryReportOptions, NowledgeMemReadOptions, Result, RouteQuery, SearchFusionWeights,
+    SearchIndex, SearchMode, SearchPredicatePushdownReport, SearchQueryOptions,
+    SearchRebuildOptions, Value, DENSE_ADJACENCY_DEGREE_THRESHOLD,
+};
+use skein_core::{
+    GraphRagQueryBinding, GraphRagQueryDraft, GraphRagQueryPattern, GraphRagQueryPredicate,
+    GraphRagQueryPredicateOperator, GraphRagQueryProjection, GraphRagSchemaContextOptions,
 };
 use std::collections::BTreeMap;
 
@@ -54,6 +58,12 @@ pub struct NowledgeGraphRouteWorkloadFixtureReport {
     pub search_metadata_probe_count: usize,
     pub failed_search_metadata_probe_count: usize,
     pub search_metadata_reports: Vec<NowledgeSearchMetadataWorkloadReport>,
+    pub graph_rag_probe_count: usize,
+    pub failed_graph_rag_probe_count: usize,
+    pub graph_rag_reports: Vec<NowledgeGraphRagWorkloadReport>,
+    pub source_projection_probe_count: usize,
+    pub failed_source_projection_probe_count: usize,
+    pub source_projection_reports: Vec<NowledgeSourceProjectionWorkloadReport>,
     pub routes: Vec<NowledgeGraphRouteWorkloadRouteReport>,
 }
 
@@ -73,7 +83,97 @@ impl NowledgeGraphRouteWorkloadFixtureReport {
             "search_metadata_probe_count": self.search_metadata_probe_count,
             "failed_search_metadata_probe_count": self.failed_search_metadata_probe_count,
             "search_metadata_reports": self.search_metadata_reports.iter().map(NowledgeSearchMetadataWorkloadReport::json).collect::<Vec<_>>(),
+            "graph_rag_probe_count": self.graph_rag_probe_count,
+            "failed_graph_rag_probe_count": self.failed_graph_rag_probe_count,
+            "graph_rag_reports": self.graph_rag_reports.iter().map(NowledgeGraphRagWorkloadReport::json).collect::<Vec<_>>(),
+            "source_projection_probe_count": self.source_projection_probe_count,
+            "failed_source_projection_probe_count": self.failed_source_projection_probe_count,
+            "source_projection_reports": self.source_projection_reports.iter().map(NowledgeSourceProjectionWorkloadReport::json).collect::<Vec<_>>(),
             "routes": self.routes.iter().map(NowledgeGraphRouteWorkloadRouteReport::json).collect::<Vec<_>>(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeSourceProjectionWorkloadReport {
+    pub name: String,
+    pub ready: bool,
+    pub source_graph_commit_epoch: Option<u64>,
+    pub complete_through_graph_commit_epoch: Option<u64>,
+    pub too_small_batch_failed_closed: bool,
+    pub operation_count: usize,
+    pub upserted_documents: usize,
+    pub deleted_documents: usize,
+    pub source_document_count: usize,
+    pub indexed_source_document_ready: bool,
+    pub error_class: Option<String>,
+}
+
+impl NowledgeSourceProjectionWorkloadReport {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "name": self.name,
+            "ready": self.ready,
+            "source_graph_commit_epoch": self.source_graph_commit_epoch,
+            "complete_through_graph_commit_epoch": self.complete_through_graph_commit_epoch,
+            "too_small_batch_failed_closed": self.too_small_batch_failed_closed,
+            "operation_count": self.operation_count,
+            "upserted_documents": self.upserted_documents,
+            "deleted_documents": self.deleted_documents,
+            "source_document_count": self.source_document_count,
+            "indexed_source_document_ready": self.indexed_source_document_ready,
+            "error_class": self.error_class,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeGraphRagWorkloadReport {
+    pub name: String,
+    pub ready: bool,
+    pub schema_protocol: Option<String>,
+    pub context_epoch: Option<u64>,
+    pub schema_fingerprint: Option<u64>,
+    pub label_count: usize,
+    pub relationship_type_count: usize,
+    pub property_count: usize,
+    pub route_count: usize,
+    pub common_path_count: usize,
+    pub parameter_requirement_count: usize,
+    pub row_count: usize,
+    pub max_rows: Option<usize>,
+    pub execution_row_cap: Option<usize>,
+    pub estimated_payload_bytes: usize,
+    pub row_budget_exceeded: bool,
+    pub payload_budget_exceeded: bool,
+    pub blocking_operator_count: usize,
+    pub streaming: bool,
+    pub error_class: Option<String>,
+}
+
+impl NowledgeGraphRagWorkloadReport {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "name": self.name,
+            "ready": self.ready,
+            "schema_protocol": self.schema_protocol,
+            "context_epoch": self.context_epoch,
+            "schema_fingerprint": self.schema_fingerprint,
+            "label_count": self.label_count,
+            "relationship_type_count": self.relationship_type_count,
+            "property_count": self.property_count,
+            "route_count": self.route_count,
+            "common_path_count": self.common_path_count,
+            "parameter_requirement_count": self.parameter_requirement_count,
+            "row_count": self.row_count,
+            "max_rows": self.max_rows,
+            "execution_row_cap": self.execution_row_cap,
+            "estimated_payload_bytes": self.estimated_payload_bytes,
+            "row_budget_exceeded": self.row_budget_exceeded,
+            "payload_budget_exceeded": self.payload_budget_exceeded,
+            "blocking_operator_count": self.blocking_operator_count,
+            "streaming": self.streaming,
+            "error_class": self.error_class,
         })
     }
 }
@@ -254,6 +354,8 @@ fn run_graph_route_workload_fixture(
         Vec::new()
     };
     let search_metadata_reports = run_search_metadata_workload_probes(graph);
+    let graph_rag_reports = run_graph_rag_workload_probes(graph);
+    let source_projection_reports = run_source_projection_workload_probes(graph);
     let query_count = routes.iter().map(|route| route.query_count).sum();
     let failed_query_count = routes.iter().map(|route| route.failed_query_count).sum();
     let total_rows = routes.iter().map(|route| route.total_rows).sum();
@@ -266,13 +368,23 @@ fn run_graph_route_workload_fixture(
         .iter()
         .filter(|report| !report.ready)
         .count();
+    let failed_graph_rag_probe_count = graph_rag_reports
+        .iter()
+        .filter(|report| !report.ready)
+        .count();
+    let failed_source_projection_probe_count = source_projection_reports
+        .iter()
+        .filter(|report| !report.ready)
+        .count();
     Ok(NowledgeGraphRouteWorkloadFixtureReport {
         protocol: NOWLEDGE_GRAPH_ROUTE_WORKLOAD_FIXTURE_PROTOCOL,
         ready: !routes.is_empty()
             && failed_query_count == 0
             && routes.iter().all(|route| route.ready)
             && failed_bounded_expansion_probe_count == 0
-            && failed_search_metadata_probe_count == 0,
+            && failed_search_metadata_probe_count == 0
+            && failed_graph_rag_probe_count == 0
+            && failed_source_projection_probe_count == 0,
         route_count: routes.len(),
         query_count,
         failed_query_count,
@@ -284,6 +396,12 @@ fn run_graph_route_workload_fixture(
         search_metadata_probe_count: search_metadata_reports.len(),
         failed_search_metadata_probe_count,
         search_metadata_reports,
+        graph_rag_probe_count: graph_rag_reports.len(),
+        failed_graph_rag_probe_count,
+        graph_rag_reports,
+        source_projection_probe_count: source_projection_reports.len(),
+        failed_source_projection_probe_count,
+        source_projection_reports,
         routes,
     })
 }
@@ -447,6 +565,7 @@ fn run_search_metadata_workload_probe(
         SearchMode::Text,
         SearchQueryOptions {
             limit: 10,
+            offset: 0,
             rank_window: None,
             fusion_weights: SearchFusionWeights::default(),
             metadata_filters: metadata_filters.clone(),
@@ -510,6 +629,215 @@ fn search_metadata_pushdown_fields(pushdown: &SearchPredicatePushdownReport) -> 
         .collect()
 }
 
+fn run_source_projection_workload_probes(
+    graph: &mut NowledgeMemGraph,
+) -> Vec<NowledgeSourceProjectionWorkloadReport> {
+    vec![run_source_projection_workload_probe(
+        graph,
+        "source-ingest-composite-changefeed",
+    )]
+}
+
+fn run_source_projection_workload_probe(
+    graph: &mut NowledgeMemGraph,
+    name: &str,
+) -> NowledgeSourceProjectionWorkloadReport {
+    let db = graph.database_mut();
+    let source_graph_commit_epoch_before = db.commit_epoch();
+    let mut transaction = db.begin_transaction();
+    for statement in [
+        "CREATE (:Source {id: 'workload-source-v1', original_name: 'workload.md', lifecycle_state: 'parsed', space_id: 'default', version: 1})",
+        "CREATE (:Source {id: 'workload-source-v2', original_name: 'workload.md', lifecycle_state: 'indexed', space_id: 'default', version: 2})",
+        "MATCH (newer:Source {id: 'workload-source-v2'}), (older:Source {id: 'workload-source-v1'})
+         CREATE (newer)-[:REVISED_AS {revision_type: 'content_refresh', detected_by: 'workload_fixture'}]->(older)",
+    ] {
+        if let Err(error) = transaction.query(statement) {
+            return source_projection_error_report(name, &error_class(&error));
+        }
+    }
+    if let Err(error) = transaction.commit() {
+        return source_projection_error_report(name, &error_class(&error));
+    }
+    let source_graph_commit_epoch = db.commit_epoch();
+    let too_small_batch_failed_closed = db
+        .build_search_projection_graph_delta_request_after(
+            source_graph_commit_epoch_before,
+            Some(1),
+        )
+        .is_err();
+    let request = match db.build_search_projection_graph_delta_request_after(
+        source_graph_commit_epoch_before,
+        Some(2),
+    ) {
+        Ok(Some(request)) => request,
+        Ok(None) => return source_projection_error_report(name, "missing_delta_request"),
+        Err(error) => return source_projection_error_report(name, &error_class(&error)),
+    };
+    let complete_through_graph_commit_epoch = request.complete_through_graph_commit_epoch;
+    let mut search_index = SearchIndex::in_memory();
+    let delta_report = match db.apply_search_projection_graph_delta(&mut search_index, request) {
+        Ok(report) => report,
+        Err(error) => return source_projection_error_report(name, &error_class(&error)),
+    };
+    let source_document_count = ["source:workload-source-v1", "source:workload-source-v2"]
+        .into_iter()
+        .filter(|document_id| search_index.document(document_id).is_some())
+        .count();
+    let indexed_source_document_ready = search_index
+        .document("source:workload-source-v2")
+        .and_then(|document| document.metadata.get("lifecycle_state"))
+        .is_some_and(|state| state == "indexed");
+    let ready = too_small_batch_failed_closed
+        && delta_report.operation_count == 2
+        && delta_report.upserted_documents == 2
+        && delta_report.deleted_documents == 0
+        && complete_through_graph_commit_epoch == Some(source_graph_commit_epoch)
+        && delta_report.source_graph_commit_epoch_after == Some(source_graph_commit_epoch)
+        && source_document_count == 2
+        && indexed_source_document_ready;
+    NowledgeSourceProjectionWorkloadReport {
+        name: name.to_string(),
+        ready,
+        source_graph_commit_epoch: Some(source_graph_commit_epoch),
+        complete_through_graph_commit_epoch,
+        too_small_batch_failed_closed,
+        operation_count: delta_report.operation_count,
+        upserted_documents: delta_report.upserted_documents,
+        deleted_documents: delta_report.deleted_documents,
+        source_document_count,
+        indexed_source_document_ready,
+        error_class: None,
+    }
+}
+
+fn source_projection_error_report(
+    name: &str,
+    error_class: &str,
+) -> NowledgeSourceProjectionWorkloadReport {
+    NowledgeSourceProjectionWorkloadReport {
+        name: name.to_string(),
+        ready: false,
+        source_graph_commit_epoch: None,
+        complete_through_graph_commit_epoch: None,
+        too_small_batch_failed_closed: false,
+        operation_count: 0,
+        upserted_documents: 0,
+        deleted_documents: 0,
+        source_document_count: 0,
+        indexed_source_document_ready: false,
+        error_class: Some(error_class.to_string()),
+    }
+}
+
+fn run_graph_rag_workload_probes(graph: &NowledgeMemGraph) -> Vec<NowledgeGraphRagWorkloadReport> {
+    vec![run_graph_rag_workload_probe(graph, "memory-to-entity")]
+}
+
+fn run_graph_rag_workload_probe(
+    graph: &NowledgeMemGraph,
+    name: &str,
+) -> NowledgeGraphRagWorkloadReport {
+    let context = graph.graph_rag_schema_context(GraphRagSchemaContextOptions::default());
+    let draft = GraphRagQueryDraft {
+        schema_fingerprint: context.fingerprint,
+        pattern: GraphRagQueryPattern::Route {
+            source_label: "Memory".to_string(),
+            relationship_type: "MENTIONS".to_string(),
+            target_label: "Entity".to_string(),
+        },
+        predicates: vec![GraphRagQueryPredicate {
+            binding: GraphRagQueryBinding::Source,
+            property: "id".to_string(),
+            operator: GraphRagQueryPredicateOperator::Eq,
+            parameter: Some("memory_id".to_string()),
+        }],
+        projections: vec![GraphRagQueryProjection {
+            binding: GraphRagQueryBinding::Target,
+            property: "id".to_string(),
+            alias: "entity_id".to_string(),
+        }],
+        limit: 4,
+    };
+    let generated = match context.generate_query(&draft) {
+        Ok(query) => query,
+        Err(error) => {
+            let _ = error;
+            return graph_rag_error_report(name, &context, "generation");
+        }
+    };
+    let parameters = BTreeMap::from([(
+        "memory_id".to_string(),
+        Value::String("community-recent-new".to_string()),
+    )]);
+    match graph.read_generated_graph_rag(
+        &generated,
+        &parameters,
+        &NowledgeMemReadOptions {
+            max_rows: Some(4),
+            max_estimated_payload_bytes: Some(4096),
+        },
+    ) {
+        Ok(output) => NowledgeGraphRagWorkloadReport {
+            name: name.to_string(),
+            ready: output.report.row_count > 0
+                && output.report.row_count <= 4
+                && !output.report.row_budget_exceeded
+                && !output.report.payload_budget_exceeded
+                && output.report.blocking_operator_count == 0
+                && !output.report.streaming
+                && generated.parameter_requirements().len() == 1,
+            schema_protocol: Some(context.protocol.to_string()),
+            context_epoch: Some(context.computed_at_commit_epoch),
+            schema_fingerprint: Some(context.fingerprint),
+            label_count: context.labels.len(),
+            relationship_type_count: context.relationship_types.len(),
+            property_count: context.properties.len(),
+            route_count: context.routes.len(),
+            common_path_count: context.common_paths.len(),
+            parameter_requirement_count: generated.parameter_requirements().len(),
+            row_count: output.report.row_count,
+            max_rows: output.report.max_rows,
+            execution_row_cap: output.report.execution_row_cap,
+            estimated_payload_bytes: output.report.estimated_payload_bytes,
+            row_budget_exceeded: output.report.row_budget_exceeded,
+            payload_budget_exceeded: output.report.payload_budget_exceeded,
+            blocking_operator_count: output.report.blocking_operator_count,
+            streaming: output.report.streaming,
+            error_class: None,
+        },
+        Err(error) => graph_rag_error_report(name, &context, &error_class(&error)),
+    }
+}
+
+fn graph_rag_error_report(
+    name: &str,
+    context: &skein_core::GraphRagSchemaContext,
+    error_class: &str,
+) -> NowledgeGraphRagWorkloadReport {
+    NowledgeGraphRagWorkloadReport {
+        name: name.to_string(),
+        ready: false,
+        schema_protocol: Some(context.protocol.to_string()),
+        context_epoch: Some(context.computed_at_commit_epoch),
+        schema_fingerprint: Some(context.fingerprint),
+        label_count: context.labels.len(),
+        relationship_type_count: context.relationship_types.len(),
+        property_count: context.properties.len(),
+        route_count: context.routes.len(),
+        common_path_count: context.common_paths.len(),
+        parameter_requirement_count: 0,
+        row_count: 0,
+        max_rows: None,
+        execution_row_cap: None,
+        estimated_payload_bytes: 0,
+        row_budget_exceeded: false,
+        payload_budget_exceeded: false,
+        blocking_operator_count: 0,
+        streaming: false,
+        error_class: Some(error_class.to_string()),
+    }
+}
+
 fn run_bounded_expansion_probe(
     db: &Database,
     search_index: &SearchIndex,
@@ -525,6 +853,7 @@ fn run_bounded_expansion_probe(
             query_embedding: None,
             mode: SearchMode::Text,
             limit: 1,
+            offset: 0,
             rank_window: None,
             search_fusion_weights: SearchFusionWeights::default(),
             metadata_filters: BTreeMap::new(),
@@ -678,6 +1007,10 @@ mod tests {
         assert_eq!(report.failed_bounded_expansion_probe_count, 0);
         assert_eq!(report.search_metadata_probe_count, 3);
         assert_eq!(report.failed_search_metadata_probe_count, 0);
+        assert_eq!(report.graph_rag_probe_count, 1);
+        assert_eq!(report.failed_graph_rag_probe_count, 0);
+        assert_eq!(report.source_projection_probe_count, 1);
+        assert_eq!(report.failed_source_projection_probe_count, 0);
         assert!(report.query_count >= report.route_count);
         assert!(report.total_rows > 0);
         assert!(report.routes.iter().all(|route| route.ready));
@@ -730,6 +1063,32 @@ mod tests {
         assert!(range_filter.fields.contains(&"importance".to_string()));
         assert!(range_filter.fields.contains(&"confidence".to_string()));
         assert!(range_filter.fields.contains(&"created_at".to_string()));
+        let graph_rag = report
+            .graph_rag_reports
+            .iter()
+            .find(|report| report.name == "memory-to-entity")
+            .unwrap();
+        assert!(graph_rag.ready);
+        assert!(graph_rag.label_count > 0);
+        assert!(graph_rag.relationship_type_count > 0);
+        assert!(graph_rag.route_count > 0);
+        assert_eq!(graph_rag.parameter_requirement_count, 1);
+        assert!(graph_rag.row_count > 0);
+        assert_eq!(graph_rag.blocking_operator_count, 0);
+        assert!(!graph_rag.streaming);
+        assert_eq!(graph_rag.error_class, None);
+        let source_projection = report
+            .source_projection_reports
+            .iter()
+            .find(|report| report.name == "source-ingest-composite-changefeed")
+            .unwrap();
+        assert!(source_projection.ready);
+        assert_eq!(source_projection.operation_count, 2);
+        assert_eq!(source_projection.upserted_documents, 2);
+        assert_eq!(source_projection.deleted_documents, 0);
+        assert_eq!(source_projection.source_document_count, 2);
+        assert!(source_projection.too_small_batch_failed_closed);
+        assert!(source_projection.indexed_source_document_ready);
     }
 
     #[test]

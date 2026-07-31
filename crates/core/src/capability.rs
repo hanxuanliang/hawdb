@@ -2,6 +2,7 @@ use crate::{Result, SkeinError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RuntimeCapability {
+    AccessControl,
     FullTextSearch,
     VectorSearch,
     GraphAnalytics,
@@ -11,6 +12,7 @@ pub enum RuntimeCapability {
 impl RuntimeCapability {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::AccessControl => "access_control",
             Self::FullTextSearch => "full_text_search",
             Self::VectorSearch => "vector_search",
             Self::GraphAnalytics => "graph_analytics",
@@ -21,6 +23,7 @@ impl RuntimeCapability {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeCapabilities {
+    pub access_control: bool,
     pub full_text_search: bool,
     pub vector_search: bool,
     pub graph_analytics: bool,
@@ -30,6 +33,7 @@ pub struct RuntimeCapabilities {
 impl RuntimeCapabilities {
     pub const fn desktop_bound() -> Self {
         Self {
+            access_control: false,
             full_text_search: true,
             vector_search: true,
             graph_analytics: true,
@@ -39,6 +43,7 @@ impl RuntimeCapabilities {
 
     pub const fn mobile_embedded() -> Self {
         Self {
+            access_control: false,
             full_text_search: true,
             vector_search: true,
             graph_analytics: false,
@@ -48,6 +53,7 @@ impl RuntimeCapabilities {
 
     pub const fn is_enabled(self, capability: RuntimeCapability) -> bool {
         match capability {
+            RuntimeCapability::AccessControl => self.access_control,
             RuntimeCapability::FullTextSearch => self.full_text_search,
             RuntimeCapability::VectorSearch => self.vector_search,
             RuntimeCapability::GraphAnalytics => self.graph_analytics,
@@ -64,6 +70,7 @@ impl RuntimeCapabilities {
 
     pub const fn with(mut self, capability: RuntimeCapability, enabled: bool) -> Self {
         match capability {
+            RuntimeCapability::AccessControl => self.access_control = enabled,
             RuntimeCapability::FullTextSearch => self.full_text_search = enabled,
             RuntimeCapability::VectorSearch => self.vector_search = enabled,
             RuntimeCapability::GraphAnalytics => self.graph_analytics = enabled,
@@ -74,6 +81,7 @@ impl RuntimeCapabilities {
 
     pub const fn intersection(self, available: Self) -> Self {
         Self {
+            access_control: self.access_control && available.access_control,
             full_text_search: self.full_text_search && available.full_text_search,
             vector_search: self.vector_search && available.vector_search,
             graph_analytics: self.graph_analytics && available.graph_analytics,
@@ -96,6 +104,7 @@ mod tests {
     fn mobile_disables_only_optional_heavy_runtime_capabilities() {
         let capabilities = RuntimeCapabilities::mobile_embedded();
 
+        assert!(!capabilities.is_enabled(RuntimeCapability::AccessControl));
         assert!(capabilities.is_enabled(RuntimeCapability::FullTextSearch));
         assert!(capabilities.is_enabled(RuntimeCapability::VectorSearch));
         assert!(!capabilities.is_enabled(RuntimeCapability::GraphAnalytics));
@@ -120,10 +129,12 @@ mod tests {
     #[test]
     fn requested_capabilities_are_bounded_by_compiled_availability() {
         let available = RuntimeCapabilities::desktop_bound()
+            .with(RuntimeCapability::AccessControl, true)
             .with(RuntimeCapability::GraphAnalytics, false)
             .with(RuntimeCapability::BackgroundMaintenance, false);
         let effective = RuntimeCapabilities::desktop_bound().intersection(available);
 
+        assert!(!effective.access_control);
         assert!(effective.full_text_search);
         assert!(effective.vector_search);
         assert!(!effective.graph_analytics);

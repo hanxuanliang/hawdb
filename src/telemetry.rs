@@ -17,6 +17,7 @@ pub enum KernelTelemetryOperation {
     WalAppend,
     Checkpoint,
     Recovery,
+    IndexMaintenance,
     SearchCheckpoint,
     BackgroundAdmission,
 }
@@ -27,9 +28,48 @@ impl KernelTelemetryOperation {
             Self::WalAppend => "wal_append",
             Self::Checkpoint => "checkpoint",
             Self::Recovery => "recovery",
+            Self::IndexMaintenance => "index_maintenance",
             Self::SearchCheckpoint => "search_checkpoint",
             Self::BackgroundAdmission => "background_admission",
         }
+    }
+}
+
+pub const REQUIRED_OPERATIONS_TELEMETRY: [KernelTelemetryOperation; 6] = [
+    KernelTelemetryOperation::WalAppend,
+    KernelTelemetryOperation::Checkpoint,
+    KernelTelemetryOperation::Recovery,
+    KernelTelemetryOperation::IndexMaintenance,
+    KernelTelemetryOperation::SearchCheckpoint,
+    KernelTelemetryOperation::BackgroundAdmission,
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationsTelemetryReadiness {
+    pub ready: bool,
+    pub graph_sink_configured: bool,
+    pub search_projection_sink_configured: bool,
+    pub required_operations: Vec<KernelTelemetryOperation>,
+    pub blocker_codes: Vec<String>,
+}
+
+pub fn operations_telemetry_readiness(
+    graph_sink_configured: bool,
+    search_projection_sink_configured: bool,
+) -> OperationsTelemetryReadiness {
+    let mut blocker_codes = Vec::new();
+    if !graph_sink_configured {
+        blocker_codes.push("operations_telemetry_graph_sink_missing".to_string());
+    }
+    if !search_projection_sink_configured {
+        blocker_codes.push("operations_telemetry_search_projection_sink_missing".to_string());
+    }
+    OperationsTelemetryReadiness {
+        ready: blocker_codes.is_empty(),
+        graph_sink_configured,
+        search_projection_sink_configured,
+        required_operations: REQUIRED_OPERATIONS_TELEMETRY.to_vec(),
+        blocker_codes,
     }
 }
 
@@ -161,8 +201,9 @@ mod tests {
     use super::*;
     use crate::qos::{QosTelemetryOutcome, QosTelemetryPhase};
     use crate::{
-        Database, LocalQosPolicy, LocalQosScheduler, SearchDocument, SearchIndex,
-        SearchProjectionDelta, SearchProjectionKind, SearchProjectionRow,
+        Database, LocalQosPolicy, LocalQosScheduler, MetadataRepairOptions, SearchDocument,
+        SearchIndex, SearchProjectionDelta, SearchProjectionKind, SearchProjectionRow,
+        SearchRebuildOptions,
     };
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -228,6 +269,29 @@ mod tests {
                 item_count: 4,
             }]
         );
+    }
+
+    #[test]
+    fn operations_telemetry_readiness_requires_host_owned_graph_and_search_sinks() {
+        let missing = operations_telemetry_readiness(false, false);
+        assert!(!missing.ready);
+        assert_eq!(missing.required_operations, REQUIRED_OPERATIONS_TELEMETRY);
+        assert!(missing
+            .blocker_codes
+            .contains(&"operations_telemetry_graph_sink_missing".to_string()));
+        assert!(missing
+            .blocker_codes
+            .contains(&"operations_telemetry_search_projection_sink_missing".to_string()));
+
+        let ready = operations_telemetry_readiness(true, true);
+        assert!(ready.ready);
+        assert!(ready.blocker_codes.is_empty());
+        assert!(ready
+            .required_operations
+            .contains(&KernelTelemetryOperation::IndexMaintenance));
+        assert!(ready
+            .required_operations
+            .contains(&KernelTelemetryOperation::BackgroundAdmission));
     }
 
     #[test]
@@ -306,6 +370,27 @@ mod tests {
     }
 
     #[test]
+    fn database_operations_telemetry_readiness_uses_configured_library_sinks() {
+        let sink = Arc::new(RecordingSink::default());
+        let mut database = Database::new();
+        let mut search_index = SearchIndex::in_memory();
+
+        let missing = database.operations_telemetry_readiness(Some(&search_index));
+        assert!(!missing.ready);
+
+        database.set_telemetry_sink(Some(sink.clone()));
+        let graph_only = database.operations_telemetry_readiness(Some(&search_index));
+        assert!(!graph_only.ready);
+        assert!(graph_only.graph_sink_configured);
+        assert!(!graph_only.search_projection_sink_configured);
+
+        search_index.set_telemetry_sink(Some(sink));
+        let ready = database.operations_telemetry_readiness(Some(&search_index));
+        assert!(ready.ready);
+        assert!(ready.blocker_codes.is_empty());
+    }
+
+    #[test]
     fn durable_database_emits_recovery_wal_and_checkpoint_metrics() {
         let path = unique_test_dir("kernel_storage");
         let sink = Arc::new(RecordingSink::default());
@@ -365,6 +450,33 @@ mod tests {
         drop(events);
         drop(index);
         std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn search_projection_rebuild_and_repair_emit_index_maintenance_metrics() {
+        let sink = Arc::new(RecordingSink::default());
+        let mut database = Database::new();
+        database
+            .query("CREATE (:Memory {id: 'telemetry-index', title: 'Index telemetry'})")
+            .unwrap();
+        let mut index = SearchIndex::in_memory();
+        index.set_telemetry_sink(Some(sink.clone()));
+
+        database
+            .rebuild_search_projection(&mut index, SearchRebuildOptions::default())
+            .unwrap();
+        database
+            .repair_search_projection_metadata(&mut index, MetadataRepairOptions::default())
+            .unwrap();
+
+        let events = sink.kernel_events.lock().unwrap();
+        let index_events = events
+            .iter()
+            .filter(|event| event.operation == KernelTelemetryOperation::IndexMaintenance)
+            .collect::<Vec<_>>();
+        assert_eq!(index_events.len(), 2);
+        assert!(index_events.iter().all(|event| event.success));
+        assert!(index_events.iter().all(|event| event.item_count >= 1));
     }
 
     fn unique_test_dir(name: &str) -> PathBuf {

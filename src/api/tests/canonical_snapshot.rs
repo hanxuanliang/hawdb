@@ -1,4 +1,109 @@
 use super::*;
+use crate::search::{SearchProjectionFreshness, SearchProjectionKind};
+use crate::{
+    graph_lightning_initial_import_advance_checkpoint,
+    graph_lightning_initial_import_advance_durable_state_with_search_projection_batch,
+    graph_lightning_initial_import_checkpoint_readiness,
+    graph_lightning_initial_import_cutover_catch_up_report,
+    graph_lightning_initial_import_document_identity_coverage,
+    graph_lightning_initial_import_durable_state_report,
+    graph_lightning_initial_import_search_projection_batch_report,
+    graph_lightning_initial_import_search_projection_batch_report_with_document_identities,
+    graph_lightning_initial_import_session_report, parse_graph_lightning_graph_stream_export,
+    CanonicalGraphSnapshotExport, CanonicalSnapshotIdentityAudit, CanonicalSnapshotNode,
+    CanonicalSnapshotRelationship, GraphLightningBootstrapManifest,
+    GraphLightningInitialImportCheckpoint, GraphLightningInitialImportCheckpointProgress,
+    GraphLightningInitialImportDocumentIdentity, GraphLightningInitialImportIdempotencyKey,
+    GraphLightningInitialImportResumeActionKind,
+};
+use crate::{SearchProjectionDelta, SearchProjectionRow};
+
+fn test_graph_lightning_checkpoint(
+    manifest: &GraphLightningBootstrapManifest,
+) -> GraphLightningInitialImportCheckpoint {
+    GraphLightningInitialImportCheckpoint {
+        protocol_version: 1,
+        import_id: "import-1".to_string(),
+        task_id: "task-1".to_string(),
+        fencing_token: "fence-1".to_string(),
+        object_digest: "object-digest-1".to_string(),
+        schema_checksum: manifest.schema_checksum,
+        graph_stream_checksum: manifest.graph_stream_checksum,
+        graph_stream_byte_len: manifest.graph_stream_byte_len,
+        manifest_graph_commit_epoch: manifest.graph_commit_epoch,
+        applied_graph_commit_epoch: manifest.graph_commit_epoch,
+        applied_search_projection_commit_epoch: Some(manifest.graph_commit_epoch),
+        durable_search_projection_commit_epoch: Some(manifest.graph_commit_epoch),
+        completed_batches: 4,
+        total_batches: 4,
+        document_identity_count: manifest.node_count + manifest.relationship_count,
+    }
+}
+
+fn initial_import_document_identity(
+    kind: SearchProjectionKind,
+    document_id: &str,
+) -> GraphLightningInitialImportDocumentIdentity {
+    GraphLightningInitialImportDocumentIdentity {
+        kind,
+        document_id: document_id.to_string(),
+    }
+}
+
+fn all_initial_import_document_identities() -> Vec<GraphLightningInitialImportDocumentIdentity> {
+    vec![
+        initial_import_document_identity(SearchProjectionKind::Memory, "memory:1"),
+        initial_import_document_identity(SearchProjectionKind::Message, "message:1"),
+        initial_import_document_identity(SearchProjectionKind::Entity, "entity:1"),
+        initial_import_document_identity(SearchProjectionKind::Source, "source:1"),
+        initial_import_document_identity(SearchProjectionKind::SourceChunk, "source_chunk:1"),
+        initial_import_document_identity(SearchProjectionKind::Community, "community:1"),
+    ]
+}
+
+fn initial_import_projection_row(
+    kind: SearchProjectionKind,
+    external_id: &str,
+) -> SearchProjectionRow {
+    SearchProjectionRow {
+        kind,
+        external_id: external_id.to_string(),
+        title: format!("title {external_id}"),
+        body: format!("body {external_id}"),
+        embedding: None,
+        source_id: None,
+        metadata: BTreeMap::new(),
+    }
+}
+
+fn all_initial_import_projection_rows() -> Vec<SearchProjectionRow> {
+    vec![
+        initial_import_projection_row(SearchProjectionKind::Memory, "1"),
+        initial_import_projection_row(SearchProjectionKind::Message, "1"),
+        initial_import_projection_row(SearchProjectionKind::Entity, "1"),
+        initial_import_projection_row(SearchProjectionKind::Source, "1"),
+        initial_import_projection_row(SearchProjectionKind::SourceChunk, "1"),
+        initial_import_projection_row(SearchProjectionKind::Community, "1"),
+    ]
+}
+
+fn initial_import_projection_freshness(
+    manifest: &GraphLightningBootstrapManifest,
+) -> SearchProjectionFreshness {
+    SearchProjectionFreshness {
+        document_count: manifest.node_count + manifest.relationship_count,
+        source_graph_commit_epoch: Some(manifest.graph_commit_epoch),
+        durable_source_graph_commit_epoch: Some(manifest.graph_commit_epoch),
+        has_uncheckpointed_changes: false,
+        full_reindex_needed: false,
+        full_reindex_reasons: Vec::new(),
+        metadata_repair_needed: false,
+        metadata_repair_reasons: Vec::new(),
+        embedding_model: None,
+        embedding_version: None,
+        embedding_dimension: None,
+    }
+}
 
 #[test]
 fn canonical_snapshot_export_uses_pinned_read_transaction_state() {
@@ -346,6 +451,1576 @@ fn graph_lightning_bootstrap_manifest_reports_ready_physical_export() {
     }
 
     std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn graph_lightning_graph_stream_decodes_to_import_ready_snapshot() {
+    let snapshot = CanonicalGraphSnapshotExport {
+        graph_commit_epoch: 42,
+        logical_checksum: 0,
+        stable_identity: CanonicalSnapshotIdentityAudit {
+            requires_stable_id_mapping: false,
+            nodes_without_stable_id: Vec::new(),
+            relationships_without_stable_id: Vec::new(),
+            duplicate_node_stable_ids: Vec::new(),
+            duplicate_relationship_stable_ids: Vec::new(),
+        },
+        nodes: vec![
+            CanonicalSnapshotNode {
+                node_id: 9,
+                stable_id: Some(Value::String("memory".to_string())),
+                labels: vec!["Memory".to_string()],
+                properties: BTreeMap::from([
+                    ("id".to_string(), Value::String("memory".to_string())),
+                    ("importance".to_string(), Value::Float(0.75)),
+                ]),
+            },
+            CanonicalSnapshotNode {
+                node_id: 7,
+                stable_id: Some(Value::String("source".to_string())),
+                labels: vec!["Source".to_string()],
+                properties: BTreeMap::from([
+                    ("id".to_string(), Value::String("source".to_string())),
+                    (
+                        "metadata".to_string(),
+                        Value::Map(BTreeMap::from([(
+                            "tags".to_string(),
+                            Value::List(vec![
+                                Value::String("import".to_string()),
+                                Value::String("bootstrap".to_string()),
+                            ]),
+                        )])),
+                    ),
+                ]),
+            },
+        ],
+        relationships: vec![CanonicalSnapshotRelationship {
+            relationship_id: 11,
+            stable_id: Some(Value::String("rel-source-memory".to_string())),
+            source_node_id: 9,
+            target_node_id: 7,
+            rel_type: "HAS_SOURCE".to_string(),
+            properties: BTreeMap::from([("weight".to_string(), Value::Int(3))]),
+        }],
+    };
+    let snapshot = CanonicalGraphSnapshotExport {
+        logical_checksum: snapshot.validate().expected_logical_checksum,
+        stable_identity: CanonicalSnapshotIdentityAudit {
+            requires_stable_id_mapping: false,
+            nodes_without_stable_id: Vec::new(),
+            relationships_without_stable_id: Vec::new(),
+            duplicate_node_stable_ids: Vec::new(),
+            duplicate_relationship_stable_ids: Vec::new(),
+        },
+        ..snapshot
+    };
+    let manifest = snapshot.graph_lightning_bootstrap_manifest();
+    let stream = snapshot.graph_lightning_graph_stream();
+
+    let decoded =
+        parse_graph_lightning_graph_stream_export(&stream.encoded, Some(&manifest)).unwrap();
+
+    assert_eq!(decoded.graph_commit_epoch, 42);
+    assert_eq!(decoded.logical_checksum, snapshot.logical_checksum);
+    assert_eq!(decoded.nodes, snapshot.nodes);
+    assert_eq!(decoded.relationships, snapshot.relationships);
+    assert!(decoded.validate().is_import_ready);
+}
+
+#[test]
+fn graph_lightning_graph_stream_decode_rejects_manifest_mismatch() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+    let mut manifest = export.manifest.clone();
+    manifest.graph_commit_epoch += 1;
+
+    let error =
+        parse_graph_lightning_graph_stream_export(&export.graph_stream.encoded, Some(&manifest))
+            .unwrap_err();
+
+    assert!(error.to_string().contains("graph stream manifest mismatch"));
+}
+
+#[test]
+fn graph_lightning_initial_import_readiness_requires_graph_and_projection_watermarks() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let manifest = db
+        .prepare_graph_lightning_bootstrap_export()
+        .unwrap()
+        .manifest;
+    let projection = SearchProjectionFreshness {
+        document_count: 2,
+        source_graph_commit_epoch: Some(1),
+        durable_source_graph_commit_epoch: Some(1),
+        has_uncheckpointed_changes: false,
+        full_reindex_needed: false,
+        full_reindex_reasons: Vec::new(),
+        metadata_repair_needed: false,
+        metadata_repair_reasons: Vec::new(),
+        embedding_model: Some("test-embedding".to_string()),
+        embedding_version: Some("v1".to_string()),
+        embedding_dimension: Some(3),
+    };
+
+    let readiness = db.graph_lightning_initial_import_readiness(&manifest, Some(&projection));
+
+    assert!(readiness.ready);
+    assert!(readiness.graph_import_caught_up);
+    assert!(readiness.projection_watermark_caught_up);
+    assert!(readiness.projection_checkpointed);
+    assert!(readiness.blocker_codes.is_empty());
+}
+
+#[test]
+fn graph_lightning_initial_import_readiness_blocks_missing_or_stale_projection() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let manifest = db
+        .prepare_graph_lightning_bootstrap_export()
+        .unwrap()
+        .manifest;
+    db.query("CREATE (:Memory {id: 'after-bootstrap'})")
+        .unwrap();
+
+    let missing = db.graph_lightning_initial_import_readiness(&manifest, None);
+    assert!(!missing.ready);
+    assert!(missing
+        .blocker_codes
+        .contains(&"search_projection_missing".to_string()));
+
+    let stale_projection = SearchProjectionFreshness {
+        document_count: 2,
+        source_graph_commit_epoch: Some(1),
+        durable_source_graph_commit_epoch: Some(1),
+        has_uncheckpointed_changes: true,
+        full_reindex_needed: false,
+        full_reindex_reasons: Vec::new(),
+        metadata_repair_needed: false,
+        metadata_repair_reasons: Vec::new(),
+        embedding_model: None,
+        embedding_version: None,
+        embedding_dimension: None,
+    };
+
+    let stale = db.graph_lightning_initial_import_readiness(&manifest, Some(&stale_projection));
+
+    assert!(!stale.ready);
+    assert_eq!(stale.target_graph_commit_epoch, 2);
+    assert!(stale
+        .blocker_codes
+        .contains(&"search_projection_watermark_behind_graph".to_string()));
+    assert!(stale
+        .blocker_codes
+        .contains(&"search_projection_not_checkpointed".to_string()));
+}
+
+#[test]
+fn graph_lightning_initial_import_checkpoint_readiness_accepts_matching_checkpoint() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let manifest = db
+        .prepare_graph_lightning_bootstrap_export()
+        .unwrap()
+        .manifest;
+    let checkpoint = test_graph_lightning_checkpoint(&manifest);
+
+    let readiness = graph_lightning_initial_import_checkpoint_readiness(&manifest, &checkpoint);
+
+    assert!(readiness.ready);
+    assert!(readiness.idempotency_key_present);
+    assert_eq!(
+        readiness.idempotency_key,
+        Some(GraphLightningInitialImportIdempotencyKey {
+            import_id: "import-1".to_string(),
+            task_id: "task-1".to_string(),
+            fencing_token: "fence-1".to_string(),
+            object_digest: "object-digest-1".to_string(),
+        })
+    );
+    assert!(readiness.checkpoint_matches_manifest);
+    assert!(readiness.graph_checkpoint_caught_up);
+    assert!(readiness.search_projection_applied_caught_up);
+    assert!(readiness.search_projection_durable_caught_up);
+    assert!(readiness.batches_complete);
+    assert!(readiness.document_identities_present);
+    assert!(readiness.blocker_codes.is_empty());
+}
+
+#[test]
+fn graph_lightning_initial_import_checkpoint_readiness_blocks_stale_checkpoint() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let manifest = db
+        .prepare_graph_lightning_bootstrap_export()
+        .unwrap()
+        .manifest;
+    let checkpoint = GraphLightningInitialImportCheckpoint {
+        schema_checksum: manifest.schema_checksum + 1,
+        applied_search_projection_commit_epoch: Some(manifest.graph_commit_epoch - 1),
+        durable_search_projection_commit_epoch: Some(manifest.graph_commit_epoch - 1),
+        completed_batches: 1,
+        total_batches: 2,
+        document_identity_count: 0,
+        ..test_graph_lightning_checkpoint(&manifest)
+    };
+
+    let readiness = graph_lightning_initial_import_checkpoint_readiness(&manifest, &checkpoint);
+
+    assert!(!readiness.ready);
+    assert!(readiness
+        .blocker_codes
+        .contains(&"initial_import_checkpoint_manifest_mismatch".to_string()));
+    assert!(readiness
+        .blocker_codes
+        .contains(&"initial_import_search_projection_apply_behind_graph".to_string()));
+    assert!(readiness
+        .blocker_codes
+        .contains(&"initial_import_search_projection_checkpoint_behind_graph".to_string()));
+    assert!(readiness
+        .blocker_codes
+        .contains(&"initial_import_batches_incomplete".to_string()));
+    assert!(readiness
+        .blocker_codes
+        .contains(&"initial_import_document_identities_missing".to_string()));
+}
+
+#[test]
+fn graph_lightning_initial_import_checkpoint_readiness_requires_idempotency_key() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let manifest = db
+        .prepare_graph_lightning_bootstrap_export()
+        .unwrap()
+        .manifest;
+    let checkpoint = GraphLightningInitialImportCheckpoint {
+        task_id: String::new(),
+        ..test_graph_lightning_checkpoint(&manifest)
+    };
+
+    let readiness = graph_lightning_initial_import_checkpoint_readiness(&manifest, &checkpoint);
+
+    assert!(!readiness.ready);
+    assert!(!readiness.idempotency_key_present);
+    assert_eq!(readiness.idempotency_key, None);
+    assert!(readiness
+        .blocker_codes
+        .contains(&"initial_import_checkpoint_idempotency_key_missing".to_string()));
+}
+
+#[test]
+fn graph_lightning_initial_import_checkpoint_progress_advances_monotonically() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let manifest = db
+        .prepare_graph_lightning_bootstrap_export()
+        .unwrap()
+        .manifest;
+    let checkpoint = GraphLightningInitialImportCheckpoint {
+        applied_graph_commit_epoch: 0,
+        applied_search_projection_commit_epoch: None,
+        durable_search_projection_commit_epoch: None,
+        completed_batches: 1,
+        total_batches: 4,
+        document_identity_count: 1,
+        ..test_graph_lightning_checkpoint(&manifest)
+    };
+
+    let report = graph_lightning_initial_import_advance_checkpoint(
+        &manifest,
+        &checkpoint,
+        GraphLightningInitialImportCheckpointProgress {
+            applied_graph_commit_epoch: manifest.graph_commit_epoch,
+            applied_search_projection_commit_epoch: Some(manifest.graph_commit_epoch),
+            durable_search_projection_commit_epoch: Some(manifest.graph_commit_epoch),
+            completed_batches: 4,
+            total_batches: 4,
+            document_identity_count: manifest.node_count + manifest.relationship_count,
+        },
+    );
+
+    assert!(report.accepted);
+    assert!(report.blocker_codes.is_empty());
+    assert!(report.readiness.ready);
+    assert_eq!(
+        report.resume_action.kind,
+        GraphLightningInitialImportResumeActionKind::ReadyForCutover
+    );
+    assert_eq!(report.checkpoint.completed_batches, 4);
+    assert_eq!(
+        report.checkpoint.applied_search_projection_commit_epoch,
+        Some(manifest.graph_commit_epoch)
+    );
+}
+
+#[test]
+fn graph_lightning_initial_import_checkpoint_progress_rejects_regressions() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let manifest = db
+        .prepare_graph_lightning_bootstrap_export()
+        .unwrap()
+        .manifest;
+    let checkpoint = GraphLightningInitialImportCheckpoint {
+        completed_batches: 3,
+        total_batches: 4,
+        document_identity_count: 3,
+        ..test_graph_lightning_checkpoint(&manifest)
+    };
+
+    let report = graph_lightning_initial_import_advance_checkpoint(
+        &manifest,
+        &checkpoint,
+        GraphLightningInitialImportCheckpointProgress {
+            applied_graph_commit_epoch: 0,
+            applied_search_projection_commit_epoch: None,
+            durable_search_projection_commit_epoch: Some(manifest.graph_commit_epoch - 1),
+            completed_batches: 2,
+            total_batches: 1,
+            document_identity_count: 2,
+        },
+    );
+
+    assert!(!report.accepted);
+    assert_eq!(report.checkpoint, checkpoint);
+    assert!(report
+        .blocker_codes
+        .contains(&"initial_import_graph_checkpoint_regressed".to_string()));
+    assert!(report
+        .blocker_codes
+        .contains(&"initial_import_search_projection_apply_regressed".to_string()));
+    assert!(report
+        .blocker_codes
+        .contains(&"initial_import_search_projection_checkpoint_regressed".to_string()));
+    assert!(report
+        .blocker_codes
+        .contains(&"initial_import_completed_batches_regressed".to_string()));
+    assert!(report
+        .blocker_codes
+        .contains(&"initial_import_total_batches_regressed".to_string()));
+    assert!(report
+        .blocker_codes
+        .contains(&"initial_import_completed_batches_exceed_total".to_string()));
+    assert!(report
+        .blocker_codes
+        .contains(&"initial_import_document_identities_regressed".to_string()));
+}
+
+#[test]
+fn graph_lightning_initial_import_document_identity_coverage_accepts_all_projection_kinds() {
+    let coverage = graph_lightning_initial_import_document_identity_coverage(&[
+        initial_import_document_identity(SearchProjectionKind::Memory, "memory:1"),
+        initial_import_document_identity(SearchProjectionKind::Message, "message:1"),
+        initial_import_document_identity(SearchProjectionKind::Entity, "entity:1"),
+        initial_import_document_identity(SearchProjectionKind::Source, "source:1"),
+        initial_import_document_identity(SearchProjectionKind::SourceChunk, "source_chunk:1"),
+        initial_import_document_identity(SearchProjectionKind::Community, "community:1"),
+    ]);
+
+    assert!(coverage.ready);
+    assert_eq!(coverage.document_identity_count, 6);
+    assert_eq!(coverage.unique_document_identity_count, 6);
+    assert!(coverage.missing_kinds.is_empty());
+    assert!(coverage.duplicate_document_ids.is_empty());
+    assert_eq!(coverage.empty_document_id_count, 0);
+    assert_eq!(coverage.kind_reports.len(), 6);
+    assert!(coverage.blocker_codes.is_empty());
+}
+
+#[test]
+fn graph_lightning_initial_import_document_identity_coverage_fails_closed_for_gaps() {
+    let coverage = graph_lightning_initial_import_document_identity_coverage(&[
+        initial_import_document_identity(SearchProjectionKind::Memory, "shared"),
+        initial_import_document_identity(SearchProjectionKind::Message, "shared"),
+        initial_import_document_identity(SearchProjectionKind::Entity, "entity:1"),
+        initial_import_document_identity(SearchProjectionKind::Source, "source:1"),
+        initial_import_document_identity(SearchProjectionKind::Community, ""),
+    ]);
+
+    assert!(!coverage.ready);
+    assert_eq!(coverage.document_identity_count, 5);
+    assert_eq!(coverage.unique_document_identity_count, 3);
+    assert_eq!(
+        coverage.missing_kinds,
+        vec![SearchProjectionKind::SourceChunk]
+    );
+    assert_eq!(coverage.duplicate_document_ids, vec!["shared".to_string()]);
+    assert_eq!(coverage.empty_document_id_count, 1);
+    assert!(coverage
+        .blocker_codes
+        .contains(&"initial_import_document_identity_kind_missing".to_string()));
+    assert!(coverage
+        .blocker_codes
+        .contains(&"initial_import_document_identity_duplicate".to_string()));
+    assert!(coverage
+        .blocker_codes
+        .contains(&"initial_import_document_identity_empty".to_string()));
+}
+
+#[test]
+fn graph_lightning_initial_import_resume_action_tracks_start_resume_cutover_and_quarantine() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let manifest = db
+        .prepare_graph_lightning_bootstrap_export()
+        .unwrap()
+        .manifest;
+
+    let start = crate::graph_lightning_initial_import_resume_action(&manifest, None);
+    assert_eq!(
+        start.kind,
+        GraphLightningInitialImportResumeActionKind::Start
+    );
+    assert_eq!(start.next_batch, Some(0));
+    assert_eq!(start.idempotency_key, None);
+
+    let partial = GraphLightningInitialImportCheckpoint {
+        applied_search_projection_commit_epoch: Some(manifest.graph_commit_epoch - 1),
+        durable_search_projection_commit_epoch: Some(manifest.graph_commit_epoch - 1),
+        completed_batches: 2,
+        total_batches: 4,
+        document_identity_count: manifest.node_count,
+        ..test_graph_lightning_checkpoint(&manifest)
+    };
+    let resume = crate::graph_lightning_initial_import_resume_action(&manifest, Some(&partial));
+    assert_eq!(
+        resume.kind,
+        GraphLightningInitialImportResumeActionKind::Resume
+    );
+    assert_eq!(resume.next_batch, Some(2));
+    assert_eq!(
+        resume.idempotency_key,
+        Some(GraphLightningInitialImportIdempotencyKey {
+            import_id: "import-1".to_string(),
+            task_id: "task-1".to_string(),
+            fencing_token: "fence-1".to_string(),
+            object_digest: "object-digest-1".to_string(),
+        })
+    );
+
+    let complete = GraphLightningInitialImportCheckpoint {
+        applied_search_projection_commit_epoch: Some(manifest.graph_commit_epoch),
+        durable_search_projection_commit_epoch: Some(manifest.graph_commit_epoch),
+        completed_batches: 4,
+        document_identity_count: manifest.node_count + manifest.relationship_count,
+        ..partial.clone()
+    };
+    let ready = crate::graph_lightning_initial_import_resume_action(&manifest, Some(&complete));
+    assert_eq!(
+        ready.kind,
+        GraphLightningInitialImportResumeActionKind::ReadyForCutover
+    );
+    assert_eq!(ready.next_batch, None);
+
+    let mismatched = GraphLightningInitialImportCheckpoint {
+        graph_stream_checksum: manifest.graph_stream_checksum + 1,
+        ..complete
+    };
+    let quarantine =
+        crate::graph_lightning_initial_import_resume_action(&manifest, Some(&mismatched));
+    assert_eq!(
+        quarantine.kind,
+        GraphLightningInitialImportResumeActionKind::Quarantine
+    );
+    assert_eq!(quarantine.next_batch, None);
+
+    let missing_idempotency = GraphLightningInitialImportCheckpoint {
+        import_id: String::new(),
+        ..test_graph_lightning_checkpoint(&manifest)
+    };
+    let quarantine =
+        crate::graph_lightning_initial_import_resume_action(&manifest, Some(&missing_idempotency));
+    assert_eq!(
+        quarantine.kind,
+        GraphLightningInitialImportResumeActionKind::Quarantine
+    );
+    assert!(quarantine
+        .blocker_codes
+        .contains(&"initial_import_checkpoint_idempotency_key_missing".to_string()));
+    assert_eq!(quarantine.idempotency_key, None);
+}
+
+#[test]
+fn graph_lightning_initial_import_plan_reports_ready_cutover() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+    let freshness = initial_import_projection_freshness(&export.manifest);
+    let checkpoint = test_graph_lightning_checkpoint(&export.manifest);
+
+    let plan = db.graph_lightning_initial_import_plan(
+        &export.graph_stream.encoded,
+        &export.manifest,
+        Some(&freshness),
+        Some(&checkpoint),
+    );
+
+    assert!(plan.ready_for_graph_import);
+    assert!(plan.ready_for_cutover);
+    assert!(plan.graph_stream_validation.is_valid);
+    assert!(plan.decoded_snapshot_import_ready);
+    assert_eq!(
+        plan.decoded_graph_commit_epoch,
+        Some(export.manifest.graph_commit_epoch)
+    );
+    assert_eq!(plan.decoded_node_count, Some(export.manifest.node_count));
+    assert_eq!(
+        plan.decoded_relationship_count,
+        Some(export.manifest.relationship_count)
+    );
+    assert!(plan.target_readiness.ready);
+    assert!(plan
+        .checkpoint_readiness
+        .as_ref()
+        .is_some_and(|readiness| readiness.ready));
+    assert_eq!(
+        plan.resume_action.kind,
+        GraphLightningInitialImportResumeActionKind::ReadyForCutover
+    );
+    assert!(plan.blocker_codes.is_empty());
+}
+
+#[test]
+fn graph_lightning_initial_import_plan_accepts_complete_document_identity_coverage() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+    let freshness = initial_import_projection_freshness(&export.manifest);
+    let checkpoint = test_graph_lightning_checkpoint(&export.manifest);
+    let document_identities = all_initial_import_document_identities();
+
+    let plan = db.graph_lightning_initial_import_plan_with_document_identities(
+        &export.graph_stream.encoded,
+        &export.manifest,
+        Some(&freshness),
+        Some(&checkpoint),
+        &document_identities,
+    );
+
+    assert!(plan.ready_for_graph_import);
+    assert!(plan.ready_for_cutover);
+    assert!(plan
+        .document_identity_coverage
+        .as_ref()
+        .is_some_and(|coverage| coverage.ready));
+    assert!(plan.blocker_codes.is_empty());
+}
+
+#[test]
+fn graph_lightning_initial_import_search_projection_batch_reports_checkpoint_progress() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+    let checkpoint = GraphLightningInitialImportCheckpoint {
+        completed_batches: 0,
+        total_batches: 1,
+        document_identity_count: 0,
+        applied_search_projection_commit_epoch: None,
+        durable_search_projection_commit_epoch: None,
+        ..test_graph_lightning_checkpoint(&export.manifest)
+    };
+    let delta = SearchProjectionDelta {
+        upserts: all_initial_import_projection_rows(),
+        deletes: Vec::new(),
+        max_operations: Some(6),
+        source_graph_commit_epoch: Some(export.manifest.graph_commit_epoch),
+    };
+
+    let report = graph_lightning_initial_import_search_projection_batch_report(
+        &export.manifest,
+        Some(&checkpoint),
+        &delta,
+        0,
+        1,
+    );
+
+    assert!(report.ready);
+    assert!(report.checkpoint_present);
+    assert!(report.checkpoint_matches_manifest);
+    assert!(report.checkpoint_idempotency_key_present);
+    assert!(report.total_batches_match_checkpoint);
+    assert!(report.source_graph_commit_epoch_matches);
+    assert!(report.batch_position_valid);
+    assert!(report.operation_limit_ok);
+    assert!(!report.empty_batch);
+    assert_eq!(report.delete_count, 0);
+    assert_eq!(report.operation_count, 6);
+    assert!(report.document_identity_coverage.ready);
+    assert_eq!(
+        report.document_identity_coverage.observed_kinds,
+        vec![
+            SearchProjectionKind::Memory,
+            SearchProjectionKind::Message,
+            SearchProjectionKind::Entity,
+            SearchProjectionKind::Source,
+            SearchProjectionKind::SourceChunk,
+            SearchProjectionKind::Community,
+        ]
+    );
+    let progress = report
+        .checkpoint_progress
+        .expect("expected checkpoint progress");
+    assert_eq!(
+        progress.applied_search_projection_commit_epoch,
+        Some(export.manifest.graph_commit_epoch)
+    );
+    assert_eq!(progress.durable_search_projection_commit_epoch, None);
+    assert_eq!(progress.completed_batches, 1);
+    assert_eq!(progress.total_batches, 1);
+    assert_eq!(progress.document_identity_count, 6);
+    assert!(report.checkpoint_progress_accepted);
+    let progress_readiness = report
+        .checkpoint_progress_readiness
+        .as_ref()
+        .expect("expected checkpoint progress readiness");
+    assert!(!progress_readiness.ready);
+    assert!(progress_readiness.search_projection_applied_caught_up);
+    assert!(!progress_readiness.search_projection_durable_caught_up);
+    assert_eq!(
+        report
+            .checkpoint_resume_action
+            .as_ref()
+            .expect("expected checkpoint resume action")
+            .kind,
+        GraphLightningInitialImportResumeActionKind::Resume
+    );
+    assert!(report.checkpoint_progress_blocker_codes.is_empty());
+
+    let advanced =
+        graph_lightning_initial_import_advance_checkpoint(&export.manifest, &checkpoint, progress);
+    assert!(advanced.accepted);
+    assert_eq!(advanced.checkpoint.completed_batches, 1);
+    assert_eq!(
+        advanced.checkpoint.applied_search_projection_commit_epoch,
+        Some(export.manifest.graph_commit_epoch)
+    );
+}
+
+#[test]
+fn graph_lightning_initial_import_search_projection_batch_reports_cutover_ready_progress() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+    let checkpoint = GraphLightningInitialImportCheckpoint {
+        completed_batches: 0,
+        total_batches: 1,
+        document_identity_count: 0,
+        applied_search_projection_commit_epoch: None,
+        durable_search_projection_commit_epoch: Some(export.manifest.graph_commit_epoch),
+        ..test_graph_lightning_checkpoint(&export.manifest)
+    };
+    let delta = SearchProjectionDelta {
+        upserts: all_initial_import_projection_rows(),
+        deletes: Vec::new(),
+        max_operations: Some(6),
+        source_graph_commit_epoch: Some(export.manifest.graph_commit_epoch),
+    };
+
+    let report = graph_lightning_initial_import_search_projection_batch_report(
+        &export.manifest,
+        Some(&checkpoint),
+        &delta,
+        0,
+        1,
+    );
+
+    assert!(report.ready);
+    assert!(report.checkpoint_progress_accepted);
+    let progress_readiness = report
+        .checkpoint_progress_readiness
+        .as_ref()
+        .expect("expected checkpoint progress readiness");
+    assert!(progress_readiness.ready);
+    assert!(progress_readiness.search_projection_applied_caught_up);
+    assert!(progress_readiness.search_projection_durable_caught_up);
+    assert_eq!(
+        report
+            .checkpoint_resume_action
+            .as_ref()
+            .expect("expected checkpoint resume action")
+            .kind,
+        GraphLightningInitialImportResumeActionKind::ReadyForCutover
+    );
+    assert!(report.checkpoint_progress_blocker_codes.is_empty());
+}
+
+#[test]
+fn graph_lightning_initial_import_durable_state_persists_partial_resume_progress() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+    let checkpoint = GraphLightningInitialImportCheckpoint {
+        completed_batches: 1,
+        total_batches: 3,
+        document_identity_count: 2,
+        applied_search_projection_commit_epoch: Some(export.manifest.graph_commit_epoch),
+        durable_search_projection_commit_epoch: None,
+        ..test_graph_lightning_checkpoint(&export.manifest)
+    };
+    let identities = vec![
+        initial_import_document_identity(SearchProjectionKind::Memory, "memory:1"),
+        initial_import_document_identity(SearchProjectionKind::Message, "message:1"),
+    ];
+
+    let report = graph_lightning_initial_import_durable_state_report(
+        &export.manifest,
+        &checkpoint,
+        &identities,
+    );
+
+    assert!(report.persistable);
+    assert!(!report.ready_for_cutover);
+    assert_eq!(
+        report.resume_action.kind,
+        GraphLightningInitialImportResumeActionKind::Resume
+    );
+    assert!(report
+        .blocker_codes
+        .contains(&"initial_import_document_identity_kind_missing".to_string()));
+    let state = report.state.expect("expected persistable durable state");
+    assert_eq!(
+        state.source_fingerprint.graph_commit_epoch,
+        export.manifest.graph_commit_epoch
+    );
+    assert_eq!(state.checkpoint.completed_batches, 1);
+    assert_eq!(state.checkpoint.total_batches, 3);
+    assert_eq!(state.document_identities, identities);
+    assert!(!state.document_identity_coverage.ready);
+}
+
+#[test]
+fn graph_lightning_initial_import_durable_state_reports_cutover_ready_checkpoint() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+    let checkpoint = GraphLightningInitialImportCheckpoint {
+        completed_batches: 1,
+        total_batches: 1,
+        document_identity_count: 6,
+        applied_search_projection_commit_epoch: Some(export.manifest.graph_commit_epoch),
+        durable_search_projection_commit_epoch: Some(export.manifest.graph_commit_epoch),
+        ..test_graph_lightning_checkpoint(&export.manifest)
+    };
+    let identities = all_initial_import_document_identities();
+
+    let report = graph_lightning_initial_import_durable_state_report(
+        &export.manifest,
+        &checkpoint,
+        &identities,
+    );
+
+    assert!(report.persistable);
+    assert!(report.ready_for_cutover);
+    assert!(report.checkpoint_readiness.ready);
+    assert_eq!(
+        report.resume_action.kind,
+        GraphLightningInitialImportResumeActionKind::ReadyForCutover
+    );
+    assert!(report.blocker_codes.is_empty());
+    let state = report.state.expect("expected persistable durable state");
+    assert_eq!(state.document_identity_coverage.document_identity_count, 6);
+    assert_eq!(
+        state.source_fingerprint.schema_checksum,
+        export.manifest.schema_checksum
+    );
+}
+
+#[test]
+fn graph_lightning_initial_import_session_resumes_from_durable_state() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+    let checkpoint = GraphLightningInitialImportCheckpoint {
+        completed_batches: 1,
+        total_batches: 3,
+        document_identity_count: 2,
+        applied_search_projection_commit_epoch: Some(export.manifest.graph_commit_epoch),
+        durable_search_projection_commit_epoch: None,
+        ..test_graph_lightning_checkpoint(&export.manifest)
+    };
+    let state = graph_lightning_initial_import_durable_state_report(
+        &export.manifest,
+        &checkpoint,
+        &[
+            initial_import_document_identity(SearchProjectionKind::Memory, "memory:1"),
+            initial_import_document_identity(SearchProjectionKind::Message, "message:1"),
+        ],
+    )
+    .state
+    .expect("expected persistable durable state");
+
+    let session = graph_lightning_initial_import_session_report(
+        &export.graph_stream.encoded,
+        &export.manifest,
+        export.manifest.graph_commit_epoch,
+        None,
+        Some(&state),
+    );
+
+    assert!(session.ready_for_graph_import);
+    assert!(!session.ready_for_cutover);
+    assert!(session.durable_state_present);
+    assert!(session.durable_state_source_matches_manifest);
+    assert_eq!(
+        session.next_action.kind,
+        GraphLightningInitialImportResumeActionKind::Resume
+    );
+    assert_eq!(session.next_action.next_batch, Some(1));
+    assert!(session
+        .blocker_codes
+        .contains(&"search_projection_missing".to_string()));
+    assert!(session
+        .blocker_codes
+        .contains(&"initial_import_checkpoint_incomplete".to_string()));
+}
+
+#[test]
+fn graph_lightning_initial_import_session_quarantines_mismatched_durable_state() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+    let checkpoint = GraphLightningInitialImportCheckpoint {
+        completed_batches: 1,
+        total_batches: 1,
+        document_identity_count: 6,
+        applied_search_projection_commit_epoch: Some(export.manifest.graph_commit_epoch),
+        durable_search_projection_commit_epoch: Some(export.manifest.graph_commit_epoch),
+        ..test_graph_lightning_checkpoint(&export.manifest)
+    };
+    let mut state = graph_lightning_initial_import_durable_state_report(
+        &export.manifest,
+        &checkpoint,
+        &all_initial_import_document_identities(),
+    )
+    .state
+    .expect("expected persistable durable state");
+    state.source_fingerprint.graph_stream_checksum = state
+        .source_fingerprint
+        .graph_stream_checksum
+        .saturating_add(1);
+    let freshness = initial_import_projection_freshness(&export.manifest);
+
+    let session = graph_lightning_initial_import_session_report(
+        &export.graph_stream.encoded,
+        &export.manifest,
+        export.manifest.graph_commit_epoch,
+        Some(&freshness),
+        Some(&state),
+    );
+
+    assert!(!session.ready_for_graph_import);
+    assert!(!session.ready_for_cutover);
+    assert!(!session.durable_state_source_matches_manifest);
+    assert_eq!(
+        session.next_action.kind,
+        GraphLightningInitialImportResumeActionKind::Quarantine
+    );
+    assert!(session.next_action.next_batch.is_none());
+    assert!(session
+        .blocker_codes
+        .contains(&"initial_import_durable_state_source_mismatch".to_string()));
+}
+
+#[test]
+fn graph_lightning_initial_import_cutover_catch_up_accepts_matching_live_watermark() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+    let checkpoint = test_graph_lightning_checkpoint(&export.manifest);
+    let durable_state = graph_lightning_initial_import_durable_state_report(
+        &export.manifest,
+        &checkpoint,
+        &all_initial_import_document_identities(),
+    )
+    .state
+    .expect("expected persistable durable state");
+    let freshness = initial_import_projection_freshness(&export.manifest);
+    let session = graph_lightning_initial_import_session_report(
+        &export.graph_stream.encoded,
+        &export.manifest,
+        export.manifest.graph_commit_epoch,
+        Some(&freshness),
+        Some(&durable_state),
+    );
+
+    let report = graph_lightning_initial_import_cutover_catch_up_report(
+        &session,
+        export.manifest.graph_commit_epoch,
+        Some(&freshness),
+    );
+
+    assert!(report.ready);
+    assert!(report.session_ready_for_cutover);
+    assert!(report.durable_state_present);
+    assert!(report.graph_watermark_caught_up);
+    assert!(report.search_projection_watermark_caught_up);
+    assert_eq!(
+        report.cutover_watermark,
+        Some(export.manifest.graph_commit_epoch)
+    );
+    assert!(report.blocker_codes.is_empty());
+}
+
+#[test]
+fn graph_lightning_initial_import_cutover_catch_up_blocks_live_mutation_lag() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+    let checkpoint = test_graph_lightning_checkpoint(&export.manifest);
+    let durable_state = graph_lightning_initial_import_durable_state_report(
+        &export.manifest,
+        &checkpoint,
+        &all_initial_import_document_identities(),
+    )
+    .state
+    .expect("expected persistable durable state");
+    let freshness = initial_import_projection_freshness(&export.manifest);
+    let session = graph_lightning_initial_import_session_report(
+        &export.graph_stream.encoded,
+        &export.manifest,
+        export.manifest.graph_commit_epoch,
+        Some(&freshness),
+        Some(&durable_state),
+    );
+
+    let report = graph_lightning_initial_import_cutover_catch_up_report(
+        &session,
+        export.manifest.graph_commit_epoch + 1,
+        Some(&freshness),
+    );
+
+    assert!(!report.ready);
+    assert!(!report.graph_watermark_caught_up);
+    assert!(!report.search_projection_watermark_caught_up);
+    assert_eq!(report.cutover_watermark, None);
+    assert!(report
+        .blocker_codes
+        .contains(&"initial_import_live_graph_watermark_not_caught_up".to_string()));
+    assert!(report
+        .blocker_codes
+        .contains(&"initial_import_live_search_projection_watermark_not_caught_up".to_string()));
+}
+
+#[test]
+fn database_initial_import_cutover_catch_up_uses_current_graph_epoch() {
+    let mut source = Database::new();
+    source
+        .query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let export = source.prepare_graph_lightning_bootstrap_export().unwrap();
+    let checkpoint = test_graph_lightning_checkpoint(&export.manifest);
+    let durable_state = graph_lightning_initial_import_durable_state_report(
+        &export.manifest,
+        &checkpoint,
+        &all_initial_import_document_identities(),
+    )
+    .state
+    .expect("expected persistable durable state");
+    let freshness = initial_import_projection_freshness(&export.manifest);
+    let mut target = Database::new();
+    target
+        .graph_lightning_initial_import_apply_with_document_identities(
+            &export.graph_stream.encoded,
+            &export.manifest,
+            Some(&freshness),
+            Some(&checkpoint),
+            &all_initial_import_document_identities(),
+        )
+        .unwrap();
+    let session = graph_lightning_initial_import_session_report(
+        &export.graph_stream.encoded,
+        &export.manifest,
+        target.store.commit_epoch(),
+        Some(&freshness),
+        Some(&durable_state),
+    );
+
+    let report =
+        target.graph_lightning_initial_import_cutover_catch_up_report(&session, Some(&freshness));
+
+    assert!(report.ready);
+    assert_eq!(report.live_graph_commit_epoch, target.store.commit_epoch());
+    assert_eq!(report.cutover_watermark, Some(target.store.commit_epoch()));
+}
+
+#[test]
+fn graph_lightning_initial_import_durable_state_rejects_unstable_checkpoint_identity() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+    let checkpoint = GraphLightningInitialImportCheckpoint {
+        import_id: String::new(),
+        schema_checksum: export.manifest.schema_checksum + 1,
+        completed_batches: 4,
+        total_batches: 3,
+        document_identity_count: 7,
+        ..test_graph_lightning_checkpoint(&export.manifest)
+    };
+    let identities = all_initial_import_document_identities();
+
+    let report = graph_lightning_initial_import_durable_state_report(
+        &export.manifest,
+        &checkpoint,
+        &identities,
+    );
+
+    assert!(!report.persistable);
+    assert!(!report.ready_for_cutover);
+    assert!(report.state.is_none());
+    assert!(report
+        .blocker_codes
+        .contains(&"initial_import_durable_state_idempotency_missing".to_string()));
+    assert!(report
+        .blocker_codes
+        .contains(&"initial_import_durable_state_manifest_mismatch".to_string()));
+    assert!(report
+        .blocker_codes
+        .contains(&"initial_import_durable_state_completed_batches_exceed_total".to_string()));
+    assert!(report
+        .blocker_codes
+        .contains(&"initial_import_durable_state_document_identity_regressed".to_string()));
+}
+
+#[test]
+fn graph_lightning_initial_import_durable_state_advances_with_search_projection_batch() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+    let checkpoint = GraphLightningInitialImportCheckpoint {
+        completed_batches: 0,
+        total_batches: 1,
+        document_identity_count: 0,
+        applied_search_projection_commit_epoch: None,
+        durable_search_projection_commit_epoch: Some(export.manifest.graph_commit_epoch),
+        ..test_graph_lightning_checkpoint(&export.manifest)
+    };
+    let initial =
+        graph_lightning_initial_import_durable_state_report(&export.manifest, &checkpoint, &[])
+            .state
+            .expect("expected persistable initial durable state");
+    let delta = SearchProjectionDelta {
+        upserts: all_initial_import_projection_rows(),
+        deletes: Vec::new(),
+        max_operations: Some(6),
+        source_graph_commit_epoch: Some(export.manifest.graph_commit_epoch),
+    };
+
+    let report = graph_lightning_initial_import_advance_durable_state_with_search_projection_batch(
+        &export.manifest,
+        &initial,
+        &delta,
+        0,
+        1,
+    );
+
+    assert!(report.ready);
+    assert!(!report.idempotent_replay);
+    assert!(report.batch_report.ready);
+    assert!(report.durable_state_report.ready_for_cutover);
+    let state = report
+        .durable_state_report
+        .state
+        .expect("expected advanced durable state");
+    assert_eq!(state.checkpoint.completed_batches, 1);
+    assert_eq!(state.checkpoint.total_batches, 1);
+    assert_eq!(
+        state.checkpoint.applied_search_projection_commit_epoch,
+        Some(export.manifest.graph_commit_epoch)
+    );
+    assert_eq!(state.checkpoint.document_identity_count, 6);
+    assert_eq!(state.document_identities.len(), 6);
+}
+
+#[test]
+fn graph_lightning_initial_import_durable_state_treats_completed_batch_as_idempotent_replay() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+    let checkpoint = GraphLightningInitialImportCheckpoint {
+        completed_batches: 1,
+        total_batches: 1,
+        document_identity_count: 6,
+        applied_search_projection_commit_epoch: Some(export.manifest.graph_commit_epoch),
+        durable_search_projection_commit_epoch: Some(export.manifest.graph_commit_epoch),
+        ..test_graph_lightning_checkpoint(&export.manifest)
+    };
+    let state = graph_lightning_initial_import_durable_state_report(
+        &export.manifest,
+        &checkpoint,
+        &all_initial_import_document_identities(),
+    )
+    .state
+    .expect("expected persistable initial durable state");
+    let delta = SearchProjectionDelta {
+        upserts: all_initial_import_projection_rows(),
+        deletes: Vec::new(),
+        max_operations: Some(6),
+        source_graph_commit_epoch: Some(export.manifest.graph_commit_epoch),
+    };
+
+    let report = graph_lightning_initial_import_advance_durable_state_with_search_projection_batch(
+        &export.manifest,
+        &state,
+        &delta,
+        0,
+        1,
+    );
+
+    assert!(report.ready);
+    assert!(report.idempotent_replay);
+    let replayed = report
+        .durable_state_report
+        .state
+        .expect("expected replayed durable state");
+    assert_eq!(replayed.checkpoint.completed_batches, 1);
+    assert_eq!(replayed.checkpoint.document_identity_count, 6);
+    assert_eq!(replayed.document_identities.len(), 6);
+    assert!(replayed.document_identity_coverage.ready);
+}
+
+#[test]
+fn graph_lightning_initial_import_durable_state_blocks_invalid_batch_advance() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+    let checkpoint = GraphLightningInitialImportCheckpoint {
+        completed_batches: 0,
+        total_batches: 1,
+        document_identity_count: 0,
+        applied_search_projection_commit_epoch: None,
+        durable_search_projection_commit_epoch: None,
+        ..test_graph_lightning_checkpoint(&export.manifest)
+    };
+    let state =
+        graph_lightning_initial_import_durable_state_report(&export.manifest, &checkpoint, &[])
+            .state
+            .expect("expected persistable initial durable state");
+    let delta = SearchProjectionDelta {
+        upserts: vec![initial_import_projection_row(
+            SearchProjectionKind::Memory,
+            "1",
+        )],
+        deletes: Vec::new(),
+        max_operations: Some(1),
+        source_graph_commit_epoch: Some(export.manifest.graph_commit_epoch + 1),
+    };
+
+    let report = graph_lightning_initial_import_advance_durable_state_with_search_projection_batch(
+        &export.manifest,
+        &state,
+        &delta,
+        0,
+        1,
+    );
+
+    assert!(!report.ready);
+    assert!(!report.idempotent_replay);
+    assert!(report
+        .blocker_codes
+        .contains(&"initial_import_search_projection_batch_epoch_mismatch".to_string()));
+    assert!(report
+        .blocker_codes
+        .contains(&"initial_import_document_identity_kind_missing".to_string()));
+    assert!(report
+        .blocker_codes
+        .contains(&"initial_import_durable_batch_checkpoint_progress_missing".to_string()));
+}
+
+#[test]
+fn graph_lightning_initial_import_search_projection_batch_accepts_cumulative_identities() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+    let checkpoint = GraphLightningInitialImportCheckpoint {
+        completed_batches: 1,
+        total_batches: 3,
+        document_identity_count: 4,
+        applied_search_projection_commit_epoch: None,
+        durable_search_projection_commit_epoch: None,
+        ..test_graph_lightning_checkpoint(&export.manifest)
+    };
+    let delta = SearchProjectionDelta {
+        upserts: vec![
+            initial_import_projection_row(SearchProjectionKind::SourceChunk, "1"),
+            initial_import_projection_row(SearchProjectionKind::Community, "1"),
+        ],
+        deletes: Vec::new(),
+        max_operations: Some(2),
+        source_graph_commit_epoch: Some(export.manifest.graph_commit_epoch),
+    };
+    let cumulative_identities = all_initial_import_document_identities();
+
+    let report =
+        graph_lightning_initial_import_search_projection_batch_report_with_document_identities(
+            &export.manifest,
+            Some(&checkpoint),
+            &delta,
+            1,
+            3,
+            &cumulative_identities,
+        );
+
+    assert!(report.ready);
+    assert!(report.checkpoint_present);
+    assert!(report.total_batches_match_checkpoint);
+    assert_eq!(report.operation_count, 2);
+    assert_eq!(report.document_identity_coverage.document_identity_count, 6);
+    let progress = report
+        .checkpoint_progress
+        .expect("expected checkpoint progress");
+    assert_eq!(progress.completed_batches, 2);
+    assert_eq!(progress.total_batches, 3);
+    assert_eq!(progress.document_identity_count, 6);
+}
+
+#[test]
+fn graph_lightning_initial_import_search_projection_batch_fails_closed() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+    let delta = SearchProjectionDelta {
+        upserts: vec![initial_import_projection_row(
+            SearchProjectionKind::Memory,
+            "1",
+        )],
+        deletes: vec!["memory:old".to_string()],
+        max_operations: Some(1),
+        source_graph_commit_epoch: Some(export.manifest.graph_commit_epoch + 1),
+    };
+
+    let report = graph_lightning_initial_import_search_projection_batch_report(
+        &export.manifest,
+        None,
+        &delta,
+        2,
+        1,
+    );
+
+    assert!(!report.ready);
+    assert!(!report.checkpoint_present);
+    assert!(!report.checkpoint_matches_manifest);
+    assert!(!report.checkpoint_idempotency_key_present);
+    assert!(!report.total_batches_match_checkpoint);
+    assert!(!report.source_graph_commit_epoch_matches);
+    assert!(!report.batch_position_valid);
+    assert!(!report.operation_limit_ok);
+    assert_eq!(report.delete_count, 1);
+    assert!(report
+        .blocker_codes
+        .contains(&"initial_import_search_projection_batch_checkpoint_missing".to_string()));
+    assert!(report
+        .blocker_codes
+        .contains(&"initial_import_search_projection_batch_epoch_mismatch".to_string()));
+    assert!(report
+        .blocker_codes
+        .contains(&"initial_import_search_projection_batch_position_invalid".to_string()));
+    assert!(report
+        .blocker_codes
+        .contains(&"initial_import_search_projection_batch_limit_exceeded".to_string()));
+    assert!(report
+        .blocker_codes
+        .contains(&"initial_import_search_projection_batch_has_deletes".to_string()));
+    assert!(report
+        .blocker_codes
+        .contains(&"initial_import_document_identity_kind_missing".to_string()));
+    assert!(report.checkpoint_progress.is_none());
+    assert!(!report.checkpoint_progress_accepted);
+    assert!(report.checkpoint_progress_readiness.is_none());
+    assert!(report.checkpoint_resume_action.is_none());
+    assert!(report.checkpoint_progress_blocker_codes.is_empty());
+}
+
+#[test]
+fn graph_lightning_initial_import_search_projection_batch_rejects_checkpoint_total_mismatch() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+    let checkpoint = GraphLightningInitialImportCheckpoint {
+        completed_batches: 0,
+        total_batches: 2,
+        document_identity_count: 0,
+        applied_search_projection_commit_epoch: None,
+        durable_search_projection_commit_epoch: None,
+        ..test_graph_lightning_checkpoint(&export.manifest)
+    };
+    let delta = SearchProjectionDelta {
+        upserts: all_initial_import_projection_rows(),
+        deletes: Vec::new(),
+        max_operations: Some(6),
+        source_graph_commit_epoch: Some(export.manifest.graph_commit_epoch),
+    };
+
+    let report = graph_lightning_initial_import_search_projection_batch_report(
+        &export.manifest,
+        Some(&checkpoint),
+        &delta,
+        0,
+        3,
+    );
+
+    assert!(!report.ready);
+    assert!(report.checkpoint_present);
+    assert!(report.checkpoint_matches_manifest);
+    assert!(report.checkpoint_idempotency_key_present);
+    assert!(!report.total_batches_match_checkpoint);
+    assert!(report
+        .blocker_codes
+        .contains(&"initial_import_search_projection_batch_total_mismatch".to_string()));
+    assert!(report.checkpoint_progress.is_none());
+    assert!(!report.checkpoint_progress_accepted);
+    assert!(report.checkpoint_progress_readiness.is_none());
+    assert!(report.checkpoint_resume_action.is_none());
+    assert!(report.checkpoint_progress_blocker_codes.is_empty());
+}
+
+#[test]
+fn graph_lightning_initial_import_plan_blocks_incomplete_document_identity_coverage() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+    let freshness = initial_import_projection_freshness(&export.manifest);
+    let checkpoint = test_graph_lightning_checkpoint(&export.manifest);
+    let document_identities = vec![
+        initial_import_document_identity(SearchProjectionKind::Memory, "memory:1"),
+        initial_import_document_identity(SearchProjectionKind::Message, "message:1"),
+        initial_import_document_identity(SearchProjectionKind::Entity, "entity:1"),
+        initial_import_document_identity(SearchProjectionKind::Source, "source:1"),
+        initial_import_document_identity(SearchProjectionKind::Community, "community:1"),
+    ];
+
+    let plan = db.graph_lightning_initial_import_plan_with_document_identities(
+        &export.graph_stream.encoded,
+        &export.manifest,
+        Some(&freshness),
+        Some(&checkpoint),
+        &document_identities,
+    );
+
+    assert!(plan.ready_for_graph_import);
+    assert!(!plan.ready_for_cutover);
+    let coverage = plan.document_identity_coverage.as_ref().unwrap();
+    assert!(!coverage.ready);
+    assert!(coverage
+        .missing_kinds
+        .contains(&SearchProjectionKind::SourceChunk));
+    assert!(plan
+        .blocker_codes
+        .contains(&"initial_import_document_identity_kind_missing".to_string()));
+}
+
+#[test]
+fn graph_lightning_initial_import_plan_fails_closed_for_invalid_stream_and_missing_checkpoint() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS {id: 'rel'}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+    let invalid_stream = export
+        .graph_stream
+        .encoded
+        .replace("checksum\t", "bad-checksum\t");
+
+    let plan =
+        db.graph_lightning_initial_import_plan(&invalid_stream, &export.manifest, None, None);
+
+    assert!(!plan.ready_for_graph_import);
+    assert!(!plan.ready_for_cutover);
+    assert!(!plan.graph_stream_validation.is_valid);
+    assert!(!plan.decoded_snapshot_import_ready);
+    assert_eq!(plan.decoded_graph_commit_epoch, None);
+    assert_eq!(plan.checkpoint_readiness, None);
+    assert_eq!(
+        plan.resume_action.kind,
+        GraphLightningInitialImportResumeActionKind::Start
+    );
+    assert!(plan
+        .blocker_codes
+        .contains(&"graph_lightning_graph_stream_invalid".to_string()));
+    assert!(plan
+        .blocker_codes
+        .contains(&"search_projection_missing".to_string()));
+    assert!(plan
+        .blocker_codes
+        .contains(&"initial_import_checkpoint_missing".to_string()));
+}
+
+#[test]
+fn graph_lightning_initial_import_apply_imports_graph_state_into_empty_target() {
+    let mut source = Database::new();
+    source
+        .query("CREATE (:Memory {id: 'root'})-[:LINKS {weight: 7}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let export = source.prepare_graph_lightning_bootstrap_export().unwrap();
+    let path = unique_test_dir("graph_lightning_initial_import_apply");
+    {
+        let mut target = Database::open(&path).unwrap();
+        let report = target
+            .graph_lightning_initial_import_apply(
+                &export.graph_stream.encoded,
+                &export.manifest,
+                None,
+                None,
+            )
+            .unwrap();
+
+        assert!(report.applied);
+        assert!(!report.ready_for_cutover);
+        assert_eq!(report.node_count, export.manifest.node_count);
+        assert_eq!(
+            report.relationship_count,
+            export.manifest.relationship_count
+        );
+        assert_eq!(report.graph_commit_epoch, 1);
+        assert!(report.blocker_codes.is_empty());
+
+        let imported = target
+            .export_canonical_graph_snapshot_with_persisted_stable_ids()
+            .unwrap();
+        assert_eq!(imported.logical_checksum, export.snapshot.logical_checksum);
+        assert_eq!(imported.stable_identity, export.snapshot.stable_identity);
+        assert_eq!(imported.nodes, export.snapshot.nodes);
+        assert_eq!(imported.relationships, export.snapshot.relationships);
+    }
+    {
+        let mut reopened = Database::open(&path).unwrap();
+        let imported = reopened
+            .export_canonical_graph_snapshot_with_persisted_stable_ids()
+            .unwrap();
+
+        assert_eq!(imported.logical_checksum, export.snapshot.logical_checksum);
+        assert_eq!(imported.stable_identity, export.snapshot.stable_identity);
+    }
+}
+
+#[test]
+fn graph_lightning_initial_import_apply_with_document_identities_reports_cutover_ready() {
+    let mut source = Database::new();
+    source
+        .query("CREATE (:Memory {id: 'root'})-[:LINKS {weight: 7}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let export = source.prepare_graph_lightning_bootstrap_export().unwrap();
+    let freshness = initial_import_projection_freshness(&export.manifest);
+    let checkpoint = test_graph_lightning_checkpoint(&export.manifest);
+    let document_identities = all_initial_import_document_identities();
+    let mut target = Database::new();
+
+    let report = target
+        .graph_lightning_initial_import_apply_with_document_identities(
+            &export.graph_stream.encoded,
+            &export.manifest,
+            Some(&freshness),
+            Some(&checkpoint),
+            &document_identities,
+        )
+        .unwrap();
+
+    assert!(report.applied);
+    assert!(report.ready_for_cutover);
+    assert!(report
+        .plan
+        .document_identity_coverage
+        .as_ref()
+        .is_some_and(|coverage| coverage.ready));
+    assert!(report.blocker_codes.is_empty());
+}
+
+#[test]
+fn graph_lightning_initial_import_apply_with_document_identities_blocks_cutover_on_gaps() {
+    let mut source = Database::new();
+    source
+        .query("CREATE (:Memory {id: 'root'})-[:LINKS {weight: 7}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let export = source.prepare_graph_lightning_bootstrap_export().unwrap();
+    let freshness = initial_import_projection_freshness(&export.manifest);
+    let checkpoint = test_graph_lightning_checkpoint(&export.manifest);
+    let document_identities = vec![
+        initial_import_document_identity(SearchProjectionKind::Memory, "memory:1"),
+        initial_import_document_identity(SearchProjectionKind::Message, "message:1"),
+        initial_import_document_identity(SearchProjectionKind::Entity, "entity:1"),
+        initial_import_document_identity(SearchProjectionKind::Source, "source:1"),
+        initial_import_document_identity(SearchProjectionKind::Community, "community:1"),
+    ];
+    let mut target = Database::new();
+
+    let report = target
+        .graph_lightning_initial_import_apply_with_document_identities(
+            &export.graph_stream.encoded,
+            &export.manifest,
+            Some(&freshness),
+            Some(&checkpoint),
+            &document_identities,
+        )
+        .unwrap();
+
+    assert!(report.applied);
+    assert!(!report.ready_for_cutover);
+    assert_eq!(report.node_count, export.manifest.node_count);
+    assert!(report
+        .plan
+        .blocker_codes
+        .contains(&"initial_import_document_identity_kind_missing".to_string()));
+    assert!(report
+        .plan
+        .document_identity_coverage
+        .as_ref()
+        .is_some_and(|coverage| !coverage.ready));
+}
+
+#[test]
+fn graph_lightning_initial_import_apply_rejects_non_empty_target_without_writing() {
+    let mut source = Database::new();
+    source
+        .query("CREATE (:Memory {id: 'root'})-[:LINKS {weight: 7}]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let export = source.prepare_graph_lightning_bootstrap_export().unwrap();
+    let mut target = Database::new();
+    target.query("CREATE (:Memory {id: 'existing'})").unwrap();
+
+    let report = target
+        .graph_lightning_initial_import_apply(
+            &export.graph_stream.encoded,
+            &export.manifest,
+            None,
+            None,
+        )
+        .unwrap();
+
+    assert!(!report.applied);
+    assert_eq!(report.node_count, 1);
+    assert_eq!(report.relationship_count, 0);
+    assert!(report
+        .blocker_codes
+        .contains(&"graph_lightning_initial_import_target_not_empty".to_string()));
+    let snapshot = target.export_canonical_graph_snapshot();
+    assert_eq!(snapshot.nodes.len(), 1);
+    assert_eq!(snapshot.relationships.len(), 0);
 }
 
 #[test]

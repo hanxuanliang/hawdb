@@ -4,12 +4,13 @@ use crate::{
         NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL, NMEM_GRAPH_ROUTE_READINESS_PROTOCOL,
     },
     nowledge_mem_graph_read_route_spec, nowledge_mem_graph_read_route_specs_json,
-    replacement_readiness_family_evidence_health_from_bundle,
+    replacement_readiness_family_evidence_health_from_bundle, GRAPH_RAG_SCHEMA_CONTEXT_PROTOCOL,
     NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE,
     NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE,
     NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
-    NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
-    REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
+    NOWLEDGE_MEM_SEARCH_ROUTE_OWNERSHIP_PROTOCOL, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
+    REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+    REQUIRED_NOWLEDGE_MEM_SEARCH_ROUTES, REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -109,6 +110,10 @@ pub fn nowledge_replacement_summary_json_with_options(
     let search_candidate_shadow_evidence_ready = search_candidate_shadow_evidence.ready;
     let search_candidate_shadow_evidence_json =
         search_candidate_shadow_evidence_summary_json(&search_candidate_shadow_evidence);
+    let search_route_ownership = search_route_ownership_summary(bundle);
+    let search_route_ownership_ready = search_route_ownership.ready;
+    let active_search_route_ownership = active_search_route_ownership_summary(bundle);
+    let active_search_route_ownership_ready = active_search_route_ownership.ready;
     let bounded_read_evidence = bounded_read_evidence_summary(bundle);
     let bounded_read_evidence_ready = bounded_read_evidence.ready;
     let graph_route_readiness = nowledge_graph_route_readiness_summary_from_bundle(bundle);
@@ -135,6 +140,8 @@ pub fn nowledge_replacement_summary_json_with_options(
         && search_projection_evidence_ready
         && search_projection_shadow_evidence_ready
         && search_candidate_shadow_evidence_ready
+        && search_route_ownership_ready
+        && active_search_route_ownership_ready
         && bounded_read_evidence_ready
         && graph_route_readiness_ready
         && query_runtime_preflight_ready
@@ -166,6 +173,8 @@ pub fn nowledge_replacement_summary_json_with_options(
             search_projection_evidence_ready,
             search_projection_shadow_evidence_ready,
             search_candidate_shadow_evidence_ready,
+            search_route_ownership_ready,
+            active_search_route_ownership_ready,
             bounded_read_evidence_ready,
             graph_route_readiness_ready,
             query_runtime_preflight_ready,
@@ -197,6 +206,8 @@ pub fn nowledge_replacement_summary_json_with_options(
             search_projection_evidence_ready,
             search_projection_shadow_evidence_ready,
             search_candidate_shadow_evidence_ready,
+            search_route_ownership_ready,
+            active_search_route_ownership_ready,
             bounded_read_evidence_ready,
             graph_route_readiness_ready,
             query_runtime_preflight_ready,
@@ -218,6 +229,12 @@ pub fn nowledge_replacement_summary_json_with_options(
         "failed_bounded_expansion_probe_count": workload_fixture_evidence.failed_bounded_expansion_probe_count,
         "search_metadata_probe_count": workload_fixture_evidence.search_metadata_probe_count,
         "failed_search_metadata_probe_count": workload_fixture_evidence.failed_search_metadata_probe_count,
+        "graph_rag_probe_count": workload_fixture_evidence.graph_rag_probe_count,
+        "failed_graph_rag_probe_count": workload_fixture_evidence.failed_graph_rag_probe_count,
+        "graph_rag_reports": workload_fixture_evidence.graph_rag_reports,
+        "source_projection_probe_count": workload_fixture_evidence.source_projection_probe_count,
+        "failed_source_projection_probe_count": workload_fixture_evidence.failed_source_projection_probe_count,
+        "source_projection_reports": workload_fixture_evidence.source_projection_reports,
         "blocker_codes": workload_fixture_evidence.blocker_codes,
     });
 
@@ -402,6 +419,8 @@ pub fn nowledge_replacement_summary_json_with_options(
         "replacement_readiness_family_summary": family_summary,
         "replacement_readiness_by_query_family": family_details.families,
     });
+    summary["search_route_ownership"] = search_route_ownership.json();
+    summary["active_search_route_ownership"] = active_search_route_ownership.json();
     summary["cutover_evidence"]["storage_recovery_replay_boundary_consistent"] =
         json_get_bool_path(
             bundle,
@@ -640,6 +659,8 @@ struct ReplacementReadinessInputs<'a> {
     search_projection_evidence_ready: bool,
     search_projection_shadow_evidence_ready: bool,
     search_candidate_shadow_evidence_ready: bool,
+    search_route_ownership_ready: bool,
+    active_search_route_ownership_ready: bool,
     bounded_read_evidence_ready: bool,
     graph_route_readiness_ready: bool,
     query_runtime_preflight_ready: bool,
@@ -664,6 +685,8 @@ struct NextActionInputs<'a> {
     search_projection_evidence_ready: bool,
     search_projection_shadow_evidence_ready: bool,
     search_candidate_shadow_evidence_ready: bool,
+    search_route_ownership_ready: bool,
+    active_search_route_ownership_ready: bool,
     bounded_read_evidence_ready: bool,
     graph_route_readiness_ready: bool,
     query_runtime_preflight_ready: bool,
@@ -777,6 +800,40 @@ struct SearchCandidateShadowEvidenceSummary {
     filter_pushdown_missing_numeric_range_fields: Vec<String>,
     filter_pushdown_missing_timestamp_range_fields: Vec<String>,
     blocker_codes: serde_json::Value,
+}
+
+struct SearchRouteOwnershipSummary {
+    protocol: Option<String>,
+    present: bool,
+    ready: bool,
+    production_cutover_ready: Option<bool>,
+    require_all_skein: Option<bool>,
+    required_route_count: Option<u64>,
+    explicit_route_count: Option<u64>,
+    skein_route_count: Option<u64>,
+    lancedb_route_count: Option<u64>,
+    missing_required_routes: Vec<String>,
+    lancedb_routes: Vec<String>,
+    blocker_codes: serde_json::Value,
+}
+
+impl SearchRouteOwnershipSummary {
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": self.protocol,
+            "present": self.present,
+            "ready": self.ready,
+            "production_cutover_ready": self.production_cutover_ready,
+            "require_all_skein": self.require_all_skein,
+            "required_route_count": self.required_route_count,
+            "explicit_route_count": self.explicit_route_count,
+            "skein_route_count": self.skein_route_count,
+            "lancedb_route_count": self.lancedb_route_count,
+            "missing_required_routes": self.missing_required_routes,
+            "lancedb_routes": self.lancedb_routes,
+            "blocker_codes": self.blocker_codes,
+        })
+    }
 }
 
 struct BoundedReadEvidenceSummary<'a> {
@@ -904,6 +961,12 @@ struct WorkloadFixtureEvidenceSummary {
     failed_bounded_expansion_probe_count: Option<u64>,
     search_metadata_probe_count: Option<u64>,
     failed_search_metadata_probe_count: Option<u64>,
+    graph_rag_probe_count: Option<u64>,
+    failed_graph_rag_probe_count: Option<u64>,
+    graph_rag_reports: serde_json::Value,
+    source_projection_probe_count: Option<u64>,
+    failed_source_projection_probe_count: Option<u64>,
+    source_projection_reports: serde_json::Value,
     blocker_codes: serde_json::Value,
 }
 
@@ -1452,6 +1515,83 @@ fn search_candidate_shadow_evidence_summary_json(
         "filter_pushdown_missing_timestamp_range_fields": evidence.filter_pushdown_missing_timestamp_range_fields,
         "blocker_codes": evidence.blocker_codes,
     })
+}
+
+fn search_route_ownership_summary(bundle: &serde_json::Value) -> SearchRouteOwnershipSummary {
+    route_ownership_summary_at(
+        bundle,
+        "search_route_ownership",
+        REQUIRED_NOWLEDGE_MEM_SEARCH_ROUTES,
+    )
+}
+
+fn active_search_route_ownership_summary(
+    bundle: &serde_json::Value,
+) -> SearchRouteOwnershipSummary {
+    route_ownership_summary_at(
+        bundle,
+        "active_search_route_ownership",
+        REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES,
+    )
+}
+
+fn route_ownership_summary_at(
+    bundle: &serde_json::Value,
+    field: &str,
+    required_routes: &[&str],
+) -> SearchRouteOwnershipSummary {
+    let path = if json_get_path(bundle, &[field]).is_some() {
+        vec![field]
+    } else {
+        vec!["cutover_evidence", field]
+    };
+    let path_refs = path.to_vec();
+    let present = json_get_path(bundle, &path_refs).is_some_and(|value| !value.is_null());
+    let protocol =
+        json_get_str_path_from_dynamic(bundle, &path_refs, "protocol").map(str::to_string);
+    let production_cutover_ready =
+        json_get_bool_path_from_dynamic(bundle, &path_refs, "production_cutover_ready");
+    let require_all_skein =
+        json_get_bool_path_from_dynamic(bundle, &path_refs, "require_all_skein");
+    let required_route_count =
+        json_get_u64_path_from_dynamic(bundle, &path_refs, "required_route_count");
+    let explicit_route_count =
+        json_get_u64_path_from_dynamic(bundle, &path_refs, "explicit_route_count");
+    let skein_route_count = json_get_u64_path_from_dynamic(bundle, &path_refs, "skein_route_count");
+    let lancedb_route_count =
+        json_get_u64_path_from_dynamic(bundle, &path_refs, "lancedb_route_count");
+    let missing_required_routes =
+        json_get_string_array_path_from_dynamic(bundle, &path_refs, "missing_required_routes");
+    let lancedb_routes =
+        json_get_string_array_path_from_dynamic(bundle, &path_refs, "lancedb_routes");
+    let blocker_codes = json_get_array_path_from_dynamic(bundle, &path_refs, "blocker_codes");
+    let expected_route_count = required_routes.len() as u64;
+    let ready = present
+        && protocol.as_deref() == Some(NOWLEDGE_MEM_SEARCH_ROUTE_OWNERSHIP_PROTOCOL)
+        && production_cutover_ready == Some(true)
+        && require_all_skein == Some(true)
+        && required_route_count == Some(expected_route_count)
+        && explicit_route_count == Some(expected_route_count)
+        && skein_route_count == Some(expected_route_count)
+        && lancedb_route_count == Some(0)
+        && missing_required_routes.is_empty()
+        && lancedb_routes.is_empty()
+        && blocker_codes.as_array().is_some_and(Vec::is_empty);
+
+    SearchRouteOwnershipSummary {
+        protocol,
+        present,
+        ready,
+        production_cutover_ready,
+        require_all_skein,
+        required_route_count,
+        explicit_route_count,
+        skein_route_count,
+        lancedb_route_count,
+        missing_required_routes,
+        lancedb_routes,
+        blocker_codes,
+    }
 }
 
 fn search_projection_shadow_pushdown_evidence_json(
@@ -2272,6 +2412,27 @@ fn workload_fixture_evidence_summary(bundle: &serde_json::Value) -> WorkloadFixt
         json_get_u64_path_from_dynamic(bundle, path, "search_metadata_probe_count");
     let failed_search_metadata_probe_count =
         json_get_u64_path_from_dynamic(bundle, path, "failed_search_metadata_probe_count");
+    let graph_rag_probe_count =
+        json_get_u64_path_from_dynamic(bundle, path, "graph_rag_probe_count");
+    let failed_graph_rag_probe_count =
+        json_get_u64_path_from_dynamic(bundle, path, "failed_graph_rag_probe_count");
+    let graph_rag_reports = json_get_array_path_from_dynamic(bundle, path, "graph_rag_reports");
+    let graph_rag_ready = graph_rag_probe_count.is_some_and(|count| count > 0)
+        && failed_graph_rag_probe_count == Some(0)
+        && graph_rag_reports
+            .as_array()
+            .is_some_and(|reports| reports.iter().any(graph_rag_workload_report_ready));
+    let source_projection_probe_count =
+        json_get_u64_path_from_dynamic(bundle, path, "source_projection_probe_count");
+    let failed_source_projection_probe_count =
+        json_get_u64_path_from_dynamic(bundle, path, "failed_source_projection_probe_count");
+    let source_projection_reports =
+        json_get_array_path_from_dynamic(bundle, path, "source_projection_reports");
+    let source_projection_ready = source_projection_probe_count.is_some_and(|count| count > 0)
+        && failed_source_projection_probe_count == Some(0)
+        && source_projection_reports
+            .as_array()
+            .is_some_and(|reports| reports.iter().any(source_projection_workload_report_ready));
     let ready = present
         && protocol.as_deref() == Some(NOWLEDGE_GRAPH_ROUTE_WORKLOAD_FIXTURE_PROTOCOL)
         && json_get_bool_path_from_dynamic(bundle, path, "ready") == Some(true)
@@ -2281,7 +2442,9 @@ fn workload_fixture_evidence_summary(bundle: &serde_json::Value) -> WorkloadFixt
         && bounded_expansion_probe_count.is_some_and(|count| count > 0)
         && failed_bounded_expansion_probe_count == Some(0)
         && search_metadata_probe_count.is_some_and(|count| count > 0)
-        && failed_search_metadata_probe_count == Some(0);
+        && failed_search_metadata_probe_count == Some(0)
+        && graph_rag_ready
+        && source_projection_ready;
     WorkloadFixtureEvidenceSummary {
         protocol,
         present,
@@ -2293,8 +2456,44 @@ fn workload_fixture_evidence_summary(bundle: &serde_json::Value) -> WorkloadFixt
         failed_bounded_expansion_probe_count,
         search_metadata_probe_count,
         failed_search_metadata_probe_count,
+        graph_rag_probe_count,
+        failed_graph_rag_probe_count,
+        graph_rag_reports,
+        source_projection_probe_count,
+        failed_source_projection_probe_count,
+        source_projection_reports,
         blocker_codes: json_get_array_path_from_dynamic(bundle, path, "blocker_codes"),
     }
+}
+
+fn graph_rag_workload_report_ready(report: &serde_json::Value) -> bool {
+    json_get_bool_path(report, &["ready"]) == Some(true)
+        && json_get_str_path(report, &["schema_protocol"])
+            == Some(GRAPH_RAG_SCHEMA_CONTEXT_PROTOCOL)
+        && json_get_u64_path(report, &["label_count"]).is_some_and(|count| count > 0)
+        && json_get_u64_path(report, &["relationship_type_count"]).is_some_and(|count| count > 0)
+        && json_get_u64_path(report, &["route_count"]).is_some_and(|count| count > 0)
+        && json_get_u64_path(report, &["parameter_requirement_count"])
+            .is_some_and(|count| count > 0)
+        && json_get_u64_path(report, &["row_count"]).is_some_and(|count| count > 0)
+        && json_get_bool_path(report, &["row_budget_exceeded"]) == Some(false)
+        && json_get_bool_path(report, &["payload_budget_exceeded"]) == Some(false)
+        && json_get_u64_path(report, &["blocking_operator_count"]) == Some(0)
+        && json_get_bool_path(report, &["streaming"]) == Some(false)
+        && json_get_str_path(report, &["error_class"]).is_none()
+}
+
+fn source_projection_workload_report_ready(report: &serde_json::Value) -> bool {
+    json_get_bool_path(report, &["ready"]) == Some(true)
+        && json_get_bool_path(report, &["too_small_batch_failed_closed"]) == Some(true)
+        && json_get_u64_path(report, &["operation_count"]) == Some(2)
+        && json_get_u64_path(report, &["upserted_documents"]) == Some(2)
+        && json_get_u64_path(report, &["deleted_documents"]) == Some(0)
+        && json_get_u64_path(report, &["source_document_count"]) == Some(2)
+        && json_get_bool_path(report, &["indexed_source_document_ready"]) == Some(true)
+        && json_get_u64_path(report, &["source_graph_commit_epoch"]).is_some()
+        && json_get_u64_path(report, &["complete_through_graph_commit_epoch"]).is_some()
+        && json_get_str_path(report, &["error_class"]).is_none()
 }
 
 fn duplicate_strings(values: &[String]) -> Vec<String> {
@@ -2448,6 +2647,12 @@ fn nowledge_replacement_blocking_categories(
     }
     if !inputs.search_candidate_shadow_evidence_ready {
         categories.insert("search_candidate_shadow_evidence".to_string());
+    }
+    if !inputs.search_route_ownership_ready {
+        categories.insert("search_route_ownership".to_string());
+    }
+    if !inputs.active_search_route_ownership_ready {
+        categories.insert("active_search_route_ownership".to_string());
     }
     if !inputs.bounded_read_evidence_ready {
         categories.insert("bounded_read_evidence".to_string());
@@ -2679,6 +2884,42 @@ fn nowledge_replacement_next_actions(
             ],
         ));
     }
+    if !inputs.search_route_ownership_ready {
+        actions.push(next_action(
+            "attach_search_route_ownership",
+            "search projection route ownership is missing or still routes a projection family to LanceDB",
+            [
+                "search_route_ownership.protocol",
+                "search_route_ownership.ready",
+                "search_route_ownership.production_cutover_ready",
+                "search_route_ownership.required_route_count",
+                "search_route_ownership.explicit_route_count",
+                "search_route_ownership.skein_route_count",
+                "search_route_ownership.lancedb_route_count",
+                "search_route_ownership.missing_required_routes",
+                "search_route_ownership.lancedb_routes",
+                "search_route_ownership.blocker_codes",
+            ],
+        ));
+    }
+    if !inputs.active_search_route_ownership_ready {
+        actions.push(next_action(
+            "attach_active_search_route_ownership",
+            "active search route ownership is missing or still routes a business search path to LanceDB",
+            [
+                "active_search_route_ownership.protocol",
+                "active_search_route_ownership.ready",
+                "active_search_route_ownership.production_cutover_ready",
+                "active_search_route_ownership.required_route_count",
+                "active_search_route_ownership.explicit_route_count",
+                "active_search_route_ownership.skein_route_count",
+                "active_search_route_ownership.lancedb_route_count",
+                "active_search_route_ownership.missing_required_routes",
+                "active_search_route_ownership.lancedb_routes",
+                "active_search_route_ownership.blocker_codes",
+            ],
+        ));
+    }
     if !inputs.bounded_read_evidence_ready {
         actions.push(next_action(
             "attach_bounded_read_profile",
@@ -2761,7 +3002,7 @@ fn nowledge_replacement_next_actions(
     if !inputs.workload_fixture_evidence_ready {
         actions.push(next_action(
             "run_workload_fixture_evidence",
-            "graph route, bounded expansion, or metadata-filtered search workload fixture evidence is missing or not ready",
+            "graph route, bounded expansion, metadata-filtered search, or source projection workload fixture evidence is missing or not ready",
             [
                 "workload_fixture_evidence.protocol",
                 "workload_fixture_evidence.present",
@@ -2773,6 +3014,12 @@ fn nowledge_replacement_next_actions(
                 "workload_fixture_evidence.failed_bounded_expansion_probe_count",
                 "workload_fixture_evidence.search_metadata_probe_count",
                 "workload_fixture_evidence.failed_search_metadata_probe_count",
+                "workload_fixture_evidence.graph_rag_probe_count",
+                "workload_fixture_evidence.failed_graph_rag_probe_count",
+                "workload_fixture_evidence.graph_rag_reports",
+                "workload_fixture_evidence.source_projection_probe_count",
+                "workload_fixture_evidence.failed_source_projection_probe_count",
+                "workload_fixture_evidence.source_projection_reports",
                 "workload_fixture_evidence.blocker_codes",
             ],
         ));
@@ -2904,6 +3151,24 @@ fn nowledge_replacement_missing_evidence(bundle: &serde_json::Value) -> Vec<Stri
         missing.push("search_candidate_shadow_evidence".to_string());
     } else if !search_candidate_shadow_evidence_summary(bundle).ready {
         missing.push("search_candidate_shadow_evidence_ready".to_string());
+    }
+    if bundle.get("search_route_ownership").is_none()
+        && json_get_path(bundle, &["cutover_evidence", "search_route_ownership"]).is_none()
+    {
+        missing.push("search_route_ownership".to_string());
+    } else if !search_route_ownership_summary(bundle).ready {
+        missing.push("search_route_ownership_ready".to_string());
+    }
+    if bundle.get("active_search_route_ownership").is_none()
+        && json_get_path(
+            bundle,
+            &["cutover_evidence", "active_search_route_ownership"],
+        )
+        .is_none()
+    {
+        missing.push("active_search_route_ownership".to_string());
+    } else if !active_search_route_ownership_summary(bundle).ready {
+        missing.push("active_search_route_ownership_ready".to_string());
     }
     if bundle.get("bounded_read_evidence").is_none()
         && json_get_path(bundle, &["cutover_evidence", "bounded_read_evidence"]).is_none()
@@ -3040,6 +3305,18 @@ fn nowledge_replacement_blockers(bundle: &serde_json::Value) -> Vec<String> {
             "search_candidate_shadow_evidence",
             "blocker_codes",
         ][..],
+        &["search_route_ownership", "blocker_codes"][..],
+        &[
+            "cutover_evidence",
+            "search_route_ownership",
+            "blocker_codes",
+        ][..],
+        &["active_search_route_ownership", "blocker_codes"][..],
+        &[
+            "cutover_evidence",
+            "active_search_route_ownership",
+            "blocker_codes",
+        ][..],
         &["bounded_read_evidence", "blocker_codes"][..],
         &["cutover_evidence", "bounded_read_evidence", "blocker_codes"][..],
         &["graph_route_readiness", "route_coverage_blocker_codes"][..],
@@ -3171,7 +3448,9 @@ mod tests {
         NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL, NMEM_GRAPH_ROUTE_READINESS_PROTOCOL,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
-        NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+        NOWLEDGE_MEM_SEARCH_ROUTE_OWNERSHIP_PROTOCOL,
+        NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES,
+        REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES, REQUIRED_NOWLEDGE_MEM_SEARCH_ROUTES,
         REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES, SEARCH_PROJECTION_REPLACEMENT_SCOPE,
         SEARCH_PROJECTION_SHADOW_PUSHDOWN_NOT_READY,
         SKEIN_SEARCH_PROJECTION_SEGMENT_DESCRIPTOR_FIELDS_MISSING,
@@ -3180,7 +3459,7 @@ mod tests {
     };
     use crate::{
         nowledge_mem_graph_read_route_spec, nowledge_mem_graph_read_route_specs_json,
-        NOWLEDGE_GRAPH_ROUTE_WORKLOAD_FIXTURE_PROTOCOL,
+        GRAPH_RAG_SCHEMA_CONTEXT_PROTOCOL, NOWLEDGE_GRAPH_ROUTE_WORKLOAD_FIXTURE_PROTOCOL,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_ENGINE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_EVIDENCE_SOURCE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_PRIMARY_ENGINE,
@@ -3219,6 +3498,7 @@ mod tests {
         assert_eq!(
             summary["blocking_categories"],
             serde_json::json!([
+                "active_search_route_ownership",
                 "bounded_read_evidence",
                 "cutover_evidence",
                 "dual_engine_evidence",
@@ -3229,6 +3509,7 @@ mod tests {
                 "search_candidate_shadow_evidence",
                 "search_projection_evidence",
                 "search_projection_shadow_evidence",
+                "search_route_ownership",
                 "shadow_parity",
                 "workload_fixture_evidence"
             ])
@@ -3340,6 +3621,32 @@ mod tests {
         assert_eq!(
             summary["workload_fixture_evidence"]["failed_search_metadata_probe_count"],
             0
+        );
+        assert_eq!(
+            summary["workload_fixture_evidence"]["failed_graph_rag_probe_count"],
+            0
+        );
+        assert_eq!(
+            summary["workload_fixture_evidence"]["graph_rag_reports"][0]["ready"],
+            true
+        );
+        assert_eq!(
+            summary["workload_fixture_evidence"]["graph_rag_reports"][0]
+                ["parameter_requirement_count"],
+            1
+        );
+        assert_eq!(
+            summary["workload_fixture_evidence"]["failed_source_projection_probe_count"],
+            0
+        );
+        assert_eq!(
+            summary["workload_fixture_evidence"]["source_projection_reports"][0]["ready"],
+            true
+        );
+        assert_eq!(
+            summary["workload_fixture_evidence"]["source_projection_reports"][0]
+                ["too_small_batch_failed_closed"],
+            true
         );
         assert_eq!(
             summary["cutover_evidence"]["storage_recovery_protocol_matches"],
@@ -3489,6 +3796,23 @@ mod tests {
         assert_eq!(
             summary["search_candidate_shadow_evidence"]["candidate_identity_ready"],
             true
+        );
+        assert_eq!(summary["search_route_ownership"]["present"], true);
+        assert_eq!(summary["search_route_ownership"]["ready"], true);
+        assert_eq!(
+            summary["search_route_ownership"]["required_route_count"],
+            REQUIRED_NOWLEDGE_MEM_SEARCH_ROUTES.len()
+        );
+        assert_eq!(summary["search_route_ownership"]["lancedb_route_count"], 0);
+        assert_eq!(summary["active_search_route_ownership"]["present"], true);
+        assert_eq!(summary["active_search_route_ownership"]["ready"], true);
+        assert_eq!(
+            summary["active_search_route_ownership"]["required_route_count"],
+            REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES.len()
+        );
+        assert_eq!(
+            summary["active_search_route_ownership"]["lancedb_route_count"],
+            0
         );
         assert_eq!(
             summary["replacement_readiness_by_query_family"][0]["query_family"],
@@ -4458,6 +4782,105 @@ mod tests {
     }
 
     #[test]
+    fn replacement_summary_blocks_production_without_search_route_ownership() {
+        let mut bundle = production_ready_bundle();
+        bundle
+            .as_object_mut()
+            .unwrap()
+            .remove("search_route_ownership");
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["search_route_ownership"]["present"], false);
+        assert_eq!(summary["search_route_ownership"]["ready"], false);
+        assert!(summary["blocking_categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "search_route_ownership"));
+        assert!(summary["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "search_route_ownership"));
+        assert!(summary["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "attach_search_route_ownership"));
+    }
+
+    #[test]
+    fn replacement_summary_blocks_production_without_active_search_route_ownership() {
+        let mut bundle = production_ready_bundle();
+        bundle
+            .as_object_mut()
+            .unwrap()
+            .remove("active_search_route_ownership");
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["active_search_route_ownership"]["present"], false);
+        assert_eq!(summary["active_search_route_ownership"]["ready"], false);
+        assert!(summary["blocking_categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "active_search_route_ownership"));
+        assert!(summary["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "active_search_route_ownership"));
+        assert!(summary["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "attach_active_search_route_ownership"));
+    }
+
+    #[test]
+    fn replacement_summary_blocks_production_when_active_search_routes_still_use_lancedb() {
+        let mut bundle = production_ready_bundle();
+        bundle["active_search_route_ownership"]["ready"] = serde_json::json!(false);
+        bundle["active_search_route_ownership"]["production_cutover_ready"] =
+            serde_json::json!(false);
+        bundle["active_search_route_ownership"]["skein_route_count"] =
+            serde_json::json!(REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES.len() - 1);
+        bundle["active_search_route_ownership"]["lancedb_route_count"] = serde_json::json!(1);
+        bundle["active_search_route_ownership"]["lancedb_routes"] =
+            serde_json::json!(["mcp_search"]);
+        bundle["active_search_route_ownership"]["blocker_codes"] =
+            serde_json::json!(["active_search_route_ownership_lancedb_routes_remaining"]);
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["active_search_route_ownership"]["ready"], false);
+        assert_eq!(
+            summary["active_search_route_ownership"]["lancedb_route_count"],
+            1
+        );
+        assert!(summary["blocking_categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "active_search_route_ownership"));
+        assert!(summary["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "active_search_route_ownership_ready"));
+        assert!(summary["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "active_search_route_ownership_lancedb_routes_remaining"));
+    }
+
+    #[test]
     fn replacement_summary_requires_search_candidate_identity_parity() {
         let mut bundle = production_ready_bundle();
         bundle["search_candidate_shadow_evidence"]["ready"] = serde_json::json!(true);
@@ -5126,6 +5549,112 @@ mod tests {
     }
 
     #[test]
+    fn replacement_summary_rejects_failed_graph_rag_workload_fixture() {
+        let mut bundle = production_ready_bundle();
+        bundle["workload_fixture_evidence"]["ready"] = serde_json::json!(false);
+        bundle["workload_fixture_evidence"]["failed_graph_rag_probe_count"] = serde_json::json!(1);
+        bundle["workload_fixture_evidence"]["graph_rag_reports"] = serde_json::json!([
+            {
+                "name": "memory-to-entity",
+                "ready": false,
+                "schema_protocol": GRAPH_RAG_SCHEMA_CONTEXT_PROTOCOL,
+                "label_count": 2,
+                "relationship_type_count": 1,
+                "route_count": 1,
+                "parameter_requirement_count": 1,
+                "row_count": 1,
+                "row_budget_exceeded": false,
+                "payload_budget_exceeded": false,
+                "blocking_operator_count": 0,
+                "streaming": false,
+                "error_class": "execution"
+            }
+        ]);
+        bundle["workload_fixture_evidence"]["blocker_codes"] =
+            serde_json::json!(["workload_fixture_graph_rag_not_ready"]);
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(
+            summary["workload_fixture_evidence"]["failed_graph_rag_probe_count"],
+            1
+        );
+        assert_eq!(
+            summary["workload_fixture_evidence"]["graph_rag_reports"][0]["ready"],
+            false
+        );
+        assert!(summary["blocking_categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "workload_fixture_evidence"));
+        assert!(summary["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "workload_fixture_evidence_ready"));
+        assert!(summary["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "workload_fixture_graph_rag_not_ready"));
+    }
+
+    #[test]
+    fn replacement_summary_rejects_failed_source_projection_workload_fixture() {
+        let mut bundle = production_ready_bundle();
+        bundle["workload_fixture_evidence"]["ready"] = serde_json::json!(false);
+        bundle["workload_fixture_evidence"]["failed_source_projection_probe_count"] =
+            serde_json::json!(1);
+        bundle["workload_fixture_evidence"]["source_projection_reports"] = serde_json::json!([
+            {
+                "name": "source-ingest-composite-changefeed",
+                "ready": false,
+                "source_graph_commit_epoch": 43,
+                "complete_through_graph_commit_epoch": 43,
+                "too_small_batch_failed_closed": false,
+                "operation_count": 1,
+                "upserted_documents": 1,
+                "deleted_documents": 0,
+                "source_document_count": 1,
+                "indexed_source_document_ready": false,
+                "error_class": "batch_split"
+            }
+        ]);
+        bundle["workload_fixture_evidence"]["blocker_codes"] =
+            serde_json::json!(["workload_fixture_source_projection_not_ready"]);
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(
+            summary["workload_fixture_evidence"]["failed_source_projection_probe_count"],
+            1
+        );
+        assert_eq!(
+            summary["workload_fixture_evidence"]["source_projection_reports"][0]
+                ["too_small_batch_failed_closed"],
+            false
+        );
+        assert!(summary["blocking_categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "workload_fixture_evidence"));
+        assert!(summary["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "workload_fixture_evidence_ready"));
+        assert!(summary["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "workload_fixture_source_projection_not_ready"));
+    }
+
+    #[test]
     fn replacement_summary_blocks_production_without_graph_delta_aggregate_evidence() {
         let mut bundle = production_ready_bundle();
         bundle["cutover_evidence"]
@@ -5561,6 +6090,7 @@ mod tests {
         assert_eq!(
             summary["blocking_categories"],
             serde_json::json!([
+                "active_search_route_ownership",
                 "background_maintenance",
                 "bounded_read_evidence",
                 "cutover_evidence",
@@ -5573,6 +6103,7 @@ mod tests {
                 "search_candidate_shadow_evidence",
                 "search_projection_evidence",
                 "search_projection_shadow_evidence",
+                "search_route_ownership",
                 "shadow_parity",
                 "storage_recovery",
                 "workload_fixture_evidence"
@@ -5590,6 +6121,8 @@ mod tests {
                 "search_projection_evidence",
                 "search_projection_shadow_evidence",
                 "search_candidate_shadow_evidence",
+                "search_route_ownership",
+                "active_search_route_ownership",
                 "bounded_read_evidence",
                 "graph_route_readiness",
                 "query_runtime_preflight",
@@ -5760,6 +6293,38 @@ mod tests {
                     ]
                 },
                 {
+                    "action": "attach_search_route_ownership",
+                    "reason": "search projection route ownership is missing or still routes a projection family to LanceDB",
+                    "evidence_fields": [
+                        "search_route_ownership.protocol",
+                        "search_route_ownership.ready",
+                        "search_route_ownership.production_cutover_ready",
+                        "search_route_ownership.required_route_count",
+                        "search_route_ownership.explicit_route_count",
+                        "search_route_ownership.skein_route_count",
+                        "search_route_ownership.lancedb_route_count",
+                        "search_route_ownership.missing_required_routes",
+                        "search_route_ownership.lancedb_routes",
+                        "search_route_ownership.blocker_codes"
+                    ]
+                },
+                {
+                    "action": "attach_active_search_route_ownership",
+                    "reason": "active search route ownership is missing or still routes a business search path to LanceDB",
+                    "evidence_fields": [
+                        "active_search_route_ownership.protocol",
+                        "active_search_route_ownership.ready",
+                        "active_search_route_ownership.production_cutover_ready",
+                        "active_search_route_ownership.required_route_count",
+                        "active_search_route_ownership.explicit_route_count",
+                        "active_search_route_ownership.skein_route_count",
+                        "active_search_route_ownership.lancedb_route_count",
+                        "active_search_route_ownership.missing_required_routes",
+                        "active_search_route_ownership.lancedb_routes",
+                        "active_search_route_ownership.blocker_codes"
+                    ]
+                },
+                {
                     "action": "attach_bounded_read_profile",
                     "reason": "bounded read execution profile is missing or not ready",
                     "evidence_fields": [
@@ -5834,7 +6399,7 @@ mod tests {
                 },
                 {
                     "action": "run_workload_fixture_evidence",
-                    "reason": "graph route, bounded expansion, or metadata-filtered search workload fixture evidence is missing or not ready",
+                    "reason": "graph route, bounded expansion, metadata-filtered search, or source projection workload fixture evidence is missing or not ready",
                     "evidence_fields": [
                         "workload_fixture_evidence.protocol",
                         "workload_fixture_evidence.present",
@@ -5846,6 +6411,12 @@ mod tests {
                         "workload_fixture_evidence.failed_bounded_expansion_probe_count",
                         "workload_fixture_evidence.search_metadata_probe_count",
                         "workload_fixture_evidence.failed_search_metadata_probe_count",
+                        "workload_fixture_evidence.graph_rag_probe_count",
+                        "workload_fixture_evidence.failed_graph_rag_probe_count",
+                        "workload_fixture_evidence.graph_rag_reports",
+                        "workload_fixture_evidence.source_projection_probe_count",
+                        "workload_fixture_evidence.failed_source_projection_probe_count",
+                        "workload_fixture_evidence.source_projection_reports",
                         "workload_fixture_evidence.blocker_codes"
                     ]
                 },
@@ -6095,6 +6666,12 @@ mod tests {
                 },
                 "blocker_codes": []
             },
+            "search_route_ownership": ready_route_ownership_json(
+                REQUIRED_NOWLEDGE_MEM_SEARCH_ROUTES
+            ),
+            "active_search_route_ownership": ready_route_ownership_json(
+                REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES
+            ),
             "bounded_read_evidence": {
                 "protocol": "skein-nowledge-mem-bounded-read-evidence-v1",
                 "mode": "shadow_read_only",
@@ -6204,6 +6781,22 @@ mod tests {
         serde_json::json!(NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS)
     }
 
+    fn ready_route_ownership_json(routes: &[&str]) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": NOWLEDGE_MEM_SEARCH_ROUTE_OWNERSHIP_PROTOCOL,
+            "ready": true,
+            "production_cutover_ready": true,
+            "require_all_skein": true,
+            "required_route_count": routes.len(),
+            "explicit_route_count": routes.len(),
+            "skein_route_count": routes.len(),
+            "lancedb_route_count": 0,
+            "missing_required_routes": [],
+            "lancedb_routes": [],
+            "blocker_codes": []
+        })
+    }
+
     fn ready_search_candidate_trace_evidence() -> serde_json::Value {
         serde_json::json!({
             "protocol": NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
@@ -6235,21 +6828,22 @@ mod tests {
     }
 
     fn scan_filter_field_summaries_json() -> serde_json::Value {
-        serde_json::json!([
-            descriptor_field("kind", true, false, false),
-            descriptor_field("external_id", true, false, false),
-            descriptor_field("source_id", true, false, false),
-            descriptor_field("space_id", true, false, false),
-            descriptor_field("unit_type", true, false, false),
-            descriptor_field("lifecycle_state", true, false, false),
-            descriptor_field("importance", true, true, false),
-            descriptor_field("confidence", true, true, false),
-            descriptor_field("created_at", true, false, true),
-            descriptor_field("updated_at", true, false, true),
-            descriptor_field("event_start", true, false, true),
-            descriptor_field("event_end", true, false, true),
-            descriptor_field("is_latest", true, false, false)
-        ])
+        serde_json::Value::Array(
+            NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
+                .iter()
+                .map(|field| {
+                    descriptor_field(
+                        field,
+                        true,
+                        matches!(*field, "importance" | "confidence"),
+                        matches!(
+                            *field,
+                            "created_at" | "updated_at" | "event_start" | "event_end"
+                        ),
+                    )
+                })
+                .collect(),
+        )
     }
 
     fn descriptor_field(
@@ -6316,6 +6910,49 @@ mod tests {
             "failed_bounded_expansion_probe_count": 0,
             "search_metadata_probe_count": 3,
             "failed_search_metadata_probe_count": 0,
+            "graph_rag_probe_count": 1,
+            "failed_graph_rag_probe_count": 0,
+            "graph_rag_reports": [
+                {
+                    "name": "memory-to-entity",
+                    "ready": true,
+                    "schema_protocol": GRAPH_RAG_SCHEMA_CONTEXT_PROTOCOL,
+                    "context_epoch": 42,
+                    "schema_fingerprint": 1001,
+                    "label_count": 2,
+                    "relationship_type_count": 1,
+                    "property_count": 3,
+                    "route_count": 1,
+                    "common_path_count": 1,
+                    "parameter_requirement_count": 1,
+                    "row_count": 1,
+                    "max_rows": 4,
+                    "execution_row_cap": 5,
+                    "estimated_payload_bytes": 128,
+                    "row_budget_exceeded": false,
+                    "payload_budget_exceeded": false,
+                    "blocking_operator_count": 0,
+                    "streaming": false,
+                    "error_class": null
+                }
+            ],
+            "source_projection_probe_count": 1,
+            "failed_source_projection_probe_count": 0,
+            "source_projection_reports": [
+                {
+                    "name": "source-ingest-composite-changefeed",
+                    "ready": true,
+                    "source_graph_commit_epoch": 43,
+                    "complete_through_graph_commit_epoch": 43,
+                    "too_small_batch_failed_closed": true,
+                    "operation_count": 2,
+                    "upserted_documents": 2,
+                    "deleted_documents": 0,
+                    "source_document_count": 2,
+                    "indexed_source_document_ready": true,
+                    "error_class": null
+                }
+            ],
             "blocker_codes": []
         })
     }

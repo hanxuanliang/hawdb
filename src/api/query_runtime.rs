@@ -19,15 +19,26 @@ impl Database {
         cypher_text: &str,
         parameters: &BTreeMap<String, Value>,
     ) -> Result<QueryOutput> {
-        self.query_with_params_trace(cypher_text, parameters, false)
+        self.query_with_params_trace_internal(cypher_text, parameters, false, None)
             .map(|(output, _)| output)
     }
 
-    pub(crate) fn query_with_params_trace(
+    pub fn query_with_params_access_control(
+        &mut self,
+        cypher_text: &str,
+        parameters: &BTreeMap<String, Value>,
+        access_control: QueryAccessControlContext,
+    ) -> Result<QueryOutput> {
+        self.query_with_params_trace_internal(cypher_text, parameters, false, Some(access_control))
+            .map(|(output, _)| output)
+    }
+
+    fn query_with_params_trace_internal(
         &mut self,
         cypher_text: &str,
         parameters: &BTreeMap<String, Value>,
         capture_trace: bool,
+        access_control: Option<QueryAccessControlContext>,
     ) -> Result<(QueryOutput, QueryExecutionTrace)> {
         let mut external = executor::NoExternalReadOperator;
         self.query_with_params_trace_and_external(
@@ -35,6 +46,7 @@ impl Database {
             parameters,
             capture_trace,
             &mut external,
+            access_control,
         )
     }
 
@@ -44,6 +56,7 @@ impl Database {
         parameters: &BTreeMap<String, Value>,
         capture_trace: bool,
         external: &mut dyn executor::ExternalReadOperator,
+        access_control: Option<QueryAccessControlContext>,
     ) -> Result<(QueryOutput, QueryExecutionTrace)> {
         let started = std::time::Instant::now();
         let statement = cypher::parse(cypher_text)?;
@@ -51,7 +64,13 @@ impl Database {
         let statement_kind_name = statement_kind(&statement);
         if let cypher::Statement::Explain(explain) = &statement {
             let query_result = self
-                .execute_explain_statement(cypher_text, explain, parameters, external)
+                .execute_explain_statement(
+                    cypher_text,
+                    explain,
+                    parameters,
+                    external,
+                    access_control.as_ref(),
+                )
                 .map(|output| (output, QueryExecutionTrace::uncached(statement)));
             let statement_result = match &query_result {
                 Ok((output, _)) => Ok(output),
@@ -63,7 +82,10 @@ impl Database {
                 statement_kind_name,
                 started,
                 statement_result,
-                None,
+                StatementExecutionContext {
+                    access_control: access_control.as_ref(),
+                    ..StatementExecutionContext::default()
+                },
             );
             return query_result;
         }
@@ -88,7 +110,12 @@ impl Database {
         }
         let query_result = (|| {
             query_work_request_for_statement(&self.system_variables, &statement)?;
-            let optimized = self.optimized_query_plan(cypher_text, &statement, parameters)?;
+            let optimized = self.optimized_query_plan_with_access_control(
+                cypher_text,
+                &statement,
+                parameters,
+                access_control.as_ref(),
+            )?;
             let is_mutation = executor::is_mutation_plan(&optimized.physical_plan)?;
             if is_mutation {
                 self.ensure_writable()?;
@@ -137,7 +164,10 @@ impl Database {
             statement_kind_name,
             started,
             statement_result,
-            execution_profile,
+            StatementExecutionContext {
+                execution_profile,
+                access_control: access_control.as_ref(),
+            },
         );
         query_result
     }
@@ -148,10 +178,16 @@ impl Database {
         explain: &cypher::Explain,
         parameters: &BTreeMap<String, Value>,
         external: &mut dyn executor::ExternalReadOperator,
+        access_control: Option<&QueryAccessControlContext>,
     ) -> Result<QueryOutput> {
         let work_request =
             query_work_request_for_statement(&self.system_variables, &explain.statement)?;
-        let optimized = self.optimized_query_plan(cypher_text, &explain.statement, parameters)?;
+        let optimized = self.optimized_query_plan_with_access_control(
+            cypher_text,
+            &explain.statement,
+            parameters,
+            access_control,
+        )?;
         let inner_statement_kind = statement_kind(statement_body(&explain.statement));
         if explain.analyze {
             if executor::is_mutation_plan(&optimized.physical_plan)? {

@@ -857,7 +857,7 @@ fn ready_production_filter_pruning_template() -> serde_json::Value {
     let mut samples = NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
         .iter()
         .map(|field| match *field {
-            "unit_type" | "lifecycle_state" => {
+            "unit_type" | "lifecycle_state" | "temporal_context" => {
                 ready_production_filter_pruning_sample_template(field, "in", "enum_in_list")
             }
             "importance" | "confidence" => {
@@ -934,22 +934,27 @@ fn ready_production_filter_pruning_sample_template(
 }
 
 fn ready_segment_descriptor_field_summaries_template() -> serde_json::Value {
-    serde_json::json!([
-        ready_segment_descriptor_field_summary_template("kind", true, false, false),
-        ready_segment_descriptor_field_summary_template("external_id", true, false, false),
-        ready_segment_descriptor_field_summary_template("source_id", true, false, false),
-        ready_segment_descriptor_field_summary_template("space_id", true, false, false),
-        ready_segment_descriptor_field_summary_template("unit_type", true, false, false),
-        ready_segment_descriptor_field_summary_template("lifecycle_state", true, false, false),
-        ready_segment_descriptor_field_summary_template("importance", true, true, false),
-        ready_segment_descriptor_field_summary_template("confidence", true, true, false),
-        ready_segment_descriptor_field_summary_template("created_at", true, false, true),
-        ready_segment_descriptor_field_summary_template("updated_at", true, false, true),
-        ready_segment_descriptor_field_summary_template("event_start", true, false, true),
-        ready_segment_descriptor_field_summary_template("event_end", true, false, true),
-        ready_segment_descriptor_field_summary_template("is_latest", true, false, false),
-        ready_segment_descriptor_field_summary_template("document_id", true, false, false)
-    ])
+    let mut fields = NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
+        .iter()
+        .map(|field| {
+            ready_segment_descriptor_field_summary_template(
+                field,
+                true,
+                matches!(*field, "importance" | "confidence"),
+                matches!(
+                    *field,
+                    "created_at" | "updated_at" | "event_start" | "event_end"
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+    fields.push(ready_segment_descriptor_field_summary_template(
+        "document_id",
+        true,
+        false,
+        false,
+    ));
+    serde_json::Value::Array(fields)
 }
 
 fn ready_segment_descriptor_field_summary_template(
@@ -1602,7 +1607,7 @@ mod tests {
     };
     use crate::{
         SearchEmbeddingManifest, SearchIndex, SearchProjectionDelta, SearchProjectionKind,
-        SearchProjectionRow,
+        SearchProjectionRow, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
     };
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -1724,21 +1729,7 @@ mod tests {
         );
         assert_eq!(
             contract["required_skein_scan_filter_fields"],
-            serde_json::json!([
-                "kind",
-                "external_id",
-                "source_id",
-                "space_id",
-                "unit_type",
-                "lifecycle_state",
-                "importance",
-                "confidence",
-                "created_at",
-                "updated_at",
-                "event_start",
-                "event_end",
-                "is_latest"
-            ])
+            serde_json::json!(NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS)
         );
         assert!(contract["predicate_pushdown_fields"]
             .as_array()
@@ -2462,21 +2453,7 @@ mod tests {
                 "segment_pruned_document_count": 4,
                 "segment_scanned_document_count": 2,
                 "supported_ops": ["eq", "in", "not_in", "gt", "gte", "lt", "lte"],
-                "scan_filter_fields": [
-                    "kind",
-                    "external_id",
-                    "source_id",
-                    "space_id",
-                    "unit_type",
-                    "lifecycle_state",
-                    "importance",
-                    "confidence",
-                    "created_at",
-                    "updated_at",
-                    "event_start",
-                    "event_end",
-                    "is_latest"
-                ],
+                "scan_filter_fields": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
                 "segment_descriptor_field_summaries": ready_segment_descriptor_field_summaries()
             },
             "production_filter_pruning": ready_production_filter_pruning_template(),
@@ -2528,6 +2505,7 @@ mod tests {
                 ("space_id".to_string(), "default".to_string()),
                 ("unit_type".to_string(), "fact".to_string()),
                 ("lifecycle_state".to_string(), "active".to_string()),
+                ("temporal_context".to_string(), "current".to_string()),
                 ("importance".to_string(), "0.8".to_string()),
                 ("confidence".to_string(), "0.9".to_string()),
                 ("created_at".to_string(), "11".to_string()),
@@ -2558,22 +2536,22 @@ mod tests {
     }
 
     fn ready_segment_descriptor_field_summaries() -> serde_json::Value {
-        serde_json::json!([
-            descriptor_field("kind", true, false, false),
-            descriptor_field("external_id", true, false, false),
-            descriptor_field("source_id", true, false, false),
-            descriptor_field("space_id", true, false, false),
-            descriptor_field("unit_type", true, false, false),
-            descriptor_field("lifecycle_state", true, false, false),
-            descriptor_field("importance", true, true, false),
-            descriptor_field("confidence", true, true, false),
-            descriptor_field("created_at", true, false, true),
-            descriptor_field("updated_at", true, false, true),
-            descriptor_field("event_start", true, false, true),
-            descriptor_field("event_end", true, false, true),
-            descriptor_field("is_latest", true, false, false),
-            descriptor_field("document_id", true, false, false)
-        ])
+        let mut fields = NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
+            .iter()
+            .map(|field| {
+                descriptor_field(
+                    field,
+                    true,
+                    matches!(field, &"importance" | &"confidence"),
+                    matches!(
+                        field,
+                        &"created_at" | &"updated_at" | &"event_start" | &"event_end"
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        fields.push(descriptor_field("document_id", true, false, false));
+        serde_json::Value::Array(fields)
     }
 
     fn descriptor_field(

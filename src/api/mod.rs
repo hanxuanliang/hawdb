@@ -17,24 +17,27 @@ use crate::schema::{
     TableDescriptor,
 };
 use crate::search::{
-    projection_row_from_node, search_metadata_predicate_pushdown, AdaptiveVectorSearchOptions,
-    CompressedVectorSearchMode, MetadataRepairOptions, MetadataRepairSummary,
-    SearchCandidateSetReport, SearchDerivedArtifactReport, SearchEmptyReasonCode,
-    SearchFallbackReasonCode, SearchFusionWeights, SearchIndex, SearchMatchedSpan, SearchMode,
-    SearchPredicatePushdownReport, SearchProjectionDelta, SearchProjectionDeltaReport,
-    SearchProjectionFreshness, SearchQueryOptions, SearchRebuildOptions, SearchRebuildSummary,
-    SearchResultSet, SearchRetrieverCandidateSetReport, SearchTruncationReasonCode,
+    projection_row_from_node_with_graph_metadata, search_metadata_predicate_pushdown,
+    AdaptiveVectorSearchOptions, CompressedVectorSearchMode, MetadataRepairOptions,
+    MetadataRepairSummary, SearchCandidateSetReport, SearchDerivedArtifactReport,
+    SearchEmptyReasonCode, SearchFallbackReasonCode, SearchFusionWeights, SearchIndex,
+    SearchMatchedSpan, SearchMode, SearchPredicatePushdownReport, SearchProjectionDelta,
+    SearchProjectionDeltaReport, SearchProjectionFreshness, SearchQueryOptions,
+    SearchRebuildOptions, SearchRebuildSummary, SearchResultSet, SearchRetrieverCandidateSetReport,
+    SearchTruncationReasonCode,
 };
 use crate::store::{
     AdjacencyConsistencyReport, AdjacencyDirection, AdjacencyLayout,
     BasicStatisticsConsistencyReport, DegreeStatisticsConsistencyReport,
-    DistinctValueStatisticsConsistencyReport, DurabilityPolicy, GraphMutation, GraphStore, NodeId,
-    NodeRecord, ProjectedGraphStatus, PropertyIndexConsistencyReport,
-    PropertyIndexProjectionRebuildAction, RecoveryMode, RelRecord, SchemaMaintenanceAction,
-    StorageReclamationWatermark, StorageRecoveryReport, WalReplayConfig,
+    DistinctValueStatisticsConsistencyReport, DurabilityPolicy, GraphMutation,
+    GraphSnapshotNodeImport, GraphSnapshotRelationshipImport, GraphStore, NodeId, NodeRecord,
+    ProjectedGraphStatus, PropertyIndexConsistencyReport, PropertyIndexProjectionRebuildAction,
+    RecoveryMode, RelId, RelRecord, SchemaMaintenanceAction, StorageReclamationWatermark,
+    StorageRecoveryReport, StoreStableIdMapping, WalReplayConfig,
 };
 use crate::telemetry::{
-    qos_telemetry_sink, KernelTelemetry, KernelTelemetryOperation, TelemetrySink,
+    operations_telemetry_readiness, qos_telemetry_sink, KernelTelemetry, KernelTelemetryOperation,
+    OperationsTelemetryReadiness, TelemetrySink,
 };
 use crate::value::Value;
 use canonical_snapshot::export_canonical_graph_snapshot_for;
@@ -62,13 +65,17 @@ pub use skein_api_types::{
     KnowledgeMemoryEvolvesRelationCountOutput, KnowledgeMemoryEvolvesRelationCountRequest,
     KnowledgeMemoryEvolvesRelationCountRow, KnowledgeNeighborDirection,
 };
-use skein_optimizer::{SearchPredicate, SearchPredicateOp, SearchPredicateSet};
+use skein_optimizer::{
+    normalize_search_enum_value, search_field_is_enum_like, SearchPredicate, SearchPredicateOp,
+    SearchPredicateSet,
+};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, MutexGuard};
 use system_variables::{query_work_request_for_statement, reject_system_variable_parameters};
 
+mod access_control;
 mod artifact_jobs;
 mod canonical_snapshot;
 mod explain;
@@ -84,17 +91,43 @@ mod system_variables;
 const DEFAULT_SEARCH_PROJECTION_CHANGE_LOG_MAX_ENTRIES: usize = 4096;
 pub const SLOW_QUERY_LOG_EVENT_PROTOCOL: &str = "skein-slow-query-log-event-v1";
 
+pub use access_control::AccessControlPolicyReadiness;
 pub use artifact_jobs::{
     DerivedArtifactJob, DerivedArtifactJobReport, DerivedArtifactJobStatus,
     ExternalContentArtifactJobCompletion, ExternalContentArtifactJobSummary,
     ExternalContentArtifactRuntimeManifest,
 };
 pub use canonical_snapshot::{
+    graph_lightning_initial_import_advance_checkpoint,
+    graph_lightning_initial_import_advance_durable_state_with_search_projection_batch,
+    graph_lightning_initial_import_checkpoint_readiness,
+    graph_lightning_initial_import_cutover_catch_up_report,
+    graph_lightning_initial_import_document_identity_coverage,
+    graph_lightning_initial_import_durable_state_report, graph_lightning_initial_import_plan,
+    graph_lightning_initial_import_plan_with_document_identities,
+    graph_lightning_initial_import_readiness, graph_lightning_initial_import_resume_action,
+    graph_lightning_initial_import_search_projection_batch_report,
+    graph_lightning_initial_import_search_projection_batch_report_with_document_identities,
+    graph_lightning_initial_import_session_report,
+    graph_lightning_initial_import_source_fingerprint, parse_graph_lightning_graph_stream_export,
     validate_graph_lightning_graph_stream, CanonicalGraphSnapshotExport,
     CanonicalGraphSnapshotValidation, CanonicalSnapshotEndpointViolation,
     CanonicalSnapshotIdentityAudit, CanonicalSnapshotNode, CanonicalSnapshotRelationship,
     CanonicalStableIdMapping, GraphLightningBootstrapExport, GraphLightningBootstrapManifest,
     GraphLightningGraphStream, GraphLightningGraphStreamValidation,
+    GraphLightningInitialImportApplyReport, GraphLightningInitialImportCheckpoint,
+    GraphLightningInitialImportCheckpointProgress,
+    GraphLightningInitialImportCheckpointProgressReport,
+    GraphLightningInitialImportCheckpointReadiness,
+    GraphLightningInitialImportCutoverCatchUpReport, GraphLightningInitialImportDocumentIdentity,
+    GraphLightningInitialImportDocumentIdentityCoverage,
+    GraphLightningInitialImportDocumentIdentityKindReport,
+    GraphLightningInitialImportDurableBatchAdvanceReport, GraphLightningInitialImportDurableState,
+    GraphLightningInitialImportDurableStateReport, GraphLightningInitialImportIdempotencyKey,
+    GraphLightningInitialImportPlan, GraphLightningInitialImportReadiness,
+    GraphLightningInitialImportResumeAction, GraphLightningInitialImportResumeActionKind,
+    GraphLightningInitialImportSearchProjectionBatchReport,
+    GraphLightningInitialImportSessionReport, GraphLightningInitialImportSourceFingerprint,
     GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION, GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION,
 };
 pub use plan_cache::{PlanCacheBypassReason, PlanCacheLookup, PlanCacheStats};
@@ -183,6 +216,82 @@ pub struct QueryOutput {
     pub rows: Vec<Row>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct QueryAccessControlContext {
+    policy_epoch: u64,
+    visibility_property: String,
+    allowed_visibility_values: BTreeSet<String>,
+}
+
+impl QueryAccessControlContext {
+    pub fn visibility_scope(
+        policy_epoch: u64,
+        visibility_property: impl Into<String>,
+        allowed_visibility_value: impl Into<String>,
+    ) -> Self {
+        Self::visibility_scopes(
+            policy_epoch,
+            visibility_property,
+            std::iter::once(allowed_visibility_value),
+        )
+    }
+
+    pub fn visibility_scopes(
+        policy_epoch: u64,
+        visibility_property: impl Into<String>,
+        allowed_visibility_values: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            policy_epoch,
+            visibility_property: visibility_property.into(),
+            allowed_visibility_values: allowed_visibility_values
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        }
+    }
+
+    pub fn policy_epoch(&self) -> u64 {
+        self.policy_epoch
+    }
+
+    pub fn visibility_property(&self) -> &str {
+        &self.visibility_property
+    }
+
+    pub fn allowed_visibility_values(&self) -> &BTreeSet<String> {
+        &self.allowed_visibility_values
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.policy_epoch == 0 {
+            return Err(SkeinError::Semantic(
+                "access control policy epoch must be non-zero".to_string(),
+            ));
+        }
+        if self.visibility_property.trim().is_empty() {
+            return Err(SkeinError::Semantic(
+                "access control visibility property must be non-empty".to_string(),
+            ));
+        }
+        if self.allowed_visibility_values.is_empty() {
+            return Err(SkeinError::Semantic(
+                "access control visibility scope must not be empty".to_string(),
+            ));
+        }
+        if self
+            .allowed_visibility_values
+            .iter()
+            .any(|value| value.trim().is_empty())
+        {
+            return Err(SkeinError::Semantic(
+                "access control visibility scope values must be non-empty".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SlowQueryLogExportOptions {
     pub include_query_text: bool,
@@ -198,6 +307,13 @@ pub struct SlowQueryLogRecordSummary {
     pub row_count: i64,
     pub success: bool,
     pub slow_log_candidate: bool,
+    pub access_control_policy_epoch: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct StatementExecutionContext<'a> {
+    execution_profile: Option<&'a executor::ReadExecutionProfile>,
+    access_control: Option<&'a QueryAccessControlContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,6 +349,7 @@ pub struct KnowledgeRetrievalRequest {
     pub query_embedding: Option<Vec<f32>>,
     pub mode: SearchMode,
     pub limit: usize,
+    pub offset: usize,
     pub rank_window: Option<usize>,
     pub search_fusion_weights: SearchFusionWeights,
     pub metadata_filters: BTreeMap<String, String>,
@@ -241,6 +358,62 @@ pub struct KnowledgeRetrievalRequest {
     pub graph_seed_limit: usize,
     pub graph_context_limit: usize,
     pub graph_context_max_hops: usize,
+}
+
+pub const NOWLEDGE_DEEP_SEARCH_MIN_RANK_WINDOW: usize = 20;
+pub const NOWLEDGE_DEEP_SEARCH_RANK_WINDOW_MULTIPLIER: usize = 5;
+pub const NOWLEDGE_DEEP_SEARCH_FILTERED_RANK_WINDOW: usize = 200;
+pub const NOWLEDGE_DEEP_SEARCH_MIN_GRAPH_SEED_LIMIT: usize = 12;
+pub const NOWLEDGE_DEEP_SEARCH_MAX_GRAPH_SEED_LIMIT: usize = 40;
+pub const NOWLEDGE_DEEP_SEARCH_GRAPH_SEED_MULTIPLIER: usize = 2;
+pub const NOWLEDGE_DEEP_SEARCH_GRAPH_CONTEXT_MAX_HOPS: usize = 2;
+
+impl KnowledgeRetrievalRequest {
+    pub fn nowledge_deep(
+        query_text: impl Into<String>,
+        query_embedding: Option<Vec<f32>>,
+        mode: SearchMode,
+        limit: usize,
+        offset: usize,
+        metadata_filters: BTreeMap<String, String>,
+    ) -> Self {
+        let page_end = offset.saturating_add(limit);
+        let rank_window = nowledge_deep_search_rank_window(page_end, !metadata_filters.is_empty());
+        let graph_seed_limit = nowledge_deep_search_graph_seed_limit(page_end);
+        Self {
+            query_text: query_text.into(),
+            query_embedding,
+            mode,
+            limit,
+            offset,
+            rank_window: Some(rank_window),
+            search_fusion_weights: SearchFusionWeights::default(),
+            metadata_filters,
+            candidate_limit: Some(rank_window),
+            candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
+            graph_seed_limit,
+            graph_context_limit: rank_window,
+            graph_context_max_hops: NOWLEDGE_DEEP_SEARCH_GRAPH_CONTEXT_MAX_HOPS,
+        }
+    }
+}
+
+pub fn nowledge_deep_search_rank_window(page_end: usize, has_filters: bool) -> usize {
+    if has_filters {
+        return NOWLEDGE_DEEP_SEARCH_FILTERED_RANK_WINDOW;
+    }
+    page_end
+        .saturating_mul(NOWLEDGE_DEEP_SEARCH_RANK_WINDOW_MULTIPLIER)
+        .max(NOWLEDGE_DEEP_SEARCH_MIN_RANK_WINDOW)
+}
+
+pub fn nowledge_deep_search_graph_seed_limit(page_end: usize) -> usize {
+    page_end
+        .saturating_mul(NOWLEDGE_DEEP_SEARCH_GRAPH_SEED_MULTIPLIER)
+        .clamp(
+            NOWLEDGE_DEEP_SEARCH_MIN_GRAPH_SEED_LIMIT,
+            NOWLEDGE_DEEP_SEARCH_MAX_GRAPH_SEED_LIMIT,
+        )
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -5341,6 +5514,23 @@ impl Database {
         self.store.search_projection_changefeed_status()
     }
 
+    pub fn search_projection_changefeed_readiness(
+        &self,
+        search_index: &SearchIndex,
+        require_restart_recoverable: bool,
+        max_operations: Option<usize>,
+    ) -> skein_storage::SearchProjectionChangefeedReadiness {
+        let freshness = search_index.projection_freshness();
+        self.store
+            .search_projection_changefeed_status()
+            .readiness_after(
+                freshness.source_graph_commit_epoch,
+                freshness.durable_source_graph_commit_epoch,
+                require_restart_recoverable,
+                max_operations,
+            )
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Self::open_with_durability(path, DurabilityPolicy::default())
     }
@@ -5436,6 +5626,22 @@ impl Database {
         self.telemetry = telemetry;
     }
 
+    pub fn telemetry_sink_configured(&self) -> bool {
+        self.telemetry.is_some()
+    }
+
+    pub fn operations_telemetry_readiness(
+        &self,
+        search_index: Option<&SearchIndex>,
+    ) -> OperationsTelemetryReadiness {
+        operations_telemetry_readiness(
+            self.telemetry_sink_configured(),
+            search_index
+                .map(SearchIndex::telemetry_sink_configured)
+                .unwrap_or(false),
+        )
+    }
+
     fn configure_qos_scheduler_telemetry(&self, scheduler: &mut LocalQosScheduler) {
         if let Some(telemetry) = &self.telemetry {
             scheduler.set_telemetry_sink(Some(qos_telemetry_sink(telemetry.clone())));
@@ -5492,7 +5698,7 @@ impl Database {
             statement_kind(body),
             started,
             query_result.as_ref(),
-            None,
+            StatementExecutionContext::default(),
         );
         query_result
     }
@@ -5546,9 +5752,36 @@ impl Database {
         cypher_text: &str,
         parameters: &BTreeMap<String, Value>,
     ) -> Result<ExplainOutput> {
+        self.explain_query_with_params_access_control_internal(cypher_text, parameters, None)
+    }
+
+    pub fn explain_query_with_params_access_control(
+        &self,
+        cypher_text: &str,
+        parameters: &BTreeMap<String, Value>,
+        access_control: QueryAccessControlContext,
+    ) -> Result<ExplainOutput> {
+        self.explain_query_with_params_access_control_internal(
+            cypher_text,
+            parameters,
+            Some(access_control),
+        )
+    }
+
+    fn explain_query_with_params_access_control_internal(
+        &self,
+        cypher_text: &str,
+        parameters: &BTreeMap<String, Value>,
+        access_control: Option<QueryAccessControlContext>,
+    ) -> Result<ExplainOutput> {
         let statement = cypher::parse(cypher_text)?;
         let work_request = query_work_request_for_statement(&self.system_variables, &statement)?;
-        let optimized = self.optimized_query_plan(cypher_text, &statement, parameters)?;
+        let optimized = self.optimized_query_plan_with_access_control(
+            cypher_text,
+            &statement,
+            parameters,
+            access_control.as_ref(),
+        )?;
         Ok(ExplainOutput {
             physical_plan: optimized.physical_plan,
             trace: optimized.trace,
@@ -5567,9 +5800,40 @@ impl Database {
         cypher_text: &str,
         parameters: &BTreeMap<String, Value>,
     ) -> Result<ExplainAnalyzeOutput> {
+        self.explain_analyze_query_with_params_access_control_internal(
+            cypher_text,
+            parameters,
+            None,
+        )
+    }
+
+    pub fn explain_analyze_query_with_params_access_control(
+        &mut self,
+        cypher_text: &str,
+        parameters: &BTreeMap<String, Value>,
+        access_control: QueryAccessControlContext,
+    ) -> Result<ExplainAnalyzeOutput> {
+        self.explain_analyze_query_with_params_access_control_internal(
+            cypher_text,
+            parameters,
+            Some(access_control),
+        )
+    }
+
+    fn explain_analyze_query_with_params_access_control_internal(
+        &mut self,
+        cypher_text: &str,
+        parameters: &BTreeMap<String, Value>,
+        access_control: Option<QueryAccessControlContext>,
+    ) -> Result<ExplainAnalyzeOutput> {
         let statement = cypher::parse(cypher_text)?;
         let work_request = query_work_request_for_statement(&self.system_variables, &statement)?;
-        let optimized = self.optimized_query_plan(cypher_text, &statement, parameters)?;
+        let optimized = self.optimized_query_plan_with_access_control(
+            cypher_text,
+            &statement,
+            parameters,
+            access_control.as_ref(),
+        )?;
         if executor::is_mutation_plan(&optimized.physical_plan)? {
             return Err(SkeinError::Execution(
                 "EXPLAIN ANALYZE only supports read queries".to_string(),
@@ -5604,6 +5868,16 @@ impl Database {
         statement: &cypher::Statement,
         parameters: &BTreeMap<String, Value>,
     ) -> Result<OptimizedQueryPlan> {
+        self.optimized_query_plan_with_access_control(cypher_text, statement, parameters, None)
+    }
+
+    fn optimized_query_plan_with_access_control(
+        &self,
+        cypher_text: &str,
+        statement: &cypher::Statement,
+        parameters: &BTreeMap<String, Value>,
+        access_control: Option<&QueryAccessControlContext>,
+    ) -> Result<OptimizedQueryPlan> {
         let cache_mode = if statement_uses_plan_cache(statement) {
             PlanCacheMode::Use
         } else {
@@ -5620,6 +5894,7 @@ impl Database {
                 optimizer: &self.optimizer,
                 config: &self.config,
                 cache: &self.plan_cache,
+                access_control,
             },
         )
     }
@@ -5685,6 +5960,220 @@ impl Database {
             snapshot,
             manifest,
             graph_stream,
+        })
+    }
+
+    pub fn graph_lightning_initial_import_readiness(
+        &self,
+        manifest: &GraphLightningBootstrapManifest,
+        projection_freshness: Option<&SearchProjectionFreshness>,
+    ) -> GraphLightningInitialImportReadiness {
+        graph_lightning_initial_import_readiness(
+            manifest,
+            self.store.commit_epoch(),
+            projection_freshness,
+        )
+    }
+
+    pub fn graph_lightning_initial_import_cutover_catch_up_report(
+        &self,
+        session: &GraphLightningInitialImportSessionReport,
+        live_projection_freshness: Option<&SearchProjectionFreshness>,
+    ) -> GraphLightningInitialImportCutoverCatchUpReport {
+        graph_lightning_initial_import_cutover_catch_up_report(
+            session,
+            self.store.commit_epoch(),
+            live_projection_freshness,
+        )
+    }
+
+    pub fn graph_lightning_initial_import_plan(
+        &self,
+        encoded_graph_stream: &str,
+        manifest: &GraphLightningBootstrapManifest,
+        projection_freshness: Option<&SearchProjectionFreshness>,
+        checkpoint: Option<&GraphLightningInitialImportCheckpoint>,
+    ) -> GraphLightningInitialImportPlan {
+        graph_lightning_initial_import_plan(
+            encoded_graph_stream,
+            manifest,
+            self.store.commit_epoch(),
+            projection_freshness,
+            checkpoint,
+        )
+    }
+
+    pub fn graph_lightning_initial_import_plan_with_document_identities(
+        &self,
+        encoded_graph_stream: &str,
+        manifest: &GraphLightningBootstrapManifest,
+        projection_freshness: Option<&SearchProjectionFreshness>,
+        checkpoint: Option<&GraphLightningInitialImportCheckpoint>,
+        document_identities: &[GraphLightningInitialImportDocumentIdentity],
+    ) -> GraphLightningInitialImportPlan {
+        graph_lightning_initial_import_plan_with_document_identities(
+            encoded_graph_stream,
+            manifest,
+            self.store.commit_epoch(),
+            projection_freshness,
+            checkpoint,
+            Some(document_identities),
+        )
+    }
+
+    pub fn graph_lightning_initial_import_apply(
+        &mut self,
+        encoded_graph_stream: &str,
+        manifest: &GraphLightningBootstrapManifest,
+        projection_freshness: Option<&SearchProjectionFreshness>,
+        checkpoint: Option<&GraphLightningInitialImportCheckpoint>,
+    ) -> Result<GraphLightningInitialImportApplyReport> {
+        self.graph_lightning_initial_import_apply_internal(
+            encoded_graph_stream,
+            manifest,
+            projection_freshness,
+            checkpoint,
+            None,
+        )
+    }
+
+    pub fn graph_lightning_initial_import_apply_with_document_identities(
+        &mut self,
+        encoded_graph_stream: &str,
+        manifest: &GraphLightningBootstrapManifest,
+        projection_freshness: Option<&SearchProjectionFreshness>,
+        checkpoint: Option<&GraphLightningInitialImportCheckpoint>,
+        document_identities: &[GraphLightningInitialImportDocumentIdentity],
+    ) -> Result<GraphLightningInitialImportApplyReport> {
+        self.graph_lightning_initial_import_apply_internal(
+            encoded_graph_stream,
+            manifest,
+            projection_freshness,
+            checkpoint,
+            Some(document_identities),
+        )
+    }
+
+    fn graph_lightning_initial_import_apply_internal(
+        &mut self,
+        encoded_graph_stream: &str,
+        manifest: &GraphLightningBootstrapManifest,
+        projection_freshness: Option<&SearchProjectionFreshness>,
+        checkpoint: Option<&GraphLightningInitialImportCheckpoint>,
+        document_identities: Option<&[GraphLightningInitialImportDocumentIdentity]>,
+    ) -> Result<GraphLightningInitialImportApplyReport> {
+        self.ensure_writable()?;
+        let mut blocker_codes = BTreeSet::new();
+        let plan = graph_lightning_initial_import_plan_with_document_identities(
+            encoded_graph_stream,
+            manifest,
+            self.store.commit_epoch(),
+            projection_freshness,
+            checkpoint,
+            document_identities,
+        );
+        if !plan.ready_for_graph_import {
+            blocker_codes.insert("graph_lightning_graph_stream_not_import_ready".to_string());
+        }
+        let target_empty = self.store.scan_nodes(None).next().is_none()
+            && self.store.scan_relationships(None).next().is_none();
+        if !target_empty {
+            blocker_codes.insert("graph_lightning_initial_import_target_not_empty".to_string());
+        }
+        let snapshot = if blocker_codes.is_empty() {
+            Some(parse_graph_lightning_graph_stream_export(
+                encoded_graph_stream,
+                Some(manifest),
+            )?)
+        } else {
+            None
+        };
+        if let Some(snapshot) = &snapshot {
+            for node in &snapshot.nodes {
+                if node.labels.len() != 1 {
+                    blocker_codes.insert(
+                        "graph_lightning_initial_import_multi_label_node_unsupported".to_string(),
+                    );
+                    break;
+                }
+            }
+        }
+        if !blocker_codes.is_empty() {
+            return Ok(GraphLightningInitialImportApplyReport {
+                applied: false,
+                ready_for_cutover: false,
+                graph_commit_epoch: self.store.commit_epoch(),
+                node_count: self.store.scan_nodes(None).count(),
+                relationship_count: self.store.scan_relationships(None).count(),
+                plan,
+                blocker_codes: blocker_codes.into_iter().collect(),
+            });
+        }
+        let snapshot = snapshot.expect("snapshot should be available without import blockers");
+        let stable_id_mapping = StoreStableIdMapping {
+            node_stable_ids: snapshot
+                .nodes
+                .iter()
+                .filter_map(|node| {
+                    node.stable_id
+                        .as_ref()
+                        .map(|stable_id| (NodeId(node.node_id), stable_id.clone()))
+                })
+                .collect(),
+            relationship_stable_ids: snapshot
+                .relationships
+                .iter()
+                .filter_map(|relationship| {
+                    relationship
+                        .stable_id
+                        .as_ref()
+                        .map(|stable_id| (RelId(relationship.relationship_id), stable_id.clone()))
+                })
+                .collect(),
+        };
+        let node_rows = snapshot
+            .nodes
+            .iter()
+            .map(|node| {
+                Ok((
+                    NodeId(node.node_id),
+                    single_import_label(node)?,
+                    node.properties.clone(),
+                ))
+            })
+            .collect::<Result<Vec<GraphSnapshotNodeImport>>>()?;
+        let relationship_rows = snapshot
+            .relationships
+            .iter()
+            .map(|relationship| {
+                Ok((
+                    RelId(relationship.relationship_id),
+                    NodeId(relationship.source_node_id),
+                    NodeId(relationship.target_node_id),
+                    relationship.rel_type.clone(),
+                    relationship.properties.clone(),
+                ))
+            })
+            .collect::<Result<Vec<GraphSnapshotRelationshipImport>>>()?;
+        self.store.replace_stable_id_mapping(stable_id_mapping)?;
+        self.store
+            .import_graph_snapshot_rows(&mut self.catalog, node_rows, relationship_rows)?;
+        let updated_plan = graph_lightning_initial_import_plan_with_document_identities(
+            encoded_graph_stream,
+            manifest,
+            self.store.commit_epoch(),
+            projection_freshness,
+            checkpoint,
+            document_identities,
+        );
+        Ok(GraphLightningInitialImportApplyReport {
+            applied: true,
+            ready_for_cutover: updated_plan.ready_for_cutover,
+            graph_commit_epoch: self.store.commit_epoch(),
+            node_count: self.store.scan_nodes(None).count(),
+            relationship_count: self.store.scan_relationships(None).count(),
+            plan: updated_plan,
+            blocker_codes: Vec::new(),
         })
     }
 
@@ -7912,6 +8401,7 @@ impl KnowledgeRetrievalGraphContext<'_> {
     ) -> Result<KnowledgeRetrievalOutput> {
         let search_options = SearchQueryOptions {
             limit: request.limit,
+            offset: request.offset,
             rank_window: request.rank_window,
             fusion_weights: request.search_fusion_weights,
             metadata_filters: request.metadata_filters.clone(),
@@ -8332,7 +8822,12 @@ impl KnowledgeRetrievalGraphContext<'_> {
         let mut input_filtered_out_count = 0usize;
         let mut scored = Vec::new();
         for node in self.store.scan_nodes(None) {
-            if !knowledge_graph_seed_matches_filters(self.catalog, node, metadata_filters) {
+            if !knowledge_graph_seed_matches_filters(
+                self.catalog,
+                self.store,
+                node,
+                metadata_filters,
+            ) {
                 input_filtered_out_count += 1;
                 continue;
             }
@@ -9053,15 +9548,17 @@ fn graph_seed_score(
 
 fn knowledge_graph_seed_matches_filters(
     catalog: &Catalog,
+    store: &GraphStore,
     node: &NodeRecord,
     metadata_filters: &BTreeMap<String, String>,
 ) -> bool {
     let pushdown = search_metadata_predicate_pushdown(metadata_filters);
-    knowledge_graph_seed_matches_predicates(catalog, node, &pushdown.predicates)
+    knowledge_graph_seed_matches_predicates(catalog, store, node, &pushdown.predicates)
 }
 
 fn knowledge_graph_seed_matches_predicates(
     catalog: &Catalog,
+    store: &GraphStore,
     node: &NodeRecord,
     predicates: &SearchPredicateSet,
 ) -> bool {
@@ -9071,37 +9568,53 @@ fn knowledge_graph_seed_matches_predicates(
     predicates
         .predicates()
         .iter()
-        .all(|predicate| knowledge_graph_seed_matches_predicate(catalog, node, predicate))
+        .all(|predicate| knowledge_graph_seed_matches_predicate(catalog, store, node, predicate))
 }
 
 fn knowledge_graph_seed_matches_predicate(
     catalog: &Catalog,
+    store: &GraphStore,
     node: &NodeRecord,
     predicate: &SearchPredicate,
 ) -> bool {
     match predicate.op() {
-        SearchPredicateOp::Eq(expected) => knowledge_graph_seed_matches_filter_value(
-            catalog,
-            node,
-            predicate.field().name(),
-            expected.as_str(),
-        ),
-        SearchPredicateOp::In(expected_values) => expected_values.iter().any(|expected| {
-            knowledge_graph_seed_matches_filter_value(
-                catalog,
-                node,
-                predicate.field().name(),
-                expected.as_str(),
-            )
-        }),
-        SearchPredicateOp::NotIn(excluded_values) => excluded_values.iter().all(|excluded| {
-            !knowledge_graph_seed_matches_filter_value(
-                catalog,
-                node,
-                predicate.field().name(),
-                excluded.as_str(),
-            )
-        }),
+        SearchPredicateOp::Eq(expected) => {
+            knowledge_graph_seed_filter_values(catalog, store, node, predicate.field().name())
+                .iter()
+                .any(|actual| {
+                    knowledge_graph_seed_filter_value_matches(
+                        predicate.field().name(),
+                        actual,
+                        expected.as_str(),
+                    )
+                })
+        }
+        SearchPredicateOp::In(expected_values) => {
+            let actual_values =
+                knowledge_graph_seed_filter_values(catalog, store, node, predicate.field().name());
+            actual_values.iter().any(|actual| {
+                expected_values.iter().any(|expected| {
+                    knowledge_graph_seed_filter_value_matches(
+                        predicate.field().name(),
+                        actual,
+                        expected.as_str(),
+                    )
+                })
+            })
+        }
+        SearchPredicateOp::NotIn(excluded_values) => {
+            let actual_values =
+                knowledge_graph_seed_filter_values(catalog, store, node, predicate.field().name());
+            actual_values.iter().all(|actual| {
+                excluded_values.iter().all(|excluded| {
+                    !knowledge_graph_seed_filter_value_matches(
+                        predicate.field().name(),
+                        actual,
+                        excluded.as_str(),
+                    )
+                })
+            })
+        }
         SearchPredicateOp::Gt(expected) => knowledge_graph_seed_matches_numeric_filter(
             node,
             predicate.field().name(),
@@ -9126,6 +9639,14 @@ fn knowledge_graph_seed_matches_predicate(
             expected.as_str(),
             |actual, expected| actual <= expected,
         ),
+        SearchPredicateOp::Exists => {
+            !knowledge_graph_seed_filter_values(catalog, store, node, predicate.field().name())
+                .is_empty()
+        }
+        SearchPredicateOp::IsMissing => {
+            knowledge_graph_seed_filter_values(catalog, store, node, predicate.field().name())
+                .is_empty()
+        }
     }
 }
 
@@ -9166,29 +9687,92 @@ fn parse_metadata_filter_number(value: &str) -> Option<f64> {
     number.is_finite().then_some(number)
 }
 
-fn knowledge_graph_seed_matches_filter_value(
+fn knowledge_graph_seed_filter_values(
     catalog: &Catalog,
+    store: &GraphStore,
     node: &NodeRecord,
     key: &str,
-    value: &str,
-) -> bool {
+) -> Vec<String> {
     match key {
         "kind" => {
-            let Some(label) = search_kind_to_label(value) else {
-                return false;
-            };
-            catalog
-                .label_id(label)
-                .is_some_and(|label_id| node.labels.contains(&label_id))
+            let label = node
+                .labels
+                .iter()
+                .find_map(|label_id| catalog.label_name(*label_id).and_then(search_label_to_kind));
+            label.map(str::to_string).into_iter().collect()
         }
-        "external_id" => projected_node_external_id(node) == value,
-        "source_id" => node_projection_source_id(node).as_deref() == Some(value),
-        "space_id" => normalized_node_space_id(node) == value,
+        "external_id" => vec![projected_node_external_id(node)],
+        "source_id" => node_projection_source_id(node).into_iter().collect(),
+        "space_id" => vec![normalized_node_space_id(node)],
+        "labels" => knowledge_graph_seed_business_labels(catalog, store, node),
         _ => node
             .properties
             .get(key)
-            .is_some_and(|property| value_to_external_id(property) == value),
+            .map(value_to_external_id)
+            .into_iter()
+            .collect(),
     }
+}
+
+fn knowledge_graph_seed_business_labels(
+    catalog: &Catalog,
+    store: &GraphStore,
+    node: &NodeRecord,
+) -> Vec<String> {
+    let Some(has_label_type_id) = catalog.rel_type_id("HAS_LABEL") else {
+        return Vec::new();
+    };
+    let Some(label_label_id) = catalog.label_id("Label") else {
+        return Vec::new();
+    };
+    store
+        .scan_relationships(Some(has_label_type_id))
+        .filter_map(|relationship| {
+            let label_node_id = if relationship.source == node.id {
+                relationship.target
+            } else if relationship.target == node.id {
+                relationship.source
+            } else {
+                return None;
+            };
+            let label = store.node(label_node_id)?;
+            label
+                .labels
+                .contains(&label_label_id)
+                .then(|| first_non_empty_node_value(label, &["canonical_name", "name", "id"]))?
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn first_non_empty_node_value(node: &NodeRecord, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .filter_map(|key| node.properties.get(*key).map(value_to_external_id))
+        .find(|value| !value.is_empty())
+}
+
+fn knowledge_graph_seed_filter_value_matches(key: &str, actual: &str, expected: &str) -> bool {
+    if key == "kind" {
+        let Some(expected_label) = search_kind_to_label(expected) else {
+            return false;
+        };
+        return search_label_to_kind(expected_label)
+            .is_some_and(|expected_kind| actual == expected_kind);
+    }
+    if key == "space_id" {
+        return normalize_graph_seed_string_filter_value(actual)
+            == normalize_graph_seed_string_filter_value(expected);
+    }
+    if search_field_is_enum_like(key) {
+        return normalize_search_enum_value(actual) == normalize_search_enum_value(expected);
+    }
+    normalize_graph_seed_string_filter_value(actual)
+        == normalize_graph_seed_string_filter_value(expected)
+}
+
+fn normalize_graph_seed_string_filter_value(value: &str) -> String {
+    value.trim().to_lowercase()
 }
 
 fn normalized_node_space_id(node: &NodeRecord) -> String {
@@ -15290,7 +15874,7 @@ fn knowledge_scoped_entity_match(
         return KnowledgeScopedEntityMatch::Missing;
     };
     if !metadata_filters.is_empty()
-        && !knowledge_graph_seed_matches_filters(catalog, node, metadata_filters)
+        && !knowledge_graph_seed_matches_filters(catalog, store, node, metadata_filters)
     {
         return KnowledgeScopedEntityMatch::FilteredOut;
     }
@@ -15820,7 +16404,12 @@ fn knowledge_scoped_property_batch_for(
             continue;
         };
         if !request.metadata_filters.is_empty()
-            && !knowledge_graph_seed_matches_filters(catalog, node, &request.metadata_filters)
+            && !knowledge_graph_seed_matches_filters(
+                catalog,
+                store,
+                node,
+                &request.metadata_filters,
+            )
         {
             filtered_out_count += 1;
             rows.push(KnowledgePropertyRow {
@@ -15939,7 +16528,12 @@ fn update_scoped_knowledge_properties_for(
         });
     };
     if !request.metadata_filters.is_empty()
-        && !knowledge_graph_seed_matches_filters(&db.catalog, seed, &request.metadata_filters)
+        && !knowledge_graph_seed_matches_filters(
+            &db.catalog,
+            &db.store,
+            seed,
+            &request.metadata_filters,
+        )
     {
         let node_id = seed.id.0;
         return Ok(KnowledgePropertyUpdateOutput {
@@ -16059,7 +16653,12 @@ fn update_scoped_knowledge_properties_batch_for(
             continue;
         }
         if !request.metadata_filters.is_empty()
-            && !knowledge_graph_seed_matches_filters(&db.catalog, seed, &request.metadata_filters)
+            && !knowledge_graph_seed_matches_filters(
+                &db.catalog,
+                &db.store,
+                seed,
+                &request.metadata_filters,
+            )
         {
             filtered_out_count += 1;
             rows.push(KnowledgePropertyUpdateBatchRow {
@@ -29156,7 +29755,12 @@ fn delete_scoped_knowledge_entity_for(
         });
     }
     if !request.metadata_filters.is_empty()
-        && !knowledge_graph_seed_matches_filters(&db.catalog, seed, &request.metadata_filters)
+        && !knowledge_graph_seed_matches_filters(
+            &db.catalog,
+            &db.store,
+            seed,
+            &request.metadata_filters,
+        )
     {
         return Ok(KnowledgeEntityDeleteOutput {
             graph_commit_epoch_before,
@@ -29247,7 +29851,12 @@ fn delete_scoped_knowledge_entity_batch_for(
             continue;
         }
         if !request.metadata_filters.is_empty()
-            && !knowledge_graph_seed_matches_filters(&db.catalog, seed, &request.metadata_filters)
+            && !knowledge_graph_seed_matches_filters(
+                &db.catalog,
+                &db.store,
+                seed,
+                &request.metadata_filters,
+            )
         {
             filtered_out_count += 1;
             rows.push(KnowledgeEntityDeleteBatchRow {
@@ -29384,12 +29993,14 @@ fn create_scoped_knowledge_relationship_for(
     let source_filtered_out = !request.source_metadata_filters.is_empty()
         && !knowledge_graph_seed_matches_filters(
             &db.catalog,
+            &db.store,
             source,
             &request.source_metadata_filters,
         );
     let target_filtered_out = !request.target_metadata_filters.is_empty()
         && !knowledge_graph_seed_matches_filters(
             &db.catalog,
+            &db.store,
             target,
             &request.target_metadata_filters,
         );
@@ -29541,12 +30152,14 @@ fn create_scoped_knowledge_relationship_batch_for(
         let source_filtered_out = !request.source_metadata_filters.is_empty()
             && !knowledge_graph_seed_matches_filters(
                 &db.catalog,
+                &db.store,
                 source,
                 &request.source_metadata_filters,
             );
         let target_filtered_out = !request.target_metadata_filters.is_empty()
             && !knowledge_graph_seed_matches_filters(
                 &db.catalog,
+                &db.store,
                 target,
                 &request.target_metadata_filters,
             );
@@ -29694,12 +30307,14 @@ fn upsert_scoped_knowledge_relationship_for(
     let source_filtered_out = !request.source_metadata_filters.is_empty()
         && !knowledge_graph_seed_matches_filters(
             &db.catalog,
+            &db.store,
             source,
             &request.source_metadata_filters,
         );
     let target_filtered_out = !request.target_metadata_filters.is_empty()
         && !knowledge_graph_seed_matches_filters(
             &db.catalog,
+            &db.store,
             target,
             &request.target_metadata_filters,
         );
@@ -29863,12 +30478,14 @@ fn upsert_scoped_knowledge_relationship_batch_for(
         let source_filtered_out = !request.source_metadata_filters.is_empty()
             && !knowledge_graph_seed_matches_filters(
                 &db.catalog,
+                &db.store,
                 source,
                 &request.source_metadata_filters,
             );
         let target_filtered_out = !request.target_metadata_filters.is_empty()
             && !knowledge_graph_seed_matches_filters(
                 &db.catalog,
+                &db.store,
                 target,
                 &request.target_metadata_filters,
             );
@@ -30119,12 +30736,14 @@ fn delete_scoped_knowledge_relationship_for(
     let source_filtered_out = !request.source_metadata_filters.is_empty()
         && !knowledge_graph_seed_matches_filters(
             &db.catalog,
+            &db.store,
             source,
             &request.source_metadata_filters,
         );
     let target_filtered_out = !request.target_metadata_filters.is_empty()
         && !knowledge_graph_seed_matches_filters(
             &db.catalog,
+            &db.store,
             target,
             &request.target_metadata_filters,
         );
@@ -30260,12 +30879,14 @@ fn update_scoped_knowledge_relationship_for(
     let source_filtered_out = !request.source_metadata_filters.is_empty()
         && !knowledge_graph_seed_matches_filters(
             &db.catalog,
+            &db.store,
             source,
             &request.source_metadata_filters,
         );
     let target_filtered_out = !request.target_metadata_filters.is_empty()
         && !knowledge_graph_seed_matches_filters(
             &db.catalog,
+            &db.store,
             target,
             &request.target_metadata_filters,
         );
@@ -30385,12 +31006,14 @@ fn update_scoped_knowledge_relationship_batch_for(
         let source_filtered_out = !request.source_metadata_filters.is_empty()
             && !knowledge_graph_seed_matches_filters(
                 &db.catalog,
+                &db.store,
                 source,
                 &request.source_metadata_filters,
             );
         let target_filtered_out = !request.target_metadata_filters.is_empty()
             && !knowledge_graph_seed_matches_filters(
                 &db.catalog,
+                &db.store,
                 target,
                 &request.target_metadata_filters,
             );
@@ -30622,12 +31245,14 @@ fn delete_scoped_knowledge_relationship_batch_for(
         let source_filtered_out = !request.source_metadata_filters.is_empty()
             && !knowledge_graph_seed_matches_filters(
                 &db.catalog,
+                &db.store,
                 source,
                 &request.source_metadata_filters,
             );
         let target_filtered_out = !request.target_metadata_filters.is_empty()
             && !knowledge_graph_seed_matches_filters(
                 &db.catalog,
+                &db.store,
                 target,
                 &request.target_metadata_filters,
             );
@@ -31523,7 +32148,7 @@ fn knowledge_scoped_neighbors_for(
         };
     };
     if !request.metadata_filters.is_empty()
-        && !knowledge_graph_seed_matches_filters(catalog, seed, &request.metadata_filters)
+        && !knowledge_graph_seed_matches_filters(catalog, store, seed, &request.metadata_filters)
     {
         let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
             graph_commit_epoch: store.commit_epoch(),
@@ -32004,7 +32629,12 @@ fn knowledge_scoped_relationships_for(
             continue;
         };
         if !request.metadata_filters.is_empty()
-            && !knowledge_graph_seed_matches_filters(catalog, seed, &request.metadata_filters)
+            && !knowledge_graph_seed_matches_filters(
+                catalog,
+                store,
+                seed,
+                &request.metadata_filters,
+            )
         {
             filtered_out_seed_count += 1;
             groups.push(KnowledgeRelationshipGroup {
@@ -32649,9 +33279,19 @@ fn knowledge_scoped_paths_for(
         };
     };
     let source_filtered = !request.source_metadata_filters.is_empty()
-        && !knowledge_graph_seed_matches_filters(catalog, source, &request.source_metadata_filters);
+        && !knowledge_graph_seed_matches_filters(
+            catalog,
+            store,
+            source,
+            &request.source_metadata_filters,
+        );
     let target_filtered = !request.target_metadata_filters.is_empty()
-        && !knowledge_graph_seed_matches_filters(catalog, target, &request.target_metadata_filters);
+        && !knowledge_graph_seed_matches_filters(
+            catalog,
+            store,
+            target,
+            &request.target_metadata_filters,
+        );
     if source_filtered || target_filtered {
         let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
             graph_commit_epoch: store.commit_epoch(),
@@ -33295,7 +33935,7 @@ fn knowledge_scoped_subgraph_for(
         };
     };
     if !request.metadata_filters.is_empty()
-        && !knowledge_graph_seed_matches_filters(catalog, seed, &request.metadata_filters)
+        && !knowledge_graph_seed_matches_filters(catalog, store, seed, &request.metadata_filters)
     {
         let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
             graph_commit_epoch: store.commit_epoch(),
@@ -34275,7 +34915,7 @@ fn search_projection_graph_delta_for(
         let Some(node) = store.node(NodeId(*node_id)) else {
             continue;
         };
-        if let Some(row) = projection_row_from_node(catalog, node) {
+        if let Some(row) = projection_row_from_node_with_graph_metadata(catalog, store, node) {
             upserts.push(row);
         }
     }
@@ -34602,6 +35242,18 @@ fn search_kind_to_label(kind: &str) -> Option<&'static str> {
         "Source" | "source" => Some("Source"),
         "SourceChunk" | "source_chunk" | "sourcechunk" | "chunk" => Some("SourceChunk"),
         "Community" | "community" => Some("Community"),
+        _ => None,
+    }
+}
+
+fn search_label_to_kind(label: &str) -> Option<&'static str> {
+    match label {
+        "Memory" | "memory" => Some("memory"),
+        "Message" | "message" => Some("message"),
+        "Entity" | "entity" => Some("entity"),
+        "Source" | "source" => Some("source"),
+        "SourceChunk" | "source_chunk" | "sourcechunk" | "chunk" => Some("source_chunk"),
+        "Community" | "community" => Some("community"),
         _ => None,
     }
 }
@@ -35123,6 +35775,7 @@ fn mutation_command_for_statement(
             optimizer: &db.optimizer,
             config: &db.config,
             cache: &db.plan_cache,
+            access_control: None,
         },
     )?;
     executor::mutation_command(&optimized.physical_plan)
@@ -35139,6 +35792,21 @@ impl DatabaseReadTransaction {
         parameters: &BTreeMap<String, Value>,
     ) -> Result<QueryOutput> {
         self.query_with_params_bounded(cypher_text, parameters, self.config.max_read_result_rows)
+    }
+
+    pub fn query_with_params_access_control(
+        &mut self,
+        cypher_text: &str,
+        parameters: &BTreeMap<String, Value>,
+        access_control: QueryAccessControlContext,
+    ) -> Result<QueryOutput> {
+        self.query_with_params_bounded_profile_access_control(
+            cypher_text,
+            parameters,
+            self.config.max_read_result_rows,
+            access_control,
+        )
+        .map(|output| output.output)
     }
 
     pub fn query_with_params_bounded(
@@ -35158,10 +35826,41 @@ impl DatabaseReadTransaction {
         parameters: &BTreeMap<String, Value>,
         max_rows: Option<usize>,
     ) -> Result<BoundedReadQueryOutput> {
+        self.query_with_params_bounded_profile_internal(cypher_text, parameters, max_rows, None)
+    }
+
+    pub fn query_with_params_bounded_profile_access_control(
+        &mut self,
+        cypher_text: &str,
+        parameters: &BTreeMap<String, Value>,
+        max_rows: Option<usize>,
+        access_control: QueryAccessControlContext,
+    ) -> Result<BoundedReadQueryOutput> {
+        self.query_with_params_bounded_profile_internal(
+            cypher_text,
+            parameters,
+            max_rows,
+            Some(access_control),
+        )
+    }
+
+    fn query_with_params_bounded_profile_internal(
+        &mut self,
+        cypher_text: &str,
+        parameters: &BTreeMap<String, Value>,
+        max_rows: Option<usize>,
+        access_control: Option<QueryAccessControlContext>,
+    ) -> Result<BoundedReadQueryOutput> {
         let statement = cypher::parse(cypher_text)?;
         let body = statement_body(&statement);
         if let cypher::Statement::Explain(explain) = &statement {
-            return self.execute_explain_statement(cypher_text, explain, parameters, max_rows);
+            return self.execute_explain_statement(
+                cypher_text,
+                explain,
+                parameters,
+                max_rows,
+                access_control,
+            );
         }
         if matches!(body, cypher::Statement::Checkpoint) {
             reject_transaction_control_parameters("CHECKPOINT", parameters)?;
@@ -35176,7 +35875,12 @@ impl DatabaseReadTransaction {
             ));
         }
         query_work_request_for_statement(&QuerySystemVariables::default(), &statement)?;
-        let optimized = self.optimized_query_plan(cypher_text, &statement, parameters)?;
+        let optimized = self.optimized_query_plan_with_access_control(
+            cypher_text,
+            &statement,
+            parameters,
+            access_control.as_ref(),
+        )?;
         if executor::is_mutation_plan(&optimized.physical_plan)? {
             return Err(SkeinError::Execution(
                 "read transaction query must not be a mutation".to_string(),
@@ -35202,10 +35906,16 @@ impl DatabaseReadTransaction {
         explain: &cypher::Explain,
         parameters: &BTreeMap<String, Value>,
         max_rows: Option<usize>,
+        access_control: Option<QueryAccessControlContext>,
     ) -> Result<BoundedReadQueryOutput> {
         let work_request =
             query_work_request_for_statement(&QuerySystemVariables::default(), &explain.statement)?;
-        let optimized = self.optimized_query_plan(cypher_text, &explain.statement, parameters)?;
+        let optimized = self.optimized_query_plan_with_access_control(
+            cypher_text,
+            &explain.statement,
+            parameters,
+            access_control.as_ref(),
+        )?;
         let inner_statement_kind = statement_kind(statement_body(&explain.statement));
         if executor::is_mutation_plan(&optimized.physical_plan)? {
             if explain.analyze {
@@ -35312,6 +36022,16 @@ impl DatabaseReadTransaction {
         statement: &cypher::Statement,
         parameters: &BTreeMap<String, Value>,
     ) -> Result<OptimizedQueryPlan> {
+        self.optimized_query_plan_with_access_control(cypher_text, statement, parameters, None)
+    }
+
+    fn optimized_query_plan_with_access_control(
+        &self,
+        cypher_text: &str,
+        statement: &cypher::Statement,
+        parameters: &BTreeMap<String, Value>,
+        access_control: Option<&QueryAccessControlContext>,
+    ) -> Result<OptimizedQueryPlan> {
         let cache_mode = if statement_uses_plan_cache(statement) {
             PlanCacheMode::Use
         } else {
@@ -35328,6 +36048,7 @@ impl DatabaseReadTransaction {
                 optimizer: &self.optimizer,
                 config: &self.config,
                 cache: &self.plan_cache,
+                access_control,
             },
         )
     }
@@ -35838,6 +36559,18 @@ impl DatabaseReadTransaction {
 
     pub fn property_descriptors(&self) -> Vec<PropertyDescriptor> {
         self.catalog.property_descriptors().cloned().collect()
+    }
+}
+
+fn single_import_label(node: &CanonicalSnapshotNode) -> Result<String> {
+    match node.labels.as_slice() {
+        [label] => Ok(label.clone()),
+        [] => Err(SkeinError::Storage(
+            "graph lightning initial import node has no label".to_string(),
+        )),
+        _ => Err(SkeinError::Storage(
+            "graph lightning initial import multi-label node is unsupported".to_string(),
+        )),
     }
 }
 

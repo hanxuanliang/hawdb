@@ -2,6 +2,7 @@ use crate::RuntimeCapabilities;
 
 pub const fn compiled_runtime_capabilities() -> RuntimeCapabilities {
     RuntimeCapabilities {
+        access_control: cfg!(feature = "acl"),
         full_text_search: cfg!(feature = "full-text-search"),
         vector_search: cfg!(feature = "vector-search"),
         graph_analytics: cfg!(feature = "graph-analytics"),
@@ -24,6 +25,10 @@ mod tests {
     fn compiled_matrix_matches_enabled_cargo_features() {
         let capabilities = compiled_runtime_capabilities();
 
+        assert_eq!(
+            capabilities.is_enabled(RuntimeCapability::AccessControl),
+            cfg!(feature = "acl")
+        );
         assert_eq!(
             capabilities.is_enabled(RuntimeCapability::FullTextSearch),
             cfg!(feature = "full-text-search")

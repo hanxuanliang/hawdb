@@ -1,9 +1,10 @@
 use crate::{
     nowledge_mem_graph_read_route_catalog_digest, Result, SkeinError,
-    NOWLEDGE_GRAPH_ROUTE_WORKLOAD_FIXTURE_PROTOCOL, NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL,
+    GRAPH_RAG_SCHEMA_CONTEXT_PROTOCOL, NOWLEDGE_GRAPH_ROUTE_WORKLOAD_FIXTURE_PROTOCOL,
+    NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL, NOWLEDGE_MEM_CUTOVER_CONTROLS_PROTOCOL,
     NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
-    NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE,
-    NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE,
+    NOWLEDGE_MEM_OPERATIONS_READINESS_PROTOCOL, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
+    NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE, NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE,
     NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
     NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
     REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
@@ -28,17 +29,26 @@ pub struct NowledgePreviousWrapperPreflightInputs {
     pub replacement_summary: serde_json::Value,
     pub query_runtime_preflight: serde_json::Value,
     pub library_readiness: serde_json::Value,
+    pub cutover_controls: serde_json::Value,
+    pub operations_readiness: serde_json::Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct NowledgePreviousWrapperPreflightArtifacts {
+    pub contract_evidence: serde_json::Value,
+    pub adapter_smoke: serde_json::Value,
+    pub migration_gate: serde_json::Value,
+    pub replacement_summary: serde_json::Value,
+    pub query_runtime_preflight: serde_json::Value,
+    pub library_readiness: serde_json::Value,
+    pub cutover_controls: serde_json::Value,
+    pub operations_readiness: serde_json::Value,
 }
 
 impl NowledgePreviousWrapperPreflightInputs {
     pub fn new(
         wrapper_identity: impl Into<String>,
-        contract_evidence: serde_json::Value,
-        adapter_smoke: serde_json::Value,
-        migration_gate: serde_json::Value,
-        replacement_summary: serde_json::Value,
-        query_runtime_preflight: serde_json::Value,
-        library_readiness: serde_json::Value,
+        artifacts: NowledgePreviousWrapperPreflightArtifacts,
     ) -> Result<Self> {
         let wrapper_identity = wrapper_identity.into();
         if wrapper_identity.trim().is_empty() {
@@ -48,12 +58,14 @@ impl NowledgePreviousWrapperPreflightInputs {
         }
         Ok(Self {
             wrapper_identity,
-            contract_evidence,
-            adapter_smoke,
-            migration_gate,
-            replacement_summary,
-            query_runtime_preflight,
-            library_readiness,
+            contract_evidence: artifacts.contract_evidence,
+            adapter_smoke: artifacts.adapter_smoke,
+            migration_gate: artifacts.migration_gate,
+            replacement_summary: artifacts.replacement_summary,
+            query_runtime_preflight: artifacts.query_runtime_preflight,
+            library_readiness: artifacts.library_readiness,
+            cutover_controls: artifacts.cutover_controls,
+            operations_readiness: artifacts.operations_readiness,
         })
     }
 }
@@ -117,7 +129,7 @@ impl NowledgePreviousWrapperPreflightReport {
 }
 
 pub fn nowledge_previous_wrapper_preflight_check_usage() -> String {
-    "nowledge-previous-wrapper-preflight-check requires [--require-ready] --wrapper-identity <id> (--bundle-dir <dir> | --contract-evidence-json <path> --adapter-smoke-json <path> --migration-gate-json <path> --replacement-summary-json <path> --query-runtime-preflight-json <path> --library-readiness-json <path>)".to_string()
+    "nowledge-previous-wrapper-preflight-check requires [--require-ready] --wrapper-identity <id> (--bundle-dir <dir> | --contract-evidence-json <path> --adapter-smoke-json <path> --migration-gate-json <path> --replacement-summary-json <path> --query-runtime-preflight-json <path> --library-readiness-json <path> --cutover-controls-json <path> --operations-readiness-json <path>)".to_string()
 }
 
 #[derive(Debug, Clone, Default)]
@@ -130,6 +142,8 @@ struct CliPreviousWrapperPreflightCheckInputs {
     replacement_summary: Option<serde_json::Value>,
     query_runtime_preflight: Option<serde_json::Value>,
     library_readiness: Option<serde_json::Value>,
+    cutover_controls: Option<serde_json::Value>,
+    operations_readiness: Option<serde_json::Value>,
 }
 
 #[cfg(test)]
@@ -193,6 +207,12 @@ pub fn run_nowledge_previous_wrapper_preflight_check(
             "--library-readiness-json" => {
                 inputs.library_readiness = Some(read_json_arg(&mut args)?);
             }
+            "--cutover-controls-json" => {
+                inputs.cutover_controls = Some(read_json_arg(&mut args)?);
+            }
+            "--operations-readiness-json" => {
+                inputs.operations_readiness = Some(read_json_arg(&mut args)?);
+            }
             _ => {
                 return Err(SkeinError::Semantic(
                     nowledge_previous_wrapper_preflight_check_usage(),
@@ -233,6 +253,14 @@ fn fill_bundle_dir_inputs(inputs: &mut CliPreviousWrapperPreflightCheckInputs) -
     if inputs.library_readiness.is_none() {
         inputs.library_readiness =
             Some(read_json_file(&bundle_dir.join("library-readiness.json"))?);
+    }
+    if inputs.cutover_controls.is_none() {
+        inputs.cutover_controls = Some(read_json_file(&bundle_dir.join("cutover-controls.json"))?);
+    }
+    if inputs.operations_readiness.is_none() {
+        inputs.operations_readiness = Some(read_json_file(
+            &bundle_dir.join("operations-readiness.json"),
+        )?);
     }
     Ok(())
 }
@@ -281,15 +309,25 @@ fn cli_inputs_to_typed(
     let library_readiness = inputs
         .library_readiness
         .ok_or_else(|| SkeinError::Semantic(nowledge_previous_wrapper_preflight_check_usage()))?;
+    let cutover_controls = inputs
+        .cutover_controls
+        .ok_or_else(|| SkeinError::Semantic(nowledge_previous_wrapper_preflight_check_usage()))?;
+    let operations_readiness = inputs
+        .operations_readiness
+        .ok_or_else(|| SkeinError::Semantic(nowledge_previous_wrapper_preflight_check_usage()))?;
 
     NowledgePreviousWrapperPreflightInputs::new(
         wrapper_identity,
-        contract_evidence,
-        adapter_smoke,
-        migration_gate,
-        replacement_summary,
-        query_runtime_preflight,
-        library_readiness,
+        NowledgePreviousWrapperPreflightArtifacts {
+            contract_evidence,
+            adapter_smoke,
+            migration_gate,
+            replacement_summary,
+            query_runtime_preflight,
+            library_readiness,
+            cutover_controls,
+            operations_readiness,
+        },
     )
 }
 
@@ -312,6 +350,8 @@ pub fn nowledge_previous_wrapper_preflight_check(
     let replacement_summary = inputs.replacement_summary;
     let query_runtime_preflight = inputs.query_runtime_preflight;
     let library_readiness = inputs.library_readiness;
+    let cutover_controls = inputs.cutover_controls;
+    let operations_readiness = inputs.operations_readiness;
 
     let checks = vec![
         preflight_check(
@@ -956,6 +996,19 @@ pub fn nowledge_previous_wrapper_preflight_check(
                         "failed_search_metadata_probe_count",
                     ],
                 ) == Some(0),
+                u64_path(
+                    &replacement_summary,
+                    &["workload_fixture_evidence", "source_projection_probe_count"],
+                )
+                .is_some_and(|count| count > 0),
+                u64_path(
+                    &replacement_summary,
+                    &[
+                        "workload_fixture_evidence",
+                        "failed_source_projection_probe_count",
+                    ],
+                ) == Some(0),
+                workload_source_projection_ready(&replacement_summary, &["workload_fixture_evidence"]),
             ],
             [
                 "production_cutover_ready",
@@ -1047,6 +1100,9 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 "workload_fixture_evidence.failed_bounded_expansion_probe_count",
                 "workload_fixture_evidence.search_metadata_probe_count",
                 "workload_fixture_evidence.failed_search_metadata_probe_count",
+                "workload_fixture_evidence.source_projection_probe_count",
+                "workload_fixture_evidence.failed_source_projection_probe_count",
+                "workload_fixture_evidence.source_projection_reports",
             ],
             blocker_codes(
                 &replacement_summary,
@@ -1348,10 +1404,13 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 library_readiness_area_ready(&library_readiness, "background"),
                 library_readiness_area_ready(&library_readiness, "query_family"),
                 library_readiness_area_ready(&library_readiness, "graph_route"),
+                library_readiness_area_ready(&library_readiness, "search_route_ownership"),
                 library_readiness_area_ready(&library_readiness, "search_projection"),
                 library_readiness_area_ready(&library_readiness, "search_projection_shadow"),
                 library_readiness_area_ready(&library_readiness, "search_candidate_shadow"),
                 library_readiness_area_ready(&library_readiness, "workload_fixture"),
+                library_readiness_graph_rag_workload_ready(&library_readiness),
+                workload_source_projection_ready(&library_readiness, &["workload_fixture_evidence"]),
             ],
             [
                 "library_readiness.protocol",
@@ -1371,10 +1430,13 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 "library_readiness.readiness_by_area.background.ready",
                 "library_readiness.readiness_by_area.query_family.ready",
                 "library_readiness.readiness_by_area.graph_route.ready",
+                "library_readiness.readiness_by_area.search_route_ownership.ready",
                 "library_readiness.readiness_by_area.search_projection.ready",
                 "library_readiness.readiness_by_area.search_projection_shadow.ready",
                 "library_readiness.readiness_by_area.search_candidate_shadow.ready",
                 "library_readiness.readiness_by_area.workload_fixture.ready",
+                "library_readiness.workload_fixture_evidence.graph_rag_reports",
+                "library_readiness.workload_fixture_evidence.source_projection_reports",
             ],
             blocker_codes(
                 &library_readiness,
@@ -1386,6 +1448,7 @@ pub fn nowledge_previous_wrapper_preflight_check(
                     &["readiness_by_area", "background", "blocker_codes"][..],
                     &["readiness_by_area", "query_family", "blocker_codes"][..],
                     &["readiness_by_area", "graph_route", "blocker_codes"][..],
+                    &["readiness_by_area", "search_route_ownership", "blocker_codes"][..],
                     &["readiness_by_area", "search_projection", "blocker_codes"][..],
                     &[
                         "readiness_by_area",
@@ -1398,8 +1461,123 @@ pub fn nowledge_previous_wrapper_preflight_check(
                         "blocker_codes",
                     ][..],
                     &["readiness_by_area", "workload_fixture", "blocker_codes"][..],
+                    &["workload_fixture_evidence", "blocker_codes"][..],
                 ],
             ),
+        ),
+        preflight_check(
+            "cutover_controls",
+            [
+                str_path(&cutover_controls, &["protocol"])
+                    == Some(NOWLEDGE_MEM_CUTOVER_CONTROLS_PROTOCOL),
+                bool_path(&cutover_controls, &["ready"]) == Some(true),
+                str_path(&cutover_controls, &["controls", "graph_reads"]) == Some("skein"),
+                str_path(&cutover_controls, &["controls", "search_reads"]) == Some("skein"),
+                str_path(&cutover_controls, &["controls", "dual_writes"]) == Some("enabled"),
+                str_path(&cutover_controls, &["controls", "projection_catch_up"])
+                    == Some("enabled"),
+                bool_path(&cutover_controls, &["graph", "read_selected_skein"]) == Some(true),
+                bool_path(&cutover_controls, &["graph", "read_effective"]) == Some(true),
+                bool_path(&cutover_controls, &["search", "read_selected_skein"]) == Some(true),
+                bool_path(&cutover_controls, &["search", "read_effective"]) == Some(true),
+                bool_path(&cutover_controls, &["work", "dual_writes_enabled"]) == Some(true),
+                bool_path(&cutover_controls, &["work", "projection_catch_up_enabled"])
+                    == Some(true),
+                bool_path(
+                    &cutover_controls,
+                    &["work", "initial_import_inactive_for_cutover"],
+                ) == Some(true)
+                    || bool_path(
+                        &cutover_controls,
+                        &["work", "initial_import_cutover_catch_up_ready"],
+                    ) == Some(true),
+                bool_path(
+                    &cutover_controls,
+                    &["production_status", "graph", "skein_cutover_effective"],
+                ) == Some(true),
+                bool_path(
+                    &cutover_controls,
+                    &["production_status", "search", "skein_cutover_effective"],
+                ) == Some(true),
+                bool_path(&cutover_controls, &["redaction", "query_text_copied"]) == Some(false),
+                bool_path(&cutover_controls, &["redaction", "parameters_copied"]) == Some(false),
+                bool_path(&cutover_controls, &["redaction", "local_paths_copied"]) == Some(false),
+            ],
+            [
+                "cutover_controls.protocol",
+                "cutover_controls.ready",
+                "cutover_controls.controls.graph_reads",
+                "cutover_controls.controls.search_reads",
+                "cutover_controls.controls.dual_writes",
+                "cutover_controls.controls.projection_catch_up",
+                "cutover_controls.graph.read_selected_skein",
+                "cutover_controls.graph.read_effective",
+                "cutover_controls.search.read_selected_skein",
+                "cutover_controls.search.read_effective",
+                "cutover_controls.work.dual_writes_enabled",
+                "cutover_controls.work.projection_catch_up_enabled",
+                "cutover_controls.work.initial_import_safe_for_read_cutover",
+                "cutover_controls.production_status.graph.skein_cutover_effective",
+                "cutover_controls.production_status.search.skein_cutover_effective",
+                "cutover_controls.redaction.query_text_copied",
+                "cutover_controls.redaction.parameters_copied",
+                "cutover_controls.redaction.local_paths_copied",
+            ],
+            blocker_codes(&cutover_controls, &[&["blocker_codes"][..]]),
+        ),
+        preflight_check(
+            "operations_readiness",
+            [
+                str_path(&operations_readiness, &["protocol"])
+                    == Some(NOWLEDGE_MEM_OPERATIONS_READINESS_PROTOCOL),
+                bool_path(&operations_readiness, &["present"]) == Some(true),
+                bool_path(&operations_readiness, &["ready"]) == Some(true),
+                bool_path(&operations_readiness, &["graph", "open"]) == Some(true),
+                bool_path(&operations_readiness, &["graph", "read_only"]) == Some(false),
+                bool_path(&operations_readiness, &["search_projection", "open"]) == Some(true),
+                bool_path(&operations_readiness, &["search_projection", "stale"]) == Some(false),
+                bool_path(&operations_readiness, &["storage_lifecycle", "ready"]) == Some(true),
+                str_path(&operations_readiness, &["storage_lifecycle", "action"])
+                    == Some("ready"),
+                bool_path(
+                    &operations_readiness,
+                    &["readiness", "storage_lifecycle_ready"],
+                ) == Some(true),
+                bool_path(
+                    &operations_readiness,
+                    &["readiness", "storage_recovery_ready"],
+                ) == Some(true),
+                bool_path(&operations_readiness, &["readiness", "slow_query_ready"]) == Some(true),
+                bool_path(
+                    &operations_readiness,
+                    &["readiness", "background_maintenance_ready"],
+                ) == Some(true),
+                bool_path(&operations_readiness, &["redaction", "query_text_copied"])
+                    == Some(false),
+                bool_path(&operations_readiness, &["redaction", "parameters_copied"])
+                    == Some(false),
+                bool_path(&operations_readiness, &["redaction", "local_paths_copied"])
+                    == Some(false),
+            ],
+            [
+                "operations_readiness.protocol",
+                "operations_readiness.present",
+                "operations_readiness.ready",
+                "operations_readiness.graph.open",
+                "operations_readiness.graph.read_only",
+                "operations_readiness.search_projection.open",
+                "operations_readiness.search_projection.stale",
+                "operations_readiness.storage_lifecycle.ready",
+                "operations_readiness.storage_lifecycle.action",
+                "operations_readiness.readiness.storage_lifecycle_ready",
+                "operations_readiness.readiness.storage_recovery_ready",
+                "operations_readiness.readiness.slow_query_ready",
+                "operations_readiness.readiness.background_maintenance_ready",
+                "operations_readiness.redaction.query_text_copied",
+                "operations_readiness.redaction.parameters_copied",
+                "operations_readiness.redaction.local_paths_copied",
+            ],
+            blocker_codes(&operations_readiness, &[&["blocker_codes"][..]]),
         ),
     ];
     let ready = checks.iter().all(|check| check.ready);
@@ -1408,15 +1586,17 @@ pub fn nowledge_previous_wrapper_preflight_check(
         .filter(|check| !check.ready)
         .map(|check| check.name.clone())
         .collect::<Vec<_>>();
-    let release_summary = previous_wrapper_preflight_release_summary(
-        &wrapper_identity,
-        &contract_evidence,
-        &adapter_smoke,
-        &migration_gate,
-        &replacement_summary,
-        &query_runtime_preflight,
-        &library_readiness,
-    );
+    let release_summary = previous_wrapper_preflight_release_summary(PreflightReleaseInputs {
+        wrapper_identity: &wrapper_identity,
+        contract_evidence: &contract_evidence,
+        adapter_smoke: &adapter_smoke,
+        migration_gate: &migration_gate,
+        replacement_summary: &replacement_summary,
+        query_runtime_preflight: &query_runtime_preflight,
+        library_readiness: &library_readiness,
+        cutover_controls: &cutover_controls,
+        operations_readiness: &operations_readiness,
+    });
 
     Ok(NowledgePreviousWrapperPreflightReport {
         protocol: NOWLEDGE_PREVIOUS_WRAPPER_PREFLIGHT_PROTOCOL.to_string(),
@@ -1428,17 +1608,31 @@ pub fn nowledge_previous_wrapper_preflight_check(
     })
 }
 
+struct PreflightReleaseInputs<'a> {
+    wrapper_identity: &'a str,
+    contract_evidence: &'a serde_json::Value,
+    adapter_smoke: &'a serde_json::Value,
+    migration_gate: &'a serde_json::Value,
+    replacement_summary: &'a serde_json::Value,
+    query_runtime_preflight: &'a serde_json::Value,
+    library_readiness: &'a serde_json::Value,
+    cutover_controls: &'a serde_json::Value,
+    operations_readiness: &'a serde_json::Value,
+}
+
 fn previous_wrapper_preflight_release_summary(
-    wrapper_identity: &str,
-    contract_evidence: &serde_json::Value,
-    adapter_smoke: &serde_json::Value,
-    migration_gate: &serde_json::Value,
-    replacement_summary: &serde_json::Value,
-    query_runtime_preflight: &serde_json::Value,
-    library_readiness: &serde_json::Value,
+    inputs: PreflightReleaseInputs<'_>,
 ) -> serde_json::Value {
     let mut summary = serde_json::Map::new();
-    insert_json_value(&mut summary, "wrapper_identity", wrapper_identity);
+    let contract_evidence = inputs.contract_evidence;
+    let adapter_smoke = inputs.adapter_smoke;
+    let migration_gate = inputs.migration_gate;
+    let replacement_summary = inputs.replacement_summary;
+    let query_runtime_preflight = inputs.query_runtime_preflight;
+    let library_readiness = inputs.library_readiness;
+    let cutover_controls = inputs.cutover_controls;
+    let operations_readiness = inputs.operations_readiness;
+    insert_json_value(&mut summary, "wrapper_identity", inputs.wrapper_identity);
     insert_json_value(
         &mut summary,
         "required_contract_ready",
@@ -2440,6 +2634,161 @@ fn previous_wrapper_preflight_release_summary(
             &["open_report", "search_projection_opened"],
         ),
     );
+    insert_json_value(
+        &mut summary,
+        "library_readiness_workload_fixture_graph_rag_ready",
+        Some(library_readiness_graph_rag_workload_ready(
+            library_readiness,
+        )),
+    );
+    insert_json_value(
+        &mut summary,
+        "library_readiness_workload_fixture_graph_rag_probe_count",
+        u64_path(
+            library_readiness,
+            &["workload_fixture_evidence", "graph_rag_probe_count"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "library_readiness_workload_fixture_failed_graph_rag_probe_count",
+        u64_path(
+            library_readiness,
+            &["workload_fixture_evidence", "failed_graph_rag_probe_count"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "library_readiness_workload_fixture_source_projection_ready",
+        Some(workload_source_projection_ready(
+            library_readiness,
+            &["workload_fixture_evidence"],
+        )),
+    );
+    insert_json_value(
+        &mut summary,
+        "library_readiness_workload_fixture_source_projection_probe_count",
+        u64_path(
+            library_readiness,
+            &["workload_fixture_evidence", "source_projection_probe_count"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "library_readiness_workload_fixture_failed_source_projection_probe_count",
+        u64_path(
+            library_readiness,
+            &[
+                "workload_fixture_evidence",
+                "failed_source_projection_probe_count",
+            ],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "cutover_controls_ready",
+        bool_path(cutover_controls, &["ready"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "cutover_controls_graph_reads",
+        str_path(cutover_controls, &["controls", "graph_reads"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "cutover_controls_search_reads",
+        str_path(cutover_controls, &["controls", "search_reads"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "cutover_controls_dual_writes_enabled",
+        bool_path(cutover_controls, &["work", "dual_writes_enabled"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "cutover_controls_projection_catch_up_enabled",
+        bool_path(cutover_controls, &["work", "projection_catch_up_enabled"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "cutover_controls_initial_import_inactive_for_cutover",
+        bool_path(
+            cutover_controls,
+            &["work", "initial_import_inactive_for_cutover"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "cutover_controls_initial_import_cutover_catch_up_ready",
+        bool_path(
+            cutover_controls,
+            &["work", "initial_import_cutover_catch_up_ready"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "cutover_controls_initial_import_safe_for_read_cutover",
+        bool_path(
+            cutover_controls,
+            &["work", "initial_import_safe_for_read_cutover"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "cutover_controls_graph_read_effective",
+        bool_path(cutover_controls, &["graph", "read_effective"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "cutover_controls_search_read_effective",
+        bool_path(cutover_controls, &["search", "read_effective"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "operations_readiness_ready",
+        bool_path(operations_readiness, &["ready"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "operations_readiness_graph_open",
+        bool_path(operations_readiness, &["graph", "open"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "operations_readiness_search_projection_open",
+        bool_path(operations_readiness, &["search_projection", "open"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "operations_readiness_search_projection_stale",
+        bool_path(operations_readiness, &["search_projection", "stale"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "operations_readiness_storage_lifecycle_action",
+        str_path(operations_readiness, &["storage_lifecycle", "action"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "operations_readiness_storage_recovery_ready",
+        bool_path(
+            operations_readiness,
+            &["readiness", "storage_recovery_ready"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "operations_readiness_slow_query_ready",
+        bool_path(operations_readiness, &["readiness", "slow_query_ready"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "operations_readiness_background_maintenance_ready",
+        bool_path(
+            operations_readiness,
+            &["readiness", "background_maintenance_ready"],
+        ),
+    );
     serde_json::Value::Object(summary)
 }
 
@@ -2561,6 +2910,58 @@ fn replacement_summary_background_maintenance_graph_delta_ready(
 fn library_readiness_area_ready(value: &serde_json::Value, area: &str) -> bool {
     value_path(value, &["readiness_by_area", area, "ready"]).and_then(serde_json::Value::as_bool)
         == Some(true)
+}
+
+fn library_readiness_graph_rag_workload_ready(value: &serde_json::Value) -> bool {
+    let Some(evidence) = value_path(value, &["workload_fixture_evidence"]) else {
+        return false;
+    };
+    str_path(evidence, &["protocol"]) == Some(NOWLEDGE_GRAPH_ROUTE_WORKLOAD_FIXTURE_PROTOCOL)
+        && bool_path(evidence, &["ready"]) == Some(true)
+        && u64_path(evidence, &["graph_rag_probe_count"]).is_some_and(|count| count > 0)
+        && u64_path(evidence, &["failed_graph_rag_probe_count"]) == Some(0)
+        && value_path(evidence, &["graph_rag_reports"])
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|reports| reports.iter().any(graph_rag_workload_report_ready))
+}
+
+fn graph_rag_workload_report_ready(report: &serde_json::Value) -> bool {
+    bool_path(report, &["ready"]) == Some(true)
+        && str_path(report, &["schema_protocol"]) == Some(GRAPH_RAG_SCHEMA_CONTEXT_PROTOCOL)
+        && u64_path(report, &["label_count"]).is_some_and(|count| count > 0)
+        && u64_path(report, &["relationship_type_count"]).is_some_and(|count| count > 0)
+        && u64_path(report, &["route_count"]).is_some_and(|count| count > 0)
+        && u64_path(report, &["parameter_requirement_count"]).is_some_and(|count| count > 0)
+        && u64_path(report, &["row_count"]).is_some_and(|count| count > 0)
+        && bool_path(report, &["row_budget_exceeded"]) == Some(false)
+        && bool_path(report, &["payload_budget_exceeded"]) == Some(false)
+        && u64_path(report, &["blocking_operator_count"]) == Some(0)
+        && bool_path(report, &["streaming"]) == Some(false)
+        && value_path(report, &["error_class"]).is_none_or(serde_json::Value::is_null)
+}
+
+fn workload_source_projection_ready(value: &serde_json::Value, path: &[&str]) -> bool {
+    let Some(evidence) = value_path(value, path) else {
+        return false;
+    };
+    u64_path(evidence, &["source_projection_probe_count"]).is_some_and(|count| count > 0)
+        && u64_path(evidence, &["failed_source_projection_probe_count"]) == Some(0)
+        && value_path(evidence, &["source_projection_reports"])
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|reports| reports.iter().any(source_projection_workload_report_ready))
+}
+
+fn source_projection_workload_report_ready(report: &serde_json::Value) -> bool {
+    bool_path(report, &["ready"]) == Some(true)
+        && bool_path(report, &["too_small_batch_failed_closed"]) == Some(true)
+        && u64_path(report, &["operation_count"]) == Some(2)
+        && u64_path(report, &["upserted_documents"]) == Some(2)
+        && u64_path(report, &["deleted_documents"]) == Some(0)
+        && u64_path(report, &["source_document_count"]) == Some(2)
+        && bool_path(report, &["indexed_source_document_ready"]) == Some(true)
+        && u64_path(report, &["source_graph_commit_epoch"]).is_some()
+        && u64_path(report, &["complete_through_graph_commit_epoch"]).is_some()
+        && value_path(report, &["error_class"]).is_none_or(serde_json::Value::is_null)
 }
 
 fn full_contract_check_count_ready(value: &serde_json::Value) -> bool {
@@ -3013,14 +3414,15 @@ mod tests {
     use super::{
         check_by_name, nowledge_previous_wrapper_preflight_check_json,
         run_nowledge_previous_wrapper_preflight_check, PreviousWrapperPreflightCheckInputs,
-        SKEIN_NOWLEDGE_SEARCH_PROJECTION_EVIDENCE_PROTOCOL,
+        GRAPH_RAG_SCHEMA_CONTEXT_PROTOCOL, SKEIN_NOWLEDGE_SEARCH_PROJECTION_EVIDENCE_PROTOCOL,
         SKEIN_NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL,
         SKEIN_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE,
     };
     use crate::{
         nowledge_mem_graph_read_route_catalog_digest,
         NOWLEDGE_GRAPH_ROUTE_WORKLOAD_FIXTURE_PROTOCOL,
-        NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL, NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
+        NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL, NOWLEDGE_MEM_CUTOVER_CONTROLS_PROTOCOL,
+        NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION, NOWLEDGE_MEM_OPERATIONS_READINESS_PROTOCOL,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE,
@@ -3328,7 +3730,7 @@ mod tests {
         );
         assert_release_summary_field(summary, "query_runtime_preflight_failed_probe_count", 0);
         assert_release_summary_field(summary, "library_readiness_ready", true);
-        assert_release_summary_field(summary, "library_readiness_ready_area_count", 10);
+        assert_release_summary_field(summary, "library_readiness_ready_area_count", 11);
         assert_release_summary_field(summary, "library_readiness_blocked_area_count", 0);
         assert_release_summary_field(summary, "library_readiness_redaction_ready", true);
         assert_release_summary_field(summary, "library_readiness_query_text_copied", false);
@@ -3336,6 +3738,72 @@ mod tests {
         assert_release_summary_field(summary, "library_readiness_local_paths_copied", false);
         assert_release_summary_field(summary, "library_readiness_graph_opened", true);
         assert_release_summary_field(summary, "library_readiness_search_projection_opened", true);
+        assert_release_summary_field(
+            summary,
+            "library_readiness_workload_fixture_graph_rag_ready",
+            true,
+        );
+        assert_release_summary_field(
+            summary,
+            "library_readiness_workload_fixture_graph_rag_probe_count",
+            1,
+        );
+        assert_release_summary_field(
+            summary,
+            "library_readiness_workload_fixture_failed_graph_rag_probe_count",
+            0,
+        );
+        assert_release_summary_field(
+            summary,
+            "library_readiness_workload_fixture_source_projection_ready",
+            true,
+        );
+        assert_release_summary_field(
+            summary,
+            "library_readiness_workload_fixture_source_projection_probe_count",
+            1,
+        );
+        assert_release_summary_field(
+            summary,
+            "library_readiness_workload_fixture_failed_source_projection_probe_count",
+            0,
+        );
+        assert_release_summary_field(summary, "cutover_controls_ready", true);
+        assert_release_summary_field(summary, "cutover_controls_graph_reads", "skein");
+        assert_release_summary_field(summary, "cutover_controls_search_reads", "skein");
+        assert_release_summary_field(summary, "cutover_controls_dual_writes_enabled", true);
+        assert_release_summary_field(
+            summary,
+            "cutover_controls_projection_catch_up_enabled",
+            true,
+        );
+        assert_release_summary_field(
+            summary,
+            "cutover_controls_initial_import_inactive_for_cutover",
+            true,
+        );
+        assert_release_summary_field(summary, "cutover_controls_graph_read_effective", true);
+        assert_release_summary_field(summary, "cutover_controls_search_read_effective", true);
+        assert_release_summary_field(summary, "operations_readiness_ready", true);
+        assert_release_summary_field(summary, "operations_readiness_graph_open", true);
+        assert_release_summary_field(summary, "operations_readiness_search_projection_open", true);
+        assert_release_summary_field(
+            summary,
+            "operations_readiness_search_projection_stale",
+            false,
+        );
+        assert_release_summary_field(
+            summary,
+            "operations_readiness_storage_lifecycle_action",
+            "ready",
+        );
+        assert_release_summary_field(summary, "operations_readiness_storage_recovery_ready", true);
+        assert_release_summary_field(summary, "operations_readiness_slow_query_ready", true);
+        assert_release_summary_field(
+            summary,
+            "operations_readiness_background_maintenance_ready",
+            true,
+        );
         assert!(report["checks"]
             .as_array()
             .unwrap()
@@ -3503,7 +3971,10 @@ mod tests {
                 "workload_fixture_evidence.bounded_expansion_probe_count",
                 "workload_fixture_evidence.failed_bounded_expansion_probe_count",
                 "workload_fixture_evidence.search_metadata_probe_count",
-                "workload_fixture_evidence.failed_search_metadata_probe_count"
+                "workload_fixture_evidence.failed_search_metadata_probe_count",
+                "workload_fixture_evidence.source_projection_probe_count",
+                "workload_fixture_evidence.failed_source_projection_probe_count",
+                "workload_fixture_evidence.source_projection_reports"
             ])
         );
         assert_eq!(
@@ -4151,7 +4622,7 @@ mod tests {
         let mut inputs = ready_inputs();
         let library_readiness = inputs.library_readiness.as_mut().unwrap();
         library_readiness["ready"] = serde_json::json!(false);
-        library_readiness["ready_area_count"] = serde_json::json!(7);
+        library_readiness["ready_area_count"] = serde_json::json!(8);
         library_readiness["blocked_area_count"] = serde_json::json!(1);
         library_readiness["blocker_codes"] = serde_json::json!(["graph_route_readiness_not_ready"]);
         library_readiness["readiness_by_area"]["graph_route"]["ready"] = serde_json::json!(false);
@@ -4183,11 +4654,49 @@ mod tests {
     }
 
     #[test]
+    fn preflight_check_requires_library_search_route_ownership_area() {
+        let mut inputs = ready_inputs();
+        let library_readiness = inputs.library_readiness.as_mut().unwrap();
+        library_readiness["ready"] = serde_json::json!(false);
+        library_readiness["ready_area_count"] = serde_json::json!(10);
+        library_readiness["blocked_area_count"] = serde_json::json!(1);
+        library_readiness["blocker_codes"] =
+            serde_json::json!(["search_route_ownership_not_ready"]);
+        library_readiness["readiness_by_area"]["search_route_ownership"]["ready"] =
+            serde_json::json!(false);
+        library_readiness["readiness_by_area"]["search_route_ownership"]["blocker_codes"] =
+            serde_json::json!(["search_routes_still_lancedb"]);
+
+        let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["library_readiness"])
+        );
+        assert_eq!(
+            check_by_name(&report, "library_readiness")["failed_evidence_fields"],
+            serde_json::json!([
+                "library_readiness.ready",
+                "library_readiness.blocked_area_count",
+                "library_readiness.readiness_by_area.search_route_ownership.ready"
+            ])
+        );
+        assert_eq!(
+            check_by_name(&report, "library_readiness")["blocker_codes"],
+            serde_json::json!([
+                "search_route_ownership_not_ready",
+                "search_routes_still_lancedb"
+            ])
+        );
+    }
+
+    #[test]
     fn preflight_check_requires_library_workload_fixture_readiness_area() {
         let mut inputs = ready_inputs();
         let library_readiness = inputs.library_readiness.as_mut().unwrap();
         library_readiness["ready"] = serde_json::json!(false);
-        library_readiness["ready_area_count"] = serde_json::json!(9);
+        library_readiness["ready_area_count"] = serde_json::json!(10);
         library_readiness["blocked_area_count"] = serde_json::json!(1);
         library_readiness["blocker_codes"] =
             serde_json::json!(["workload_fixture_evidence_not_ready"]);
@@ -4217,6 +4726,242 @@ mod tests {
                 "workload_fixture_bounded_expansion_not_ready",
                 "workload_fixture_evidence_not_ready"
             ])
+        );
+    }
+
+    #[test]
+    fn preflight_check_requires_library_graph_rag_workload_evidence() {
+        let mut inputs = ready_inputs();
+        let library_readiness = inputs.library_readiness.as_mut().unwrap();
+        library_readiness["workload_fixture_evidence"]["graph_rag_probe_count"] =
+            serde_json::json!(1);
+        library_readiness["workload_fixture_evidence"]["failed_graph_rag_probe_count"] =
+            serde_json::json!(1);
+        library_readiness["workload_fixture_evidence"]["graph_rag_reports"] = serde_json::json!([
+            {
+                "name": "memory-to-entity",
+                "ready": false,
+                "schema_protocol": GRAPH_RAG_SCHEMA_CONTEXT_PROTOCOL,
+                "label_count": 2,
+                "relationship_type_count": 1,
+                "route_count": 1,
+                "parameter_requirement_count": 1,
+                "row_count": 1,
+                "row_budget_exceeded": false,
+                "payload_budget_exceeded": false,
+                "blocking_operator_count": 0,
+                "streaming": false,
+                "error_class": "execution"
+            }
+        ]);
+        library_readiness["workload_fixture_evidence"]["blocker_codes"] =
+            serde_json::json!(["workload_fixture_graph_rag_not_ready"]);
+
+        let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["library_readiness"])
+        );
+        assert_eq!(
+            check_by_name(&report, "library_readiness")["failed_evidence_fields"],
+            serde_json::json!(["library_readiness.workload_fixture_evidence.graph_rag_reports"])
+        );
+        assert_eq!(
+            check_by_name(&report, "library_readiness")["blocker_codes"],
+            serde_json::json!(["workload_fixture_graph_rag_not_ready"])
+        );
+    }
+
+    #[test]
+    fn preflight_check_requires_library_source_projection_workload_evidence() {
+        let mut inputs = ready_inputs();
+        let library_readiness = inputs.library_readiness.as_mut().unwrap();
+        library_readiness["workload_fixture_evidence"]["source_projection_probe_count"] =
+            serde_json::json!(1);
+        library_readiness["workload_fixture_evidence"]["failed_source_projection_probe_count"] =
+            serde_json::json!(1);
+        library_readiness["workload_fixture_evidence"]["source_projection_reports"] = serde_json::json!([
+            {
+                "name": "source-ingest-composite-changefeed",
+                "ready": false,
+                "source_graph_commit_epoch": 43,
+                "complete_through_graph_commit_epoch": 43,
+                "too_small_batch_failed_closed": false,
+                "operation_count": 1,
+                "upserted_documents": 1,
+                "deleted_documents": 0,
+                "source_document_count": 1,
+                "indexed_source_document_ready": false,
+                "error_class": "batch_split"
+            }
+        ]);
+        library_readiness["workload_fixture_evidence"]["blocker_codes"] =
+            serde_json::json!(["workload_fixture_source_projection_not_ready"]);
+
+        let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["library_readiness"])
+        );
+        assert_eq!(
+            check_by_name(&report, "library_readiness")["failed_evidence_fields"],
+            serde_json::json!([
+                "library_readiness.workload_fixture_evidence.source_projection_reports"
+            ])
+        );
+        assert_eq!(
+            check_by_name(&report, "library_readiness")["blocker_codes"],
+            serde_json::json!(["workload_fixture_source_projection_not_ready"])
+        );
+        assert_release_summary_field(
+            &report["release_summary"],
+            "library_readiness_workload_fixture_source_projection_ready",
+            false,
+        );
+    }
+
+    #[test]
+    fn preflight_check_requires_effective_cutover_controls() {
+        let mut inputs = ready_inputs();
+        let cutover_controls = inputs.cutover_controls.as_mut().unwrap();
+        cutover_controls["ready"] = serde_json::json!(false);
+        cutover_controls["graph"]["read_effective"] = serde_json::json!(false);
+        cutover_controls["production_status"]["graph"]["skein_cutover_effective"] =
+            serde_json::json!(false);
+        cutover_controls["blocker_codes"] =
+            serde_json::json!(["graph_read_selected_skein_but_not_effective"]);
+
+        let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["cutover_controls"])
+        );
+        assert_eq!(
+            check_by_name(&report, "cutover_controls")["failed_evidence_fields"],
+            serde_json::json!([
+                "cutover_controls.ready",
+                "cutover_controls.graph.read_effective",
+                "cutover_controls.production_status.graph.skein_cutover_effective"
+            ])
+        );
+        assert_eq!(
+            check_by_name(&report, "cutover_controls")["blocker_codes"],
+            serde_json::json!(["graph_read_selected_skein_but_not_effective"])
+        );
+        assert_release_summary_field(
+            &report["release_summary"],
+            "cutover_controls_graph_read_effective",
+            false,
+        );
+    }
+
+    #[test]
+    fn preflight_check_blocks_active_initial_import_for_read_cutover() {
+        let mut inputs = ready_inputs();
+        let cutover_controls = inputs.cutover_controls.as_mut().unwrap();
+        cutover_controls["ready"] = serde_json::json!(false);
+        cutover_controls["controls"]["initial_import"] = serde_json::json!("enabled");
+        cutover_controls["work"]["initial_import_enabled"] = serde_json::json!(true);
+        cutover_controls["work"]["initial_import_inactive_for_cutover"] = serde_json::json!(false);
+        cutover_controls["blocker_codes"] =
+            serde_json::json!(["initial_import_active_blocks_read_cutover"]);
+
+        let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["cutover_controls"])
+        );
+        assert_eq!(
+            check_by_name(&report, "cutover_controls")["failed_evidence_fields"],
+            serde_json::json!([
+                "cutover_controls.ready",
+                "cutover_controls.work.initial_import_safe_for_read_cutover"
+            ])
+        );
+        assert_eq!(
+            check_by_name(&report, "cutover_controls")["blocker_codes"],
+            serde_json::json!(["initial_import_active_blocks_read_cutover"])
+        );
+        assert_release_summary_field(
+            &report["release_summary"],
+            "cutover_controls_initial_import_inactive_for_cutover",
+            false,
+        );
+    }
+
+    #[test]
+    fn preflight_check_accepts_active_initial_import_with_cutover_catch_up_proof() {
+        let mut inputs = ready_inputs();
+        let cutover_controls = inputs.cutover_controls.as_mut().unwrap();
+        cutover_controls["controls"]["initial_import"] = serde_json::json!("enabled");
+        cutover_controls["work"]["initial_import_enabled"] = serde_json::json!(true);
+        cutover_controls["work"]["initial_import_inactive_for_cutover"] = serde_json::json!(false);
+        cutover_controls["work"]["initial_import_cutover_catch_up_ready"] = serde_json::json!(true);
+        cutover_controls["work"]["initial_import_safe_for_read_cutover"] = serde_json::json!(true);
+
+        let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
+
+        assert_eq!(report["ready"], true);
+        assert_release_summary_field(
+            &report["release_summary"],
+            "cutover_controls_initial_import_inactive_for_cutover",
+            false,
+        );
+        assert_release_summary_field(
+            &report["release_summary"],
+            "cutover_controls_initial_import_cutover_catch_up_ready",
+            true,
+        );
+        assert_release_summary_field(
+            &report["release_summary"],
+            "cutover_controls_initial_import_safe_for_read_cutover",
+            true,
+        );
+    }
+
+    #[test]
+    fn preflight_check_requires_operations_readiness() {
+        let mut inputs = ready_inputs();
+        let operations_readiness = inputs.operations_readiness.as_mut().unwrap();
+        operations_readiness["ready"] = serde_json::json!(false);
+        operations_readiness["search_projection"]["stale"] = serde_json::json!(true);
+        operations_readiness["storage_lifecycle"]["action"] = serde_json::json!("repair_wal_tail");
+        operations_readiness["readiness"]["storage_recovery_ready"] = serde_json::json!(false);
+        operations_readiness["blocker_codes"] =
+            serde_json::json!(["search_projection_stale", "storage_recovery_not_ready"]);
+
+        let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["operations_readiness"])
+        );
+        assert_eq!(
+            check_by_name(&report, "operations_readiness")["failed_evidence_fields"],
+            serde_json::json!([
+                "operations_readiness.ready",
+                "operations_readiness.search_projection.stale",
+                "operations_readiness.storage_lifecycle.action",
+                "operations_readiness.readiness.storage_recovery_ready"
+            ])
+        );
+        assert_eq!(
+            check_by_name(&report, "operations_readiness")["blocker_codes"],
+            serde_json::json!(["search_projection_stale", "storage_recovery_not_ready"])
+        );
+        assert_release_summary_field(
+            &report["release_summary"],
+            "operations_readiness_search_projection_stale",
+            true,
         );
     }
 
@@ -4682,6 +5427,14 @@ mod tests {
             bundle_dir.join("library-readiness.json"),
             inputs.library_readiness.as_ref().unwrap(),
         );
+        write_json(
+            bundle_dir.join("cutover-controls.json"),
+            inputs.cutover_controls.as_ref().unwrap(),
+        );
+        write_json(
+            bundle_dir.join("operations-readiness.json"),
+            inputs.operations_readiness.as_ref().unwrap(),
+        );
 
         let (report, require_ready) = run_nowledge_previous_wrapper_preflight_check(
             vec![
@@ -4871,7 +5624,88 @@ mod tests {
             })),
             query_runtime_preflight: Some(ready_query_runtime_preflight()),
             library_readiness: Some(ready_library_readiness()),
+            cutover_controls: Some(ready_cutover_controls()),
+            operations_readiness: Some(ready_operations_readiness()),
         }
+    }
+
+    fn ready_cutover_controls() -> serde_json::Value {
+        serde_json::json!({
+            "protocol": NOWLEDGE_MEM_CUTOVER_CONTROLS_PROTOCOL,
+            "ready": true,
+            "controls": {
+                "graph_reads": "skein",
+                "search_reads": "skein",
+                "dual_writes": "enabled",
+                "initial_import": "disabled",
+                "projection_catch_up": "enabled"
+            },
+            "graph": {
+                "read_selected_skein": true,
+                "read_effective": true
+            },
+            "search": {
+                "read_selected_skein": true,
+                "read_effective": true
+            },
+            "work": {
+                "dual_writes_enabled": true,
+                "initial_import_enabled": false,
+                "initial_import_inactive_for_cutover": true,
+                "initial_import_cutover_catch_up_ready": false,
+                "initial_import_safe_for_read_cutover": true,
+                "projection_catch_up_enabled": true
+            },
+            "production_status": {
+                "graph": {
+                    "skein_cutover_effective": true
+                },
+                "search": {
+                    "skein_cutover_effective": true
+                }
+            },
+            "redaction": {
+                "query_text_copied": false,
+                "parameters_copied": false,
+                "local_paths_copied": false
+            },
+            "blocker_codes": []
+        })
+    }
+
+    fn ready_operations_readiness() -> serde_json::Value {
+        serde_json::json!({
+            "protocol": NOWLEDGE_MEM_OPERATIONS_READINESS_PROTOCOL,
+            "present": true,
+            "ready": true,
+            "mode": "writable_cutover",
+            "graph": {
+                "open": true,
+                "read_only": false,
+                "commit_epoch": 42
+            },
+            "search_projection": {
+                "open": true,
+                "commit_lag": 0,
+                "stale": false
+            },
+            "storage_lifecycle": {
+                "ready": true,
+                "action": "ready"
+            },
+            "readiness": {
+                "storage_lifecycle_ready": true,
+                "storage_recovery_ready": true,
+                "slow_query_ready": true,
+                "background_maintenance_ready": true
+            },
+            "redaction": {
+                "query_text_copied": false,
+                "parameters_copied": false,
+                "local_paths_copied": false
+            },
+            "blocker_codes": []
+        })
     }
 
     fn ready_route_catalog_metadata() -> serde_json::Value {
@@ -4914,6 +5748,49 @@ mod tests {
             "failed_bounded_expansion_probe_count": 0,
             "search_metadata_probe_count": 3,
             "failed_search_metadata_probe_count": 0,
+            "graph_rag_probe_count": 1,
+            "failed_graph_rag_probe_count": 0,
+            "graph_rag_reports": [
+                {
+                    "name": "memory-to-entity",
+                    "ready": true,
+                    "schema_protocol": GRAPH_RAG_SCHEMA_CONTEXT_PROTOCOL,
+                    "context_epoch": 42,
+                    "schema_fingerprint": 4242,
+                    "label_count": 2,
+                    "relationship_type_count": 1,
+                    "property_count": 3,
+                    "route_count": 1,
+                    "common_path_count": 1,
+                    "parameter_requirement_count": 1,
+                    "row_count": 1,
+                    "max_rows": 4,
+                    "execution_row_cap": 5,
+                    "estimated_payload_bytes": 128,
+                    "row_budget_exceeded": false,
+                    "payload_budget_exceeded": false,
+                    "blocking_operator_count": 0,
+                    "streaming": false,
+                    "error_class": null
+                }
+            ],
+            "source_projection_probe_count": 1,
+            "failed_source_projection_probe_count": 0,
+            "source_projection_reports": [
+                {
+                    "name": "source-ingest-composite-changefeed",
+                    "ready": true,
+                    "source_graph_commit_epoch": 43,
+                    "complete_through_graph_commit_epoch": 43,
+                    "too_small_batch_failed_closed": true,
+                    "operation_count": 2,
+                    "upserted_documents": 2,
+                    "deleted_documents": 0,
+                    "source_document_count": 2,
+                    "indexed_source_document_ready": true,
+                    "error_class": null
+                }
+            ],
             "blocker_codes": []
         })
     }
@@ -5048,7 +5925,7 @@ mod tests {
             "present": true,
             "ready": true,
             "mode": "shadow_read_only",
-            "ready_area_count": 10,
+            "ready_area_count": 11,
             "blocked_area_count": 0,
             "blocker_codes": [],
             "redaction": {
@@ -5088,6 +5965,10 @@ mod tests {
                     "ready": true,
                     "blocker_codes": []
                 },
+                "search_route_ownership": {
+                    "ready": true,
+                    "blocker_codes": []
+                },
                 "search_projection": {
                     "ready": true,
                     "blocker_codes": []
@@ -5104,7 +5985,8 @@ mod tests {
                     "ready": true,
                     "blocker_codes": []
                 }
-            }
+            },
+            "workload_fixture_evidence": ready_workload_fixture_evidence()
         })
     }
 

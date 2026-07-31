@@ -5,7 +5,8 @@ use crate::{
     },
     nowledge_graph_route_readiness_summary, nowledge_mem_graph_read_route_catalog_digest,
     nowledge_mem_required_query_families_for_route, Result, SkeinError,
-    NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
+    NOWLEDGE_MEM_CUTOVER_CONTROLS_PROTOCOL, NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
+    NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL, NOWLEDGE_MEM_OPERATIONS_READINESS_PROTOCOL,
     NOWLEDGE_MEM_ROUTE_OWNERSHIP_PROTOCOL, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
     NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE, NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE,
     NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL, NOWLEDGE_MEM_SEARCH_ROUTE,
@@ -57,6 +58,8 @@ const ROUTE_COVERAGE_CHECKS: &[&str] = &[
     "graph_route_readiness_alignment",
     "graph_route_parity_alignment",
     "route_ownership",
+    "search_route_ownership_alignment",
+    "active_search_route_ownership_alignment",
     "query_runtime_preflight",
     "query_runtime_preflight_alignment",
 ];
@@ -68,10 +71,10 @@ const SEARCH_PROJECTION_CHECKS: &[&str] = &[
     "search_projection_replacement_evidence",
     "search_candidate_primary_evidence",
 ];
-const STORAGE_RECOVERY_CHECKS: &[&str] = &["storage_recovery_evidence"];
+const STORAGE_RECOVERY_CHECKS: &[&str] = &["storage_recovery_evidence", "operations_readiness"];
 const BACKGROUND_QOS_CHECKS: &[&str] = &["background_maintenance_evidence"];
 const BLACKBOX_CHECKS: &[&str] = &["blackbox_redaction", "blackbox_operational_evidence"];
-const LIBRARY_ONLY_CHECKS: &[&str] = &["library_readiness"];
+const LIBRARY_ONLY_CHECKS: &[&str] = &["library_readiness", "cutover_controls"];
 
 pub const NOWLEDGE_MEM_INTEGRATION_READINESS_PROTOCOL: &str =
     "skein-nowledge-mem-integration-readiness";
@@ -295,10 +298,53 @@ pub struct LibraryReadinessCutoverReadiness {
     pub background_ready: bool,
     pub query_family_ready: bool,
     pub graph_route_ready: bool,
+    pub search_route_ownership_ready: bool,
     pub search_projection_ready: bool,
     pub search_projection_shadow_ready: bool,
     pub search_candidate_shadow_ready: bool,
     pub workload_fixture_ready: bool,
+    pub blocker_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CutoverControlsReadiness {
+    pub protocol_matches: bool,
+    pub ready: bool,
+    pub graph_reads_skein: bool,
+    pub graph_read_effective: bool,
+    pub graph_production_status_effective: bool,
+    pub search_reads_skein: bool,
+    pub search_read_effective: bool,
+    pub search_production_status_effective: bool,
+    pub dual_writes_enabled: bool,
+    pub projection_catch_up_enabled: bool,
+    pub initial_import_safe: bool,
+    pub initial_import_inactive_for_cutover: bool,
+    pub initial_import_cutover_catch_up_ready: bool,
+    pub initial_import_safe_for_read_cutover: bool,
+    pub query_text_redacted: bool,
+    pub parameters_redacted: bool,
+    pub local_paths_redacted: bool,
+    pub blocker_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationsReadinessCutoverReadiness {
+    pub protocol_matches: bool,
+    pub present: bool,
+    pub ready: bool,
+    pub graph_open: bool,
+    pub graph_writable: bool,
+    pub search_projection_open: bool,
+    pub search_projection_not_stale: bool,
+    pub storage_lifecycle_ready: bool,
+    pub storage_lifecycle_action_ready: bool,
+    pub storage_recovery_ready: bool,
+    pub slow_query_ready: bool,
+    pub background_maintenance_ready: bool,
+    pub query_text_redacted: bool,
+    pub parameters_redacted: bool,
+    pub local_paths_redacted: bool,
     pub blocker_codes: Vec<String>,
 }
 
@@ -516,6 +562,25 @@ pub struct RouteOwnershipCutoverReadiness {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchRouteOwnershipAlignmentCutoverReadiness {
+    pub ready: bool,
+    pub evidence_ready: bool,
+    pub summary_ready: bool,
+    pub protocol_matches: bool,
+    pub readiness_matches: bool,
+    pub production_cutover_ready_matches: bool,
+    pub require_all_skein_matches: bool,
+    pub required_route_count_matches: bool,
+    pub explicit_route_count_matches: bool,
+    pub skein_route_count_matches: bool,
+    pub lancedb_route_count_matches: bool,
+    pub missing_required_routes_matches: bool,
+    pub lancedb_routes_matches: bool,
+    pub blocker_codes_match: bool,
+    pub blocker_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryRuntimePreflightCutoverReadiness {
     pub protocol_matches: bool,
     pub ready: bool,
@@ -627,10 +692,51 @@ impl LibraryReadinessCutoverReadiness {
             && self.background_ready
             && self.query_family_ready
             && self.graph_route_ready
+            && self.search_route_ownership_ready
             && self.search_projection_ready
             && self.search_projection_shadow_ready
             && self.search_candidate_shadow_ready
             && self.workload_fixture_ready
+    }
+}
+
+impl CutoverControlsReadiness {
+    pub fn evidence_ready(&self) -> bool {
+        self.protocol_matches
+            && self.ready
+            && self.graph_reads_skein
+            && self.graph_read_effective
+            && self.graph_production_status_effective
+            && self.search_reads_skein
+            && self.search_read_effective
+            && self.search_production_status_effective
+            && self.dual_writes_enabled
+            && self.projection_catch_up_enabled
+            && self.initial_import_safe
+            && self.initial_import_safe_for_read_cutover
+            && self.query_text_redacted
+            && self.parameters_redacted
+            && self.local_paths_redacted
+    }
+}
+
+impl OperationsReadinessCutoverReadiness {
+    pub fn evidence_ready(&self) -> bool {
+        self.protocol_matches
+            && self.present
+            && self.ready
+            && self.graph_open
+            && self.graph_writable
+            && self.search_projection_open
+            && self.search_projection_not_stale
+            && self.storage_lifecycle_ready
+            && self.storage_lifecycle_action_ready
+            && self.storage_recovery_ready
+            && self.slow_query_ready
+            && self.background_maintenance_ready
+            && self.query_text_redacted
+            && self.parameters_redacted
+            && self.local_paths_redacted
     }
 }
 
@@ -820,6 +926,25 @@ impl GraphRouteParityAlignmentCutoverReadiness {
             && self.route_mismatch_routes_empty
             && self.protocol_mismatch_routes_empty
             && self.blocker_routes_empty
+    }
+}
+
+impl SearchRouteOwnershipAlignmentCutoverReadiness {
+    pub fn evidence_ready(&self) -> bool {
+        self.ready
+            && self.evidence_ready
+            && self.summary_ready
+            && self.protocol_matches
+            && self.readiness_matches
+            && self.production_cutover_ready_matches
+            && self.require_all_skein_matches
+            && self.required_route_count_matches
+            && self.explicit_route_count_matches
+            && self.skein_route_count_matches
+            && self.lancedb_route_count_matches
+            && self.missing_required_routes_matches
+            && self.lancedb_routes_matches
+            && self.blocker_codes_match
     }
 }
 
@@ -1119,6 +1244,7 @@ pub fn nowledge_mem_integration_readiness(
     let content_store_readiness = content_store_boundary_cutover_readiness(bundle);
     let previous_wrapper_readiness = previous_wrapper_preflight_cutover_readiness(bundle);
     let library_readiness = library_readiness_cutover_readiness(bundle);
+    let cutover_controls = cutover_controls_readiness(bundle);
     let graph_replacement_readiness = graph_replacement_cutover_readiness(bundle);
     let query_family_readiness = query_family_replacement_cutover_readiness(bundle);
     let search_projection_readiness = search_projection_cutover_readiness(bundle);
@@ -1130,10 +1256,21 @@ pub fn nowledge_mem_integration_readiness(
     let graph_route_parity_alignment_readiness =
         graph_route_parity_alignment_cutover_readiness(bundle);
     let route_ownership_readiness = route_ownership_cutover_readiness(bundle);
+    let search_route_ownership_alignment_readiness =
+        search_route_ownership_alignment_cutover_readiness(
+            bundle,
+            "replacement_summary_search_route_ownership_alignment",
+        );
+    let active_search_route_ownership_alignment_readiness =
+        search_route_ownership_alignment_cutover_readiness(
+            bundle,
+            "replacement_summary_active_search_route_ownership_alignment",
+        );
     let query_runtime_readiness = query_runtime_preflight_cutover_readiness(bundle);
     let query_runtime_alignment_readiness =
         query_runtime_preflight_alignment_cutover_readiness(bundle);
     let storage_recovery_readiness = storage_recovery_cutover_readiness(bundle);
+    let operations_readiness = operations_readiness_cutover_readiness(bundle);
     let background_maintenance_readiness = background_maintenance_cutover_readiness(bundle);
     let checks = vec![
         check_named_conditions(
@@ -1221,6 +1358,26 @@ pub fn nowledge_mem_integration_readiness(
             route_ownership_readiness.blocker_codes.clone(),
         ),
         check_named_conditions(
+            "search_route_ownership_alignment",
+            search_route_ownership_alignment_cutover_conditions(
+                &search_route_ownership_alignment_readiness,
+                "replacement_summary_search_route_ownership_alignment",
+            ),
+            search_route_ownership_alignment_readiness
+                .blocker_codes
+                .clone(),
+        ),
+        check_named_conditions(
+            "active_search_route_ownership_alignment",
+            search_route_ownership_alignment_cutover_conditions(
+                &active_search_route_ownership_alignment_readiness,
+                "replacement_summary_active_search_route_ownership_alignment",
+            ),
+            active_search_route_ownership_alignment_readiness
+                .blocker_codes
+                .clone(),
+        ),
+        check_named_conditions(
             "query_runtime_preflight",
             query_runtime_preflight_cutover_conditions(&query_runtime_readiness),
             query_runtime_readiness.blocker_codes.clone(),
@@ -1238,6 +1395,11 @@ pub fn nowledge_mem_integration_readiness(
             library_readiness.blocker_codes.clone(),
         ),
         check_named_conditions(
+            "cutover_controls",
+            cutover_controls_conditions(&cutover_controls),
+            cutover_controls.blocker_codes.clone(),
+        ),
+        check_named_conditions(
             "background_maintenance_evidence",
             background_maintenance_cutover_conditions(&background_maintenance_readiness),
             background_maintenance_readiness.blocker_codes.clone(),
@@ -1246,6 +1408,11 @@ pub fn nowledge_mem_integration_readiness(
             "storage_recovery_evidence",
             storage_recovery_cutover_conditions(&storage_recovery_readiness),
             storage_recovery_readiness.blocker_codes.clone(),
+        ),
+        check_named_conditions(
+            "operations_readiness",
+            operations_readiness_cutover_conditions(&operations_readiness),
+            operations_readiness.blocker_codes.clone(),
         ),
         check_named_conditions(
             "blackbox_redaction",
@@ -1286,6 +1453,7 @@ pub fn nowledge_mem_integration_readiness(
                 content_store: &content_store_readiness,
                 previous_wrapper: &previous_wrapper_readiness,
                 library: &library_readiness,
+                cutover_controls: &cutover_controls,
                 graph_replacement: &graph_replacement_readiness,
                 query_family: &query_family_readiness,
                 search_projection: &search_projection_readiness,
@@ -1296,10 +1464,14 @@ pub fn nowledge_mem_integration_readiness(
                 graph_route_alignment: &graph_route_alignment_readiness,
                 graph_route_parity_alignment: &graph_route_parity_alignment_readiness,
                 route_ownership: &route_ownership_readiness,
+                search_route_ownership_alignment: &search_route_ownership_alignment_readiness,
+                active_search_route_ownership_alignment:
+                    &active_search_route_ownership_alignment_readiness,
                 query_runtime: &query_runtime_readiness,
                 query_runtime_alignment: &query_runtime_alignment_readiness,
                 blackbox: &blackbox_readiness,
                 storage_recovery: &storage_recovery_readiness,
+                operations: &operations_readiness,
                 background_maintenance: &background_maintenance_readiness,
             },
         ),
@@ -1549,6 +1721,7 @@ struct IntegrationGateReadiness<'a> {
     content_store: &'a ContentStoreBoundaryCutoverReadiness,
     previous_wrapper: &'a PreviousWrapperPreflightCutoverReadiness,
     library: &'a LibraryReadinessCutoverReadiness,
+    cutover_controls: &'a CutoverControlsReadiness,
     graph_replacement: &'a GraphReplacementCutoverReadiness,
     query_family: &'a QueryFamilyReplacementCutoverReadiness,
     search_projection: &'a SearchProjectionCutoverReadiness,
@@ -1559,10 +1732,13 @@ struct IntegrationGateReadiness<'a> {
     graph_route_alignment: &'a GraphRouteAlignmentCutoverReadiness,
     graph_route_parity_alignment: &'a GraphRouteParityAlignmentCutoverReadiness,
     route_ownership: &'a RouteOwnershipCutoverReadiness,
+    search_route_ownership_alignment: &'a SearchRouteOwnershipAlignmentCutoverReadiness,
+    active_search_route_ownership_alignment: &'a SearchRouteOwnershipAlignmentCutoverReadiness,
     query_runtime: &'a QueryRuntimePreflightCutoverReadiness,
     query_runtime_alignment: &'a QueryRuntimePreflightAlignmentCutoverReadiness,
     blackbox: &'a BlackboxReadinessReport,
     storage_recovery: &'a StorageRecoveryCutoverReadiness,
+    operations: &'a OperationsReadinessCutoverReadiness,
     background_maintenance: &'a BackgroundMaintenanceCutoverReadiness,
 }
 
@@ -1840,6 +2016,43 @@ fn next_actions(
             ],
         ));
     }
+    if !readiness.search_route_ownership_alignment.evidence_ready() {
+        actions.push(next_action(
+            "regenerate_search_route_ownership_alignment",
+            "live search projection route ownership must match the replacement summary before Mem cutover",
+            [
+                "search_route_ownership.ready",
+                "search_route_ownership.production_cutover_ready",
+                "replacement_summary.search_route_ownership.ready",
+                "replacement_summary_search_route_ownership_alignment.ready",
+                "replacement_summary_search_route_ownership_alignment.evidence_ready",
+                "replacement_summary_search_route_ownership_alignment.summary_ready",
+                "replacement_summary_search_route_ownership_alignment.lancedb_route_count_matches",
+                "replacement_summary_search_route_ownership_alignment.lancedb_routes_matches",
+                "replacement_summary_search_route_ownership_alignment.blocker_codes",
+            ],
+        ));
+    }
+    if !readiness
+        .active_search_route_ownership_alignment
+        .evidence_ready()
+    {
+        actions.push(next_action(
+            "regenerate_active_search_route_ownership_alignment",
+            "live active search route ownership must match the replacement summary before Mem cutover",
+            [
+                "active_search_route_ownership.ready",
+                "active_search_route_ownership.production_cutover_ready",
+                "replacement_summary.active_search_route_ownership.ready",
+                "replacement_summary_active_search_route_ownership_alignment.ready",
+                "replacement_summary_active_search_route_ownership_alignment.evidence_ready",
+                "replacement_summary_active_search_route_ownership_alignment.summary_ready",
+                "replacement_summary_active_search_route_ownership_alignment.lancedb_route_count_matches",
+                "replacement_summary_active_search_route_ownership_alignment.lancedb_routes_matches",
+                "replacement_summary_active_search_route_ownership_alignment.blocker_codes",
+            ],
+        ));
+    }
     if !readiness.query_runtime.evidence_ready() {
         actions.push(next_action(
             "attach_query_runtime_preflight_evidence",
@@ -1891,6 +2104,26 @@ fn next_actions(
             ],
         ));
     }
+    if !readiness.cutover_controls.evidence_ready() {
+        actions.push(next_action(
+            "attach_cutover_controls_evidence",
+            "Nowledge Mem cutover requires host-owned graph/search read controls to select effective Skein reads with dual writes and projection catch-up enabled",
+            [
+                "cutover_controls.protocol",
+                "cutover_controls.ready",
+                "cutover_controls.controls.graph_reads",
+                "cutover_controls.graph.read_effective",
+                "cutover_controls.production_status.graph.skein_cutover_effective",
+                "cutover_controls.controls.search_reads",
+                "cutover_controls.search.read_effective",
+                "cutover_controls.production_status.search.skein_cutover_effective",
+                "cutover_controls.work.dual_writes_enabled",
+                "cutover_controls.work.projection_catch_up_enabled",
+                "cutover_controls.work.initial_import_safe_for_read_cutover",
+                "cutover_controls.blocker_codes",
+            ],
+        ));
+    }
     if !readiness.blackbox.redaction_ready {
         actions.push(next_action(
             "attach_blackbox_redaction_report",
@@ -1933,6 +2166,27 @@ fn next_actions(
                 "replacement_summary.cutover_evidence.storage_recovery_replay_boundary_consistent",
                 "replacement_summary.cutover_evidence.storage_recovery_torn_tail_clean",
                 "replacement_summary.cutover_evidence.storage_recovery_blocker_codes",
+            ],
+        ));
+    }
+    if !readiness.operations.evidence_ready() {
+        actions.push(next_action(
+            "attach_operations_readiness_report",
+            "Nowledge Mem cutover requires the embedded Skein library to expose ready lifecycle, recovery, slow-query, background, and projection freshness status",
+            [
+                "operations_readiness.protocol",
+                "operations_readiness.present",
+                "operations_readiness.ready",
+                "operations_readiness.graph.open",
+                "operations_readiness.graph.read_only",
+                "operations_readiness.search_projection.open",
+                "operations_readiness.search_projection.stale",
+                "operations_readiness.storage_lifecycle.ready",
+                "operations_readiness.storage_lifecycle.action",
+                "operations_readiness.readiness.storage_recovery_ready",
+                "operations_readiness.readiness.slow_query_ready",
+                "operations_readiness.readiness.background_maintenance_ready",
+                "operations_readiness.blocker_codes",
             ],
         ));
     }
@@ -2211,6 +2465,203 @@ fn search_projection_replacement_evidence_present(bundle: &serde_json::Value) ->
             &["replacement_summary", "search_projection_shadow_evidence"],
         )
         .is_some()
+}
+
+pub fn search_route_ownership_alignment_cutover_readiness(
+    bundle: &serde_json::Value,
+    field: &'static str,
+) -> SearchRouteOwnershipAlignmentCutoverReadiness {
+    SearchRouteOwnershipAlignmentCutoverReadiness {
+        ready: search_route_ownership_alignment_bool(bundle, field, "ready"),
+        evidence_ready: search_route_ownership_alignment_bool(bundle, field, "evidence_present"),
+        summary_ready: search_route_ownership_alignment_bool(bundle, field, "summary_present"),
+        protocol_matches: search_route_ownership_alignment_bool(bundle, field, "protocol_matches"),
+        readiness_matches: search_route_ownership_alignment_bool(bundle, field, "ready_matches"),
+        production_cutover_ready_matches: search_route_ownership_alignment_bool(
+            bundle,
+            field,
+            "production_cutover_ready_matches",
+        ),
+        require_all_skein_matches: search_route_ownership_alignment_bool(
+            bundle,
+            field,
+            "require_all_skein_matches",
+        ),
+        required_route_count_matches: search_route_ownership_alignment_bool(
+            bundle,
+            field,
+            "required_route_count_matches",
+        ),
+        explicit_route_count_matches: search_route_ownership_alignment_bool(
+            bundle,
+            field,
+            "explicit_route_count_matches",
+        ),
+        skein_route_count_matches: search_route_ownership_alignment_bool(
+            bundle,
+            field,
+            "skein_route_count_matches",
+        ),
+        lancedb_route_count_matches: search_route_ownership_alignment_bool(
+            bundle,
+            field,
+            "lancedb_route_count_matches",
+        ),
+        missing_required_routes_matches: search_route_ownership_alignment_bool(
+            bundle,
+            field,
+            "missing_required_routes_matches",
+        ),
+        lancedb_routes_matches: search_route_ownership_alignment_bool(
+            bundle,
+            field,
+            "lancedb_routes_matches",
+        ),
+        blocker_codes_match: search_route_ownership_alignment_bool(
+            bundle,
+            field,
+            "blocker_codes_match",
+        ),
+        blocker_codes: blocker_codes(bundle, &[&[field, "blocker_codes"][..]]),
+    }
+}
+
+fn search_route_ownership_alignment_bool(
+    bundle: &serde_json::Value,
+    field: &'static str,
+    property: &'static str,
+) -> bool {
+    bool_path(bundle, &[field, property]) == Some(true)
+}
+
+fn search_route_ownership_alignment_cutover_conditions(
+    readiness: &SearchRouteOwnershipAlignmentCutoverReadiness,
+    field: &'static str,
+) -> Vec<(&'static str, bool)> {
+    let fields = search_route_ownership_alignment_condition_fields(field);
+    vec![
+        (fields.ready, readiness.ready),
+        (fields.evidence_ready, readiness.evidence_ready),
+        (fields.summary_ready, readiness.summary_ready),
+        (fields.protocol_matches, readiness.protocol_matches),
+        (fields.readiness_matches, readiness.readiness_matches),
+        (
+            fields.production_cutover_ready_matches,
+            readiness.production_cutover_ready_matches,
+        ),
+        (
+            fields.require_all_skein_matches,
+            readiness.require_all_skein_matches,
+        ),
+        (
+            fields.required_route_count_matches,
+            readiness.required_route_count_matches,
+        ),
+        (
+            fields.explicit_route_count_matches,
+            readiness.explicit_route_count_matches,
+        ),
+        (
+            fields.skein_route_count_matches,
+            readiness.skein_route_count_matches,
+        ),
+        (
+            fields.lancedb_route_count_matches,
+            readiness.lancedb_route_count_matches,
+        ),
+        (
+            fields.missing_required_routes_matches,
+            readiness.missing_required_routes_matches,
+        ),
+        (
+            fields.lancedb_routes_matches,
+            readiness.lancedb_routes_matches,
+        ),
+        (fields.blocker_codes_match, readiness.blocker_codes_match),
+    ]
+}
+
+struct SearchRouteOwnershipAlignmentConditionFields {
+    ready: &'static str,
+    evidence_ready: &'static str,
+    summary_ready: &'static str,
+    protocol_matches: &'static str,
+    readiness_matches: &'static str,
+    production_cutover_ready_matches: &'static str,
+    require_all_skein_matches: &'static str,
+    required_route_count_matches: &'static str,
+    explicit_route_count_matches: &'static str,
+    skein_route_count_matches: &'static str,
+    lancedb_route_count_matches: &'static str,
+    missing_required_routes_matches: &'static str,
+    lancedb_routes_matches: &'static str,
+    blocker_codes_match: &'static str,
+}
+
+fn search_route_ownership_alignment_condition_fields(
+    field: &'static str,
+) -> SearchRouteOwnershipAlignmentConditionFields {
+    match field {
+        "replacement_summary_search_route_ownership_alignment" => {
+            SearchRouteOwnershipAlignmentConditionFields {
+                ready: "replacement_summary_search_route_ownership_alignment.ready",
+                evidence_ready: "replacement_summary_search_route_ownership_alignment.evidence_present",
+                summary_ready: "replacement_summary_search_route_ownership_alignment.summary_present",
+                protocol_matches: "replacement_summary_search_route_ownership_alignment.protocol_matches",
+                readiness_matches: "replacement_summary_search_route_ownership_alignment.ready_matches",
+                production_cutover_ready_matches: "replacement_summary_search_route_ownership_alignment.production_cutover_ready_matches",
+                require_all_skein_matches: "replacement_summary_search_route_ownership_alignment.require_all_skein_matches",
+                required_route_count_matches: "replacement_summary_search_route_ownership_alignment.required_route_count_matches",
+                explicit_route_count_matches: "replacement_summary_search_route_ownership_alignment.explicit_route_count_matches",
+                skein_route_count_matches: "replacement_summary_search_route_ownership_alignment.skein_route_count_matches",
+                lancedb_route_count_matches: "replacement_summary_search_route_ownership_alignment.lancedb_route_count_matches",
+                missing_required_routes_matches: "replacement_summary_search_route_ownership_alignment.missing_required_routes_matches",
+                lancedb_routes_matches: "replacement_summary_search_route_ownership_alignment.lancedb_routes_matches",
+                blocker_codes_match: "replacement_summary_search_route_ownership_alignment.blocker_codes_match",
+            }
+        }
+        "replacement_summary_active_search_route_ownership_alignment" => {
+            SearchRouteOwnershipAlignmentConditionFields {
+                ready: "replacement_summary_active_search_route_ownership_alignment.ready",
+                evidence_ready: "replacement_summary_active_search_route_ownership_alignment.evidence_present",
+                summary_ready: "replacement_summary_active_search_route_ownership_alignment.summary_present",
+                protocol_matches: "replacement_summary_active_search_route_ownership_alignment.protocol_matches",
+                readiness_matches: "replacement_summary_active_search_route_ownership_alignment.ready_matches",
+                production_cutover_ready_matches: "replacement_summary_active_search_route_ownership_alignment.production_cutover_ready_matches",
+                require_all_skein_matches: "replacement_summary_active_search_route_ownership_alignment.require_all_skein_matches",
+                required_route_count_matches: "replacement_summary_active_search_route_ownership_alignment.required_route_count_matches",
+                explicit_route_count_matches: "replacement_summary_active_search_route_ownership_alignment.explicit_route_count_matches",
+                skein_route_count_matches: "replacement_summary_active_search_route_ownership_alignment.skein_route_count_matches",
+                lancedb_route_count_matches: "replacement_summary_active_search_route_ownership_alignment.lancedb_route_count_matches",
+                missing_required_routes_matches: "replacement_summary_active_search_route_ownership_alignment.missing_required_routes_matches",
+                lancedb_routes_matches: "replacement_summary_active_search_route_ownership_alignment.lancedb_routes_matches",
+                blocker_codes_match: "replacement_summary_active_search_route_ownership_alignment.blocker_codes_match",
+            }
+        }
+        _ => SearchRouteOwnershipAlignmentConditionFields {
+            ready: "unknown_search_route_ownership_alignment.ready",
+            evidence_ready: "unknown_search_route_ownership_alignment.evidence_present",
+            summary_ready: "unknown_search_route_ownership_alignment.summary_present",
+            protocol_matches: "unknown_search_route_ownership_alignment.protocol_matches",
+            readiness_matches: "unknown_search_route_ownership_alignment.ready_matches",
+            production_cutover_ready_matches:
+                "unknown_search_route_ownership_alignment.production_cutover_ready_matches",
+            require_all_skein_matches:
+                "unknown_search_route_ownership_alignment.require_all_skein_matches",
+            required_route_count_matches:
+                "unknown_search_route_ownership_alignment.required_route_count_matches",
+            explicit_route_count_matches:
+                "unknown_search_route_ownership_alignment.explicit_route_count_matches",
+            skein_route_count_matches:
+                "unknown_search_route_ownership_alignment.skein_route_count_matches",
+            lancedb_route_count_matches:
+                "unknown_search_route_ownership_alignment.lancedb_route_count_matches",
+            missing_required_routes_matches:
+                "unknown_search_route_ownership_alignment.missing_required_routes_matches",
+            lancedb_routes_matches: "unknown_search_route_ownership_alignment.lancedb_routes_matches",
+            blocker_codes_match: "unknown_search_route_ownership_alignment.blocker_codes_match",
+        },
+    }
 }
 
 #[derive(Debug, Default)]
@@ -4729,6 +5180,10 @@ pub fn library_readiness_cutover_readiness(
         background_ready: library_readiness_area_ready(bundle, "background"),
         query_family_ready: library_readiness_area_ready(bundle, "query_family"),
         graph_route_ready: library_readiness_area_ready(bundle, "graph_route"),
+        search_route_ownership_ready: library_readiness_area_ready(
+            bundle,
+            "search_route_ownership",
+        ),
         search_projection_ready: library_readiness_area_ready(bundle, "search_projection"),
         search_projection_shadow_ready: library_readiness_area_ready(
             bundle,
@@ -4777,6 +5232,12 @@ pub fn library_readiness_cutover_readiness(
                     "library_readiness",
                     "readiness_by_area",
                     "graph_route",
+                    "blocker_codes",
+                ][..],
+                &[
+                    "library_readiness",
+                    "readiness_by_area",
+                    "search_route_ownership",
                     "blocker_codes",
                 ][..],
                 &[
@@ -4892,6 +5353,10 @@ fn library_readiness_cutover_conditions(
             readiness.graph_route_ready,
         ),
         (
+            "library_readiness.readiness_by_area.search_route_ownership.ready",
+            readiness.search_route_ownership_ready,
+        ),
+        (
             "library_readiness.readiness_by_area.search_projection.ready",
             readiness.search_projection_ready,
         ),
@@ -4917,6 +5382,268 @@ fn library_readiness_area_ready(bundle: &serde_json::Value, area: &str) -> bool 
     )
     .and_then(serde_json::Value::as_bool)
         == Some(true)
+}
+
+pub fn cutover_controls_readiness(bundle: &serde_json::Value) -> CutoverControlsReadiness {
+    let initial_import_enabled = bool_path(
+        bundle,
+        &["cutover_controls", "work", "initial_import_enabled"],
+    ) == Some(true);
+    let dual_writes_enabled =
+        bool_path(bundle, &["cutover_controls", "work", "dual_writes_enabled"]) == Some(true);
+    let initial_import_inactive_for_cutover = bool_path(
+        bundle,
+        &[
+            "cutover_controls",
+            "work",
+            "initial_import_inactive_for_cutover",
+        ],
+    ) == Some(true);
+    let initial_import_cutover_catch_up_ready = bool_path(
+        bundle,
+        &[
+            "cutover_controls",
+            "work",
+            "initial_import_cutover_catch_up_ready",
+        ],
+    ) == Some(true);
+    CutoverControlsReadiness {
+        protocol_matches: str_path(bundle, &["cutover_controls", "protocol"])
+            == Some(NOWLEDGE_MEM_CUTOVER_CONTROLS_PROTOCOL),
+        ready: bool_path(bundle, &["cutover_controls", "ready"]) == Some(true),
+        graph_reads_skein: str_path(bundle, &["cutover_controls", "controls", "graph_reads"])
+            == Some("skein"),
+        graph_read_effective: bool_path(bundle, &["cutover_controls", "graph", "read_effective"])
+            == Some(true),
+        graph_production_status_effective: bool_path(
+            bundle,
+            &[
+                "cutover_controls",
+                "production_status",
+                "graph",
+                "skein_cutover_effective",
+            ],
+        ) == Some(true),
+        search_reads_skein: str_path(bundle, &["cutover_controls", "controls", "search_reads"])
+            == Some("skein"),
+        search_read_effective: bool_path(bundle, &["cutover_controls", "search", "read_effective"])
+            == Some(true),
+        search_production_status_effective: bool_path(
+            bundle,
+            &[
+                "cutover_controls",
+                "production_status",
+                "search",
+                "skein_cutover_effective",
+            ],
+        ) == Some(true),
+        dual_writes_enabled,
+        projection_catch_up_enabled: bool_path(
+            bundle,
+            &["cutover_controls", "work", "projection_catch_up_enabled"],
+        ) == Some(true),
+        initial_import_safe: !initial_import_enabled || dual_writes_enabled,
+        initial_import_inactive_for_cutover,
+        initial_import_cutover_catch_up_ready,
+        initial_import_safe_for_read_cutover: initial_import_inactive_for_cutover
+            || initial_import_cutover_catch_up_ready,
+        query_text_redacted: bool_path(
+            bundle,
+            &["cutover_controls", "redaction", "query_text_copied"],
+        ) == Some(false),
+        parameters_redacted: bool_path(
+            bundle,
+            &["cutover_controls", "redaction", "parameters_copied"],
+        ) == Some(false),
+        local_paths_redacted: bool_path(
+            bundle,
+            &["cutover_controls", "redaction", "local_paths_copied"],
+        ) == Some(false),
+        blocker_codes: blocker_codes(
+            bundle,
+            &[
+                &["cutover_controls", "blocker_codes"][..],
+                &["cutover_controls", "production_status", "blocker_codes"][..],
+            ],
+        ),
+    }
+}
+
+fn cutover_controls_conditions(readiness: &CutoverControlsReadiness) -> Vec<(&'static str, bool)> {
+    vec![
+        ("cutover_controls.protocol", readiness.protocol_matches),
+        ("cutover_controls.ready", readiness.ready),
+        (
+            "cutover_controls.controls.graph_reads",
+            readiness.graph_reads_skein,
+        ),
+        (
+            "cutover_controls.graph.read_effective",
+            readiness.graph_read_effective,
+        ),
+        (
+            "cutover_controls.production_status.graph.skein_cutover_effective",
+            readiness.graph_production_status_effective,
+        ),
+        (
+            "cutover_controls.controls.search_reads",
+            readiness.search_reads_skein,
+        ),
+        (
+            "cutover_controls.search.read_effective",
+            readiness.search_read_effective,
+        ),
+        (
+            "cutover_controls.production_status.search.skein_cutover_effective",
+            readiness.search_production_status_effective,
+        ),
+        (
+            "cutover_controls.work.dual_writes_enabled",
+            readiness.dual_writes_enabled,
+        ),
+        (
+            "cutover_controls.work.projection_catch_up_enabled",
+            readiness.projection_catch_up_enabled,
+        ),
+        (
+            "cutover_controls.work.initial_import_enabled",
+            readiness.initial_import_safe,
+        ),
+        (
+            "cutover_controls.work.initial_import_safe_for_read_cutover",
+            readiness.initial_import_safe_for_read_cutover,
+        ),
+        (
+            "cutover_controls.redaction.query_text_copied",
+            readiness.query_text_redacted,
+        ),
+        (
+            "cutover_controls.redaction.parameters_copied",
+            readiness.parameters_redacted,
+        ),
+        (
+            "cutover_controls.redaction.local_paths_copied",
+            readiness.local_paths_redacted,
+        ),
+    ]
+}
+
+pub fn operations_readiness_cutover_readiness(
+    bundle: &serde_json::Value,
+) -> OperationsReadinessCutoverReadiness {
+    OperationsReadinessCutoverReadiness {
+        protocol_matches: str_path(bundle, &["operations_readiness", "protocol"])
+            == Some(NOWLEDGE_MEM_OPERATIONS_READINESS_PROTOCOL),
+        present: bool_path(bundle, &["operations_readiness", "present"]) == Some(true),
+        ready: bool_path(bundle, &["operations_readiness", "ready"]) == Some(true),
+        graph_open: bool_path(bundle, &["operations_readiness", "graph", "open"]) == Some(true),
+        graph_writable: bool_path(bundle, &["operations_readiness", "graph", "read_only"])
+            == Some(false),
+        search_projection_open: bool_path(
+            bundle,
+            &["operations_readiness", "search_projection", "open"],
+        ) == Some(true),
+        search_projection_not_stale: bool_path(
+            bundle,
+            &["operations_readiness", "search_projection", "stale"],
+        ) == Some(false),
+        storage_lifecycle_ready: bool_path(
+            bundle,
+            &["operations_readiness", "storage_lifecycle", "ready"],
+        ) == Some(true),
+        storage_lifecycle_action_ready: str_path(
+            bundle,
+            &["operations_readiness", "storage_lifecycle", "action"],
+        ) == Some("ready"),
+        storage_recovery_ready: bool_path(
+            bundle,
+            &[
+                "operations_readiness",
+                "readiness",
+                "storage_recovery_ready",
+            ],
+        ) == Some(true),
+        slow_query_ready: bool_path(
+            bundle,
+            &["operations_readiness", "readiness", "slow_query_ready"],
+        ) == Some(true),
+        background_maintenance_ready: bool_path(
+            bundle,
+            &[
+                "operations_readiness",
+                "readiness",
+                "background_maintenance_ready",
+            ],
+        ) == Some(true),
+        query_text_redacted: bool_path(
+            bundle,
+            &["operations_readiness", "redaction", "query_text_copied"],
+        ) == Some(false),
+        parameters_redacted: bool_path(
+            bundle,
+            &["operations_readiness", "redaction", "parameters_copied"],
+        ) == Some(false),
+        local_paths_redacted: bool_path(
+            bundle,
+            &["operations_readiness", "redaction", "local_paths_copied"],
+        ) == Some(false),
+        blocker_codes: blocker_codes(bundle, &[&["operations_readiness", "blocker_codes"][..]]),
+    }
+}
+
+fn operations_readiness_cutover_conditions(
+    readiness: &OperationsReadinessCutoverReadiness,
+) -> Vec<(&'static str, bool)> {
+    vec![
+        ("operations_readiness.protocol", readiness.protocol_matches),
+        ("operations_readiness.present", readiness.present),
+        ("operations_readiness.ready", readiness.ready),
+        ("operations_readiness.graph.open", readiness.graph_open),
+        (
+            "operations_readiness.graph.read_only",
+            readiness.graph_writable,
+        ),
+        (
+            "operations_readiness.search_projection.open",
+            readiness.search_projection_open,
+        ),
+        (
+            "operations_readiness.search_projection.stale",
+            readiness.search_projection_not_stale,
+        ),
+        (
+            "operations_readiness.storage_lifecycle.ready",
+            readiness.storage_lifecycle_ready,
+        ),
+        (
+            "operations_readiness.storage_lifecycle.action",
+            readiness.storage_lifecycle_action_ready,
+        ),
+        (
+            "operations_readiness.readiness.storage_recovery_ready",
+            readiness.storage_recovery_ready,
+        ),
+        (
+            "operations_readiness.readiness.slow_query_ready",
+            readiness.slow_query_ready,
+        ),
+        (
+            "operations_readiness.readiness.background_maintenance_ready",
+            readiness.background_maintenance_ready,
+        ),
+        (
+            "operations_readiness.redaction.query_text_copied",
+            readiness.query_text_redacted,
+        ),
+        (
+            "operations_readiness.redaction.parameters_copied",
+            readiness.parameters_redacted,
+        ),
+        (
+            "operations_readiness.redaction.local_paths_copied",
+            readiness.local_paths_redacted,
+        ),
+    ]
 }
 
 pub fn storage_recovery_cutover_readiness(
@@ -5398,11 +6125,16 @@ mod tests {
         nowledge_mem_integration_readiness_json, SKEIN_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE,
     };
     use crate::{
+        nowledge_mem_active_search_route_ownership_all_skein,
+        nowledge_mem_active_search_route_ownership_readiness,
         nowledge_mem_graph_read_route_catalog_digest, nowledge_mem_graph_read_route_spec,
         nowledge_mem_graph_read_route_specs_json, nowledge_mem_route_ownership_all_skein,
         nowledge_mem_route_ownership_readiness, nowledge_mem_search_candidate_shadow_evidence_json,
-        NowledgeMemRouteOwnershipPolicy, NowledgeMemRouteReadinessSummary,
-        NowledgeMemSearchCandidateShadowAccumulator, NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
+        nowledge_mem_search_route_ownership_all_skein,
+        nowledge_mem_search_route_ownership_readiness, NowledgeMemRouteOwnershipPolicy,
+        NowledgeMemRouteReadinessSummary, NowledgeMemSearchCandidateShadowAccumulator,
+        NowledgeMemSearchRouteOwnershipPolicy, NOWLEDGE_MEM_CUTOVER_CONTROLS_PROTOCOL,
+        NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION, NOWLEDGE_MEM_OPERATIONS_READINESS_PROTOCOL,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE, NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_ENGINE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_EVIDENCE_SOURCE,
@@ -8928,6 +9660,7 @@ mod tests {
                 "library_readiness.readiness_by_area.background.ready",
                 "library_readiness.readiness_by_area.query_family.ready",
                 "library_readiness.readiness_by_area.graph_route.ready",
+                "library_readiness.readiness_by_area.search_route_ownership.ready",
                 "library_readiness.readiness_by_area.search_projection.ready",
                 "library_readiness.readiness_by_area.search_projection_shadow.ready",
                 "library_readiness.readiness_by_area.search_candidate_shadow.ready",
@@ -9065,6 +9798,282 @@ mod tests {
     }
 
     #[test]
+    fn requires_cutover_controls_evidence() {
+        let mut bundle = ready_bundle();
+        bundle.as_object_mut().unwrap().remove("cutover_controls");
+
+        let typed = super::cutover_controls_readiness(&bundle);
+        assert!(!typed.evidence_ready());
+        assert!(!typed.protocol_matches);
+        assert!(!typed.ready);
+        assert!(!typed.graph_reads_skein);
+        assert!(!typed.search_reads_skein);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["cutover_controls"])
+        );
+        let check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "cutover_controls")
+            .unwrap();
+        assert_eq!(
+            check["failed_evidence_fields"],
+            serde_json::json!([
+                "cutover_controls.protocol",
+                "cutover_controls.ready",
+                "cutover_controls.controls.graph_reads",
+                "cutover_controls.graph.read_effective",
+                "cutover_controls.production_status.graph.skein_cutover_effective",
+                "cutover_controls.controls.search_reads",
+                "cutover_controls.search.read_effective",
+                "cutover_controls.production_status.search.skein_cutover_effective",
+                "cutover_controls.work.dual_writes_enabled",
+                "cutover_controls.work.projection_catch_up_enabled",
+                "cutover_controls.work.initial_import_safe_for_read_cutover",
+                "cutover_controls.redaction.query_text_copied",
+                "cutover_controls.redaction.parameters_copied",
+                "cutover_controls.redaction.local_paths_copied"
+            ])
+        );
+        assert!(report["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "attach_cutover_controls_evidence"));
+    }
+
+    #[test]
+    fn cutover_controls_reject_legacy_or_ineffective_skein_reads() {
+        let mut bundle = ready_bundle();
+        bundle["cutover_controls"]["ready"] = serde_json::json!(false);
+        bundle["cutover_controls"]["controls"]["graph_reads"] = serde_json::json!("legacy");
+        bundle["cutover_controls"]["graph"]["read_effective"] = serde_json::json!(false);
+        bundle["cutover_controls"]["production_status"]["graph"]["skein_cutover_effective"] =
+            serde_json::json!(false);
+        bundle["cutover_controls"]["work"]["projection_catch_up_enabled"] =
+            serde_json::json!(false);
+        bundle["cutover_controls"]["blocker_codes"] = serde_json::json!([
+            "graph_read_selected_skein_but_not_effective",
+            "search_read_selected_skein_without_projection_catch_up"
+        ]);
+
+        let typed = super::cutover_controls_readiness(&bundle);
+        assert!(!typed.evidence_ready());
+        assert!(typed.protocol_matches);
+        assert!(!typed.ready);
+        assert!(!typed.graph_reads_skein);
+        assert!(!typed.graph_read_effective);
+        assert!(!typed.graph_production_status_effective);
+        assert!(!typed.projection_catch_up_enabled);
+        assert_eq!(
+            typed.blocker_codes,
+            vec![
+                "graph_read_selected_skein_but_not_effective".to_string(),
+                "search_read_selected_skein_without_projection_catch_up".to_string()
+            ]
+        );
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+        let check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "cutover_controls")
+            .unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["cutover_controls"])
+        );
+        assert_eq!(
+            check["failed_evidence_fields"],
+            serde_json::json!([
+                "cutover_controls.ready",
+                "cutover_controls.controls.graph_reads",
+                "cutover_controls.graph.read_effective",
+                "cutover_controls.production_status.graph.skein_cutover_effective",
+                "cutover_controls.work.projection_catch_up_enabled"
+            ])
+        );
+    }
+
+    #[test]
+    fn cutover_controls_reject_active_initial_import_for_read_cutover() {
+        let mut bundle = ready_bundle();
+        bundle["cutover_controls"]["ready"] = serde_json::json!(false);
+        bundle["cutover_controls"]["controls"]["initial_import"] = serde_json::json!("enabled");
+        bundle["cutover_controls"]["work"]["initial_import_enabled"] = serde_json::json!(true);
+        bundle["cutover_controls"]["work"]["initial_import_inactive_for_cutover"] =
+            serde_json::json!(false);
+        bundle["cutover_controls"]["blocker_codes"] =
+            serde_json::json!(["initial_import_active_blocks_read_cutover"]);
+
+        let typed = super::cutover_controls_readiness(&bundle);
+        assert!(!typed.evidence_ready());
+        assert!(typed.dual_writes_enabled);
+        assert!(typed.initial_import_safe);
+        assert!(!typed.initial_import_inactive_for_cutover);
+        assert!(!typed.initial_import_cutover_catch_up_ready);
+        assert!(!typed.initial_import_safe_for_read_cutover);
+        assert_eq!(
+            typed.blocker_codes,
+            vec!["initial_import_active_blocks_read_cutover".to_string()]
+        );
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+        let check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "cutover_controls")
+            .unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["cutover_controls"])
+        );
+        assert_eq!(
+            check["failed_evidence_fields"],
+            serde_json::json!([
+                "cutover_controls.ready",
+                "cutover_controls.work.initial_import_safe_for_read_cutover"
+            ])
+        );
+        assert_eq!(
+            check["blocker_codes"],
+            serde_json::json!(["initial_import_active_blocks_read_cutover"])
+        );
+    }
+
+    #[test]
+    fn cutover_controls_accept_active_initial_import_with_catch_up_proof() {
+        let mut bundle = ready_bundle();
+        bundle["cutover_controls"]["controls"]["initial_import"] = serde_json::json!("enabled");
+        bundle["cutover_controls"]["work"]["initial_import_enabled"] = serde_json::json!(true);
+        bundle["cutover_controls"]["work"]["initial_import_inactive_for_cutover"] =
+            serde_json::json!(false);
+        bundle["cutover_controls"]["work"]["initial_import_cutover_catch_up_ready"] =
+            serde_json::json!(true);
+        bundle["cutover_controls"]["work"]["initial_import_safe_for_read_cutover"] =
+            serde_json::json!(true);
+
+        let typed = super::cutover_controls_readiness(&bundle);
+        assert!(typed.evidence_ready());
+        assert!(typed.initial_import_safe);
+        assert!(!typed.initial_import_inactive_for_cutover);
+        assert!(typed.initial_import_cutover_catch_up_ready);
+        assert!(typed.initial_import_safe_for_read_cutover);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+        assert_eq!(report["ready"], true);
+    }
+
+    #[test]
+    fn requires_operations_readiness_evidence() {
+        let mut bundle = ready_bundle();
+        bundle
+            .as_object_mut()
+            .unwrap()
+            .remove("operations_readiness");
+
+        let typed = super::operations_readiness_cutover_readiness(&bundle);
+        assert!(!typed.evidence_ready());
+        assert!(!typed.protocol_matches);
+        assert!(!typed.present);
+        assert!(!typed.ready);
+        assert!(!typed.graph_open);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["operations_readiness"])
+        );
+        assert_eq!(report["blocking_categories"], serde_json::Value::Null);
+        let check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "operations_readiness")
+            .unwrap();
+        assert_eq!(
+            check["failed_evidence_fields"],
+            serde_json::json!([
+                "operations_readiness.protocol",
+                "operations_readiness.present",
+                "operations_readiness.ready",
+                "operations_readiness.graph.open",
+                "operations_readiness.graph.read_only",
+                "operations_readiness.search_projection.open",
+                "operations_readiness.search_projection.stale",
+                "operations_readiness.storage_lifecycle.ready",
+                "operations_readiness.storage_lifecycle.action",
+                "operations_readiness.readiness.storage_recovery_ready",
+                "operations_readiness.readiness.slow_query_ready",
+                "operations_readiness.readiness.background_maintenance_ready",
+                "operations_readiness.redaction.query_text_copied",
+                "operations_readiness.redaction.parameters_copied",
+                "operations_readiness.redaction.local_paths_copied"
+            ])
+        );
+        assert!(report["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "attach_operations_readiness_report"));
+    }
+
+    #[test]
+    fn operations_readiness_blocks_stale_projection_and_recovery_actions() {
+        let mut bundle = ready_bundle();
+        bundle["operations_readiness"]["ready"] = serde_json::json!(false);
+        bundle["operations_readiness"]["search_projection"]["stale"] = serde_json::json!(true);
+        bundle["operations_readiness"]["storage_lifecycle"]["ready"] = serde_json::json!(false);
+        bundle["operations_readiness"]["storage_lifecycle"]["action"] =
+            serde_json::json!("run_checkpoint");
+        bundle["operations_readiness"]["readiness"]["storage_recovery_ready"] =
+            serde_json::json!(false);
+        bundle["operations_readiness"]["blocker_codes"] =
+            serde_json::json!(["storage_recovery_not_ready", "search_projection_stale"]);
+
+        let typed = super::operations_readiness_cutover_readiness(&bundle);
+        assert!(!typed.evidence_ready());
+        assert!(typed.protocol_matches);
+        assert!(typed.present);
+        assert!(!typed.ready);
+        assert!(!typed.search_projection_not_stale);
+        assert!(!typed.storage_lifecycle_ready);
+        assert!(!typed.storage_lifecycle_action_ready);
+        assert!(!typed.storage_recovery_ready);
+        assert_eq!(
+            typed.blocker_codes,
+            vec![
+                "search_projection_stale".to_string(),
+                "storage_recovery_not_ready".to_string()
+            ]
+        );
+
+        let preflight = super::nowledge_mem_final_cutover_preflight(&bundle);
+        assert!(!preflight.production_cutover_ready);
+        assert!(!preflight.storage_recovery_ready);
+        assert!(preflight
+            .failed_checks
+            .contains(&"operations_readiness".to_string()));
+        assert!(preflight
+            .blocking_categories
+            .contains(&"storage_recovery".to_string()));
+    }
+
+    #[test]
     fn rejects_library_readiness_that_copies_sensitive_fields() {
         let mut bundle = ready_bundle();
         bundle["library_readiness"]["ready"] = serde_json::json!(false);
@@ -9115,7 +10124,7 @@ mod tests {
     fn rejects_blocked_library_graph_route_readiness_area() {
         let mut bundle = ready_bundle();
         bundle["library_readiness"]["ready"] = serde_json::json!(false);
-        bundle["library_readiness"]["ready_area_count"] = serde_json::json!(7);
+        bundle["library_readiness"]["ready_area_count"] = serde_json::json!(8);
         bundle["library_readiness"]["blocked_area_count"] = serde_json::json!(1);
         bundle["library_readiness"]["blocker_codes"] =
             serde_json::json!(["graph_route_readiness_not_ready"]);
@@ -9170,10 +10179,75 @@ mod tests {
     }
 
     #[test]
+    fn rejects_blocked_library_search_route_ownership_area() {
+        let mut bundle = ready_bundle();
+        bundle["library_readiness"]["ready"] = serde_json::json!(false);
+        bundle["library_readiness"]["ready_area_count"] = serde_json::json!(10);
+        bundle["library_readiness"]["blocked_area_count"] = serde_json::json!(1);
+        bundle["library_readiness"]["blocker_codes"] =
+            serde_json::json!(["search_route_ownership_not_ready"]);
+        bundle["library_readiness"]["search_route_ownership"]["ready"] = serde_json::json!(false);
+        bundle["library_readiness"]["search_route_ownership"]["production_cutover_ready"] =
+            serde_json::json!(false);
+        bundle["library_readiness"]["search_route_ownership"]["lancedb_route_count"] =
+            serde_json::json!(1);
+        bundle["library_readiness"]["search_route_ownership"]["lancedb_routes"] =
+            serde_json::json!(["memory"]);
+        bundle["library_readiness"]["search_route_ownership"]["blocker_codes"] =
+            serde_json::json!(["search_routes_still_lancedb"]);
+        bundle["library_readiness"]["readiness_by_area"]["search_route_ownership"]["ready"] =
+            serde_json::json!(false);
+        bundle["library_readiness"]["readiness_by_area"]["search_route_ownership"]
+            ["blocker_codes"] = serde_json::json!(["search_routes_still_lancedb"]);
+
+        let typed = super::library_readiness_cutover_readiness(&bundle);
+        assert!(!typed.evidence_ready());
+        assert!(!typed.ready);
+        assert!(!typed.blocked_area_count_zero);
+        assert!(!typed.search_route_ownership_ready);
+        assert_eq!(
+            typed.blocker_codes,
+            vec![
+                "search_route_ownership_not_ready".to_string(),
+                "search_routes_still_lancedb".to_string()
+            ]
+        );
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["library_readiness"])
+        );
+        assert_eq!(
+            report["blocker_codes"],
+            serde_json::json!([
+                "search_route_ownership_not_ready",
+                "search_routes_still_lancedb"
+            ])
+        );
+        let library_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "library_readiness")
+            .unwrap();
+        assert_eq!(
+            library_check["failed_evidence_fields"],
+            serde_json::json!([
+                "library_readiness.ready",
+                "library_readiness.blocked_area_count",
+                "library_readiness.readiness_by_area.search_route_ownership.ready"
+            ])
+        );
+    }
+
+    #[test]
     fn rejects_blocked_library_workload_fixture_readiness_area() {
         let mut bundle = ready_bundle();
         bundle["library_readiness"]["ready"] = serde_json::json!(false);
-        bundle["library_readiness"]["ready_area_count"] = serde_json::json!(9);
+        bundle["library_readiness"]["ready_area_count"] = serde_json::json!(10);
         bundle["library_readiness"]["blocked_area_count"] = serde_json::json!(1);
         bundle["library_readiness"]["blocker_codes"] =
             serde_json::json!(["workload_fixture_evidence_not_ready"]);
@@ -9810,6 +10884,15 @@ mod tests {
             "routes": ready_graph_route_profile_routes()
         });
         bundle["route_ownership"] = ready_route_ownership();
+        bundle["search_route_ownership"] = ready_search_route_ownership();
+        bundle["active_search_route_ownership"] = ready_active_search_route_ownership();
+        bundle["replacement_summary"]["search_route_ownership"] = ready_search_route_ownership();
+        bundle["replacement_summary"]["active_search_route_ownership"] =
+            ready_active_search_route_ownership();
+        bundle["replacement_summary_search_route_ownership_alignment"] =
+            ready_search_route_ownership_alignment();
+        bundle["replacement_summary_active_search_route_ownership_alignment"] =
+            ready_search_route_ownership_alignment();
         bundle["graph_route_parity_alignment"] = serde_json::json!({
             "ready": true,
             "required_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
@@ -9909,6 +10992,8 @@ mod tests {
             "embedding_identity_ready": true,
         });
         bundle["library_readiness"] = ready_library_readiness();
+        bundle["cutover_controls"] = ready_cutover_controls();
+        bundle["operations_readiness"] = ready_operations_readiness();
         bundle["blackbox_manifest"] = ready_blackbox_manifest();
         bundle
     }
@@ -9986,6 +11071,44 @@ mod tests {
             NowledgeMemRouteOwnershipPolicy::production_cutover(),
         )
         .json()
+    }
+
+    fn ready_search_route_ownership() -> serde_json::Value {
+        nowledge_mem_search_route_ownership_readiness(
+            &nowledge_mem_search_route_ownership_all_skein(),
+            NowledgeMemSearchRouteOwnershipPolicy::production_cutover(),
+        )
+        .json()
+    }
+
+    fn ready_active_search_route_ownership() -> serde_json::Value {
+        nowledge_mem_active_search_route_ownership_readiness(
+            &nowledge_mem_active_search_route_ownership_all_skein(),
+            NowledgeMemSearchRouteOwnershipPolicy::production_cutover(),
+        )
+        .json()
+    }
+
+    fn ready_search_route_ownership_alignment() -> serde_json::Value {
+        serde_json::json!({
+            "ready": true,
+            "evidence_present": true,
+            "summary_present": true,
+            "protocol_matches": true,
+            "ready_matches": true,
+            "production_cutover_ready_matches": true,
+            "require_all_skein_matches": true,
+            "required_route_count_matches": true,
+            "explicit_route_count_matches": true,
+            "skein_route_count_matches": true,
+            "lancedb_route_count_matches": true,
+            "missing_required_routes_matches": true,
+            "lancedb_routes_matches": true,
+            "blocker_codes_match": true,
+            "evidence_lancedb_routes": [],
+            "summary_lancedb_routes": [],
+            "blocker_codes": []
+        })
     }
 
     fn ready_route_readiness_summary() -> NowledgeMemRouteReadinessSummary {
@@ -10199,7 +11322,7 @@ mod tests {
             "present": true,
             "ready": true,
             "mode": "shadow_read_only",
-            "ready_area_count": 10,
+            "ready_area_count": 11,
             "blocked_area_count": 0,
             "blocker_codes": [],
             "redaction": {
@@ -10254,6 +11377,10 @@ mod tests {
                     "ready": true,
                     "blocker_codes": []
                 },
+                "search_route_ownership": {
+                    "ready": true,
+                    "blocker_codes": []
+                },
                 "search_projection": {
                     "ready": true,
                     "blocker_codes": []
@@ -10275,6 +11402,8 @@ mod tests {
                 "ready": true,
                 "blocker_codes": []
             },
+            "search_route_ownership": ready_search_route_ownership(),
+            "active_search_route_ownership": ready_active_search_route_ownership(),
             "query_family_evidence": {
                 "ready": true,
                 "blocker_codes": []
@@ -10293,6 +11422,85 @@ mod tests {
             "search_projection_shadow_evidence": {
                 "ready": true,
                 "blocker_codes": []
+            }
+        })
+    }
+
+    fn ready_cutover_controls() -> serde_json::Value {
+        serde_json::json!({
+            "protocol": NOWLEDGE_MEM_CUTOVER_CONTROLS_PROTOCOL,
+            "ready": true,
+            "controls": {
+                "graph_reads": "skein",
+                "search_reads": "skein",
+                "dual_writes": "enabled",
+                "initial_import": "disabled",
+                "projection_catch_up": "enabled"
+            },
+            "graph": {
+                "read_selected_skein": true,
+                "read_effective": true
+            },
+            "search": {
+                "read_selected_skein": true,
+                "read_effective": true
+            },
+            "work": {
+                "dual_writes_enabled": true,
+                "initial_import_enabled": false,
+                "initial_import_inactive_for_cutover": true,
+                "initial_import_cutover_catch_up_ready": false,
+                "initial_import_safe_for_read_cutover": true,
+                "projection_catch_up_enabled": true
+            },
+            "blocker_codes": [],
+            "production_status": {
+                "graph": {
+                    "skein_cutover_effective": true
+                },
+                "search": {
+                    "skein_cutover_effective": true
+                },
+                "blocker_codes": []
+            },
+            "redaction": {
+                "query_text_copied": false,
+                "parameters_copied": false,
+                "local_paths_copied": false
+            }
+        })
+    }
+
+    fn ready_operations_readiness() -> serde_json::Value {
+        serde_json::json!({
+            "protocol": NOWLEDGE_MEM_OPERATIONS_READINESS_PROTOCOL,
+            "present": true,
+            "ready": true,
+            "graph": {
+                "open": true,
+                "read_only": false,
+                "commit_epoch": 7
+            },
+            "search_projection": {
+                "open": true,
+                "commit_lag": 0,
+                "stale": false
+            },
+            "storage_lifecycle": {
+                "ready": true,
+                "action": "ready"
+            },
+            "readiness": {
+                "storage_lifecycle_ready": true,
+                "storage_recovery_ready": true,
+                "slow_query_ready": true,
+                "background_maintenance_ready": true
+            },
+            "blocker_codes": [],
+            "redaction": {
+                "query_text_copied": false,
+                "parameters_copied": false,
+                "local_paths_copied": false
             }
         })
     }

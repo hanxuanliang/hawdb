@@ -20,11 +20,12 @@ pub use skein_storage::{
     RelationshipDeleteRequest, RelationshipOnCreatePropertyValue, RelationshipPropertiesUpdate,
     RelationshipPropertyUpdate, RelationshipSetAssignment, RelationshipTargetNodeDelete,
     ScanPruningReport, ScanPruningStrategy, ScanPruningTargetKind, SchemaMaintenanceAction,
-    SchemaMaintenancePlanItem, SearchProjectionChangefeedStatus, SearchProjectionGraphChange,
-    SearchProjectionMutationId, SegmentRangeReader, SegmentReadError, SegmentReadExecutionError,
-    SegmentReadExecutionReport, SegmentReadExecutor, SegmentReadPayload, SegmentReadRange,
-    SegmentReadSchedule, SegmentReadScheduler, SegmentReadWave, StorageReclamationWatermark,
-    StorageRecoveryReport, StoreStableIdMapping, WalReplayConfig,
+    SchemaMaintenancePlanItem, SearchProjectionChangefeedReadiness,
+    SearchProjectionChangefeedStatus, SearchProjectionGraphChange, SearchProjectionMutationId,
+    SegmentRangeReader, SegmentReadError, SegmentReadExecutionError, SegmentReadExecutionReport,
+    SegmentReadExecutor, SegmentReadPayload, SegmentReadRange, SegmentReadSchedule,
+    SegmentReadScheduler, SegmentReadWave, StorageReclamationWatermark, StorageRecoveryReport,
+    StoreStableIdMapping, WalReplayConfig,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
@@ -49,6 +50,27 @@ const DURABLE_COMPRESSION_HEADER: &str = "SKEIN_COMPRESSED_V1";
 const DEFAULT_COMPRESSION_LEVEL: i32 = 3;
 pub const DENSE_ADJACENCY_DEGREE_THRESHOLD: usize = 64;
 const MAX_ADJACENCY_CONSISTENCY_SAMPLES: usize = 32;
+
+type PendingNode = (NodeId, LabelId, BTreeMap<String, Value>);
+type PendingRelationship = (RelId, NodeId, NodeId, RelTypeId, BTreeMap<String, Value>);
+pub type GraphSnapshotNodeImport = (NodeId, String, BTreeMap<String, Value>);
+pub type GraphSnapshotRelationshipImport = (RelId, NodeId, NodeId, String, BTreeMap<String, Value>);
+
+#[derive(Debug, Clone)]
+struct RelationshipCandidate {
+    source: NodeId,
+    target: NodeId,
+    properties: BTreeMap<String, Value>,
+}
+
+struct RelationshipMatchRequest<'a> {
+    rel_type_id: RelTypeId,
+    source_label_id: Option<LabelId>,
+    source_filter: Option<&'a PropertyFilter>,
+    target_label_id: Option<LabelId>,
+    target_filter: Option<&'a PropertyFilter>,
+    rel_properties: &'a BTreeMap<String, Value>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdjacencyConsistencyReport {
@@ -1555,6 +1577,107 @@ impl GraphStore {
         Ok(id)
     }
 
+    pub fn import_graph_snapshot_rows(
+        &mut self,
+        catalog: &mut Catalog,
+        nodes: Vec<GraphSnapshotNodeImport>,
+        relationships: Vec<GraphSnapshotRelationshipImport>,
+    ) -> Result<()> {
+        if !self.nodes.is_empty() || !self.relationships.is_empty() {
+            return Err(SkeinError::Storage(
+                "graph lightning initial import requires an empty target graph".to_string(),
+            ));
+        }
+        let mut node_ids = BTreeSet::new();
+        for (id, label, _) in &nodes {
+            if label.is_empty() {
+                return Err(SkeinError::Storage(
+                    "graph lightning initial import node label is empty".to_string(),
+                ));
+            }
+            if !node_ids.insert(*id) {
+                return Err(SkeinError::Storage(format!(
+                    "graph lightning initial import duplicate node id {}",
+                    id.0
+                )));
+            }
+        }
+        let mut relationship_ids = BTreeSet::new();
+        for (id, source, target, rel_type, _) in &relationships {
+            if rel_type.is_empty() {
+                return Err(SkeinError::Storage(
+                    "graph lightning initial import relationship type is empty".to_string(),
+                ));
+            }
+            if !relationship_ids.insert(*id) {
+                return Err(SkeinError::Storage(format!(
+                    "graph lightning initial import duplicate relationship id {}",
+                    id.0
+                )));
+            }
+            if !node_ids.contains(source) {
+                return Err(SkeinError::Storage(format!(
+                    "graph lightning initial import relationship {} references missing source node {}",
+                    id.0, source.0
+                )));
+            }
+            if !node_ids.contains(target) {
+                return Err(SkeinError::Storage(format!(
+                    "graph lightning initial import relationship {} references missing target node {}",
+                    id.0, target.0
+                )));
+            }
+        }
+        if nodes.is_empty() && relationships.is_empty() {
+            return Ok(());
+        }
+
+        let mut working_catalog = catalog.clone();
+        for (_, label, _) in &nodes {
+            working_catalog.get_or_create_label(label);
+        }
+        for (_, _, _, rel_type, _) in &relationships {
+            working_catalog.get_or_create_rel_type(rel_type);
+        }
+        let mut ops = Vec::with_capacity(nodes.len() + relationships.len());
+        ops.extend(
+            nodes
+                .iter()
+                .map(|(id, label, properties)| WalOp::CreateNode {
+                    id: *id,
+                    label: label.clone(),
+                    properties: properties.clone(),
+                }),
+        );
+        ops.extend(
+            relationships
+                .iter()
+                .map(
+                    |(id, source, target, rel_type, properties)| WalOp::CreateRelationship {
+                        id: *id,
+                        source: *source,
+                        target: *target,
+                        rel_type: rel_type.clone(),
+                        properties: properties.clone(),
+                    },
+                ),
+        );
+        self.validate_constraints_for_ops(&working_catalog, &ops)?;
+        if let Some(durable) = &mut self.durable {
+            durable.append_batch(ops.clone())?;
+        }
+        self.record_search_projection_graph_changes_for_ops(
+            &working_catalog,
+            self.commit_epoch + 1,
+            &ops,
+        );
+        for op in ops {
+            self.apply_wal_op(catalog, op);
+        }
+        self.commit_epoch += 1;
+        Ok(())
+    }
+
     pub fn create_relationships_between_matches(
         &mut self,
         catalog: &mut Catalog,
@@ -2424,6 +2547,80 @@ impl GraphStore {
             .collect()
     }
 
+    fn relationship_target_node_ids_with_pending(
+        &self,
+        catalog: &Catalog,
+        request: &RelationshipTargetNodeDelete,
+        pending_nodes: &[PendingNode],
+        pending_relationships: &[PendingRelationship],
+    ) -> Vec<NodeId> {
+        let Some(source_label_id) = optional_label_id(catalog, &request.source_label) else {
+            return Vec::new();
+        };
+        let Some(target_label_id) = optional_label_id(catalog, &request.target_label) else {
+            return Vec::new();
+        };
+        let Some(rel_type_id) = catalog.rel_type_id(&request.rel_type) else {
+            return Vec::new();
+        };
+        let source_ids = self
+            .matching_node_ids_with_pending(
+                Some(source_label_id),
+                request.source_filter.as_ref(),
+                pending_nodes,
+            )
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        if source_ids.is_empty() {
+            return Vec::new();
+        }
+        let target_ids = request.target_filter.as_ref().map(|filter| {
+            self.matching_node_ids_with_pending(Some(target_label_id), Some(filter), pending_nodes)
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+        });
+        if target_ids.as_ref().is_some_and(BTreeSet::is_empty) {
+            return Vec::new();
+        }
+        let mut ids = self.relationship_target_node_ids(catalog, request);
+        ids.extend(pending_relationships.iter().filter_map(
+            |(relationship_id, source, target, pending_rel_type_id, properties)| {
+                if *pending_rel_type_id != rel_type_id || !source_ids.contains(source) {
+                    return None;
+                }
+                if request
+                    .rel_filter
+                    .as_ref()
+                    .map(|filter| !property_filter_matches(filter, relationship_id.0, properties))
+                    .unwrap_or(false)
+                {
+                    return None;
+                }
+                if !node_matches_label_and_filter(
+                    self,
+                    pending_nodes,
+                    *target,
+                    target_label_id,
+                    request.target_filter.as_ref(),
+                ) {
+                    return None;
+                }
+                if target_ids
+                    .as_ref()
+                    .map(|ids| !ids.contains(target))
+                    .unwrap_or(false)
+                {
+                    return None;
+                }
+                Some(*target)
+            },
+        ));
+        ids.into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
     pub fn set_relationship_property(
         &mut self,
         catalog: &mut Catalog,
@@ -3210,17 +3407,18 @@ impl GraphStore {
                 } => {
                     let label_id = optional_label_id(&working_catalog, &label);
                     if label.is_empty() || label_id.is_some() {
-                        for id in self.matching_node_ids(label_id, filter.as_ref()) {
-                            ops.push(WalOp::SetNodeProperty {
-                                id,
-                                property: property.clone(),
-                                value: value.clone(),
-                            });
-                            rows.push(BTreeMap::from([(
-                                "node_id".to_string(),
-                                Value::Int(id.0 as i64),
-                            )]));
-                        }
+                        let assignment = [NodeSetAssignment {
+                            property: property.clone(),
+                            value: NodeSetValue::Value(value.clone()),
+                        }];
+                        self.apply_set_node_properties_mutation(
+                            &mut ops,
+                            &mut rows,
+                            &mut pending_nodes,
+                            label_id,
+                            filter.as_ref(),
+                            &assignment,
+                        )?;
                     }
                 }
                 GraphMutation::SetNodePropertyAddInt {
@@ -3231,35 +3429,18 @@ impl GraphStore {
                 } => {
                     let label_id = optional_label_id(&working_catalog, &label);
                     if label.is_empty() || label_id.is_some() {
-                        for id in self.matching_node_ids(label_id, filter.as_ref()) {
-                            let current = self
-                                .nodes
-                                .get(&id)
-                                .and_then(|node| node.properties.get(&property));
-                            let current = match current {
-                                None | Some(Value::Null) => 0,
-                                Some(Value::Int(value)) => *value,
-                                Some(value) => {
-                                    return Err(SkeinError::Execution(format!(
-                                        "property increment requires an integer or null value, got {value:?}"
-                                    )));
-                                }
-                            };
-                            let value = current.checked_add(amount).ok_or_else(|| {
-                                SkeinError::Execution(
-                                    "property increment overflowed i64".to_string(),
-                                )
-                            })?;
-                            ops.push(WalOp::SetNodeProperty {
-                                id,
-                                property: property.clone(),
-                                value: Value::Int(value),
-                            });
-                            rows.push(BTreeMap::from([(
-                                "node_id".to_string(),
-                                Value::Int(id.0 as i64),
-                            )]));
-                        }
+                        let assignment = [NodeSetAssignment {
+                            property: property.clone(),
+                            value: NodeSetValue::AddInt { amount },
+                        }];
+                        self.apply_set_node_properties_mutation(
+                            &mut ops,
+                            &mut rows,
+                            &mut pending_nodes,
+                            label_id,
+                            filter.as_ref(),
+                            &assignment,
+                        )?;
                     }
                 }
                 GraphMutation::SetNodeProperties {
@@ -3269,13 +3450,14 @@ impl GraphStore {
                 } => {
                     let label_id = optional_label_id(&working_catalog, &label);
                     if label.is_empty() || label_id.is_some() {
-                        let ids = self
-                            .matching_node_ids(label_id, filter.as_ref())
-                            .collect::<Vec<_>>();
-                        ops.extend(self.node_set_property_ops(&ids, &assignments)?);
-                        rows.extend(ids.into_iter().map(|id| {
-                            BTreeMap::from([("node_id".to_string(), Value::Int(id.0 as i64))])
-                        }));
+                        self.apply_set_node_properties_mutation(
+                            &mut ops,
+                            &mut rows,
+                            &mut pending_nodes,
+                            label_id,
+                            filter.as_ref(),
+                            &assignments,
+                        )?;
                     }
                 }
                 GraphMutation::SetRelationshipProperty {
@@ -3294,6 +3476,8 @@ impl GraphStore {
                         &working_catalog,
                         &mut ops,
                         &mut rows,
+                        &pending_nodes,
+                        &mut pending_relationships,
                         RelationshipPropertiesUpdate {
                             source_label,
                             filter,
@@ -3319,6 +3503,8 @@ impl GraphStore {
                         &working_catalog,
                         &mut ops,
                         &mut rows,
+                        &pending_nodes,
+                        &mut pending_relationships,
                         RelationshipPropertiesUpdate {
                             source_label,
                             filter,
@@ -3337,11 +3523,39 @@ impl GraphStore {
                 } => {
                     let label_id = optional_label_id(&working_catalog, &label);
                     if label.is_empty() || label_id.is_some() {
-                        let ids = self
+                        let committed_ids = self
                             .matching_node_ids(label_id, filter.as_ref())
                             .collect::<Vec<_>>();
-                        let delete_ops = self.delete_node_ops(&ids, detach)?;
-                        for id in ids {
+                        let pending_ids = Self::pending_node_ids_matching(
+                            label_id,
+                            filter.as_ref(),
+                            &pending_nodes,
+                        );
+                        let mut delete_ids = committed_ids.clone();
+                        delete_ids.extend(pending_ids.iter().copied());
+                        let incident_pending_relationship_ids =
+                            pending_relationship_ids_for_nodes(&pending_relationships, &delete_ids);
+                        if !detach && !incident_pending_relationship_ids.is_empty() {
+                            let id = delete_ids.first().copied().unwrap_or(NodeId(0));
+                            return Err(SkeinError::Storage(format!(
+                                "node {} has relationships; use DETACH DELETE",
+                                id.0
+                            )));
+                        }
+                        let delete_ops = self.delete_node_ops(&committed_ids, detach)?;
+                        if detach {
+                            for relationship_id in incident_pending_relationship_ids {
+                                remove_pending_relationship(
+                                    &mut ops,
+                                    &mut pending_relationships,
+                                    relationship_id,
+                                );
+                            }
+                        }
+                        for id in &pending_ids {
+                            remove_pending_node(&mut ops, &mut pending_nodes, *id);
+                        }
+                        for id in delete_ids {
                             rows.push(BTreeMap::from([(
                                 "node_id".to_string(),
                                 Value::Int(id.0 as i64),
@@ -3364,11 +3578,21 @@ impl GraphStore {
                         working_catalog.rel_type_id(&rel_type),
                     ) {
                         let source_ids = self
-                            .matching_node_ids(Some(source_label_id), filter.as_ref())
+                            .matching_node_ids_with_pending(
+                                Some(source_label_id),
+                                filter.as_ref(),
+                                &pending_nodes,
+                            )
+                            .into_iter()
                             .collect::<BTreeSet<_>>();
                         let target_ids = target_filter.as_ref().map(|filter| {
-                            self.matching_node_ids(Some(target_label_id), Some(filter))
-                                .collect::<BTreeSet<_>>()
+                            self.matching_node_ids_with_pending(
+                                Some(target_label_id),
+                                Some(filter),
+                                &pending_nodes,
+                            )
+                            .into_iter()
+                            .collect::<BTreeSet<_>>()
                         });
                         if target_ids.as_ref().is_some_and(BTreeSet::is_empty) {
                             continue;
@@ -3413,11 +3637,103 @@ impl GraphStore {
                                 )]));
                             }
                         }
+                        let pending_delete_ids = pending_relationships
+                            .iter()
+                            .filter_map(
+                                |(
+                                    relationship_id,
+                                    source,
+                                    target,
+                                    pending_rel_type_id,
+                                    properties,
+                                )| {
+                                    if *pending_rel_type_id != rel_type_id
+                                        || !source_ids.contains(source)
+                                    {
+                                        return None;
+                                    }
+                                    if rel_filter
+                                        .as_ref()
+                                        .map(|filter| {
+                                            !property_filter_matches(
+                                                filter,
+                                                relationship_id.0,
+                                                properties,
+                                            )
+                                        })
+                                        .unwrap_or(false)
+                                    {
+                                        return None;
+                                    }
+                                    if !node_matches_label_and_filter(
+                                        self,
+                                        &pending_nodes,
+                                        *target,
+                                        target_label_id,
+                                        target_filter.as_ref(),
+                                    ) {
+                                        return None;
+                                    }
+                                    Some(*relationship_id)
+                                },
+                            )
+                            .collect::<Vec<_>>();
+                        for relationship_id in pending_delete_ids {
+                            remove_pending_relationship(
+                                &mut ops,
+                                &mut pending_relationships,
+                                relationship_id,
+                            );
+                            rows.push(BTreeMap::from([(
+                                "rel_id".to_string(),
+                                Value::Int(relationship_id.0 as i64),
+                            )]));
+                        }
                     }
                 }
                 GraphMutation::DeleteRelationshipTargetNodes(request) => {
-                    let ids = self.relationship_target_node_ids(&working_catalog, &request);
-                    let delete_ops = self.delete_node_ops(&ids, request.detach)?;
+                    let ids = self.relationship_target_node_ids_with_pending(
+                        &working_catalog,
+                        &request,
+                        &pending_nodes,
+                        &pending_relationships,
+                    );
+                    let committed_ids = ids
+                        .iter()
+                        .copied()
+                        .filter(|id| self.nodes.contains_key(id))
+                        .collect::<Vec<_>>();
+                    let pending_ids = ids
+                        .iter()
+                        .copied()
+                        .filter(|id| {
+                            pending_nodes
+                                .iter()
+                                .any(|(pending_id, _, _)| pending_id == id)
+                        })
+                        .collect::<Vec<_>>();
+                    let incident_pending_relationship_ids =
+                        pending_relationship_ids_for_nodes(&pending_relationships, &ids);
+                    if !request.detach && !incident_pending_relationship_ids.is_empty() {
+                        let id = ids.first().copied().unwrap_or(NodeId(0));
+                        return Err(SkeinError::Storage(format!(
+                            "node {} has relationships; use DETACH DELETE",
+                            id.0
+                        )));
+                    }
+                    let delete_ops = self.delete_node_ops(&committed_ids, request.detach)?;
+                    if request.detach {
+                        for relationship_id in incident_pending_relationship_ids {
+                            remove_pending_relationship(
+                                &mut ops,
+                                &mut pending_relationships,
+                                relationship_id,
+                            );
+                        }
+                    }
+                    for id in &pending_ids {
+                        remove_pending_node(&mut ops, &mut pending_nodes, *id);
+                    }
                     ops.extend(delete_ops);
                     rows.extend(ids.into_iter().map(|id| {
                         BTreeMap::from([("node_id".to_string(), Value::Int(id.0 as i64))])
@@ -3434,12 +3750,16 @@ impl GraphStore {
                         continue;
                     }
                     let rel_type_id = working_catalog.get_or_create_rel_type(&request.rel_type);
-                    let sources = self
-                        .matching_node_ids(source_label_id, request.source_filter.as_ref())
-                        .collect::<Vec<_>>();
-                    let targets = self
-                        .matching_node_ids(target_label_id, request.target_filter.as_ref())
-                        .collect::<Vec<_>>();
+                    let sources = self.matching_node_ids_with_pending(
+                        source_label_id,
+                        request.source_filter.as_ref(),
+                        &pending_nodes,
+                    );
+                    let targets = self.matching_node_ids_with_pending(
+                        target_label_id,
+                        request.target_filter.as_ref(),
+                        &pending_nodes,
+                    );
                     for source in sources {
                         for target in &targets {
                             let relationship = RelId(next_rel_id);
@@ -3477,12 +3797,16 @@ impl GraphStore {
                         continue;
                     }
                     let rel_type_id = working_catalog.get_or_create_rel_type(&request.rel_type);
-                    let sources = self
-                        .matching_node_ids(source_label_id, request.source_filter.as_ref())
-                        .collect::<Vec<_>>();
-                    let targets = self
-                        .matching_node_ids(target_label_id, request.target_filter.as_ref())
-                        .collect::<Vec<_>>();
+                    let sources = self.matching_node_ids_with_pending(
+                        source_label_id,
+                        request.source_filter.as_ref(),
+                        &pending_nodes,
+                    );
+                    let targets = self.matching_node_ids_with_pending(
+                        target_label_id,
+                        request.target_filter.as_ref(),
+                        &pending_nodes,
+                    );
                     for source in sources {
                         for target in &targets {
                             let current = self.find_relationship_by_property_subset(
@@ -3571,58 +3895,29 @@ impl GraphStore {
                     };
                     let new_rel_type_id =
                         working_catalog.get_or_create_rel_type(&request.new_rel_type);
-                    let source_ids = self
-                        .scan_relationships(Some(old_rel_type_id))
-                        .filter(|relationship| {
-                            properties_contain_all(
-                                &relationship.properties,
-                                &request.old_rel_filter,
-                            ) && self
-                                .nodes
-                                .get(&relationship.source)
-                                .map(|node| {
-                                    source_label_id
-                                        .map(|label_id| node.labels.contains(&label_id))
-                                        .unwrap_or(true)
-                                        && request
-                                            .source_filter
-                                            .as_ref()
-                                            .map(|filter| {
-                                                property_filter_matches(
-                                                    filter,
-                                                    node.id.0,
-                                                    &node.properties,
-                                                )
-                                            })
-                                            .unwrap_or(true)
-                                })
-                                .unwrap_or(false)
-                                && self
-                                    .nodes
-                                    .get(&relationship.target)
-                                    .map(|node| {
-                                        node.labels.contains(&old_target_label_id)
-                                            && request
-                                                .old_target_filter
-                                                .as_ref()
-                                                .map(|filter| {
-                                                    property_filter_matches(
-                                                        filter,
-                                                        node.id.0,
-                                                        &node.properties,
-                                                    )
-                                                })
-                                                .unwrap_or(true)
-                                    })
-                                    .unwrap_or(false)
-                        })
-                        .map(|relationship| relationship.source)
-                        .collect::<BTreeSet<_>>();
+                    let source_ids = relationships_with_pending_matching(
+                        self,
+                        &pending_nodes,
+                        &pending_relationships,
+                        RelationshipMatchRequest {
+                            rel_type_id: old_rel_type_id,
+                            source_label_id,
+                            source_filter: request.source_filter.as_ref(),
+                            target_label_id: Some(old_target_label_id),
+                            target_filter: request.old_target_filter.as_ref(),
+                            rel_properties: &request.old_rel_filter,
+                        },
+                    )
+                    .into_iter()
+                    .map(|relationship| relationship.source)
+                    .collect::<BTreeSet<_>>();
                     let target_ids = self
-                        .matching_node_ids(
+                        .matching_node_ids_with_pending(
                             Some(new_target_label_id),
                             request.new_target_filter.as_ref(),
+                            &pending_nodes,
                         )
+                        .into_iter()
                         .collect::<Vec<_>>();
                     for source in source_ids {
                         for target in &target_ids {
@@ -3710,55 +4005,29 @@ impl GraphStore {
                     };
                     let new_rel_type_id =
                         working_catalog.get_or_create_rel_type(&request.new_rel_type);
-                    let target_ids = self
-                        .scan_relationships(Some(old_rel_type_id))
-                        .filter(|relationship| {
-                            properties_contain_all(
-                                &relationship.properties,
-                                &request.old_rel_filter,
-                            ) && self
-                                .nodes
-                                .get(&relationship.source)
-                                .map(|node| {
-                                    old_source_label_id
-                                        .map(|label_id| node.labels.contains(&label_id))
-                                        .unwrap_or(true)
-                                        && request
-                                            .old_source_filter
-                                            .as_ref()
-                                            .map(|filter| {
-                                                property_filter_matches(
-                                                    filter,
-                                                    node.id.0,
-                                                    &node.properties,
-                                                )
-                                            })
-                                            .unwrap_or(true)
-                                })
-                                .unwrap_or(false)
-                                && self
-                                    .nodes
-                                    .get(&relationship.target)
-                                    .map(|node| {
-                                        node.labels.contains(&old_target_label_id)
-                                            && request
-                                                .old_target_filter
-                                                .as_ref()
-                                                .map(|filter| {
-                                                    property_filter_matches(
-                                                        filter,
-                                                        node.id.0,
-                                                        &node.properties,
-                                                    )
-                                                })
-                                                .unwrap_or(true)
-                                    })
-                                    .unwrap_or(false)
-                        })
-                        .map(|relationship| relationship.target)
-                        .collect::<BTreeSet<_>>();
+                    let target_ids = relationships_with_pending_matching(
+                        self,
+                        &pending_nodes,
+                        &pending_relationships,
+                        RelationshipMatchRequest {
+                            rel_type_id: old_rel_type_id,
+                            source_label_id: old_source_label_id,
+                            source_filter: request.old_source_filter.as_ref(),
+                            target_label_id: Some(old_target_label_id),
+                            target_filter: request.old_target_filter.as_ref(),
+                            rel_properties: &request.old_rel_filter,
+                        },
+                    )
+                    .into_iter()
+                    .map(|relationship| relationship.target)
+                    .collect::<BTreeSet<_>>();
                     let source_ids = self
-                        .matching_node_ids(new_source_label_id, request.new_source_filter.as_ref())
+                        .matching_node_ids_with_pending(
+                            new_source_label_id,
+                            request.new_source_filter.as_ref(),
+                            &pending_nodes,
+                        )
+                        .into_iter()
                         .collect::<Vec<_>>();
                     for source in source_ids {
                         for target in &target_ids {
@@ -3840,55 +4109,19 @@ impl GraphStore {
                     };
                     let new_rel_type_id =
                         working_catalog.get_or_create_rel_type(&request.new_rel_type);
-                    let old_relationships = self
-                        .scan_relationships(Some(old_rel_type_id))
-                        .filter(|relationship| {
-                            properties_contain_all(
-                                &relationship.properties,
-                                &request.old_rel_filter,
-                            ) && self
-                                .nodes
-                                .get(&relationship.source)
-                                .map(|node| {
-                                    source_label_id
-                                        .map(|label_id| node.labels.contains(&label_id))
-                                        .unwrap_or(true)
-                                        && request
-                                            .source_filter
-                                            .as_ref()
-                                            .map(|filter| {
-                                                property_filter_matches(
-                                                    filter,
-                                                    node.id.0,
-                                                    &node.properties,
-                                                )
-                                            })
-                                            .unwrap_or(true)
-                                })
-                                .unwrap_or(false)
-                                && self
-                                    .nodes
-                                    .get(&relationship.target)
-                                    .map(|node| {
-                                        target_label_id
-                                            .map(|label_id| node.labels.contains(&label_id))
-                                            .unwrap_or(true)
-                                            && request
-                                                .target_filter
-                                                .as_ref()
-                                                .map(|filter| {
-                                                    property_filter_matches(
-                                                        filter,
-                                                        node.id.0,
-                                                        &node.properties,
-                                                    )
-                                                })
-                                                .unwrap_or(true)
-                                    })
-                                    .unwrap_or(false)
-                        })
-                        .cloned()
-                        .collect::<Vec<_>>();
+                    let old_relationships = relationships_with_pending_matching(
+                        self,
+                        &pending_nodes,
+                        &pending_relationships,
+                        RelationshipMatchRequest {
+                            rel_type_id: old_rel_type_id,
+                            source_label_id,
+                            source_filter: request.source_filter.as_ref(),
+                            target_label_id,
+                            target_filter: request.target_filter.as_ref(),
+                            rel_properties: &request.old_rel_filter,
+                        },
+                    );
                     for old_relationship in old_relationships {
                         let current = self.find_relationship_by_property_subset(
                             old_relationship.source,
@@ -4036,7 +4269,7 @@ impl GraphStore {
 
     fn apply_pending_node_assignments(
         ops: &mut [WalOp],
-        pending_nodes: &mut [(NodeId, LabelId, BTreeMap<String, Value>)],
+        pending_nodes: &mut [PendingNode],
         id: NodeId,
         assignments: &[NodeSetAssignment],
     ) -> Result<()> {
@@ -4062,6 +4295,30 @@ impl GraphStore {
                 }
             }
         }
+        Ok(())
+    }
+
+    fn apply_set_node_properties_mutation(
+        &self,
+        ops: &mut Vec<WalOp>,
+        rows: &mut Vec<BTreeMap<String, Value>>,
+        pending_nodes: &mut [PendingNode],
+        label_id: Option<LabelId>,
+        filter: Option<&PropertyFilter>,
+        assignments: &[NodeSetAssignment],
+    ) -> Result<()> {
+        let committed_ids = self.matching_node_ids(label_id, filter).collect::<Vec<_>>();
+        ops.extend(self.node_set_property_ops(&committed_ids, assignments)?);
+        let pending_ids = Self::pending_node_ids_matching(label_id, filter, pending_nodes);
+        for id in &pending_ids {
+            Self::apply_pending_node_assignments(ops, pending_nodes, *id, assignments)?;
+        }
+        rows.extend(
+            committed_ids
+                .into_iter()
+                .chain(pending_ids)
+                .map(|id| BTreeMap::from([("node_id".to_string(), Value::Int(id.0 as i64))])),
+        );
         Ok(())
     }
 
@@ -4165,6 +4422,20 @@ impl GraphStore {
 
     pub fn stable_id_mapping(&self) -> StoreStableIdMapping {
         self.stable_id_mapping.clone()
+    }
+
+    pub fn replace_stable_id_mapping(&mut self, mapping: StoreStableIdMapping) -> Result<()> {
+        if self
+            .durable
+            .as_ref()
+            .is_some_and(|durable| durable.read_only)
+        {
+            return Err(SkeinError::Storage(
+                "stable id mapping persistence is not allowed in read-only mode".to_string(),
+            ));
+        }
+        self.stable_id_mapping = mapping;
+        self.write_stable_id_mapping()
     }
 
     pub fn ensure_stable_id_mapping(&mut self) -> Result<StoreStableIdMapping> {
@@ -4463,6 +4734,9 @@ impl GraphStore {
                         }
                         upsert_node_ids.insert(*id);
                     }
+                    if matches!(property.as_str(), "id" | "name" | "canonical_name") {
+                        self.collect_label_projection_neighbors(catalog, *id, upsert_node_ids);
+                    }
                 }
                 WalOp::DeleteNode { id } => {
                     if let Some(node) = self.nodes.get(id)
@@ -4471,6 +4745,7 @@ impl GraphStore {
                     {
                         delete_document_ids.insert(document_id);
                     }
+                    self.collect_label_projection_neighbors(catalog, *id, upsert_node_ids);
                 }
                 WalOp::Batch(batch_ops) => self.collect_search_projection_graph_changes_for_ops(
                     catalog,
@@ -4478,6 +4753,30 @@ impl GraphStore {
                     upsert_node_ids,
                     delete_document_ids,
                 ),
+                WalOp::CreateRelationship {
+                    source,
+                    target,
+                    rel_type,
+                    ..
+                } => {
+                    if rel_type == "HAS_LABEL" {
+                        self.collect_has_label_projection_endpoints(
+                            catalog,
+                            *source,
+                            *target,
+                            upsert_node_ids,
+                        );
+                    }
+                }
+                WalOp::DeleteRelationship { id } => {
+                    if let Some(relationship) = self.relationships.get(id) {
+                        self.collect_has_label_projection_endpoints_for_relationship(
+                            catalog,
+                            relationship,
+                            upsert_node_ids,
+                        );
+                    }
+                }
                 WalOp::CreateNodeLabel { .. }
                 | WalOp::CreateRelationshipType { .. }
                 | WalOp::CreateNodeTable { .. }
@@ -4495,12 +4794,96 @@ impl GraphStore {
                 | WalOp::CreateNodePropertyExistsConstraint { .. }
                 | WalOp::CreateRelationshipUniqueConstraint { .. }
                 | WalOp::CreateRelationshipPropertyExistsConstraint { .. }
-                | WalOp::CreateRelationship { .. }
                 | WalOp::SetRelationshipProperty { .. }
-                | WalOp::DeleteRelationship { .. }
                 | WalOp::ProjectGraph { .. } => {}
             }
         }
+    }
+
+    fn collect_label_projection_neighbors(
+        &self,
+        catalog: &Catalog,
+        label_node_id: NodeId,
+        upsert_node_ids: &mut BTreeSet<NodeId>,
+    ) {
+        let Some(label_node) = self.nodes.get(&label_node_id) else {
+            return;
+        };
+        if !Self::node_has_label(catalog, label_node, "Label") {
+            return;
+        }
+        let Some(has_label_type_id) = catalog.rel_type_id("HAS_LABEL") else {
+            return;
+        };
+        for relationship in self.scan_relationships(Some(has_label_type_id)) {
+            if relationship.source == label_node_id {
+                self.insert_projection_node_if_any(catalog, relationship.target, upsert_node_ids);
+            } else if relationship.target == label_node_id {
+                self.insert_projection_node_if_any(catalog, relationship.source, upsert_node_ids);
+            }
+        }
+    }
+
+    fn collect_has_label_projection_endpoints_for_relationship(
+        &self,
+        catalog: &Catalog,
+        relationship: &RelRecord,
+        upsert_node_ids: &mut BTreeSet<NodeId>,
+    ) {
+        if catalog.rel_type_name(relationship.rel_type) != Some("HAS_LABEL") {
+            return;
+        }
+        self.collect_has_label_projection_endpoints(
+            catalog,
+            relationship.source,
+            relationship.target,
+            upsert_node_ids,
+        );
+    }
+
+    fn collect_has_label_projection_endpoints(
+        &self,
+        catalog: &Catalog,
+        source: NodeId,
+        target: NodeId,
+        upsert_node_ids: &mut BTreeSet<NodeId>,
+    ) {
+        let source_is_label = self
+            .nodes
+            .get(&source)
+            .is_some_and(|node| Self::node_has_label(catalog, node, "Label"));
+        let target_is_label = self
+            .nodes
+            .get(&target)
+            .is_some_and(|node| Self::node_has_label(catalog, node, "Label"));
+        if source_is_label {
+            self.insert_projection_node_if_any(catalog, target, upsert_node_ids);
+        }
+        if target_is_label {
+            self.insert_projection_node_if_any(catalog, source, upsert_node_ids);
+        }
+    }
+
+    fn insert_projection_node_if_any(
+        &self,
+        catalog: &Catalog,
+        node_id: NodeId,
+        upsert_node_ids: &mut BTreeSet<NodeId>,
+    ) {
+        if self
+            .nodes
+            .get(&node_id)
+            .and_then(|node| search_projection_document_id_for_node(catalog, node))
+            .is_some()
+        {
+            upsert_node_ids.insert(node_id);
+        }
+    }
+
+    fn node_has_label(catalog: &Catalog, node: &NodeRecord, label: &str) -> bool {
+        catalog
+            .label_id(label)
+            .is_some_and(|label_id| node.labels.contains(&label_id))
     }
 
     fn apply_create_node(
@@ -6118,6 +6501,36 @@ impl GraphStore {
             .nodes
             .into_iter()
             .map(|node| node.id)
+    }
+
+    fn matching_node_ids_with_pending(
+        &self,
+        label_id: Option<LabelId>,
+        filter: Option<&PropertyFilter>,
+        pending_nodes: &[PendingNode],
+    ) -> Vec<NodeId> {
+        let mut ids = self.matching_node_ids(label_id, filter).collect::<Vec<_>>();
+        ids.extend(Self::pending_node_ids_matching(
+            label_id,
+            filter,
+            pending_nodes,
+        ));
+        ids
+    }
+
+    fn pending_node_ids_matching(
+        label_id: Option<LabelId>,
+        filter: Option<&PropertyFilter>,
+        pending_nodes: &[PendingNode],
+    ) -> Vec<NodeId> {
+        pending_nodes
+            .iter()
+            .filter(|(id, pending_label_id, properties)| {
+                label_id.is_none_or(|label_id| *pending_label_id == label_id)
+                    && filter.is_none_or(|filter| property_filter_matches(filter, id.0, properties))
+            })
+            .map(|(id, _, _)| *id)
+            .collect()
     }
 
     fn apply_set_node_property(
@@ -10018,6 +10431,8 @@ fn apply_set_relationship_properties_mutation(
     catalog: &Catalog,
     ops: &mut Vec<WalOp>,
     rows: &mut Vec<BTreeMap<String, Value>>,
+    pending_nodes: &[PendingNode],
+    pending_relationships: &mut [PendingRelationship],
     update: RelationshipPropertiesUpdate,
 ) {
     let (Some(source_label_id), Some(target_label_id), Some(rel_type_id)) = (
@@ -10028,7 +10443,12 @@ fn apply_set_relationship_properties_mutation(
         return;
     };
     let source_ids = store
-        .matching_node_ids(Some(source_label_id), update.filter.as_ref())
+        .matching_node_ids_with_pending(
+            Some(source_label_id),
+            update.filter.as_ref(),
+            pending_nodes,
+        )
+        .into_iter()
         .collect::<BTreeSet<_>>();
     for relationship in store.relationships.values() {
         if relationship.rel_type != rel_type_id || !source_ids.contains(&relationship.source) {
@@ -10073,6 +10493,216 @@ fn apply_set_relationship_properties_mutation(
             Value::Int(relationship.id.0 as i64),
         )]));
     }
+    for (relationship_id, source, target, pending_rel_type_id, properties) in pending_relationships
+    {
+        if *pending_rel_type_id != rel_type_id || !source_ids.contains(source) {
+            continue;
+        }
+        if update
+            .rel_filter
+            .as_ref()
+            .map(|filter| !property_filter_matches(filter, relationship_id.0, properties))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if !node_matches_label_and_filter(
+            store,
+            pending_nodes,
+            *target,
+            target_label_id,
+            update.target_filter.as_ref(),
+        ) {
+            continue;
+        }
+        for assignment in &update.assignments {
+            properties.insert(assignment.property.clone(), assignment.value.clone());
+            apply_pending_relationship_property(
+                ops,
+                *relationship_id,
+                &assignment.property,
+                assignment.value.clone(),
+            );
+        }
+        rows.push(BTreeMap::from([(
+            "rel_id".to_string(),
+            Value::Int(relationship_id.0 as i64),
+        )]));
+    }
+}
+
+fn node_matches_label_and_filter(
+    store: &GraphStore,
+    pending_nodes: &[PendingNode],
+    id: NodeId,
+    label_id: LabelId,
+    filter: Option<&PropertyFilter>,
+) -> bool {
+    if let Some(node) = store.nodes.get(&id) {
+        return node.labels.contains(&label_id)
+            && filter
+                .map(|filter| property_filter_matches(filter, id.0, &node.properties))
+                .unwrap_or(true);
+    }
+    pending_nodes
+        .iter()
+        .find(|(pending_id, _, _)| *pending_id == id)
+        .map(|(_, pending_label_id, properties)| {
+            *pending_label_id == label_id
+                && filter
+                    .map(|filter| property_filter_matches(filter, id.0, properties))
+                    .unwrap_or(true)
+        })
+        .unwrap_or(false)
+}
+
+fn node_matches_optional_label_and_filter(
+    store: &GraphStore,
+    pending_nodes: &[PendingNode],
+    id: NodeId,
+    label_id: Option<LabelId>,
+    filter: Option<&PropertyFilter>,
+) -> bool {
+    if let Some(node) = store.nodes.get(&id) {
+        return label_id
+            .map(|label_id| node.labels.contains(&label_id))
+            .unwrap_or(true)
+            && filter
+                .map(|filter| property_filter_matches(filter, id.0, &node.properties))
+                .unwrap_or(true);
+    }
+    pending_nodes
+        .iter()
+        .find(|(pending_id, _, _)| *pending_id == id)
+        .map(|(_, pending_label_id, properties)| {
+            label_id
+                .map(|label_id| *pending_label_id == label_id)
+                .unwrap_or(true)
+                && filter
+                    .map(|filter| property_filter_matches(filter, id.0, properties))
+                    .unwrap_or(true)
+        })
+        .unwrap_or(false)
+}
+
+fn relationships_with_pending_matching(
+    store: &GraphStore,
+    pending_nodes: &[PendingNode],
+    pending_relationships: &[PendingRelationship],
+    request: RelationshipMatchRequest<'_>,
+) -> Vec<RelationshipCandidate> {
+    let mut relationships = store
+        .scan_relationships(Some(request.rel_type_id))
+        .filter(|relationship| {
+            properties_contain_all(&relationship.properties, request.rel_properties)
+                && node_matches_optional_label_and_filter(
+                    store,
+                    pending_nodes,
+                    relationship.source,
+                    request.source_label_id,
+                    request.source_filter,
+                )
+                && node_matches_optional_label_and_filter(
+                    store,
+                    pending_nodes,
+                    relationship.target,
+                    request.target_label_id,
+                    request.target_filter,
+                )
+        })
+        .map(|relationship| RelationshipCandidate {
+            source: relationship.source,
+            target: relationship.target,
+            properties: relationship.properties.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    relationships.extend(pending_relationships.iter().filter_map(
+        |(_, source, target, pending_rel_type_id, properties)| {
+            if *pending_rel_type_id != request.rel_type_id
+                || !properties_contain_all(properties, request.rel_properties)
+                || !node_matches_optional_label_and_filter(
+                    store,
+                    pending_nodes,
+                    *source,
+                    request.source_label_id,
+                    request.source_filter,
+                )
+                || !node_matches_optional_label_and_filter(
+                    store,
+                    pending_nodes,
+                    *target,
+                    request.target_label_id,
+                    request.target_filter,
+                )
+            {
+                return None;
+            }
+            Some(RelationshipCandidate {
+                source: *source,
+                target: *target,
+                properties: properties.clone(),
+            })
+        },
+    ));
+    relationships
+}
+
+fn apply_pending_relationship_property(ops: &mut [WalOp], id: RelId, property: &str, value: Value) {
+    for op in ops {
+        if let WalOp::CreateRelationship {
+            id: create_id,
+            properties,
+            ..
+        } = op
+            && *create_id == id
+        {
+            properties.insert(property.to_string(), value);
+            break;
+        }
+    }
+}
+
+fn pending_relationship_ids_for_nodes(
+    pending_relationships: &[PendingRelationship],
+    node_ids: &[NodeId],
+) -> Vec<RelId> {
+    let node_ids = node_ids.iter().copied().collect::<BTreeSet<_>>();
+    pending_relationships
+        .iter()
+        .filter_map(|(relationship_id, source, target, _, _)| {
+            (node_ids.contains(source) || node_ids.contains(target)).then_some(*relationship_id)
+        })
+        .collect()
+}
+
+fn remove_pending_node(ops: &mut Vec<WalOp>, pending_nodes: &mut Vec<PendingNode>, id: NodeId) {
+    pending_nodes.retain(|(node_id, _, _)| *node_id != id);
+    ops.retain(|op| match op {
+        WalOp::CreateNode { id: node_id, .. } | WalOp::SetNodeProperty { id: node_id, .. } => {
+            *node_id != id
+        }
+        _ => true,
+    });
+}
+
+fn remove_pending_relationship(
+    ops: &mut Vec<WalOp>,
+    pending_relationships: &mut Vec<PendingRelationship>,
+    id: RelId,
+) {
+    pending_relationships.retain(|(relationship_id, _, _, _, _)| *relationship_id != id);
+    ops.retain(|op| match op {
+        WalOp::CreateRelationship {
+            id: relationship_id,
+            ..
+        }
+        | WalOp::SetRelationshipProperty {
+            id: relationship_id,
+            ..
+        } => *relationship_id != id,
+        _ => true,
+    });
 }
 
 fn range_bounds_match(

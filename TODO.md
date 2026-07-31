@@ -112,7 +112,7 @@ LanceDB for that path.
     - Real legacy/Skein tests cover normal replacement, a crash after the
       legacy transaction commits but before acknowledgement, and contested
       replacement downgraded to `challenges` in both graphs.
-  - [ ] Route Memory lifecycle/delete and the remaining entity mutation
+  - [x] Route Memory lifecycle/delete and the remaining entity mutation
     families through the same durable coordinator.
     - [x] Generalize startup replay by durable operation kind and route REST
       archive/forget lifecycle transitions through a versioned, idempotent
@@ -216,6 +216,28 @@ LanceDB for that path.
       - [ ] Route Source ingest/create, content refresh/reparse, indexed
         transition, revision edges, and search-projection effects through a
         frozen composite Source obligation.
+        - [x] Strengthen the Skein transaction kernel so a composite Source
+          obligation can create or merge Source nodes, set Source properties,
+          create or merge revision relationships, set relationship properties,
+          and remove no-op pending creates in one grouped WAL transaction
+          without requiring a new typed business API.
+        - [x] Make relationship retarget/copy merge mutations read pending
+          nodes and pending relationships inside the same grouped transaction,
+          so Source revision and label inheritance style Cypher does not fall
+          back to committed-only scans.
+        - [x] Prove a Source-ingest-shaped grouped commit that creates parsed
+          and indexed Source revisions plus a revision edge remains atomic for
+          search-projection changefeed batching; a too-small projection batch
+          now fails closed instead of advancing only part of the Source
+          composite.
+        - [x] Carry the Source projection workload evidence through replacement
+          summary, library readiness, and final preflight gates so missing
+          atomic Source-ingest projection evidence blocks cutover instead of
+          being hidden behind generic workload readiness.
+        - Mem still needs to freeze and replay the full Source ingest/create,
+          refresh/reparse, indexed transition, revision-edge, and
+          search-projection payload through its durable dual-write coordinator
+          before this item can close.
   - Inject one long-lived writable Skein handle into Mem write resources.
   - Cover Memory create, update, lifecycle, and delete first, then Label,
     Entity, Thread, Source, and relationship mutations.
@@ -230,13 +252,85 @@ LanceDB for that path.
 - [ ] Add resumable initial import from Kuzu/Ladybug and LanceDB.
   - Run import through bounded Rust library APIs; production startup must not
     spawn a CLI or helper process.
+  - [x] Expose a Rust library parser for Graph Lightning graph streams that
+    materializes an import-ready canonical snapshot after checksum, endpoint,
+    count, and manifest validation; this is the graph-state decode layer for a
+    future resumable importer.
+  - [x] Expose a typed library readiness contract that blocks initial-import
+    cutover until the decoded manifest is import-ready, the target graph has
+    reached the manifest epoch, and the search projection has a durable
+    checkpointed source-graph watermark at or beyond the target graph epoch.
+  - [x] Expose a typed resumable checkpoint readiness contract that verifies
+    source schema/checksum identity, caller-owned idempotency keys, batch
+    completion, document identity presence, applied graph watermarks, and
+    durable search-projection watermarks against the Graph Lightning manifest.
+  - [x] Expose a typed resume decision for initial import checkpoints so Mem can
+    choose start, resume, ready-for-cutover, or quarantine without parsing CLI
+    artifacts.
+  - [x] Expose a typed library initial-import plan that combines graph-stream
+    validation, import-ready decode evidence, target graph/search projection
+    readiness, checkpoint readiness, and resume action into one fail-closed
+    report for Mem startup/import orchestration.
+  - [x] Import canonical Graph Lightning graph state into an empty Skein target
+    through a bounded Rust library API, using one WAL batch, endpoint and
+    duplicate-id validation, persisted stable-id mapping, and fail-closed
+    non-empty target checks.
+  - [x] Expose a typed monotonic checkpoint progress helper that keeps
+    source schema/checksum identity and caller-owned idempotency keys stable,
+    rejects graph/search watermark, batch, and document-identity regressions,
+    and returns updated readiness plus resume action for Mem-owned checkpoint
+    persistence.
+  - [x] Expose typed document-identity coverage for the six Nowledge search
+    projection kinds so Mem can fail closed when Memory, Message, Entity,
+    Source, SourceChunk, or Community identities are missing, empty, or
+    duplicated before initial-import cutover.
+  - [x] Feed document-identity coverage into the typed initial-import plan and
+    cutover gate, while keeping the compatibility plan available for callers
+    that have not wired durable projection identities yet.
+  - [x] Expose a strict initial-import apply API that carries durable projection
+    document identities through the returned plan, so graph import can proceed
+    while cutover remains fail-closed on identity gaps.
+  - [x] Expose a typed search-projection import batch report that validates the
+    checkpoint idempotency contract, batch graph epoch, batch position,
+    operation limits, delete-free initial import semantics, total-batch
+    stability, and cumulative coverage for all six projection document-identity
+    kinds before returning checkpoint progress for Mem-owned durable
+    persistence, and verifies the returned progress through the checkpoint
+    advance path so callers can inspect post-progress readiness and resume
+    action without duplicating checkpoint logic.
   - Import canonical graph state from Kuzu/Ladybug and rebuild or import all six
     search projection kinds: Memory, Message, Community, Entity, Source, and
     SourceChunk.
   - Persist source schema/version fingerprints, batch checkpoints, document
     identities, and graph/search watermarks.
+    - [x] Expose a typed durable-state envelope that packages the source
+      fingerprint, checkpoint, document identities, coverage report, checkpoint
+      readiness, and resume action, while keeping partial progress persistable
+      and cutover readiness fail-closed.
   - Keep foreground dual writes active while import catches up, and make retries
     idempotent.
+    - [x] Expose a typed durable-state batch advance helper that merges
+      projection document identities idempotently, advances checkpoint progress
+      through the same monotonic checkpoint path, reports completed-batch
+      replays explicitly, and fails closed without emitting a new state when a
+      batch cannot produce accepted checkpoint progress.
+    - [x] Expose a typed initial-import session report that combines graph
+      stream validation, target readiness, persisted durable state, resume
+      action, and durable-state source fingerprint checks. This lets Mem restart
+      into start, resume, ready-for-cutover, or quarantine without parsing CLI
+      output or reimplementing checkpoint logic.
+    - [x] Require production cutover gates to prove initial import is inactive
+      for read cutover; an active import now blocks cutover even when dual
+      writes are enabled, unless a future Mem-owned session gate proves the
+      imported state and live mutations have reached the same durable watermark.
+    - [x] Expose a typed initial-import cutover catch-up report that compares
+      the durable import checkpoint, live graph commit epoch, and live durable
+      search-projection watermark, so Mem can prove the imported state and live
+      mutations share a cutover watermark without hand-written JSON path checks.
+    - [x] Consume the typed cutover catch-up proof in host-owned cutover
+      controls, integration readiness, and final previous-wrapper preflight, so
+      active initial import remains blocked by default but can pass read cutover
+      only when the library-owned catch-up proof is ready.
   - Acceptance: restart resumes from the last durable checkpoint and read
     cutover remains blocked until imported state and live mutations reach the
     same durable watermark.
@@ -256,6 +350,25 @@ LanceDB for that path.
 - [ ] Replace every active LanceDB search projection read.
   - Wire Mem to Skein candidate reads for Memory, Message, Community, Entity,
     Source, and SourceChunk projections.
+  - [x] Expose a typed search projection route-ownership contract for Memory,
+    Message, Community, Entity, Source, and SourceChunk, so production cutover
+    can fail closed while any route family still selects LanceDB.
+  - [x] Consume the search projection route-ownership contract in library
+    readiness, Mem integration readiness, and final previous-wrapper preflight
+    gates as a dedicated readiness area, so missing ownership evidence or any
+    LanceDB-owned search route family blocks cutover.
+  - [x] Expose typed active search route ownership for thread/message FTS,
+    entity/community discovery, source recall, source chunk recall,
+    `/fs/recall`, MCP search, and deep-search graph expansion, and consume it
+    through the same library readiness area so active route coverage is checked
+    separately from projection-family ownership.
+  - [x] Consume projection-family and active search route ownership in the
+    replacement summary production cutover gate, missing-evidence list, blocker
+    aggregation, and next-action guidance.
+  - [x] Require the Mem integration bundle to carry projection-family and
+    active search route ownership inputs, emit replacement-summary alignment
+    reports for both, and fail the integration readiness gate when either live
+    ownership evidence diverges from the replacement summary.
   - Cover thread/message FTS, entity/community discovery, source and source
     chunk recall, `/fs/recall`, MCP search, and deep-search graph expansion.
   - Preserve embedding identity, zero-vector semantics, CJK tokenization,
@@ -263,7 +376,7 @@ LanceDB for that path.
   - Acceptance: no active search route requires a LanceDB handle when the Skein
     search engine is selected.
 
-- [ ] Split graph and search cutover controls and make status truthful.
+- [x] Split graph and search cutover controls and make status truthful.
   - Configure graph reads, search reads, dual writes, import, and projection
     catch-up independently through host-owned library configuration.
   - Do not report the whole graph or search engine as Skein-owned merely because
@@ -285,25 +398,95 @@ LanceDB for that path.
       `skein-nowledge-mem-runtime-status-v1`. The health payload reads the live
       process-owned handle and fails closed on unopened state, projection lag,
       repair/reindex markers, or non-recoverable changefeed state.
+  - [x] Expose a Skein embedded-library production status report that keeps
+    graph route ownership and search projection freshness as separate cutover
+    decisions, and refuses to claim effective graph/search cutover from mode,
+    compiled features, or configured paths alone.
+  - [x] Expose typed host-owned cutover controls for graph reads, search reads,
+    dual writes, initial import, and projection catch-up, and validate selected
+    Skein reads against the live production status before reporting them
+    effective.
+  - [x] Require the integration bundle and final preflight gate to consume the
+    typed cutover controls report, so host-selected Skein graph/search reads,
+    dual writes, and projection catch-up cannot be omitted from production
+    cutover evidence.
+  - [x] Require final previous-wrapper preflight to consume typed cutover
+    controls directly, so Skein graph/search reads cannot pass release gates
+    unless the selected host controls are effective against live production
+    status.
   - Acceptance: partial route migration is represented as partial ownership, and
     stale or unopened stores cannot report an effective Skein cutover.
+    - Covered by the typed cutover controls report, integration bundle,
+      previous-wrapper preflight, and active-initial-import cutover blocker.
 
-- [ ] Close Mem search filter and result-semantics parity.
-  - Add labels, event-date ranges, recorded-date ranges, temporal context,
+- [x] Close Mem search filter and result-semantics parity.
+  - [x] Add labels, event-date ranges, recorded-date ranges, temporal context,
     cross-space scope, and the remaining metadata predicate forms.
-  - Push descriptor-safe predicates into segment planning before payload reads;
-    keep bounded residual evaluation only for predicates that cannot be exact.
-  - Preserve offset/limit, stable ordering, deep mode, and empty-versus-error
-    behavior.
-  - Acceptance: supported Mem search requests no longer return
+  - [x] Canonicalize Mem-facing `latest` and `history` search filters into the
+    descriptor-safe `is_latest` predicate, with `history=true` mapped to
+    `is_latest=false` and boolean range predicates rejected fail-closed.
+  - [x] Canonicalize Mem-facing event-date and recorded-date range filters into
+    descriptor-safe timestamp predicates, using overlap semantics for
+    `event_date_from/to` and `created_at` ranges for `recorded_date_from/to`.
+  - [x] Canonicalize Mem-facing temporal context aliases into the
+    descriptor-safe `temporal_context` enum predicate and include it in the
+    default search projection scan-filter field summaries.
+  - [x] Canonicalize Mem-facing cross-space scope aliases into the
+    descriptor-safe `space_id` predicate, including default-space normalization
+    for missing or empty graph/search projection rows.
+  - [x] Lower Mem-facing `__exists` and `__missing` metadata filters into typed
+    descriptor-safe presence predicates, with search and graph-seed residual
+    evaluation sharing the same semantics.
+  - [x] Project relationship-derived `HAS_LABEL -> Label` values into
+    descriptor-safe `labels` search metadata, evaluate `labels__in` as a
+    multi-value predicate, and include label relationship changes in the
+    ordered graph-to-search changefeed.
+  - [x] Treat `labels` as an enum-like search predicate field and prove
+    persisted segment descriptors can prune `labels__in` before physical
+    payload range reads.
+  - [x] Push descriptor-safe predicates into segment planning before payload
+    reads; keep bounded residual evaluation only for predicates that cannot be
+    exact.
+    - Covered by persisted segment descriptor pruning tests, physical
+      range-read tests, `persisted_segment_ranges_prune_label_in_filters_before_payload_reads`,
+      and production pruning evidence samples that require
+      `EXPLAIN ANALYZE` payload-read avoidance.
+  - [x] Preserve deep mode behavior.
+    - `KnowledgeRetrievalRequest::nowledge_deep` preserves visible
+      `limit`/`offset` semantics while using a wider `rank_window`,
+      `candidate_limit`, graph-seed limit, and bounded two-hop graph context
+      expansion for Mem deep-search callers.
+    - `nowledge_deep_retrieval_profile_preserves_visible_limit_with_wide_candidate_window`
+      and `nowledge_deep_retrieval_profile_uses_filtered_candidate_window`
+      cover the no-filter `max(page_end * 5, 20)` window, filtered `200`
+      window, metadata-filter preservation, and graph-context expansion
+      diagnostics.
+  - [x] Preserve search-result offset/limit, stable ordering, and empty-page
+    versus error behavior in the typed knowledge retrieval path.
+    - `KnowledgeRetrievalRequest`, `SearchQueryOptions`, `SearchResultSet`, and
+      `NowledgeMemSearchCandidateReport` now carry `offset`; search execution
+      applies offset after stable score/id ordering while keeping total-hit
+      counts pre-pagination. The
+      `knowledge_retrieval_filter_preserves_stable_offset_limit_pages` test
+      covers descriptor-safe filtering, deterministic second-page results, and
+      an empty offset page as a non-error result.
+  - [x] Acceptance: supported Mem search requests no longer return
     `NOT_IMPLEMENTED`, and `EXPLAIN ANALYZE` proves payload avoidance for
     descriptor-safe filters.
+    - Covered by `knowledge_retrieval` filter/result-semantics tests, typed
+      search candidate reports, production-filter pruning evidence gates, and
+      `rg` verification that the active search/API path has no
+      `NOT_IMPLEMENTED` marker.
 
-- [ ] Persist the ordered graph-to-search changefeed.
+- [x] Persist the ordered graph-to-search changefeed.
   - [x] Use the graph commit epoch as a stable mutation identity and reconstruct
     checkpointed plus WAL-only ordered deltas after restart.
   - [x] Expose typed changefeed status with the resumable floor, retained
     mutation bounds, and restart-recoverable state.
+  - [x] Expose typed changefeed readiness that fails closed when the projection
+    watermark is outside the retained window, the graph is not restart
+    recoverable for production catch-up, or the configured batch limit disables
+    incremental progress.
   - [x] Resume from the search projection's durable source-graph watermark,
     keep one graph commit indivisible across bounded batches, and advance the
     durable watermark only after a successful projection checkpoint.
@@ -312,21 +495,76 @@ LanceDB for that path.
     - Implemented in Mem PR #384 with a process-lifetime runtime, persistent
       QoS scheduler, bounded batches, typed stop reasons, and host shutdown.
       The parent remains open until the integration is merged and shipped.
-  - Acceptance: restart, bounded-log truncation, and stale upsert/delete
+  - [x] Prove the Skein changefeed does not split one graph commit across
+    bounded projection batches.
+    - `search_projection_changefeed_does_not_split_one_commit_across_batches`
+      creates two projection mutations in one transaction and verifies a
+      too-small batch limit fails closed instead of emitting a partial commit.
+  - [x] Prove stale upsert/delete sequences converge through durable catch-up.
+    - `durable_search_projection_catch_up_converges_stale_update_delete_sequence`
+      checkpoints an initial Memory projection, applies id update, content
+      update, and delete mutations, catches up from the durable watermark, and
+      verifies neither old nor new document ids remain after reopen.
+  - [x] Acceptance: restart, bounded-log truncation, and stale upsert/delete
     sequences converge without losing or splitting a committed graph mutation.
+    - Covered by `search_projection_changefeed_replays_wal_only_mutations_after_restart`,
+      `search_projection_changefeed_retention_forces_rebuild_for_expired_epoch`,
+      `search_projection_delta_request_requires_rebuild_when_changefeed_start_is_too_new`,
+      `search_projection_changefeed_does_not_split_one_commit_across_batches`,
+      and `durable_search_projection_catch_up_converges_stale_update_delete_sequence`.
 
-- [ ] Integrate Skein recovery and operations into the Mem lifecycle.
+- [x] Integrate Skein recovery and operations into the Mem lifecycle.
   - Wire checkpoint, shutdown, WAL replay, corruption quarantine/repair,
     projection catch-up, QoS, slow-query, and blackbox APIs into Mem startup,
     health, readiness, and background scheduling.
-  - Add host-owned OpenTelemetry metrics for WAL, checkpoint, recovery, index
+  - [x] Expose a typed storage lifecycle decision through the embedded Mem
+    library facade so callers get stable `ready`, `run_checkpoint`,
+    `repair_wal_tail`, `quarantine`, or `open_read_only_inspect` actions from
+    recovery evidence instead of reimplementing WAL/checkpoint blockers.
+  - [x] Carry the storage lifecycle decision into typed operations readiness so
+    Mem startup, health, and background scheduling can consume one
+    library-owned actionable report without re-deriving recovery blockers.
+  - [x] Carry the storage lifecycle action into the compact readiness dashboard
+    without adding another dashboard area, so human-facing health output can
+    show the same library-owned recovery next action.
+  - [x] Add host-owned OpenTelemetry metrics for WAL, checkpoint, recovery, index
     maintenance, and background admission without installing a global
     subscriber.
-  - Prove overlapping pinned reads while commits remain serialized and
+    - `TelemetrySink` stays host-owned and optional. Skein exposes
+      `OpenTelemetryMetrics::new(meter)` behind the `opentelemetry` feature and
+      never initializes a global subscriber.
+    - Kernel telemetry now covers WAL append, checkpoint, recovery, search
+      checkpoint, index maintenance, and background admission. The typed
+      operations telemetry readiness report fails closed until both graph and
+      search projection handles have host sinks configured.
+  - [x] Prove overlapping pinned reads while commits remain serialized and
     durable-before-publish.
+    - `overlapping_pinned_reads_survive_serialized_durable_commit` holds two
+      pinned read transactions across a serialized foreground commit and
+      checkpoint, proves old readers keep the pre-commit snapshot, and verifies
+      the committed value remains visible after reopen.
+    - `reader_keeps_a_stable_snapshot_after_publish`,
+      `durability_failure_does_not_publish_staged_value`, and
+      `concurrent_commits_are_serialized` cover the storage-facing snapshot
+      invariants underneath the embedded library contract.
+  - [x] Expose typed operations readiness through the embedded library by
+    aggregating runtime watermarks, storage recovery, slow-query, background
+    maintenance, and projection-staleness signals without requiring CLI,
+    environment-variable, helper-process, or global-subscriber control planes.
+  - [x] Require the integration bundle and final preflight gate to consume typed
+    operations readiness, so Mem lifecycle cutover fails closed on missing
+    recovery actions, stale projections, slow-query/reporting gaps, background
+    maintenance blockers, or unsafe redaction.
+  - [x] Require final previous-wrapper preflight to consume typed operations
+    readiness directly, so release evidence cannot omit storage lifecycle,
+    projection freshness, slow-query, background-maintenance, or redaction
+    checks.
   - Acceptance: Mem health exposes typed actionable blockers, and crash,
     corruption, memory-pressure, and long-running concurrent workloads have
     integration tests through the embedded library path.
+    - Covered by typed operations readiness, storage lifecycle decisions,
+      host-owned telemetry readiness, integration bundle, final preflight, and
+      pinned-read/serialized-commit tests through the embedded library path.
 
 ## P0: Concrete Cutover Blockers
 
@@ -1027,21 +1265,35 @@ contract.
     - [x] Seal generated queries and verify schema-context integrity before
       generation so callers cannot bypass draft validation with invented
       identifiers.
-    - Carry schema-derived scalar/list parameter requirements into generated
-      queries, reject missing, unexpected, incompatible, or conflicting
-      bindings before execution, and reject a query generated for a different
-      pinned graph epoch.
-    - Execute validated generated queries through the read transaction's
+    - [x] Carry schema-derived scalar/list parameter requirements into
+      generated queries, reject missing, unexpected, incompatible, or
+      conflicting bindings before execution, and reject a query generated for a
+      different pinned graph epoch.
+      - Core generation tests cover parameter conflicts; read-transaction API
+        tests cover missing, unexpected, scalar/list mismatch, and stale
+        schema-epoch rejection before canonical execution.
+    - [x] Execute validated generated queries through the read transaction's
       canonical parser, optimizer, plan cache, profiler, and executor path;
       do not add a GraphRAG-specific interpreter.
     - [x] Expose schema context and bounded generated-query execution through
       the `NowledgeMemEmbeddedStoreHandle` library API so application-bound
       callers do not need direct `Database` ownership.
-    - Return required parameter names and reject invented identifiers,
+    - [x] Return required parameter names and reject invented identifiers,
       unavailable bindings, properties outside the context, and stale schema
       drafts before parsing or planning.
-    - Run generated queries through the normal parser, optimizer, execution
+    - [x] Run generated queries through the normal parser, optimizer, execution
       profile, and slow-query/blackbox reporting path.
+    - [x] Feed a schema-guided GraphRAG probe into the workload-fixture library
+      readiness evidence so cutover gates can reject missing schema context,
+      draft validation, bounded generated-query execution, or unsafe runtime
+      shape before Mem enables GraphRAG-backed reads.
+    - [x] Require final previous-wrapper preflight to consume the library
+      workload-fixture GraphRAG probe details directly, so release evidence
+      fails closed when schema context, draft validation, bounded execution, or
+      safe runtime-shape proof is missing.
+    - [x] Carry GraphRAG workload-fixture probe details through replacement
+      summary as well, so intermediate cutover evidence cannot hide missing
+      schema-guided query generation readiness behind generic workload status.
 
 ## P1: Operability
 
@@ -1072,14 +1324,92 @@ contract.
     silent unbounded fallbacks.
   - [x] Add build-time feature gates for optional mobile capabilities after the
     runtime capability contract is stable.
-- [ ] Add optional ACL support after the embedded read/write contract is stable.
-  - Keep ACL disabled by default and compile-time removable on mobile.
-  - Bind authorization context and policy epoch into binder/planner/executor and
-    plan-cache contracts.
-  - Enforce visibility before payload materialization where storage metadata
-    permits it; result-only filtering is not sufficient.
-  - Fail closed on missing, stale, or unsupported policy state and keep
+- [x] Add optional ACL support after the embedded read/write contract is stable.
+  - [x] Keep ACL disabled by default and compile-time removable on mobile.
+    - Added the non-default `acl` Cargo feature and `AccessControl` runtime
+      capability. Desktop and mobile profiles keep ACL off unless the host
+      explicitly enables it and the feature is compiled in.
+  - [x] Bind authorization context and policy epoch into binder/planner/executor
+    and plan-cache contracts.
+    - [x] Bind search candidate reports to a typed access-control policy epoch
+      when callers use the explicit ACL search API.
+    - [x] Extend Cypher query-runtime planning and plan-cache keys so explicit
+      ACL graph query plans cannot cross policy epochs.
+      - Added `QueryAccessControlContext` and explicit library query/explain
+        entrypoints. The default query path remains unchanged, while ACL query
+        planning requires the `AccessControl` runtime capability, rejects a
+        zero policy epoch before cache lookup, and records only the policy epoch
+        binding in optimizer trace decisions.
+      - Runtime capability tests cover fail-closed disabled ACL, zero policy
+        epoch rejection, and LFU plan-cache isolation across policy epochs.
+    - [x] Bind explicit ACL contexts into executor-facing physical plans and
+      slow-query observability without introducing a production CLI or global
+      environment control plane.
+      - Search, node scan, adjacency expansion, shortest path, and graph
+        algorithm execution all apply policy-visible predicates before result
+        projection. Slow-query records carry only the numeric policy epoch for
+        explicit ACL queries.
+  - [x] Enforce visibility before payload materialization where storage
+    metadata permits it; result-only filtering is not sufficient.
+    - [x] Add `SearchAccessControlContext` and
+      `try_search_with_options_access_control`, which inject descriptor-safe
+      visibility predicates into the search segment-pruning path before ranking
+      while keeping ordinary no-ACL search unchanged.
+    - [x] Extend the same policy-visible predicate contract to query-runtime
+      node scans.
+      - `QueryAccessControlContext::visibility_scope(s)` now carries a
+        descriptor-safe visibility property and allowed values. Explicit ACL
+        graph queries inject a `PropertyIn` predicate into logical `NodeScan`
+        before optimization, so the selected physical plan contains
+        `FilterExec(SeqNodeScan)` and the executor can use
+        `ScanPruningStrategy::PropertyIn` before result projection.
+      - All visibility inputs stay out of plan-cache keys and traces except
+        for the policy epoch; ordinary no-ACL query APIs remain unchanged.
+    - [x] Extend policy-visible predicates to adjacency expansion endpoint
+      materialization.
+      - Explicit ACL graph queries now wrap logical `Expand` targets with a
+        visibility `PropertyIn` predicate. The executor recognizes simple
+        target-only predicates above `AdjacencyExpandExec` and applies the
+        target property filter before creating endpoint bindings, while still
+        evaluating the predicate after expansion for correctness.
+      - Runtime capability tests cover a `Memory` seed that points to visible
+        and hidden `Entity` endpoints; only the visible endpoint is projected.
+    - [x] Extend policy-visible predicates to shortest-path node
+      materialization.
+      - Explicit ACL graph queries now bind source and target visibility
+        predicates into `ShortestPathExec`. The executor checks endpoint
+        visibility before path search and applies the same node visibility
+        filter while expanding BFS candidates, so hidden intermediate nodes
+        cannot appear through `properties(nodes(p), ...)` projections.
+      - Runtime capability tests cover visible endpoints connected only through
+        a hidden intermediate node; the ACL path query returns no rows and the
+        physical fingerprint records both endpoint visibility predicates.
+    - [x] Extend policy-visible predicates to graph-algorithm endpoint
+      materialization so every graph read operator has the same fail-closed
+      visibility boundary.
+      - Explicit ACL graph queries now bind a node visibility predicate into
+        `GraphAlgorithm`. When that predicate is present, the executor rebuilds
+        the named graph definition as a visibility-filtered graph instead of
+        reusing an unscoped projected-graph artifact, then rechecks emitted
+        node ids before result projection.
+      - Runtime capability tests cover a named graph that was projected with a
+        hidden node before the ACL query; PageRank returns only visible nodes
+        and the physical fingerprint records `node_visibility`.
+  - [x] Fail closed on missing, stale, or unsupported policy state and keep
     credentials and policy inputs out of telemetry.
+    - [x] Explicit ACL search fails closed when access control is disabled,
+      when the policy epoch is zero, when visibility metadata is missing, or
+      when search options carry a conflicting policy epoch.
+    - [x] Search telemetry exposes only the policy epoch and filtered counts;
+      visibility values are not copied into reported metadata filters.
+    - [x] Add readiness and slow-log checks for stale policy state once graph
+      query ACL contexts exist.
+      - `access_control_policy_readiness` reports missing, invalid, stale, and
+        capability-disabled policy state with stable blocker codes while
+        exposing only required and observed policy epochs.
+      - Slow-query summaries, SQL system-table rows, and JSONL events expose
+        only `access_control_policy_epoch`; visibility property names and
+        allowed values remain out of default telemetry and redaction metadata.
 - [x] Add compact readiness dashboards for route, query-family, storage, search,
   and background-maintenance blockers.
 - [x] Add stable counters for plan cache hit, miss, admission, eviction, and

@@ -1,11 +1,12 @@
 use super::{
-    validate_graph_lightning_graph_stream, BackgroundMaintenanceKind, BackgroundMaintenanceOptions,
-    CanonicalStableIdMapping, Database, DatabaseConfig, DerivedArtifactJobStatus,
-    ExternalContentArtifactJobCompletion, ExternalContentArtifactRuntimeManifest,
-    KnowledgeAugmentationJobInterruptRequest, KnowledgeAugmentationJobLifecycleBatchRequest,
-    KnowledgeAugmentationJobLifecycleTransition, KnowledgeAugmentationJobLifecycleUpdate,
-    KnowledgeAugmentationJobListOrder, KnowledgeAugmentationJobListRequest,
-    KnowledgeAugmentationJobRequest, KnowledgeCandidateScoringPolicy, KnowledgeCandidateSource,
+    nowledge_deep_search_graph_seed_limit, validate_graph_lightning_graph_stream,
+    BackgroundMaintenanceKind, BackgroundMaintenanceOptions, CanonicalStableIdMapping, Database,
+    DatabaseConfig, DerivedArtifactJobStatus, ExternalContentArtifactJobCompletion,
+    ExternalContentArtifactRuntimeManifest, KnowledgeAugmentationJobInterruptRequest,
+    KnowledgeAugmentationJobLifecycleBatchRequest, KnowledgeAugmentationJobLifecycleTransition,
+    KnowledgeAugmentationJobLifecycleUpdate, KnowledgeAugmentationJobListOrder,
+    KnowledgeAugmentationJobListRequest, KnowledgeAugmentationJobRequest,
+    KnowledgeCandidateScoringPolicy, KnowledgeCandidateSource,
     KnowledgeCommunityAssignmentClearRequest, KnowledgeCommunityCleanupRequest,
     KnowledgeCommunityCreate, KnowledgeCommunityEntityVisibilityRequest,
     KnowledgeCommunityLifecycleBatchRequest, KnowledgeCommunityListOrder,
@@ -109,6 +110,8 @@ use super::{
     KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
     NowledgeGraphStatement, PlanCacheBypassReason, PlanCacheLookup, QueryOutput, RecoveryMode,
     SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    NOWLEDGE_DEEP_SEARCH_FILTERED_RANK_WINDOW, NOWLEDGE_DEEP_SEARCH_GRAPH_CONTEXT_MAX_HOPS,
+    NOWLEDGE_DEEP_SEARCH_MIN_GRAPH_SEED_LIMIT, NOWLEDGE_DEEP_SEARCH_MIN_RANK_WINDOW,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{

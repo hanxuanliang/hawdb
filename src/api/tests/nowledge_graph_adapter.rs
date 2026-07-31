@@ -126,6 +126,7 @@ fn nowledge_graph_adapter_retrieves_knowledge_with_external_projection() {
             query_embedding: None,
             mode: SearchMode::Text,
             limit: 4,
+            offset: 0,
             rank_window: None,
             search_fusion_weights: SearchFusionWeights::default(),
             metadata_filters: BTreeMap::new(),

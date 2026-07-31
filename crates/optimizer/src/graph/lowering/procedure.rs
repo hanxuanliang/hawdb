@@ -18,11 +18,13 @@ pub(super) fn lower(logical: &LogicalPlan) -> Option<PhysicalPlan> {
             graph_name,
             options,
             score_column,
+            node_visibility_predicate,
         } => Some(PhysicalPlan::GraphAlgorithm {
             algorithm: *algorithm,
             graph_name: graph_name.clone(),
             options: *options,
             score_column: score_column.clone(),
+            node_visibility_predicate: node_visibility_predicate.clone(),
         }),
         LogicalPlan::VectorSeed {
             embedding_parameter,

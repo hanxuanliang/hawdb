@@ -23,6 +23,7 @@ use skein_storage::{
     EnumDictionaryStats, FieldSummary, RangeBound, ScanPredicate, SegmentPruner, SegmentReadRange,
     SegmentSummary,
 };
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -70,8 +71,10 @@ pub const NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS: &[&str] = &[
     "external_id",
     "source_id",
     "space_id",
+    "labels",
     "unit_type",
     "lifecycle_state",
+    "temporal_context",
     "importance",
     "confidence",
     "created_at",
@@ -94,7 +97,7 @@ pub struct SearchDocument {
     pub metadata: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SearchProjectionKind {
     Memory,
     Message,
@@ -246,6 +249,7 @@ pub struct SearchResultSet {
     pub hits: Vec<SearchHit>,
     pub total_hits: usize,
     pub limit: usize,
+    pub offset: usize,
     pub truncated: bool,
     pub truncation_reason_codes: Vec<SearchTruncationReasonCode>,
     pub truncation_reasons: Vec<String>,
@@ -454,10 +458,98 @@ impl Default for SearchFusionWeights {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SearchQueryOptions {
     pub limit: usize,
+    pub offset: usize,
     pub rank_window: Option<usize>,
     pub fusion_weights: SearchFusionWeights,
     pub metadata_filters: BTreeMap<String, String>,
     pub policy_epoch: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchAccessControlContext {
+    pub policy_epoch: u64,
+    pub visibility_metadata_field: String,
+    pub allowed_visibility_values: BTreeSet<String>,
+}
+
+impl SearchAccessControlContext {
+    pub fn visibility_scopes(
+        policy_epoch: u64,
+        visibility_metadata_field: impl Into<String>,
+        allowed_visibility_values: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            policy_epoch,
+            visibility_metadata_field: visibility_metadata_field.into(),
+            allowed_visibility_values: allowed_visibility_values
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.policy_epoch == 0 {
+            return Err(SkeinError::Storage(
+                "access control context requires a non-zero policy epoch".to_string(),
+            ));
+        }
+        if self.visibility_metadata_field.trim().is_empty() {
+            return Err(SkeinError::Storage(
+                "access control context requires a visibility metadata field".to_string(),
+            ));
+        }
+        if self.allowed_visibility_values.is_empty() {
+            return Err(SkeinError::Storage(
+                "access control context requires at least one visibility value".to_string(),
+            ));
+        }
+        if self
+            .allowed_visibility_values
+            .iter()
+            .any(|value| value.trim().is_empty())
+        {
+            return Err(SkeinError::Storage(
+                "access control context visibility values must be non-empty".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn apply_to_filters(
+        &self,
+        metadata_filters: &BTreeMap<String, String>,
+    ) -> Result<BTreeMap<String, String>> {
+        self.validate()?;
+        let mut filters = metadata_filters.clone();
+        if self.allowed_visibility_values.len() == 1 {
+            filters.insert(
+                self.visibility_metadata_field.clone(),
+                self.allowed_visibility_values
+                    .iter()
+                    .next()
+                    .expect("single visibility value")
+                    .clone(),
+            );
+        } else {
+            filters.insert(
+                format!("{}__in", self.visibility_metadata_field),
+                serde_json::to_string(
+                    &self
+                        .allowed_visibility_values
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                )
+                .map_err(|error| {
+                    SkeinError::Storage(format!(
+                        "failed to encode access control visibility predicate: {error}"
+                    ))
+                })?,
+            );
+        }
+        Ok(filters)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -940,6 +1032,10 @@ impl SearchIndex {
         self.telemetry = telemetry;
     }
 
+    pub fn telemetry_sink_configured(&self) -> bool {
+        self.telemetry.is_some()
+    }
+
     fn configure_qos_scheduler_telemetry(&self, scheduler: &mut LocalQosScheduler) {
         if let Some(telemetry) = &self.telemetry {
             scheduler.set_telemetry_sink(Some(qos_telemetry_sink(telemetry.clone())));
@@ -1296,41 +1392,54 @@ impl SearchIndex {
         store: &GraphStore,
         options: SearchRebuildOptions,
     ) -> Result<SearchRebuildSummary> {
+        let started = std::time::Instant::now();
         let mut next_documents = BTreeMap::new();
         let mut scanned_nodes = 0;
 
-        for node in store.scan_nodes(None) {
-            scanned_nodes += 1;
-            let Some(row) = projection_row_from_node(catalog, node) else {
-                continue;
-            };
-            if options
-                .max_rows
-                .map(|limit| next_documents.len() >= limit)
-                .unwrap_or(false)
-            {
-                self.mark_full_reindex_needed("full rebuild exceeded configured row limit")?;
-                return Err(SkeinError::Storage(format!(
-                    "full rebuild exceeded configured row limit after {} documents",
-                    next_documents.len()
-                )));
+        let result = (|| {
+            for node in store.scan_nodes(None) {
+                scanned_nodes += 1;
+                let Some(row) = projection_row_from_node_with_graph_metadata(catalog, store, node)
+                else {
+                    continue;
+                };
+                if options
+                    .max_rows
+                    .map(|limit| next_documents.len() >= limit)
+                    .unwrap_or(false)
+                {
+                    self.mark_full_reindex_needed("full rebuild exceeded configured row limit")?;
+                    return Err(SkeinError::Storage(format!(
+                        "full rebuild exceeded configured row limit after {} documents",
+                        next_documents.len()
+                    )));
+                }
+                let document = row.into_document();
+                next_documents.insert(document.id.clone(), document);
             }
-            let document = row.into_document();
-            next_documents.insert(document.id.clone(), document);
-        }
 
-        self.documents = next_documents;
-        self.source_graph_commit_epoch = Some(store.commit_epoch());
-        self.embedding_dimension = self
-            .embedding_manifest
-            .as_ref()
-            .map(|manifest| manifest.dimension);
-        self.clear_marker(FULL_REINDEX_MARKER)?;
-        self.clear_marker(METADATA_REPAIR_MARKER)?;
-        Ok(SearchRebuildSummary {
-            scanned_nodes,
-            indexed_documents: self.documents.len(),
-        })
+            self.documents = next_documents;
+            self.source_graph_commit_epoch = Some(store.commit_epoch());
+            self.embedding_dimension = self
+                .embedding_manifest
+                .as_ref()
+                .map(|manifest| manifest.dimension);
+            self.clear_marker(FULL_REINDEX_MARKER)?;
+            self.clear_marker(METADATA_REPAIR_MARKER)?;
+            Ok(SearchRebuildSummary {
+                scanned_nodes,
+                indexed_documents: self.documents.len(),
+            })
+        })();
+        if let Some(telemetry) = &self.telemetry {
+            telemetry.record_kernel(KernelTelemetry {
+                operation: KernelTelemetryOperation::IndexMaintenance,
+                success: result.is_ok(),
+                elapsed_micros: elapsed_micros(started),
+                item_count: scanned_nodes,
+            });
+        }
+        result
     }
 
     pub fn rebuild_derived_artifacts(
@@ -1438,49 +1547,64 @@ impl SearchIndex {
         store: &GraphStore,
         options: MetadataRepairOptions,
     ) -> Result<MetadataRepairSummary> {
+        let started = std::time::Instant::now();
         let mut repairs = Vec::new();
         let mut scanned_nodes = 0;
         let mut missing_documents = 0;
 
-        for node in store.scan_nodes(None) {
-            scanned_nodes += 1;
-            let Some(row) = projection_row_from_node(catalog, node) else {
-                continue;
-            };
-            let document = row.into_document();
-            if !self.documents.contains_key(&document.id) {
-                missing_documents += 1;
-                continue;
+        let result = (|| {
+            for node in store.scan_nodes(None) {
+                scanned_nodes += 1;
+                let Some(row) = projection_row_from_node_with_graph_metadata(catalog, store, node)
+                else {
+                    continue;
+                };
+                let document = row.into_document();
+                if !self.documents.contains_key(&document.id) {
+                    missing_documents += 1;
+                    continue;
+                }
+                if options
+                    .max_rows
+                    .map(|limit| repairs.len() >= limit)
+                    .unwrap_or(false)
+                {
+                    self.mark_metadata_repair_needed(
+                        "metadata repair exceeded configured row limit",
+                    )?;
+                    return Err(SkeinError::Storage(format!(
+                        "metadata repair exceeded configured row limit after {} documents",
+                        repairs.len()
+                    )));
+                }
+                repairs.push((document.id, document.metadata));
             }
-            if options
-                .max_rows
-                .map(|limit| repairs.len() >= limit)
-                .unwrap_or(false)
-            {
-                self.mark_metadata_repair_needed("metadata repair exceeded configured row limit")?;
-                return Err(SkeinError::Storage(format!(
-                    "metadata repair exceeded configured row limit after {} documents",
-                    repairs.len()
-                )));
-            }
-            repairs.push((document.id, document.metadata));
-        }
 
-        let repaired_documents = repairs.len();
-        for (id, metadata) in repairs {
-            if let Some(existing) = self.documents.get_mut(&id) {
-                existing.metadata = metadata;
+            let repaired_documents = repairs.len();
+            for (id, metadata) in repairs {
+                if let Some(existing) = self.documents.get_mut(&id) {
+                    existing.metadata = metadata;
+                }
             }
+            if missing_documents > 0 {
+                self.mark_full_reindex_needed("metadata repair found missing projection rows")?;
+            }
+            self.clear_marker(METADATA_REPAIR_MARKER)?;
+            Ok(MetadataRepairSummary {
+                scanned_nodes,
+                repaired_documents,
+                missing_documents,
+            })
+        })();
+        if let Some(telemetry) = &self.telemetry {
+            telemetry.record_kernel(KernelTelemetry {
+                operation: KernelTelemetryOperation::IndexMaintenance,
+                success: result.is_ok(),
+                elapsed_micros: elapsed_micros(started),
+                item_count: scanned_nodes,
+            });
         }
-        if missing_documents > 0 {
-            self.mark_full_reindex_needed("metadata repair found missing projection rows")?;
-        }
-        self.clear_marker(METADATA_REPAIR_MARKER)?;
-        Ok(MetadataRepairSummary {
-            scanned_nodes,
-            repaired_documents,
-            missing_documents,
-        })
+        result
     }
 
     pub fn metadata_repair_background_work_plan(
@@ -1639,6 +1763,7 @@ impl SearchIndex {
             mode,
             SearchQueryOptions {
                 limit,
+                offset: 0,
                 rank_window: None,
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::new(),
@@ -1660,6 +1785,7 @@ impl SearchIndex {
             mode,
             options,
             SearchExecutionStrategy::fixed(VectorSearchBackend::Scalar, None, false),
+            None,
         )
         .expect("in-memory search path does not perform fallible range I/O")
     }
@@ -1677,6 +1803,25 @@ impl SearchIndex {
             mode,
             options,
             SearchExecutionStrategy::fixed(VectorSearchBackend::Scalar, None, true),
+            None,
+        )
+    }
+
+    pub fn try_search_with_options_access_control(
+        &self,
+        query_text: &str,
+        query_embedding: Option<&[f32]>,
+        mode: SearchMode,
+        options: SearchQueryOptions,
+        access_control: SearchAccessControlContext,
+    ) -> Result<SearchResultSet> {
+        self.try_search_with_options_using_vector_backend(
+            query_text,
+            query_embedding,
+            mode,
+            options,
+            SearchExecutionStrategy::fixed(VectorSearchBackend::Scalar, None, true),
+            Some(&access_control),
         )
     }
 
@@ -1809,6 +1954,7 @@ impl SearchIndex {
                 .expect("sampled vector document has an embedding");
             let query_options = SearchQueryOptions {
                 limit: query_limit,
+                offset: 0,
                 rank_window: None,
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: options.metadata_filters.clone(),
@@ -1864,6 +2010,7 @@ impl SearchIndex {
                 adaptive_options.recall_validation_probe,
                 use_physical_range_reads,
             ),
+            None,
         )
     }
 
@@ -1961,6 +2108,7 @@ impl SearchIndex {
             mode,
             options,
             SearchExecutionStrategy::fixed(VectorSearchBackend::Turbovec(projection), None, false),
+            None,
         )
         .expect("in-memory search path does not perform fallible range I/O")
     }
@@ -1972,7 +2120,12 @@ impl SearchIndex {
         mode: SearchMode,
         options: SearchQueryOptions,
         strategy: SearchExecutionStrategy<'_>,
+        access_control: Option<&SearchAccessControlContext>,
     ) -> Result<SearchResultSet> {
+        if access_control.is_some() {
+            self.runtime_capabilities
+                .require(RuntimeCapability::AccessControl)?;
+        }
         self.require_search_capabilities(mode)?;
         let SearchExecutionStrategy {
             vector_backend: vector_backend_request,
@@ -1989,7 +2142,24 @@ impl SearchIndex {
         }
         let limit = options.limit;
         let document_count = self.documents.len();
-        let mut predicate_pushdown = search_metadata_predicate_pushdown(&options.metadata_filters);
+        let metadata_filters = match access_control {
+            Some(access_control) => {
+                if let Some(policy_epoch) = options.policy_epoch
+                    && policy_epoch != access_control.policy_epoch
+                {
+                    return Err(SkeinError::Storage(format!(
+                        "search options policy epoch {policy_epoch} does not match access control policy epoch {}",
+                        access_control.policy_epoch
+                    )));
+                }
+                access_control.apply_to_filters(&options.metadata_filters)?
+            }
+            None => options.metadata_filters.clone(),
+        };
+        let policy_epoch = access_control
+            .map(|access_control| access_control.policy_epoch)
+            .or(options.policy_epoch);
+        let mut predicate_pushdown = search_metadata_predicate_pushdown(&metadata_filters);
         let range_read = if matches!(payload_access, SearchPayloadAccess::PrunedRanges) {
             self.read_pruned_search_segments(&predicate_pushdown.predicates)?
         } else {
@@ -2073,7 +2243,7 @@ impl SearchIndex {
             cardinality: filtered_document_count,
             exact: true,
             snapshot_source_graph_commit_epoch: self.source_graph_commit_epoch,
-            policy_epoch: options.policy_epoch,
+            policy_epoch,
             filtered_out_count: document_count.saturating_sub(filtered_document_count),
             metadata_filters: options.metadata_filters.clone(),
             metadata_predicate_pushdown: predicate_pushdown.report,
@@ -2353,9 +2523,15 @@ impl SearchIndex {
                 .then_with(|| left.id.cmp(&right.id))
         });
         let total_hits = hits.len();
-        let truncated = total_hits > limit;
-        hits.truncate(limit);
-        let truncation_reasons = if truncated {
+        let page_end = options.offset.saturating_add(limit);
+        let truncated = total_hits > page_end;
+        hits = hits.into_iter().skip(options.offset).take(limit).collect();
+        let truncation_reasons = if truncated && options.offset > 0 {
+            vec![format!(
+                "offset {} limit {limit} returned from {total_hits} matching hits",
+                options.offset
+            )]
+        } else if truncated {
             vec![format!(
                 "limit {limit} returned from {total_hits} matching hits"
             )]
@@ -2372,6 +2548,10 @@ impl SearchIndex {
             document_count,
             filtered_document_count,
             total_hits,
+            SearchPageWindow {
+                offset: options.offset,
+                limit,
+            },
             &truncation_reasons,
             &fallback_reasons,
         );
@@ -2385,6 +2565,7 @@ impl SearchIndex {
             hits,
             total_hits,
             limit,
+            offset: options.offset,
             truncated,
             truncation_reason_codes,
             truncation_reasons,
@@ -3151,7 +3332,7 @@ fn search_projection_probe_production_filter_predicate(
 fn search_projection_probe_production_filter_operation_family(field: &str) -> &'static str {
     match field {
         SEARCH_DOCUMENT_ID_FIELD => "unique_key",
-        "unit_type" | "lifecycle_state" => "enum_in_list",
+        "unit_type" | "lifecycle_state" | "temporal_context" => "enum_in_list",
         "importance" | "confidence" => "numeric_range",
         "created_at" | "updated_at" | "event_start" | "event_end" => "timestamp_range",
         "is_latest" => "normalized_default_equality",
@@ -3389,6 +3570,58 @@ pub(crate) fn projection_row_from_node(
     })
 }
 
+pub(crate) fn projection_row_from_node_with_graph_metadata(
+    catalog: &Catalog,
+    store: &GraphStore,
+    node: &NodeRecord,
+) -> Option<SearchProjectionRow> {
+    let mut row = projection_row_from_node(catalog, node)?;
+    let labels = projection_business_labels_for_node(catalog, store, node);
+    if !labels.is_empty() {
+        row.metadata.insert(
+            "labels".to_string(),
+            serde_json::to_string(&labels).expect("label metadata serializes as a string array"),
+        );
+    }
+    Some(row)
+}
+
+fn projection_business_labels_for_node(
+    catalog: &Catalog,
+    store: &GraphStore,
+    node: &NodeRecord,
+) -> Vec<String> {
+    let Some(has_label_type_id) = catalog.rel_type_id("HAS_LABEL") else {
+        return Vec::new();
+    };
+    let Some(label_label_id) = catalog.label_id("Label") else {
+        return Vec::new();
+    };
+    store
+        .scan_relationships(Some(has_label_type_id))
+        .filter_map(|relationship| {
+            let label_node_id = if relationship.source == node.id {
+                relationship.target
+            } else if relationship.target == node.id {
+                relationship.source
+            } else {
+                return None;
+            };
+            let label = store.node(label_node_id)?;
+            label
+                .labels
+                .contains(&label_label_id)
+                .then(|| projection_business_label_value(label))?
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn projection_business_label_value(label: &NodeRecord) -> Option<String> {
+    first_non_empty_string_property(label, &["canonical_name", "name", "id"])
+}
+
 fn search_projection_kind_from_label(label: &str) -> Option<SearchProjectionKind> {
     match label {
         "Memory" | "memory" => Some(SearchProjectionKind::Memory),
@@ -3485,11 +3718,18 @@ fn search_empty_reason_codes(
     vec![SearchEmptyReasonCode::LimitExcludedAllHits]
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SearchPageWindow {
+    offset: usize,
+    limit: usize,
+}
+
 fn search_empty_reasons(
     returned_empty: bool,
     document_count: usize,
     filtered_document_count: usize,
     total_hits: usize,
+    page_window: SearchPageWindow,
     truncation_reasons: &[String],
     fallback_reasons: &[String],
 ) -> Vec<String> {
@@ -3507,6 +3747,12 @@ fn search_empty_reasons(
             vec!["search retrievers returned no hits inside filtered scope".to_string()];
         reasons.extend(fallback_reasons.iter().cloned());
         return reasons;
+    }
+    if page_window.offset > 0 {
+        return vec![format!(
+            "offset {} limit {} returned no hits from {total_hits} matching hits",
+            page_window.offset, page_window.limit
+        )];
     }
     truncation_reasons.to_vec()
 }
@@ -3948,6 +4194,9 @@ impl SearchFieldPruningAccumulator {
                         stats.timestamp_range_summary_used = true;
                     }
                 }
+                SearchPredicateOp::Exists | SearchPredicateOp::IsMissing => {
+                    stats.value_summary_used = true;
+                }
             }
         }
         Self { fields }
@@ -4041,6 +4290,7 @@ fn search_predicate_value_kind(predicate: &SearchPredicate) -> &'static str {
             .next()
             .map(search_scalar_report_kind)
             .unwrap_or("unknown"),
+        SearchPredicateOp::Exists | SearchPredicateOp::IsMissing => "presence",
     }
 }
 
@@ -4060,6 +4310,8 @@ fn search_predicate_op_kind(op: &SearchPredicateOp) -> &'static str {
         SearchPredicateOp::Gte(_) => "gte",
         SearchPredicateOp::Lt(_) => "lt",
         SearchPredicateOp::Lte(_) => "lte",
+        SearchPredicateOp::Exists => "exists",
+        SearchPredicateOp::IsMissing => "missing",
     }
 }
 
@@ -4081,25 +4333,28 @@ impl SearchFilterSegmentSummary {
         let mut timestamp_ranges = BTreeMap::<String, SearchTimestampRange>::new();
         for document in documents {
             for field in fields {
-                let Some(value) = search_document_field_value(document, field) else {
+                let actual_values = search_document_field_values(document, field);
+                if actual_values.is_empty() {
                     continue;
-                };
-                *present_counts.entry(field.clone()).or_insert(0) += 1;
-                values
-                    .entry(field.clone())
-                    .or_default()
-                    .insert(search_segment_summary_value(field, value));
-                if let Some(number) = metadata_numeric_value(value) {
-                    numeric_ranges
-                        .entry(field.clone())
-                        .and_modify(|range| *range = range.with_value(number))
-                        .or_insert_with(|| SearchNumericRange::point(number));
                 }
-                if let Some(timestamp) = metadata_timestamp_value(value) {
-                    timestamp_ranges
+                *present_counts.entry(field.clone()).or_insert(0) += 1;
+                for value in actual_values {
+                    values
                         .entry(field.clone())
-                        .and_modify(|range| *range = range.with_value(timestamp))
-                        .or_insert_with(|| SearchTimestampRange::point(timestamp));
+                        .or_default()
+                        .insert(search_segment_summary_value(field, value.as_ref()));
+                    if let Some(number) = metadata_numeric_value(value.as_ref()) {
+                        numeric_ranges
+                            .entry(field.clone())
+                            .and_modify(|range| *range = range.with_value(number))
+                            .or_insert_with(|| SearchNumericRange::point(number));
+                    }
+                    if let Some(timestamp) = metadata_timestamp_value(value.as_ref()) {
+                        timestamp_ranges
+                            .entry(field.clone())
+                            .and_modify(|range| *range = range.with_value(timestamp))
+                            .or_insert_with(|| SearchTimestampRange::point(timestamp));
+                    }
                 }
             }
         }
@@ -4190,7 +4445,17 @@ impl SearchFilterSegmentSummary {
                 predicate.op(),
                 expected.as_str(),
             ),
+            SearchPredicateOp::Exists => self.field_may_exist(predicate.field().name()),
+            SearchPredicateOp::IsMissing => self.field_may_be_missing(predicate.field().name()),
         }
+    }
+
+    fn field_may_exist(&self, field: &str) -> bool {
+        self.present_counts.get(field).copied().unwrap_or_default() > 0
+    }
+
+    fn field_may_be_missing(&self, field: &str) -> bool {
+        self.present_counts.get(field).copied().unwrap_or_default() < self.document_count
     }
 
     fn values_may_match_any<'a>(
@@ -4366,15 +4631,18 @@ impl SearchSegmentDescriptorEntry {
             .collect::<BTreeMap<_, _>>();
         for document in documents {
             for field in fields {
-                let Some(value) = search_document_field_value(document, field) else {
+                let values = search_document_field_values(document, field);
+                if values.is_empty() {
                     continue;
-                };
+                }
                 let summary = metadata.entry(field.clone()).or_default();
                 summary.present_count += 1;
-                summary
-                    .values
-                    .insert(search_segment_summary_value(field, value));
-                summary.update_range_summaries(value);
+                for value in values {
+                    summary
+                        .values
+                        .insert(search_segment_summary_value(field, value.as_ref()));
+                    summary.update_range_summaries(value.as_ref());
+                }
             }
         }
         Self {
@@ -4458,7 +4726,21 @@ impl SearchSegmentDescriptorEntry {
                 predicate.op(),
                 expected.as_str(),
             ),
+            SearchPredicateOp::Exists => self.field_may_exist(predicate.field().name()),
+            SearchPredicateOp::IsMissing => self.field_may_be_missing(predicate.field().name()),
         }
+    }
+
+    fn field_may_exist(&self, field: &str) -> bool {
+        self.metadata
+            .get(field)
+            .is_some_and(|summary| summary.present_count > 0)
+    }
+
+    fn field_may_be_missing(&self, field: &str) -> bool {
+        self.metadata
+            .get(field)
+            .is_none_or(|summary| summary.present_count < self.document_count)
     }
 
     fn values_may_match_any<'a>(
@@ -4547,6 +4829,8 @@ fn search_storage_scan_predicate(predicate: &SearchPredicate) -> Option<ScanPred
             lower: None,
             upper: Some(RangeBound::inclusive(search_range_summary_value(value))),
         }),
+        SearchPredicateOp::Exists => Some(ScanPredicate::Exists { property }),
+        SearchPredicateOp::IsMissing => Some(ScanPredicate::IsMissing { property }),
     }
 }
 
@@ -4593,33 +4877,39 @@ fn search_document_matches_predicate(
     document: &SearchDocument,
     predicate: &SearchPredicate,
 ) -> bool {
-    let actual = search_document_field_value(document, predicate.field().name());
+    let actual_values = search_document_field_values(document, predicate.field().name());
     match predicate.op() {
-        SearchPredicateOp::Eq(expected) => actual.is_some_and(|actual| {
-            metadata_value_matches(predicate.field().name(), actual, expected.as_str())
+        SearchPredicateOp::Eq(expected) => actual_values.iter().any(|actual| {
+            metadata_value_matches(predicate.field().name(), actual.as_ref(), expected.as_str())
         }),
-        SearchPredicateOp::In(expected_values) => actual.is_some_and(|actual| {
+        SearchPredicateOp::In(expected_values) => actual_values.iter().any(|actual| {
             expected_values.iter().any(|expected| {
-                metadata_value_matches(predicate.field().name(), actual, expected.as_str())
+                metadata_value_matches(predicate.field().name(), actual.as_ref(), expected.as_str())
             })
         }),
-        SearchPredicateOp::NotIn(excluded_values) => actual.is_none_or(|actual| {
+        SearchPredicateOp::NotIn(excluded_values) => actual_values.iter().all(|actual| {
             excluded_values.iter().all(|excluded| {
-                !metadata_value_matches(predicate.field().name(), actual, excluded.as_str())
+                !metadata_value_matches(
+                    predicate.field().name(),
+                    actual.as_ref(),
+                    excluded.as_str(),
+                )
             })
         }),
-        SearchPredicateOp::Gt(expected) => {
-            actual.is_some_and(|actual| metadata_range_gt(actual, expected.as_str()))
-        }
-        SearchPredicateOp::Gte(expected) => {
-            actual.is_some_and(|actual| metadata_range_gte(actual, expected.as_str()))
-        }
-        SearchPredicateOp::Lt(expected) => {
-            actual.is_some_and(|actual| metadata_range_lt(actual, expected.as_str()))
-        }
-        SearchPredicateOp::Lte(expected) => {
-            actual.is_some_and(|actual| metadata_range_lte(actual, expected.as_str()))
-        }
+        SearchPredicateOp::Gt(expected) => actual_values
+            .iter()
+            .any(|actual| metadata_range_gt(actual.as_ref(), expected.as_str())),
+        SearchPredicateOp::Gte(expected) => actual_values
+            .iter()
+            .any(|actual| metadata_range_gte(actual.as_ref(), expected.as_str())),
+        SearchPredicateOp::Lt(expected) => actual_values
+            .iter()
+            .any(|actual| metadata_range_lt(actual.as_ref(), expected.as_str())),
+        SearchPredicateOp::Lte(expected) => actual_values
+            .iter()
+            .any(|actual| metadata_range_lte(actual.as_ref(), expected.as_str())),
+        SearchPredicateOp::Exists => !actual_values.is_empty(),
+        SearchPredicateOp::IsMissing => actual_values.is_empty(),
     }
 }
 
@@ -4636,6 +4926,36 @@ fn search_document_field_value<'a>(document: &'a SearchDocument, key: &str) -> O
         ),
         _ => document.metadata.get(key).map(String::as_str),
     }
+}
+
+fn search_document_field_values<'a>(document: &'a SearchDocument, key: &str) -> Vec<Cow<'a, str>> {
+    if key == "labels" {
+        return document
+            .metadata
+            .get(key)
+            .map(|value| parse_label_metadata_values(value))
+            .unwrap_or_default();
+    }
+    search_document_field_value(document, key)
+        .map(Cow::Borrowed)
+        .into_iter()
+        .collect()
+}
+
+fn parse_label_metadata_values(value: &str) -> Vec<Cow<'_, str>> {
+    if let Ok(values) = serde_json::from_str::<Vec<String>>(value) {
+        return values
+            .into_iter()
+            .map(|value| Cow::<str>::Owned(value.trim().to_string()))
+            .filter(|value| !value.is_empty())
+            .collect();
+    }
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(Cow::Borrowed)
+        .collect()
 }
 
 fn metadata_value_matches(key: &str, actual: &str, expected: &str) -> bool {
@@ -4755,7 +5075,11 @@ fn metadata_numeric_range_may_match(
         SearchPredicateOp::Gte(_) => range.max >= expected,
         SearchPredicateOp::Lt(_) => range.min < expected,
         SearchPredicateOp::Lte(_) => range.min <= expected,
-        SearchPredicateOp::Eq(_) | SearchPredicateOp::In(_) | SearchPredicateOp::NotIn(_) => true,
+        SearchPredicateOp::Eq(_)
+        | SearchPredicateOp::In(_)
+        | SearchPredicateOp::NotIn(_)
+        | SearchPredicateOp::Exists
+        | SearchPredicateOp::IsMissing => true,
     }
 }
 
@@ -4769,7 +5093,11 @@ fn metadata_timestamp_range_may_match(
         SearchPredicateOp::Gte(_) => range.max_epoch_millis >= expected,
         SearchPredicateOp::Lt(_) => range.min_epoch_millis < expected,
         SearchPredicateOp::Lte(_) => range.min_epoch_millis <= expected,
-        SearchPredicateOp::Eq(_) | SearchPredicateOp::In(_) | SearchPredicateOp::NotIn(_) => true,
+        SearchPredicateOp::Eq(_)
+        | SearchPredicateOp::In(_)
+        | SearchPredicateOp::NotIn(_)
+        | SearchPredicateOp::Exists
+        | SearchPredicateOp::IsMissing => true,
     }
 }
 
@@ -6206,6 +6534,7 @@ mod tests {
             SearchMode::Hybrid,
             SearchQueryOptions {
                 limit: 10,
+                offset: 0,
                 rank_window: Some(1),
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::new(),
@@ -6266,6 +6595,7 @@ mod tests {
             SearchMode::Hybrid,
             SearchQueryOptions {
                 limit: 10,
+                offset: 0,
                 rank_window: Some(1),
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::from([("scope".to_string(), "visible".to_string())]),
@@ -6324,6 +6654,7 @@ mod tests {
             SearchMode::Hybrid,
             SearchQueryOptions {
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 fusion_weights: SearchFusionWeights {
                     vector_weight: 1.0,
@@ -6339,6 +6670,7 @@ mod tests {
             SearchMode::Hybrid,
             SearchQueryOptions {
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 fusion_weights: SearchFusionWeights {
                     vector_weight: 3.0,
@@ -6410,6 +6742,7 @@ mod tests {
             SearchMode::Text,
             SearchQueryOptions {
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::from([(
@@ -6501,6 +6834,7 @@ mod tests {
             SearchMode::Text,
             SearchQueryOptions {
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::from([("customer".to_string(), "acme".to_string())]),
@@ -6542,6 +6876,7 @@ mod tests {
             SearchMode::Text,
             SearchQueryOptions {
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::from([(
@@ -6643,6 +6978,7 @@ mod tests {
             SearchMode::Text,
             SearchQueryOptions {
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::from([(
@@ -6673,6 +7009,102 @@ mod tests {
     }
 
     #[test]
+    fn search_with_options_applies_metadata_exists_and_missing_filters_before_ranking() {
+        let mut index = SearchIndex::in_memory();
+        for (id, source_id) in [
+            ("memory:has_source", Some("thread_1")),
+            ("memory:missing_source_1", None),
+            ("memory:missing_source_2", None),
+        ] {
+            let mut metadata = BTreeMap::from([("kind".to_string(), "memory".to_string())]);
+            if let Some(source_id) = source_id {
+                metadata.insert("source_id".to_string(), source_id.to_string());
+            }
+            index
+                .upsert(SearchDocument {
+                    id: id.to_string(),
+                    title: "Graph memory".to_string(),
+                    content: "presence predicate retrieval".to_string(),
+                    embedding: None,
+                    metadata,
+                })
+                .unwrap();
+        }
+
+        let exists = index.search_with_options(
+            "presence predicate retrieval",
+            None,
+            SearchMode::Text,
+            SearchQueryOptions {
+                limit: 10,
+                offset: 0,
+                rank_window: None,
+                fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::from([(
+                    "source_id__exists".to_string(),
+                    "true".to_string(),
+                )]),
+                policy_epoch: None,
+            },
+        );
+        let missing = index.search_with_options(
+            "presence predicate retrieval",
+            None,
+            SearchMode::Text,
+            SearchQueryOptions {
+                limit: 10,
+                offset: 0,
+                rank_window: None,
+                fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::from([(
+                    "source_id__missing".to_string(),
+                    "true".to_string(),
+                )]),
+                policy_epoch: None,
+            },
+        );
+
+        assert_eq!(exists.total_hits, 1);
+        assert_eq!(exists.hits[0].id, "memory:has_source");
+        assert_eq!(exists.filtered_document_count, 1);
+        assert_eq!(
+            exists
+                .candidate_set
+                .metadata_predicate_pushdown
+                .field_summaries,
+            vec![SearchPredicateFieldPruningReport {
+                field: "source_id".to_string(),
+                value_kind: "presence".to_string(),
+                operation_kinds: vec!["exists".to_string()],
+                segment_count: 2,
+                pruned_segment_count: 1,
+                scanned_segment_count: 1,
+                numeric_range_summary_used: false,
+                timestamp_range_summary_used: false,
+                value_summary_used: true,
+            }]
+        );
+
+        let missing_ids = missing
+            .hits
+            .iter()
+            .map(|hit| hit.id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(missing.total_hits, 2);
+        assert!(missing_ids.contains("memory:missing_source_1"));
+        assert!(missing_ids.contains("memory:missing_source_2"));
+        assert!(!missing_ids.contains("memory:has_source"));
+        assert_eq!(
+            missing
+                .candidate_set
+                .metadata_predicate_pushdown
+                .field_summaries[0]
+                .operation_kinds,
+            vec!["missing".to_string()]
+        );
+    }
+
+    #[test]
     fn search_with_options_applies_numeric_range_filters_before_ranking() {
         let mut index = SearchIndex::in_memory();
         for (id, created_at) in [
@@ -6697,6 +7129,7 @@ mod tests {
             SearchMode::Text,
             SearchQueryOptions {
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::from([("created_at__gt".to_string(), "5".to_string())]),
@@ -6787,6 +7220,7 @@ mod tests {
             SearchMode::Text,
             SearchQueryOptions {
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::from([(
@@ -6834,6 +7268,7 @@ mod tests {
             SearchMode::Text,
             SearchQueryOptions {
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::from([(
@@ -6915,6 +7350,7 @@ mod tests {
             SearchMode::Text,
             SearchQueryOptions {
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::from([(
@@ -6970,6 +7406,7 @@ mod tests {
             SearchMode::Text,
             SearchQueryOptions {
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::from([("kind".to_string(), "Memory".to_string())]),
@@ -7001,6 +7438,7 @@ mod tests {
             SearchMode::Text,
             SearchQueryOptions {
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::from([("kind".to_string(), "SourceChunk".to_string())]),
@@ -7049,6 +7487,7 @@ mod tests {
             SearchMode::Text,
             SearchQueryOptions {
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::from([(
@@ -7089,6 +7528,7 @@ mod tests {
             SearchMode::Text,
             SearchQueryOptions {
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::from([(
@@ -8008,6 +8448,7 @@ mod tests {
             SearchMode::Text,
             SearchQueryOptions {
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::from([("space_id".to_string(), "archive".to_string())]),
@@ -8186,6 +8627,7 @@ mod tests {
                 SearchMode::Text,
                 SearchQueryOptions {
                     limit: 10,
+                    offset: 0,
                     rank_window: None,
                     fusion_weights: SearchFusionWeights::default(),
                     metadata_filters: BTreeMap::new(),
@@ -8292,6 +8734,7 @@ mod tests {
             SearchMode::Vector,
             SearchQueryOptions {
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::new(),
@@ -8304,6 +8747,7 @@ mod tests {
             SearchMode::Vector,
             SearchQueryOptions {
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::new(),
@@ -8370,6 +8814,7 @@ mod tests {
             SearchMode::Vector,
             SearchQueryOptions {
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::new(),
@@ -8416,6 +8861,7 @@ mod tests {
             SearchMode::Vector,
             SearchQueryOptions {
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::new(),
@@ -8453,6 +8899,7 @@ mod tests {
             SearchMode::Vector,
             SearchQueryOptions {
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::new(),
@@ -8500,6 +8947,7 @@ mod tests {
         }
         let options = SearchQueryOptions {
             limit: 10,
+            offset: 0,
             rank_window: None,
             fusion_weights: SearchFusionWeights::default(),
             metadata_filters: BTreeMap::from([("space_id".to_string(), "selected".to_string())]),
@@ -8764,6 +9212,7 @@ mod tests {
             SearchMode::Text,
             SearchQueryOptions {
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::from([(
@@ -8854,6 +9303,7 @@ mod tests {
             SearchMode::Text,
             SearchQueryOptions {
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::from([(
@@ -9014,6 +9464,7 @@ mod tests {
                 SearchMode::Text,
                 SearchQueryOptions {
                     limit: 10,
+                    offset: 0,
                     rank_window: None,
                     fusion_weights: SearchFusionWeights::default(),
                     metadata_filters: BTreeMap::from([(
@@ -9058,6 +9509,7 @@ mod tests {
                 SearchMode::Text,
                 SearchQueryOptions {
                     limit: 10,
+                    offset: 0,
                     rank_window: None,
                     fusion_weights: SearchFusionWeights::default(),
                     metadata_filters: BTreeMap::from([(
@@ -9069,6 +9521,95 @@ mod tests {
             )
             .unwrap_err();
         assert!(error.to_string().contains("payload checksum mismatch"));
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn persisted_segment_ranges_prune_label_in_filters_before_payload_reads() {
+        let path = unique_test_dir("search_segment_label_physical_ranges");
+        {
+            let mut index = SearchIndex::open(&path).unwrap();
+            for (id, labels) in [
+                ("memory:0", r#"["database"]"#),
+                ("memory:1", r#"["database","rust"]"#),
+                ("memory:2", r#"["planning"]"#),
+            ] {
+                index
+                    .upsert(SearchDocument {
+                        id: id.to_string(),
+                        title: format!("Title {id}"),
+                        content: "Physical label segment range".to_string(),
+                        embedding: None,
+                        metadata: BTreeMap::from([("labels".to_string(), labels.to_string())]),
+                    })
+                    .unwrap();
+            }
+            index.checkpoint().unwrap();
+        }
+
+        let descriptor = read_search_segment_descriptor(&path)
+            .unwrap()
+            .expect("expected persisted segment descriptor");
+        assert_eq!(descriptor.segments.len(), 2);
+        let index = SearchIndex::open(&path).unwrap();
+        let result = index
+            .try_search_with_options(
+                "physical label segment range",
+                None,
+                SearchMode::Text,
+                SearchQueryOptions {
+                    limit: 10,
+                    offset: 0,
+                    rank_window: None,
+                    fusion_weights: SearchFusionWeights::default(),
+                    metadata_filters: BTreeMap::from([(
+                        "labels__in".to_string(),
+                        r#"["Planning"]"#.to_string(),
+                    )]),
+                    policy_epoch: None,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            result
+                .hits
+                .iter()
+                .map(|hit| hit.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["memory:2"]
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .physical_range_read_count,
+            1
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .physical_bytes_read,
+            descriptor.segments[1].payload_range.unwrap().length
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .field_summaries,
+            vec![SearchPredicateFieldPruningReport {
+                field: "labels".to_string(),
+                value_kind: "enum".to_string(),
+                operation_kinds: vec!["in".to_string()],
+                segment_count: 2,
+                pruned_segment_count: 1,
+                scanned_segment_count: 1,
+                numeric_range_summary_used: false,
+                timestamp_range_summary_used: false,
+                value_summary_used: true,
+            }]
+        );
         std::fs::remove_dir_all(path).unwrap();
     }
 
@@ -9111,6 +9652,7 @@ mod tests {
                 SearchMode::Text,
                 SearchQueryOptions {
                     limit: 10,
+                    offset: 0,
                     rank_window: None,
                     fusion_weights: SearchFusionWeights::default(),
                     metadata_filters: BTreeMap::from([(
@@ -9186,6 +9728,7 @@ mod tests {
             SearchMode::Text,
             SearchQueryOptions {
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::from([(
@@ -9279,6 +9822,7 @@ mod tests {
             SearchMode::Text,
             SearchQueryOptions {
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::from([(
@@ -9352,6 +9896,7 @@ mod tests {
             SearchMode::Text,
             SearchQueryOptions {
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::from([("unit_type".to_string(), "fact".to_string())]),
@@ -9543,6 +10088,7 @@ mod tests {
             SearchMode::Text,
             SearchQueryOptions {
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::from([(
@@ -9649,6 +10195,7 @@ mod tests {
             SearchMode::Text,
             SearchQueryOptions {
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::from([(
@@ -9726,6 +10273,7 @@ mod tests {
             SearchMode::Text,
             SearchQueryOptions {
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::from([(
@@ -9986,6 +10534,7 @@ mod tests {
             SearchMode::Vector,
             SearchQueryOptions {
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::from([("space_id".to_string(), "allowed".to_string())]),
@@ -10244,6 +10793,7 @@ mod tests {
             SearchMode::Text,
             SearchQueryOptions {
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::from([(

@@ -2,7 +2,8 @@ use crate::{
     graph_route_readiness::NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL,
     nowledge_graph_route_readiness_summary, nowledge_mem_graph_read_route_catalog_digest, Result,
     SkeinError, NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
-    REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+    NOWLEDGE_MEM_SEARCH_ROUTE_OWNERSHIP_PROTOCOL, REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES,
+    REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES, REQUIRED_NOWLEDGE_MEM_SEARCH_ROUTES,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -17,7 +18,7 @@ const ROUTE_PARITY_EVIDENCE_SOURCE: &str = "route_parity_evidence";
 const ROUTE_PARITY_FULL_MATCH_PER_MILLION: u64 = 1_000_000;
 
 pub fn nowledge_mem_integration_bundle_usage() -> String {
-    "nowledge-mem-integration-bundle requires [--require-ready] --submodule-path <path> --submodule-commit <commit> --legacy-data-retained --coexistence-mode shadow|side_by_side --content-store-present --content-store-engine sqlite --content-store-messages-available --content-store-source-chunks-available --previous-wrapper-preflight-json <path> --replacement-summary-json <path> --bounded-read-evidence-json <path> --graph-route-readiness-json <path> --route-ownership-json <path> --query-runtime-preflight-json <path> --search-candidate-shadow-evidence-json <path> --library-readiness-json <path> --blackbox-manifest-json <path>"
+    "nowledge-mem-integration-bundle requires [--require-ready] --submodule-path <path> --submodule-commit <commit> --legacy-data-retained --coexistence-mode shadow|side_by_side --content-store-present --content-store-engine sqlite --content-store-messages-available --content-store-source-chunks-available --previous-wrapper-preflight-json <path> --replacement-summary-json <path> --bounded-read-evidence-json <path> --graph-route-readiness-json <path> --route-ownership-json <path> --search-route-ownership-json <path> --active-search-route-ownership-json <path> --query-runtime-preflight-json <path> --search-candidate-shadow-evidence-json <path> --library-readiness-json <path> --cutover-controls-json <path> --operations-readiness-json <path> --blackbox-manifest-json <path>"
         .to_string()
 }
 
@@ -38,9 +39,13 @@ pub struct IntegrationBundleInputs {
     pub bounded_read_evidence: Option<serde_json::Value>,
     pub graph_route_readiness: Option<serde_json::Value>,
     pub route_ownership: Option<serde_json::Value>,
+    pub search_route_ownership: Option<serde_json::Value>,
+    pub active_search_route_ownership: Option<serde_json::Value>,
     pub query_runtime_preflight: Option<serde_json::Value>,
     pub search_candidate_shadow_evidence: Option<serde_json::Value>,
     pub library_readiness: Option<serde_json::Value>,
+    pub cutover_controls: Option<serde_json::Value>,
+    pub operations_readiness: Option<serde_json::Value>,
     pub blackbox_manifest: Option<serde_json::Value>,
 }
 
@@ -95,6 +100,12 @@ pub fn run_nowledge_mem_integration_bundle(
             "--route-ownership-json" => {
                 inputs.route_ownership = Some(read_json_arg(&mut args)?);
             }
+            "--search-route-ownership-json" => {
+                inputs.search_route_ownership = Some(read_json_arg(&mut args)?);
+            }
+            "--active-search-route-ownership-json" => {
+                inputs.active_search_route_ownership = Some(read_json_arg(&mut args)?);
+            }
             "--query-runtime-preflight-json" => {
                 inputs.query_runtime_preflight = Some(read_json_arg(&mut args)?);
             }
@@ -103,6 +114,12 @@ pub fn run_nowledge_mem_integration_bundle(
             }
             "--library-readiness-json" => {
                 inputs.library_readiness = Some(read_json_arg(&mut args)?);
+            }
+            "--cutover-controls-json" => {
+                inputs.cutover_controls = Some(read_json_arg(&mut args)?);
+            }
+            "--operations-readiness-json" => {
+                inputs.operations_readiness = Some(read_json_arg(&mut args)?);
             }
             "--blackbox-manifest-json" => {
                 inputs.blackbox_manifest = Some(read_json_arg(&mut args)?);
@@ -141,6 +158,14 @@ pub fn nowledge_mem_integration_bundle_json(
     let graph_route_readiness =
         require_json(inputs.graph_route_readiness, "--graph-route-readiness-json")?;
     let route_ownership = require_json(inputs.route_ownership, "--route-ownership-json")?;
+    let search_route_ownership = require_json(
+        inputs.search_route_ownership,
+        "--search-route-ownership-json",
+    )?;
+    let active_search_route_ownership = require_json(
+        inputs.active_search_route_ownership,
+        "--active-search-route-ownership-json",
+    )?;
     let query_runtime_preflight = require_json(
         inputs.query_runtime_preflight,
         "--query-runtime-preflight-json",
@@ -150,11 +175,26 @@ pub fn nowledge_mem_integration_bundle_json(
         "--search-candidate-shadow-evidence-json",
     )?;
     let library_readiness = require_json(inputs.library_readiness, "--library-readiness-json")?;
+    let cutover_controls = require_json(inputs.cutover_controls, "--cutover-controls-json")?;
+    let operations_readiness =
+        require_json(inputs.operations_readiness, "--operations-readiness-json")?;
     let blackbox_manifest = require_json(inputs.blackbox_manifest, "--blackbox-manifest-json")?;
     let bounded_alignment =
         bounded_read_alignment_json(&bounded_read_evidence, &replacement_summary);
     let graph_route_alignment =
         graph_route_alignment_json(&graph_route_readiness, &replacement_summary);
+    let search_route_ownership_alignment = search_route_ownership_alignment_json(
+        &search_route_ownership,
+        &replacement_summary,
+        "search_route_ownership",
+        REQUIRED_NOWLEDGE_MEM_SEARCH_ROUTES,
+    );
+    let active_search_route_ownership_alignment = search_route_ownership_alignment_json(
+        &active_search_route_ownership,
+        &replacement_summary,
+        "active_search_route_ownership",
+        REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES,
+    );
     let query_runtime_alignment =
         query_runtime_alignment_json(&query_runtime_preflight, &replacement_summary);
     let graph_route_parity_alignment = graph_route_parity_alignment_json(&graph_route_readiness);
@@ -195,10 +235,16 @@ pub fn nowledge_mem_integration_bundle_json(
         "replacement_summary_graph_route_alignment": graph_route_alignment,
         "graph_route_parity_alignment": graph_route_parity_alignment,
         "route_ownership": route_ownership,
+        "search_route_ownership": search_route_ownership,
+        "replacement_summary_search_route_ownership_alignment": search_route_ownership_alignment,
+        "active_search_route_ownership": active_search_route_ownership,
+        "replacement_summary_active_search_route_ownership_alignment": active_search_route_ownership_alignment,
         "query_runtime_preflight": query_runtime_preflight,
         "replacement_summary_query_runtime_alignment": query_runtime_alignment,
         "search_candidate_shadow_evidence": search_candidate_shadow_evidence,
         "library_readiness": library_readiness,
+        "cutover_controls": cutover_controls,
+        "operations_readiness": operations_readiness,
         "blackbox_manifest": blackbox_manifest,
     }))
 }
@@ -877,6 +923,161 @@ impl BoundedReadAlignment {
     }
 }
 
+fn search_route_ownership_alignment_json(
+    evidence: &serde_json::Value,
+    replacement_summary: &serde_json::Value,
+    field: &str,
+    required_routes: &[&str],
+) -> serde_json::Value {
+    let summary = replacement_summary
+        .get(field)
+        .unwrap_or(&serde_json::Value::Null);
+    let evidence_present = !evidence.is_null();
+    let summary_present = !summary.is_null();
+    let protocol_matches = str_path(evidence, &["protocol"]) == str_path(summary, &["protocol"])
+        && str_path(evidence, &["protocol"]) == Some(NOWLEDGE_MEM_SEARCH_ROUTE_OWNERSHIP_PROTOCOL);
+    let ready_matches = bool_path(evidence, &["ready"]) == bool_path(summary, &["ready"]);
+    let production_cutover_ready_matches = bool_path(evidence, &["production_cutover_ready"])
+        == bool_path(summary, &["production_cutover_ready"]);
+    let require_all_skein_matches =
+        bool_path(evidence, &["require_all_skein"]) == bool_path(summary, &["require_all_skein"]);
+    let expected_count = required_routes.len() as u64;
+    let required_route_count_matches = u64_path(evidence, &["required_route_count"])
+        == u64_path(summary, &["required_route_count"])
+        && u64_path(evidence, &["required_route_count"]) == Some(expected_count);
+    let explicit_route_count_matches = u64_path(evidence, &["explicit_route_count"])
+        == u64_path(summary, &["explicit_route_count"])
+        && u64_path(evidence, &["explicit_route_count"]) == Some(expected_count);
+    let skein_route_count_matches = u64_path(evidence, &["skein_route_count"])
+        == u64_path(summary, &["skein_route_count"])
+        && u64_path(evidence, &["skein_route_count"]) == Some(expected_count);
+    let lancedb_route_count_matches = u64_path(evidence, &["lancedb_route_count"])
+        == u64_path(summary, &["lancedb_route_count"])
+        && u64_path(evidence, &["lancedb_route_count"]) == Some(0);
+    let missing_required_routes_matches = string_set_path(evidence, &["missing_required_routes"])
+        == string_set_path(summary, &["missing_required_routes"])
+        && string_set_path(evidence, &["missing_required_routes"]).is_empty();
+    let lancedb_routes_matches = string_set_path(evidence, &["lancedb_routes"])
+        == string_set_path(summary, &["lancedb_routes"])
+        && string_set_path(evidence, &["lancedb_routes"]).is_empty();
+    let blocker_codes_match = string_set_path(evidence, &["blocker_codes"])
+        == string_set_path(summary, &["blocker_codes"])
+        && string_set_path(evidence, &["blocker_codes"]).is_empty();
+    let ready = evidence_present
+        && summary_present
+        && protocol_matches
+        && ready_matches
+        && bool_path(evidence, &["ready"]) == Some(true)
+        && production_cutover_ready_matches
+        && bool_path(evidence, &["production_cutover_ready"]) == Some(true)
+        && require_all_skein_matches
+        && bool_path(evidence, &["require_all_skein"]) == Some(true)
+        && required_route_count_matches
+        && explicit_route_count_matches
+        && skein_route_count_matches
+        && lancedb_route_count_matches
+        && missing_required_routes_matches
+        && lancedb_routes_matches
+        && blocker_codes_match;
+    serde_json::json!({
+        "ready": ready,
+        "evidence_present": evidence_present,
+        "summary_present": summary_present,
+        "protocol_matches": protocol_matches,
+        "ready_matches": ready_matches,
+        "production_cutover_ready_matches": production_cutover_ready_matches,
+        "require_all_skein_matches": require_all_skein_matches,
+        "required_route_count_matches": required_route_count_matches,
+        "explicit_route_count_matches": explicit_route_count_matches,
+        "skein_route_count_matches": skein_route_count_matches,
+        "lancedb_route_count_matches": lancedb_route_count_matches,
+        "missing_required_routes_matches": missing_required_routes_matches,
+        "lancedb_routes_matches": lancedb_routes_matches,
+        "blocker_codes_match": blocker_codes_match,
+        "evidence_lancedb_routes": string_set_path(evidence, &["lancedb_routes"]),
+        "summary_lancedb_routes": string_set_path(summary, &["lancedb_routes"]),
+        "blocker_codes": search_route_ownership_alignment_blockers(
+            ready,
+            evidence_present,
+            summary_present,
+            protocol_matches,
+            ready_matches,
+            production_cutover_ready_matches,
+            require_all_skein_matches,
+            required_route_count_matches,
+            explicit_route_count_matches,
+            skein_route_count_matches,
+            lancedb_route_count_matches,
+            missing_required_routes_matches,
+            lancedb_routes_matches,
+            blocker_codes_match,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn search_route_ownership_alignment_blockers(
+    ready: bool,
+    evidence_present: bool,
+    summary_present: bool,
+    protocol_matches: bool,
+    ready_matches: bool,
+    production_cutover_ready_matches: bool,
+    require_all_skein_matches: bool,
+    required_route_count_matches: bool,
+    explicit_route_count_matches: bool,
+    skein_route_count_matches: bool,
+    lancedb_route_count_matches: bool,
+    missing_required_routes_matches: bool,
+    lancedb_routes_matches: bool,
+    blocker_codes_match: bool,
+) -> Vec<&'static str> {
+    if ready {
+        return Vec::new();
+    }
+    let mut blockers = Vec::new();
+    if !evidence_present {
+        blockers.push("search_route_ownership_missing");
+    }
+    if !summary_present {
+        blockers.push("replacement_summary_search_route_ownership_missing");
+    }
+    if !protocol_matches {
+        blockers.push("search_route_ownership_protocol_mismatch");
+    }
+    if !ready_matches {
+        blockers.push("search_route_ownership_ready_mismatch");
+    }
+    if !production_cutover_ready_matches {
+        blockers.push("search_route_ownership_cutover_ready_mismatch");
+    }
+    if !require_all_skein_matches {
+        blockers.push("search_route_ownership_policy_mismatch");
+    }
+    if !required_route_count_matches {
+        blockers.push("search_route_ownership_required_count_mismatch");
+    }
+    if !explicit_route_count_matches {
+        blockers.push("search_route_ownership_explicit_count_mismatch");
+    }
+    if !skein_route_count_matches {
+        blockers.push("search_route_ownership_skein_count_mismatch");
+    }
+    if !lancedb_route_count_matches {
+        blockers.push("search_route_ownership_lancedb_count_mismatch");
+    }
+    if !missing_required_routes_matches {
+        blockers.push("search_route_ownership_missing_routes_mismatch");
+    }
+    if !lancedb_routes_matches {
+        blockers.push("search_route_ownership_lancedb_routes_mismatch");
+    }
+    if !blocker_codes_match {
+        blockers.push("search_route_ownership_blocker_codes_mismatch");
+    }
+    blockers
+}
+
 fn query_runtime_alignment_json(
     query_runtime_preflight: &serde_json::Value,
     replacement_summary: &serde_json::Value,
@@ -1269,13 +1470,19 @@ mod tests {
         SKEIN_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE,
     };
     use crate::{
+        nowledge_mem_active_search_route_ownership_all_skein,
+        nowledge_mem_active_search_route_ownership_readiness,
         nowledge_mem_graph_read_route_catalog_digest, nowledge_mem_graph_read_route_spec,
         nowledge_mem_graph_read_route_specs_json, nowledge_mem_integration_readiness_json,
         nowledge_mem_route_ownership_all_skein, nowledge_mem_route_ownership_readiness,
-        nowledge_mem_search_candidate_shadow_evidence_json, NowledgeMemRouteOwnershipPolicy,
+        nowledge_mem_search_candidate_shadow_evidence_json,
+        nowledge_mem_search_route_ownership_all_skein,
+        nowledge_mem_search_route_ownership_readiness, NowledgeMemRouteOwnershipPolicy,
         NowledgeMemRouteReadinessSummary, NowledgeMemSearchCandidateShadowAccumulator,
-        NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
-        NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+        NowledgeMemSearchRouteOwnershipPolicy, NOWLEDGE_MEM_CUTOVER_CONTROLS_PROTOCOL,
+        NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION, NOWLEDGE_MEM_OPERATIONS_READINESS_PROTOCOL,
+        NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES,
+        REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES, REQUIRED_NOWLEDGE_MEM_SEARCH_ROUTES,
     };
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1319,9 +1526,27 @@ mod tests {
             true
         );
         assert_eq!(
+            bundle["replacement_summary_search_route_ownership_alignment"]["ready"],
+            true
+        );
+        assert_eq!(
+            bundle["replacement_summary_active_search_route_ownership_alignment"]["ready"],
+            true
+        );
+        assert_eq!(
             bundle["blackbox_manifest"]["protocol"],
             "skein-blackbox-report-v1"
         );
+        assert_eq!(
+            bundle["cutover_controls"]["protocol"],
+            NOWLEDGE_MEM_CUTOVER_CONTROLS_PROTOCOL
+        );
+        assert_eq!(bundle["cutover_controls"]["ready"], true);
+        assert_eq!(
+            bundle["operations_readiness"]["protocol"],
+            NOWLEDGE_MEM_OPERATIONS_READINESS_PROTOCOL
+        );
+        assert_eq!(bundle["operations_readiness"]["ready"], true);
         assert_eq!(
             bundle["blackbox_manifest"]["redaction"]["raw_query_text_copied"],
             false
@@ -1570,6 +1795,75 @@ mod tests {
     }
 
     #[test]
+    fn generated_bundle_detects_search_route_ownership_alignment_mismatch() {
+        let mut inputs = ready_inputs();
+        inputs.replacement_summary.as_mut().unwrap()["search_route_ownership"]
+            ["lancedb_route_count"] = serde_json::json!(1);
+        inputs.replacement_summary.as_mut().unwrap()["search_route_ownership"]["lancedb_routes"] =
+            serde_json::json!([REQUIRED_NOWLEDGE_MEM_SEARCH_ROUTES[0]]);
+        inputs.replacement_summary.as_mut().unwrap()["search_route_ownership"]["ready"] =
+            serde_json::json!(false);
+        inputs.replacement_summary.as_mut().unwrap()["search_route_ownership"]
+            ["production_cutover_ready"] = serde_json::json!(false);
+
+        let bundle = nowledge_mem_integration_bundle_json(inputs).unwrap();
+        let readiness = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(
+            bundle["replacement_summary_search_route_ownership_alignment"]["ready"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            bundle["replacement_summary_search_route_ownership_alignment"]["blocker_codes"],
+            serde_json::json!([
+                "search_route_ownership_ready_mismatch",
+                "search_route_ownership_cutover_ready_mismatch",
+                "search_route_ownership_lancedb_count_mismatch",
+                "search_route_ownership_lancedb_routes_mismatch"
+            ])
+        );
+        assert_eq!(readiness["ready"], false);
+        assert_eq!(
+            readiness["failed_checks"],
+            serde_json::json!(["search_route_ownership_alignment"])
+        );
+    }
+
+    #[test]
+    fn generated_bundle_detects_active_search_route_ownership_alignment_mismatch() {
+        let mut inputs = ready_inputs();
+        inputs.active_search_route_ownership.as_mut().unwrap()["lancedb_route_count"] =
+            serde_json::json!(1);
+        inputs.active_search_route_ownership.as_mut().unwrap()["lancedb_routes"] =
+            serde_json::json!([REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES[0]]);
+        inputs.active_search_route_ownership.as_mut().unwrap()["ready"] = serde_json::json!(false);
+        inputs.active_search_route_ownership.as_mut().unwrap()["production_cutover_ready"] =
+            serde_json::json!(false);
+
+        let bundle = nowledge_mem_integration_bundle_json(inputs).unwrap();
+        let readiness = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(
+            bundle["replacement_summary_active_search_route_ownership_alignment"]["ready"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            bundle["replacement_summary_active_search_route_ownership_alignment"]["blocker_codes"],
+            serde_json::json!([
+                "search_route_ownership_ready_mismatch",
+                "search_route_ownership_cutover_ready_mismatch",
+                "search_route_ownership_lancedb_count_mismatch",
+                "search_route_ownership_lancedb_routes_mismatch"
+            ])
+        );
+        assert_eq!(readiness["ready"], false);
+        assert_eq!(
+            readiness["failed_checks"],
+            serde_json::json!(["active_search_route_ownership_alignment"])
+        );
+    }
+
+    #[test]
     fn generated_bundle_detects_graph_route_pruning_summary_mismatch() {
         let mut inputs = ready_inputs();
         inputs.replacement_summary.as_mut().unwrap()["graph_route_readiness"]
@@ -1647,11 +1941,93 @@ mod tests {
             bounded_read_evidence: Some(ready_bounded_read_evidence()),
             graph_route_readiness: Some(ready_graph_route_readiness()),
             route_ownership: Some(ready_route_ownership()),
+            search_route_ownership: Some(ready_search_route_ownership()),
+            active_search_route_ownership: Some(ready_active_search_route_ownership()),
             query_runtime_preflight: Some(ready_query_runtime_preflight()),
             search_candidate_shadow_evidence: Some(ready_search_candidate_shadow_evidence()),
             library_readiness: Some(ready_library_readiness()),
+            cutover_controls: Some(ready_cutover_controls()),
+            operations_readiness: Some(ready_operations_readiness()),
             blackbox_manifest: Some(ready_blackbox_manifest()),
         }
+    }
+
+    fn ready_cutover_controls() -> serde_json::Value {
+        serde_json::json!({
+            "protocol": NOWLEDGE_MEM_CUTOVER_CONTROLS_PROTOCOL,
+            "ready": true,
+            "controls": {
+                "graph_reads": "skein",
+                "search_reads": "skein",
+                "dual_writes": "enabled",
+                "initial_import": "disabled",
+                "projection_catch_up": "enabled"
+            },
+            "graph": {
+                "read_selected_skein": true,
+                "read_effective": true
+            },
+            "search": {
+                "read_selected_skein": true,
+                "read_effective": true
+            },
+            "work": {
+                "dual_writes_enabled": true,
+                "initial_import_enabled": false,
+                "initial_import_inactive_for_cutover": true,
+                "initial_import_cutover_catch_up_ready": false,
+                "initial_import_safe_for_read_cutover": true,
+                "projection_catch_up_enabled": true
+            },
+            "blocker_codes": [],
+            "production_status": {
+                "graph": {
+                    "skein_cutover_effective": true
+                },
+                "search": {
+                    "skein_cutover_effective": true
+                }
+            },
+            "redaction": {
+                "query_text_copied": false,
+                "parameters_copied": false,
+                "local_paths_copied": false
+            }
+        })
+    }
+
+    fn ready_operations_readiness() -> serde_json::Value {
+        serde_json::json!({
+            "protocol": NOWLEDGE_MEM_OPERATIONS_READINESS_PROTOCOL,
+            "present": true,
+            "ready": true,
+            "graph": {
+                "open": true,
+                "read_only": false,
+                "commit_epoch": 7
+            },
+            "search_projection": {
+                "open": true,
+                "commit_lag": 0,
+                "stale": false
+            },
+            "storage_lifecycle": {
+                "ready": true,
+                "action": "ready"
+            },
+            "readiness": {
+                "storage_lifecycle_ready": true,
+                "storage_recovery_ready": true,
+                "slow_query_ready": true,
+                "background_maintenance_ready": true
+            },
+            "blocker_codes": [],
+            "redaction": {
+                "query_text_copied": false,
+                "parameters_copied": false,
+                "local_paths_copied": false
+            }
+        })
     }
 
     fn ready_replacement_summary() -> serde_json::Value {
@@ -1771,6 +2147,8 @@ mod tests {
                 "storage_owner": "nowledge_mem"
             }
         });
+        summary["search_route_ownership"] = ready_search_route_ownership();
+        summary["active_search_route_ownership"] = ready_active_search_route_ownership();
         summary
     }
 
@@ -1871,6 +2249,22 @@ mod tests {
             &nowledge_mem_route_ownership_all_skein(),
             Some(&ready_route_readiness_summary()),
             NowledgeMemRouteOwnershipPolicy::production_cutover(),
+        )
+        .json()
+    }
+
+    fn ready_search_route_ownership() -> serde_json::Value {
+        nowledge_mem_search_route_ownership_readiness(
+            &nowledge_mem_search_route_ownership_all_skein(),
+            NowledgeMemSearchRouteOwnershipPolicy::production_cutover(),
+        )
+        .json()
+    }
+
+    fn ready_active_search_route_ownership() -> serde_json::Value {
+        nowledge_mem_active_search_route_ownership_readiness(
+            &nowledge_mem_active_search_route_ownership_all_skein(),
+            NowledgeMemSearchRouteOwnershipPolicy::production_cutover(),
         )
         .json()
     }
@@ -2219,7 +2613,7 @@ mod tests {
             "protocol": "skein-nowledge-mem-library-readiness-v1",
             "present": true,
             "ready": true,
-            "ready_area_count": 10,
+            "ready_area_count": 11,
             "blocked_area_count": 0,
             "blocker_codes": [],
             "redaction": {
@@ -2246,6 +2640,7 @@ mod tests {
                 "background": {"ready": true, "blocker_codes": []},
                 "query_family": {"ready": true, "blocker_codes": []},
                 "graph_route": {"ready": true, "blocker_codes": []},
+                "search_route_ownership": {"ready": true, "blocker_codes": []},
                 "search_projection": {"ready": true, "blocker_codes": []},
                 "search_projection_shadow": {"ready": true, "blocker_codes": []},
                 "search_candidate_shadow": {"ready": true, "blocker_codes": []},

@@ -11,13 +11,14 @@ use crate::search_projection_evidence::{
 use crate::{
     cypher, BackgroundMaintenanceKind, BackgroundMaintenanceOptions, BackgroundMaintenanceSummary,
     BackgroundWorkHint, BackgroundWorkPlan, BoundedReadQueryOutput, Database, DatabaseConfig,
-    GraphRagGeneratedQuery, GraphRagSchemaContext, GraphRagSchemaContextOptions,
-    KnowledgeEntityDeleteBatchOutput, KnowledgeEntityDeleteBatchRequest,
-    KnowledgeMemoryEvolvesCreateBatchOutput, KnowledgeMemoryEvolvesCreateBatchRequest,
-    KnowledgeMemoryLifecycleBatchOutput, KnowledgeMemoryLifecycleBatchRequest,
-    KnowledgeRetrievalOutput, KnowledgeRetrievalRequest, LocalQosPolicy, LocalQosScheduler,
-    LocalQosState, NowledgeGraphStatement, PlanCacheLookup, QueryOutput, ReadExecutionProfile,
-    Result, ScheduledSearchProjectionCatchUpReport, SearchIndex, SearchProjectionCatchUpReport,
+    GraphLightningInitialImportCutoverCatchUpReport, GraphRagGeneratedQuery, GraphRagSchemaContext,
+    GraphRagSchemaContextOptions, KnowledgeEntityDeleteBatchOutput,
+    KnowledgeEntityDeleteBatchRequest, KnowledgeMemoryEvolvesCreateBatchOutput,
+    KnowledgeMemoryEvolvesCreateBatchRequest, KnowledgeMemoryLifecycleBatchOutput,
+    KnowledgeMemoryLifecycleBatchRequest, KnowledgeRetrievalOutput, KnowledgeRetrievalRequest,
+    LocalQosPolicy, LocalQosScheduler, LocalQosState, NowledgeGraphStatement, PlanCacheLookup,
+    QueryOutput, ReadExecutionProfile, Result, ScheduledSearchProjectionCatchUpReport, SearchIndex,
+    SearchProjectionCatchUpReport, SearchProjectionChangefeedReadiness,
     SearchProjectionChangefeedStatus, SearchProjectionDeltaReport, SearchProjectionFreshness,
     SearchProjectionGraphDeltaRequest, SearchProjectionMutationId, SearchProjectionProbeOptions,
     SearchResultSet, SkeinError, SlowQueryLogRecordSummary, TelemetrySink, Value,
@@ -27,6 +28,13 @@ use crate::{
     nowledge_inventory::{
         background_maintenance_evidence_health, background_maintenance_summary_to_json,
         replacement_readiness_family_evidence_health, REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
+    },
+    route_ownership::NowledgeMemRouteOwnershipReadinessReport,
+    search_route_ownership::{
+        NowledgeMemActiveSearchRouteOwnershipReadinessReport,
+        NowledgeMemSearchRouteOwnershipReadinessReport,
+        NOWLEDGE_MEM_SEARCH_ROUTE_OWNERSHIP_PROTOCOL, REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES,
+        REQUIRED_NOWLEDGE_MEM_SEARCH_ROUTES,
     },
     store::{RecoveryMode, ScanPruningReport, ScanPruningStrategy, StorageRecoveryReport},
     workload_fixtures::{
@@ -362,8 +370,372 @@ impl NowledgeMemRuntimeStatus {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemProductionStatus {
+    pub protocol: String,
+    pub mode: NowledgeMemGraphMode,
+    pub graph_open: bool,
+    pub graph_read_only: bool,
+    pub graph_skein_cutover_effective: bool,
+    pub graph_route_ownership_present: bool,
+    pub graph_route_ownership_ready: bool,
+    pub graph_skein_route_count: usize,
+    pub graph_legacy_route_count: usize,
+    pub search_projection_open: bool,
+    pub search_skein_cutover_effective: bool,
+    pub graph_commit_epoch: u64,
+    pub search_projection_source_graph_commit_epoch: Option<u64>,
+    pub search_projection_durable_source_graph_commit_epoch: Option<u64>,
+    pub search_projection_commit_lag: u64,
+    pub search_projection_stale: bool,
+    pub search_projection_full_reindex_needed: bool,
+    pub search_projection_metadata_repair_needed: bool,
+    pub search_projection_changefeed_restart_recoverable: bool,
+    pub blocker_codes: Vec<String>,
+    pub runtime_status: NowledgeMemRuntimeStatus,
+    pub route_ownership: Option<NowledgeMemRouteOwnershipReadinessReport>,
+}
+
+impl NowledgeMemProductionStatus {
+    fn from_runtime(
+        mode: NowledgeMemGraphMode,
+        graph_read_only: bool,
+        runtime_status: NowledgeMemRuntimeStatus,
+        route_ownership: Option<NowledgeMemRouteOwnershipReadinessReport>,
+    ) -> Self {
+        let freshness = runtime_status.projection_freshness.as_ref();
+        let search_projection_open = freshness.is_some();
+        let search_projection_commit_lag = runtime_status.projection_commit_lag();
+        let search_projection_stale = search_projection_open && runtime_status.projection_stale();
+        let search_projection_full_reindex_needed =
+            freshness.is_some_and(|freshness| freshness.full_reindex_needed);
+        let search_projection_metadata_repair_needed =
+            freshness.is_some_and(|freshness| freshness.metadata_repair_needed);
+        let graph_route_ownership_present = route_ownership.is_some();
+        let graph_route_ownership_ready =
+            route_ownership.as_ref().is_some_and(|report| report.ready);
+        let graph_skein_route_count = route_ownership
+            .as_ref()
+            .map(|report| report.skein_route_count)
+            .unwrap_or(0);
+        let graph_legacy_route_count = route_ownership
+            .as_ref()
+            .map(|report| report.legacy_route_count)
+            .unwrap_or(0);
+        let mut blocker_codes = Vec::new();
+        if graph_read_only {
+            blocker_codes.push("graph_opened_read_only".to_string());
+        }
+        if !graph_route_ownership_present {
+            blocker_codes.push("graph_route_ownership_missing".to_string());
+        } else if !graph_route_ownership_ready {
+            blocker_codes.push("graph_route_ownership_not_ready".to_string());
+        }
+        if graph_legacy_route_count > 0 {
+            blocker_codes.push("graph_legacy_routes_remaining".to_string());
+        }
+        if !search_projection_open {
+            blocker_codes.push("search_projection_not_open".to_string());
+        }
+        if search_projection_stale {
+            blocker_codes.push("search_projection_stale".to_string());
+        }
+        if search_projection_full_reindex_needed {
+            blocker_codes.push("search_projection_full_reindex_needed".to_string());
+        }
+        if search_projection_metadata_repair_needed {
+            blocker_codes.push("search_projection_metadata_repair_needed".to_string());
+        }
+        if !runtime_status.changefeed.restart_recoverable {
+            blocker_codes.push("search_projection_changefeed_not_restart_recoverable".to_string());
+        }
+
+        let graph_skein_cutover_effective = !graph_read_only
+            && route_ownership
+                .as_ref()
+                .is_some_and(|report| report.production_cutover_ready);
+        let search_skein_cutover_effective = search_projection_open
+            && !search_projection_stale
+            && !search_projection_full_reindex_needed
+            && !search_projection_metadata_repair_needed
+            && runtime_status.changefeed.restart_recoverable;
+
+        Self {
+            protocol: NOWLEDGE_MEM_PRODUCTION_STATUS_PROTOCOL.to_string(),
+            mode,
+            graph_open: true,
+            graph_read_only,
+            graph_skein_cutover_effective,
+            graph_route_ownership_present,
+            graph_route_ownership_ready,
+            graph_skein_route_count,
+            graph_legacy_route_count,
+            search_projection_open,
+            search_skein_cutover_effective,
+            graph_commit_epoch: runtime_status.graph_commit_epoch,
+            search_projection_source_graph_commit_epoch: freshness
+                .and_then(|freshness| freshness.source_graph_commit_epoch),
+            search_projection_durable_source_graph_commit_epoch: freshness
+                .and_then(|freshness| freshness.durable_source_graph_commit_epoch),
+            search_projection_commit_lag,
+            search_projection_stale,
+            search_projection_full_reindex_needed,
+            search_projection_metadata_repair_needed,
+            search_projection_changefeed_restart_recoverable: runtime_status
+                .changefeed
+                .restart_recoverable,
+            blocker_codes,
+            runtime_status,
+            route_ownership,
+        }
+    }
+
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": self.protocol,
+            "mode": self.mode.as_str(),
+            "graph": {
+                "open": self.graph_open,
+                "read_only": self.graph_read_only,
+                "skein_cutover_effective": self.graph_skein_cutover_effective,
+                "route_ownership_present": self.graph_route_ownership_present,
+                "route_ownership_ready": self.graph_route_ownership_ready,
+                "skein_route_count": self.graph_skein_route_count,
+                "legacy_route_count": self.graph_legacy_route_count,
+                "commit_epoch": self.graph_commit_epoch,
+            },
+            "search": {
+                "projection_open": self.search_projection_open,
+                "skein_cutover_effective": self.search_skein_cutover_effective,
+                "source_graph_commit_epoch": self.search_projection_source_graph_commit_epoch,
+                "durable_source_graph_commit_epoch": self.search_projection_durable_source_graph_commit_epoch,
+                "commit_lag": self.search_projection_commit_lag,
+                "stale": self.search_projection_stale,
+                "full_reindex_needed": self.search_projection_full_reindex_needed,
+                "metadata_repair_needed": self.search_projection_metadata_repair_needed,
+                "changefeed_restart_recoverable": self.search_projection_changefeed_restart_recoverable,
+            },
+            "blocker_codes": self.blocker_codes,
+            "runtime_status": self.runtime_status.json(),
+            "route_ownership": self.route_ownership.as_ref().map(NowledgeMemRouteOwnershipReadinessReport::json),
+            "redaction": {
+                "query_text_copied": false,
+                "parameters_copied": false,
+                "local_paths_copied": false,
+            },
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NowledgeMemReadControl {
+    Legacy,
+    Skein,
+}
+
+impl NowledgeMemReadControl {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::Skein => "skein",
+        }
+    }
+
+    pub const fn selects_skein(self) -> bool {
+        matches!(self, Self::Skein)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NowledgeMemWorkControl {
+    Disabled,
+    Enabled,
+}
+
+impl NowledgeMemWorkControl {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Enabled => "enabled",
+        }
+    }
+
+    pub const fn enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NowledgeMemCutoverControls {
+    pub graph_reads: NowledgeMemReadControl,
+    pub search_reads: NowledgeMemReadControl,
+    pub dual_writes: NowledgeMemWorkControl,
+    pub initial_import: NowledgeMemWorkControl,
+    pub projection_catch_up: NowledgeMemWorkControl,
+}
+
+impl NowledgeMemCutoverControls {
+    pub const fn legacy() -> Self {
+        Self {
+            graph_reads: NowledgeMemReadControl::Legacy,
+            search_reads: NowledgeMemReadControl::Legacy,
+            dual_writes: NowledgeMemWorkControl::Disabled,
+            initial_import: NowledgeMemWorkControl::Disabled,
+            projection_catch_up: NowledgeMemWorkControl::Disabled,
+        }
+    }
+
+    pub const fn skein_shadow() -> Self {
+        Self {
+            graph_reads: NowledgeMemReadControl::Legacy,
+            search_reads: NowledgeMemReadControl::Legacy,
+            dual_writes: NowledgeMemWorkControl::Enabled,
+            initial_import: NowledgeMemWorkControl::Enabled,
+            projection_catch_up: NowledgeMemWorkControl::Enabled,
+        }
+    }
+
+    pub const fn skein_reads() -> Self {
+        Self {
+            graph_reads: NowledgeMemReadControl::Skein,
+            search_reads: NowledgeMemReadControl::Skein,
+            dual_writes: NowledgeMemWorkControl::Enabled,
+            initial_import: NowledgeMemWorkControl::Disabled,
+            projection_catch_up: NowledgeMemWorkControl::Enabled,
+        }
+    }
+
+    fn json(self) -> serde_json::Value {
+        serde_json::json!({
+            "graph_reads": self.graph_reads.as_str(),
+            "search_reads": self.search_reads.as_str(),
+            "dual_writes": self.dual_writes.as_str(),
+            "initial_import": self.initial_import.as_str(),
+            "projection_catch_up": self.projection_catch_up.as_str(),
+        })
+    }
+}
+
+impl Default for NowledgeMemCutoverControls {
+    fn default() -> Self {
+        Self::legacy()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemCutoverControlsReport {
+    pub protocol: String,
+    pub ready: bool,
+    pub controls: NowledgeMemCutoverControls,
+    pub graph_read_selected_skein: bool,
+    pub graph_read_effective: bool,
+    pub search_read_selected_skein: bool,
+    pub search_read_effective: bool,
+    pub dual_writes_enabled: bool,
+    pub initial_import_enabled: bool,
+    pub initial_import_inactive_for_cutover: bool,
+    pub initial_import_cutover_catch_up_ready: bool,
+    pub initial_import_safe_for_read_cutover: bool,
+    pub projection_catch_up_enabled: bool,
+    pub blocker_codes: Vec<String>,
+    pub production_status: NowledgeMemProductionStatus,
+}
+
+impl NowledgeMemCutoverControlsReport {
+    fn from_status_with_initial_import_cutover_catch_up(
+        controls: NowledgeMemCutoverControls,
+        production_status: NowledgeMemProductionStatus,
+        initial_import_cutover_catch_up: Option<&GraphLightningInitialImportCutoverCatchUpReport>,
+    ) -> Self {
+        let graph_read_selected_skein = controls.graph_reads.selects_skein();
+        let search_read_selected_skein = controls.search_reads.selects_skein();
+        let dual_writes_enabled = controls.dual_writes.enabled();
+        let initial_import_enabled = controls.initial_import.enabled();
+        let initial_import_inactive_for_cutover = !initial_import_enabled;
+        let initial_import_cutover_catch_up_ready =
+            initial_import_cutover_catch_up.is_some_and(|report| report.ready);
+        let initial_import_safe_for_read_cutover =
+            initial_import_inactive_for_cutover || initial_import_cutover_catch_up_ready;
+        let projection_catch_up_enabled = controls.projection_catch_up.enabled();
+        let graph_read_effective =
+            !graph_read_selected_skein || production_status.graph_skein_cutover_effective;
+        let search_read_effective =
+            !search_read_selected_skein || production_status.search_skein_cutover_effective;
+        let mut blocker_codes = Vec::new();
+        if !graph_read_effective {
+            blocker_codes.push("graph_read_selected_skein_but_not_effective".to_string());
+        }
+        if !search_read_effective {
+            blocker_codes.push("search_read_selected_skein_but_not_effective".to_string());
+        }
+        if search_read_selected_skein && !projection_catch_up_enabled {
+            blocker_codes
+                .push("search_read_selected_skein_without_projection_catch_up".to_string());
+        }
+        if initial_import_enabled && !dual_writes_enabled {
+            blocker_codes.push("initial_import_enabled_without_dual_writes".to_string());
+        }
+        if !initial_import_safe_for_read_cutover {
+            blocker_codes.push("initial_import_active_blocks_read_cutover".to_string());
+        }
+
+        Self {
+            protocol: NOWLEDGE_MEM_CUTOVER_CONTROLS_PROTOCOL.to_string(),
+            ready: blocker_codes.is_empty(),
+            controls,
+            graph_read_selected_skein,
+            graph_read_effective,
+            search_read_selected_skein,
+            search_read_effective,
+            dual_writes_enabled,
+            initial_import_enabled,
+            initial_import_inactive_for_cutover,
+            initial_import_cutover_catch_up_ready,
+            initial_import_safe_for_read_cutover,
+            projection_catch_up_enabled,
+            blocker_codes,
+            production_status,
+        }
+    }
+
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": self.protocol,
+            "ready": self.ready,
+            "controls": self.controls.json(),
+            "graph": {
+                "read_selected_skein": self.graph_read_selected_skein,
+                "read_effective": self.graph_read_effective,
+            },
+            "search": {
+                "read_selected_skein": self.search_read_selected_skein,
+                "read_effective": self.search_read_effective,
+            },
+            "work": {
+                "dual_writes_enabled": self.dual_writes_enabled,
+                "initial_import_enabled": self.initial_import_enabled,
+                "initial_import_inactive_for_cutover": self.initial_import_inactive_for_cutover,
+                "initial_import_cutover_catch_up_ready": self.initial_import_cutover_catch_up_ready,
+                "initial_import_safe_for_read_cutover": self.initial_import_safe_for_read_cutover,
+                "projection_catch_up_enabled": self.projection_catch_up_enabled,
+            },
+            "blocker_codes": self.blocker_codes,
+            "production_status": self.production_status.json(),
+            "redaction": {
+                "query_text_copied": false,
+                "parameters_copied": false,
+                "local_paths_copied": false,
+            },
+        })
+    }
+}
+
 pub const NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL: &str = "skein-nowledge-mem-open-report";
 pub const NOWLEDGE_MEM_RUNTIME_STATUS_PROTOCOL: &str = "skein-nowledge-mem-runtime-status-v1";
+pub const NOWLEDGE_MEM_PRODUCTION_STATUS_PROTOCOL: &str = "skein-nowledge-mem-production-status-v1";
+pub const NOWLEDGE_MEM_CUTOVER_CONTROLS_PROTOCOL: &str = "skein-nowledge-mem-cutover-controls-v1";
+pub const NOWLEDGE_MEM_OPERATIONS_READINESS_PROTOCOL: &str =
+    "skein-nowledge-mem-operations-readiness-v1";
 pub const NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL: &str = "skein-nowledge-mem-query-report-v1";
 pub const NOWLEDGE_MEM_READ_REPORT_PROTOCOL: &str = "skein-nowledge-mem-read-report";
 pub const NOWLEDGE_MEM_GRAPH_OVERVIEW_ROUTE_REPORT_PROTOCOL: &str =
@@ -390,6 +762,8 @@ pub const NOWLEDGE_MEM_SEARCH_CANDIDATE_REPORT_PROTOCOL: &str =
 pub const NOWLEDGE_MEM_SEARCH_CANDIDATE_READINESS_PROTOCOL: &str =
     "skein-nowledge-mem-search-candidate-readiness-v1";
 pub const NOWLEDGE_MEM_SLOW_QUERY_REPORT_PROTOCOL: &str = "skein-nowledge-mem-slow-query-report-v1";
+pub const NOWLEDGE_MEM_STORAGE_LIFECYCLE_DECISION_PROTOCOL: &str =
+    "skein-nowledge-mem-storage-lifecycle-decision-v1";
 pub const NOWLEDGE_MEM_READINESS_DASHBOARD_PROTOCOL: &str =
     "skein-nowledge-mem-readiness-dashboard-v1";
 pub const NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL: &str =
@@ -3239,6 +3613,8 @@ pub struct NowledgeMemReadinessOptions {
     pub bounded_read_evidence: Option<serde_json::Value>,
     pub covered_routes: Vec<String>,
     pub graph_route_readiness: Option<NowledgeMemRouteReadinessSummary>,
+    pub search_route_ownership: Option<NowledgeMemSearchRouteOwnershipReadinessReport>,
+    pub active_search_route_ownership: Option<NowledgeMemActiveSearchRouteOwnershipReadinessReport>,
     pub replacement_readiness_by_query_family: Option<serde_json::Value>,
     pub read_options: NowledgeMemReadOptions,
     pub search_projection_evidence: Option<serde_json::Value>,
@@ -3267,6 +3643,8 @@ pub struct NowledgeMemLibraryReadinessReport {
     pub graph_open: bool,
     pub graph_read_only: bool,
     pub graph_route_readiness: serde_json::Value,
+    pub search_route_ownership: serde_json::Value,
+    pub active_search_route_ownership: serde_json::Value,
     pub bounded_read_evidence: serde_json::Value,
     pub storage_recovery: serde_json::Value,
     pub background_maintenance: serde_json::Value,
@@ -3302,6 +3680,8 @@ impl NowledgeMemLibraryReadinessReport {
                 "read_only": self.graph_read_only,
             },
             "graph_route_readiness": self.graph_route_readiness,
+            "search_route_ownership": self.search_route_ownership,
+            "active_search_route_ownership": self.active_search_route_ownership,
             "bounded_read_evidence": self.bounded_read_evidence,
             "storage_recovery": self.storage_recovery,
             "background_maintenance": self.background_maintenance,
@@ -3384,6 +3764,8 @@ pub struct NowledgeMemReadinessDashboard {
     pub blocked_area_count: usize,
     pub blocker_codes: Vec<String>,
     pub areas: Vec<NowledgeMemReadinessAreaSummary>,
+    pub storage_lifecycle_action: NowledgeMemStorageLifecycleActionKind,
+    pub storage_lifecycle_ready: bool,
     pub slow_query_ready: bool,
     pub slow_query_record_count: usize,
 }
@@ -3391,6 +3773,7 @@ pub struct NowledgeMemReadinessDashboard {
 impl NowledgeMemReadinessDashboard {
     fn from_reports(
         library: &NowledgeMemLibraryReadinessReport,
+        storage_lifecycle: &NowledgeMemStorageLifecycleDecision,
         slow_query: &NowledgeMemSlowQueryReport,
     ) -> Self {
         let areas = nowledge_mem_readiness_dashboard_areas(library, slow_query);
@@ -3406,6 +3789,8 @@ impl NowledgeMemReadinessDashboard {
             blocked_area_count,
             blocker_codes: library.blocker_codes.clone(),
             areas,
+            storage_lifecycle_action: storage_lifecycle.action,
+            storage_lifecycle_ready: storage_lifecycle.ready_for_mem_lifecycle,
             slow_query_ready: slow_query.ready,
             slow_query_record_count: slow_query.record_count,
         }
@@ -3421,6 +3806,10 @@ impl NowledgeMemReadinessDashboard {
             "blocked_area_count": self.blocked_area_count,
             "blocker_codes": self.blocker_codes,
             "areas": self.areas.iter().map(NowledgeMemReadinessAreaSummary::json).collect::<Vec<_>>(),
+            "storage_lifecycle": {
+                "ready": self.storage_lifecycle_ready,
+                "action": self.storage_lifecycle_action.as_str(),
+            },
             "slow_query": {
                 "ready": self.slow_query_ready,
                 "record_count": self.slow_query_record_count,
@@ -3429,6 +3818,131 @@ impl NowledgeMemReadinessDashboard {
                 "query_text_copied": false,
                 "parameters_copied": false,
                 "local_paths_copied": false
+            },
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemOperationsReadinessReport {
+    pub protocol: String,
+    pub present: bool,
+    pub ready: bool,
+    pub mode: NowledgeMemGraphMode,
+    pub graph_open: bool,
+    pub graph_read_only: bool,
+    pub search_projection_open: bool,
+    pub graph_commit_epoch: u64,
+    pub projection_commit_lag: u64,
+    pub projection_stale: bool,
+    pub storage_lifecycle_action: NowledgeMemStorageLifecycleActionKind,
+    pub storage_lifecycle_ready: bool,
+    pub storage_recovery_ready: bool,
+    pub slow_query_ready: bool,
+    pub background_maintenance_ready: bool,
+    pub blocker_codes: Vec<String>,
+    pub runtime_status: NowledgeMemRuntimeStatus,
+    pub storage_lifecycle_decision: NowledgeMemStorageLifecycleDecision,
+    pub storage_recovery: NowledgeMemStorageRecoveryReport,
+    pub slow_query: NowledgeMemSlowQueryReport,
+    pub background_maintenance: NowledgeMemBackgroundMaintenanceReport,
+}
+
+impl NowledgeMemOperationsReadinessReport {
+    fn from_reports(
+        mode: NowledgeMemGraphMode,
+        graph_read_only: bool,
+        runtime_status: NowledgeMemRuntimeStatus,
+        storage_recovery: NowledgeMemStorageRecoveryReport,
+        slow_query: NowledgeMemSlowQueryReport,
+        background_maintenance: NowledgeMemBackgroundMaintenanceReport,
+    ) -> Self {
+        let search_projection_open = runtime_status.projection_freshness.is_some();
+        let projection_commit_lag = runtime_status.projection_commit_lag();
+        let projection_stale = search_projection_open && runtime_status.projection_stale();
+        let storage_lifecycle_decision =
+            NowledgeMemStorageLifecycleDecision::from_storage_recovery(storage_recovery.clone());
+        let mut blocker_codes = Vec::new();
+        if !storage_lifecycle_decision.ready_for_mem_lifecycle {
+            blocker_codes.push("storage_recovery_not_ready".to_string());
+            blocker_codes.extend(
+                storage_lifecycle_decision
+                    .blocker_codes
+                    .iter()
+                    .map(|code| format!("storage_lifecycle.{code}")),
+            );
+        }
+        if !slow_query.ready {
+            blocker_codes.push("slow_query_report_not_ready".to_string());
+        }
+        if !background_maintenance.ready {
+            blocker_codes.push("background_maintenance_not_ready".to_string());
+        }
+        if search_projection_open && projection_stale {
+            blocker_codes.push("search_projection_stale".to_string());
+        }
+
+        Self {
+            protocol: NOWLEDGE_MEM_OPERATIONS_READINESS_PROTOCOL.to_string(),
+            present: true,
+            ready: blocker_codes.is_empty(),
+            mode,
+            graph_open: true,
+            graph_read_only,
+            search_projection_open,
+            graph_commit_epoch: runtime_status.graph_commit_epoch,
+            projection_commit_lag,
+            projection_stale,
+            storage_lifecycle_action: storage_lifecycle_decision.action,
+            storage_lifecycle_ready: storage_lifecycle_decision.ready_for_mem_lifecycle,
+            storage_recovery_ready: storage_recovery.ready,
+            slow_query_ready: slow_query.ready,
+            background_maintenance_ready: background_maintenance.ready,
+            blocker_codes,
+            runtime_status,
+            storage_lifecycle_decision,
+            storage_recovery,
+            slow_query,
+            background_maintenance,
+        }
+    }
+
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": self.protocol,
+            "present": self.present,
+            "ready": self.ready,
+            "mode": self.mode.as_str(),
+            "graph": {
+                "open": self.graph_open,
+                "read_only": self.graph_read_only,
+                "commit_epoch": self.graph_commit_epoch,
+            },
+            "search_projection": {
+                "open": self.search_projection_open,
+                "commit_lag": self.projection_commit_lag,
+                "stale": self.projection_stale,
+            },
+            "storage_lifecycle": {
+                "ready": self.storage_lifecycle_ready,
+                "action": self.storage_lifecycle_action.as_str(),
+            },
+            "readiness": {
+                "storage_lifecycle_ready": self.storage_lifecycle_ready,
+                "storage_recovery_ready": self.storage_recovery_ready,
+                "slow_query_ready": self.slow_query_ready,
+                "background_maintenance_ready": self.background_maintenance_ready,
+            },
+            "blocker_codes": self.blocker_codes,
+            "runtime_status": self.runtime_status.json(),
+            "storage_lifecycle_decision": self.storage_lifecycle_decision.json(),
+            "storage_recovery": self.storage_recovery.json(),
+            "slow_query": self.slow_query.json(),
+            "background_maintenance": self.background_maintenance.json(),
+            "redaction": {
+                "query_text_copied": false,
+                "parameters_copied": false,
+                "local_paths_copied": false,
             },
         })
     }
@@ -3537,6 +4051,100 @@ impl NowledgeMemStorageRecoveryReport {
             },
             "blocker_codes": self.blocker_codes,
         })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NowledgeMemStorageLifecycleActionKind {
+    Ready,
+    RunCheckpoint,
+    RepairWalTail,
+    Quarantine,
+    OpenReadOnlyInspect,
+}
+
+impl NowledgeMemStorageLifecycleActionKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::RunCheckpoint => "run_checkpoint",
+            Self::RepairWalTail => "repair_wal_tail",
+            Self::Quarantine => "quarantine",
+            Self::OpenReadOnlyInspect => "open_read_only_inspect",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemStorageLifecycleDecision {
+    pub protocol: String,
+    pub action: NowledgeMemStorageLifecycleActionKind,
+    pub ready_for_mem_lifecycle: bool,
+    pub storage_recovery_ready: bool,
+    pub checkpoint_required: bool,
+    pub repair_required: bool,
+    pub quarantine_required: bool,
+    pub read_only_inspection_required: bool,
+    pub blocker_codes: Vec<String>,
+    pub recovery: NowledgeMemStorageRecoveryReport,
+}
+
+impl NowledgeMemStorageLifecycleDecision {
+    pub fn from_storage_recovery(recovery: NowledgeMemStorageRecoveryReport) -> Self {
+        let mut blocker_codes = recovery.blocker_codes.clone();
+        let action = if recovery.ready {
+            NowledgeMemStorageLifecycleActionKind::Ready
+        } else if !recovery.durable_recovery_observed {
+            push_unique_blocker(&mut blocker_codes, "storage_not_durable");
+            NowledgeMemStorageLifecycleActionKind::OpenReadOnlyInspect
+        } else if !recovery.torn_tail_clean {
+            push_unique_blocker(&mut blocker_codes, "wal_tail_repair_required");
+            NowledgeMemStorageLifecycleActionKind::RepairWalTail
+        } else if !recovery.checkpoint_boundary_present {
+            push_unique_blocker(&mut blocker_codes, "checkpoint_required");
+            NowledgeMemStorageLifecycleActionKind::RunCheckpoint
+        } else if !recovery.replay_boundary_consistent || !recovery.wal_replay_bounded {
+            push_unique_blocker(&mut blocker_codes, "storage_recovery_quarantine_required");
+            NowledgeMemStorageLifecycleActionKind::Quarantine
+        } else {
+            push_unique_blocker(&mut blocker_codes, "storage_recovery_unknown_blocker");
+            NowledgeMemStorageLifecycleActionKind::Quarantine
+        };
+
+        Self {
+            protocol: NOWLEDGE_MEM_STORAGE_LIFECYCLE_DECISION_PROTOCOL.to_string(),
+            ready_for_mem_lifecycle: action == NowledgeMemStorageLifecycleActionKind::Ready,
+            storage_recovery_ready: recovery.ready,
+            checkpoint_required: action == NowledgeMemStorageLifecycleActionKind::RunCheckpoint,
+            repair_required: action == NowledgeMemStorageLifecycleActionKind::RepairWalTail,
+            quarantine_required: action == NowledgeMemStorageLifecycleActionKind::Quarantine,
+            read_only_inspection_required: action
+                == NowledgeMemStorageLifecycleActionKind::OpenReadOnlyInspect,
+            action,
+            blocker_codes,
+            recovery,
+        }
+    }
+
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": self.protocol,
+            "action": self.action.as_str(),
+            "ready_for_mem_lifecycle": self.ready_for_mem_lifecycle,
+            "storage_recovery_ready": self.storage_recovery_ready,
+            "checkpoint_required": self.checkpoint_required,
+            "repair_required": self.repair_required,
+            "quarantine_required": self.quarantine_required,
+            "read_only_inspection_required": self.read_only_inspection_required,
+            "blocker_codes": self.blocker_codes,
+            "recovery": self.recovery.json(),
+        })
+    }
+}
+
+fn push_unique_blocker(blocker_codes: &mut Vec<String>, code: &str) {
+    if !blocker_codes.iter().any(|existing| existing == code) {
+        blocker_codes.push(code.to_string());
     }
 }
 
@@ -3773,6 +4381,7 @@ pub struct NowledgeMemSearchCandidateRequest {
     pub query_embedding: Option<Vec<f32>>,
     pub mode: SearchMode,
     pub limit: usize,
+    pub offset: usize,
     pub rank_window: Option<usize>,
     pub fusion_weights: SearchFusionWeights,
     pub metadata_filters: BTreeMap<String, String>,
@@ -3789,6 +4398,7 @@ impl NowledgeMemSearchCandidateRequest {
             query_embedding: None,
             mode: SearchMode::Text,
             limit,
+            offset: 0,
             rank_window: None,
             fusion_weights: SearchFusionWeights::default(),
             metadata_filters: BTreeMap::new(),
@@ -3805,6 +4415,7 @@ impl NowledgeMemSearchCandidateRequest {
             query_embedding: Some(query_embedding),
             mode: SearchMode::Vector,
             limit,
+            offset: 0,
             rank_window: None,
             fusion_weights: SearchFusionWeights::default(),
             metadata_filters: BTreeMap::new(),
@@ -3821,6 +4432,7 @@ impl NowledgeMemSearchCandidateRequest {
             query_embedding: Some(query_embedding),
             mode: SearchMode::Hybrid,
             limit,
+            offset: 0,
             rank_window: None,
             fusion_weights: SearchFusionWeights::default(),
             metadata_filters: BTreeMap::new(),
@@ -3833,6 +4445,11 @@ impl NowledgeMemSearchCandidateRequest {
 
     pub fn with_rank_window(mut self, rank_window: Option<usize>) -> Self {
         self.rank_window = rank_window;
+        self
+    }
+
+    pub fn with_offset(mut self, offset: usize) -> Self {
+        self.offset = offset;
         self
     }
 
@@ -3893,6 +4510,7 @@ pub struct NowledgeMemSearchCandidateReport {
     pub mode: SearchMode,
     pub query_embedding_dimension: Option<usize>,
     pub limit: usize,
+    pub offset: usize,
     pub rank_window: Option<usize>,
     pub document_count: usize,
     pub filtered_document_count: usize,
@@ -3982,6 +4600,7 @@ impl NowledgeMemSearchCandidateReport {
             "projection_embedding_dimension": self.projection_embedding_dimension,
         });
         let object = value.as_object_mut().expect("report JSON is an object");
+        object.insert("offset".to_string(), serde_json::json!(self.offset));
         object.insert(
             "projection_durable_source_graph_commit_epoch".to_string(),
             serde_json::json!(self.projection_durable_source_graph_commit_epoch),
@@ -4329,6 +4948,7 @@ impl NowledgeMemGraph {
             parameters,
             options.capture_physical_plan,
             external,
+            None,
         )?;
         let elapsed_micros = started.elapsed().as_micros();
         let report = nowledge_mem_query_report(NowledgeMemQueryReportInput {
@@ -5293,6 +5913,7 @@ impl NowledgeMemSearchProjection {
             request.mode,
             SearchQueryOptions {
                 limit: request.limit,
+                offset: request.offset,
                 rank_window: request.rank_window,
                 fusion_weights: request.fusion_weights,
                 metadata_filters: request.metadata_filters.clone(),
@@ -5326,6 +5947,7 @@ impl NowledgeMemSearchProjection {
                 request.mode,
                 SearchQueryOptions {
                     limit: request.limit,
+                    offset: request.offset,
                     rank_window: request.rank_window,
                     fusion_weights: request.fusion_weights,
                     metadata_filters: request.metadata_filters.clone(),
@@ -5817,6 +6439,70 @@ impl NowledgeMemEmbeddedStoreHandle {
         Ok(self.read_store()?.runtime_status())
     }
 
+    pub fn production_status(
+        &self,
+        route_ownership: Option<&NowledgeMemRouteOwnershipReadinessReport>,
+    ) -> Result<NowledgeMemProductionStatus> {
+        Ok(self.read_store()?.production_status(route_ownership))
+    }
+
+    pub fn production_status_json(
+        &self,
+        route_ownership: Option<&NowledgeMemRouteOwnershipReadinessReport>,
+    ) -> Result<serde_json::Value> {
+        Ok(self.read_store()?.production_status_json(route_ownership))
+    }
+
+    pub fn cutover_controls_report(
+        &self,
+        controls: NowledgeMemCutoverControls,
+        route_ownership: Option<&NowledgeMemRouteOwnershipReadinessReport>,
+    ) -> Result<NowledgeMemCutoverControlsReport> {
+        Ok(self
+            .read_store()?
+            .cutover_controls_report(controls, route_ownership))
+    }
+
+    pub fn cutover_controls_report_with_initial_import_cutover_catch_up(
+        &self,
+        controls: NowledgeMemCutoverControls,
+        route_ownership: Option<&NowledgeMemRouteOwnershipReadinessReport>,
+        initial_import_cutover_catch_up: Option<&GraphLightningInitialImportCutoverCatchUpReport>,
+    ) -> Result<NowledgeMemCutoverControlsReport> {
+        Ok(self
+            .read_store()?
+            .cutover_controls_report_with_initial_import_cutover_catch_up(
+                controls,
+                route_ownership,
+                initial_import_cutover_catch_up,
+            ))
+    }
+
+    pub fn cutover_controls_report_json(
+        &self,
+        controls: NowledgeMemCutoverControls,
+        route_ownership: Option<&NowledgeMemRouteOwnershipReadinessReport>,
+    ) -> Result<serde_json::Value> {
+        Ok(self
+            .read_store()?
+            .cutover_controls_report_json(controls, route_ownership))
+    }
+
+    pub fn cutover_controls_report_json_with_initial_import_cutover_catch_up(
+        &self,
+        controls: NowledgeMemCutoverControls,
+        route_ownership: Option<&NowledgeMemRouteOwnershipReadinessReport>,
+        initial_import_cutover_catch_up: Option<&GraphLightningInitialImportCutoverCatchUpReport>,
+    ) -> Result<serde_json::Value> {
+        Ok(self
+            .read_store()?
+            .cutover_controls_report_json_with_initial_import_cutover_catch_up(
+                controls,
+                route_ownership,
+                initial_import_cutover_catch_up,
+            ))
+    }
+
     pub fn library_readiness(
         &self,
         options: &NowledgeMemReadinessOptions,
@@ -5845,6 +6531,20 @@ impl NowledgeMemEmbeddedStoreHandle {
         Ok(self.read_store()?.readiness_dashboard_json(options))
     }
 
+    pub fn operations_readiness(
+        &self,
+        options: &NowledgeMemReadinessOptions,
+    ) -> Result<NowledgeMemOperationsReadinessReport> {
+        Ok(self.read_store()?.operations_readiness(options))
+    }
+
+    pub fn operations_readiness_json(
+        &self,
+        options: &NowledgeMemReadinessOptions,
+    ) -> Result<serde_json::Value> {
+        Ok(self.read_store()?.operations_readiness_json(options))
+    }
+
     pub fn query_runtime_preflight(
         &self,
         probes: &[NowledgeQueryRuntimePreflightProbe],
@@ -5866,6 +6566,15 @@ impl NowledgeMemEmbeddedStoreHandle {
     ) -> Result<SearchProjectionCatchUpReport> {
         self.write_store()?
             .catch_up_search_projection(max_operations_per_batch, max_batches)
+    }
+
+    pub fn search_projection_changefeed_readiness(
+        &self,
+        require_restart_recoverable: bool,
+        max_operations: Option<usize>,
+    ) -> Result<SearchProjectionChangefeedReadiness> {
+        self.read_store()?
+            .search_projection_changefeed_readiness(require_restart_recoverable, max_operations)
     }
 
     pub fn catch_up_search_projection_with_scheduler(
@@ -5966,6 +6675,14 @@ impl NowledgeMemEmbeddedStore {
         self.storage_recovery_report().json()
     }
 
+    pub fn storage_lifecycle_decision(&self) -> NowledgeMemStorageLifecycleDecision {
+        NowledgeMemStorageLifecycleDecision::from_storage_recovery(self.storage_recovery_report())
+    }
+
+    pub fn storage_lifecycle_decision_json(&self) -> serde_json::Value {
+        self.storage_lifecycle_decision().json()
+    }
+
     pub fn runtime_status(&self) -> NowledgeMemRuntimeStatus {
         let graph_commit_epoch = self.graph.database().commit_epoch();
         NowledgeMemRuntimeStatus {
@@ -5979,6 +6696,73 @@ impl NowledgeMemEmbeddedStore {
         }
     }
 
+    pub fn production_status(
+        &self,
+        route_ownership: Option<&NowledgeMemRouteOwnershipReadinessReport>,
+    ) -> NowledgeMemProductionStatus {
+        NowledgeMemProductionStatus::from_runtime(
+            self.graph.mode(),
+            self.graph.database().config().read_only,
+            self.runtime_status(),
+            route_ownership.cloned(),
+        )
+    }
+
+    pub fn production_status_json(
+        &self,
+        route_ownership: Option<&NowledgeMemRouteOwnershipReadinessReport>,
+    ) -> serde_json::Value {
+        self.production_status(route_ownership).json()
+    }
+
+    pub fn cutover_controls_report(
+        &self,
+        controls: NowledgeMemCutoverControls,
+        route_ownership: Option<&NowledgeMemRouteOwnershipReadinessReport>,
+    ) -> NowledgeMemCutoverControlsReport {
+        self.cutover_controls_report_with_initial_import_cutover_catch_up(
+            controls,
+            route_ownership,
+            None,
+        )
+    }
+
+    pub fn cutover_controls_report_with_initial_import_cutover_catch_up(
+        &self,
+        controls: NowledgeMemCutoverControls,
+        route_ownership: Option<&NowledgeMemRouteOwnershipReadinessReport>,
+        initial_import_cutover_catch_up: Option<&GraphLightningInitialImportCutoverCatchUpReport>,
+    ) -> NowledgeMemCutoverControlsReport {
+        NowledgeMemCutoverControlsReport::from_status_with_initial_import_cutover_catch_up(
+            controls,
+            self.production_status(route_ownership),
+            initial_import_cutover_catch_up,
+        )
+    }
+
+    pub fn cutover_controls_report_json(
+        &self,
+        controls: NowledgeMemCutoverControls,
+        route_ownership: Option<&NowledgeMemRouteOwnershipReadinessReport>,
+    ) -> serde_json::Value {
+        self.cutover_controls_report(controls, route_ownership)
+            .json()
+    }
+
+    pub fn cutover_controls_report_json_with_initial_import_cutover_catch_up(
+        &self,
+        controls: NowledgeMemCutoverControls,
+        route_ownership: Option<&NowledgeMemRouteOwnershipReadinessReport>,
+        initial_import_cutover_catch_up: Option<&GraphLightningInitialImportCutoverCatchUpReport>,
+    ) -> serde_json::Value {
+        self.cutover_controls_report_with_initial_import_cutover_catch_up(
+            controls,
+            route_ownership,
+            initial_import_cutover_catch_up,
+        )
+        .json()
+    }
+
     pub fn build_search_projection_graph_delta_request_from_freshness(
         &self,
         max_operations: Option<usize>,
@@ -5990,6 +6774,22 @@ impl NowledgeMemEmbeddedStore {
                 search_projection.index(),
                 max_operations,
             )
+    }
+
+    pub fn search_projection_changefeed_readiness(
+        &self,
+        require_restart_recoverable: bool,
+        max_operations: Option<usize>,
+    ) -> Result<SearchProjectionChangefeedReadiness> {
+        let search_projection = self.require_search_projection()?;
+        Ok(self
+            .graph
+            .database()
+            .search_projection_changefeed_readiness(
+                search_projection.index(),
+                require_restart_recoverable,
+                max_operations,
+            ))
     }
 
     pub fn search_projection_graph_delta_background_work_plan(
@@ -6411,6 +7211,16 @@ impl NowledgeMemEmbeddedStore {
         );
         let graph_route_readiness =
             nowledge_mem_graph_route_readiness_json(options.graph_route_readiness.as_ref());
+        let search_route_ownership = options
+            .search_route_ownership
+            .as_ref()
+            .map(NowledgeMemSearchRouteOwnershipReadinessReport::json)
+            .unwrap_or_else(missing_search_route_ownership_json);
+        let active_search_route_ownership = options
+            .active_search_route_ownership
+            .as_ref()
+            .map(NowledgeMemActiveSearchRouteOwnershipReadinessReport::json)
+            .unwrap_or_else(missing_active_search_route_ownership_json);
         let search_projection_evidence =
             options
                 .search_projection_evidence
@@ -6452,6 +7262,8 @@ impl NowledgeMemEmbeddedStore {
             background_maintenance: &background_maintenance,
             query_family_evidence: &query_family_evidence,
             graph_route_readiness: &graph_route_readiness,
+            search_route_ownership: &search_route_ownership,
+            active_search_route_ownership: &active_search_route_ownership,
             search_projection_evidence: &search_projection_evidence,
             search_projection_shadow_evidence: &search_projection_shadow_evidence,
             search_candidate_shadow_evidence: &search_candidate_shadow_evidence,
@@ -6482,6 +7294,8 @@ impl NowledgeMemEmbeddedStore {
             graph_open: true,
             graph_read_only: self.graph.database().config().read_only,
             graph_route_readiness,
+            search_route_ownership,
+            active_search_route_ownership,
             bounded_read_evidence,
             storage_recovery,
             background_maintenance,
@@ -6498,8 +7312,9 @@ impl NowledgeMemEmbeddedStore {
         options: &NowledgeMemReadinessOptions,
     ) -> NowledgeMemReadinessDashboard {
         let library = self.library_readiness(options);
+        let storage_lifecycle = self.storage_lifecycle_decision();
         let slow_query = self.slow_query_report();
-        NowledgeMemReadinessDashboard::from_reports(&library, &slow_query)
+        NowledgeMemReadinessDashboard::from_reports(&library, &storage_lifecycle, &slow_query)
     }
 
     pub fn readiness_dashboard_json(
@@ -6507,6 +7322,35 @@ impl NowledgeMemEmbeddedStore {
         options: &NowledgeMemReadinessOptions,
     ) -> serde_json::Value {
         self.readiness_dashboard(options).json()
+    }
+
+    pub fn operations_readiness(
+        &self,
+        options: &NowledgeMemReadinessOptions,
+    ) -> NowledgeMemOperationsReadinessReport {
+        let runtime_status = self.runtime_status();
+        let storage_recovery = self.storage_recovery_report();
+        let slow_query = self.slow_query_report();
+        let background_maintenance = self.background_maintenance_report(
+            &options.qos_policy,
+            &options.qos_state,
+            options.background_maintenance_options.clone(),
+        );
+        NowledgeMemOperationsReadinessReport::from_reports(
+            self.graph.mode(),
+            self.graph.database().config().read_only,
+            runtime_status,
+            storage_recovery,
+            slow_query,
+            background_maintenance,
+        )
+    }
+
+    pub fn operations_readiness_json(
+        &self,
+        options: &NowledgeMemReadinessOptions,
+    ) -> serde_json::Value {
+        self.operations_readiness(options).json()
     }
 
     fn bounded_read_probe_evidence_json(
@@ -7354,12 +8198,92 @@ fn nowledge_mem_graph_route_readiness_json(
     })
 }
 
+fn missing_search_route_ownership_json() -> serde_json::Value {
+    serde_json::json!({
+        "protocol": NOWLEDGE_MEM_SEARCH_ROUTE_OWNERSHIP_PROTOCOL,
+        "ready": false,
+        "production_cutover_ready": false,
+        "require_all_skein": true,
+        "required_route_count": REQUIRED_NOWLEDGE_MEM_SEARCH_ROUTES.len(),
+        "explicit_route_count": 0,
+        "skein_route_count": 0,
+        "lancedb_route_count": 0,
+        "routes": [],
+        "skein_routes": [],
+        "lancedb_routes": [],
+        "missing_required_routes": REQUIRED_NOWLEDGE_MEM_SEARCH_ROUTES,
+        "unknown_routes": [],
+        "duplicate_routes": [],
+        "conflicting_routes": [],
+        "blocker_codes": ["search_route_ownership_missing"],
+    })
+}
+
+fn missing_active_search_route_ownership_json() -> serde_json::Value {
+    serde_json::json!({
+        "protocol": NOWLEDGE_MEM_SEARCH_ROUTE_OWNERSHIP_PROTOCOL,
+        "ready": false,
+        "production_cutover_ready": false,
+        "require_all_skein": true,
+        "required_route_count": REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES.len(),
+        "explicit_route_count": 0,
+        "skein_route_count": 0,
+        "lancedb_route_count": 0,
+        "routes": [],
+        "skein_routes": [],
+        "lancedb_routes": [],
+        "missing_required_routes": REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES,
+        "unknown_routes": [],
+        "duplicate_routes": [],
+        "invalid_projection_routes": [],
+        "blocker_codes": ["active_search_route_ownership_missing"],
+    })
+}
+
+fn search_route_ownership_ready(evidence: &serde_json::Value) -> bool {
+    evidence.get("protocol").and_then(serde_json::Value::as_str)
+        == Some(NOWLEDGE_MEM_SEARCH_ROUTE_OWNERSHIP_PROTOCOL)
+        && evidence.get("ready").and_then(serde_json::Value::as_bool) == Some(true)
+        && evidence
+            .get("production_cutover_ready")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        && evidence
+            .get("lancedb_route_count")
+            .and_then(serde_json::Value::as_u64)
+            == Some(0)
+        && evidence
+            .get("blocker_codes")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(Vec::is_empty)
+}
+
+fn active_search_route_ownership_ready(evidence: &serde_json::Value) -> bool {
+    evidence.get("protocol").and_then(serde_json::Value::as_str)
+        == Some(NOWLEDGE_MEM_SEARCH_ROUTE_OWNERSHIP_PROTOCOL)
+        && evidence.get("ready").and_then(serde_json::Value::as_bool) == Some(true)
+        && evidence
+            .get("production_cutover_ready")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        && evidence
+            .get("lancedb_route_count")
+            .and_then(serde_json::Value::as_u64)
+            == Some(0)
+        && evidence
+            .get("blocker_codes")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(Vec::is_empty)
+}
+
 struct LibraryReadinessEvidence<'a> {
     bounded_read_evidence: &'a serde_json::Value,
     storage_recovery: &'a serde_json::Value,
     background_maintenance: &'a serde_json::Value,
     query_family_evidence: &'a serde_json::Value,
     graph_route_readiness: &'a serde_json::Value,
+    search_route_ownership: &'a serde_json::Value,
+    active_search_route_ownership: &'a serde_json::Value,
     search_projection_evidence: &'a serde_json::Value,
     search_projection_shadow_evidence: &'a serde_json::Value,
     search_candidate_shadow_evidence: &'a serde_json::Value,
@@ -7398,6 +8322,12 @@ fn library_readiness_blocker_codes(evidence: &LibraryReadinessEvidence<'_>) -> V
     {
         blockers.push("graph_route_readiness_not_ready");
     }
+    if !search_route_ownership_ready(evidence.search_route_ownership) {
+        blockers.push("search_route_ownership_not_ready");
+    }
+    if !active_search_route_ownership_ready(evidence.active_search_route_ownership) {
+        blockers.push("active_search_route_ownership_not_ready");
+    }
     if !search_projection_evidence_ready(evidence.search_projection_evidence) {
         blockers.push("search_projection_evidence_not_ready");
     }
@@ -7429,6 +8359,10 @@ fn library_readiness_by_area(
             evidence.graph_route_readiness,
             "graph_route_readiness_not_ready",
         ),
+        search_route_ownership: search_route_ownership_readiness_area(
+            evidence.search_route_ownership,
+            evidence.active_search_route_ownership,
+        ),
         storage: readiness_area(
             "storage",
             evidence.storage_recovery,
@@ -7449,6 +8383,44 @@ fn library_readiness_by_area(
 fn bounded_read_readiness_area(evidence: &serde_json::Value) -> NowledgeMemReadinessAreaSummary {
     let blocker_codes = bounded_read_readiness_blocker_codes(evidence);
     NowledgeMemReadinessAreaSummary::new("query", blocker_codes.is_empty(), blocker_codes)
+}
+
+fn search_route_ownership_readiness_area(
+    evidence: &serde_json::Value,
+    active_route_evidence: &serde_json::Value,
+) -> NowledgeMemReadinessAreaSummary {
+    let ready = search_route_ownership_ready(evidence)
+        && active_search_route_ownership_ready(active_route_evidence);
+    let blocker_codes = if ready {
+        Vec::new()
+    } else {
+        let mut codes = evidence
+            .get("blocker_codes")
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        codes.extend(
+            active_route_evidence
+                .get("blocker_codes")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string),
+        );
+        if codes.is_empty() {
+            vec!["search_route_ownership_not_ready".to_string()]
+        } else {
+            codes
+        }
+    };
+    NowledgeMemReadinessAreaSummary::new("search_route_ownership", ready, blocker_codes)
 }
 
 fn bounded_read_evidence_ready(evidence: &serde_json::Value) -> bool {
@@ -7769,6 +8741,103 @@ fn workload_fixture_readiness_blocker_codes(evidence: &serde_json::Value) -> Vec
     {
         blockers.insert("workload_fixture_search_metadata_not_ready".to_string());
     }
+    if !evidence_u64(evidence, "graph_rag_probe_count").is_some_and(|count| count > 0)
+        || evidence_u64(evidence, "failed_graph_rag_probe_count") != Some(0)
+    {
+        blockers.insert("workload_fixture_graph_rag_not_ready".to_string());
+    }
+    if !array_at(evidence, &["graph_rag_reports"]).is_some_and(|reports| {
+        reports.iter().any(|report| {
+            report.get("ready").and_then(serde_json::Value::as_bool) == Some(true)
+                && report
+                    .get("label_count")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some_and(|count| count > 0)
+                && report
+                    .get("relationship_type_count")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some_and(|count| count > 0)
+                && report
+                    .get("route_count")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some_and(|count| count > 0)
+                && report
+                    .get("parameter_requirement_count")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some_and(|count| count > 0)
+                && report
+                    .get("row_count")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some_and(|count| count > 0)
+                && report
+                    .get("row_budget_exceeded")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(false)
+                && report
+                    .get("payload_budget_exceeded")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(false)
+                && report
+                    .get("blocking_operator_count")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(0)
+                && report.get("streaming").and_then(serde_json::Value::as_bool) == Some(false)
+                && report
+                    .get("error_class")
+                    .and_then(serde_json::Value::as_str)
+                    .is_none()
+        })
+    }) {
+        blockers.insert("workload_fixture_graph_rag_probe_missing".to_string());
+    }
+    if !evidence_u64(evidence, "source_projection_probe_count").is_some_and(|count| count > 0)
+        || evidence_u64(evidence, "failed_source_projection_probe_count") != Some(0)
+    {
+        blockers.insert("workload_fixture_source_projection_not_ready".to_string());
+    }
+    if !array_at(evidence, &["source_projection_reports"]).is_some_and(|reports| {
+        reports.iter().any(|report| {
+            report.get("ready").and_then(serde_json::Value::as_bool) == Some(true)
+                && report
+                    .get("too_small_batch_failed_closed")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                && report
+                    .get("operation_count")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(2)
+                && report
+                    .get("upserted_documents")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(2)
+                && report
+                    .get("deleted_documents")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(0)
+                && report
+                    .get("source_document_count")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(2)
+                && report
+                    .get("indexed_source_document_ready")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                && report
+                    .get("source_graph_commit_epoch")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some()
+                && report
+                    .get("complete_through_graph_commit_epoch")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some()
+                && report
+                    .get("error_class")
+                    .and_then(serde_json::Value::as_str)
+                    .is_none()
+        })
+    }) {
+        blockers.insert("workload_fixture_source_projection_probe_missing".to_string());
+    }
     blockers.into_iter().collect()
 }
 
@@ -7900,6 +8969,10 @@ fn string_array_at(value: &serde_json::Value, path: &[&str]) -> Option<Vec<Strin
         .collect()
 }
 
+fn array_at<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a Vec<serde_json::Value>> {
+    nested_value(value, path)?.as_array()
+}
+
 fn evidence_blocker_codes(evidence: &serde_json::Value) -> BTreeSet<String> {
     evidence
         .get("blocker_codes")
@@ -8023,6 +9096,7 @@ fn nowledge_mem_search_candidate_report(
         mode: request.mode,
         query_embedding_dimension: request.query_embedding.as_ref().map(std::vec::Vec::len),
         limit: result.limit,
+        offset: result.offset,
         rank_window: result.rank_window,
         document_count: result.document_count,
         filtered_document_count: result.filtered_document_count,
@@ -8497,6 +9571,7 @@ mod tests {
         nowledge_mem_fast_path_classification, nowledge_mem_graph_config,
         nowledge_mem_graph_config_with_search_mode,
         nowledge_mem_search_candidate_shadow_evidence_json, required_u64_field,
+        workload_fixture_readiness_blocker_codes, NowledgeMemCutoverControls,
         NowledgeMemEmbeddedStore, NowledgeMemEmbeddedStoreHandle, NowledgeMemGraph,
         NowledgeMemGraphAugmentationStateOptions, NowledgeMemGraphCommunityMembersOptions,
         NowledgeMemGraphCommunityRecentMemoriesOptions, NowledgeMemGraphCommunitySubgraphOptions,
@@ -8509,8 +9584,10 @@ mod tests {
         NowledgeMemRouteReadinessSummary, NowledgeMemSearchCandidateReadinessOptions,
         NowledgeMemSearchCandidateRequest, NowledgeMemSearchCandidateShadowAccumulator,
         NowledgeMemSearchCandidateShadowEvidence, NowledgeMemSearchProjection,
-        NowledgeMemStorageRecoveryReport, NowledgeQueryRuntimePreflightProbe,
-        NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL, NOWLEDGE_MEM_GRAPH_AUGMENTATION_STATE_ROUTE,
+        NowledgeMemStorageLifecycleActionKind, NowledgeMemStorageLifecycleDecision,
+        NowledgeMemStorageRecoveryReport, NowledgeMemWorkControl,
+        NowledgeQueryRuntimePreflightProbe, NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL,
+        NOWLEDGE_MEM_CUTOVER_CONTROLS_PROTOCOL, NOWLEDGE_MEM_GRAPH_AUGMENTATION_STATE_ROUTE,
         NOWLEDGE_MEM_GRAPH_AUGMENTATION_STATE_ROUTE_REPORT_PROTOCOL,
         NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ROUTE,
         NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ROUTE_REPORT_PROTOCOL,
@@ -8524,20 +9601,34 @@ mod tests {
         NOWLEDGE_MEM_GRAPH_OVERVIEW_ROUTE_REPORT_PROTOCOL, NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ROUTE,
         NOWLEDGE_MEM_GRAPH_PAGERANK_PLAN_ROUTE_REPORT_PROTOCOL, NOWLEDGE_MEM_GRAPH_SAMPLE_ROUTE,
         NOWLEDGE_MEM_GRAPH_SAMPLE_ROUTE_REPORT_PROTOCOL, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
-        NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL, NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL,
+        NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL, NOWLEDGE_MEM_OPERATIONS_READINESS_PROTOCOL,
+        NOWLEDGE_MEM_PRODUCTION_STATUS_PROTOCOL, NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL,
         NOWLEDGE_MEM_READINESS_DASHBOARD_PROTOCOL, NOWLEDGE_MEM_READ_REPORT_PROTOCOL,
         NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_READINESS_PROTOCOL,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_REPORT_PROTOCOL,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
-        NOWLEDGE_MEM_SLOW_QUERY_REPORT_PROTOCOL, NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL,
-        NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
-        REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES, SEARCH_PROJECTION_SHADOW_PUSHDOWN_NOT_READY,
+        NOWLEDGE_MEM_SLOW_QUERY_REPORT_PROTOCOL, NOWLEDGE_MEM_STORAGE_LIFECYCLE_DECISION_PROTOCOL,
+        NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
+        REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES, REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
+        SEARCH_PROJECTION_SHADOW_PUSHDOWN_NOT_READY,
     };
     use crate::mem_integration_readiness::nowledge_mem_final_cutover_preflight;
+    use crate::route_ownership::{
+        nowledge_mem_route_ownership_all_legacy, nowledge_mem_route_ownership_all_skein,
+        nowledge_mem_route_ownership_readiness, NowledgeMemRouteOwnershipPolicy,
+    };
     use crate::search::CompressedVectorSearchMode;
     use crate::search::SearchFusionWeights;
+    use crate::search_route_ownership::{
+        nowledge_mem_active_search_route_ownership_all_skein,
+        nowledge_mem_active_search_route_ownership_readiness,
+        nowledge_mem_search_route_ownership_all_skein,
+        nowledge_mem_search_route_ownership_readiness,
+        NowledgeMemActiveSearchRouteOwnershipReadinessReport,
+        NowledgeMemSearchRouteOwnershipPolicy, NowledgeMemSearchRouteOwnershipReadinessReport,
+    };
     use crate::workload_fixtures::{
         nowledge_graph_route_workload_fixture_report, NowledgeGraphRouteWorkloadFixtureOptions,
     };
@@ -8546,10 +9637,11 @@ mod tests {
     use crate::Value;
     use crate::{
         BackgroundMaintenanceKind, BackgroundMaintenanceOptions, BackgroundWorkHint, Database,
-        DatabaseConfig, GraphRagQueryBinding, GraphRagQueryDraft, GraphRagQueryPattern,
-        GraphRagQueryPredicate, GraphRagQueryPredicateOperator, GraphRagQueryProjection,
-        GraphRagSchemaContextOptions, KnowledgeCandidateScoringPolicy, KnowledgeRetrievalRequest,
-        LocalQosPolicy, LocalQosScheduler, LocalQosState, NowledgeGraphStatement, RecoveryMode,
+        DatabaseConfig, GraphLightningInitialImportCutoverCatchUpReport, GraphRagQueryBinding,
+        GraphRagQueryDraft, GraphRagQueryPattern, GraphRagQueryPredicate,
+        GraphRagQueryPredicateOperator, GraphRagQueryProjection, GraphRagSchemaContextOptions,
+        KnowledgeCandidateScoringPolicy, KnowledgeRetrievalRequest, LocalQosPolicy,
+        LocalQosScheduler, LocalQosState, NowledgeGraphStatement, RecoveryMode,
         SearchEmbeddingManifest, SearchIndex, SearchMode, SearchProjectionDelta,
         SearchProjectionKind, SearchProjectionProbeOptions, SearchProjectionRow,
         StorageRecoveryReport, VectorRecallValidationOptions, VectorRecallValidationReport,
@@ -9769,6 +10861,134 @@ mod tests {
     }
 
     #[test]
+    fn embedded_store_exposes_typed_operations_readiness_report() {
+        let db = Database::new_with_config(DatabaseConfig {
+            slow_query_log_threshold_micros: 0,
+            slow_query_log_capacity: 4,
+            ..DatabaseConfig::default()
+        });
+        let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        let mut store = NowledgeMemEmbeddedStore::new(graph, None);
+        store
+            .query_with_report("CREATE (:Memory {id: 'ops-1', title: 'Operations'})")
+            .unwrap();
+
+        let report = store.operations_readiness(&NowledgeMemReadinessOptions::default());
+        let json = report.json();
+        let encoded = json.to_string();
+
+        assert_eq!(report.protocol, NOWLEDGE_MEM_OPERATIONS_READINESS_PROTOCOL);
+        assert!(report.present);
+        assert!(!report.ready);
+        assert!(report.graph_open);
+        assert!(!report.graph_read_only);
+        assert!(!report.search_projection_open);
+        assert_eq!(report.graph_commit_epoch, 1);
+        assert_eq!(report.projection_commit_lag, 1);
+        assert!(!report.projection_stale);
+        assert_eq!(
+            report.storage_lifecycle_action,
+            NowledgeMemStorageLifecycleActionKind::OpenReadOnlyInspect
+        );
+        assert!(!report.storage_lifecycle_ready);
+        assert!(!report.storage_recovery_ready);
+        assert!(report.slow_query_ready);
+        assert!(report.background_maintenance_ready);
+        assert!(report
+            .blocker_codes
+            .contains(&"storage_recovery_not_ready".to_string()));
+        assert!(report
+            .blocker_codes
+            .contains(&"storage_lifecycle.storage_not_durable".to_string()));
+        assert_eq!(json["protocol"], NOWLEDGE_MEM_OPERATIONS_READINESS_PROTOCOL);
+        assert_eq!(
+            json["storage_lifecycle"]["action"],
+            "open_read_only_inspect"
+        );
+        assert_eq!(json["readiness"]["storage_lifecycle_ready"], false);
+        assert_eq!(
+            json["storage_lifecycle_decision"]["protocol"],
+            NOWLEDGE_MEM_STORAGE_LIFECYCLE_DECISION_PROTOCOL
+        );
+        assert_eq!(json["redaction"]["query_text_copied"], false);
+        assert!(!encoded.contains("Operations"));
+        assert!(!encoded.contains("ops-1"));
+    }
+
+    #[test]
+    fn embedded_store_operations_readiness_reports_projection_staleness() {
+        let root = unique_nowledge_mem_test_dir("operations_readiness_projection_stale");
+        let search_path = root.join("search");
+        let mut graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::WritableCutover);
+        graph
+            .query("CREATE (:Memory {id: 'ops-stale', title: 'Projection stale'})")
+            .unwrap();
+        let projection =
+            NowledgeMemSearchProjection::from_index(SearchIndex::open(&search_path).unwrap());
+        let mut store = NowledgeMemEmbeddedStore::new(graph, Some(projection));
+
+        let stale = store.operations_readiness(&NowledgeMemReadinessOptions::default());
+        assert!(stale.search_projection_open);
+        assert_eq!(stale.projection_commit_lag, 1);
+        assert!(stale.projection_stale);
+        assert!(stale
+            .blocker_codes
+            .contains(&"search_projection_stale".to_string()));
+
+        store.catch_up_search_projection(16, 1).unwrap();
+        let caught_up = store.operations_readiness(&NowledgeMemReadinessOptions::default());
+        assert!(caught_up.search_projection_open);
+        assert_eq!(caught_up.projection_commit_lag, 0);
+        assert!(!caught_up.projection_stale);
+        assert!(!caught_up
+            .blocker_codes
+            .contains(&"search_projection_stale".to_string()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn embedded_store_handle_supports_operations_readiness_with_shared_reads() {
+        let db = Database::new_with_config(DatabaseConfig {
+            slow_query_log_threshold_micros: 0,
+            slow_query_log_capacity: 8,
+            ..DatabaseConfig::default()
+        });
+        let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        let mut store = NowledgeMemEmbeddedStore::new(graph, None);
+        store
+            .query_with_report("CREATE (:Memory {id: 'ops-shared', title: 'Shared Operations'})")
+            .unwrap();
+        let handle = NowledgeMemEmbeddedStoreHandle::new(store);
+
+        let reader = {
+            let handle = handle.clone();
+            thread::spawn(move || {
+                let read = handle
+                    .read_query(
+                        "MATCH (m:Memory {id: 'ops-shared'}) RETURN m.title AS title",
+                        &NowledgeMemReadOptions::default(),
+                    )
+                    .unwrap();
+                assert_eq!(read.output.rows.len(), 1);
+            })
+        };
+        let observer = {
+            let handle = handle.clone();
+            thread::spawn(move || {
+                let report = handle
+                    .operations_readiness(&NowledgeMemReadinessOptions::default())
+                    .unwrap();
+                assert!(report.slow_query_ready);
+                assert!(report.background_maintenance_ready);
+            })
+        };
+
+        reader.join().unwrap();
+        observer.join().unwrap();
+    }
+
+    #[test]
     fn embedded_store_handle_allows_overlapping_read_guards() {
         let graph =
             NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::WritableCutover);
@@ -10537,6 +11757,25 @@ mod tests {
             serde_json::json!(["graph_route_readiness_missing"])
         );
         assert_eq!(
+            readiness["search_route_ownership"]["blocker_codes"],
+            serde_json::json!(["search_route_ownership_missing"])
+        );
+        assert_eq!(
+            readiness["active_search_route_ownership"]["blocker_codes"],
+            serde_json::json!(["active_search_route_ownership_missing"])
+        );
+        assert_eq!(
+            readiness["readiness_by_area"]["search_route_ownership"]["ready"],
+            false
+        );
+        assert_eq!(
+            readiness["readiness_by_area"]["search_route_ownership"]["blocker_codes"],
+            serde_json::json!([
+                "search_route_ownership_missing",
+                "active_search_route_ownership_missing"
+            ])
+        );
+        assert_eq!(
             readiness["readiness_by_area"]["search_projection"]["ready"],
             false
         );
@@ -10565,7 +11804,7 @@ mod tests {
             serde_json::json!(["workload_fixture_evidence_missing"])
         );
         assert_eq!(readiness["ready_area_count"], 1);
-        assert_eq!(readiness["blocked_area_count"], 9);
+        assert_eq!(readiness["blocked_area_count"], 10);
         assert!(!readiness.to_string().contains("redacted"));
     }
 
@@ -10589,9 +11828,9 @@ mod tests {
         assert!(report.graph_open);
         assert!(!report.graph_read_only);
         let areas = report.areas();
-        assert_eq!(areas.len(), 10);
+        assert_eq!(areas.len(), 11);
         assert_eq!(report.ready_area_count, 1);
-        assert_eq!(report.blocked_area_count, 9);
+        assert_eq!(report.blocked_area_count, 10);
         assert!(report.readiness_by_area.graph.ready);
         assert!(!report.readiness_by_area.query.ready);
         assert_eq!(
@@ -10602,6 +11841,17 @@ mod tests {
         assert_eq!(
             report.readiness_by_area.graph_route.blocker_codes,
             vec!["graph_route_readiness_missing".to_string()]
+        );
+        assert!(!report.readiness_by_area.search_route_ownership.ready);
+        assert_eq!(
+            report
+                .readiness_by_area
+                .search_route_ownership
+                .blocker_codes,
+            vec![
+                "search_route_ownership_missing".to_string(),
+                "active_search_route_ownership_missing".to_string()
+            ]
         );
         assert!(!report.readiness_by_area.workload_fixture.ready);
         assert_eq!(
@@ -10630,6 +11880,14 @@ mod tests {
             .blocker_codes
             .iter()
             .any(|code| code == "graph_route_readiness_not_ready"));
+        assert!(report
+            .blocker_codes
+            .iter()
+            .any(|code| code == "search_route_ownership_not_ready"));
+        assert!(report
+            .blocker_codes
+            .iter()
+            .any(|code| code == "active_search_route_ownership_not_ready"));
         assert_eq!(json["ready"], false);
         assert_eq!(json["redaction"]["ready"], true);
         assert_eq!(json["redaction"]["query_text_copied"], false);
@@ -10652,6 +11910,14 @@ mod tests {
         assert_eq!(
             json["bounded_read_evidence"]["blocker_codes"],
             serde_json::json!(["bounded_read_probe_missing"])
+        );
+        assert_eq!(
+            json["search_route_ownership"]["blocker_codes"],
+            serde_json::json!(["search_route_ownership_missing"])
+        );
+        assert_eq!(
+            json["active_search_route_ownership"]["blocker_codes"],
+            serde_json::json!(["active_search_route_ownership_missing"])
         );
     }
 
@@ -10699,6 +11965,89 @@ mod tests {
             json["workload_fixture_evidence"]["failed_search_metadata_probe_count"],
             serde_json::json!(0)
         );
+        assert_eq!(
+            json["workload_fixture_evidence"]["failed_graph_rag_probe_count"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
+            json["workload_fixture_evidence"]["failed_source_projection_probe_count"],
+            serde_json::json!(0)
+        );
+        assert_eq!(
+            json["workload_fixture_evidence"]["graph_rag_reports"][0]["ready"],
+            true
+        );
+        assert_eq!(
+            json["workload_fixture_evidence"]["graph_rag_reports"][0]
+                ["parameter_requirement_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            json["workload_fixture_evidence"]["source_projection_reports"][0]["ready"],
+            true
+        );
+        assert_eq!(
+            json["workload_fixture_evidence"]["source_projection_reports"][0]
+                ["too_small_batch_failed_closed"],
+            true
+        );
+        assert_eq!(
+            json["workload_fixture_evidence"]["source_projection_reports"][0]
+                ["indexed_source_document_ready"],
+            true
+        );
+    }
+
+    #[test]
+    fn library_readiness_rejects_workload_fixture_without_graph_rag_probe() {
+        let workload_fixture = nowledge_graph_route_workload_fixture_report(
+            NowledgeGraphRouteWorkloadFixtureOptions::default(),
+        )
+        .unwrap();
+        let mut evidence = workload_fixture.json();
+        evidence
+            .as_object_mut()
+            .unwrap()
+            .remove("graph_rag_probe_count");
+        evidence
+            .as_object_mut()
+            .unwrap()
+            .remove("failed_graph_rag_probe_count");
+        evidence
+            .as_object_mut()
+            .unwrap()
+            .remove("graph_rag_reports");
+
+        let blockers = workload_fixture_readiness_blocker_codes(&evidence);
+
+        assert!(blockers.contains(&"workload_fixture_graph_rag_not_ready".to_string()));
+        assert!(blockers.contains(&"workload_fixture_graph_rag_probe_missing".to_string()));
+    }
+
+    #[test]
+    fn library_readiness_rejects_workload_fixture_without_source_projection_probe() {
+        let workload_fixture = nowledge_graph_route_workload_fixture_report(
+            NowledgeGraphRouteWorkloadFixtureOptions::default(),
+        )
+        .unwrap();
+        let mut evidence = workload_fixture.json();
+        evidence
+            .as_object_mut()
+            .unwrap()
+            .remove("source_projection_probe_count");
+        evidence
+            .as_object_mut()
+            .unwrap()
+            .remove("failed_source_projection_probe_count");
+        evidence
+            .as_object_mut()
+            .unwrap()
+            .remove("source_projection_reports");
+
+        let blockers = workload_fixture_readiness_blocker_codes(&evidence);
+
+        assert!(blockers.contains(&"workload_fixture_source_projection_not_ready".to_string()));
+        assert!(blockers.contains(&"workload_fixture_source_projection_probe_missing".to_string()));
     }
 
     #[test]
@@ -10839,6 +12188,11 @@ mod tests {
         assert_eq!(dashboard.area_count, 11);
         assert_eq!(dashboard.ready_area_count, 3);
         assert_eq!(dashboard.blocked_area_count, 8);
+        assert_eq!(
+            dashboard.storage_lifecycle_action,
+            NowledgeMemStorageLifecycleActionKind::OpenReadOnlyInspect
+        );
+        assert!(!dashboard.storage_lifecycle_ready);
         assert!(dashboard.slow_query_ready);
         assert_eq!(dashboard.slow_query_record_count, 1);
         assert!(readiness_dashboard_area(&dashboard, "graph").ready);
@@ -10882,6 +12236,11 @@ mod tests {
         );
         assert!(readiness_dashboard_area(&dashboard, "slow_query").ready);
         assert_eq!(json["protocol"], NOWLEDGE_MEM_READINESS_DASHBOARD_PROTOCOL);
+        assert_eq!(
+            json["storage_lifecycle"]["action"],
+            "open_read_only_inspect"
+        );
+        assert_eq!(json["storage_lifecycle"]["ready"], false);
         assert_eq!(json["redaction"]["query_text_copied"], false);
         assert_eq!(json["redaction"]["parameters_copied"], false);
         assert_eq!(json["redaction"]["local_paths_copied"], false);
@@ -10921,6 +12280,142 @@ mod tests {
         assert_eq!(json["readiness"]["wal_replay_bounded"], true);
         assert_eq!(json["readiness"]["replay_boundary_consistent"], true);
         assert_eq!(json["max_wal_replay_entries"], 16);
+    }
+
+    #[test]
+    fn storage_lifecycle_decision_reports_ready_for_clean_recovery() {
+        let recovery =
+            NowledgeMemStorageRecoveryReport::from_storage_report(&StorageRecoveryReport {
+                durable: true,
+                recovery_mode: RecoveryMode::Strict,
+                max_wal_replay_entries: Some(16),
+                checkpoint_epoch: Some(3),
+                checkpoint_commit_epoch: Some(11),
+                wal_present: true,
+                wal_replay_start_lsn: Some(4),
+                next_lsn_after_replay: Some(7),
+                replayed_wal_entries: 3,
+                torn_tail_ignored: false,
+                torn_tail_reason: None,
+                recovered_commit_epoch: 14,
+            });
+
+        let decision = NowledgeMemStorageLifecycleDecision::from_storage_recovery(recovery);
+        let json = decision.json();
+
+        assert_eq!(
+            decision.protocol,
+            NOWLEDGE_MEM_STORAGE_LIFECYCLE_DECISION_PROTOCOL
+        );
+        assert_eq!(
+            decision.action,
+            NowledgeMemStorageLifecycleActionKind::Ready
+        );
+        assert!(decision.ready_for_mem_lifecycle);
+        assert!(decision.storage_recovery_ready);
+        assert!(!decision.checkpoint_required);
+        assert!(!decision.repair_required);
+        assert!(!decision.quarantine_required);
+        assert!(!decision.read_only_inspection_required);
+        assert!(decision.blocker_codes.is_empty());
+        assert_eq!(json["action"], "ready");
+        assert_eq!(json["ready_for_mem_lifecycle"], true);
+    }
+
+    #[test]
+    fn storage_lifecycle_decision_recommends_wal_tail_repair() {
+        let recovery =
+            NowledgeMemStorageRecoveryReport::from_storage_report(&StorageRecoveryReport {
+                durable: true,
+                recovery_mode: RecoveryMode::TolerateTornTail,
+                max_wal_replay_entries: Some(16),
+                checkpoint_epoch: Some(3),
+                checkpoint_commit_epoch: Some(11),
+                wal_present: true,
+                wal_replay_start_lsn: Some(4),
+                next_lsn_after_replay: Some(7),
+                replayed_wal_entries: 3,
+                torn_tail_ignored: true,
+                torn_tail_reason: Some("partial wal entry".to_string()),
+                recovered_commit_epoch: 14,
+            });
+
+        let decision = NowledgeMemStorageLifecycleDecision::from_storage_recovery(recovery);
+
+        assert_eq!(
+            decision.action,
+            NowledgeMemStorageLifecycleActionKind::RepairWalTail
+        );
+        assert!(!decision.ready_for_mem_lifecycle);
+        assert!(decision.repair_required);
+        assert_eq!(
+            decision.blocker_codes,
+            vec![
+                "torn_tail_observed".to_string(),
+                "wal_tail_repair_required".to_string()
+            ]
+        );
+        assert_eq!(decision.json()["action"], "repair_wal_tail");
+    }
+
+    #[test]
+    fn storage_lifecycle_decision_fails_closed_for_in_memory_storage() {
+        let db = Database::new();
+        let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::ShadowReadOnly);
+        let store = NowledgeMemEmbeddedStore::new(graph, None);
+
+        let decision = store.storage_lifecycle_decision();
+        let json = store.storage_lifecycle_decision_json();
+
+        assert_eq!(
+            decision.action,
+            NowledgeMemStorageLifecycleActionKind::OpenReadOnlyInspect
+        );
+        assert!(!decision.ready_for_mem_lifecycle);
+        assert!(decision.read_only_inspection_required);
+        assert!(decision
+            .blocker_codes
+            .contains(&"durable_recovery_not_observed".to_string()));
+        assert!(decision
+            .blocker_codes
+            .contains(&"storage_not_durable".to_string()));
+        assert_eq!(json["action"], "open_read_only_inspect");
+    }
+
+    #[test]
+    fn storage_lifecycle_decision_recommends_checkpoint_for_missing_boundary() {
+        let recovery =
+            NowledgeMemStorageRecoveryReport::from_storage_report(&StorageRecoveryReport {
+                durable: true,
+                recovery_mode: RecoveryMode::Strict,
+                max_wal_replay_entries: Some(16),
+                checkpoint_epoch: None,
+                checkpoint_commit_epoch: None,
+                wal_present: true,
+                wal_replay_start_lsn: Some(4),
+                next_lsn_after_replay: Some(4),
+                replayed_wal_entries: 0,
+                torn_tail_ignored: false,
+                torn_tail_reason: None,
+                recovered_commit_epoch: 4,
+            });
+
+        let decision = NowledgeMemStorageLifecycleDecision::from_storage_recovery(recovery);
+
+        assert_eq!(
+            decision.action,
+            NowledgeMemStorageLifecycleActionKind::RunCheckpoint
+        );
+        assert!(!decision.ready_for_mem_lifecycle);
+        assert!(decision.checkpoint_required);
+        assert_eq!(
+            decision.blocker_codes,
+            vec![
+                "checkpoint_boundary_missing".to_string(),
+                "replay_boundary_inconsistent".to_string(),
+                "checkpoint_required".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -11041,6 +12536,8 @@ mod tests {
             }),
             covered_routes: full_bounded_read_routes(),
             graph_route_readiness: Some(ready_route_readiness_summary()),
+            search_route_ownership: Some(ready_search_route_ownership()),
+            active_search_route_ownership: Some(ready_active_search_route_ownership()),
             replacement_readiness_by_query_family: Some(ready_query_family_replacement()),
             ..NowledgeMemReadinessOptions::default()
         });
@@ -11090,6 +12587,18 @@ mod tests {
         );
         assert_eq!(readiness["readiness_by_area"]["graph_route"]["ready"], true);
         assert_eq!(
+            readiness["readiness_by_area"]["search_route_ownership"]["ready"],
+            true
+        );
+        assert_eq!(
+            readiness["search_route_ownership"]["lancedb_route_count"],
+            0
+        );
+        assert_eq!(
+            readiness["active_search_route_ownership"]["lancedb_route_count"],
+            0
+        );
+        assert_eq!(
             readiness["graph_route_readiness"]["primary_ready_route_count"],
             REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len()
         );
@@ -11121,6 +12630,8 @@ mod tests {
             }),
             covered_routes: full_bounded_read_routes(),
             graph_route_readiness: Some(ready_route_readiness_summary()),
+            search_route_ownership: Some(ready_search_route_ownership()),
+            active_search_route_ownership: Some(ready_active_search_route_ownership()),
             replacement_readiness_by_query_family: Some(ready_query_family_replacement()),
             ..NowledgeMemReadinessOptions::default()
         });
@@ -11142,6 +12653,7 @@ mod tests {
 
         assert!(library.readiness_by_area.query.ready);
         assert!(library.readiness_by_area.graph_route.ready);
+        assert!(library.readiness_by_area.search_route_ownership.ready);
         assert!(library.readiness_by_area.query_family.ready);
         assert!(library.readiness_by_area.background.ready);
         assert!(!library.readiness_by_area.storage.ready);
@@ -11726,6 +13238,310 @@ mod tests {
     }
 
     #[test]
+    fn production_status_does_not_claim_graph_cutover_without_route_ownership() {
+        let graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::WritableCutover);
+        let store = NowledgeMemEmbeddedStore::new(graph, None);
+
+        let status = store.production_status(None);
+        let json = status.json();
+
+        assert_eq!(status.protocol, NOWLEDGE_MEM_PRODUCTION_STATUS_PROTOCOL);
+        assert!(status.graph_open);
+        assert!(!status.graph_read_only);
+        assert!(!status.graph_route_ownership_present);
+        assert!(!status.graph_skein_cutover_effective);
+        assert!(!status.search_projection_open);
+        assert!(!status.search_skein_cutover_effective);
+        assert!(status
+            .blocker_codes
+            .contains(&"graph_route_ownership_missing".to_string()));
+        assert!(status
+            .blocker_codes
+            .contains(&"search_projection_not_open".to_string()));
+        assert_eq!(json["graph"]["skein_cutover_effective"], false);
+        assert_eq!(json["search"]["skein_cutover_effective"], false);
+        assert_eq!(json["redaction"]["local_paths_copied"], false);
+    }
+
+    #[test]
+    fn production_status_reports_partial_graph_ownership_without_cutover_claim() {
+        let graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::WritableCutover);
+        let store = NowledgeMemEmbeddedStore::new(graph, None);
+        let route_ownership = nowledge_mem_route_ownership_readiness(
+            &nowledge_mem_route_ownership_all_legacy(),
+            Some(&ready_route_readiness_summary()),
+            NowledgeMemRouteOwnershipPolicy::migration(),
+        );
+
+        let status = store.production_status(Some(&route_ownership));
+
+        assert!(status.graph_route_ownership_present);
+        assert!(status.graph_route_ownership_ready);
+        assert_eq!(status.graph_skein_route_count, 0);
+        assert_eq!(
+            status.graph_legacy_route_count,
+            REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len()
+        );
+        assert!(!status.graph_skein_cutover_effective);
+        assert!(status
+            .blocker_codes
+            .contains(&"graph_legacy_routes_remaining".to_string()));
+    }
+
+    #[test]
+    fn production_status_separates_graph_cutover_from_search_freshness() {
+        let root = unique_nowledge_mem_test_dir("production_status_split_cutover");
+        let graph_path = root.join("graph");
+        let search_path = root.join("search");
+        let mut graph =
+            NowledgeMemGraph::open(&graph_path, NowledgeMemGraphMode::WritableCutover).unwrap();
+        graph
+            .query("CREATE (:Memory {id: 'status-m1', title: 'Production status'})")
+            .unwrap();
+        let projection =
+            NowledgeMemSearchProjection::from_index(SearchIndex::open(&search_path).unwrap());
+        let mut store = NowledgeMemEmbeddedStore::new(graph, Some(projection));
+        let route_ownership = nowledge_mem_route_ownership_readiness(
+            &nowledge_mem_route_ownership_all_skein(),
+            Some(&ready_route_readiness_summary()),
+            NowledgeMemRouteOwnershipPolicy::production_cutover(),
+        );
+
+        let stale = store.production_status(Some(&route_ownership));
+        assert!(stale.graph_skein_cutover_effective);
+        assert!(stale.search_projection_open);
+        assert_eq!(stale.search_projection_commit_lag, 1);
+        assert!(stale.search_projection_stale);
+        assert!(!stale.search_skein_cutover_effective);
+        assert!(stale
+            .blocker_codes
+            .contains(&"search_projection_stale".to_string()));
+
+        store.catch_up_search_projection(16, 1).unwrap();
+        let ready = store.production_status(Some(&route_ownership));
+        assert!(ready.graph_skein_cutover_effective);
+        assert!(ready.search_projection_open);
+        assert_eq!(ready.search_projection_commit_lag, 0);
+        assert!(!ready.search_projection_stale);
+        assert!(ready.search_skein_cutover_effective);
+        assert!(!ready
+            .blocker_codes
+            .contains(&"search_projection_stale".to_string()));
+        assert_eq!(
+            ready.json()["route_ownership"]["production_cutover_ready"],
+            true
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cutover_controls_keep_legacy_reads_ready_without_skein_ownership() {
+        let graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::WritableCutover);
+        let store = NowledgeMemEmbeddedStore::new(graph, None);
+
+        let report = store.cutover_controls_report(NowledgeMemCutoverControls::legacy(), None);
+        let json = report.json();
+
+        assert_eq!(report.protocol, NOWLEDGE_MEM_CUTOVER_CONTROLS_PROTOCOL);
+        assert!(report.ready);
+        assert!(!report.graph_read_selected_skein);
+        assert!(report.graph_read_effective);
+        assert!(!report.search_read_selected_skein);
+        assert!(report.search_read_effective);
+        assert!(!report.dual_writes_enabled);
+        assert_eq!(json["controls"]["graph_reads"], "legacy");
+        assert_eq!(json["controls"]["search_reads"], "legacy");
+        assert_eq!(json["redaction"]["local_paths_copied"], false);
+    }
+
+    #[test]
+    fn cutover_controls_fail_closed_when_skein_reads_are_not_effective() {
+        let graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::WritableCutover);
+        let store = NowledgeMemEmbeddedStore::new(graph, None);
+
+        let report = store.cutover_controls_report(NowledgeMemCutoverControls::skein_reads(), None);
+
+        assert!(!report.ready);
+        assert!(report.graph_read_selected_skein);
+        assert!(!report.graph_read_effective);
+        assert!(report.search_read_selected_skein);
+        assert!(!report.search_read_effective);
+        assert!(report.projection_catch_up_enabled);
+        assert!(report
+            .blocker_codes
+            .contains(&"graph_read_selected_skein_but_not_effective".to_string()));
+        assert!(report
+            .blocker_codes
+            .contains(&"search_read_selected_skein_but_not_effective".to_string()));
+        assert_eq!(
+            report.json()["production_status"]["graph"]["skein_cutover_effective"],
+            false
+        );
+    }
+
+    #[test]
+    fn cutover_controls_require_dual_writes_for_initial_import() {
+        let graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::WritableCutover);
+        let store = NowledgeMemEmbeddedStore::new(graph, None);
+        let controls = NowledgeMemCutoverControls {
+            initial_import: NowledgeMemWorkControl::Enabled,
+            ..NowledgeMemCutoverControls::legacy()
+        };
+
+        let report = store.cutover_controls_report(controls, None);
+
+        assert!(!report.ready);
+        assert!(report.initial_import_enabled);
+        assert!(!report.dual_writes_enabled);
+        assert!(!report.initial_import_inactive_for_cutover);
+        assert!(report
+            .blocker_codes
+            .contains(&"initial_import_enabled_without_dual_writes".to_string()));
+        assert!(report
+            .blocker_codes
+            .contains(&"initial_import_active_blocks_read_cutover".to_string()));
+    }
+
+    fn ready_initial_import_cutover_catch_up_report(
+    ) -> GraphLightningInitialImportCutoverCatchUpReport {
+        GraphLightningInitialImportCutoverCatchUpReport {
+            ready: true,
+            session_ready_for_cutover: true,
+            durable_state_present: true,
+            live_projection_present: true,
+            import_graph_commit_epoch: Some(42),
+            import_durable_search_projection_commit_epoch: Some(42),
+            live_graph_commit_epoch: 42,
+            live_search_projection_commit_epoch: Some(42),
+            live_durable_search_projection_commit_epoch: Some(42),
+            graph_watermark_caught_up: true,
+            search_projection_watermark_caught_up: true,
+            live_projection_checkpointed: true,
+            live_projection_healthy: true,
+            cutover_watermark: Some(42),
+            blocker_codes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn cutover_controls_accept_active_initial_import_with_cutover_catch_up_proof() {
+        let root = unique_nowledge_mem_test_dir("cutover_controls_initial_import_catch_up");
+        let graph_path = root.join("graph");
+        let search_path = root.join("search");
+        let mut graph =
+            NowledgeMemGraph::open(&graph_path, NowledgeMemGraphMode::WritableCutover).unwrap();
+        graph
+            .query("CREATE (:Memory {id: 'controls-import-m1', title: 'Import cutover'})")
+            .unwrap();
+        let projection =
+            NowledgeMemSearchProjection::from_index(SearchIndex::open(&search_path).unwrap());
+        let mut store = NowledgeMemEmbeddedStore::new(graph, Some(projection));
+        store.catch_up_search_projection(16, 1).unwrap();
+        let route_ownership = nowledge_mem_route_ownership_readiness(
+            &nowledge_mem_route_ownership_all_skein(),
+            Some(&ready_route_readiness_summary()),
+            NowledgeMemRouteOwnershipPolicy::production_cutover(),
+        );
+        let controls = NowledgeMemCutoverControls {
+            dual_writes: NowledgeMemWorkControl::Enabled,
+            initial_import: NowledgeMemWorkControl::Enabled,
+            projection_catch_up: NowledgeMemWorkControl::Enabled,
+            graph_reads: super::NowledgeMemReadControl::Skein,
+            search_reads: super::NowledgeMemReadControl::Skein,
+        };
+        let catch_up = ready_initial_import_cutover_catch_up_report();
+
+        let report = store.cutover_controls_report_with_initial_import_cutover_catch_up(
+            controls,
+            Some(&route_ownership),
+            Some(&catch_up),
+        );
+
+        assert!(report.ready);
+        assert!(report.initial_import_enabled);
+        assert!(!report.initial_import_inactive_for_cutover);
+        assert!(report.initial_import_cutover_catch_up_ready);
+        assert!(report.initial_import_safe_for_read_cutover);
+        assert!(report.blocker_codes.is_empty());
+        assert_eq!(
+            report.json()["work"]["initial_import_safe_for_read_cutover"],
+            true
+        );
+    }
+
+    #[test]
+    fn cutover_controls_block_read_cutover_while_initial_import_is_active() {
+        let graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::WritableCutover);
+        let store = NowledgeMemEmbeddedStore::new(graph, None);
+        let controls = NowledgeMemCutoverControls {
+            dual_writes: NowledgeMemWorkControl::Enabled,
+            initial_import: NowledgeMemWorkControl::Enabled,
+            ..NowledgeMemCutoverControls::legacy()
+        };
+
+        let report = store.cutover_controls_report(controls, None);
+
+        assert!(!report.ready);
+        assert!(report.dual_writes_enabled);
+        assert!(report.initial_import_enabled);
+        assert!(!report.initial_import_inactive_for_cutover);
+        assert_eq!(
+            report.json()["work"]["initial_import_inactive_for_cutover"],
+            false
+        );
+        assert_eq!(
+            report.blocker_codes,
+            vec!["initial_import_active_blocks_read_cutover".to_string()]
+        );
+    }
+
+    #[test]
+    fn cutover_controls_accept_independent_skein_reads_after_status_is_ready() {
+        let root = unique_nowledge_mem_test_dir("cutover_controls_ready_reads");
+        let graph_path = root.join("graph");
+        let search_path = root.join("search");
+        let mut graph =
+            NowledgeMemGraph::open(&graph_path, NowledgeMemGraphMode::WritableCutover).unwrap();
+        graph
+            .query("CREATE (:Memory {id: 'controls-m1', title: 'Cutover controls'})")
+            .unwrap();
+        let projection =
+            NowledgeMemSearchProjection::from_index(SearchIndex::open(&search_path).unwrap());
+        let mut store = NowledgeMemEmbeddedStore::new(graph, Some(projection));
+        store.catch_up_search_projection(16, 1).unwrap();
+        let route_ownership = nowledge_mem_route_ownership_readiness(
+            &nowledge_mem_route_ownership_all_skein(),
+            Some(&ready_route_readiness_summary()),
+            NowledgeMemRouteOwnershipPolicy::production_cutover(),
+        );
+
+        let report = store.cutover_controls_report(
+            NowledgeMemCutoverControls::skein_reads(),
+            Some(&route_ownership),
+        );
+
+        assert!(report.ready);
+        assert!(report.graph_read_selected_skein);
+        assert!(report.graph_read_effective);
+        assert!(report.search_read_selected_skein);
+        assert!(report.search_read_effective);
+        assert!(report.dual_writes_enabled);
+        assert!(report.projection_catch_up_enabled);
+        assert!(report.blocker_codes.is_empty());
+        assert_eq!(
+            report.json()["production_status"]["search"]["skein_cutover_effective"],
+            true
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn embedded_store_catches_up_delete_after_graph_checkpoint_and_restart() {
         let root = unique_nowledge_mem_test_dir("embedded_projection_checkpoint_restart");
         let graph_path = root.join("graph");
@@ -11853,6 +13669,7 @@ mod tests {
                 query_embedding: None,
                 mode: SearchMode::Text,
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 search_fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::new(),
@@ -12052,6 +13869,7 @@ mod tests {
                 query_embedding: None,
                 mode: SearchMode::Text,
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 search_fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::new(),
@@ -12793,6 +14611,7 @@ mod tests {
             NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::ShadowReadOnly);
         let store = NowledgeMemEmbeddedStore::new(graph, Some(projection));
         let request = NowledgeMemSearchCandidateRequest::vector(vec![1.0, 0.0], 10)
+            .with_offset(1)
             .with_rank_window(Some(2))
             .with_metadata_filters(BTreeMap::from([(
                 "lifecycle_state__not_in".to_string(),
@@ -12802,10 +14621,13 @@ mod tests {
         let output = store.search_candidates(&request).unwrap();
 
         assert_eq!(output.result.total_hits, 2);
-        assert_eq!(output.result.hits[0].id, "memory:zza-active");
-        assert_eq!(output.result.hits[0].vector_rank, Some(1));
+        assert_eq!(output.result.offset, 1);
+        assert_eq!(output.result.hits.len(), 1);
+        assert_eq!(output.result.hits[0].id, "memory:zzb-other");
+        assert_eq!(output.result.hits[0].vector_rank, Some(2));
         assert_eq!(output.report.mode, SearchMode::Vector);
         assert_eq!(output.report.query_embedding_dimension, Some(2));
+        assert_eq!(output.report.offset, 1);
         assert_eq!(output.report.rank_window, Some(2));
         assert_eq!(
             output.report.retriever_backends.get("vector"),
@@ -12833,6 +14655,7 @@ mod tests {
         assert_eq!(output.report.filtered_out_count, 2);
         assert!(output.report.persisted_segment_descriptor_used);
         assert_eq!(output.report.json()["query_embedding_dimension"], 2);
+        assert_eq!(output.report.json()["offset"], 1);
         assert_eq!(
             output.report.json()["retriever_candidate_counts"]["vector"],
             2
@@ -13622,6 +15445,7 @@ mod tests {
                 query_embedding: Some(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
                 mode: SearchMode::Vector,
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 search_fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::new(),
@@ -13673,6 +15497,7 @@ mod tests {
                 query_embedding: None,
                 mode: SearchMode::Text,
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 search_fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::new(),
@@ -13893,6 +15718,21 @@ mod tests {
             relationship_property_pruning_report_count: 0,
             route_relationship_property_pruning_evidence_ready: true,
         }
+    }
+
+    fn ready_search_route_ownership() -> NowledgeMemSearchRouteOwnershipReadinessReport {
+        nowledge_mem_search_route_ownership_readiness(
+            &nowledge_mem_search_route_ownership_all_skein(),
+            NowledgeMemSearchRouteOwnershipPolicy::production_cutover(),
+        )
+    }
+
+    fn ready_active_search_route_ownership() -> NowledgeMemActiveSearchRouteOwnershipReadinessReport
+    {
+        nowledge_mem_active_search_route_ownership_readiness(
+            &nowledge_mem_active_search_route_ownership_all_skein(),
+            NowledgeMemSearchRouteOwnershipPolicy::production_cutover(),
+        )
     }
 
     fn seed_graph_overview_memories(graph: &mut NowledgeMemGraph) {

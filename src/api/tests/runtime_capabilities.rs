@@ -1,5 +1,5 @@
 use super::*;
-use crate::{RuntimeCapabilities, RuntimeCapability, SkeinError};
+use crate::{QueryAccessControlContext, RuntimeCapabilities, RuntimeCapability, SkeinError};
 
 #[test]
 fn disabled_query_capabilities_fail_before_planning_or_catalog_mutation() {
@@ -46,6 +46,7 @@ fn disabled_search_capability_does_not_fall_back_to_another_retriever() {
             SearchMode::Text,
             crate::search::SearchQueryOptions {
                 limit: 10,
+                offset: 0,
                 rank_window: None,
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::new(),
@@ -73,8 +74,446 @@ fn disabled_background_capability_precedes_qos_admission() {
 }
 
 #[test]
+fn access_control_is_disabled_by_default_and_fails_closed_when_requested() {
+    let mut search = SearchIndex::in_memory();
+    search.set_runtime_capabilities(
+        RuntimeCapabilities::default().with(RuntimeCapability::AccessControl, false),
+    );
+    search
+        .upsert(SearchDocument {
+            id: "doc-1".to_string(),
+            title: "ACL".to_string(),
+            content: "visibility scoped".to_string(),
+            embedding: None,
+            metadata: BTreeMap::from([("space_id".to_string(), "allowed".to_string())]),
+        })
+        .unwrap();
+
+    let error = search
+        .try_search_with_options_access_control(
+            "visibility",
+            None,
+            SearchMode::Text,
+            crate::search::SearchQueryOptions {
+                limit: 10,
+                offset: 0,
+                rank_window: None,
+                fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::new(),
+                policy_epoch: None,
+            },
+            crate::search::SearchAccessControlContext::visibility_scopes(
+                7,
+                "space_id",
+                ["allowed"],
+            ),
+        )
+        .unwrap_err();
+
+    assert_capability_error(error, RuntimeCapability::AccessControl);
+}
+
+#[test]
+fn cypher_access_control_is_disabled_by_default_and_fails_before_plan_cache() {
+    let db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        runtime_capabilities: RuntimeCapabilities::default()
+            .with(RuntimeCapability::AccessControl, false),
+        ..DatabaseConfig::default()
+    });
+    let before = db.plan_cache_stats();
+
+    let error = db
+        .explain_query_with_params_access_control(
+            "MATCH (m:Memory) RETURN m.id AS id",
+            &BTreeMap::new(),
+            QueryAccessControlContext::visibility_scope(7, "space_id", "allowed"),
+        )
+        .unwrap_err();
+
+    assert_capability_error(error, RuntimeCapability::AccessControl);
+    assert_eq!(db.plan_cache_stats(), before);
+}
+
+#[test]
+fn cypher_access_control_rejects_zero_policy_epoch_before_plan_cache() {
+    let db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        runtime_capabilities: RuntimeCapabilities::default()
+            .with(RuntimeCapability::AccessControl, true),
+        ..DatabaseConfig::default()
+    });
+    let before = db.plan_cache_stats();
+
+    let error = db
+        .explain_query_with_params_access_control(
+            "MATCH (m:Memory) RETURN m.id AS id",
+            &BTreeMap::new(),
+            QueryAccessControlContext::visibility_scope(0, "space_id", "allowed"),
+        )
+        .unwrap_err();
+
+    if cfg!(feature = "acl") {
+        assert!(error
+            .to_string()
+            .contains("access control policy epoch must be non-zero"));
+    } else {
+        assert_capability_error(error, RuntimeCapability::AccessControl);
+    }
+    assert_eq!(db.plan_cache_stats(), before);
+}
+
+#[cfg(feature = "acl")]
+#[test]
+fn cypher_access_control_policy_epoch_isolates_plan_cache_entries() {
+    let db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        runtime_capabilities: RuntimeCapabilities::default()
+            .with(RuntimeCapability::AccessControl, true),
+        ..DatabaseConfig::default()
+    });
+    let query = "MATCH (m:Memory) WHERE m.id = $id RETURN m.title AS title";
+    let parameters = BTreeMap::from([("id".to_string(), Value::String("mem-1".to_string()))]);
+
+    let epoch_7_first = db
+        .explain_query_with_params_access_control(
+            query,
+            &parameters,
+            QueryAccessControlContext::visibility_scope(7, "space_id", "allowed"),
+        )
+        .unwrap();
+    let epoch_8_first = db
+        .explain_query_with_params_access_control(
+            query,
+            &parameters,
+            QueryAccessControlContext::visibility_scope(8, "space_id", "allowed"),
+        )
+        .unwrap();
+    let epoch_7_second = db
+        .explain_query_with_params_access_control(
+            query,
+            &parameters,
+            QueryAccessControlContext::visibility_scope(7, "space_id", "allowed"),
+        )
+        .unwrap();
+
+    assert_eq!(epoch_7_first.plan_cache_lookup, PlanCacheLookup::Miss);
+    assert_eq!(epoch_8_first.plan_cache_lookup, PlanCacheLookup::Miss);
+    assert_eq!(epoch_7_second.plan_cache_lookup, PlanCacheLookup::Hit);
+    assert!(epoch_7_second
+        .trace
+        .decisions
+        .iter()
+        .any(|decision| decision == "access control policy epoch 7 bound to plan cache key"));
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 2);
+    assert_eq!(stats.misses, 2);
+    assert_eq!(stats.hits, 1);
+}
+
+#[cfg(feature = "acl")]
+#[test]
+fn cypher_access_control_readiness_fails_closed_for_missing_and_stale_policy() {
+    let db = Database::new_with_config(DatabaseConfig {
+        runtime_capabilities: RuntimeCapabilities::default()
+            .with(RuntimeCapability::AccessControl, true),
+        ..DatabaseConfig::default()
+    });
+
+    let missing = db.access_control_policy_readiness(10, None);
+    assert!(!missing.ready);
+    assert!(!missing.stale_policy_state);
+    assert_eq!(missing.observed_policy_epoch, None);
+    assert!(missing
+        .blocker_codes
+        .contains(&"access_control_policy_missing".to_string()));
+
+    let stale_policy = QueryAccessControlContext::visibility_scope(9, "space_id", "allowed");
+    let stale = db.access_control_policy_readiness(10, Some(&stale_policy));
+    assert!(!stale.ready);
+    assert!(stale.stale_policy_state);
+    assert_eq!(stale.observed_policy_epoch, Some(9));
+    assert!(stale
+        .blocker_codes
+        .contains(&"access_control_policy_stale".to_string()));
+
+    let current_policy = QueryAccessControlContext::visibility_scope(10, "space_id", "allowed");
+    let current = db.access_control_policy_readiness(10, Some(&current_policy));
+    assert!(current.ready);
+    assert!(current.blocker_codes.is_empty());
+    assert_eq!(current.observed_policy_epoch, Some(10));
+}
+
+#[test]
+fn cypher_access_control_readiness_reports_disabled_capability_without_policy_inputs() {
+    let db = Database::new_with_config(DatabaseConfig {
+        runtime_capabilities: RuntimeCapabilities::default()
+            .with(RuntimeCapability::AccessControl, false),
+        ..DatabaseConfig::default()
+    });
+    let policy = QueryAccessControlContext::visibility_scope(10, "secret_space_id", "secret_space");
+
+    let readiness = db.access_control_policy_readiness(10, Some(&policy));
+
+    assert!(!readiness.ready);
+    assert!(!readiness.access_control_capability_enabled);
+    assert_eq!(readiness.required_policy_epoch, 10);
+    assert_eq!(readiness.observed_policy_epoch, Some(10));
+    assert!(readiness
+        .blocker_codes
+        .contains(&"access_control_capability_disabled".to_string()));
+    assert!(!readiness
+        .blocker_codes
+        .iter()
+        .any(|code| code.contains("secret")));
+}
+
+#[cfg(feature = "acl")]
+#[test]
+fn cypher_access_control_filters_node_scans_before_payload_projection() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        runtime_capabilities: RuntimeCapabilities::default()
+            .with(RuntimeCapability::AccessControl, true),
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 'allowed', title: 'Allowed', space_id: 'allowed'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'denied', title: 'Denied', space_id: 'denied'})")
+        .unwrap();
+
+    let output = db
+        .explain_analyze_query_with_params_access_control(
+            "MATCH (m:Memory) RETURN m.id AS id ORDER BY id",
+            &BTreeMap::new(),
+            QueryAccessControlContext::visibility_scope(7, "space_id", "allowed"),
+        )
+        .unwrap();
+
+    assert_eq!(output.output.rows.len(), 1);
+    assert_eq!(
+        output.output.rows[0].get("id"),
+        Some(&Value::String("allowed".to_string()))
+    );
+    assert!(output.physical_plan.explain(0).contains("FilterExec"));
+    assert!(output
+        .trace
+        .decisions
+        .iter()
+        .any(|decision| decision == "access control policy epoch 7 bound to plan cache key"));
+    assert!(output
+        .execution_profile
+        .scan_pruning_reports
+        .iter()
+        .any(|report| report.strategy
+            == crate::store::ScanPruningStrategy::PropertyIn {
+                property: "space_id".to_string()
+            }));
+}
+
+#[cfg(feature = "acl")]
+#[test]
+fn cypher_access_control_filters_adjacency_targets_before_projection() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        runtime_capabilities: RuntimeCapabilities::default()
+            .with(RuntimeCapability::AccessControl, true),
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 'seed', title: 'Seed', space_id: 'allowed'})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'visible', name: 'Visible', space_id: 'allowed'})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'hidden', name: 'Hidden', space_id: 'denied'})")
+        .unwrap();
+    db.query(
+        "MATCH (m:Memory {id: 'seed'}), (e:Entity {id: 'visible'}) CREATE (m)-[:MENTIONS]->(e)",
+    )
+    .unwrap();
+    db.query(
+        "MATCH (m:Memory {id: 'seed'}), (e:Entity {id: 'hidden'}) CREATE (m)-[:MENTIONS]->(e)",
+    )
+    .unwrap();
+
+    let output = db
+        .explain_analyze_query_with_params_access_control(
+            "MATCH (m:Memory {id: 'seed'})-[:MENTIONS]->(e:Entity) RETURN e.id AS id ORDER BY id",
+            &BTreeMap::new(),
+            QueryAccessControlContext::visibility_scope(7, "space_id", "allowed"),
+        )
+        .unwrap();
+
+    assert_eq!(output.output.rows.len(), 1);
+    assert_eq!(
+        output.output.rows[0].get("id"),
+        Some(&Value::String("visible".to_string()))
+    );
+    let physical_plan = output.physical_plan.explain(0);
+    assert!(physical_plan.contains("AdjacencyExpandExec"));
+    assert!(physical_plan.contains("FilterExec"));
+    assert!(output
+        .trace
+        .decisions
+        .iter()
+        .any(|decision| decision == "access control policy epoch 7 bound to plan cache key"));
+}
+
+#[cfg(feature = "acl")]
+#[test]
+fn cypher_access_control_filters_shortest_path_nodes_before_path_projection() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        runtime_capabilities: RuntimeCapabilities::default()
+            .with(RuntimeCapability::AccessControl, true),
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Entity {id: 'source', name: 'Source', space_id: 'allowed'})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'hidden', name: 'Hidden', space_id: 'denied'})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'target', name: 'Target', space_id: 'allowed'})")
+        .unwrap();
+    db.query("MATCH (source:Entity {id: 'source'}), (hidden:Entity {id: 'hidden'}) CREATE (source)-[:LINKS]->(hidden)")
+        .unwrap();
+    db.query("MATCH (hidden:Entity {id: 'hidden'}), (target:Entity {id: 'target'}) CREATE (hidden)-[:LINKS]->(target)")
+        .unwrap();
+
+    let parameters = BTreeMap::from([
+        ("from_id".to_string(), Value::String("source".to_string())),
+        ("to_id".to_string(), Value::String("target".to_string())),
+    ]);
+    let output = db
+        .explain_analyze_query_with_params_access_control(
+            "MATCH p = (a:Entity)-[:LINKS* ALL SHORTEST 1..3]-(b:Entity) WHERE a.id = $from_id AND b.id = $to_id RETURN properties(nodes(p), 'id') AS node_ids, length(p) AS hops",
+            &parameters,
+            QueryAccessControlContext::visibility_scope(7, "space_id", "allowed"),
+        )
+        .unwrap();
+
+    assert!(output.output.rows.is_empty());
+    assert!(output.physical_plan.explain(0).contains("ShortestPathExec"));
+    assert!(output
+        .physical_plan
+        .fingerprint()
+        .contains("source_visibility="));
+    assert!(output
+        .physical_plan
+        .fingerprint()
+        .contains("target_visibility="));
+}
+
+#[cfg(feature = "acl")]
+#[test]
+fn cypher_access_control_filters_graph_algorithm_nodes_before_result_projection() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        runtime_capabilities: RuntimeCapabilities::default()
+            .with(RuntimeCapability::AccessControl, true)
+            .with(RuntimeCapability::GraphAnalytics, true),
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Entity {id: 'source', name: 'Source', space_id: 'allowed'})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'hidden', name: 'Hidden', space_id: 'denied'})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'target', name: 'Target', space_id: 'allowed'})")
+        .unwrap();
+    db.query("MATCH (source:Entity {id: 'source'}), (hidden:Entity {id: 'hidden'}) CREATE (source)-[:LINKS]->(hidden)")
+        .unwrap();
+    db.query("MATCH (hidden:Entity {id: 'hidden'}), (target:Entity {id: 'target'}) CREATE (hidden)-[:LINKS]->(target)")
+        .unwrap();
+    let hidden_node = db
+        .query("MATCH (hidden:Entity {id: 'hidden'}) RETURN id(hidden) AS node")
+        .unwrap()
+        .rows[0]
+        .get("node")
+        .cloned()
+        .unwrap();
+    db.query("CALL project_graph('EntityGraph', ['Entity'], ['LINKS'])")
+        .unwrap();
+
+    let output = db
+        .explain_analyze_query_with_params_access_control(
+            "CALL page_rank('EntityGraph') RETURN node, pagerank_score",
+            &BTreeMap::new(),
+            QueryAccessControlContext::visibility_scope(7, "space_id", "allowed"),
+        )
+        .unwrap();
+
+    assert_eq!(output.output.rows.len(), 2);
+    assert!(output
+        .output
+        .rows
+        .iter()
+        .all(|row| row.get("node") != Some(&hidden_node)));
+    assert!(output.physical_plan.explain(0).contains("GraphAlgorithm"));
+    assert!(output
+        .physical_plan
+        .fingerprint()
+        .contains("node_visibility="));
+}
+
+#[cfg(feature = "acl")]
+#[test]
+fn enabled_access_control_filters_before_ranking_without_exposing_policy_inputs() {
+    let mut search = SearchIndex::in_memory();
+    search.set_runtime_capabilities(
+        RuntimeCapabilities::default().with(RuntimeCapability::AccessControl, true),
+    );
+    search
+        .upsert(SearchDocument {
+            id: "doc-1".to_string(),
+            title: "ACL allowed".to_string(),
+            content: "visibility scoped".to_string(),
+            embedding: None,
+            metadata: BTreeMap::from([("space_id".to_string(), "allowed".to_string())]),
+        })
+        .unwrap();
+    search
+        .upsert(SearchDocument {
+            id: "doc-2".to_string(),
+            title: "ACL denied".to_string(),
+            content: "visibility scoped".to_string(),
+            embedding: None,
+            metadata: BTreeMap::from([("space_id".to_string(), "denied".to_string())]),
+        })
+        .unwrap();
+
+    let result = search
+        .try_search_with_options_access_control(
+            "visibility",
+            None,
+            SearchMode::Text,
+            crate::search::SearchQueryOptions {
+                limit: 10,
+                offset: 0,
+                rank_window: None,
+                fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::new(),
+                policy_epoch: None,
+            },
+            crate::search::SearchAccessControlContext::visibility_scopes(
+                7,
+                "space_id",
+                ["allowed"],
+            ),
+        )
+        .unwrap();
+
+    assert_eq!(result.total_hits, 1);
+    assert_eq!(result.hits[0].id, "doc-1");
+    assert_eq!(result.candidate_set.policy_epoch, Some(7));
+    assert_eq!(result.candidate_set.filtered_out_count, 1);
+    assert!(result.candidate_set.metadata_filters.is_empty());
+    assert_eq!(
+        result
+            .candidate_set
+            .metadata_predicate_pushdown
+            .pushed_predicate_count,
+        1
+    );
+}
+
+#[test]
 fn runtime_capabilities_cannot_exceed_compiled_availability() {
-    let requested = RuntimeCapabilities::desktop_bound();
+    let requested =
+        RuntimeCapabilities::desktop_bound().with(RuntimeCapability::AccessControl, true);
     let db = Database::new_with_config(DatabaseConfig {
         runtime_capabilities: requested,
         ..DatabaseConfig::default()
@@ -84,11 +523,11 @@ fn runtime_capabilities_cannot_exceed_compiled_availability() {
 
     assert_eq!(
         db.runtime_capabilities(),
-        crate::compiled_runtime_capabilities()
+        requested.intersection(crate::compiled_runtime_capabilities())
     );
     assert_eq!(
         search.runtime_capabilities(),
-        crate::compiled_runtime_capabilities()
+        requested.intersection(crate::compiled_runtime_capabilities())
     );
 }
 

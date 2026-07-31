@@ -167,6 +167,7 @@ impl PhysicalPlan {
                 graph_name,
                 options,
                 score_column,
+                node_visibility_predicate,
             } => {
                 output.push_str("GraphAlgorithm(");
                 output.push_str(match algorithm {
@@ -185,6 +186,8 @@ impl PhysicalPlan {
                 }
                 output.push_str(":score=");
                 write_identifier(output, score_column);
+                output.push_str(":node_visibility=");
+                write_optional_predicate(output, node_visibility_predicate.as_ref());
                 output.push(')');
             }
             PhysicalPlan::VectorSeedScan {
@@ -927,11 +930,13 @@ impl PhysicalPlan {
                 source_variable,
                 source_label,
                 source_id,
+                source_visibility_predicate,
                 rel_type,
                 direction,
                 target_variable,
                 target_label,
                 target_id,
+                target_visibility_predicate,
                 min_hops,
                 max_hops,
                 returns,
@@ -942,6 +947,8 @@ impl PhysicalPlan {
                 write_identifier(output, source_label);
                 output.push_str(",source_id=");
                 write_value(output, source_id);
+                output.push_str(",source_visibility=");
+                write_optional_predicate(output, source_visibility_predicate.as_ref());
                 match direction {
                     RelationshipDirection::Incoming => output.push_str("<-[:"),
                     RelationshipDirection::Outgoing | RelationshipDirection::Undirected => {
@@ -963,6 +970,8 @@ impl PhysicalPlan {
                 write_identifier(output, target_label);
                 output.push_str(",target_id=");
                 write_value(output, target_id);
+                output.push_str(",target_visibility=");
+                write_optional_predicate(output, target_visibility_predicate.as_ref());
                 output.push_str(",returns=");
                 for item in returns {
                     write_identifier(output, &item.name);

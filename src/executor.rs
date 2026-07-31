@@ -895,8 +895,18 @@ fn projected_graph(
     node_labels: &[String],
     rel_types: &[String],
 ) -> ProjectedGraph {
+    projected_graph_with_node_filter(catalog, store, node_labels, rel_types, |_| true)
+}
+
+fn projected_graph_with_node_filter(
+    catalog: &Catalog,
+    store: &GraphStore,
+    node_labels: &[String],
+    rel_types: &[String],
+    include_node: impl Fn(&NodeRecord) -> bool,
+) -> ProjectedGraph {
     if node_labels.is_empty() && rel_types.is_empty() {
-        return ProjectedGraph::from_store(store, None);
+        return ProjectedGraph::from_store_with_node_filter(store, None, include_node);
     }
     let label_ids = node_labels
         .iter()
@@ -911,11 +921,20 @@ fn projected_graph(
         .collect::<Vec<_>>();
     if !rel_types.is_empty() && rel_type_ids.is_empty() {
         if label_ids.is_empty() {
-            return ProjectedGraph::from_store_without_edges(store);
+            return ProjectedGraph::from_store_without_edges_with_node_filter(store, include_node);
         }
-        return ProjectedGraph::from_store_labels_without_edges(store, &label_ids);
+        return ProjectedGraph::from_store_labels_without_edges_with_node_filter(
+            store,
+            &label_ids,
+            include_node,
+        );
     }
-    ProjectedGraph::from_store_labels_and_rel_types(store, &label_ids, &rel_type_ids)
+    ProjectedGraph::from_store_labels_and_rel_types_with_node_filter(
+        store,
+        &label_ids,
+        &rel_type_ids,
+        include_node,
+    )
 }
 
 fn execute_bindings_with_limit(
@@ -1210,23 +1229,38 @@ fn execute_bindings_with_limit(
             graph_name,
             options,
             score_column,
+            node_visibility_predicate,
         } => {
             let Some(definition) = store.projected_graph_definition(graph_name) else {
                 return Err(SkeinError::Execution(format!(
                     "projected graph '{graph_name}' does not exist"
                 )));
             };
-            let graph = store
-                .projected_graph_artifact(graph_name, definition)
-                .cloned()
-                .unwrap_or_else(|| {
-                    projected_graph(
-                        catalog,
-                        store,
-                        &definition.node_labels,
-                        &definition.rel_types,
-                    )
-                });
+            let node_visibility_filter = node_visibility_predicate
+                .as_ref()
+                .map(property_filter_from_predicate)
+                .transpose()?;
+            let graph = if let Some(filter) = node_visibility_filter.as_ref() {
+                projected_graph_with_node_filter(
+                    catalog,
+                    store,
+                    &definition.node_labels,
+                    &definition.rel_types,
+                    |node| node_matches_property_filter(node, filter),
+                )
+            } else {
+                store
+                    .projected_graph_artifact(graph_name, definition)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        projected_graph(
+                            catalog,
+                            store,
+                            &definition.node_labels,
+                            &definition.rel_types,
+                        )
+                    })
+            };
             Ok(match algorithm {
                 GraphAlgorithmKind::PageRank => graph
                     .page_rank(PageRankOptions {
@@ -1238,6 +1272,17 @@ fn execute_bindings_with_limit(
                             .unwrap_or_else(|| PageRankOptions::default().damping),
                     })
                     .into_iter()
+                    .filter(|score| {
+                        node_visibility_filter
+                            .as_ref()
+                            .map(|filter| {
+                                store
+                                    .node(score.node)
+                                    .map(|node| node_matches_property_filter(node, filter))
+                                    .unwrap_or(false)
+                            })
+                            .unwrap_or(true)
+                    })
                     .map(|score| Binding {
                         values: BTreeMap::from([
                             ("node".to_string(), Value::Int(score.node.0 as i64)),
@@ -1257,6 +1302,17 @@ fn execute_bindings_with_limit(
                             .unwrap_or_else(|| LouvainOptions::default().max_levels),
                     })
                     .into_iter()
+                    .filter(|assignment| {
+                        node_visibility_filter
+                            .as_ref()
+                            .map(|filter| {
+                                store
+                                    .node(assignment.node)
+                                    .map(|node| node_matches_property_filter(node, filter))
+                                    .unwrap_or(false)
+                            })
+                            .unwrap_or(true)
+                    })
                     .map(|assignment| Binding {
                         values: BTreeMap::from([
                             ("node".to_string(), Value::Int(assignment.node.0 as i64)),
@@ -2198,9 +2254,15 @@ fn execute_bindings_with_limit(
                 })
                 .collect())
         }
-        PhysicalPlan::AdjacencyExpandExec { input, .. } => {
-            execute_adjacency_expand(plan, input, catalog, store, context, execution_limit, None)
-        }
+        PhysicalPlan::AdjacencyExpandExec { input, .. } => execute_adjacency_expand(
+            plan,
+            input,
+            catalog,
+            store,
+            context,
+            execution_limit,
+            AdjacencyExpandFilters::default(),
+        ),
         PhysicalPlan::OptionalDegreeExec {
             source_variable,
             rel_type,
@@ -2302,29 +2364,44 @@ fn execute_bindings_with_limit(
         PhysicalPlan::ShortestPathExec {
             source_label,
             source_id,
+            source_visibility_predicate,
             rel_type,
             direction,
             target_label,
             target_id,
+            target_visibility_predicate,
             min_hops,
             max_hops,
             returns,
             ..
-        } => execute_shortest_path(
-            catalog,
-            store,
-            ShortestPathExecInput {
-                source_label,
-                source_id,
-                rel_type,
-                direction: *direction,
-                target_label,
-                target_id,
-                min_hops: *min_hops,
-                max_hops: *max_hops,
-                returns,
-            },
-        ),
+        } => {
+            let source_visibility_filter = source_visibility_predicate
+                .as_ref()
+                .map(property_filter_from_predicate)
+                .transpose()?;
+            let target_visibility_filter = target_visibility_predicate
+                .as_ref()
+                .map(property_filter_from_predicate)
+                .transpose()?;
+            execute_shortest_path(
+                catalog,
+                store,
+                ShortestPathExecInput {
+                    source_label,
+                    source_id,
+                    source_visibility_filter: source_visibility_filter.as_ref(),
+                    path_node_visibility_filter: source_visibility_filter.as_ref(),
+                    rel_type,
+                    direction: *direction,
+                    target_label,
+                    target_id,
+                    target_visibility_filter: target_visibility_filter.as_ref(),
+                    min_hops: *min_hops,
+                    max_hops: *max_hops,
+                    returns,
+                },
+            )
+        }
         PhysicalPlan::FilterExec { predicate, input } => {
             if let PhysicalPlan::SeqNodeScan { variable, label } = input.as_ref()
                 && let Ok(filter) = property_filter_from_predicate(predicate)
@@ -2353,7 +2430,41 @@ fn execute_bindings_with_limit(
                     store,
                     context,
                     execution_limit,
-                    Some(&filter),
+                    AdjacencyExpandFilters {
+                        relationship_scan_filter: Some(&filter),
+                        target_scan_filter: None,
+                    },
+                )?;
+                let mut output = Vec::new();
+                for binding in input {
+                    if evaluate_predicate(predicate, catalog, store, &binding) {
+                        output.push(binding);
+                        if execution_limit.is_reached(output.len()) {
+                            return Ok(output);
+                        }
+                    }
+                }
+                return Ok(output);
+            }
+            if let PhysicalPlan::AdjacencyExpandExec {
+                target_variable,
+                input: expand_input,
+                ..
+            } = input.as_ref()
+                && predicate_references_only_variable(predicate, target_variable)
+                && let Ok(filter) = property_filter_from_predicate(predicate)
+            {
+                let input = execute_adjacency_expand(
+                    input,
+                    expand_input,
+                    catalog,
+                    store,
+                    context,
+                    execution_limit,
+                    AdjacencyExpandFilters {
+                        relationship_scan_filter: None,
+                        target_scan_filter: Some(&filter),
+                    },
                 )?;
                 let mut output = Vec::new();
                 for binding in input {
@@ -2669,6 +2780,12 @@ fn record_node_column_lookup_scan_pruning_report(
     });
 }
 
+#[derive(Default)]
+struct AdjacencyExpandFilters<'a> {
+    relationship_scan_filter: Option<&'a PropertyFilter>,
+    target_scan_filter: Option<&'a PropertyFilter>,
+}
+
 fn execute_adjacency_expand(
     plan: &PhysicalPlan,
     input: &PhysicalPlan,
@@ -2676,7 +2793,7 @@ fn execute_adjacency_expand(
     store: &mut GraphStore,
     context: &mut ExecutionContext<'_>,
     execution_limit: ExecutionLimit,
-    relationship_scan_filter: Option<&PropertyFilter>,
+    filters: AdjacencyExpandFilters<'_>,
 ) -> Result<Vec<Binding>> {
     let PhysicalPlan::AdjacencyExpandExec {
         source_variable,
@@ -2725,7 +2842,7 @@ fn execute_adjacency_expand(
         let output_len_before = output.len();
         if rel_variable.is_some()
             || !rel_properties.is_empty()
-            || relationship_scan_filter.is_some()
+            || filters.relationship_scan_filter.is_some()
             || *direction != RelationshipDirection::Outgoing
         {
             let bound_target_id = binding.nodes.get(target_variable).map(|node| node.id);
@@ -2735,10 +2852,17 @@ fn execute_adjacency_expand(
                 rel_type_id,
                 target_label_ids.as_deref(),
                 rel_properties,
-                relationship_scan_filter,
+                filters.relationship_scan_filter,
                 *direction,
             ) {
                 if bound_target_id.is_some_and(|node_id| node_id != target.id) {
+                    continue;
+                }
+                if filters
+                    .target_scan_filter
+                    .map(|filter| !node_matches_property_filter(target, filter))
+                    .unwrap_or(false)
+                {
                     continue;
                 }
                 let mut nodes = binding.nodes.clone();
@@ -2772,6 +2896,13 @@ fn execute_adjacency_expand(
                 *max_hops,
             ) {
                 if bound_target_id.is_some_and(|node_id| node_id != target.id) {
+                    continue;
+                }
+                if filters
+                    .target_scan_filter
+                    .map(|filter| !node_matches_property_filter(target, filter))
+                    .unwrap_or(false)
+                {
                     continue;
                 }
                 let mut nodes = binding.nodes.clone();
@@ -3560,10 +3691,13 @@ fn node_properties_match(node: &NodeRecord, properties: &BTreeMap<String, Value>
 struct ShortestPathExecInput<'a> {
     source_label: &'a str,
     source_id: &'a Value,
+    source_visibility_filter: Option<&'a PropertyFilter>,
+    path_node_visibility_filter: Option<&'a PropertyFilter>,
     rel_type: &'a str,
     direction: RelationshipDirection,
     target_label: &'a str,
     target_id: &'a Value,
+    target_visibility_filter: Option<&'a PropertyFilter>,
     min_hops: usize,
     max_hops: usize,
     returns: &'a [ShortestPathProjection],
@@ -3584,6 +3718,17 @@ fn execute_shortest_path(
     else {
         return Ok(Vec::new());
     };
+    if input
+        .source_visibility_filter
+        .map(|filter| !node_matches_property_filter(source, filter))
+        .unwrap_or(false)
+        || input
+            .target_visibility_filter
+            .map(|filter| !node_matches_property_filter(target, filter))
+            .unwrap_or(false)
+    {
+        return Ok(Vec::new());
+    }
     let rel_type_id = if input.rel_type.is_empty() {
         None
     } else {
@@ -3594,12 +3739,15 @@ fn execute_shortest_path(
     };
     let paths = all_shortest_paths(
         store,
-        source.id,
-        target.id,
-        rel_type_id,
-        input.direction,
-        input.min_hops,
-        input.max_hops,
+        ShortestPathSearch {
+            source: source.id,
+            target: target.id,
+            rel_type_id,
+            direction: input.direction,
+            min_hops: input.min_hops,
+            max_hops: input.max_hops,
+            path_node_visibility_filter: input.path_node_visibility_filter,
+        },
     );
     paths
         .iter()
@@ -3622,43 +3770,52 @@ fn find_node_by_id_property<'a>(
     store.seek_nodes_by_property(label_id, "id", id).next()
 }
 
-fn all_shortest_paths(
-    store: &GraphStore,
+struct ShortestPathSearch<'a> {
     source: NodeId,
     target: NodeId,
     rel_type_id: Option<crate::schema::RelTypeId>,
     direction: RelationshipDirection,
     min_hops: usize,
     max_hops: usize,
-) -> Vec<Vec<NodeId>> {
-    let mut queue = VecDeque::from([vec![source]]);
+    path_node_visibility_filter: Option<&'a PropertyFilter>,
+}
+
+fn all_shortest_paths(store: &GraphStore, search: ShortestPathSearch<'_>) -> Vec<Vec<NodeId>> {
+    let mut queue = VecDeque::from([vec![search.source]]);
     let mut results = Vec::new();
     let mut found_depth = None;
     while let Some(path) = queue.pop_front() {
         let depth = path.len() - 1;
-        if found_depth.is_some_and(|found| depth >= found) || depth == max_hops {
+        if found_depth.is_some_and(|found| depth >= found) || depth == search.max_hops {
             continue;
         }
         let current = *path.last().expect("path is never empty");
         for (_, next) in one_hop_relationships(
             store,
             current,
-            rel_type_id,
+            search.rel_type_id,
             None,
             &BTreeMap::new(),
             None,
-            direction,
+            search.direction,
         ) {
+            if search
+                .path_node_visibility_filter
+                .map(|filter| !node_matches_property_filter(next, filter))
+                .unwrap_or(false)
+            {
+                continue;
+            }
             if path.contains(&next.id) {
                 continue;
             }
             let next_depth = depth + 1;
             let mut next_path = path.clone();
             next_path.push(next.id);
-            if next.id == target && next_depth >= min_hops {
+            if next.id == search.target && next_depth >= search.min_hops {
                 found_depth = Some(next_depth);
                 results.push(next_path);
-            } else if found_depth.is_none() && next_depth < max_hops {
+            } else if found_depth.is_none() && next_depth < search.max_hops {
                 queue.push_back(next_path);
             }
         }
@@ -4034,6 +4191,143 @@ fn collect_one_hop_relationships<'a>(
             matches.push((relationship, target));
         }
     }
+}
+
+fn node_matches_property_filter(node: &NodeRecord, filter: &PropertyFilter) -> bool {
+    property_filter_matches_values(filter, node.id.0, &node.properties)
+}
+
+fn property_filter_matches_values(
+    filter: &PropertyFilter,
+    id: u64,
+    properties: &BTreeMap<String, Value>,
+) -> bool {
+    match filter {
+        PropertyFilter::And(filters) => filters
+            .iter()
+            .all(|filter| property_filter_matches_values(filter, id, properties)),
+        PropertyFilter::Or(filters) => filters
+            .iter()
+            .any(|filter| property_filter_matches_values(filter, id, properties)),
+        PropertyFilter::Not(filter) => !property_filter_matches_values(filter, id, properties),
+        PropertyFilter::IdEq { value } => &Value::Int(id as i64) == value,
+        PropertyFilter::IdNotEq { value } => &Value::Int(id as i64) != value,
+        PropertyFilter::IdRange { lower, upper } => {
+            value_matches_range(&Value::Int(id as i64), lower.as_ref(), upper.as_ref())
+        }
+        PropertyFilter::IdIn { values } => {
+            values.iter().any(|value| value == &Value::Int(id as i64))
+        }
+        PropertyFilter::Eq { property, value } => properties
+            .get(property)
+            .map(|actual| actual == value)
+            .unwrap_or(false),
+        PropertyFilter::NotEq { property, value } => properties
+            .get(property)
+            .map(|actual| actual != value)
+            .unwrap_or(false),
+        PropertyFilter::IsNull { property } => properties
+            .get(property)
+            .map(|actual| actual == &Value::Null)
+            .unwrap_or(true),
+        PropertyFilter::IsNotNull { property } => properties
+            .get(property)
+            .map(|actual| actual != &Value::Null)
+            .unwrap_or(false),
+        PropertyFilter::In { property, values } => properties
+            .get(property)
+            .map(|actual| values.iter().any(|value| value == actual))
+            .unwrap_or(false),
+        PropertyFilter::ListContains { property, value } => properties
+            .get(property)
+            .and_then(|actual| match actual {
+                Value::List(values) => Some(values.iter().any(|actual| actual == value)),
+                _ => None,
+            })
+            .unwrap_or(false),
+        PropertyFilter::Contains { property, value } => properties
+            .get(property)
+            .and_then(|actual| match actual {
+                Value::String(actual) => Some(actual.contains(value)),
+                _ => None,
+            })
+            .unwrap_or(false),
+        PropertyFilter::StartsWith { property, value } => properties
+            .get(property)
+            .and_then(|actual| match actual {
+                Value::String(actual) => Some(actual.starts_with(value)),
+                _ => None,
+            })
+            .unwrap_or(false),
+        PropertyFilter::EndsWith { property, value } => properties
+            .get(property)
+            .and_then(|actual| match actual {
+                Value::String(actual) => Some(actual.ends_with(value)),
+                _ => None,
+            })
+            .unwrap_or(false),
+        PropertyFilter::RegexMatch { property, pattern } => properties
+            .get(property)
+            .and_then(|actual| match actual {
+                Value::String(actual) => Some(pattern.is_match(actual)),
+                _ => None,
+            })
+            .unwrap_or(false),
+        PropertyFilter::DefaultIfNullOrEq {
+            property,
+            empty,
+            default,
+            value,
+            negated,
+        } => {
+            let actual = properties.get(property).unwrap_or(&Value::Null);
+            let normalized = if actual == &Value::Null || actual == empty {
+                default
+            } else {
+                actual
+            };
+            let matches = normalized == value;
+            if *negated {
+                !matches
+            } else {
+                matches
+            }
+        }
+        PropertyFilter::Range {
+            property,
+            lower,
+            upper,
+        } => properties
+            .get(property)
+            .map(|actual| value_matches_range(actual, lower.as_ref(), upper.as_ref()))
+            .unwrap_or(false),
+    }
+}
+
+fn value_matches_range(
+    actual: &Value,
+    lower: Option<&ValueRangeBound>,
+    upper: Option<&ValueRangeBound>,
+) -> bool {
+    let lower_matches = lower
+        .map(|(lower, inclusive)| {
+            if *inclusive {
+                compare_property_values(actual, ComparisonOp::Gte, lower)
+            } else {
+                compare_property_values(actual, ComparisonOp::Gt, lower)
+            }
+        })
+        .unwrap_or(true);
+    let upper_matches = upper
+        .map(|(upper, inclusive)| {
+            if *inclusive {
+                compare_property_values(actual, ComparisonOp::Lte, upper)
+            } else {
+                compare_property_values(actual, ComparisonOp::Lt, upper)
+            }
+        })
+        .unwrap_or(true);
+    lower_matches && upper_matches
 }
 
 fn relationship_properties_match(

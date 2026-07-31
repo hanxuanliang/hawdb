@@ -138,6 +138,44 @@ fn database_facade_builds_search_projection_delta_request_from_changefeed() {
 }
 
 #[test]
+fn search_projection_changefeed_tracks_has_label_relationship_metadata() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'm1', title: 'Labelled', content: 'label delta retrieval'})")
+        .unwrap();
+    db.query("CREATE (:Label {id: 'database', name: 'Database', canonical_name: 'database'})")
+        .unwrap();
+
+    let mut search_index = SearchIndex::in_memory();
+    db.rebuild_search_projection(&mut search_index, SearchRebuildOptions::default())
+        .unwrap();
+    assert!(search_index
+        .document("memory:m1")
+        .and_then(|document| document.metadata.get("labels"))
+        .is_none());
+
+    db.query(
+        "MATCH (m:Memory {id: 'm1'}), (l:Label {id: 'database'}) CREATE (m)-[:HAS_LABEL]->(l)",
+    )
+    .unwrap();
+    let request = db
+        .build_search_projection_graph_delta_request_from_freshness(&search_index, Some(2))
+        .unwrap()
+        .unwrap();
+    assert_eq!(request.upsert_node_ids, vec![0]);
+    assert!(request.delete_document_ids.is_empty());
+
+    db.apply_search_projection_graph_delta(&mut search_index, request)
+        .unwrap();
+    assert_eq!(
+        search_index
+            .document("memory:m1")
+            .and_then(|document| document.metadata.get("labels"))
+            .map(String::as_str),
+        Some(r#"["database"]"#)
+    );
+}
+
+#[test]
 fn durable_search_projection_catch_up_resumes_in_bounded_batches() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 'm1', title: 'First'})")
@@ -220,6 +258,146 @@ fn durable_search_projection_catch_up_skips_nodes_deleted_before_projection() {
     assert_eq!(report.end_durable_epoch, Some(db.commit_epoch()));
     assert!(search_index.document("memory:m1").is_none());
     std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn durable_search_projection_catch_up_converges_stale_update_delete_sequence() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'm1', title: 'Original', content: 'stale projection'})")
+        .unwrap();
+    let path = unique_test_dir("durable_search_projection_catch_up_stale_update_delete");
+    let mut search_index = SearchIndex::open(&path).unwrap();
+
+    let initial = db
+        .catch_up_search_projection(&mut search_index, 8, 1)
+        .unwrap();
+    assert!(initial.complete);
+    assert_eq!(initial.end_durable_epoch, Some(1));
+    assert!(search_index.document("memory:m1").is_some());
+
+    db.query("MATCH (m:Memory {id: 'm1'}) SET m.id = 'm2'")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'm2'}) SET m.title = 'Updated'")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'm2'}) DETACH DELETE m")
+        .unwrap();
+
+    let report = db
+        .catch_up_search_projection(&mut search_index, 8, 1)
+        .unwrap();
+
+    assert!(report.complete);
+    assert_eq!(report.start_durable_epoch, Some(1));
+    assert_eq!(report.end_durable_epoch, Some(db.commit_epoch()));
+    assert_eq!(report.applied_batch_count, 1);
+    assert_eq!(report.applied_operation_count, 2);
+    assert!(search_index.document("memory:m1").is_none());
+    assert!(search_index.document("memory:m2").is_none());
+    assert!(search_index
+        .search("stale projection", None, SearchMode::Text, 10)
+        .is_empty());
+    assert_eq!(
+        search_index
+            .projection_freshness()
+            .durable_source_graph_commit_epoch,
+        Some(db.commit_epoch())
+    );
+
+    drop(search_index);
+    let reopened = SearchIndex::open(&path).unwrap();
+    assert!(reopened.document("memory:m1").is_none());
+    assert!(reopened.document("memory:m2").is_none());
+    assert_eq!(
+        reopened
+            .projection_freshness()
+            .durable_source_graph_commit_epoch,
+        Some(db.commit_epoch())
+    );
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn search_projection_changefeed_does_not_split_one_commit_across_batches() {
+    let mut db = Database::new();
+    let mut transaction = db.begin_transaction();
+    transaction
+        .query("CREATE (:Memory {id: 'm1', title: 'First'})")
+        .unwrap();
+    transaction
+        .query("CREATE (:Memory {id: 'm2', title: 'Second'})")
+        .unwrap();
+    transaction.commit().unwrap();
+
+    assert_eq!(db.commit_epoch(), 1);
+    let error = db
+        .build_search_projection_graph_delta_request_after(0, Some(1))
+        .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("exceeding configured per-batch limit 1"));
+    assert!(error.to_string().contains("commit epoch 1"));
+}
+
+#[test]
+fn search_projection_changefeed_keeps_source_ingest_composite_commit_atomic() {
+    let mut db = Database::new();
+    let mut transaction = db.begin_transaction();
+    transaction
+        .query(
+            "CREATE (:Source {id: 'source-v1', original_name: 'source.md', lifecycle_state: 'parsed', space_id: 'default', version: 1})",
+        )
+        .unwrap();
+    transaction
+        .query(
+            "CREATE (:Source {id: 'source-v2', original_name: 'source.md', lifecycle_state: 'indexed', space_id: 'default', version: 2})",
+        )
+        .unwrap();
+    transaction
+        .query(
+            "MATCH (newer:Source {id: 'source-v2'}), (older:Source {id: 'source-v1'})
+             CREATE (newer)-[:REVISED_AS {revision_type: 'content_refresh', detected_by: 'source_ingest'}]->(older)",
+        )
+        .unwrap();
+    transaction.commit().unwrap();
+
+    assert_eq!(db.commit_epoch(), 1);
+    let too_small = db
+        .build_search_projection_graph_delta_request_after(0, Some(1))
+        .unwrap_err();
+    assert!(too_small
+        .to_string()
+        .contains("exceeding configured per-batch limit 1"));
+    assert!(too_small.to_string().contains("commit epoch 1"));
+
+    let request = db
+        .build_search_projection_graph_delta_request_after(0, Some(2))
+        .unwrap()
+        .unwrap();
+    assert_eq!(request.upsert_node_ids, vec![0, 1]);
+    assert!(request.delete_document_ids.is_empty());
+    assert_eq!(request.complete_through_graph_commit_epoch, Some(1));
+
+    let mut search_index = SearchIndex::in_memory();
+    let report = db
+        .apply_search_projection_graph_delta(&mut search_index, request)
+        .unwrap();
+    assert_eq!(report.operation_count, 2);
+    assert_eq!(report.upserted_documents, 2);
+    assert_eq!(report.source_graph_commit_epoch_after, Some(1));
+    assert_eq!(
+        search_index
+            .projection_freshness()
+            .source_graph_commit_epoch,
+        Some(1)
+    );
+    assert_eq!(
+        search_index
+            .document("source:source-v2")
+            .and_then(|document| document.metadata.get("lifecycle_state"))
+            .map(String::as_str),
+        Some("indexed")
+    );
 }
 
 #[test]
@@ -350,6 +528,81 @@ fn search_projection_changefeed_status_reports_resume_window_and_mutation_identi
     assert!(status.can_resume_after(1));
     assert!(status.can_resume_after(3));
     assert!(!status.can_resume_after(4));
+}
+
+#[test]
+fn search_projection_changefeed_readiness_reports_incremental_window() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_search_projection_change_log_entries: Some(2),
+        ..DatabaseConfig::default()
+    });
+    let mut search_index = SearchIndex::in_memory();
+    db.query("CREATE (:Memory {id: 'm1', title: 'First'})")
+        .unwrap();
+    let request = db
+        .build_search_projection_graph_delta_request_after(0, Some(1))
+        .unwrap()
+        .unwrap();
+    db.apply_search_projection_graph_delta(&mut search_index, request)
+        .unwrap();
+    for id in ["m2", "m3"] {
+        db.query_with_params(
+            "CREATE (:Memory {id: $id, title: $id})",
+            &BTreeMap::from([("id".to_string(), Value::String(id.to_string()))]),
+        )
+        .unwrap();
+    }
+
+    let readiness = db.search_projection_changefeed_readiness(&search_index, false, Some(2));
+
+    assert!(readiness.ready);
+    assert!(readiness.incremental_ready);
+    assert_eq!(readiness.graph_commit_epoch, 3);
+    assert_eq!(readiness.projection_source_graph_commit_epoch, Some(1));
+    assert_eq!(readiness.resume_floor_commit_epoch, 1);
+    assert_eq!(readiness.max_operations, Some(2));
+    assert!(readiness.blocker_codes.is_empty());
+}
+
+#[test]
+fn search_projection_changefeed_readiness_fails_closed_for_expired_floor() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_search_projection_change_log_entries: Some(1),
+        ..DatabaseConfig::default()
+    });
+    for id in ["m1", "m2", "m3"] {
+        db.query_with_params(
+            "CREATE (:Memory {id: $id, title: $id})",
+            &BTreeMap::from([("id".to_string(), Value::String(id.to_string()))]),
+        )
+        .unwrap();
+    }
+    let search_index = SearchIndex::in_memory();
+
+    let readiness = db.search_projection_changefeed_readiness(&search_index, false, Some(2));
+
+    assert!(!readiness.ready);
+    assert!(!readiness.incremental_ready);
+    assert_eq!(readiness.resume_floor_commit_epoch, 2);
+    assert!(readiness
+        .blocker_codes
+        .contains(&"search_projection_changefeed_resume_floor_expired".to_string()));
+}
+
+#[test]
+fn search_projection_changefeed_readiness_can_require_restart_recovery() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'm1', title: 'First'})")
+        .unwrap();
+    let search_index = SearchIndex::in_memory();
+
+    let readiness = db.search_projection_changefeed_readiness(&search_index, true, Some(1));
+
+    assert!(!readiness.ready);
+    assert!(!readiness.restart_recoverable);
+    assert!(readiness
+        .blocker_codes
+        .contains(&"search_projection_changefeed_not_restart_recoverable".to_string()));
 }
 
 #[test]

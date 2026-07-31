@@ -275,6 +275,78 @@ fn generated_graph_rag_query_validates_parameters_before_canonical_execution() {
     assert!(error
         .to_string()
         .contains("GraphRAG query parameter memory_id must be string"));
+
+    let error = read
+        .query_generated_graph_rag(&generated, &BTreeMap::new())
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("missing GraphRAG query parameter: memory_id"));
+
+    let error = read
+        .query_generated_graph_rag(
+            &generated,
+            &BTreeMap::from([
+                (
+                    "memory_id".to_string(),
+                    Value::String("memory-1".to_string()),
+                ),
+                ("invented".to_string(), Value::Bool(true)),
+            ]),
+        )
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("unexpected GraphRAG query parameter: invented"));
+
+    let generated_in = context
+        .generate_query(&GraphRagQueryDraft {
+            schema_fingerprint: context.fingerprint,
+            pattern: GraphRagQueryPattern::Node {
+                label: "Memory".to_string(),
+            },
+            predicates: vec![GraphRagQueryPredicate {
+                binding: GraphRagQueryBinding::Source,
+                property: "id".to_string(),
+                operator: GraphRagQueryPredicateOperator::In,
+                parameter: Some("memory_ids".to_string()),
+            }],
+            projections: vec![GraphRagQueryProjection {
+                binding: GraphRagQueryBinding::Source,
+                property: "id".to_string(),
+                alias: "id".to_string(),
+            }],
+            limit: 5,
+        })
+        .unwrap();
+    assert_eq!(generated_in.required_parameters(), ["memory_ids"]);
+
+    let error = read
+        .query_generated_graph_rag(
+            &generated_in,
+            &BTreeMap::from([(
+                "memory_ids".to_string(),
+                Value::String("memory-1".to_string()),
+            )]),
+        )
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("GraphRAG query parameter memory_ids must be list<string>"));
+
+    let output = read
+        .query_generated_graph_rag(
+            &generated_in,
+            &BTreeMap::from([(
+                "memory_ids".to_string(),
+                Value::List(vec![Value::String("memory-1".to_string())]),
+            )]),
+        )
+        .unwrap();
+    assert_eq!(
+        output.rows[0].get("id"),
+        Some(&Value::String("memory-1".to_string()))
+    );
 }
 
 #[test]

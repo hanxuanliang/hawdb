@@ -228,3 +228,450 @@ fn transaction_merge_relationship_deduplicates_pending_pattern() {
     }
     std::fs::remove_dir_all(path).unwrap();
 }
+
+#[test]
+fn transaction_relationship_replay_sees_pending_node_upsert() {
+    let mut db = Database::new();
+    db.query("CREATE (:Source {id: 'source-v1'})").unwrap();
+
+    for _ in 0..2 {
+        let commit_epoch_before = db.store.commit_epoch();
+        let mut transaction = db.begin_transaction();
+        transaction
+            .query("MERGE (:Source {id: 'source-v2'})")
+            .unwrap();
+        transaction
+            .query(
+                "MATCH (:Source {id: 'source-v2'})-[revision:REVISED_AS]->(:Source {id: 'source-v1'})
+                 DELETE revision",
+            )
+            .unwrap();
+        transaction
+            .query(
+                "MATCH (newer:Source {id: 'source-v2'}), (older:Source {id: 'source-v1'})
+                 CREATE (newer)-[:REVISED_AS {revision_type: 'update'}]->(older)",
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+        assert_eq!(db.store.commit_epoch(), commit_epoch_before + 1);
+    }
+
+    let output = db
+        .query(
+            "MATCH (newer:Source {id: 'source-v2'})-[revision:REVISED_AS]->(older:Source {id: 'source-v1'})
+             RETURN revision.revision_type AS revision_type",
+        )
+        .unwrap();
+    assert_eq!(
+        output.rows,
+        vec![BTreeMap::from([(
+            "revision_type".to_string(),
+            Value::String("update".to_string()),
+        )])]
+    );
+}
+
+#[test]
+fn transaction_set_updates_pending_node_before_relationship_match() {
+    let path = unique_test_dir("pending_set_before_relationship_match");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Source {id: 'source-v1'})").unwrap();
+        let mut transaction = db.begin_transaction();
+        transaction
+            .query("MERGE (:Source {id: 'source-v2'})")
+            .unwrap();
+        transaction
+            .query(
+                "MATCH (s:Source {id: 'source-v2'})
+                 SET s.lifecycle_state = 'indexed', s.version = s.version + 1",
+            )
+            .unwrap();
+        transaction
+            .query(
+                "MATCH (newer:Source {id: 'source-v2', lifecycle_state: 'indexed'}), (older:Source {id: 'source-v1'})
+                 CREATE (newer)-[:REVISED_AS {revision_type: 'update'}]->(older)",
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+    }
+
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert_eq!(wal.lines().count(), 2);
+    assert_eq!(wal.matches("create_node").count(), 2);
+    assert_eq!(wal.matches("set_node_property").count(), 0);
+    assert_eq!(wal.matches("create_rel").count(), 1);
+
+    {
+        let mut db = Database::open(&path).unwrap();
+        let output = db
+            .query(
+                "MATCH (newer:Source {id: 'source-v2'})-[revision:REVISED_AS]->(:Source {id: 'source-v1'})
+                 RETURN newer.lifecycle_state AS state, newer.version AS version, revision.revision_type AS revision_type",
+            )
+            .unwrap();
+        assert_eq!(
+            output.rows,
+            vec![BTreeMap::from([
+                ("state".to_string(), Value::String("indexed".to_string())),
+                ("version".to_string(), Value::Int(1)),
+                (
+                    "revision_type".to_string(),
+                    Value::String("update".to_string())
+                ),
+            ])]
+        );
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn transaction_set_updates_pending_relationship_properties() {
+    let path = unique_test_dir("pending_relationship_set");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Source {id: 'source-v1'})").unwrap();
+        db.query("CREATE (:Source {id: 'source-v2'})").unwrap();
+        let mut transaction = db.begin_transaction();
+        transaction
+            .query(
+                "MATCH (newer:Source {id: 'source-v2'}), (older:Source {id: 'source-v1'})
+                 CREATE (newer)-[:REVISED_AS {revision_type: 'update'}]->(older)",
+            )
+            .unwrap();
+        transaction
+            .query(
+                "MATCH (:Source {id: 'source-v2'})-[revision:REVISED_AS {revision_type: 'update'}]->(:Source {id: 'source-v1'})
+                 SET revision.detected_by = 'filename_match'",
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+    }
+
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert_eq!(wal.matches("create_rel").count(), 1);
+    assert_eq!(wal.matches("set_rel_property").count(), 0);
+
+    {
+        let mut db = Database::open(&path).unwrap();
+        let output = db
+            .query(
+                "MATCH (:Source {id: 'source-v2'})-[revision:REVISED_AS]->(:Source {id: 'source-v1'})
+                 RETURN revision.revision_type AS revision_type, revision.detected_by AS detected_by",
+            )
+            .unwrap();
+        assert_eq!(
+            output.rows,
+            vec![BTreeMap::from([
+                (
+                    "detected_by".to_string(),
+                    Value::String("filename_match".to_string())
+                ),
+                (
+                    "revision_type".to_string(),
+                    Value::String("update".to_string())
+                ),
+            ])]
+        );
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn transaction_delete_removes_pending_relationship_create() {
+    let path = unique_test_dir("pending_relationship_delete");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Source {id: 'source-v1'})").unwrap();
+        db.query("CREATE (:Source {id: 'source-v2'})").unwrap();
+        let commit_epoch_before = db.commit_epoch();
+        let mut transaction = db.begin_transaction();
+        transaction
+            .query(
+                "MATCH (newer:Source {id: 'source-v2'}), (older:Source {id: 'source-v1'})
+                 CREATE (newer)-[:REVISED_AS {revision_type: 'update'}]->(older)",
+            )
+            .unwrap();
+        transaction
+            .query(
+                "MATCH (:Source {id: 'source-v2'})-[revision:REVISED_AS {revision_type: 'update'}]->(:Source {id: 'source-v1'})
+                 DELETE revision",
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+        assert_eq!(db.commit_epoch(), commit_epoch_before);
+    }
+
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert_eq!(wal.matches("create_rel").count(), 0);
+    assert_eq!(wal.matches("delete_rel").count(), 0);
+
+    {
+        let mut db = Database::open(&path).unwrap();
+        let output = db
+            .query(
+                "MATCH (:Source {id: 'source-v2'})-[revision:REVISED_AS]->(:Source {id: 'source-v1'})
+                 RETURN revision.revision_type AS revision_type",
+            )
+            .unwrap();
+        assert!(output.rows.is_empty());
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn transaction_delete_removes_pending_node_create() {
+    let path = unique_test_dir("pending_node_delete");
+    {
+        let mut db = Database::open(&path).unwrap();
+        let commit_epoch_before = db.commit_epoch();
+        let mut transaction = db.begin_transaction();
+        transaction
+            .query("MERGE (s:Source {id: 'source-temp'})")
+            .unwrap();
+        transaction
+            .query("MATCH (s:Source {id: 'source-temp'}) SET s.lifecycle_state = 'indexed'")
+            .unwrap();
+        transaction
+            .query("MATCH (s:Source {id: 'source-temp'}) DELETE s")
+            .unwrap();
+        transaction.commit().unwrap();
+        assert_eq!(db.commit_epoch(), commit_epoch_before);
+    }
+
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap_or_default();
+    assert!(!wal.contains("source-temp"));
+    assert_eq!(wal.matches("create_node").count(), 0);
+    assert_eq!(wal.matches("set_node_property").count(), 0);
+    assert_eq!(wal.matches("delete_node").count(), 0);
+
+    {
+        let mut db = Database::open(&path).unwrap();
+        let output = db
+            .query("MATCH (s:Source {id: 'source-temp'}) RETURN s.id AS id")
+            .unwrap();
+        assert!(output.rows.is_empty());
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn transaction_delete_pending_node_rejects_pending_relationship_without_detach() {
+    let mut db = Database::new();
+    let mut transaction = db.begin_transaction();
+    transaction
+        .query(
+            "MERGE (:Source {id: 'source-v2'})-[:REVISED_AS {revision_type: 'update'}]->(:Source {id: 'source-v1'})",
+        )
+        .unwrap();
+    transaction
+        .query("MATCH (s:Source {id: 'source-v2'}) DELETE s")
+        .unwrap();
+    let error = transaction.commit().unwrap_err();
+    assert!(error.to_string().contains("DETACH DELETE"));
+}
+
+#[test]
+fn transaction_detach_delete_removes_pending_node_and_relationship_create() {
+    let path = unique_test_dir("pending_node_detach_delete");
+    {
+        let mut db = Database::open(&path).unwrap();
+        let commit_epoch_before = db.commit_epoch();
+        let mut transaction = db.begin_transaction();
+        transaction
+            .query(
+                "MERGE (:Source {id: 'source-v2'})-[:REVISED_AS {revision_type: 'update'}]->(:Source {id: 'source-v1'})",
+            )
+            .unwrap();
+        transaction
+            .query("MATCH (s:Source {id: 'source-v2'}) DETACH DELETE s")
+            .unwrap();
+        transaction.commit().unwrap();
+        assert_eq!(db.commit_epoch(), commit_epoch_before + 1);
+    }
+
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert!(!wal.contains("source-v2"));
+    assert_eq!(wal.matches("create_rel").count(), 0);
+
+    {
+        let mut db = Database::open(&path).unwrap();
+        let source = db
+            .query("MATCH (s:Source {id: 'source-v2'}) RETURN s.id AS id")
+            .unwrap();
+        assert!(source.rows.is_empty());
+        let relationship = db
+            .query("MATCH (:Source)-[revision:REVISED_AS]->(:Source) RETURN revision.revision_type AS revision_type")
+            .unwrap();
+        assert!(relationship.rows.is_empty());
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn transaction_detach_delete_target_nodes_sees_pending_relationship() {
+    let path = unique_test_dir("pending_relationship_target_delete");
+    {
+        let mut db = Database::open(&path).unwrap();
+        let commit_epoch_before = db.commit_epoch();
+        let mut transaction = db.begin_transaction();
+        transaction
+            .query("MERGE (:Source {id: 'source-v2'})-[:REVISED_AS]->(:Source {id: 'source-v1'})")
+            .unwrap();
+        transaction
+            .query(
+                "MATCH (newer:Source {id: 'source-v2'})-[:REVISED_AS]->(older:Source {id: 'source-v1'})
+                 DETACH DELETE older",
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+        assert_eq!(db.commit_epoch(), commit_epoch_before + 1);
+    }
+
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap_or_default();
+    assert!(!wal.contains("source-v1"));
+    assert_eq!(wal.matches("create_rel").count(), 0);
+
+    {
+        let mut db = Database::open(&path).unwrap();
+        let deleted_target = db
+            .query("MATCH (s:Source {id: 'source-v1'}) RETURN s.id AS id")
+            .unwrap();
+        assert!(deleted_target.rows.is_empty());
+        let source = db
+            .query("MATCH (s:Source {id: 'source-v2'}) RETURN s.id AS id")
+            .unwrap();
+        assert_eq!(source.rows.len(), 1);
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn transaction_retarget_to_matched_pending_target_sees_pending_old_relationship() {
+    let path = unique_test_dir("pending_retarget_to_matched_target");
+    {
+        let mut db = Database::open(&path).unwrap();
+        let mut transaction = db.begin_transaction();
+        transaction
+            .query("MERGE (:Memory {id: 'm1'})-[:HAS_LABEL]->(:Label {id: 'src'})")
+            .unwrap();
+        transaction.query("MERGE (:Label {id: 'dst'})").unwrap();
+        transaction
+            .query(
+                "MATCH (m:Memory {id: 'm1'})-[:HAS_LABEL]->(src:Label {id: 'src'})
+                 MATCH (dst:Label {id: 'dst'})
+                 MERGE (m)-[r:HAS_LABEL]->(dst)
+                 ON CREATE SET r.assigned_by = 'label_merge'",
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+    }
+
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert_eq!(wal.lines().count(), 1);
+    assert_eq!(wal.matches("create_node").count(), 3);
+    assert_eq!(wal.matches("create_rel").count(), 2);
+
+    {
+        let mut db = Database::open(&path).unwrap();
+        let output = db
+            .query(
+                "MATCH (:Memory {id: 'm1'})-[r:HAS_LABEL]->(label:Label)
+                 RETURN count(r) AS total, min(r.assigned_by) AS assigned_by",
+            )
+            .unwrap();
+        assert_eq!(output.rows[0].get("total"), Some(&Value::Int(2)));
+        assert_eq!(
+            output.rows[0].get("assigned_by"),
+            Some(&Value::String("label_merge".to_string()))
+        );
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn transaction_retarget_from_pending_source_sees_pending_old_relationship() {
+    let path = unique_test_dir("pending_retarget_from_matched_source");
+    {
+        let mut db = Database::open(&path).unwrap();
+        let mut transaction = db.begin_transaction();
+        transaction
+            .query("MERGE (:Memory {id: 'old'})-[:HAS_LABEL]->(:Label {id: 'shared'})")
+            .unwrap();
+        transaction.query("MERGE (:Memory {id: 'new'})").unwrap();
+        transaction
+            .query(
+                "MATCH (old:Memory {id: 'old'})-[:HAS_LABEL]->(label:Label {id: 'shared'}),
+                       (new:Memory {id: 'new'})
+                 MERGE (new)-[r:HAS_LABEL]->(label)
+                 ON CREATE SET r.assigned_by = 'inherit'",
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+    }
+
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert_eq!(wal.lines().count(), 1);
+    assert_eq!(wal.matches("create_node").count(), 3);
+    assert_eq!(wal.matches("create_rel").count(), 2);
+
+    {
+        let mut db = Database::open(&path).unwrap();
+        let output = db
+            .query(
+                "MATCH (:Memory {id: 'new'})-[r:HAS_LABEL]->(:Label {id: 'shared'})
+                 RETURN r.assigned_by AS assigned_by",
+            )
+            .unwrap();
+        assert_eq!(
+            output.rows,
+            vec![BTreeMap::from([(
+                "assigned_by".to_string(),
+                Value::String("inherit".to_string())
+            )])]
+        );
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn transaction_copy_merge_sees_pending_matched_relationship_properties() {
+    let path = unique_test_dir("pending_copy_merge_relationship");
+    {
+        let mut db = Database::open(&path).unwrap();
+        let mut transaction = db.begin_transaction();
+        transaction
+            .query(
+                "MERGE (:Memory {id: 'child'})-[:CRYSTALLIZED_FROM {contribution_weight: 7}]->(:Memory {id: 'source'})",
+            )
+            .unwrap();
+        transaction
+            .query(
+                "MATCH (child:Memory {id: 'child'})-[old:CRYSTALLIZED_FROM]->(source:Memory {id: 'source'})
+                 MERGE (child)-[new:SYNTHESIZED_FROM]->(source)
+                 ON CREATE SET new.weight = old.contribution_weight",
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+    }
+
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert_eq!(wal.lines().count(), 1);
+    assert_eq!(wal.matches("create_node").count(), 2);
+    assert_eq!(wal.matches("create_rel").count(), 2);
+
+    {
+        let mut db = Database::open(&path).unwrap();
+        let output = db
+            .query(
+                "MATCH (:Memory {id: 'child'})-[new:SYNTHESIZED_FROM]->(:Memory {id: 'source'})
+                 RETURN new.weight AS weight",
+            )
+            .unwrap();
+        assert_eq!(
+            output.rows,
+            vec![BTreeMap::from([("weight".to_string(), Value::Int(7))])]
+        );
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}

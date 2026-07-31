@@ -1,5 +1,5 @@
 use crate::schema::RelTypeId;
-use crate::store::{GraphStore, NodeId};
+use crate::store::{GraphStore, NodeId, NodeRecord};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -98,8 +98,17 @@ impl ProjectedGraph {
     }
 
     pub fn from_store(store: &GraphStore, rel_type: Option<RelTypeId>) -> Self {
+        Self::from_store_with_node_filter(store, rel_type, |_| true)
+    }
+
+    pub fn from_store_with_node_filter(
+        store: &GraphStore,
+        rel_type: Option<RelTypeId>,
+        include_node: impl Fn(&NodeRecord) -> bool,
+    ) -> Self {
         let nodes = store
             .scan_nodes(None)
+            .filter(|node| include_node(node))
             .map(|node| node.id)
             .collect::<Vec<_>>();
         Self::from_nodes_and_relationships(store, nodes, move |relationship| {
@@ -114,11 +123,21 @@ impl ProjectedGraph {
         labels: &[crate::schema::LabelId],
         rel_types: &[RelTypeId],
     ) -> Self {
+        Self::from_store_labels_and_rel_types_with_node_filter(store, labels, rel_types, |_| true)
+    }
+
+    pub fn from_store_labels_and_rel_types_with_node_filter(
+        store: &GraphStore,
+        labels: &[crate::schema::LabelId],
+        rel_types: &[RelTypeId],
+        include_node: impl Fn(&NodeRecord) -> bool,
+    ) -> Self {
         let labels = labels.iter().copied().collect::<BTreeSet<_>>();
         let nodes = store
             .scan_nodes(None)
             .filter(|node| {
-                labels.is_empty() || node.labels.iter().any(|label| labels.contains(label))
+                (labels.is_empty() || node.labels.iter().any(|label| labels.contains(label)))
+                    && include_node(node)
             })
             .map(|node| node.id)
             .collect::<Vec<_>>();
@@ -129,8 +148,16 @@ impl ProjectedGraph {
     }
 
     pub fn from_store_without_edges(store: &GraphStore) -> Self {
+        Self::from_store_without_edges_with_node_filter(store, |_| true)
+    }
+
+    pub fn from_store_without_edges_with_node_filter(
+        store: &GraphStore,
+        include_node: impl Fn(&NodeRecord) -> bool,
+    ) -> Self {
         let nodes = store
             .scan_nodes(None)
+            .filter(|node| include_node(node))
             .map(|node| node.id)
             .collect::<Vec<_>>();
         Self::from_nodes_without_edges(nodes)
@@ -140,10 +167,20 @@ impl ProjectedGraph {
         store: &GraphStore,
         labels: &[crate::schema::LabelId],
     ) -> Self {
+        Self::from_store_labels_without_edges_with_node_filter(store, labels, |_| true)
+    }
+
+    pub fn from_store_labels_without_edges_with_node_filter(
+        store: &GraphStore,
+        labels: &[crate::schema::LabelId],
+        include_node: impl Fn(&NodeRecord) -> bool,
+    ) -> Self {
         let labels = labels.iter().copied().collect::<BTreeSet<_>>();
         let nodes = store
             .scan_nodes(None)
-            .filter(|node| node.labels.iter().any(|label| labels.contains(label)))
+            .filter(|node| {
+                node.labels.iter().any(|label| labels.contains(label)) && include_node(node)
+            })
             .map(|node| node.id)
             .collect::<Vec<_>>();
         Self::from_nodes_without_edges(nodes)

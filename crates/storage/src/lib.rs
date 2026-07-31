@@ -21,9 +21,9 @@ pub use mutation::{
 };
 pub use projection::{
     ProjectedGraphDefinition, ProjectedGraphStatus, PropertyIndexProjectionRebuildAction,
-    SchemaMaintenanceAction, SchemaMaintenancePlanItem, SearchProjectionChangefeedStatus,
-    SearchProjectionGraphChange, SearchProjectionMutationId, StorageReclamationWatermark,
-    StorageRecoveryReport, StoreStableIdMapping,
+    SchemaMaintenanceAction, SchemaMaintenancePlanItem, SearchProjectionChangefeedReadiness,
+    SearchProjectionChangefeedStatus, SearchProjectionGraphChange, SearchProjectionMutationId,
+    StorageReclamationWatermark, StorageRecoveryReport, StoreStableIdMapping,
 };
 pub use scan::{
     CandidateCursor, DateTimeMinMax, EnumDictionaryStats, FieldSummary, FileSegmentRangeReader,
