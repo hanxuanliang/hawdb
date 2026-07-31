@@ -1181,7 +1181,7 @@ m.source AS source, \
 m.event_start AS event_start, \
 m.event_end AS event_end, \
 m.importance AS importance \
-ORDER BY COALESCE(m.pagerank_score, m.importance, 0.5) DESC \
+ORDER BY COALESCE(m.pagerank_score, m.importance, 0.5) DESC, m.id ASC \
 LIMIT $limit";
 pub const NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ENTITY_QUERY: &str = "\
 MATCH (e:Entity) \
@@ -3254,6 +3254,8 @@ pub struct NowledgeMemGraphCommunityMembersOutput {
     pub rows: Vec<NowledgeMemGraphOverviewRow>,
     pub entities: Vec<NowledgeMemGraphCommunityMemberEntityRow>,
     pub edges: Vec<NowledgeMemGraphCommunityMemberEdgeRow>,
+    pub memory_has_more: bool,
+    pub entity_has_more: bool,
     pub report: NowledgeMemGraphCommunityMembersRouteReport,
 }
 
@@ -3263,6 +3265,8 @@ impl NowledgeMemGraphCommunityMembersOutput {
             "rows": self.rows.iter().map(NowledgeMemGraphOverviewRow::json).collect::<Vec<_>>(),
             "entities": self.entities.iter().map(NowledgeMemGraphCommunityMemberEntityRow::json).collect::<Vec<_>>(),
             "edges": self.edges.iter().map(NowledgeMemGraphCommunityMemberEdgeRow::json).collect::<Vec<_>>(),
+            "memory_has_more": self.memory_has_more,
+            "entity_has_more": self.entity_has_more,
             "report": self.report.json(),
         })
     }
@@ -5526,41 +5530,45 @@ impl NowledgeMemGraph {
         &self,
         options: &NowledgeMemGraphCommunityMembersOptions,
     ) -> Result<NowledgeMemGraphCommunityMembersOutput> {
-        let limit = i64::try_from(options.limit).map_err(|_| {
+        let scan_limit = graph_community_members_scan_limit(options)?;
+        let limit = i64::try_from(scan_limit).map_err(|_| {
             SkeinError::Semantic(
                 "graph community members limit exceeds supported range".to_string(),
             )
         })?;
-        if limit <= 0 {
-            return Err(SkeinError::Semantic(
-                "graph community members limit must be greater than zero".to_string(),
-            ));
-        }
         let mut parameters = BTreeMap::new();
         parameters.insert("community_id".to_string(), Value::Int(options.community_id));
         parameters.insert("limit".to_string(), Value::Int(limit));
         let read = self.read_query_with_params(
             NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_MEMORY_QUERY,
             &parameters,
-            &graph_community_members_read_options(options),
+            &graph_community_members_read_options(options, scan_limit),
         )?;
-        let rows = read
+        let mut rows = read
             .output
             .rows
             .iter()
             .map(decode_graph_overview_row)
             .collect::<Result<Vec<_>>>()?;
+        let memory_has_more = rows.len() > options.limit;
+        if memory_has_more {
+            rows.pop();
+        }
         let entity_read = self.read_query_with_params(
             NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ENTITY_QUERY,
             &parameters,
-            &graph_community_members_read_options(options),
+            &graph_community_members_read_options(options, scan_limit),
         )?;
-        let entities = entity_read
+        let mut entities = entity_read
             .output
             .rows
             .iter()
             .map(decode_graph_community_member_entity_row)
             .collect::<Result<Vec<_>>>()?;
+        let entity_has_more = entities.len() > options.limit;
+        if entity_has_more {
+            entities.pop();
+        }
         let member_ids = rows
             .iter()
             .filter_map(|row| row.memory_id.clone())
@@ -5610,6 +5618,8 @@ impl NowledgeMemGraph {
             rows,
             entities,
             edges,
+            memory_has_more,
+            entity_has_more,
             report,
         })
     }
@@ -6048,13 +6058,35 @@ fn graph_node_details_read_options(
     read_options
 }
 
+fn graph_community_members_scan_limit(
+    options: &NowledgeMemGraphCommunityMembersOptions,
+) -> Result<usize> {
+    if options.limit == 0 {
+        return Err(SkeinError::Semantic(
+            "graph community members limit must be greater than zero".to_string(),
+        ));
+    }
+    let scan_limit = options.limit.checked_add(1).ok_or_else(|| {
+        SkeinError::Semantic("graph community members limit exceeds supported range".to_string())
+    })?;
+    if let Some(max_rows) = options.read_options.max_rows {
+        if max_rows < scan_limit {
+            return Err(SkeinError::Semantic(format!(
+                "graph community member pagination requires max_rows of at least {scan_limit}"
+            )));
+        }
+    }
+    Ok(scan_limit)
+}
+
 fn graph_community_members_read_options(
     options: &NowledgeMemGraphCommunityMembersOptions,
+    scan_limit: usize,
 ) -> NowledgeMemReadOptions {
     let mut read_options = options.read_options.clone();
     read_options.max_rows = Some(match read_options.max_rows {
-        Some(max_rows) => max_rows.min(options.limit),
-        None => options.limit,
+        Some(max_rows) => max_rows.min(scan_limit),
+        None => scan_limit,
     });
     read_options
 }
@@ -10744,6 +10776,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(output.rows.len(), 2);
+        assert!(!output.memory_has_more);
+        assert!(!output.entity_has_more);
         assert_eq!(
             output.rows[0].memory_id.as_deref(),
             Some("community-memory-high")
@@ -10808,6 +10842,64 @@ mod tests {
             output.json()["rows"][0]["memory_id"],
             "community-memory-high"
         );
+        assert_eq!(output.json()["memory_has_more"], false);
+        assert_eq!(output.json()["entity_has_more"], false);
+    }
+
+    #[test]
+    fn graph_community_members_reports_bounded_member_truncation() {
+        let db = Database::new();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        seed_graph_community_members_memories(&mut graph);
+        graph
+            .query("CREATE (:Memory {id: 'community-memory-middle', title: 'Community Middle', pagerank_score: 2.0, community_id: 42})")
+            .unwrap();
+        graph
+            .query("CREATE (:Entity {id: 'community-entity-low', name: 'Community Entity Low', community_id: 42, pagerank_score: 1.0})")
+            .unwrap();
+        graph
+            .query("CREATE (:Entity {id: 'community-entity-high', name: 'Community Entity High', community_id: 42, pagerank_score: 3.0})")
+            .unwrap();
+
+        let output = graph
+            .read_graph_community_members(&NowledgeMemGraphCommunityMembersOptions {
+                community_id: 42,
+                limit: 2,
+                max_edges: 0,
+                read_options: NowledgeMemReadOptions::default(),
+            })
+            .unwrap();
+
+        assert_eq!(output.rows.len(), 2);
+        assert_eq!(output.entities.len(), 2);
+        assert!(output.memory_has_more);
+        assert!(output.entity_has_more);
+        assert!(output.edges.is_empty());
+        assert!(output.report.edge_read_report.is_none());
+        assert_eq!(output.report.read_report.row_count, 3);
+        assert_eq!(output.report.entity_read_report.row_count, 3);
+    }
+
+    #[test]
+    fn graph_community_members_rejects_insufficient_scan_budget() {
+        let db = Database::new();
+        let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+
+        let error = graph
+            .read_graph_community_members(&NowledgeMemGraphCommunityMembersOptions {
+                community_id: 42,
+                limit: 2,
+                max_edges: 0,
+                read_options: NowledgeMemReadOptions {
+                    max_rows: Some(2),
+                    ..NowledgeMemReadOptions::default()
+                },
+            })
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("graph community member pagination requires max_rows of at least 3"));
     }
 
     #[test]

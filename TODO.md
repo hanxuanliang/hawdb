@@ -382,7 +382,9 @@ LanceDB for that path.
   - [x] Add a bounded community-members graph contract that returns Entity and
     Memory members plus member-internal edges. Entity and Memory reads are
     separately bounded; edges are read only for the returned member IDs and
-    can be disabled with `max_edges = 0`.
+    can be disabled with `max_edges = 0`. Each member scan reads one sentinel
+    row and exposes a per-kind truncation signal instead of silently presenting
+    a partial community as complete.
   - [ ] Migrate `/graph/community-members/{community_id}` only after adding
     explicit pagination or a bounded compatibility contract. The legacy route
     is unbounded, so Skein must not silently truncate its response.
