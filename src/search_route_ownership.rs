@@ -42,6 +42,41 @@ pub const REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES: &[&str] = &[
     NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_DEEP_SEARCH_GRAPH_EXPANSION,
 ];
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemActiveSearchRouteReadRequirement {
+    pub route: String,
+    pub projection_route: String,
+    pub requires_text_candidates: bool,
+    pub requires_vector_candidates: bool,
+    pub requires_candidate_identity: bool,
+    pub requires_embedding_identity: bool,
+    pub requires_zero_vector_semantics: bool,
+    pub requires_cjk_tokenization: bool,
+    pub requires_metadata_pushdown: bool,
+    pub requires_ranking_window: bool,
+    pub requires_fail_soft_reason_codes: bool,
+    pub requires_repair_rebuild_markers: bool,
+}
+
+impl NowledgeMemActiveSearchRouteReadRequirement {
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "route": self.route,
+            "projection_route": self.projection_route,
+            "requires_text_candidates": self.requires_text_candidates,
+            "requires_vector_candidates": self.requires_vector_candidates,
+            "requires_candidate_identity": self.requires_candidate_identity,
+            "requires_embedding_identity": self.requires_embedding_identity,
+            "requires_zero_vector_semantics": self.requires_zero_vector_semantics,
+            "requires_cjk_tokenization": self.requires_cjk_tokenization,
+            "requires_metadata_pushdown": self.requires_metadata_pushdown,
+            "requires_ranking_window": self.requires_ranking_window,
+            "requires_fail_soft_reason_codes": self.requires_fail_soft_reason_codes,
+            "requires_repair_rebuild_markers": self.requires_repair_rebuild_markers,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NowledgeMemSearchRouteOwnershipPolicy {
     pub require_all_skein: bool,
@@ -282,6 +317,7 @@ pub struct NowledgeMemActiveSearchRouteReadinessReport {
     pub skein_route_count: usize,
     pub lancedb_handle_required_route_count: usize,
     pub routes: Vec<NowledgeMemActiveSearchRouteReadEvidence>,
+    pub requirements: Vec<NowledgeMemActiveSearchRouteReadRequirement>,
     pub ready_routes: Vec<String>,
     pub missing_required_routes: Vec<String>,
     pub unknown_routes: Vec<String>,
@@ -316,6 +352,7 @@ impl NowledgeMemActiveSearchRouteReadinessReport {
             "skein_route_count": self.skein_route_count,
             "lancedb_handle_required_route_count": self.lancedb_handle_required_route_count,
             "routes": self.routes.iter().map(active_search_route_read_evidence_json).collect::<Vec<_>>(),
+            "requirements": self.requirements.iter().map(NowledgeMemActiveSearchRouteReadRequirement::json).collect::<Vec<_>>(),
             "ready_routes": self.ready_routes,
             "missing_required_routes": self.missing_required_routes,
             "unknown_routes": self.unknown_routes,
@@ -392,6 +429,53 @@ pub fn nowledge_mem_active_search_route_read_evidence_all_skein_ready(
             )
         })
         .collect()
+}
+
+pub fn nowledge_mem_active_search_route_read_requirements(
+) -> Vec<NowledgeMemActiveSearchRouteReadRequirement> {
+    REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES
+        .iter()
+        .filter_map(|route| active_search_route_read_requirement(route))
+        .collect()
+}
+
+pub fn active_search_route_read_requirement(
+    route: &str,
+) -> Option<NowledgeMemActiveSearchRouteReadRequirement> {
+    let projection_route = required_projection_route_for_active_search_route(route);
+    if projection_route.is_empty() {
+        return None;
+    }
+    let requires_vector_candidates = matches!(
+        route,
+        NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_SOURCE_RECALL
+            | NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_SOURCE_CHUNK_RECALL
+            | NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_FS_RECALL
+            | NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_MCP_SEARCH
+            | NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_DEEP_SEARCH_GRAPH_EXPANSION
+    );
+    let requires_cjk_tokenization = matches!(
+        route,
+        NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_THREAD_MESSAGE_FTS
+            | NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_SOURCE_RECALL
+            | NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_SOURCE_CHUNK_RECALL
+            | NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_FS_RECALL
+            | NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_MCP_SEARCH
+    );
+    Some(NowledgeMemActiveSearchRouteReadRequirement {
+        route: route.to_string(),
+        projection_route: projection_route.to_string(),
+        requires_text_candidates: true,
+        requires_vector_candidates,
+        requires_candidate_identity: true,
+        requires_embedding_identity: requires_vector_candidates,
+        requires_zero_vector_semantics: requires_vector_candidates,
+        requires_cjk_tokenization,
+        requires_metadata_pushdown: true,
+        requires_ranking_window: true,
+        requires_fail_soft_reason_codes: true,
+        requires_repair_rebuild_markers: true,
+    })
 }
 
 pub fn nowledge_mem_search_route_ownership_readiness(
@@ -621,26 +705,48 @@ pub fn nowledge_mem_active_search_route_readiness(
         active_search_read_routes_where(evidence, |route| route.lancedb_handle_required);
     let candidate_not_ready_routes =
         active_search_read_routes_where(evidence, |route| !route.candidate_readiness_ready);
-    let candidate_identity_not_ready_routes =
-        active_search_read_routes_where(evidence, |route| !route.candidate_identity_ready);
-    let embedding_identity_not_ready_routes =
-        active_search_read_routes_where(evidence, |route| !route.embedding_identity_ready);
+    let candidate_identity_not_ready_routes = active_search_read_routes_where(evidence, |route| {
+        active_search_route_requires(route, |requirement| requirement.requires_candidate_identity)
+            && !route.candidate_identity_ready
+    });
+    let embedding_identity_not_ready_routes = active_search_read_routes_where(evidence, |route| {
+        active_search_route_requires(route, |requirement| requirement.requires_embedding_identity)
+            && !route.embedding_identity_ready
+    });
     let zero_vector_semantics_not_ready_routes =
-        active_search_read_routes_where(evidence, |route| !route.zero_vector_semantics_ready);
-    let cjk_tokenization_not_ready_routes =
-        active_search_read_routes_where(evidence, |route| !route.cjk_tokenization_ready);
-    let metadata_pushdown_not_ready_routes =
-        active_search_read_routes_where(evidence, |route| !route.metadata_pushdown_ready);
-    let ranking_window_not_ready_routes =
-        active_search_read_routes_where(evidence, |route| !route.ranking_window_ready);
+        active_search_read_routes_where(evidence, |route| {
+            active_search_route_requires(route, |requirement| {
+                requirement.requires_zero_vector_semantics
+            }) && !route.zero_vector_semantics_ready
+        });
+    let cjk_tokenization_not_ready_routes = active_search_read_routes_where(evidence, |route| {
+        active_search_route_requires(route, |requirement| requirement.requires_cjk_tokenization)
+            && !route.cjk_tokenization_ready
+    });
+    let metadata_pushdown_not_ready_routes = active_search_read_routes_where(evidence, |route| {
+        active_search_route_requires(route, |requirement| requirement.requires_metadata_pushdown)
+            && !route.metadata_pushdown_ready
+    });
+    let ranking_window_not_ready_routes = active_search_read_routes_where(evidence, |route| {
+        active_search_route_requires(route, |requirement| requirement.requires_ranking_window)
+            && !route.ranking_window_ready
+    });
     let ranking_not_ready_routes =
         active_search_read_routes_where(evidence, |route| !route.ranking_ready);
     let fail_soft_not_ready_routes =
         active_search_read_routes_where(evidence, |route| !route.fail_soft_ready);
     let fail_soft_reason_codes_not_ready_routes =
-        active_search_read_routes_where(evidence, |route| !route.fail_soft_reason_codes_ready);
+        active_search_read_routes_where(evidence, |route| {
+            active_search_route_requires(route, |requirement| {
+                requirement.requires_fail_soft_reason_codes
+            }) && !route.fail_soft_reason_codes_ready
+        });
     let repair_rebuild_markers_not_ready_routes =
-        active_search_read_routes_where(evidence, |route| !route.repair_rebuild_markers_ready);
+        active_search_read_routes_where(evidence, |route| {
+            active_search_route_requires(route, |requirement| {
+                requirement.requires_repair_rebuild_markers
+            }) && !route.repair_rebuild_markers_ready
+        });
     let ready_routes = active_search_read_routes_where(evidence, active_search_read_evidence_ready);
     let skein_route_count = evidence
         .iter()
@@ -719,6 +825,7 @@ pub fn nowledge_mem_active_search_route_readiness(
         skein_route_count,
         lancedb_handle_required_route_count: lancedb_handle_required_routes.len(),
         routes: normalized_active_search_read_evidence(evidence),
+        requirements: nowledge_mem_active_search_route_read_requirements(),
         ready_routes,
         missing_required_routes,
         unknown_routes,
@@ -839,21 +946,33 @@ fn active_search_read_routes_where(
     routes
 }
 
+fn active_search_route_requires(
+    route: &NowledgeMemActiveSearchRouteReadEvidence,
+    required: impl Fn(&NowledgeMemActiveSearchRouteReadRequirement) -> bool,
+) -> bool {
+    active_search_route_read_requirement(&route.route).is_some_and(|requirement| {
+        requirement.projection_route == route.projection_route && required(&requirement)
+    })
+}
+
 fn active_search_read_evidence_ready(route: &NowledgeMemActiveSearchRouteReadEvidence) -> bool {
+    let Some(requirement) = active_search_route_read_requirement(&route.route) else {
+        return false;
+    };
     route.read_engine == NowledgeMemSearchReadEngine::Skein
         && route.candidate_readiness_ready
-        && route.candidate_identity_ready
-        && route.embedding_identity_ready
-        && route.zero_vector_semantics_ready
-        && route.cjk_tokenization_ready
-        && route.metadata_pushdown_ready
-        && route.ranking_window_ready
+        && (!requirement.requires_candidate_identity || route.candidate_identity_ready)
+        && (!requirement.requires_embedding_identity || route.embedding_identity_ready)
+        && (!requirement.requires_zero_vector_semantics || route.zero_vector_semantics_ready)
+        && (!requirement.requires_cjk_tokenization || route.cjk_tokenization_ready)
+        && (!requirement.requires_metadata_pushdown || route.metadata_pushdown_ready)
+        && (!requirement.requires_ranking_window || route.ranking_window_ready)
         && route.ranking_ready
         && route.fail_soft_ready
-        && route.fail_soft_reason_codes_ready
-        && route.repair_rebuild_markers_ready
+        && (!requirement.requires_fail_soft_reason_codes || route.fail_soft_reason_codes_ready)
+        && (!requirement.requires_repair_rebuild_markers || route.repair_rebuild_markers_ready)
         && !route.lancedb_handle_required
-        && route.projection_route == required_projection_route_for_active_search_route(&route.route)
+        && route.projection_route == requirement.projection_route
 }
 
 fn search_route_ownership_json(route: &NowledgeMemSearchRouteOwnership) -> serde_json::Value {
@@ -1071,6 +1190,46 @@ mod tests {
     }
 
     #[test]
+    fn active_search_route_read_requirements_cover_business_routes() {
+        let requirements = nowledge_mem_active_search_route_read_requirements();
+
+        assert_eq!(
+            requirements.len(),
+            REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES.len()
+        );
+        let thread_fts = active_search_route_read_requirement(
+            NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_THREAD_MESSAGE_FTS,
+        )
+        .unwrap();
+        assert_eq!(
+            thread_fts.projection_route,
+            NOWLEDGE_MEM_SEARCH_ROUTE_MESSAGE
+        );
+        assert!(thread_fts.requires_text_candidates);
+        assert!(!thread_fts.requires_vector_candidates);
+        assert!(thread_fts.requires_cjk_tokenization);
+        assert!(!thread_fts.requires_embedding_identity);
+        assert!(!thread_fts.requires_zero_vector_semantics);
+
+        let source_chunk = active_search_route_read_requirement(
+            NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_SOURCE_CHUNK_RECALL,
+        )
+        .unwrap();
+        assert_eq!(
+            source_chunk.projection_route,
+            NOWLEDGE_MEM_SEARCH_ROUTE_SOURCE_CHUNK
+        );
+        assert!(source_chunk.requires_text_candidates);
+        assert!(source_chunk.requires_vector_candidates);
+        assert!(source_chunk.requires_embedding_identity);
+        assert!(source_chunk.requires_zero_vector_semantics);
+        assert!(source_chunk.requires_metadata_pushdown);
+        assert!(source_chunk.requires_ranking_window);
+        assert!(source_chunk.requires_fail_soft_reason_codes);
+        assert!(source_chunk.requires_repair_rebuild_markers);
+    }
+
+    #[test]
     fn active_search_route_readiness_accepts_all_skein_ready_evidence() {
         let report = nowledge_mem_active_search_route_readiness(
             &nowledge_mem_active_search_route_read_evidence_all_skein_ready(),
@@ -1092,6 +1251,14 @@ mod tests {
         assert_eq!(
             report.json()["protocol"],
             NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_READINESS_PROTOCOL
+        );
+        assert_eq!(
+            report.requirements.len(),
+            REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES.len()
+        );
+        assert_eq!(
+            report.json()["requirements"].as_array().unwrap().len(),
+            REQUIRED_NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTES.len()
         );
         assert_eq!(report.json()["lancedb_handle_required_route_count"], 0);
     }
@@ -1162,6 +1329,26 @@ mod tests {
         assert!(report.blocker_codes.contains(
             &"active_search_route_readiness_repair_rebuild_markers_not_ready".to_string()
         ));
+    }
+
+    #[test]
+    fn active_search_route_readiness_uses_route_specific_vector_requirements() {
+        let mut evidence = nowledge_mem_active_search_route_read_evidence_all_skein_ready();
+        let thread_fts = evidence
+            .iter_mut()
+            .find(|route| route.route == NOWLEDGE_MEM_ACTIVE_SEARCH_ROUTE_THREAD_MESSAGE_FTS)
+            .unwrap();
+        thread_fts.embedding_identity_ready = false;
+        thread_fts.zero_vector_semantics_ready = false;
+
+        let report = nowledge_mem_active_search_route_readiness(
+            &evidence,
+            NowledgeMemSearchRouteOwnershipPolicy::production_cutover(),
+        );
+
+        assert!(report.ready);
+        assert!(report.embedding_identity_not_ready_routes.is_empty());
+        assert!(report.zero_vector_semantics_not_ready_routes.is_empty());
     }
 
     #[test]

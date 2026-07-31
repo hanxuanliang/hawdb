@@ -378,8 +378,9 @@ LanceDB for that path.
     summary and Mem integration bundle alignment gate, so final cutover
     evidence fails closed when any active search route still needs LanceDB or
     lacks candidate-read evidence.
-  - Cover thread/message FTS, entity/community discovery, source and source
-    chunk recall, `/fs/recall`, MCP search, and deep-search graph expansion.
+  - [x] Cover thread/message FTS, entity/community discovery, source and
+    source chunk recall, `/fs/recall`, MCP search, and deep-search graph
+    expansion with a typed active search route read requirement catalog.
   - [x] Preserve embedding identity, zero-vector semantics, CJK tokenization,
     ranking windows, fail-soft reason codes, and repair/rebuild markers in the
     active search route read evidence, replacement summary, and integration
