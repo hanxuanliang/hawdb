@@ -678,6 +678,12 @@ LanceDB for that path.
       retains JSON provenance normalization, grouping, colors, and ordering;
       a `100_000 + 1` sentinel and payload budget fail rather than yield a
       partial source distribution.
+  - [x] Route monthly Memory-growth analytics through parameterized embedded
+    Cypher.
+    - `/stats/growth` computes total, crystal, and default-visible non-crystal
+      month buckets in Skein with space scope pushed into each aggregate. Mem
+      merges the bounded bucket maps and preserves chronological response
+      ordering plus the active/history/crystal breakdown.
   - [x] Migrate the primary Entity list through parameterized embedded Cypher.
     - `/entities` must retain type filtering, alias/name/id case-insensitive
       substring matching, and its two legacy orderings (created time or
