@@ -617,6 +617,11 @@ LanceDB for that path.
       evidence-ID list, and bounded newest evidence preview through Skein.
       Oversized ID lists fail rather than returning a partial detail response;
       Mem retains metadata/health shaping and local bundle/body file reads.
+  - [x] Route Skill activity through parameterized embedded Cypher.
+    - `/skills/activity` reads a single exact Skill or a bounded, optionally
+      space-scoped Skill metadata scan through Skein. Mem retains the pure
+      use/outcome timeline aggregation and ordering; no route-specific typed
+      API or Kuzu read is used in Skein mode.
   - [x] Add a bounded community-members graph contract that returns Entity and
     Memory members plus member-internal edges. Entity and Memory reads are
     separately bounded; edges are read only for the returned member IDs and
