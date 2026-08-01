@@ -644,6 +644,12 @@ LanceDB for that path.
       then reuses Mem's semantic vector cache/ranking and keyword fallback.
       The router receives candidate values rather than a Kuzu client, and no
       route-specific typed API is introduced.
+  - [x] Route Skill evaluation existence/version reads through parameterized
+    embedded Cypher.
+    - `/skills/{skill_id}/eval` and `/skills/{skill_id}/eval/cases` share a
+      bounded exact Skill version query in Skein mode. Mem retains local
+      benchmark/proof-file reads and legacy pre-version Skills normalize to
+      version 1 without reopening Kuzu.
   - [x] Add a bounded community-members graph contract that returns Entity and
     Memory members plus member-internal edges. Entity and Memory reads are
     separately bounded; edges are read only for the returned member IDs and
