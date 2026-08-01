@@ -655,6 +655,12 @@ LanceDB for that path.
       content store has no readable rows, a bounded ordered `CONTAINS` Message
       fallback through Skein. The content-store preference and export rendering
       remain in Mem; oversized graph message exports fail rather than truncate.
+  - [x] Route Entity relationship detail through parameterized embedded Cypher.
+    - `/entities/{entity_id}/relationships` reads the exact Entity, one-hop
+      `RELATES_TO` edges, `MENTIONS` previews, and optional Community summary
+      through Skein. Relationship and mention scans use a `limit + 1` sentinel
+      plus payload budgets and fail on overflow; Mem retains the existing
+      response shaping and never reopens Kuzu in Skein mode.
   - [x] Add a bounded community-members graph contract that returns Entity and
     Memory members plus member-internal edges. Entity and Memory reads are
     separately bounded; edges are read only for the returned member IDs and
