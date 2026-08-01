@@ -667,13 +667,13 @@ LanceDB for that path.
       limit and a fixed payload budget. The host retains the legacy empty/error
       fallback, so the analytics response remains `[No Relations]` when no
       pair is available without selecting Skein and reopening Kuzu.
-  - [ ] Migrate the primary Entity list through parameterized embedded Cypher.
+  - [x] Migrate the primary Entity list through parameterized embedded Cypher.
     - `/entities` must retain type filtering, alias/name/id case-insensitive
       substring matching, and its two legacy orderings (created time or
-      `MENTIONS` count). The current parser lacks a bounded list-element
-      predicate or equivalent `UNWIND` form for alias substring matching; add
-      that query-language capability with optimizer-visible filtering before
-      migrating the route. Do not replace it with a host-owned full Entity scan.
+      `MENTIONS` count). `list_contains_lower(e.aliases, $query)` is a
+      parameterized, optimizer-visible list-property predicate that preserves
+      alias substring matching without a host-owned Entity scan; the selected
+      Skein path does not reopen Kuzu.
   - [x] Add a bounded community-members graph contract that returns Entity and
     Memory members plus member-internal edges. Entity and Memory reads are
     separately bounded; edges are read only for the returned member IDs and
