@@ -556,6 +556,12 @@ LanceDB for that path.
     - `/threads/{thread_id}/coverage` reads the exact Thread and its
       `COMPACTS_TO` Memory count with one-row query budgets, while preserving
       content-store message-count precedence and metadata defaults in Mem.
+  - [x] Route the space roster's graph observations through parameterized
+    embedded Cypher.
+    - `/spaces` retains local profile and Working Memory rules in Mem, while
+      three bounded grouped queries provide normalized observed spaces and
+      Memory/Thread/Source usage counts. Overflow fails instead of silently
+      dropping a space from the roster evidence.
   - [x] Add a bounded community-members graph contract that returns Entity and
     Memory members plus member-internal edges. Entity and Memory reads are
     separately bounded; edges are read only for the returned member IDs and
