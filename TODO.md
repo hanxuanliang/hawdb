@@ -667,6 +667,11 @@ LanceDB for that path.
       limit and a fixed payload budget. The host retains the legacy empty/error
       fallback, so the analytics response remains `[No Relations]` when no
       pair is available without selecting Skein and reopening Kuzu.
+  - [x] Route top Community analytics through parameterized embedded Cypher.
+    - `/stats/top-communities` keeps separate global member-count and
+      space-scoped distinct-Memory aggregation plans. Space scope is applied
+      before aggregation, both paths use row/payload budgets, and Mem retains
+      only the legacy missing-name and empty-description response fallbacks.
   - [x] Migrate the primary Entity list through parameterized embedded Cypher.
     - `/entities` must retain type filtering, alias/name/id case-insensitive
       substring matching, and its two legacy orderings (created time or
