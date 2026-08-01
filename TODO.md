@@ -684,6 +684,13 @@ LanceDB for that path.
       month buckets in Skein with space scope pushed into each aggregate. Mem
       merges the bounded bucket maps and preserves chronological response
       ordering plus the active/history/crystal breakdown.
+  - [x] Route timezone-aware daily Memory growth through parameterized embedded
+    Cypher.
+    - `/stats/daily-growth` pushes the UTC cutoff, normalized space scope, and
+      each visibility bucket into Skein. Mem retains IANA timezone day
+      projection, chronological merge, and legacy response shaping; each input
+      read uses a `100_000 + 1` sentinel and payload budget to fail instead of
+      materializing an unbounded activity calendar.
   - [x] Migrate the primary Entity list through parameterized embedded Cypher.
     - `/entities` must retain type filtering, alias/name/id case-insensitive
       substring matching, and its two legacy orderings (created time or
