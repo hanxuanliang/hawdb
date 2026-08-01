@@ -471,6 +471,11 @@ LanceDB for that path.
     - The host uses known Memory IDs, keeps the existing per-seed budget, and
       derives the live-preview edge envelope from the same query-runtime result
       used by `/graph/explore`.
+  - [x] Route `/graph/expand/{node_id}` through the embedded bounded subgraph
+    API.
+    - Short Memory IDs use the query-runtime prefix ownership API with the
+      existing exact-first and unique-prefix rules; ambiguous prefixes remain
+      conflicts rather than falling back to Kuzu.
   - [x] Route `/graph/augmentation/state` through the embedded runtime with
     GraphMeta and bounded community-assignment count reads.
   - [x] Route `/graph/augmentation/pagerank/plan` through the embedded runtime

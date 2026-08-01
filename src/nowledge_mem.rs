@@ -1,6 +1,7 @@
 use crate::api::{
-    KnowledgeInducedEdgeListOutput, KnowledgeInducedEdgeListRequest, KnowledgeSubgraphOutput,
-    KnowledgeSubgraphRequest,
+    KnowledgeInducedEdgeListOutput, KnowledgeInducedEdgeListRequest,
+    KnowledgeMemoryPrefixOwnershipOutput, KnowledgeMemoryPrefixOwnershipRequest,
+    KnowledgeSubgraphOutput, KnowledgeSubgraphRequest,
 };
 use crate::search::{
     AdaptiveVectorSearchOptions, CompressedVectorSearchMode, SearchCandidateSetReport,
@@ -7179,6 +7180,18 @@ impl NowledgeMemEmbeddedStoreHandle {
             .graph
             .database()
             .knowledge_induced_edges(request)
+    }
+
+    /// Resolves a Memory id prefix through the embedded query runtime. Hosts
+    /// use the result to preserve exact-first, unique-prefix reference rules.
+    pub fn knowledge_memory_prefix_ownership(
+        &self,
+        request: &KnowledgeMemoryPrefixOwnershipRequest,
+    ) -> Result<KnowledgeMemoryPrefixOwnershipOutput> {
+        self.read_store()?
+            .graph
+            .database()
+            .knowledge_memory_prefix_ownership(request)
     }
 
     pub fn create_knowledge_memory_evolves_batch(
