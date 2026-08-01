@@ -562,6 +562,10 @@ LanceDB for that path.
       three bounded grouped queries provide normalized observed spaces and
       Memory/Thread/Source usage counts. Overflow fails instead of silently
       dropping a space from the roster evidence.
+  - [x] Route Thread summaries through parameterized embedded Cypher.
+    - `/threads/summaries` pushes normalized optional `space_id` scope into a
+      bounded aggregate query and retains last-activity ordering. A sentinel
+      row prevents an oversized graph response from becoming a partial list.
   - [x] Add a bounded community-members graph contract that returns Entity and
     Memory members plus member-internal edges. Entity and Memory reads are
     separately bounded; edges are read only for the returned member IDs and
