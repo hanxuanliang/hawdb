@@ -1,3 +1,4 @@
+use crate::api::{KnowledgeSubgraphOutput, KnowledgeSubgraphRequest};
 use crate::search::{
     AdaptiveVectorSearchOptions, CompressedVectorSearchMode, SearchCandidateSetReport,
     SearchFallbackReasonCode, SearchFusionWeights, SearchMode, SearchQueryOptions,
@@ -6814,6 +6815,18 @@ impl NowledgeMemEmbeddedStoreHandle {
             .graph
             .database()
             .knowledge_source_candidates(request)
+    }
+
+    /// Reads a bounded graph subgraph through the embedded query runtime.
+    pub fn knowledge_subgraph(
+        &self,
+        request: &KnowledgeSubgraphRequest,
+    ) -> Result<KnowledgeSubgraphOutput> {
+        Ok(self
+            .read_store()?
+            .graph
+            .database()
+            .knowledge_subgraph(request))
     }
 
     pub fn create_knowledge_memory_evolves_batch(
