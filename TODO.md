@@ -606,6 +606,12 @@ LanceDB for that path.
       fanout, and sample Memories in Skein. Mem retains visibility, aggregate
       ranking, and preview shaping; oversized fanout scans fail instead of
       returning a partial Community detail response.
+  - [x] Route Skill lists through parameterized embedded Cypher.
+    - `/skills` pushes optional `stage` and `space_id` filters plus offset and
+      limit into Skein, returns only Skill property maps, and reuses Mem's
+      canonical payload/proof shaping. The query response is row and payload
+      bounded; Skein-selected reads do not open Kuzu or add a route-specific
+      typed API.
   - [x] Add a bounded community-members graph contract that returns Entity and
     Memory members plus member-internal edges. Entity and Memory reads are
     separately bounded; edges are read only for the returned member IDs and
