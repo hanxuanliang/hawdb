@@ -661,6 +661,12 @@ LanceDB for that path.
       through Skein. Relationship and mention scans use a `limit + 1` sentinel
       plus payload budgets and fail on overflow; Mem retains the existing
       response shaping and never reopens Kuzu in Skein mode.
+  - [x] Route Entity relationship analytics through parameterized embedded
+    Cypher.
+    - The top `RELATES_TO` pair aggregate runs through Skein with the request
+      limit and a fixed payload budget. The host retains the legacy empty/error
+      fallback, so the analytics response remains `[No Relations]` when no
+      pair is available without selecting Skein and reopening Kuzu.
   - [x] Add a bounded community-members graph contract that returns Entity and
     Memory members plus member-internal edges. Entity and Memory reads are
     separately bounded; edges are read only for the returned member IDs and
