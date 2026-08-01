@@ -718,8 +718,7 @@ LanceDB for that path.
   - [x] Route `GET /library/wiki-page/crystal/{crystal_id}` through bounded
     embedded Cypher.
     - The exact-or-short-key Crystal query returns one bounded Memory row;
-      Mem reuses the existing YAML and deeplink-cleanup rendering rules. The
-      Entity wiki page remains a separate multi-query migration.
+      Mem reuses the existing YAML and deeplink-cleanup rendering rules.
   - [x] Route `GET /library/wiki-page/topic/{community_id}` through bounded
     embedded Cypher.
     - Community and Entity reads use the request limit. Crystal and
@@ -729,6 +728,12 @@ LanceDB for that path.
       ordering. Mem therefore applies the existing secondary presentation sort
       only after Skein has produced the bounded candidate set, then reuses the
       shared topic Markdown renderer.
+  - [x] Route `GET /library/wiki-page/entity/{id_or_name}` through bounded
+    embedded Cypher.
+    - Exact-or-case-insensitive-name Entity lookup, bounded mentions, bounded
+      related Entities, and optional Community context use four parameterized
+      queries. List properties are converted through the shared Library row
+      reader; Mem reuses the existing Entity Markdown renderer unchanged.
   - [x] Route monthly Memory-growth analytics through parameterized embedded
     Cypher.
     - `/stats/growth` computes total, crystal, and default-visible non-crystal
