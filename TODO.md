@@ -521,6 +521,12 @@ LanceDB for that path.
     requires `limit`; REST returns per-kind truncation signals and accepts a
     bounded `max_edges`, so it cannot silently present a partial community as
     complete.
+  - [x] Migrate `/library/community/{community_id}/subgraph` through bounded
+    embedded Cypher.
+    - Entity selection, internal `RELATES_TO` edges, optional top Memory nodes,
+      and their `MENTIONS` edges use parameterized query-runtime reads. A shared
+      relationship budget uses a sentinel and fails on overflow, preserving the
+      existing MiniGraph response shape without unbounded edge materialization.
   - [x] Add keyset pagination for `/graph/orphans` in the embedded contract.
     Each page reads at most `limit + 1` rows to derive `has_more` and a stable
     `next_cursor`; insufficient row budget fails closed rather than reporting
