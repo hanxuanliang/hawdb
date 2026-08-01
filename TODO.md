@@ -583,6 +583,11 @@ LanceDB for that path.
       short-prefix resolution, removed-memory exclusion, 404/409 responses,
       and bounded `HAS_LABEL` reads without selecting Skein then reopening
       Kuzu for reference resolution.
+  - [x] Route Memory relation reads through parameterized embedded Cypher.
+    - `/memories/{memory_id}/relations` reuses the same short-ID resolver,
+      pushes direction/status/type/space predicates into bounded relation
+      queries, and preserves default-visible endpoint filtering plus legacy
+      direction merge/truncation semantics without Kuzu reads in Skein mode.
   - [x] Add a bounded community-members graph contract that returns Entity and
     Memory members plus member-internal edges. Entity and Memory reads are
     separately bounded; edges are read only for the returned member IDs and
