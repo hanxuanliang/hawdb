@@ -514,6 +514,12 @@ LanceDB for that path.
     - `/graph/augmentation/jobs` and `/graph/augmentation/status/{job_id}` use
       bounded query-runtime reads, preserve lifecycle/error/result shaping in
       Mem, and do not introduce route-specific typed library wrappers.
+  - [x] Route the KG backfill preview input scan through parameterized embedded
+    Cypher.
+    - `/agent/trigger/kg-extraction/plan` applies the shared default-visible
+      Memory predicate and row/payload budgets in Skein, then passes rows to the
+      existing pure classification and batch-selection function. It does not
+      create a route-specific typed API or handwritten graph executor.
   - [x] Route `/library/community/{community_id}/recent-memories` through the
     embedded runtime with the existing bounded ordering and response shape.
   - [x] Route `/library/community/{community_id}/related` through the embedded
