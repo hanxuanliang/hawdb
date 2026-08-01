@@ -572,6 +572,11 @@ LanceDB for that path.
       source-alias filters into Skein, retains host title/summary scoring and
       content-store message counts, and never opens Kuzu in Skein mode. The
       `full` FTS path remains part of the separate search-projection cutover.
+  - [x] Route the primary Thread list through parameterized embedded Cypher.
+    - `/threads` uses a logical identity page query, bounded selected-page
+      hydration, and a distinct exact total query. It preserves source/space
+      filtering, duplicate-row newest selection, and content-store message
+      counts without reopening Kuzu in Skein mode.
   - [x] Add a bounded community-members graph contract that returns Entity and
     Memory members plus member-internal edges. Entity and Memory reads are
     separately bounded; edges are read only for the returned member IDs and
