@@ -428,6 +428,11 @@ pub enum Predicate {
         property: String,
         value: Value,
     },
+    PropertyListContainsLower {
+        variable: String,
+        property: String,
+        value: String,
+    },
     PropertyContains {
         variable: String,
         property: String,
@@ -4185,6 +4190,20 @@ fn plan_predicate(
             property: property.clone(),
             value: bind_value(value, parameters)?,
         }),
+        PropertyPredicate::ListContainsLower {
+            variable,
+            property,
+            value,
+        } => match bind_value(value, parameters)? {
+            Value::String(value) => Ok(Predicate::PropertyListContainsLower {
+                variable: variable.clone(),
+                property: property.clone(),
+                value: value.to_lowercase(),
+            }),
+            value => Err(SkeinError::Semantic(format!(
+                "list_contains_lower predicate requires a string value, got {value:?}"
+            ))),
+        },
         PropertyPredicate::Contains {
             variable,
             property,
@@ -4542,6 +4561,7 @@ fn predicate_variable(predicate: &PropertyPredicate) -> Option<&str> {
         | PropertyPredicate::IdIn { variable, .. }
         | PropertyPredicate::Compare { variable, .. }
         | PropertyPredicate::ListContains { variable, .. }
+        | PropertyPredicate::ListContainsLower { variable, .. }
         | PropertyPredicate::Contains { variable, .. }
         | PropertyPredicate::StartsWith { variable, .. }
         | PropertyPredicate::EndsWith { variable, .. }

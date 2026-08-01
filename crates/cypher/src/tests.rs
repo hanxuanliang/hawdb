@@ -2440,6 +2440,20 @@ fn parses_null_and_list_predicates() {
             value: ValueExpression::Parameter("name".to_string()),
         }
     );
+
+    let statement =
+        parse("MATCH (e:Entity) WHERE list_contains_lower(e.aliases, $query) RETURN e.id").unwrap();
+    let Statement::MatchReturn(query) = statement else {
+        panic!("expected match return");
+    };
+    assert_eq!(
+        query.predicate.unwrap(),
+        PropertyPredicate::ListContainsLower {
+            variable: "e".to_string(),
+            property: "aliases".to_string(),
+            value: ValueExpression::Parameter("query".to_string()),
+        }
+    );
 }
 
 #[test]

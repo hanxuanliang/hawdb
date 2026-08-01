@@ -320,6 +320,10 @@ pub enum PropertyFilter {
         property: String,
         value: Value,
     },
+    ListContainsLower {
+        property: String,
+        value: String,
+    },
     Contains {
         property: String,
         value: String,

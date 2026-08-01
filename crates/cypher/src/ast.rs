@@ -610,6 +610,11 @@ pub enum PropertyPredicate {
         property: String,
         value: ValueExpression,
     },
+    ListContainsLower {
+        variable: String,
+        property: String,
+        value: ValueExpression,
+    },
     Contains {
         variable: String,
         property: String,

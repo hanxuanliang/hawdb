@@ -106,6 +106,20 @@ impl Parser<'_> {
                 value,
             });
         }
+        if variable.eq_ignore_ascii_case("list_contains_lower") && self.peek_char() == Some('(') {
+            self.expect_char('(')?;
+            let variable = self.parse_ident()?;
+            self.expect_char('.')?;
+            let property = self.parse_ident()?;
+            self.expect_char(',')?;
+            let value = self.parse_value()?;
+            self.expect_char(')')?;
+            return Ok(PropertyPredicate::ListContainsLower {
+                variable,
+                property,
+                value,
+            });
+        }
         if variable.eq_ignore_ascii_case("contains") && self.peek_char() == Some('(') {
             self.expect_char('(')?;
             let expression = self.parse_return_value_expression()?;

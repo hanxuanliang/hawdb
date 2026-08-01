@@ -208,6 +208,19 @@ pub(super) fn write_predicate(output: &mut String, predicate: &Predicate) {
             write_value(output, value);
             output.push(')');
         }
+        Predicate::PropertyListContainsLower {
+            variable,
+            property,
+            value,
+        } => {
+            output.push_str("PropertyListContainsLower(");
+            write_identifier(output, variable);
+            output.push('.');
+            write_identifier(output, property);
+            output.push_str(" contains ");
+            write_identifier(output, value);
+            output.push(')');
+        }
         Predicate::PropertyContains {
             variable,
             property,

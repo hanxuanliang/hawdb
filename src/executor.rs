@@ -4459,6 +4459,16 @@ fn property_filter_matches_values(
                 _ => None,
             })
             .unwrap_or(false),
+        PropertyFilter::ListContainsLower { property, value } => properties
+            .get(property)
+            .and_then(|actual| match actual {
+                Value::List(values) => Some(values.iter().any(|actual| match actual {
+                    Value::String(actual) => actual.to_lowercase().contains(value),
+                    _ => false,
+                })),
+                _ => None,
+            })
+            .unwrap_or(false),
         PropertyFilter::Contains { property, value } => properties
             .get(property)
             .and_then(|actual| match actual {
@@ -4883,6 +4893,19 @@ fn evaluate_predicate(
                 _ => None,
             })
             .unwrap_or(false),
+        Predicate::PropertyListContainsLower {
+            variable,
+            property,
+            value,
+        } => binding_property(binding, variable, property)
+            .and_then(|actual| match actual {
+                Value::List(values) => Some(values.iter().any(|actual| match actual {
+                    Value::String(actual) => actual.to_lowercase().contains(value),
+                    _ => false,
+                })),
+                _ => None,
+            })
+            .unwrap_or(false),
         Predicate::PropertyContains {
             variable,
             property,
@@ -5125,6 +5148,12 @@ fn property_filter_from_predicate(predicate: &Predicate) -> Result<PropertyFilte
             property: property.clone(),
             value: value.clone(),
         }),
+        Predicate::PropertyListContainsLower {
+            property, value, ..
+        } => Ok(PropertyFilter::ListContainsLower {
+            property: property.clone(),
+            value: value.clone(),
+        }),
         Predicate::PropertyContains {
             property, value, ..
         } => Ok(PropertyFilter::Contains {
@@ -5192,6 +5221,9 @@ fn predicate_references_only_variable(predicate: &Predicate, variable: &str) -> 
             variable: current, ..
         }
         | Predicate::PropertyListContains {
+            variable: current, ..
+        }
+        | Predicate::PropertyListContainsLower {
             variable: current, ..
         }
         | Predicate::PropertyContains {
@@ -5288,6 +5320,7 @@ fn exact_relationship_scan_filter_is_safe(filter: &PropertyFilter) -> bool {
         | PropertyFilter::IdNotEq { .. }
         | PropertyFilter::NotEq { .. }
         | PropertyFilter::ListContains { .. }
+        | PropertyFilter::ListContainsLower { .. }
         | PropertyFilter::Contains { .. }
         | PropertyFilter::StartsWith { .. }
         | PropertyFilter::EndsWith { .. }

@@ -5466,6 +5466,7 @@ impl GraphStore {
                 self.node_ids_for_property_exists(label_id, property),
             )),
             PropertyFilter::ListContains { .. }
+            | PropertyFilter::ListContainsLower { .. }
             | PropertyFilter::Contains { .. }
             | PropertyFilter::StartsWith { .. }
             | PropertyFilter::EndsWith { .. }
@@ -6146,6 +6147,7 @@ impl GraphStore {
                 ))
             }
             PropertyFilter::ListContains { .. }
+            | PropertyFilter::ListContainsLower { .. }
             | PropertyFilter::Contains { .. }
             | PropertyFilter::StartsWith { .. }
             | PropertyFilter::EndsWith { .. }
@@ -10506,6 +10508,16 @@ fn property_filter_matches(
             .get(property)
             .and_then(|actual| match actual {
                 Value::List(values) => Some(values.iter().any(|actual| actual == value)),
+                _ => None,
+            })
+            .unwrap_or(false),
+        PropertyFilter::ListContainsLower { property, value } => properties
+            .get(property)
+            .and_then(|actual| match actual {
+                Value::List(values) => Some(values.iter().any(|actual| match actual {
+                    Value::String(actual) => actual.to_lowercase().contains(value),
+                    _ => false,
+                })),
                 _ => None,
             })
             .unwrap_or(false),

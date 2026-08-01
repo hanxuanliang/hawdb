@@ -113,6 +113,18 @@ fn filters_with_literal_and_parameterized_in_predicates() {
         output.rows[0].get("id"),
         Some(&Value::String("e1".to_string()))
     );
+
+    let output = db
+        .query_with_params(
+            "MATCH (e:Entity) WHERE list_contains_lower(e.aliases, $query) RETURN e.id AS id",
+            &BTreeMap::from([("query".to_string(), Value::String("RIS".to_string()))]),
+        )
+        .unwrap();
+    assert_eq!(output.rows.len(), 1);
+    assert_eq!(
+        output.rows[0].get("id"),
+        Some(&Value::String("e1".to_string()))
+    );
 }
 
 #[test]
