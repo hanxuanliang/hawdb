@@ -577,6 +577,12 @@ LanceDB for that path.
       hydration, and a distinct exact total query. It preserves source/space
       filtering, duplicate-row newest selection, and content-store message
       counts without reopening Kuzu in Skein mode.
+  - [x] Route Memory label reads and short-ID resolution through parameterized
+    embedded Cypher.
+    - `/memories/{memory_id}/labels` keeps exact-first custom IDs, unique
+      short-prefix resolution, removed-memory exclusion, 404/409 responses,
+      and bounded `HAS_LABEL` reads without selecting Skein then reopening
+      Kuzu for reference resolution.
   - [x] Add a bounded community-members graph contract that returns Entity and
     Memory members plus member-internal edges. Entity and Memory reads are
     separately bounded; edges are read only for the returned member IDs and
