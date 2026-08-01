@@ -112,6 +112,8 @@ pub use api::{
     KnowledgeMemoryLifecycleBatchRow, KnowledgeMemoryLifecycleUpdate,
     KnowledgeRetrievalDiagnostics, KnowledgeRetrievalEmptyReasonCode, KnowledgeRetrievalOutput,
     KnowledgeRetrievalRequest, KnowledgeRetrieverCandidate, KnowledgeRetrieverReport,
+    KnowledgeSourceCandidateRow, KnowledgeSourceCandidateScanOrigin,
+    KnowledgeSourceCandidateScanOutput, KnowledgeSourceCandidateScanRequest,
     KnowledgeTraversalDiagnostics, KnowledgeTraversalFallbackReasonCode,
     KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphExplainOutput,
     NowledgeGraphStatement, NowledgeGraphTransactionOutput, PlanCacheBypassReason, PlanCacheLookup,

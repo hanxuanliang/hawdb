@@ -19,8 +19,9 @@ use crate::{
     KnowledgeEntityDeleteBatchRequest, KnowledgeMemoryEvolvesCreateBatchOutput,
     KnowledgeMemoryEvolvesCreateBatchRequest, KnowledgeMemoryLifecycleBatchOutput,
     KnowledgeMemoryLifecycleBatchRequest, KnowledgeRetrievalOutput, KnowledgeRetrievalRequest,
-    LocalQosPolicy, LocalQosScheduler, LocalQosState, NowledgeGraphStatement, PlanCacheLookup,
-    QueryOutput, ReadExecutionProfile, Result, ScheduledSearchProjectionCatchUpReport, SearchIndex,
+    KnowledgeSourceCandidateScanOutput, KnowledgeSourceCandidateScanRequest, LocalQosPolicy,
+    LocalQosScheduler, LocalQosState, NowledgeGraphStatement, PlanCacheLookup, QueryOutput,
+    ReadExecutionProfile, Result, ScheduledSearchProjectionCatchUpReport, SearchIndex,
     SearchProjectionCatchUpReport, SearchProjectionChangefeedReadiness,
     SearchProjectionChangefeedStatus, SearchProjectionDelta, SearchProjectionDeltaReport,
     SearchProjectionFreshness, SearchProjectionGraphDeltaRequest, SearchProjectionMutationId,
@@ -6803,6 +6804,16 @@ impl NowledgeMemEmbeddedStoreHandle {
     ) -> Result<NowledgeMemQueryOutput> {
         self.write_store()?
             .query_with_params_with_report(cypher, parameters)
+    }
+
+    pub fn knowledge_source_candidates(
+        &self,
+        request: &KnowledgeSourceCandidateScanRequest,
+    ) -> Result<KnowledgeSourceCandidateScanOutput> {
+        self.read_store()?
+            .graph
+            .database()
+            .knowledge_source_candidates(request)
     }
 
     pub fn create_knowledge_memory_evolves_batch(
