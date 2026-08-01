@@ -622,6 +622,11 @@ LanceDB for that path.
       space-scoped Skill metadata scan through Skein. Mem retains the pure
       use/outcome timeline aggregation and ordering; no route-specific typed
       API or Kuzu read is used in Skein mode.
+  - [x] Route Skill duplicate existence checks through parameterized embedded
+    Cypher.
+    - `/skills/{skill_id}/duplicate-of` keeps its offline-safe `null` result
+      while Skein performs the bounded exact Skill existence check. It does not
+      invoke embeddings, Kuzu, or a route-specific typed API.
   - [x] Add a bounded community-members graph contract that returns Entity and
     Memory members plus member-internal edges. Entity and Memory reads are
     separately bounded; edges are read only for the returned member IDs and
