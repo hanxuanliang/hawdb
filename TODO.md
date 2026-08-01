@@ -627,6 +627,11 @@ LanceDB for that path.
     - `/skills/{skill_id}/duplicate-of` keeps its offline-safe `null` result
       while Skein performs the bounded exact Skill existence check. It does not
       invoke embeddings, Kuzu, or a route-specific typed API.
+  - [x] Route Skill curator proposals through parameterized embedded Cypher.
+    - `/skills/curator/proposals` reads the bounded active Skill catalog through
+      Skein, then retains Mem's existing pure rot detection and optional
+      embedding-backed merge candidate evaluation. Skein mode does not open
+      Kuzu for the active-scan input.
   - [x] Add a bounded community-members graph contract that returns Entity and
     Memory members plus member-internal edges. Entity and Memory reads are
     separately bounded; edges are read only for the returned member IDs and
