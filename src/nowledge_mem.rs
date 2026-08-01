@@ -7338,11 +7338,23 @@ impl NowledgeMemEmbeddedStore {
         delta: SearchProjectionDelta,
         import_source_graph_commit_epoch: u64,
     ) -> Result<SearchProjectionDeltaReport> {
+        // The frozen legacy source epoch is provenance only. The graph import
+        // created a new local WAL history, so the projection cursor must be
+        // stamped from that local history before it is made durable.
+        let local_graph_commit_epoch = self.graph.database().commit_epoch();
         let projection = require_search_projection_mut(&mut self.search_projection)?;
+        projection
+            .index()
+            .validate_import_source_graph_commit_epoch(import_source_graph_commit_epoch)?;
+        let report = projection
+            .index_mut()
+            .apply_projection_delta(SearchProjectionDelta {
+                source_graph_commit_epoch: Some(local_graph_commit_epoch),
+                ..delta
+            })?;
         projection
             .index_mut()
             .record_import_source_graph_commit_epoch(import_source_graph_commit_epoch)?;
-        let report = projection.index_mut().apply_projection_delta(delta)?;
         projection.index().checkpoint()?;
         Ok(report)
     }
@@ -14207,6 +14219,64 @@ mod tests {
                 .title,
             "Incremental facade"
         );
+    }
+
+    #[test]
+    fn initial_import_projection_uses_local_cursor_and_preserves_legacy_provenance() {
+        let root = unique_nowledge_mem_test_dir("initial_import_projection_local_cursor");
+        let graph_path = root.join("graph");
+        let search_path = root.join("search");
+        let options = NowledgeMemOpenOptions::with_search_projection(
+            graph_path,
+            search_path,
+            NowledgeMemGraphMode::WritableCutover,
+        );
+        let (mut store, _) = NowledgeMemEmbeddedStore::open_with_options(options).unwrap();
+        store
+            .graph_mut()
+            .query("CREATE (:Memory {id: 'm1', title: 'Imported'})")
+            .unwrap();
+        let local_graph_commit_epoch = store.graph().database().commit_epoch();
+
+        let report = store
+            .apply_initial_import_projection_delta_and_checkpoint(
+                SearchProjectionDelta {
+                    upserts: vec![SearchProjectionRow {
+                        kind: SearchProjectionKind::Memory,
+                        external_id: "m1".to_string(),
+                        title: "Imported".to_string(),
+                        body: "legacy import".to_string(),
+                        embedding: None,
+                        source_id: None,
+                        metadata: BTreeMap::new(),
+                    }],
+                    deletes: Vec::new(),
+                    max_operations: Some(1),
+                    source_graph_commit_epoch: Some(77),
+                },
+                77,
+            )
+            .unwrap();
+
+        assert_eq!(
+            report.source_graph_commit_epoch_after,
+            Some(local_graph_commit_epoch)
+        );
+        let freshness = store
+            .search_projection()
+            .unwrap()
+            .index()
+            .projection_freshness();
+        assert_eq!(freshness.import_source_graph_commit_epoch, Some(77));
+        assert_eq!(
+            freshness.source_graph_commit_epoch,
+            Some(local_graph_commit_epoch)
+        );
+        assert_eq!(
+            freshness.durable_source_graph_commit_epoch,
+            Some(local_graph_commit_epoch)
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

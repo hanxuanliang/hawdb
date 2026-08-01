@@ -1304,15 +1304,19 @@ impl SearchIndex {
     /// Records immutable provenance for an external graph bootstrap. The
     /// mutable local projection cursor remains independent.
     pub fn record_import_source_graph_commit_epoch(&mut self, epoch: u64) -> Result<()> {
+        self.validate_import_source_graph_commit_epoch(epoch)?;
+        self.import_source_graph_commit_epoch = Some(epoch);
+        Ok(())
+    }
+
+    /// Verifies that an import retry still belongs to the same frozen legacy
+    /// source without changing the in-memory projection state.
+    pub fn validate_import_source_graph_commit_epoch(&self, epoch: u64) -> Result<()> {
         match self.import_source_graph_commit_epoch {
             Some(existing) if existing != epoch => Err(SkeinError::Storage(
                 "search projection import provenance conflicts with existing source".to_string(),
             )),
-            Some(_) => Ok(()),
-            None => {
-                self.import_source_graph_commit_epoch = Some(epoch);
-                Ok(())
-            }
+            Some(_) | None => Ok(()),
         }
     }
 

@@ -1879,12 +1879,9 @@ fn graph_lightning_initial_import_cutover_catch_up_blocks_live_mutation_lag() {
     );
 
     assert!(!report.ready);
-    assert!(!report.graph_watermark_caught_up);
+    assert!(report.graph_watermark_caught_up);
     assert!(!report.search_projection_watermark_caught_up);
     assert_eq!(report.cutover_watermark, None);
-    assert!(report
-        .blocker_codes
-        .contains(&"initial_import_live_graph_watermark_not_caught_up".to_string()));
     assert!(report
         .blocker_codes
         .contains(&"initial_import_live_search_projection_watermark_not_caught_up".to_string()));

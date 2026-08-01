@@ -1164,8 +1164,18 @@ pub fn graph_lightning_initial_import_readiness(
         projection_freshness.and_then(|freshness| freshness.source_graph_commit_epoch);
     let projection_durable_source_graph_commit_epoch =
         projection_freshness.and_then(|freshness| freshness.durable_source_graph_commit_epoch);
-    let projection_watermark_caught_up = projection_durable_source_graph_commit_epoch
-        .is_some_and(|epoch| epoch >= target_graph_commit_epoch);
+    let imported_projection_matches_manifest = projection_freshness.is_some_and(|freshness| {
+        freshness.import_source_graph_commit_epoch == Some(manifest.graph_commit_epoch)
+    });
+    let projection_watermark_caught_up = if imported_projection_matches_manifest {
+        // An imported projection's cursor belongs to the newly created local
+        // WAL. Its presence is sufficient for source-import readiness; live
+        // local catch-up is evaluated by the cutover report below.
+        projection_durable_source_graph_commit_epoch.is_some()
+    } else {
+        projection_durable_source_graph_commit_epoch
+            .is_some_and(|epoch| epoch >= target_graph_commit_epoch)
+    };
     let projection_checkpointed = projection_freshness
         .map(|freshness| !freshness.has_uncheckpointed_changes)
         .unwrap_or(false);
@@ -1980,6 +1990,11 @@ pub fn graph_lightning_initial_import_cutover_catch_up_report(
     let import_durable_search_projection_commit_epoch =
         durable_state.and_then(|state| state.checkpoint.durable_search_projection_commit_epoch);
     let live_projection_present = live_projection_freshness.is_some();
+    let import_projection_provenance_matches = live_projection_freshness
+        .zip(import_graph_commit_epoch)
+        .is_some_and(|(freshness, import_epoch)| {
+            freshness.import_source_graph_commit_epoch == Some(import_epoch)
+        });
     let live_search_projection_commit_epoch =
         live_projection_freshness.and_then(|freshness| freshness.source_graph_commit_epoch);
     let live_durable_search_projection_commit_epoch =
@@ -1990,13 +2005,15 @@ pub fn graph_lightning_initial_import_cutover_catch_up_report(
     let live_projection_healthy = live_projection_freshness
         .map(|freshness| !freshness.full_reindex_needed && !freshness.metadata_repair_needed)
         .unwrap_or(false);
-    let graph_watermark_caught_up = import_graph_commit_epoch
-        .is_some_and(|import_epoch| import_epoch >= live_graph_commit_epoch);
-    let search_projection_watermark_caught_up = import_durable_search_projection_commit_epoch
-        .zip(live_durable_search_projection_commit_epoch)
-        .is_some_and(|(import_epoch, live_epoch)| {
-            import_epoch >= live_graph_commit_epoch && live_epoch >= live_graph_commit_epoch
-        });
+    // `import_*` epochs name the frozen legacy source. `live_*` epochs name
+    // the post-import local WAL. They are separate domains and must not be
+    // compared numerically. The source is checked by immutable provenance;
+    // live catch-up is checked only against the local durable cursor.
+    let graph_watermark_caught_up = session.ready_for_cutover
+        && durable_state.is_some()
+        && import_projection_provenance_matches;
+    let search_projection_watermark_caught_up = live_durable_search_projection_commit_epoch
+        .is_some_and(|live_epoch| live_epoch >= live_graph_commit_epoch);
     let cutover_watermark = if graph_watermark_caught_up
         && search_projection_watermark_caught_up
         && live_projection_checkpointed
@@ -2019,6 +2036,9 @@ pub fn graph_lightning_initial_import_cutover_catch_up_report(
     }
     if !graph_watermark_caught_up {
         blocker_codes.insert("initial_import_live_graph_watermark_not_caught_up".to_string());
+    }
+    if live_projection_present && !import_projection_provenance_matches {
+        blocker_codes.insert("initial_import_projection_provenance_mismatch".to_string());
     }
     if !search_projection_watermark_caught_up {
         blocker_codes

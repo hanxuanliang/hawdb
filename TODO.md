@@ -420,18 +420,19 @@ LanceDB for that path.
       epoch from the durable checkpoint, while live catch-up separately reads
       the local runtime epoch; a six-kind import can therefore become ready
       without forging physical commit history.
-    - [ ] Persist a typed local-epoch fence alongside the completed initial
-      import receipt. A later local graph commit must invalidate the import
-      cutover gate until its derived projection catches up; source logical
-      epochs and local WAL epochs are different domains and must never be
-      compared as interchangeable counters.
+    - [x] Persist a typed local-epoch fence alongside the completed initial
+      import receipt. A later local graph commit invalidates the import
+      cutover gate until its derived projection catches up; the source logical
+      epoch and local WAL epoch remain separate domains, and the host advances
+      the fence only after the typed local catch-up proof is ready.
       - [x] Persist a host-owned atomic local-epoch fence with the completed
         receipt and fail closed on a missing, mismatched, or advanced local WAL
         epoch before a session can report read cutover ready.
-      - [ ] Carry a separate local projection watermark through the embedded
-        search projection. Advance the fence only from a durable live
-        projection catch-up receipt; legacy import source epochs must remain
-        provenance, never the scheduler's local changefeed cursor.
+      - [x] Carry a separate local projection watermark through the embedded
+        search projection. Initial import records the frozen legacy epoch as
+        immutable provenance while stamping the projection cursor from the
+        local graph WAL; Mem advances its host fence only after the typed live
+        catch-up report proves that local durable cursor has caught up.
     - [x] Expose a typed initial-import session-bundle readiness helper that
       combines source-bundle readiness, durable session state, resume action,
       and optional live cutover catch-up proof so Mem startup can fail closed
@@ -494,11 +495,13 @@ LanceDB for that path.
       before applying the established display-name normalization in result shaping.
     - The route has explicit row and payload budgets and does not fall back to
       Kuzu when Skein graph mode is selected.
-  - [ ] Upgrade `GET /sources` to a storage-facing bounded Source scan.
-    - [x] Expose a library-owned Source candidate scan with a stable
-      `created_at`/node-id cursor, property allowlist, sidecar I/O report, and
-      canonical GraphStore fallback. The scan returns a candidate superset;
-      Mem retains exact label alias and nested metadata residual evaluation.
+  - [x] Upgrade `GET /sources` to a storage-facing bounded Source scan.
+    - Expose a library-owned Source candidate scan with a stable
+      `created_at`/node-id cursor, property allowlist, checkpoint-sidecar I/O
+      report, segment-summary predicate pruning, and canonical GraphStore
+      fallback. Mem retains exact label alias and nested metadata residual
+      evaluation over bounded candidate pages and reports the exact filtered
+      total.
     - [x] Route Mem `GET /sources` through the embedded candidate scan. Skein
       owns `created_at`-descending cursor ordering and storage fallback; Mem
       keeps scope/type/lifecycle verification and exact label/metadata
