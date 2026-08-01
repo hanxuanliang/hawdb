@@ -471,6 +471,10 @@ LanceDB for that path.
     - The host uses known Memory IDs, keeps the existing per-seed budget, and
       derives the live-preview edge envelope from the same query-runtime result
       used by `/graph/explore`.
+  - [x] Route `/graph/live-preview/{node_id}` through the same embedded
+    single-Memory expansion adapter as `/graph/expand/{node_id}`.
+    - It preserves short-ID conflict handling and metadata stripping without a
+      Skein-selected request touching Kuzu.
   - [x] Route `/graph/expand/{node_id}` through the embedded bounded subgraph
     API.
     - Short Memory IDs use the query-runtime prefix ownership API with the
