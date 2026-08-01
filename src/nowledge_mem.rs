@@ -1,4 +1,7 @@
-use crate::api::{KnowledgeSubgraphOutput, KnowledgeSubgraphRequest};
+use crate::api::{
+    KnowledgeInducedEdgeListOutput, KnowledgeInducedEdgeListRequest, KnowledgeSubgraphOutput,
+    KnowledgeSubgraphRequest,
+};
 use crate::search::{
     AdaptiveVectorSearchOptions, CompressedVectorSearchMode, SearchCandidateSetReport,
     SearchFallbackReasonCode, SearchFusionWeights, SearchMode, SearchQueryOptions,
@@ -3060,6 +3063,43 @@ pub struct NowledgeMemGraphSampleOutput {
     pub report: NowledgeMemGraphSampleRouteReport,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NowledgeMemGraphCanvasMode {
+    Overview,
+    Sample,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemGraphCanvasOptions {
+    pub mode: NowledgeMemGraphCanvasMode,
+    pub limit: usize,
+    pub edge_limit: usize,
+    pub read_options: NowledgeMemReadOptions,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemGraphCanvasNode {
+    pub id: String,
+    pub node_type: String,
+    pub properties: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemGraphCanvasEdge {
+    pub source_id: String,
+    pub target_id: String,
+    pub relationship_id: u64,
+    pub relationship_type: String,
+    pub strength: Value,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemGraphCanvasOutput {
+    pub nodes: Vec<NowledgeMemGraphCanvasNode>,
+    pub edges: Vec<NowledgeMemGraphCanvasEdge>,
+    pub read_reports: Vec<NowledgeMemReadReport>,
+}
+
 impl NowledgeMemGraphSampleOutput {
     pub fn json(&self) -> serde_json::Value {
         serde_json::json!({
@@ -5496,6 +5536,86 @@ impl NowledgeMemGraph {
         Ok(NowledgeMemGraphSampleOutput { rows, report })
     }
 
+    /// Builds the bounded node and induced-edge set consumed by graph canvas
+    /// routes. Candidate selection and edge reads both remain inside Skein.
+    pub fn read_graph_canvas(
+        &self,
+        options: &NowledgeMemGraphCanvasOptions,
+    ) -> Result<NowledgeMemGraphCanvasOutput> {
+        if options.limit == 0 || options.edge_limit == 0 {
+            return Err(SkeinError::Semantic(
+                "graph canvas limits must be greater than zero".to_string(),
+            ));
+        }
+        let budgets = graph_canvas_budgets(options.mode, options.limit);
+        let mut nodes = Vec::with_capacity(options.limit);
+        let mut reports = Vec::new();
+        for (node_type, limit, query) in graph_canvas_queries(options.mode, budgets) {
+            if limit == 0 {
+                continue;
+            }
+            let read = self.read_query_with_params(
+                query,
+                &BTreeMap::from([(
+                    "limit".to_string(),
+                    Value::Int(i64::try_from(limit).unwrap_or(i64::MAX)),
+                )]),
+                &graph_canvas_read_options(options, limit),
+            )?;
+            reports.push(read.report);
+            for row in read.output.rows {
+                let Some(Value::Map(properties)) = row.get("node") else {
+                    continue;
+                };
+                let Some(id) = properties.get("id").and_then(graph_canvas_external_id) else {
+                    continue;
+                };
+                if nodes
+                    .iter()
+                    .all(|node: &NowledgeMemGraphCanvasNode| node.id != id)
+                {
+                    nodes.push(NowledgeMemGraphCanvasNode {
+                        id,
+                        node_type: node_type.to_string(),
+                        properties: properties.clone(),
+                    });
+                }
+                if nodes.len() == options.limit {
+                    break;
+                }
+            }
+            if nodes.len() == options.limit {
+                break;
+            }
+        }
+        let edges = if nodes.is_empty() {
+            Vec::new()
+        } else {
+            self.db
+                .knowledge_induced_edges(&KnowledgeInducedEdgeListRequest {
+                    external_ids: nodes.iter().map(|node| node.id.clone()).collect(),
+                    limit: options.edge_limit,
+                })?
+                .rows
+                .into_iter()
+                .filter_map(|row| {
+                    Some(NowledgeMemGraphCanvasEdge {
+                        source_id: row.source_id?,
+                        target_id: row.target_id?,
+                        relationship_id: row.relationship_id,
+                        relationship_type: row.relationship_type,
+                        strength: row.strength,
+                    })
+                })
+                .collect()
+        };
+        Ok(NowledgeMemGraphCanvasOutput {
+            nodes,
+            edges,
+            read_reports: reports,
+        })
+    }
+
     pub fn read_graph_node_details(
         &self,
         options: &NowledgeMemGraphNodeDetailsOptions,
@@ -6048,6 +6168,86 @@ fn graph_sample_read_options(options: &NowledgeMemGraphSampleOptions) -> Nowledg
         None => options.limit,
     });
     read_options
+}
+
+const GRAPH_CANVAS_MEMORY_QUERY: &str = "MATCH (m:Memory) RETURN m AS node ORDER BY COALESCE(m.pagerank_score, m.importance, 0.5) DESC, m.id ASC LIMIT $limit";
+const GRAPH_CANVAS_ENTITY_QUERY: &str = "MATCH (e:Entity) RETURN e AS node ORDER BY COALESCE(e.pagerank_score, e.confidence, 0.5) DESC, e.id ASC LIMIT $limit";
+const GRAPH_CANVAS_SOURCE_QUERY: &str =
+    "MATCH (s:Source) RETURN s AS node ORDER BY s.memory_count DESC, s.id ASC LIMIT $limit";
+const GRAPH_CANVAS_THREAD_QUERY: &str =
+    "MATCH (t:Thread) RETURN t AS node ORDER BY t.message_count DESC, t.id ASC LIMIT $limit";
+const GRAPH_CANVAS_SKILL_QUERY: &str =
+    "MATCH (s:Skill) RETURN s AS node ORDER BY s.updated_at DESC, s.id ASC LIMIT $limit";
+
+fn graph_canvas_budgets(
+    mode: NowledgeMemGraphCanvasMode,
+    limit: usize,
+) -> (usize, usize, usize, usize, usize) {
+    match mode {
+        NowledgeMemGraphCanvasMode::Sample => {
+            let memory = limit.div_ceil(2);
+            (memory, limit.saturating_sub(memory), 0, 0, 0)
+        }
+        NowledgeMemGraphCanvasMode::Overview => {
+            let primary = limit.saturating_mul(70) / 100;
+            let source = limit.saturating_mul(10) / 100;
+            let thread = limit.saturating_mul(10) / 100;
+            let memory = primary.div_ceil(2);
+            (
+                memory,
+                primary.saturating_sub(memory),
+                source,
+                thread,
+                limit.saturating_sub(primary + source + thread),
+            )
+        }
+    }
+}
+
+fn graph_canvas_queries(
+    mode: NowledgeMemGraphCanvasMode,
+    budgets: (usize, usize, usize, usize, usize),
+) -> [(&'static str, usize, &'static str); 5] {
+    let (memory, entity, source, thread, skill) = budgets;
+    let secondary = matches!(mode, NowledgeMemGraphCanvasMode::Overview);
+    [
+        ("memory", memory, GRAPH_CANVAS_MEMORY_QUERY),
+        ("entity", entity, GRAPH_CANVAS_ENTITY_QUERY),
+        (
+            "source",
+            usize::from(secondary) * source,
+            GRAPH_CANVAS_SOURCE_QUERY,
+        ),
+        (
+            "thread",
+            usize::from(secondary) * thread,
+            GRAPH_CANVAS_THREAD_QUERY,
+        ),
+        (
+            "skill",
+            usize::from(secondary) * skill,
+            GRAPH_CANVAS_SKILL_QUERY,
+        ),
+    ]
+}
+
+fn graph_canvas_read_options(
+    options: &NowledgeMemGraphCanvasOptions,
+    limit: usize,
+) -> NowledgeMemReadOptions {
+    let mut read_options = options.read_options.clone();
+    read_options.max_rows = Some(match read_options.max_rows {
+        Some(max_rows) => max_rows.min(limit),
+        None => limit,
+    });
+    read_options
+}
+
+fn graph_canvas_external_id(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) if !value.is_empty() => Some(value.clone()),
+        _ => None,
+    }
 }
 
 fn graph_node_details_read_options(
@@ -6827,6 +7027,18 @@ impl NowledgeMemEmbeddedStoreHandle {
             .graph
             .database()
             .knowledge_subgraph(request))
+    }
+
+    /// Reads relationships induced by a bounded external-id set through the
+    /// embedded query runtime.
+    pub fn knowledge_induced_edges(
+        &self,
+        request: &KnowledgeInducedEdgeListRequest,
+    ) -> Result<KnowledgeInducedEdgeListOutput> {
+        self.read_store()?
+            .graph
+            .database()
+            .knowledge_induced_edges(request)
     }
 
     pub fn create_knowledge_memory_evolves_batch(
@@ -10394,7 +10606,8 @@ mod tests {
         nowledge_mem_source_mutation_dual_write_readiness, required_u64_field,
         workload_fixture_readiness_blocker_codes, NowledgeMemCutoverControls,
         NowledgeMemEmbeddedStore, NowledgeMemEmbeddedStoreHandle, NowledgeMemGraph,
-        NowledgeMemGraphAugmentationStateOptions, NowledgeMemGraphCommunityMembersOptions,
+        NowledgeMemGraphAugmentationStateOptions, NowledgeMemGraphCanvasMode,
+        NowledgeMemGraphCanvasOptions, NowledgeMemGraphCommunityMembersOptions,
         NowledgeMemGraphCommunityRecentMemoriesOptions, NowledgeMemGraphCommunitySubgraphOptions,
         NowledgeMemGraphMode, NowledgeMemGraphNodeDetailsOptions, NowledgeMemGraphOrphansOptions,
         NowledgeMemGraphOverviewOptions, NowledgeMemGraphPageRankPlanOptions,
@@ -10770,6 +10983,66 @@ mod tests {
         assert_eq!(output.rows.len(), 1);
         assert_eq!(output.rows[0].memory_id.as_deref(), Some("sample-memory-a"));
         assert_eq!(output.report.route, NOWLEDGE_MEM_GRAPH_SAMPLE_ROUTE);
+    }
+
+    #[test]
+    fn graph_canvas_reads_multiple_node_kinds_and_only_induced_edges() {
+        let db = Database::new();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        graph
+            .query(
+                "CREATE (:Memory {id: 'canvas-memory', title: 'Memory', importance: 0.9})\
+                 -[:MENTIONS {strength: 0.8}]->(:Entity {id: 'canvas-entity', name: 'Entity', confidence: 0.7})",
+            )
+            .unwrap();
+        graph
+            .query(
+                "CREATE (:Source {id: 'canvas-source', original_name: 'Source', memory_count: 3})",
+            )
+            .unwrap();
+        graph
+            .query("CREATE (:Thread {id: 'canvas-thread', title: 'Thread', message_count: 2})")
+            .unwrap();
+        graph
+            .query("CREATE (:Skill {id: 'canvas-skill', name: 'Skill', updated_at: 4})")
+            .unwrap();
+
+        let output = graph
+            .read_graph_canvas(&NowledgeMemGraphCanvasOptions {
+                mode: NowledgeMemGraphCanvasMode::Overview,
+                limit: 10,
+                edge_limit: 10,
+                read_options: NowledgeMemReadOptions::default(),
+            })
+            .unwrap();
+
+        assert!(output
+            .nodes
+            .iter()
+            .any(|node| node.id == "canvas-memory" && node.node_type == "memory"));
+        assert!(output
+            .nodes
+            .iter()
+            .any(|node| node.id == "canvas-entity" && node.node_type == "entity"));
+        assert!(output
+            .nodes
+            .iter()
+            .any(|node| node.id == "canvas-source" && node.node_type == "source"));
+        assert!(output
+            .nodes
+            .iter()
+            .any(|node| node.id == "canvas-thread" && node.node_type == "thread"));
+        assert!(output
+            .nodes
+            .iter()
+            .any(|node| node.id == "canvas-skill" && node.node_type == "skill"));
+        assert_eq!(output.edges.len(), 1);
+        assert_eq!(output.edges[0].source_id, "canvas-memory");
+        assert_eq!(output.edges[0].target_id, "canvas-entity");
+        assert!(output
+            .read_reports
+            .iter()
+            .all(|report| report.row_limit_enforced_before_output));
     }
 
     #[test]
