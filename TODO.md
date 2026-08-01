@@ -597,6 +597,10 @@ LanceDB for that path.
       inputs from Skein, then keeps percentile, coverage, and canonical-group
       calculations in Mem. Oversized vocabulary or Memory scans fail rather
       than yielding partial health statistics.
+  - [x] Route the Community summary list through parameterized embedded Cypher.
+    - `/communities` applies its summary-presence gate, member-count ordering,
+      and request limit in Skein; Mem only shapes the legacy response envelope
+      under an explicit row and payload budget.
   - [x] Add a bounded community-members graph contract that returns Entity and
     Memory members plus member-internal edges. Entity and Memory reads are
     separately bounded; edges are read only for the returned member IDs and
