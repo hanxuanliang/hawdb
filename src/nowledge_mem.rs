@@ -7194,6 +7194,13 @@ impl NowledgeMemEmbeddedStoreHandle {
         self.read_store()?.read_graph_sample(options)
     }
 
+    pub fn read_graph_canvas(
+        &self,
+        options: &NowledgeMemGraphCanvasOptions,
+    ) -> Result<NowledgeMemGraphCanvasOutput> {
+        self.read_store()?.read_graph_canvas(options)
+    }
+
     pub fn read_graph_node_details(
         &self,
         options: &NowledgeMemGraphNodeDetailsOptions,
@@ -8056,6 +8063,13 @@ impl NowledgeMemEmbeddedStore {
         options: &NowledgeMemGraphSampleOptions,
     ) -> Result<NowledgeMemGraphSampleOutput> {
         self.graph.read_graph_sample(options)
+    }
+
+    pub fn read_graph_canvas(
+        &self,
+        options: &NowledgeMemGraphCanvasOptions,
+    ) -> Result<NowledgeMemGraphCanvasOutput> {
+        self.graph.read_graph_canvas(options)
     }
 
     pub fn read_graph_node_details(
