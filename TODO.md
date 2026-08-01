@@ -485,6 +485,10 @@ LanceDB for that path.
     - The library reads the entity plus exact neighbor and relationship counts
       through bounded query-runtime calls; the host only preserves legacy
       property truncation and display fields.
+  - [x] Route `/graph/shortest-path` through bounded embedded Cypher.
+    - The Skein path runs the supported `ALL SHORTEST` plan with an explicit
+      path-row limit and returns `truncated` rather than silently dropping an
+      unbounded result set.
   - [x] Route `/graph/augmentation/state` through the embedded runtime with
     GraphMeta and bounded community-assignment count reads.
   - [x] Route `/graph/augmentation/pagerank/plan` through the embedded runtime
