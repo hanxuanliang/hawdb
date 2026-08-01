@@ -3074,6 +3074,9 @@ pub struct NowledgeMemGraphCanvasOptions {
     pub mode: NowledgeMemGraphCanvasMode,
     pub limit: usize,
     pub edge_limit: usize,
+    /// Optional Memory space lens. Only `Sample` accepts a space lens; scoped
+    /// samples never widen to global candidates when the scoped graph is sparse.
+    pub space_id: Option<String>,
     pub read_options: NowledgeMemReadOptions,
 }
 
@@ -5547,46 +5550,13 @@ impl NowledgeMemGraph {
                 "graph canvas limits must be greater than zero".to_string(),
             ));
         }
-        let budgets = graph_canvas_budgets(options.mode, options.limit);
         let mut nodes = Vec::with_capacity(options.limit);
         let mut reports = Vec::new();
-        for (node_type, limit, query) in graph_canvas_queries(options.mode, budgets) {
-            if limit == 0 {
-                continue;
-            }
-            let read = self.read_query_with_params(
-                query,
-                &BTreeMap::from([(
-                    "limit".to_string(),
-                    Value::Int(i64::try_from(limit).unwrap_or(i64::MAX)),
-                )]),
-                &graph_canvas_read_options(options, limit),
-            )?;
-            reports.push(read.report);
-            for row in read.output.rows {
-                let Some(Value::Map(properties)) = row.get("node") else {
-                    continue;
-                };
-                let Some(id) = properties.get("id").and_then(graph_canvas_external_id) else {
-                    continue;
-                };
-                if nodes
-                    .iter()
-                    .all(|node: &NowledgeMemGraphCanvasNode| node.id != id)
-                {
-                    nodes.push(NowledgeMemGraphCanvasNode {
-                        id,
-                        node_type: node_type.to_string(),
-                        properties: properties.clone(),
-                    });
-                }
-                if nodes.len() == options.limit {
-                    break;
-                }
-            }
-            if nodes.len() == options.limit {
-                break;
-            }
+        let scope = graph_canvas_scope(options)?;
+        if let Some(space_id) = scope.as_deref() {
+            self.read_scoped_graph_canvas_nodes(options, space_id, &mut nodes, &mut reports)?;
+        } else {
+            self.read_unscoped_graph_canvas_nodes(options, &mut nodes, &mut reports)?;
         }
         let edges = if nodes.is_empty() {
             Vec::new()
@@ -5614,6 +5584,93 @@ impl NowledgeMemGraph {
             edges,
             read_reports: reports,
         })
+    }
+
+    fn read_unscoped_graph_canvas_nodes(
+        &self,
+        options: &NowledgeMemGraphCanvasOptions,
+        nodes: &mut Vec<NowledgeMemGraphCanvasNode>,
+        reports: &mut Vec<NowledgeMemReadReport>,
+    ) -> Result<()> {
+        let budgets = graph_canvas_budgets(options.mode, options.limit);
+        for (node_type, limit, query) in graph_canvas_queries(options.mode, budgets) {
+            if limit == 0 {
+                continue;
+            }
+            let read = self.read_query_with_params(
+                query,
+                &graph_canvas_parameters(limit, None, None),
+                &graph_canvas_read_options(options, limit),
+            )?;
+            reports.push(read.report);
+            graph_canvas_append_nodes(nodes, node_type, read.output.rows, options.limit, None);
+            if nodes.len() == options.limit {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn read_scoped_graph_canvas_nodes(
+        &self,
+        options: &NowledgeMemGraphCanvasOptions,
+        space_id: &str,
+        nodes: &mut Vec<NowledgeMemGraphCanvasNode>,
+        reports: &mut Vec<NowledgeMemReadReport>,
+    ) -> Result<()> {
+        let seed_limit = options.limit.div_ceil(2);
+        let seed_read = self.read_query_with_params(
+            GRAPH_CANVAS_SCOPED_MEMORY_SEED_QUERY,
+            &graph_canvas_parameters(seed_limit, Some(space_id), None),
+            &graph_canvas_read_options(options, seed_limit),
+        )?;
+        reports.push(seed_read.report);
+        graph_canvas_append_nodes(
+            nodes,
+            "memory",
+            seed_read.output.rows,
+            options.limit,
+            Some(space_id),
+        );
+        let seed_ids = nodes.iter().map(|node| node.id.clone()).collect::<Vec<_>>();
+        if seed_ids.is_empty() || nodes.len() == options.limit {
+            return Ok(());
+        }
+
+        let remaining = options.limit - nodes.len();
+        let memory_limit = remaining / 2;
+        if memory_limit > 0 {
+            let memory_read = self.read_query_with_params(
+                GRAPH_CANVAS_SCOPED_MEMORY_NEIGHBOR_QUERY,
+                &graph_canvas_parameters(memory_limit, Some(space_id), Some(&seed_ids)),
+                &graph_canvas_read_options(options, memory_limit),
+            )?;
+            reports.push(memory_read.report);
+            graph_canvas_append_nodes(
+                nodes,
+                "memory",
+                memory_read.output.rows,
+                options.limit,
+                Some(space_id),
+            );
+        }
+        let remaining = options.limit - nodes.len();
+        if remaining > 0 {
+            let entity_read = self.read_query_with_params(
+                GRAPH_CANVAS_SCOPED_ENTITY_NEIGHBOR_QUERY,
+                &graph_canvas_parameters(remaining, Some(space_id), Some(&seed_ids)),
+                &graph_canvas_read_options(options, remaining),
+            )?;
+            reports.push(entity_read.report);
+            graph_canvas_append_nodes(
+                nodes,
+                "entity",
+                entity_read.output.rows,
+                options.limit,
+                None,
+            );
+        }
+        Ok(())
     }
 
     pub fn read_graph_node_details(
@@ -6178,6 +6235,9 @@ const GRAPH_CANVAS_THREAD_QUERY: &str =
     "MATCH (t:Thread) RETURN t AS node ORDER BY t.message_count DESC, t.id ASC LIMIT $limit";
 const GRAPH_CANVAS_SKILL_QUERY: &str =
     "MATCH (s:Skill) RETURN s AS node ORDER BY s.updated_at DESC, s.id ASC LIMIT $limit";
+const GRAPH_CANVAS_SCOPED_MEMORY_SEED_QUERY: &str = "MATCH (m:Memory) WHERE CASE WHEN m.space_id IS NULL OR m.space_id = '' THEN 'default' ELSE m.space_id END = $space_id RETURN m AS node ORDER BY COALESCE(m.pagerank_score, m.importance, 0.5) DESC, m.id ASC LIMIT $limit";
+const GRAPH_CANVAS_SCOPED_MEMORY_NEIGHBOR_QUERY: &str = "MATCH (seed:Memory)-[r]-(m:Memory) WHERE seed.id IN $memory_ids AND CASE WHEN m.space_id IS NULL OR m.space_id = '' THEN 'default' ELSE m.space_id END = $space_id RETURN m AS node ORDER BY COALESCE(m.pagerank_score, m.importance, 0.5) DESC, m.id ASC LIMIT $limit";
+const GRAPH_CANVAS_SCOPED_ENTITY_NEIGHBOR_QUERY: &str = "MATCH (seed:Memory)-[r]-(e:Entity) WHERE seed.id IN $memory_ids RETURN e AS node ORDER BY COALESCE(e.pagerank_score, e.confidence, 0.5) DESC, e.id ASC LIMIT $limit";
 
 fn graph_canvas_budgets(
     mode: NowledgeMemGraphCanvasMode,
@@ -6241,6 +6301,86 @@ fn graph_canvas_read_options(
         None => limit,
     });
     read_options
+}
+
+fn graph_canvas_scope(options: &NowledgeMemGraphCanvasOptions) -> Result<Option<String>> {
+    let Some(space_id) = options.space_id.as_deref() else {
+        return Ok(None);
+    };
+    let space_id = space_id.trim();
+    if space_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "graph canvas space_id must not be blank".to_string(),
+        ));
+    }
+    if !matches!(options.mode, NowledgeMemGraphCanvasMode::Sample) {
+        return Err(SkeinError::Semantic(
+            "graph canvas space_id is supported only for sample mode".to_string(),
+        ));
+    }
+    Ok(Some(space_id.to_string()))
+}
+
+fn graph_canvas_parameters(
+    limit: usize,
+    space_id: Option<&str>,
+    memory_ids: Option<&[String]>,
+) -> BTreeMap<String, Value> {
+    let mut parameters = BTreeMap::from([(
+        "limit".to_string(),
+        Value::Int(i64::try_from(limit).unwrap_or(i64::MAX)),
+    )]);
+    if let Some(space_id) = space_id {
+        parameters.insert("space_id".to_string(), Value::String(space_id.to_string()));
+    }
+    if let Some(memory_ids) = memory_ids {
+        parameters.insert(
+            "memory_ids".to_string(),
+            Value::List(memory_ids.iter().cloned().map(Value::String).collect()),
+        );
+    }
+    parameters
+}
+
+fn graph_canvas_append_nodes(
+    nodes: &mut Vec<NowledgeMemGraphCanvasNode>,
+    node_type: &str,
+    rows: Vec<BTreeMap<String, Value>>,
+    limit: usize,
+    memory_space_id: Option<&str>,
+) {
+    for row in rows {
+        let Some(Value::Map(properties)) = row.get("node") else {
+            continue;
+        };
+        if memory_space_id.is_some_and(|space_id| {
+            node_type == "memory" && !graph_canvas_memory_in_space(properties, space_id)
+        }) {
+            continue;
+        }
+        let Some(id) = properties.get("id").and_then(graph_canvas_external_id) else {
+            continue;
+        };
+        if nodes.iter().all(|node| node.id != id) {
+            nodes.push(NowledgeMemGraphCanvasNode {
+                id,
+                node_type: node_type.to_string(),
+                properties: properties.clone(),
+            });
+        }
+        if nodes.len() == limit {
+            break;
+        }
+    }
+}
+
+fn graph_canvas_memory_in_space(properties: &BTreeMap<String, Value>, space_id: &str) -> bool {
+    let actual_space_id = properties
+        .get("space_id")
+        .and_then(graph_canvas_external_id)
+        .filter(|space_id| !space_id.is_empty())
+        .unwrap_or_else(|| "default".to_string());
+    actual_space_id == space_id
 }
 
 fn graph_canvas_external_id(value: &Value) -> Option<String> {
@@ -11026,6 +11166,7 @@ mod tests {
                 mode: NowledgeMemGraphCanvasMode::Overview,
                 limit: 10,
                 edge_limit: 10,
+                space_id: None,
                 read_options: NowledgeMemReadOptions::default(),
             })
             .unwrap();
@@ -11057,6 +11198,56 @@ mod tests {
             .read_reports
             .iter()
             .all(|report| report.row_limit_enforced_before_output));
+    }
+
+    #[test]
+    fn scoped_graph_canvas_never_widens_to_other_memory_spaces() {
+        let db = Database::new();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        graph
+            .query(
+                "CREATE (:Memory {id: 'scope-a', space_id: 'team-a'})\
+                 -[:MENTIONS {strength: 0.8}]->(:Entity {id: 'shared-entity', name: 'Shared'})",
+            )
+            .unwrap();
+        graph
+            .query("CREATE (:Memory {id: 'scope-b', space_id: 'team-b'})")
+            .unwrap();
+        graph
+            .query(
+                "CREATE (:Memory {id: 'default-memory', title: 'Default'})\
+                 -[:MENTIONS]->(:Entity {id: 'default-entity', name: 'Default'})",
+            )
+            .unwrap();
+
+        let scoped = graph
+            .read_graph_canvas(&NowledgeMemGraphCanvasOptions {
+                mode: NowledgeMemGraphCanvasMode::Sample,
+                limit: 10,
+                edge_limit: 10,
+                space_id: Some("team-a".to_string()),
+                read_options: NowledgeMemReadOptions::default(),
+            })
+            .unwrap();
+        assert!(scoped.nodes.iter().any(|node| node.id == "scope-a"));
+        assert!(scoped.nodes.iter().any(|node| node.id == "shared-entity"));
+        assert!(scoped.nodes.iter().all(|node| node.id != "scope-b"));
+        assert!(scoped
+            .edges
+            .iter()
+            .all(|edge| edge.source_id != "scope-b" && edge.target_id != "scope-b"));
+
+        let default = graph
+            .read_graph_canvas(&NowledgeMemGraphCanvasOptions {
+                mode: NowledgeMemGraphCanvasMode::Sample,
+                limit: 10,
+                edge_limit: 10,
+                space_id: Some("default".to_string()),
+                read_options: NowledgeMemReadOptions::default(),
+            })
+            .unwrap();
+        assert!(default.nodes.iter().any(|node| node.id == "default-memory"));
+        assert!(default.nodes.iter().all(|node| node.id != "scope-a"));
     }
 
     #[test]

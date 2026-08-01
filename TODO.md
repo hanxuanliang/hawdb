@@ -461,8 +461,12 @@ LanceDB for that path.
       selected external IDs.
     - Mem preserves its existing overview response envelope and uses the legacy
       route only when the configured graph engine is not Skein.
-    - Scoped `/graph/sample` remains separate until its hard space-scope
-      contract can be enforced without widening or cross-space leakage.
+  - [x] Route `/graph/sample` through the embedded canvas runtime, including
+    strict `space_id` handling.
+    - A scoped sample first selects only normalized-space Memory seeds, then
+      adds only same-space Memory neighbors and Entity neighbors of those
+      seeds. An empty or sparse scope returns a smaller canvas and never
+      widens to global candidates.
   - [x] Route `/graph/augmentation/state` through the embedded runtime with
     GraphMeta and bounded community-assignment count reads.
   - [x] Route `/graph/augmentation/pagerank/plan` through the embedded runtime
