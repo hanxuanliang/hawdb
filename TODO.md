@@ -536,6 +536,12 @@ LanceDB for that path.
     - `/library/crystal/{crystal_id}/source-memories` uses the existing bounded
       relationship query in Skein, retains Memory preview shaping in Mem, and
       does not add a route-specific typed API.
+  - [x] Route Label list and detail reads through parameterized embedded
+    Cypher.
+    - `/labels` preserves its whitelisted ordering, offset/limit bounds, and
+      cross-node `HAS_LABEL` usage count; `/labels/{label_id}` retains exact
+      lookup and 404 behavior. Both keep response shaping in Mem without a
+      route-specific typed API.
   - [x] Add a bounded community-members graph contract that returns Entity and
     Memory members plus member-internal edges. Entity and Memory reads are
     separately bounded; edges are read only for the returned member IDs and
