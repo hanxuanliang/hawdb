@@ -531,6 +531,11 @@ LanceDB for that path.
   - [x] Route `/library/community/{community_id}/related` through the embedded
     runtime with the bounded cross-community `RELATES_TO` aggregation and
     legacy summary fallback response shape.
+  - [x] Route crystal source-memory reads through parameterized embedded
+    Cypher.
+    - `/library/crystal/{crystal_id}/source-memories` uses the existing bounded
+      relationship query in Skein, retains Memory preview shaping in Mem, and
+      does not add a route-specific typed API.
   - [x] Add a bounded community-members graph contract that returns Entity and
     Memory members plus member-internal edges. Entity and Memory reads are
     separately bounded; edges are read only for the returned member IDs and
