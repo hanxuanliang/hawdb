@@ -19,6 +19,10 @@ query family, or cutover gate requires them.
 - [x] Move graph read traffic through the query runtime boundary.
   - Mem should dual-write to Kuzu/Ladybug and Skein from the start of the
     migration window, then choose the read engine through configuration.
+  - Prefer readable, parameterized Cypher for Mem route behavior. Do not add a
+    route-specific typed API when the query runtime can express the read or
+    write; reserve typed APIs for stable multi-statement, mutation/WAL,
+    recovery, or otherwise non-Cypher library contracts.
   - Keep Kuzu/Ladybug as the default read engine until each active route has
     route-level Skein readiness evidence.
   - Avoid direct hand-written execution paths in application routes when the
