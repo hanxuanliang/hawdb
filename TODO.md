@@ -672,6 +672,12 @@ LanceDB for that path.
       space-scoped distinct-Memory aggregation plans. Space scope is applied
       before aggregation, both paths use row/payload budgets, and Mem retains
       only the legacy missing-name and empty-description response fallbacks.
+  - [x] Route source-origin analytics through parameterized embedded Cypher.
+    - `/stats/sources` pushes active-memory visibility and normalized space
+      scope into Skein before returning only source and metadata fields. Mem
+      retains JSON provenance normalization, grouping, colors, and ordering;
+      a `100_000 + 1` sentinel and payload budget fail rather than yield a
+      partial source distribution.
   - [x] Migrate the primary Entity list through parameterized embedded Cypher.
     - `/entities` must retain type filtering, alias/name/id case-insensitive
       substring matching, and its two legacy orderings (created time or
