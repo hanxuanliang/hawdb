@@ -489,6 +489,13 @@ LanceDB for that path.
     - The Skein path runs the supported `ALL SHORTEST` plan with an explicit
       path-row limit and returns `truncated` rather than silently dropping an
       unbounded result set.
+  - [x] Route the fallback `/graph/search` text seed scan through the embedded
+    query runtime.
+    - The bounded, parameterized Cypher seed query preserves case-insensitive
+      title/content matching, score ordering, and explicit `space_id` scope;
+      the resulting Memory IDs use the existing bounded seed-subgraph adapter.
+      A Skein-selected request never opens Kuzu, while the separately mounted
+      semantic-search handler remains responsible for indexed retrieval.
   - [x] Route `/graph/augmentation/state` through the embedded runtime with
     GraphMeta and bounded community-assignment count reads.
   - [x] Route `/graph/augmentation/pagerank/plan` through the embedded runtime
