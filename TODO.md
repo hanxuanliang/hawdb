@@ -607,6 +607,11 @@ LanceDB for that path.
       pushes direction/status/type/space predicates into bounded relation
       queries, and preserves default-visible endpoint filtering plus legacy
       direction merge/truncation semantics without Kuzu reads in Skein mode.
+  - [x] Keep Feed agent graph context on the selected graph plane.
+    - Feed graph statistics, attached Source/Memory/Thread context, and
+      timeline-selected Memory snapshots use bounded parameterized Cypher on
+      the process-lifetime Skein runtime when graph reads select Skein. Legacy
+      selection retains the Kuzu reader without opening a second runtime.
   - [x] Bound Source label reads through the embedded query runtime.
     - `/sources/{source_id}/labels` uses `read_query_with_params` rather than
       an unbounded generic query, retains its empty-label behavior, and fails
@@ -919,11 +924,6 @@ LanceDB for that path.
     - Route ownership now includes `/fs/recall`, and an integration test writes
       a canonical Memory, catches up the projection, and proves the route
       candidate helper returns its stable ID without a legacy search index.
-  - [x] Keep Feed agent graph context on the selected graph plane.
-    - Feed graph statistics, attached Source/Memory/Thread context, and
-      timeline-selected Memory snapshots use bounded parameterized Cypher on
-      the process-lifetime Skein runtime when graph reads select Skein. Legacy
-      selection retains the Kuzu reader without opening a second runtime.
   - [x] Keep `POST /memories/search` entirely on the selected search plane.
     - When Skein search is selected, construct its full `MemoryNode` response
       from the bounded Skein projection card and do not reopen Kuzu only for
