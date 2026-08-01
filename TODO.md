@@ -520,6 +520,12 @@ LanceDB for that path.
       Memory predicate and row/payload budgets in Skein, then passes rows to the
       existing pure classification and batch-selection function. It does not
       create a route-specific typed API or handwritten graph executor.
+  - [x] Route the community-detection preview inputs through parameterized
+    embedded Cypher.
+    - `/agent/trigger/community-detection/plan` reads GraphMeta, a bounded
+      Memory scan, the latest Community stamp, and bounded Community summaries
+      in Skein before invoking the existing pure planner. Summary sentinel
+      overflow fails rather than producing a partial coverage estimate.
   - [x] Route `/library/community/{community_id}/recent-memories` through the
     embedded runtime with the existing bounded ordering and response shape.
   - [x] Route `/library/community/{community_id}/related` through the embedded
