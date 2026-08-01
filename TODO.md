@@ -480,6 +480,11 @@ LanceDB for that path.
     - Short Memory IDs use the query-runtime prefix ownership API with the
       existing exact-first and unique-prefix rules; ambiguous prefixes remain
       conflicts rather than falling back to Kuzu.
+  - [x] Route `/graph/node-details/{node_id}` through the typed embedded
+    entity-details API.
+    - The library reads the entity plus exact neighbor and relationship counts
+      through bounded query-runtime calls; the host only preserves legacy
+      property truncation and display fields.
   - [x] Route `/graph/augmentation/state` through the embedded runtime with
     GraphMeta and bounded community-assignment count reads.
   - [x] Route `/graph/augmentation/pagerank/plan` through the embedded runtime

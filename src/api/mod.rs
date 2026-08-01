@@ -1506,6 +1506,20 @@ pub struct KnowledgeEntityOutput {
     pub entity: Option<KnowledgeEntity>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeEntityDetailsRequest {
+    pub label: String,
+    pub external_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct KnowledgeEntityDetailsOutput {
+    pub graph_commit_epoch: u64,
+    pub entity: Option<KnowledgeEntity>,
+    pub neighbor_count: u64,
+    pub relationship_count: u64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgeEntityBatchOutput {
     pub graph_commit_epoch: u64,
@@ -7317,6 +7331,13 @@ impl Database {
         request: &KnowledgeEntityRequest,
     ) -> Result<KnowledgeEntityOutput> {
         knowledge_entity_via_query_runtime(self, request)
+    }
+
+    pub fn knowledge_entity_details(
+        &self,
+        request: &KnowledgeEntityDetailsRequest,
+    ) -> Result<KnowledgeEntityDetailsOutput> {
+        knowledge_entity_details_via_query_runtime(self, request)
     }
 
     pub fn knowledge_entity_batch(

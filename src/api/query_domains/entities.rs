@@ -26,6 +26,81 @@ pub(in crate::api) fn knowledge_entity_via_query_runtime(
     })
 }
 
+pub(in crate::api) fn knowledge_entity_details_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeEntityDetailsRequest,
+) -> Result<KnowledgeEntityDetailsOutput> {
+    if request.external_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge entity details requires a non-empty external_id".to_string(),
+        ));
+    }
+    validate_cypher_identifier(&request.label, "label")?;
+    let parameters = BTreeMap::from([(
+        "external_id".to_string(),
+        Value::String(request.external_id.clone()),
+    )]);
+    let entity_output = db.query_read_only_with_params_bounded(
+        &format!(
+            "MATCH (n:{label}) WHERE n.id = $external_id RETURN n AS entity",
+            label = request.label,
+        ),
+        &parameters,
+        Some(1),
+    )?;
+    let Some(entity) = entity_output
+        .rows
+        .first()
+        .and_then(|row| row.get("entity"))
+        .and_then(knowledge_entity_from_value)
+    else {
+        return Ok(KnowledgeEntityDetailsOutput {
+            graph_commit_epoch: db.store.commit_epoch(),
+            entity: None,
+            neighbor_count: 0,
+            relationship_count: 0,
+        });
+    };
+    let neighbor_count = db
+        .query_read_only_with_params_bounded(
+            &format!(
+                "MATCH (n:{label}) WHERE n.id = $external_id \
+                 OPTIONAL MATCH (n)-[r]-(neighbor) \
+                 RETURN COUNT(DISTINCT neighbor) AS neighbor_count",
+                label = request.label,
+            ),
+            &parameters,
+            Some(1),
+        )?
+        .rows
+        .first()
+        .and_then(|row| row.get("neighbor_count"))
+        .and_then(value_to_non_negative_u64)
+        .unwrap_or(0);
+    let relationship_count = db
+        .query_read_only_with_params_bounded(
+            &format!(
+                "MATCH (n:{label}) WHERE n.id = $external_id \
+                 OPTIONAL MATCH (n)-[r]-() \
+                 RETURN COUNT(r) AS relationship_count",
+                label = request.label,
+            ),
+            &parameters,
+            Some(1),
+        )?
+        .rows
+        .first()
+        .and_then(|row| row.get("relationship_count"))
+        .and_then(value_to_non_negative_u64)
+        .unwrap_or(0);
+    Ok(KnowledgeEntityDetailsOutput {
+        graph_commit_epoch: db.store.commit_epoch(),
+        entity: Some(entity),
+        neighbor_count,
+        relationship_count,
+    })
+}
+
 pub(in crate::api) fn knowledge_scoped_entity_via_query_runtime(
     db: &Database,
     request: &KnowledgeScopedEntityRequest,
@@ -194,6 +269,30 @@ fn decode_entity_lookup_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn entity_details_reads_entity_and_exact_neighbor_counts() {
+        let mut db = Database::new();
+        db.query(
+            "CREATE (:Memory {id: 'details-memory'})\
+             -[:MENTIONS]->(:Entity {id: 'details-entity', name: 'Entity'})",
+        )
+        .unwrap();
+
+        let output = db
+            .knowledge_entity_details(&KnowledgeEntityDetailsRequest {
+                label: "Entity".to_string(),
+                external_id: "details-entity".to_string(),
+            })
+            .unwrap();
+
+        assert_eq!(
+            output.entity.unwrap().external_id.as_deref(),
+            Some("details-entity")
+        );
+        assert_eq!(output.neighbor_count, 1);
+        assert_eq!(output.relationship_count, 1);
+    }
 
     #[test]
     fn rejects_invalid_query_result_rows() {

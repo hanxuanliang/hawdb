@@ -1,7 +1,7 @@
 use crate::api::{
-    KnowledgeInducedEdgeListOutput, KnowledgeInducedEdgeListRequest,
-    KnowledgeMemoryPrefixOwnershipOutput, KnowledgeMemoryPrefixOwnershipRequest,
-    KnowledgeSubgraphOutput, KnowledgeSubgraphRequest,
+    KnowledgeEntityDetailsOutput, KnowledgeEntityDetailsRequest, KnowledgeInducedEdgeListOutput,
+    KnowledgeInducedEdgeListRequest, KnowledgeMemoryPrefixOwnershipOutput,
+    KnowledgeMemoryPrefixOwnershipRequest, KnowledgeSubgraphOutput, KnowledgeSubgraphRequest,
 };
 use crate::search::{
     AdaptiveVectorSearchOptions, CompressedVectorSearchMode, SearchCandidateSetReport,
@@ -7192,6 +7192,16 @@ impl NowledgeMemEmbeddedStoreHandle {
             .graph
             .database()
             .knowledge_memory_prefix_ownership(request)
+    }
+
+    pub fn knowledge_entity_details(
+        &self,
+        request: &KnowledgeEntityDetailsRequest,
+    ) -> Result<KnowledgeEntityDetailsOutput> {
+        self.read_store()?
+            .graph
+            .database()
+            .knowledge_entity_details(request)
     }
 
     pub fn create_knowledge_memory_evolves_batch(
