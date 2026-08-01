@@ -612,6 +612,11 @@ LanceDB for that path.
       timeline-selected Memory snapshots use bounded parameterized Cypher on
       the process-lifetime Skein runtime when graph reads select Skein. Legacy
       selection retains the Kuzu reader without opening a second runtime.
+  - [x] Route the read-only distillation batch planner through Skein.
+    - `/memories/distill/batch-plan` uses separate bounded Cypher statements
+      for Thread candidate pages, exact totals, identity, message-count
+      fallback, and `COMPACTS_TO` counts when graph reads select Skein. The
+      content store remains the preferred local message/coverage source.
   - [x] Bound Source label reads through the embedded query runtime.
     - `/sources/{source_id}/labels` uses `read_query_with_params` rather than
       an unbounded generic query, retains its empty-label behavior, and fails
