@@ -588,6 +588,10 @@ LanceDB for that path.
       pushes direction/status/type/space predicates into bounded relation
       queries, and preserves default-visible endpoint filtering plus legacy
       direction merge/truncation semantics without Kuzu reads in Skein mode.
+  - [x] Bound Source label reads through the embedded query runtime.
+    - `/sources/{source_id}/labels` uses `read_query_with_params` rather than
+      an unbounded generic query, retains its empty-label behavior, and fails
+      on a `4096 + 1` row sentinel instead of allocating an unlimited result.
   - [x] Add a bounded community-members graph contract that returns Entity and
     Memory members plus member-internal edges. Entity and Memory reads are
     separately bounded; edges are read only for the returned member IDs and
