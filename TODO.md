@@ -566,6 +566,12 @@ LanceDB for that path.
     - `/threads/summaries` pushes normalized optional `space_id` scope into a
       bounded aggregate query and retains last-activity ordering. A sentinel
       row prevents an oversized graph response from becoming a partial list.
+  - [x] Route Thread metadata/typeahead search through parameterized embedded
+    Cypher.
+    - The non-FTS `/threads/search` path pushes normalized multi-space and
+      source-alias filters into Skein, retains host title/summary scoring and
+      content-store message counts, and never opens Kuzu in Skein mode. The
+      `full` FTS path remains part of the separate search-projection cutover.
   - [x] Add a bounded community-members graph contract that returns Entity and
     Memory members plus member-internal edges. Entity and Memory reads are
     separately bounded; edges are read only for the returned member IDs and
