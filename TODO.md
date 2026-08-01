@@ -459,6 +459,17 @@ LanceDB for that path.
 
 - [ ] Migrate the complete Mem graph read route inventory.
   - Treat the shared route catalog as an inventory, not proof of live ownership.
+  - [ ] Keep remaining route migrations query-first.
+    - Express each route's graph lookup, predicate filtering, traversal/join,
+      aggregation, ordering, and pagination as readable parameterized Cypher
+      statements through the embedded query runtime.
+    - Use separate bounded statements for exact lookup, count, candidate-page,
+      and hydration phases when that keeps the query and resource limits clear.
+      Query count is not a reason to reimplement graph semantics in Rust.
+    - Host code may normalize requests, enforce a cross-query budget, perform
+      non-graph local reads, and shape the established response only. It must
+      not materialize an unbounded graph scan or implement a route-specific
+      filter, join, sort, or aggregate fallback.
   - [x] Route the global `/graph/overview` canvas through the embedded runtime.
     - `GraphCanvas` selects bounded Memory, Entity, Source, Thread, and Skill
       candidates inside Skein, then reads only relationships induced by the
@@ -678,6 +689,14 @@ LanceDB for that path.
       retains JSON provenance normalization, grouping, colors, and ordering;
       a `100_000 + 1` sentinel and payload budget fail rather than yield a
       partial source distribution.
+  - [x] Route the `/stats` overview aggregate through parameterized embedded
+    Cypher.
+    - Separate bounded statements provide lifecycle counts, scoped graph
+      relationship counts, and grouped raw Thread sources. The host only
+      normalizes source display names, combines the established response
+      fields, and caches the completed payload.
+    - Global and resolved-space fixtures prove that graph filtering and
+      aggregation remain in Skein rather than becoming a host-owned scan.
   - [x] Route monthly Memory-growth analytics through parameterized embedded
     Cypher.
     - `/stats/growth` computes total, crystal, and default-visible non-crystal
