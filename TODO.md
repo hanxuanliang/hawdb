@@ -496,6 +496,11 @@ LanceDB for that path.
       the resulting Memory IDs use the existing bounded seed-subgraph adapter.
       A Skein-selected request never opens Kuzu, while the separately mounted
       semantic-search handler remains responsible for indexed retrieval.
+  - [x] Route `/graph/analysis` through bounded embedded Cypher.
+    - Community, centrality, and graph-statistics reads use parameterized
+      query-runtime calls. Community analysis reads one sentinel row beyond a
+      fixed limit and fails rather than silently returning a partial graph.
+      Existing response shaping and density calculations remain in the host.
   - [x] Route `/graph/augmentation/state` through the embedded runtime with
     GraphMeta and bounded community-assignment count reads.
   - [x] Route `/graph/augmentation/pagerank/plan` through the embedded runtime
