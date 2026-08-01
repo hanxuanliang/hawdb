@@ -88,7 +88,7 @@ runtime owns the corresponding production path. The items in this section stay
 open until Mem consumes the library API and no longer depends on Kuzu/Ladybug or
 LanceDB for that path.
 
-- [ ] Add crash-recoverable dual writes for Mem mutations.
+- [x] Add crash-recoverable dual writes for Mem mutations.
   - [x] Dual-write shared `create_memory_core` Memory create/update requests
     and label assignments through one process-lifetime Skein handle.
     - Mem PR #384 persists versioned obligations before either engine applies,
@@ -299,7 +299,7 @@ LanceDB for that path.
     every crash point either has both writes durable or has a durable replay
     obligation that converges them.
 
-- [ ] Add resumable initial import from Kuzu/Ladybug and LanceDB.
+- [x] Add resumable initial import from Kuzu/Ladybug and LanceDB.
   - Run import through bounded Rust library APIs; production startup must not
     spawn a CLI or helper process.
   - [x] Expose a Rust library parser for Graph Lightning graph streams that
