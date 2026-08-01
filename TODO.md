@@ -638,6 +638,12 @@ LanceDB for that path.
       to 16 bounded `EVOLVES` frontiers through Skein. Any row-budget overflow
       fails instead of returning a partial staleness plan; Mem retains pure
       selection, summary, and optional merge evaluation.
+  - [x] Route active Skill matching candidate reads through parameterized
+    embedded Cypher.
+    - `/skills/match` loads its bounded active candidate corpus from Skein,
+      then reuses Mem's semantic vector cache/ranking and keyword fallback.
+      The router receives candidate values rather than a Kuzu client, and no
+      route-specific typed API is introduced.
   - [x] Add a bounded community-members graph contract that returns Entity and
     Memory members plus member-internal edges. Entity and Memory reads are
     separately bounded; edges are read only for the returned member IDs and
