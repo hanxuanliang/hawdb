@@ -455,6 +455,14 @@ LanceDB for that path.
 
 - [ ] Migrate the complete Mem graph read route inventory.
   - Treat the shared route catalog as an inventory, not proof of live ownership.
+  - [x] Route the global `/graph/overview` canvas through the embedded runtime.
+    - `GraphCanvas` selects bounded Memory, Entity, Source, Thread, and Skill
+      candidates inside Skein, then reads only relationships induced by the
+      selected external IDs.
+    - Mem preserves its existing overview response envelope and uses the legacy
+      route only when the configured graph engine is not Skein.
+    - Scoped `/graph/sample` remains separate until its hard space-scope
+      contract can be enforced without widening or cross-space leakage.
   - [x] Route `/graph/augmentation/state` through the embedded runtime with
     GraphMeta and bounded community-assignment count reads.
   - [x] Route `/graph/augmentation/pagerank/plan` through the embedded runtime
