@@ -691,6 +691,11 @@ LanceDB for that path.
       projection, chronological merge, and legacy response shaping; each input
       read uses a `100_000 + 1` sentinel and payload budget to fail instead of
       materializing an unbounded activity calendar.
+  - [x] Route EVOLVES edge history through parameterized embedded Cypher.
+    - `/agent/evolves` resolves exact and short Memory references in Skein,
+      then issues bounded count and page queries using the same relationship
+      filters. Content preview truncation occurs in the page query; Mem retains
+      its 404/409 reference errors and response envelope without reopening Kuzu.
   - [x] Migrate the primary Entity list through parameterized embedded Cypher.
     - `/entities` must retain type filtering, alias/name/id case-insensitive
       substring matching, and its two legacy orderings (created time or
