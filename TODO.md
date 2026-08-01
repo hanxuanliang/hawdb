@@ -467,6 +467,10 @@ LanceDB for that path.
       adds only same-space Memory neighbors and Entity neighbors of those
       seeds. An empty or sparse scope returns a smaller canvas and never
       widens to global candidates.
+  - [x] Route `/graph/live-preview` through the embedded bounded subgraph API.
+    - The host uses known Memory IDs, keeps the existing per-seed budget, and
+      derives the live-preview edge envelope from the same query-runtime result
+      used by `/graph/explore`.
   - [x] Route `/graph/augmentation/state` through the embedded runtime with
     GraphMeta and bounded community-assignment count reads.
   - [x] Route `/graph/augmentation/pagerank/plan` through the embedded runtime
