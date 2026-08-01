@@ -79,6 +79,43 @@ fn explain_analyze_reports_storage_scan_pruning_profile() {
 }
 
 #[test]
+fn explain_analyze_reports_durable_source_segment_pruning() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("skein-source-analyze-{nonce}"));
+    let mut db = Database::open(&path).unwrap();
+    for id in 0..128 {
+        db.query(&format!(
+            "CREATE (:Source {{id: 'source-beta-{id}', archive_group: 'beta'}})"
+        ))
+        .unwrap();
+    }
+    db.query("CREATE (:Source {id: 'source-missing'})").unwrap();
+    db.checkpoint().unwrap();
+
+    let output = db
+        .explain_analyze_query("MATCH (s:Source) WHERE s.archive_group IS NULL RETURN s.id AS id")
+        .unwrap();
+    assert_eq!(output.output.rows.len(), 1);
+    let physical_plan = output.physical_plan.explain(0);
+    assert!(
+        physical_plan.contains("SourceSegmentScan"),
+        "expected SourceSegmentScan, got:\n{physical_plan}"
+    );
+    assert_eq!(output.execution_profile.scan_pruning_reports.len(), 1);
+    let scan = &output.execution_profile.scan_pruning_reports[0];
+    assert!(scan.pruned);
+    assert_eq!(scan.candidate_count_before_pruning, 129);
+    assert_eq!(scan.candidate_count_before_filter, 1);
+    assert_eq!(scan.pruned_candidate_count, 128);
+    assert_eq!(scan.output_count, 1);
+    assert_eq!(scan.strategy, crate::store::ScanPruningStrategy::OrUnion);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
 fn explain_analyze_reports_property_exists_scan_pruning_profile() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 'mem-confidence-1', confidence: 0.9})")

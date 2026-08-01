@@ -213,6 +213,11 @@ LanceDB for that path.
         PR #384 commit `94e287bff`).
         - Retain the durable storage-cleanup intent when Kuzu commits the graph
           delete before Skein converges.
+      - [x] Keep Source ingest side effects on durable write paths.
+        - Ingest-time label create/assignment, caller attribution stamps, and
+          extracted-to-indexed chunk recovery reuse the replayable Label,
+          SourceLabel, and Source mutation obligations instead of writing only
+          to Kuzu.
       - [ ] Route Source ingest/create, content refresh/reparse, indexed
         transition, revision edges, and search-projection effects through a
         frozen composite Source obligation.
@@ -244,6 +249,14 @@ LanceDB for that path.
           summary, integration readiness, and final cutover preflight so
           missing composite Source mutation evidence blocks graph replacement
           cutover explicitly.
+        - [x] Persist Source operation identities in projection-repair entries
+          and frozen mutation payloads, so recovery can correlate an
+          unfinished graph write with its derived-search repair.
+        - [x] Freeze a unique request-scoped operation identity for content
+          ingest, reparse, OCR reparse, URL refetch, lifecycle updates, and
+          delete. Each covered route carries it through the repair marker and
+          its graph/projection obligations. Older replay payloads remain
+          compatible with the legacy single-Source identity.
         - Mem still needs to freeze and replay the full Source ingest/create,
           refresh/reparse, indexed transition, revision-edge, and
           search-projection payload through its durable dual-write coordinator
@@ -339,9 +352,14 @@ LanceDB for that path.
       graph epoch and six LanceDB table versions, applies the graph stage,
       advances one projection page, and recovers from persisted partial state
       after reopening the embedded runtime.
-    - [ ] Wire the Mem startup session to extract and import the six active
+    - [x] Wire the Mem startup session to extract and import the six active
       LanceDB projection kinds, persist each accepted projection-batch advance,
       and use the typed session/catch-up report before enabling read cutover.
+      - Mem's server-owned session freezes the legacy graph epoch and all six
+        table versions, imports immutable keyset pages, and persists its
+        sidecar state only after Skein accepts the durable checkpoint advance.
+      - Session and projection tests cover resumable bounded pages, all six
+        projection kinds, and the typed cutover catch-up report.
     - [x] Expose a typed durable-state batch advance helper that merges
       projection document identities idempotently, advances checkpoint progress
       through the same monotonic checkpoint path, reports completed-batch
@@ -392,6 +410,9 @@ LanceDB for that path.
     and derive the changed-count cutoff from canonical GraphMeta state.
   - [x] Route `/library/community/{community_id}/recent-memories` through the
     embedded runtime with the existing bounded ordering and response shape.
+  - [x] Route `/library/community/{community_id}/related` through the embedded
+    runtime with the bounded cross-community `RELATES_TO` aggregation and
+    legacy summary fallback response shape.
   - [x] Add a bounded community-members graph contract that returns Entity and
     Memory members plus member-internal edges. Entity and Memory reads are
     separately bounded; edges are read only for the returned member IDs and
@@ -411,6 +432,55 @@ LanceDB for that path.
     `limit` and keyset `cursor` parameters. Skein mode rejects an unbounded
     request and returns `has_more` plus `next_cursor` instead of silently
     truncating the legacy response.
+  - [x] Migrate `GET /sources` through the embedded bounded query runtime.
+    - The route pushes scope, source type, and lifecycle predicates into
+      Cypher before row decoding. It obtains exact unfiltered totals from an
+      aggregate query and applies offset/page in the same bounded read.
+    - Conjunctive label aliases and nested metadata retain their existing Mem
+      semantics through fixed-size candidate pages; only the current candidate
+      page and returned page are host-owned at once.
+  - [x] Migrate `GET /threads/sources` through the embedded bounded query runtime.
+    - Space filtering stays in Cypher and the route aggregates raw source values
+      before applying the established display-name normalization in result shaping.
+    - The route has explicit row and payload budgets and does not fall back to
+      Kuzu when Skein graph mode is selected.
+  - [ ] Upgrade `GET /sources` to a storage-facing bounded Source scan.
+    - [x] Expose a library-owned Source candidate scan with a stable node-id
+      cursor, property allowlist, sidecar I/O report, and canonical GraphStore
+      fallback. The scan returns a candidate superset; Mem retains exact label
+      alias and nested metadata residual evaluation.
+    - Preserve strict/shared/all space scope, source type and lifecycle
+      predicates, conjunctive label aliases, nested metadata criteria, stable
+      created-at ordering, offset/page semantics, and the exact filtered total.
+    - [x] Define the epoch-bound scan manifest contract before wiring a
+      sidecar into the checkpoint format.
+      - A reader can receive payload ranges and exact local candidate cursors
+        only when its pinned graph epoch equals the durable manifest epoch;
+        stale or absent manifests return an explicit graph fallback decision.
+      - The TLA model covers durable-before-manifest publication, stale-reader
+        fallback, and crash recovery of the last published segment generation.
+    - [x] Persist a rebuildable Source scan sidecar with independently zstd
+      compressed payload ranges, bounded field summaries, and `id` exact
+      cursors.
+      - Checkpoint publication writes and syncs the sidecar before its main
+        manifest reference. A later WAL epoch makes it ineligible, while a
+        missing or corrupt sidecar is removed when writable and falls back to
+        the canonical graph without blocking recovery.
+      - The library now exposes a range-scheduled candidate reader; it verifies
+        payload checksums after I/O and leaves nested metadata and label aliases
+        to the query runtime as residual predicates.
+      - `SourceSegmentScan` is an optimizer-visible physical access operator.
+        It is selected only after a usable property index is ruled out, and its
+        enclosing `FilterExec` remains the semantic authority.
+      - Query-runtime coverage proves the physical operator is selected for a
+        durable parameterized Source filter and that a later uncheckpointed
+        mutation falls back to the canonical graph without losing rows.
+      - `EXPLAIN ANALYZE` records a real segment-pruning report only after a
+        sidecar read succeeds; fallback scans retain their canonical report.
+    - Reuse the runtime candidate-page contract without materializing every
+      Source and label in application memory. The storage contract must add
+      segment pruning before payload reads and expose a bounded candidate
+      cursor for residual metadata or label verification.
   - Move REST, MCP, read-batch, export, and background-maintenance reads from
     direct `KuzuClient` calls to parameterized Cypher through the embedded query
     runtime.
@@ -459,6 +529,15 @@ LanceDB for that path.
     ranking windows, fail-soft reason codes, and repair/rebuild markers in the
     active search route read evidence, replacement summary, and integration
     readiness alignment gate.
+  - [x] Migrate `GET /sources/search` from LanceDB FTS to the embedded Skein
+    Source search projection.
+    - The route pushes `kind=source` and strict/shared space scope into the
+      persistent candidate scan, then hydrates only returned Source IDs through
+      the bounded graph query runtime.
+    - Source projection bodies remain searchable, so indexed document content
+      is not reduced to graph-name or summary matching. Label aliases and
+      nested metadata retain bounded residual verification after candidate
+      selection.
   - Acceptance: no active search route requires a LanceDB handle when the Skein
     search engine is selected.
 

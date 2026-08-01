@@ -85,6 +85,7 @@ mod query_domains;
 mod query_runtime;
 mod schema_guidance;
 mod search_projection_catch_up;
+mod source_candidates;
 mod system_sql;
 mod system_variables;
 
@@ -147,6 +148,10 @@ pub use plan_cache::{PlanCacheBypassReason, PlanCacheLookup, PlanCacheStats};
 pub use search_projection_catch_up::{
     ScheduledSearchProjectionCatchUpReport, SearchProjectionCatchUpReport,
     SearchProjectionCatchUpStopReason,
+};
+pub use source_candidates::{
+    KnowledgeSourceCandidateRow, KnowledgeSourceCandidateScanOrigin,
+    KnowledgeSourceCandidateScanOutput, KnowledgeSourceCandidateScanRequest,
 };
 pub use system_variables::QuerySystemVariables;
 

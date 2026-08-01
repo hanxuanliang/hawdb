@@ -27,11 +27,13 @@ pub use projection::{
 };
 pub use scan::{
     CandidateCursor, DateTimeMinMax, EnumDictionaryStats, FieldSummary, FileSegmentRangeReader,
-    MembershipFilterSummary, MembershipVerdict, NumericMinMax, PruningDecision, PruningReason,
-    RangeBound, ScanPredicate, ScanPruningReport, ScanPruningStrategy, ScanPruningTargetKind,
-    ScanScalar, SegmentPruner, SegmentRangeReader, SegmentReadError, SegmentReadExecutionError,
-    SegmentReadExecutionReport, SegmentReadExecutor, SegmentReadPayload, SegmentReadRange,
-    SegmentReadSchedule, SegmentReadScheduler, SegmentReadWave, SegmentSummary,
+    MembershipFilterSummary, MembershipVerdict, NumericMinMax, PersistedScanSegment,
+    PlannedScanSegment, PruningDecision, PruningReason, RangeBound, ReadySegmentScan,
+    ScanPredicate, ScanPruningReport, ScanPruningStrategy, ScanPruningTargetKind, ScanScalar,
+    ScanSegmentAccessPlan, ScanSegmentFallback, ScanSegmentManifest, ScanSegmentManifestError,
+    SegmentPayloadRange, SegmentPruner, SegmentRangeReader, SegmentReadError,
+    SegmentReadExecutionError, SegmentReadExecutionReport, SegmentReadExecutor, SegmentReadPayload,
+    SegmentReadRange, SegmentReadSchedule, SegmentReadScheduler, SegmentReadWave, SegmentSummary,
 };
 pub use snapshot::{
     SnapshotCommitError, SnapshotCoordinator, SnapshotReadGuard, VersionedSnapshot,

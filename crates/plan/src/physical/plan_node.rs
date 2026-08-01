@@ -67,6 +67,7 @@ impl PhysicalPlan {
             }
             PhysicalPlan::CreateRelationship { .. } => PhysicalPlanKind::CreateRelationship,
             PhysicalPlan::SeqNodeScan { .. } => PhysicalPlanKind::SeqNodeScan,
+            PhysicalPlan::SourceSegmentScan { .. } => PhysicalPlanKind::SourceSegmentScan,
             PhysicalPlan::NodeCartesianProductExec { .. } => {
                 PhysicalPlanKind::NodeCartesianProductExec
             }

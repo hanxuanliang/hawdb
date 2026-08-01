@@ -662,6 +662,16 @@ impl PhysicalPlan {
                 write_identifier(output, label);
                 output.push(')');
             }
+            PhysicalPlan::SourceSegmentScan {
+                variable,
+                predicate,
+            } => {
+                output.push_str("SourceSegmentScan(");
+                write_identifier(output, variable);
+                output.push_str(",predicate=");
+                write_predicate(output, predicate);
+                output.push(')');
+            }
             PhysicalPlan::NodeCartesianProductExec { left, right } => {
                 output.push_str("NodeCartesianProductExec(");
                 left.write_fingerprint(output);

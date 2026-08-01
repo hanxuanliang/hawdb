@@ -9,6 +9,8 @@ use crate::search::{
 };
 use crate::telemetry::{KernelTelemetry, KernelTelemetryOperation, TelemetrySink};
 use crate::value::Value;
+#[path = "store/source_scan.rs"]
+mod source_scan;
 pub use skein_storage::{
     AdjacencyDirection, AdjacencyGroupConsistencyMismatch, AdjacencyGroupKey, AdjacencyGroupStats,
     AdjacencyLayout, ConnectedNodesCreate, DurabilityPolicy, DurableCompression,
@@ -19,7 +21,8 @@ pub use skein_storage::{
     PropertyIndexProjectionRebuildAction, RecoveryMode, RelId, RelRecord,
     RelationshipDeleteRequest, RelationshipOnCreatePropertyValue, RelationshipPropertiesUpdate,
     RelationshipPropertyUpdate, RelationshipSetAssignment, RelationshipTargetNodeDelete,
-    ScanPruningReport, ScanPruningStrategy, ScanPruningTargetKind, SchemaMaintenanceAction,
+    ScanPredicate, ScanPruningReport, ScanPruningStrategy, ScanPruningTargetKind,
+    ScanSegmentAccessPlan, ScanSegmentFallback, ScanSegmentManifest, SchemaMaintenanceAction,
     SchemaMaintenancePlanItem, SearchProjectionChangefeedReadiness,
     SearchProjectionChangefeedStatus, SearchProjectionGraphChange, SearchProjectionMutationId,
     SegmentRangeReader, SegmentReadError, SegmentReadExecutionError, SegmentReadExecutionReport,
@@ -27,9 +30,11 @@ pub use skein_storage::{
     SegmentReadScheduler, SegmentReadWave, StorageReclamationWatermark, StorageRecoveryReport,
     StoreStableIdMapping, WalReplayConfig,
 };
+pub use source_scan::SourceScanRow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Cursor, Write};
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -439,8 +444,23 @@ pub struct GraphStore {
     search_projection_change_log_start_epoch: u64,
     search_projection_graph_changes: Vec<SearchProjectionGraphChange>,
     max_search_projection_change_log_entries: Option<usize>,
+    source_scan_manifest: Option<ScanSegmentManifest>,
     storage_recovery_report: StorageRecoveryReport,
     durable: Option<DurableStore>,
+}
+
+/// Result of reading Source scan sidecar candidates. The rows have passed
+/// segment pruning and exact local cursors only; query execution must still
+/// apply residual predicates such as nested metadata and label aliases.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SourceScanCandidateRead {
+    Rows {
+        graph_epoch: u64,
+        skipped_segment_count: usize,
+        report: SegmentReadExecutionReport,
+        rows: Vec<SourceScanRow>,
+    },
+    Fallback(ScanSegmentFallback),
 }
 
 #[derive(Debug, Clone)]
@@ -599,6 +619,7 @@ impl GraphStore {
             search_projection_change_log_start_epoch: 0,
             search_projection_graph_changes: Vec::new(),
             max_search_projection_change_log_entries: None,
+            source_scan_manifest: None,
             storage_recovery_report: StorageRecoveryReport::default(),
             durable: Some(durable),
         };
@@ -608,6 +629,7 @@ impl GraphStore {
         store.refresh_basic_statistics_epoch();
         store.load_projected_graph_artifacts()?;
         store.load_stable_id_mapping()?;
+        store.load_source_scan_manifest()?;
         Ok(store)
     }
 
@@ -4443,8 +4465,15 @@ impl GraphStore {
         let projected_graph_artifacts =
             encode_projected_graph_artifacts(catalog, self, projection_epoch);
         let (_, artifacts) = decode_projected_graph_artifacts(&projected_graph_artifacts)?;
+        let mut source_scan_projection = source_scan::build(
+            self.commit_epoch,
+            catalog.label_id("Source"),
+            self.nodes.values(),
+        );
         let durable = self.durable.as_mut().expect("durable store must exist");
         durable.write_projected_graph_artifacts(&projected_graph_artifacts)?;
+        let source_scan_publication =
+            source_scan::write(durable.root_path(), &mut source_scan_projection)?;
         durable.write_checkpoint(CheckpointImage {
             catalog,
             commit_epoch: self.commit_epoch,
@@ -4458,8 +4487,17 @@ impl GraphStore {
             initial_import_source_fingerprint: self.initial_import_source_fingerprint.as_deref(),
         })?;
         durable.truncate_wal()?;
-        durable.publish_checkpoint_manifest(self.commit_epoch, oldest_reader_commit_epoch)?;
+        durable.publish_checkpoint_manifest(
+            self.commit_epoch,
+            oldest_reader_commit_epoch,
+            Some(source_scan_publication),
+        )?;
         self.projected_graph_artifacts = artifacts;
+        self.source_scan_manifest = source_scan::load(
+            durable.root_path(),
+            self.commit_epoch,
+            source_scan_publication.descriptor_checksum(),
+        )?;
         Ok(())
     }
 
@@ -4720,6 +4758,7 @@ impl GraphStore {
             search_projection_change_log_start_epoch: self.search_projection_change_log_start_epoch,
             search_projection_graph_changes: self.search_projection_graph_changes.clone(),
             max_search_projection_change_log_entries: self.max_search_projection_change_log_entries,
+            source_scan_manifest: self.source_scan_manifest.clone(),
             storage_recovery_report: self.storage_recovery_report.clone(),
             durable: None,
         }
@@ -6409,6 +6448,150 @@ impl GraphStore {
         self.nodes.get(&id)
     }
 
+    /// Selects a checkpoint-published segment manifest for the current graph
+    /// snapshot. A missing or stale manifest is an explicit graph-scan fallback,
+    /// never permission to use an older physical projection.
+    pub fn plan_checkpoint_segment_scan(
+        &self,
+        manifest: Option<&ScanSegmentManifest>,
+        predicate: &ScanPredicate,
+    ) -> ScanSegmentAccessPlan {
+        manifest.map_or_else(
+            || ScanSegmentAccessPlan::fallback(ScanSegmentFallback::NoManifest),
+            |manifest| manifest.plan_scan(self.commit_epoch, predicate),
+        )
+    }
+
+    /// Plans the checkpoint-published Source sidecar for the current graph
+    /// snapshot. An unavailable, corrupted, or stale sidecar is represented as
+    /// an explicit fallback so callers keep the canonical graph authoritative.
+    pub fn plan_published_source_scan(&self, predicate: &ScanPredicate) -> ScanSegmentAccessPlan {
+        self.plan_checkpoint_segment_scan(self.source_scan_manifest.as_ref(), predicate)
+    }
+
+    /// Reads only the persisted Source ranges selected by the current
+    /// checkpoint-published manifest. This is a physical candidate operator,
+    /// not a substitute for query residual evaluation.
+    pub fn read_published_source_scan_candidates(
+        &self,
+        predicate: &ScanPredicate,
+        io_depth: NonZeroUsize,
+        max_coalesced_bytes: NonZeroU64,
+        max_wave_bytes: NonZeroU64,
+    ) -> Result<SourceScanCandidateRead> {
+        let plan = self.plan_published_source_scan(predicate);
+        let ScanSegmentAccessPlan::Read(plan) = plan else {
+            let ScanSegmentAccessPlan::Fallback(reason) = plan else {
+                unreachable!("source scan plan is read or fallback")
+            };
+            return Ok(SourceScanCandidateRead::Fallback(reason));
+        };
+        let Some(durable) = &self.durable else {
+            return Ok(SourceScanCandidateRead::Fallback(
+                ScanSegmentFallback::NoManifest,
+            ));
+        };
+
+        let mut reader = FileSegmentRangeReader::new();
+        reader.register(
+            source_scan::SOURCE_SCAN_ARTIFACT_ID,
+            durable
+                .root_path()
+                .join(source_scan::SOURCE_SCAN_PAYLOAD_FILE),
+        );
+        let ranges = plan
+            .segments
+            .iter()
+            .map(|segment| (segment.segment_id, segment.payload_range.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let checksums = self
+            .source_scan_manifest
+            .as_ref()
+            .expect("read source scan must have a manifest")
+            .segments()
+            .iter()
+            .map(|segment| (segment.summary.segment_id, segment.payload_range.checksum))
+            .collect::<BTreeMap<_, _>>();
+        let mut candidates = plan
+            .segments
+            .iter()
+            .map(|segment| {
+                let positions = segment.candidates.clone().map(|mut cursor| {
+                    cursor
+                        .next_batch(usize::MAX)
+                        .into_iter()
+                        .collect::<BTreeSet<_>>()
+                });
+                (segment.segment_id, positions)
+            })
+            .collect::<BTreeMap<_, _>>();
+        let schedule = SegmentReadScheduler::new(io_depth, max_coalesced_bytes)
+            .schedule(ranges.values().cloned());
+        let mut rows = Vec::new();
+        let report = SegmentReadExecutor::new(max_wave_bytes)
+            .execute(&reader, &schedule, |payload| {
+                for segment_id in &payload.range.segment_ids {
+                    let range = ranges.get(segment_id).ok_or_else(|| {
+                        SkeinError::Storage(format!(
+                            "source scan reader returned unknown segment {segment_id}"
+                        ))
+                    })?;
+                    let start = usize::try_from(range.offset.saturating_sub(payload.range.offset))
+                        .map_err(|_| {
+                            SkeinError::Storage(
+                                "source scan payload offset exceeds address space".to_string(),
+                            )
+                        })?;
+                    let end = start
+                        .checked_add(usize::try_from(range.length.get()).map_err(|_| {
+                            SkeinError::Storage(
+                                "source scan payload length exceeds address space".to_string(),
+                            )
+                        })?)
+                        .ok_or_else(|| {
+                            SkeinError::Storage("source scan payload slice overflows".to_string())
+                        })?;
+                    let bytes = payload.bytes.get(start..end).ok_or_else(|| {
+                        SkeinError::Storage(
+                            "source scan coalesced payload does not cover a segment".to_string(),
+                        )
+                    })?;
+                    if checksum_bytes(bytes) != checksums[segment_id] {
+                        return Err(SkeinError::Storage(format!(
+                            "source scan segment {segment_id} checksum changed after manifest validation"
+                        )));
+                    }
+                    let segment_rows = source_scan::decode_payload(bytes)?;
+                    if let Some(positions) = candidates.remove(segment_id).flatten() {
+                        rows.extend(
+                            segment_rows
+                                .into_iter()
+                                .enumerate()
+                                .filter_map(|(row_id, row)| positions.contains(&(row_id as u64)).then_some(row)),
+                        );
+                    } else {
+                        rows.extend(segment_rows);
+                    }
+                }
+                Ok::<_, SkeinError>(())
+            })
+            .map_err(|error| SkeinError::Storage(error.to_string()))?;
+        Ok(SourceScanCandidateRead::Rows {
+            graph_epoch: plan.graph_epoch,
+            skipped_segment_count: plan.skipped_segment_count,
+            report,
+            rows,
+        })
+    }
+
+    fn load_source_scan_manifest(&mut self) -> Result<()> {
+        let Some(durable) = &self.durable else {
+            return Ok(());
+        };
+        self.source_scan_manifest = durable.load_source_scan_manifest(self.commit_epoch)?;
+        Ok(())
+    }
+
     fn adjacency_relationship_ids(
         &self,
         node_id: NodeId,
@@ -7396,6 +7579,7 @@ impl GraphStore {
 
 #[derive(Debug)]
 struct DurableStore {
+    root_path: PathBuf,
     checkpoint_path: PathBuf,
     manifest_path: PathBuf,
     projected_graphs_path: PathBuf,
@@ -7407,6 +7591,8 @@ struct DurableStore {
     safe_reclaim_commit_epoch: u64,
     wal_replay_start_lsn: u64,
     next_lsn: u64,
+    source_scan_commit_epoch: Option<u64>,
+    source_scan_descriptor_checksum: Option<u64>,
     durability: DurabilityPolicy,
     read_only: bool,
     telemetry: Option<Arc<dyn TelemetrySink>>,
@@ -7457,6 +7643,7 @@ impl DurableStore {
         let manifest_path = path.join(MANIFEST_FILE);
         let manifest = DurableManifest::load(&manifest_path)?;
         Ok(Self {
+            root_path: path.to_path_buf(),
             checkpoint_path: path.join(CHECKPOINT_FILE),
             manifest_path,
             projected_graphs_path: path.join(PROJECTED_GRAPHS_FILE),
@@ -7468,10 +7655,37 @@ impl DurableStore {
             safe_reclaim_commit_epoch: manifest.safe_reclaim_commit_epoch,
             wal_replay_start_lsn: manifest.wal_replay_start_lsn,
             next_lsn: manifest.next_lsn,
+            source_scan_commit_epoch: manifest.source_scan_commit_epoch,
+            source_scan_descriptor_checksum: manifest.source_scan_descriptor_checksum,
             durability,
             read_only,
             telemetry: None,
         })
+    }
+
+    fn root_path(&self) -> &Path {
+        &self.root_path
+    }
+
+    fn load_source_scan_manifest(&self, _graph_epoch: u64) -> Result<Option<ScanSegmentManifest>> {
+        let (Some(source_scan_epoch), Some(source_scan_descriptor_checksum)) = (
+            self.source_scan_commit_epoch,
+            self.source_scan_descriptor_checksum,
+        ) else {
+            return Ok(None);
+        };
+        match source_scan::load(
+            &self.root_path,
+            source_scan_epoch,
+            source_scan_descriptor_checksum,
+        ) {
+            Ok(manifest) => Ok(manifest),
+            Err(_) if !self.read_only => {
+                remove_source_scan_artifacts(&self.root_path)?;
+                Ok(None)
+            }
+            Err(_) => Ok(None),
+        }
     }
 
     fn append_create_node(
@@ -7958,6 +8172,7 @@ impl DurableStore {
         &mut self,
         checkpoint_commit_epoch: u64,
         oldest_reader_commit_epoch: Option<u64>,
+        source_scan_publication: Option<source_scan::SourceScanPublication>,
     ) -> Result<()> {
         self.checkpoint_epoch += 1;
         self.checkpoint_commit_epoch = checkpoint_commit_epoch;
@@ -7965,6 +8180,9 @@ impl DurableStore {
         self.safe_reclaim_commit_epoch =
             safe_reclaim_commit_epoch(self.checkpoint_commit_epoch, oldest_reader_commit_epoch);
         self.wal_replay_start_lsn = self.next_lsn;
+        self.source_scan_commit_epoch = source_scan_publication.map(|value| value.graph_epoch());
+        self.source_scan_descriptor_checksum =
+            source_scan_publication.map(|value| value.descriptor_checksum());
         DurableManifest {
             checkpoint_epoch: self.checkpoint_epoch,
             checkpoint_commit_epoch: self.checkpoint_commit_epoch,
@@ -7972,6 +8190,8 @@ impl DurableStore {
             safe_reclaim_commit_epoch: self.safe_reclaim_commit_epoch,
             wal_replay_start_lsn: self.next_lsn,
             next_lsn: self.next_lsn,
+            source_scan_commit_epoch: self.source_scan_commit_epoch,
+            source_scan_descriptor_checksum: self.source_scan_descriptor_checksum,
         }
         .write(&self.manifest_path)
     }
@@ -7985,6 +8205,8 @@ struct DurableManifest {
     safe_reclaim_commit_epoch: u64,
     wal_replay_start_lsn: u64,
     next_lsn: u64,
+    source_scan_commit_epoch: Option<u64>,
+    source_scan_descriptor_checksum: Option<u64>,
 }
 
 impl Default for DurableManifest {
@@ -7996,6 +8218,8 @@ impl Default for DurableManifest {
             safe_reclaim_commit_epoch: 0,
             wal_replay_start_lsn: 1,
             next_lsn: 1,
+            source_scan_commit_epoch: None,
+            source_scan_descriptor_checksum: None,
         }
     }
 }
@@ -8042,6 +8266,14 @@ impl DurableManifest {
                 ["next_lsn", raw] => {
                     manifest.next_lsn = parse_u64(raw, "manifest next lsn")?;
                 }
+                ["source_scan_commit_epoch", raw] => {
+                    manifest.source_scan_commit_epoch =
+                        parse_optional_u64(raw, "source scan commit epoch")?;
+                }
+                ["source_scan_descriptor_checksum", raw] => {
+                    manifest.source_scan_descriptor_checksum =
+                        parse_optional_u64(raw, "source scan descriptor checksum")?;
+                }
                 [""] => {}
                 _ => {
                     return Err(SkeinError::Storage(format!(
@@ -8081,6 +8313,14 @@ impl DurableManifest {
             self.wal_replay_start_lsn
         ));
         body.push_str(&format!("next_lsn\t{}\n", self.next_lsn));
+        body.push_str(&format!(
+            "source_scan_commit_epoch\t{}\n",
+            encode_optional_u64(self.source_scan_commit_epoch)
+        ));
+        body.push_str(&format!(
+            "source_scan_descriptor_checksum\t{}\n",
+            encode_optional_u64(self.source_scan_descriptor_checksum)
+        ));
         let checksum = checksum_bytes(body.as_bytes());
         let data = format!("{body}checksum\t{checksum}\n");
         let tmp_path = path.with_extension("skein.tmp");
@@ -8095,7 +8335,22 @@ impl DurableManifest {
     }
 }
 
-fn sync_parent_dir(path: &Path) -> Result<()> {
+fn remove_source_scan_artifacts(path: &Path) -> Result<()> {
+    for file in [
+        source_scan::SOURCE_SCAN_DESCRIPTOR_FILE,
+        source_scan::SOURCE_SCAN_PAYLOAD_FILE,
+    ] {
+        let artifact = path.join(file);
+        match fs::remove_file(&artifact) {
+            Ok(()) => sync_parent_dir(&artifact)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn sync_parent_dir(path: &Path) -> Result<()> {
     let Some(parent) = path.parent() else {
         return Ok(());
     };
@@ -10954,7 +11209,7 @@ fn split_stable_id_mapping_checksum(text: &str) -> Result<(&str, u64)> {
     Ok((body, checksum))
 }
 
-fn encode_durable_text(text: &str, compression: DurableCompression) -> Result<Vec<u8>> {
+pub(crate) fn encode_durable_text(text: &str, compression: DurableCompression) -> Result<Vec<u8>> {
     match compression {
         DurableCompression::Zstd => encode_zstd_durable_text(text),
     }
@@ -10977,10 +11232,14 @@ fn encode_zstd_durable_text(text: &str) -> Result<Vec<u8>> {
 
 fn read_durable_text(path: &Path, name: &str) -> Result<String> {
     let bytes = fs::read(path)?;
+    read_durable_text_bytes(&bytes, name)
+}
+
+pub(crate) fn read_durable_text_bytes(bytes: &[u8], name: &str) -> Result<String> {
     if bytes.starts_with(DURABLE_COMPRESSION_HEADER.as_bytes()) {
-        decode_compressed_durable_text(&bytes, name)
+        decode_compressed_durable_text(bytes, name)
     } else {
-        String::from_utf8(bytes)
+        String::from_utf8(bytes.to_vec())
             .map_err(|error| SkeinError::Storage(format!("{name} is not valid UTF-8: {error}")))
     }
 }
@@ -11260,7 +11519,7 @@ fn decode_usize_vec(input: &str, name: &str) -> Result<Vec<usize>> {
         .collect()
 }
 
-fn encode_properties(properties: &BTreeMap<String, Value>) -> String {
+pub(crate) fn encode_properties(properties: &BTreeMap<String, Value>) -> String {
     properties
         .iter()
         .map(|(key, value)| format!("{}={}", encode_string(key), encode_value(value)))
@@ -11268,7 +11527,7 @@ fn encode_properties(properties: &BTreeMap<String, Value>) -> String {
         .join(";")
 }
 
-fn decode_properties(input: &str) -> Result<BTreeMap<String, Value>> {
+pub(crate) fn decode_properties(input: &str) -> Result<BTreeMap<String, Value>> {
     let mut properties = BTreeMap::new();
     if input.is_empty() {
         return Ok(properties);
@@ -11284,7 +11543,7 @@ fn decode_properties(input: &str) -> Result<BTreeMap<String, Value>> {
     Ok(properties)
 }
 
-fn encode_value(value: &Value) -> String {
+pub(crate) fn encode_value(value: &Value) -> String {
     match value {
         Value::Null => "n".to_string(),
         Value::Bool(false) => "b0".to_string(),
@@ -11315,7 +11574,7 @@ fn encode_value(value: &Value) -> String {
     }
 }
 
-fn decode_value(input: &str) -> Result<Value> {
+pub(crate) fn decode_value(input: &str) -> Result<Value> {
     if input.is_empty() {
         return Err(SkeinError::Storage("empty encoded value".to_string()));
     }
@@ -11478,7 +11737,7 @@ fn decode_schema_object_state(input: &str) -> Result<SchemaObjectState> {
     }
 }
 
-fn encode_string(input: &str) -> String {
+pub(crate) fn encode_string(input: &str) -> String {
     input
         .as_bytes()
         .iter()
@@ -11486,7 +11745,7 @@ fn encode_string(input: &str) -> String {
         .collect()
 }
 
-fn decode_string(input: &str) -> Result<String> {
+pub(crate) fn decode_string(input: &str) -> Result<String> {
     if !input.len().is_multiple_of(2) {
         return Err(SkeinError::Storage(format!(
             "invalid hex string length: {}",
@@ -11502,7 +11761,7 @@ fn decode_string(input: &str) -> Result<String> {
     String::from_utf8(bytes).map_err(|error| SkeinError::Storage(error.to_string()))
 }
 
-fn checksum_bytes(bytes: &[u8]) -> u64 {
+pub(crate) fn checksum_bytes(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in bytes {
         hash ^= u64::from(*byte);
@@ -11515,7 +11774,7 @@ fn elapsed_micros(started: std::time::Instant) -> u64 {
     started.elapsed().as_micros().min(u64::MAX as u128) as u64
 }
 
-fn parse_u64(input: &str, name: &str) -> Result<u64> {
+pub(crate) fn parse_u64(input: &str, name: &str) -> Result<u64> {
     input
         .parse()
         .map_err(|_| SkeinError::Storage(format!("invalid {name}: {input}")))
@@ -11533,7 +11792,7 @@ fn parse_usize(input: &str, name: &str) -> Result<usize> {
         .map_err(|_| SkeinError::Storage(format!("invalid {name}: {input}")))
 }
 
-fn parse_i64(input: &str, name: &str) -> Result<i64> {
+pub(crate) fn parse_i64(input: &str, name: &str) -> Result<i64> {
     input
         .parse()
         .map_err(|_| SkeinError::Storage(format!("invalid {name}: {input}")))
@@ -11565,18 +11824,23 @@ fn validate_storage_version(version: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        checksum_bytes, compute_statistics, encode_durable_text, read_durable_text,
+        checksum_bytes, compute_statistics, encode_durable_text, read_durable_text, source_scan,
         AdjacencyDirection, AdjacencyGroupStats, AdjacencyLayout, ConnectedNodesCreate,
         DegreeStatisticsEntry, DegreeStatisticsKey, DurableCompression, GraphStore, NodeId,
         NodeRecord, NodeSetAssignment, NodeSetValue, OrderedAdjacencyEntry,
         ProjectedGraphDefinition, PropertyFilter, RelId, RelRecord, RelTypeId,
         RelationshipDeleteRequest, ScanPruningStrategy, ScanPruningTargetKind,
-        SearchProjectionGraphChange, DENSE_ADJACENCY_DEGREE_THRESHOLD, DURABLE_COMPRESSION_HEADER,
+        SearchProjectionGraphChange, SourceScanCandidateRead, DENSE_ADJACENCY_DEGREE_THRESHOLD,
+        DURABLE_COMPRESSION_HEADER,
     };
     use crate::schema::{Catalog, LabelId};
     use crate::value::Value;
+    use skein_storage::{
+        ScanPredicate, ScanSegmentAccessPlan, ScanSegmentFallback, ScanSegmentManifest,
+    };
     use std::collections::{BTreeMap, BTreeSet};
     use std::io::Write;
+    use std::num::{NonZeroU64, NonZeroUsize};
 
     #[test]
     fn replays_relationships_from_wal_and_rebuilds_adjacency() {
@@ -11611,6 +11875,163 @@ mod tests {
             assert_eq!(rels[0].target, NodeId(1));
             assert_eq!(rels[0].properties.get("weight"), Some(&Value::Int(7)));
         }
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn checkpoint_segment_scan_rejects_a_manifest_behind_the_graph_snapshot() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        let manifest = ScanSegmentManifest::new(0, Vec::new()).unwrap();
+
+        assert!(matches!(
+            store.plan_checkpoint_segment_scan(Some(&manifest), &ScanPredicate::True),
+            ScanSegmentAccessPlan::Read(_)
+        ));
+        store
+            .create_node(
+                &mut catalog,
+                "Source",
+                properties([("id", Value::String("source-1".to_string()))]),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            store.plan_checkpoint_segment_scan(Some(&manifest), &ScanPredicate::True),
+            ScanSegmentAccessPlan::Fallback(ScanSegmentFallback::SnapshotEpochMismatch {
+                reader_epoch: 1,
+                manifest_epoch: 0,
+            })
+        ));
+        assert!(matches!(
+            store.plan_checkpoint_segment_scan(None, &ScanPredicate::True),
+            ScanSegmentAccessPlan::Fallback(ScanSegmentFallback::NoManifest)
+        ));
+    }
+
+    #[test]
+    fn checkpoint_publishes_source_scan_and_wal_mutation_invalidates_it() {
+        let path = unique_test_dir("source_scan_checkpoint");
+        {
+            let mut catalog = Catalog::default();
+            let mut store = GraphStore::open(&path, &mut catalog).unwrap();
+            store
+                .create_node(
+                    &mut catalog,
+                    "Source",
+                    properties([
+                        ("id", Value::String("source-a".to_string())),
+                        ("space_id", Value::String("alpha".to_string())),
+                    ]),
+                )
+                .unwrap();
+            store.checkpoint(&catalog).unwrap();
+            assert!(matches!(
+                store.plan_published_source_scan(&ScanPredicate::Eq {
+                    property: "space_id".to_string(),
+                    value: Value::String("alpha".to_string()),
+                }),
+                ScanSegmentAccessPlan::Read(_)
+            ));
+            let SourceScanCandidateRead::Rows { rows, report, .. } = store
+                .read_published_source_scan_candidates(
+                    &ScanPredicate::Eq {
+                        property: "space_id".to_string(),
+                        value: Value::String("alpha".to_string()),
+                    },
+                    NonZeroUsize::new(2).unwrap(),
+                    NonZeroU64::new(1024).unwrap(),
+                    NonZeroU64::new(1024).unwrap(),
+                )
+                .unwrap()
+            else {
+                panic!("expected source scan payload read");
+            };
+            assert_eq!(report.range_count, 1);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0].properties["id"],
+                Value::String("source-a".to_string())
+            );
+            store
+                .create_node(
+                    &mut catalog,
+                    "Memory",
+                    properties([("id", Value::String("memory-a".to_string()))]),
+                )
+                .unwrap();
+            assert!(matches!(
+                store.plan_published_source_scan(&ScanPredicate::True),
+                ScanSegmentAccessPlan::Fallback(ScanSegmentFallback::SnapshotEpochMismatch { .. })
+            ));
+        }
+        {
+            let mut catalog = Catalog::default();
+            let store = GraphStore::open(&path, &mut catalog).unwrap();
+            assert!(matches!(
+                store.plan_published_source_scan(&ScanPredicate::True),
+                ScanSegmentAccessPlan::Fallback(ScanSegmentFallback::SnapshotEpochMismatch { .. })
+            ));
+        }
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn corrupted_source_scan_artifact_never_blocks_canonical_graph_recovery() {
+        let path = unique_test_dir("source_scan_corruption");
+        {
+            let mut catalog = Catalog::default();
+            let mut store = GraphStore::open(&path, &mut catalog).unwrap();
+            store
+                .create_node(
+                    &mut catalog,
+                    "Source",
+                    properties([("id", Value::String("source-a".to_string()))]),
+                )
+                .unwrap();
+            store.checkpoint(&catalog).unwrap();
+        }
+        std::fs::write(path.join(source_scan::SOURCE_SCAN_PAYLOAD_FILE), b"corrupt").unwrap();
+        let mut catalog = Catalog::default();
+        let store = GraphStore::open(&path, &mut catalog).unwrap();
+        assert!(store.node(NodeId(0)).is_some());
+        assert!(matches!(
+            store.plan_published_source_scan(&ScanPredicate::True),
+            ScanSegmentAccessPlan::Fallback(ScanSegmentFallback::NoManifest)
+        ));
+        assert!(!path.join(source_scan::SOURCE_SCAN_PAYLOAD_FILE).exists());
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn source_scan_reader_decodes_coalesced_segment_ranges() {
+        let path = unique_test_dir("source_scan_coalesced_ranges");
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::open(&path, &mut catalog).unwrap();
+        for id in 0..129 {
+            store
+                .create_node(
+                    &mut catalog,
+                    "Source",
+                    properties([("id", Value::String(format!("source-{id}")))]),
+                )
+                .unwrap();
+        }
+        store.checkpoint(&catalog).unwrap();
+        let SourceScanCandidateRead::Rows { rows, report, .. } = store
+            .read_published_source_scan_candidates(
+                &ScanPredicate::True,
+                NonZeroUsize::new(2).unwrap(),
+                NonZeroU64::new(1024 * 1024).unwrap(),
+                NonZeroU64::new(1024 * 1024).unwrap(),
+            )
+            .unwrap()
+        else {
+            panic!("expected source scan payload read");
+        };
+        assert_eq!(rows.len(), 129);
+        assert_eq!(report.range_count, 1);
+        assert_eq!(report.wave_count, 1);
         std::fs::remove_dir_all(path).unwrap();
     }
 

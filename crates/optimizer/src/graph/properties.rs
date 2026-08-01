@@ -32,6 +32,13 @@ pub(super) fn selected_plan_properties(plan: &PhysicalPlan) -> PhysicalPropertie
             memory_budget: MemoryBudgetClass::RowLinear,
             ..PhysicalProperties::default()
         },
+        PhysicalPlan::SourceSegmentScan { .. } => PhysicalProperties {
+            distribution: Distribution::Single,
+            scan_pruning: ScanPruningSupport::Segment,
+            vector_precision: VectorPrecision::NotVector,
+            memory_budget: MemoryBudgetClass::RowLinear,
+            ..PhysicalProperties::default()
+        },
         PhysicalPlan::IndexNodeSeek {
             label, property, ..
         }
@@ -109,6 +116,8 @@ fn combine_scan_pruning(left: ScanPruningSupport, right: ScanPruningSupport) -> 
         ScanPruningSupport::ExactEmpty
     } else if left == ScanPruningSupport::Index || right == ScanPruningSupport::Index {
         ScanPruningSupport::Index
+    } else if left == ScanPruningSupport::Segment || right == ScanPruningSupport::Segment {
+        ScanPruningSupport::Segment
     } else if left == ScanPruningSupport::Label || right == ScanPruningSupport::Label {
         ScanPruningSupport::Label
     } else if left == ScanPruningSupport::None && right == ScanPruningSupport::None {

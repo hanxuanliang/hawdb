@@ -289,6 +289,13 @@ impl FieldSummary {
         }
         self
     }
+
+    /// Records exact row positions without exposing the bitmap implementation
+    /// to projection builders outside the storage crate.
+    pub fn with_exact_row_ids(self, value: Value, row_ids: impl IntoIterator<Item = u64>) -> Self {
+        let row_ids = row_ids.into_iter().collect();
+        self.with_exact_value(value, row_ids)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

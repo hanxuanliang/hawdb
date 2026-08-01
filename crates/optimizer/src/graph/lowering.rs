@@ -380,6 +380,15 @@ impl GroupExpr {
                     index_seek_from_filter(predicate, input, catalog, decisions, stage_events)
                 {
                     plan
+                } else if let Some(plan) = access::source_segment_scan_from_filter(predicate, input)
+                {
+                    decisions.push(
+                        "choose SourceSegmentScan for storage-prunable Source filter".to_string(),
+                    );
+                    PhysicalPlan::FilterExec {
+                        predicate: predicate.clone(),
+                        input: Box::new(plan),
+                    }
                 } else {
                     let mut input =
                         best_physical(memo, self.children[0], catalog, decisions, stage_events);
@@ -796,6 +805,14 @@ fn logical_to_physical_direct(
                 index_seek_from_filter(predicate, input, catalog, decisions, stage_events)
             {
                 plan
+            } else if let Some(plan) = access::source_segment_scan_from_filter(predicate, input) {
+                decisions.push(
+                    "choose SourceSegmentScan for storage-prunable Source filter".to_string(),
+                );
+                PhysicalPlan::FilterExec {
+                    predicate: predicate.clone(),
+                    input: Box::new(plan),
+                }
             } else {
                 let mut input = logical_to_physical_direct(input, catalog, decisions, stage_events);
                 push_vector_seed_metadata_filter(&mut input, predicate, decisions);

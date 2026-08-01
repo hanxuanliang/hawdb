@@ -18,3 +18,20 @@ tlc -config docs/tla/SkeinConcurrentSnapshots.cfg \
 The checked invariants cover durable-before-publish ordering, writer ownership of
 the next epoch, reader visibility of published epochs, and recoverability after
 a crash at any modeled write stage.
+
+## Source Segment Publication Model
+
+`SkeinSourceSegmentPublication.tla` models the future storage-facing Source
+scan sidecar. A Source segment is built from one graph epoch, made durable, and
+only then published through a manifest for that same epoch. Readers may use the
+sidecar only when their pinned graph epoch, the published manifest epoch, and
+the durable segment epoch are identical. A newer graph snapshot must use the
+authoritative graph path until a matching segment is published; it must never
+silently read a stale segment.
+
+Run the model with:
+
+```bash
+tlc -config docs/tla/SkeinSourceSegmentPublication.cfg \
+  docs/tla/SkeinSourceSegmentPublication.tla
+```

@@ -108,6 +108,7 @@ impl PhysicalPlan {
                 PhysicalPlanDomainRef::Mutation(MutationPhysicalPlanRef::new(self))
             }
             PhysicalPlan::SeqNodeScan { .. }
+            | PhysicalPlan::SourceSegmentScan { .. }
             | PhysicalPlan::NodeColumnLookupExec { .. }
             | PhysicalPlan::IndexNodeSeek { .. }
             | PhysicalPlan::IndexNodeMultiSeek { .. }

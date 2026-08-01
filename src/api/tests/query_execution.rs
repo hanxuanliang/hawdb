@@ -43,6 +43,76 @@ fn parameterized_create_and_index_seek_execute_end_to_end() {
 }
 
 #[test]
+fn durable_source_filter_uses_segment_scan_through_query_runtime() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("skein-source-query-runtime-{nonce}"));
+    let mut db = Database::open(&path).unwrap();
+    db.query("CREATE (:Source {id: 'source-alpha', space_id: 'alpha', source_type: 'file'})")
+        .unwrap();
+    db.query("CREATE (:Source {id: 'source-beta', space_id: 'beta', source_type: 'file'})")
+        .unwrap();
+    db.checkpoint().unwrap();
+
+    let query = "MATCH (s:Source) WHERE s.space_id = $space_id RETURN s.id AS id";
+    let parameters = BTreeMap::from([("space_id".to_string(), Value::String("alpha".to_string()))]);
+    let explain = db.explain_query_with_params(query, &parameters).unwrap();
+    assert!(explain
+        .physical_plan
+        .explain(0)
+        .contains("SourceSegmentScan"));
+    assert!(explain
+        .trace
+        .decisions
+        .iter()
+        .any(|decision| decision.contains("choose SourceSegmentScan")));
+
+    let output = db.query_with_params(query, &parameters).unwrap();
+    assert_eq!(output.rows.len(), 1);
+    assert_eq!(
+        output.rows[0].get("id"),
+        Some(&Value::String("source-alpha".to_string()))
+    );
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn source_segment_scan_falls_back_after_uncheckpointed_mutation() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("skein-source-query-fallback-{nonce}"));
+    let mut db = Database::open(&path).unwrap();
+    db.query("CREATE (:Source {id: 'source-checkpointed', space_id: 'alpha'})")
+        .unwrap();
+    db.checkpoint().unwrap();
+    db.query("CREATE (:Source {id: 'source-uncheckpointed', space_id: 'alpha'})")
+        .unwrap();
+
+    let query = "MATCH (s:Source) WHERE s.space_id = 'alpha' RETURN s.id AS id ORDER BY id ASC";
+    let explain = db.explain_query(query).unwrap();
+    assert!(explain
+        .physical_plan
+        .explain(0)
+        .contains("SourceSegmentScan"));
+
+    let output = db.query(query).unwrap();
+    assert_eq!(output.rows.len(), 2);
+    assert_eq!(
+        output.rows[0].get("id"),
+        Some(&Value::String("source-checkpointed".to_string()))
+    );
+    assert_eq!(
+        output.rows[1].get("id"),
+        Some(&Value::String("source-uncheckpointed".to_string()))
+    );
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
 fn database_config_caps_optimizer_groups_for_explain() {
     let db = Database::new_with_config(DatabaseConfig {
         max_optimizer_groups: Some(2),

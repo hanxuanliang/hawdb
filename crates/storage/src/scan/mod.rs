@@ -1,12 +1,17 @@
 use skein_core::{LabelId, RelTypeId};
 
 mod cursor;
+mod manifest;
 mod predicate;
 mod reader;
 mod scheduler;
 mod summary;
 
 pub use cursor::CandidateCursor;
+pub use manifest::{
+    PersistedScanSegment, PlannedScanSegment, ReadySegmentScan, ScanSegmentAccessPlan,
+    ScanSegmentFallback, ScanSegmentManifest, ScanSegmentManifestError, SegmentPayloadRange,
+};
 pub use predicate::{PruningDecision, PruningReason, RangeBound, ScanPredicate, SegmentPruner};
 pub use reader::{
     FileSegmentRangeReader, SegmentRangeReader, SegmentReadError, SegmentReadExecutionError,

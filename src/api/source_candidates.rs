@@ -1,0 +1,327 @@
+use super::{Database, DatabaseReadTransaction};
+use crate::error::{Result, SkeinError};
+use crate::schema::Catalog;
+use crate::store::{GraphStore, NodeRecord, SourceScanCandidateRead};
+use crate::value::Value;
+use skein_storage::{ScanPredicate, ScanSegmentFallback, SegmentReadExecutionReport};
+use std::collections::BTreeMap;
+use std::num::{NonZeroU64, NonZeroUsize};
+
+const SOURCE_SCAN_IO_DEPTH: usize = 2;
+const SOURCE_SCAN_MAX_COALESCED_BYTES: u64 = 512 * 1024;
+const SOURCE_SCAN_MAX_WAVE_BYTES: u64 = 2 * 1024 * 1024;
+
+/// A bounded Source candidate scan. The predicate is used for storage pruning;
+/// callers must retain semantic residual evaluation for unsupported terms.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KnowledgeSourceCandidateScanRequest {
+    pub predicate: ScanPredicate,
+    pub after_node_id: Option<u64>,
+    pub limit: usize,
+    pub property_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceCandidateRow {
+    pub node_id: u64,
+    pub source_id: Option<String>,
+    pub properties: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KnowledgeSourceCandidateScanOrigin {
+    Sidecar {
+        graph_epoch: u64,
+        skipped_segment_count: usize,
+    },
+    CanonicalFallback {
+        reason: ScanSegmentFallback,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceCandidateScanOutput {
+    pub graph_commit_epoch: u64,
+    pub rows: Vec<KnowledgeSourceCandidateRow>,
+    pub next_after_node_id: Option<u64>,
+    pub origin: KnowledgeSourceCandidateScanOrigin,
+    pub read_report: Option<SegmentReadExecutionReport>,
+}
+
+impl Database {
+    pub fn knowledge_source_candidates(
+        &self,
+        request: &KnowledgeSourceCandidateScanRequest,
+    ) -> Result<KnowledgeSourceCandidateScanOutput> {
+        knowledge_source_candidates(&self.catalog, &self.store, request)
+    }
+}
+
+impl DatabaseReadTransaction {
+    pub fn knowledge_source_candidates(
+        &self,
+        request: &KnowledgeSourceCandidateScanRequest,
+    ) -> Result<KnowledgeSourceCandidateScanOutput> {
+        knowledge_source_candidates(&self.catalog, &self.store, request)
+    }
+}
+
+fn knowledge_source_candidates(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeSourceCandidateScanRequest,
+) -> Result<KnowledgeSourceCandidateScanOutput> {
+    validate_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let source_label_id = catalog.label_id("Source");
+    let (mut nodes, origin, read_report) = match store.read_published_source_scan_candidates(
+        &request.predicate,
+        NonZeroUsize::new(SOURCE_SCAN_IO_DEPTH).expect("non-zero I/O depth"),
+        NonZeroU64::new(SOURCE_SCAN_MAX_COALESCED_BYTES).expect("non-zero coalesced range"),
+        NonZeroU64::new(SOURCE_SCAN_MAX_WAVE_BYTES).expect("non-zero I/O wave"),
+    ) {
+        Ok(SourceScanCandidateRead::Rows {
+            graph_epoch,
+            skipped_segment_count,
+            report,
+            rows,
+        }) => {
+            let mut nodes = Vec::with_capacity(rows.len());
+            for row in rows {
+                let Some(node) = store.node(crate::store::NodeId(row.node_id)) else {
+                    return canonical_fallback(
+                        catalog,
+                        store,
+                        request,
+                        ScanSegmentFallback::NoManifest,
+                    );
+                };
+                if source_label_id.is_none_or(|label_id| !node.labels.contains(&label_id))
+                    || node.properties != row.properties
+                {
+                    return canonical_fallback(
+                        catalog,
+                        store,
+                        request,
+                        ScanSegmentFallback::NoManifest,
+                    );
+                }
+                nodes.push(node.clone());
+            }
+            (
+                nodes,
+                KnowledgeSourceCandidateScanOrigin::Sidecar {
+                    graph_epoch,
+                    skipped_segment_count,
+                },
+                Some(report),
+            )
+        }
+        Ok(SourceScanCandidateRead::Fallback(reason)) => {
+            return canonical_fallback(catalog, store, request, reason)
+        }
+        Err(_) => {
+            return canonical_fallback(catalog, store, request, ScanSegmentFallback::NoManifest)
+        }
+    };
+
+    nodes.sort_unstable_by_key(|node| node.id.0);
+    render_page(graph_commit_epoch, nodes, request, origin, read_report)
+}
+
+fn canonical_fallback(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeSourceCandidateScanRequest,
+    reason: ScanSegmentFallback,
+) -> Result<KnowledgeSourceCandidateScanOutput> {
+    let nodes = catalog
+        .label_id("Source")
+        .map_or_else(Vec::new, |label_id| {
+            store.scan_nodes(Some(label_id)).cloned().collect()
+        });
+    render_page(
+        store.commit_epoch(),
+        nodes,
+        request,
+        KnowledgeSourceCandidateScanOrigin::CanonicalFallback { reason },
+        None,
+    )
+}
+
+fn render_page(
+    graph_commit_epoch: u64,
+    mut nodes: Vec<NodeRecord>,
+    request: &KnowledgeSourceCandidateScanRequest,
+    origin: KnowledgeSourceCandidateScanOrigin,
+    read_report: Option<SegmentReadExecutionReport>,
+) -> Result<KnowledgeSourceCandidateScanOutput> {
+    nodes.sort_unstable_by_key(|node| node.id.0);
+    let mut nodes = nodes
+        .into_iter()
+        .filter(|node| request.after_node_id.is_none_or(|after| node.id.0 > after))
+        .collect::<Vec<_>>();
+    let has_more = nodes.len() > request.limit;
+    nodes.truncate(request.limit);
+    let rows = nodes
+        .into_iter()
+        .map(|node| KnowledgeSourceCandidateRow {
+            node_id: node.id.0,
+            source_id: node
+                .properties
+                .get("id")
+                .and_then(|value| matches!(value, Value::String(_)).then(|| value.clone()))
+                .and_then(|value| match value {
+                    Value::String(value) => Some(value),
+                    _ => None,
+                }),
+            properties: node
+                .properties
+                .iter()
+                .filter(|(name, _)| request.property_names.contains(*name))
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+    let next_after_node_id = has_more
+        .then(|| rows.last().map(|row| row.node_id))
+        .flatten();
+    Ok(KnowledgeSourceCandidateScanOutput {
+        graph_commit_epoch,
+        rows,
+        next_after_node_id,
+        origin,
+        read_report,
+    })
+}
+
+fn validate_request(request: &KnowledgeSourceCandidateScanRequest) -> Result<()> {
+    if request.limit == 0 {
+        return Err(SkeinError::Semantic(
+            "knowledge source candidate scan requires a positive limit".to_string(),
+        ));
+    }
+    if request
+        .property_names
+        .iter()
+        .any(|name| name.trim().is_empty())
+    {
+        return Err(SkeinError::Semantic(
+            "knowledge source candidate scan requires non-empty property names".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn test_dir(name: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "skein_source_candidates_{name}_{}_{}",
+            std::process::id(),
+            nonce
+        ))
+    }
+
+    fn request() -> KnowledgeSourceCandidateScanRequest {
+        KnowledgeSourceCandidateScanRequest {
+            predicate: ScanPredicate::Eq {
+                property: "source_type".to_string(),
+                value: Value::String("file".to_string()),
+            },
+            after_node_id: None,
+            limit: 8,
+            property_names: vec!["id".to_string(), "source_type".to_string()],
+        }
+    }
+
+    #[test]
+    fn candidate_scan_reads_checkpointed_source_sidecar() {
+        let directory = test_dir("sidecar");
+        let mut db = Database::open(&directory).unwrap();
+        db.query("CREATE (:Source {id: 'source-a', source_type: 'file'})")
+            .unwrap();
+        db.query("CREATE (:Source {id: 'source-b', source_type: 'url'})")
+            .unwrap();
+        db.checkpoint().unwrap();
+
+        let output = db.knowledge_source_candidates(&request()).unwrap();
+        assert!(matches!(
+            output.origin,
+            KnowledgeSourceCandidateScanOrigin::Sidecar {
+                skipped_segment_count: 0,
+                ..
+            }
+        ));
+        assert!(output.read_report.is_some());
+        assert_eq!(output.rows.len(), 2);
+        assert!(output
+            .rows
+            .iter()
+            .any(|row| row.source_id.as_deref() == Some("source-a")));
+        assert!(output
+            .rows
+            .iter()
+            .all(|row| row.properties.contains_key("source_type")));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn candidate_scan_falls_back_after_uncheckpointed_source_write() {
+        let directory = test_dir("fallback");
+        let mut db = Database::open(&directory).unwrap();
+        db.query("CREATE (:Source {id: 'source-a', source_type: 'file'})")
+            .unwrap();
+        db.checkpoint().unwrap();
+        db.query("CREATE (:Source {id: 'source-new', source_type: 'file'})")
+            .unwrap();
+
+        let output = db.knowledge_source_candidates(&request()).unwrap();
+        assert!(matches!(
+            output.origin,
+            KnowledgeSourceCandidateScanOrigin::CanonicalFallback { .. }
+        ));
+        assert!(output.read_report.is_none());
+        assert!(output
+            .rows
+            .iter()
+            .any(|row| row.source_id.as_deref() == Some("source-new")));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn candidate_scan_uses_node_id_cursor_without_repeating_rows() {
+        let directory = test_dir("cursor");
+        let mut db = Database::open(&directory).unwrap();
+        db.query("CREATE (:Source {id: 'source-a', source_type: 'file'})")
+            .unwrap();
+        db.query("CREATE (:Source {id: 'source-b', source_type: 'file'})")
+            .unwrap();
+        db.checkpoint().unwrap();
+
+        let mut first_request = request();
+        first_request.limit = 1;
+        let first = db.knowledge_source_candidates(&first_request).unwrap();
+        let cursor = first.next_after_node_id.expect("second candidate cursor");
+        let first_node_id = first.rows[0].node_id;
+
+        let second = db
+            .knowledge_source_candidates(&KnowledgeSourceCandidateScanRequest {
+                after_node_id: Some(cursor),
+                ..first_request
+            })
+            .unwrap();
+        assert_eq!(second.rows.len(), 1);
+        assert!(second.rows[0].node_id > first_node_id);
+        assert_ne!(second.rows[0].source_id, first.rows[0].source_id);
+        assert!(second.next_after_node_id.is_none());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}

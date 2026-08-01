@@ -31,6 +31,7 @@ pub enum ScanPruningSupport {
     Unknown,
     None,
     Label,
+    Segment,
     Index,
     ExactEmpty,
 }
@@ -79,6 +80,7 @@ impl ScanPruningSupport {
             ScanPruningSupport::Unknown => "unknown",
             ScanPruningSupport::None => "none",
             ScanPruningSupport::Label => "label",
+            ScanPruningSupport::Segment => "segment",
             ScanPruningSupport::Index => "index",
             ScanPruningSupport::ExactEmpty => "exact_empty",
         }
@@ -87,7 +89,10 @@ impl ScanPruningSupport {
     pub fn is_prunable(self) -> bool {
         matches!(
             self,
-            ScanPruningSupport::Label | ScanPruningSupport::Index | ScanPruningSupport::ExactEmpty
+            ScanPruningSupport::Label
+                | ScanPruningSupport::Segment
+                | ScanPruningSupport::Index
+                | ScanPruningSupport::ExactEmpty
         )
     }
 }
@@ -223,6 +228,7 @@ mod tests {
             "hash"
         );
         assert_eq!(ScanPruningSupport::Index.as_str(), "index");
+        assert_eq!(ScanPruningSupport::Segment.as_str(), "segment");
         assert_eq!(VectorPrecision::RawReranked.as_str(), "raw_reranked");
         assert_eq!(MemoryBudgetClass::Blocking.as_str(), "blocking");
     }

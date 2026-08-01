@@ -216,6 +216,62 @@ fn optimizer_roots_preserve_logical_and_physical_phase_boundaries() {
 }
 
 #[test]
+fn source_filter_selects_an_optimizer_visible_segment_scan() {
+    let logical = LogicalPlan::Filter {
+        predicate: Predicate::PropertyEq {
+            variable: "s".to_string(),
+            property: "space_id".to_string(),
+            value: Value::String("alpha".to_string()),
+        },
+        input: Box::new(LogicalPlan::NodeScan {
+            variable: "s".to_string(),
+            label: "Source".to_string(),
+        }),
+    };
+    let (plan, trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 16 })
+        .optimize_with_catalog(&logical, &OptimizerCatalog::default());
+    assert_eq!(
+        trace.selected_plan_properties.scan_pruning,
+        ScanPruningSupport::Segment
+    );
+    let PhysicalPlan::FilterExec { input, .. } = plan else {
+        panic!("expected residual filter over source segment scan");
+    };
+    assert!(matches!(*input, PhysicalPlan::SourceSegmentScan { .. }));
+}
+
+#[test]
+fn source_index_seek_remains_preferred_over_segment_scan() {
+    let logical = LogicalPlan::Filter {
+        predicate: Predicate::PropertyEq {
+            variable: "s".to_string(),
+            property: "id".to_string(),
+            value: Value::String("source-a".to_string()),
+        },
+        input: Box::new(LogicalPlan::NodeScan {
+            variable: "s".to_string(),
+            label: "Source".to_string(),
+        }),
+    };
+    let catalog = OptimizerCatalog::new(
+        OptimizerCatalogIndexes::new([("Source".to_string(), "id".to_string())], [], [], []),
+        OptimizerCatalogStatistics::new(
+            [("Source".to_string(), 1_000)],
+            [],
+            [],
+            [],
+            [],
+            [(("Source".to_string(), "id".to_string()), 1_000)],
+            [],
+        ),
+    );
+    let plan = CascadesOptimizer::new(OptimizerConfig { max_groups: 16 })
+        .optimize_with_catalog(&logical, &catalog)
+        .0;
+    assert!(matches!(plan, PhysicalPlan::IndexNodeSeek { .. }));
+}
+
+#[test]
 fn selected_plan_properties_report_distribution_and_sort_ordering() {
     let logical = LogicalPlan::Limit {
         offset: 0,

@@ -59,6 +59,15 @@ pub(super) fn estimate_physical_plan_cost(
                 cost: estimate_node_full_scan_cost(rows),
             }
         }
+        PhysicalPlan::SourceSegmentScan { .. } => {
+            let rows = catalog.label_count("Source");
+            PlanCost {
+                estimated_rows: rows,
+                // The persisted sidecar adds bounded range I/O, but avoids a
+                // canonical graph label scan when its summaries prune ranges.
+                cost: rows.saturating_add(NODE_FULL_SCAN_STARTUP_COST),
+            }
+        }
         PhysicalPlan::VectorSeedScan { vector_plan, .. } => {
             let rows = vector_top_k(vector_plan) as u64;
             PlanCost {
@@ -327,6 +336,10 @@ pub(super) fn estimate_physical_plan_cost_breakdown(
         PhysicalPlan::SeqNodeScan { label, .. } => {
             let rows = catalog.label_count(label);
             PlanCostBreakdown::new(rows, 0, 0, estimate_node_full_scan_cost(rows), 0)
+        }
+        PhysicalPlan::SourceSegmentScan { .. } => {
+            let rows = catalog.label_count("Source");
+            PlanCostBreakdown::new(rows, 0, 1, rows, 0)
         }
         PhysicalPlan::VectorSeedScan { vector_plan, .. } => {
             let rows = vector_top_k(vector_plan) as u64;

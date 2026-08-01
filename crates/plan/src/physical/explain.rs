@@ -299,6 +299,9 @@ impl PhysicalPlan {
             PhysicalPlan::SeqNodeScan { variable, label } => {
                 format!("{pad}SeqNodeScan variable={variable} label={label}")
             }
+            PhysicalPlan::SourceSegmentScan { variable, predicate } => {
+                format!("{pad}SourceSegmentScan variable={variable} predicate={predicate:?}")
+            }
             PhysicalPlan::NodeCartesianProductExec { left, right } => {
                 format!(
                     "{pad}NodeCartesianProductExec\n{}\n{}",

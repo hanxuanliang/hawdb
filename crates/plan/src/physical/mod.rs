@@ -270,6 +270,12 @@ pub enum PhysicalPlan {
         variable: String,
         label: String,
     },
+    /// A checkpoint-published Source sidecar candidate scan. The enclosing
+    /// FilterExec retains the original predicate as the semantic authority.
+    SourceSegmentScan {
+        variable: String,
+        predicate: Predicate,
+    },
     NodeCartesianProductExec {
         left: Box<PhysicalPlan>,
         right: Box<PhysicalPlan>,

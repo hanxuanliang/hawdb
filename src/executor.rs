@@ -17,19 +17,26 @@ use crate::store::{
     NodeSetAssignment, NodeSetValue, OrderedAdjacencyEntry, ProjectedGraphDefinition,
     PropertyFilter, RelRecord, RelationshipDeleteRequest, RelationshipOnCreatePropertyValue,
     RelationshipPropertiesUpdate, RelationshipPropertyUpdate, RelationshipSetAssignment,
-    RelationshipTargetNodeDelete, ScanPruningReport, ScanPruningStrategy,
+    RelationshipTargetNodeDelete, ScanPredicate, ScanPruningReport, ScanPruningStrategy,
+    SourceScanCandidateRead,
 };
 use crate::value::Value;
 use skein_ddl::{object_state_to_core, property_type_to_core, table_kind_to_core};
 use skein_executor::{ExecutionLimit, VectorExecutionReport};
+use skein_storage::RangeBound;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::num::{NonZeroU64, NonZeroUsize};
 
 pub type Row = skein_executor::Row;
 pub type ReadExecutionProfile = skein_executor::ReadExecutionProfile<ScanPruningReport>;
 pub type ProfiledQueryRows = skein_executor::ProfiledQueryRows<ScanPruningReport>;
 type ValueRangeBound = (Value, bool);
 type ValueRangeBounds = (Option<ValueRangeBound>, Option<ValueRangeBound>);
+
+const SOURCE_SEGMENT_SCAN_IO_DEPTH: usize = 2;
+const SOURCE_SEGMENT_SCAN_MAX_COALESCED_BYTES: u64 = 512 * 1024;
+const SOURCE_SEGMENT_SCAN_MAX_WAVE_BYTES: u64 = 2 * 1024 * 1024;
 
 thread_local! {
     static SCAN_PRUNING_REPORT_CAPTURE: RefCell<Option<Vec<ScanPruningReport>>> = const { RefCell::new(None) };
@@ -822,6 +829,7 @@ pub fn mutation_command(plan: &PhysicalPlan) -> Result<Option<GraphMutation>> {
             },
         ))),
         PhysicalPlan::SeqNodeScan { .. }
+        | PhysicalPlan::SourceSegmentScan { .. }
         | PhysicalPlan::NodeCartesianProductExec { .. }
         | PhysicalPlan::NodeColumnLookupExec { .. }
         | PhysicalPlan::IndexNodeSeek { .. }
@@ -2035,6 +2043,10 @@ fn execute_bindings_with_limit(
             store,
             execution_limit,
         ),
+        PhysicalPlan::SourceSegmentScan {
+            variable,
+            predicate,
+        } => execute_source_segment_scan(variable, predicate, catalog, store, execution_limit),
         PhysicalPlan::NodeCartesianProductExec { left, right } => {
             let left = execute_child_bindings(left, catalog, store, context)?;
             let right = execute_child_bindings(right, catalog, store, context)?;
@@ -2596,6 +2608,208 @@ fn execute_node_scan_with_optional_filter(
             relationships: BTreeMap::new(),
         })
         .collect())
+}
+
+fn execute_source_segment_scan(
+    variable: &str,
+    predicate: &Predicate,
+    catalog: &Catalog,
+    store: &GraphStore,
+    execution_limit: ExecutionLimit,
+) -> Result<Vec<Binding>> {
+    let Some(storage_predicate) = source_storage_scan_predicate(predicate, variable) else {
+        return execute_node_scan_with_optional_filter(
+            variable,
+            "Source",
+            None,
+            catalog,
+            store,
+            execution_limit,
+        );
+    };
+    let read = store.read_published_source_scan_candidates(
+        &storage_predicate,
+        NonZeroUsize::new(SOURCE_SEGMENT_SCAN_IO_DEPTH)
+            .expect("source segment scan I/O depth is non-zero"),
+        NonZeroU64::new(SOURCE_SEGMENT_SCAN_MAX_COALESCED_BYTES)
+            .expect("source segment scan coalesced range limit is non-zero"),
+        NonZeroU64::new(SOURCE_SEGMENT_SCAN_MAX_WAVE_BYTES)
+            .expect("source segment scan wave byte limit is non-zero"),
+    );
+    let rows = match read {
+        Ok(SourceScanCandidateRead::Rows {
+            skipped_segment_count,
+            rows,
+            ..
+        }) => {
+            let source_count = catalog
+                .label_id("Source")
+                .map(|label_id| store.node_count_for_label(Some(label_id)))
+                .unwrap_or_default();
+            record_scan_pruning_report(ScanPruningReport {
+                target_kind: crate::store::ScanPruningTargetKind::Node,
+                label_id: catalog.label_id("Source"),
+                rel_type_id: None,
+                strategy: source_scan_pruning_strategy(&storage_predicate),
+                pruned: skipped_segment_count > 0 || rows.len() < source_count,
+                exact_empty: rows.is_empty(),
+                candidate_count_before_pruning: source_count,
+                pruned_candidate_count: source_count.saturating_sub(rows.len()),
+                candidate_count_before_filter: rows.len(),
+                output_count: rows
+                    .len()
+                    .min(execution_limit.output_rows.unwrap_or(usize::MAX)),
+                filtered_out_count: 0,
+            });
+            rows
+        }
+        Ok(SourceScanCandidateRead::Fallback(_)) | Err(_) => {
+            return execute_node_scan_with_optional_filter(
+                variable,
+                "Source",
+                None,
+                catalog,
+                store,
+                execution_limit,
+            );
+        }
+    };
+    let source_label_id = catalog.label_id("Source");
+    let mut bindings = Vec::new();
+    for row in rows {
+        let Some(node) = store.node(NodeId(row.node_id)) else {
+            return execute_node_scan_with_optional_filter(
+                variable,
+                "Source",
+                None,
+                catalog,
+                store,
+                execution_limit,
+            );
+        };
+        if source_label_id.is_none_or(|label_id| !node.labels.contains(&label_id))
+            || node.properties != row.properties
+        {
+            return execute_node_scan_with_optional_filter(
+                variable,
+                "Source",
+                None,
+                catalog,
+                store,
+                execution_limit,
+            );
+        }
+        bindings.push(Binding {
+            values: BTreeMap::new(),
+            nodes: BTreeMap::from([(variable.to_string(), node.clone())]),
+            relationships: BTreeMap::new(),
+        });
+        if execution_limit.is_reached(bindings.len()) {
+            break;
+        }
+    }
+    Ok(bindings)
+}
+
+fn source_scan_pruning_strategy(predicate: &ScanPredicate) -> ScanPruningStrategy {
+    match predicate {
+        ScanPredicate::False => ScanPruningStrategy::Empty,
+        ScanPredicate::Eq { property, .. } => ScanPruningStrategy::PropertyEq {
+            property: property.clone(),
+        },
+        ScanPredicate::In { property, .. } => ScanPruningStrategy::PropertyIn {
+            property: property.clone(),
+        },
+        ScanPredicate::Range { property, .. } => ScanPruningStrategy::PropertyRange {
+            property: property.clone(),
+        },
+        ScanPredicate::IsNull { property } | ScanPredicate::IsMissing { property } => {
+            ScanPruningStrategy::PropertyMissingOrNull {
+                property: property.clone(),
+            }
+        }
+        ScanPredicate::Exists { property } => ScanPruningStrategy::PropertyExists {
+            property: property.clone(),
+        },
+        ScanPredicate::Or(_) => ScanPruningStrategy::OrUnion,
+        ScanPredicate::And(predicates) => predicates
+            .iter()
+            .map(source_scan_pruning_strategy)
+            .find(|strategy| !matches!(strategy, ScanPruningStrategy::FullLabelScan))
+            .unwrap_or(ScanPruningStrategy::FullLabelScan),
+        ScanPredicate::True => ScanPruningStrategy::FullLabelScan,
+    }
+}
+
+fn source_storage_scan_predicate(predicate: &Predicate, variable: &str) -> Option<ScanPredicate> {
+    match predicate {
+        Predicate::And(predicates) => {
+            let predicates = predicates
+                .iter()
+                .filter_map(|predicate| source_storage_scan_predicate(predicate, variable))
+                .collect::<Vec<_>>();
+            match predicates.len() {
+                0 => None,
+                1 => predicates.into_iter().next(),
+                _ => Some(ScanPredicate::And(predicates)),
+            }
+        }
+        Predicate::Or(predicates) => predicates
+            .iter()
+            .map(|predicate| source_storage_scan_predicate(predicate, variable))
+            .collect::<Option<Vec<_>>>()
+            .and_then(|predicates| {
+                (!predicates.is_empty()).then_some(ScanPredicate::Or(predicates))
+            }),
+        Predicate::PropertyEq {
+            variable: candidate,
+            property,
+            value,
+        } if candidate == variable => Some(ScanPredicate::Eq {
+            property: property.clone(),
+            value: value.clone(),
+        }),
+        Predicate::PropertyIn {
+            variable: candidate,
+            property,
+            values,
+        } if candidate == variable => Some(ScanPredicate::In {
+            property: property.clone(),
+            values: values.clone(),
+        }),
+        Predicate::PropertyCompare {
+            variable: candidate,
+            property,
+            op,
+            value,
+        } if candidate == variable => {
+            let bound = RangeBound {
+                value: value.clone(),
+                inclusive: matches!(op, ComparisonOp::Gte | ComparisonOp::Lte),
+            };
+            let (lower, upper) = match op {
+                ComparisonOp::Gt | ComparisonOp::Gte => (Some(bound), None),
+                ComparisonOp::Lt | ComparisonOp::Lte => (None, Some(bound)),
+            };
+            Some(ScanPredicate::Range {
+                property: property.clone(),
+                lower,
+                upper,
+            })
+        }
+        Predicate::PropertyIsNull {
+            variable: candidate,
+            property,
+        } if candidate == variable => Some(ScanPredicate::Or(vec![
+            ScanPredicate::IsNull {
+                property: property.clone(),
+            },
+            ScanPredicate::IsMissing {
+                property: property.clone(),
+            },
+        ])),
+        _ => None,
+    }
 }
 
 fn exact_scan_label_id(catalog: &Catalog, label: &str) -> Option<Option<crate::schema::LabelId>> {
@@ -5383,6 +5597,71 @@ mod tests {
         assert_eq!(lookup_scan.candidate_count_before_filter, 1);
         assert_eq!(lookup_scan.pruned_candidate_count, 2);
         assert_eq!(lookup_scan.output_count, 2);
+    }
+
+    #[test]
+    fn source_segment_scan_uses_checkpoint_sidecar_and_keeps_filter_semantics() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("skein-source-segment-executor-{nonce}"));
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::open(&path, &mut catalog).unwrap();
+        store
+            .create_node(
+                &mut catalog,
+                "Source",
+                BTreeMap::from([
+                    ("id".to_string(), Value::String("source-a".to_string())),
+                    ("space_id".to_string(), Value::String("alpha".to_string())),
+                ]),
+            )
+            .unwrap();
+        store
+            .create_node(
+                &mut catalog,
+                "Source",
+                BTreeMap::from([
+                    ("id".to_string(), Value::String("source-b".to_string())),
+                    ("space_id".to_string(), Value::String("beta".to_string())),
+                ]),
+            )
+            .unwrap();
+        store.checkpoint(&catalog).unwrap();
+
+        let predicate = Predicate::PropertyEq {
+            variable: "s".to_string(),
+            property: "space_id".to_string(),
+            value: Value::String("alpha".to_string()),
+        };
+        let plan = PhysicalPlan::FilterExec {
+            predicate: predicate.clone(),
+            input: Box::new(PhysicalPlan::SourceSegmentScan {
+                variable: "s".to_string(),
+                predicate,
+            }),
+        };
+        let parameters = BTreeMap::new();
+        let mut external = NoExternalReadOperator;
+        let mut context = ExecutionContext {
+            parameters: &parameters,
+            external: &mut external,
+        };
+        let bindings = execute_bindings_with_limit(
+            &plan,
+            &mut catalog,
+            &mut store,
+            &mut context,
+            ExecutionLimit::unlimited(),
+        )
+        .unwrap();
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(
+            bindings[0].nodes["s"].properties["id"],
+            Value::String("source-a".to_string())
+        );
+        std::fs::remove_dir_all(path).unwrap();
     }
 
     fn properties(
