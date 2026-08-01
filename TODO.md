@@ -592,6 +592,11 @@ LanceDB for that path.
     - `/sources/{source_id}/labels` uses `read_query_with_params` rather than
       an unbounded generic query, retains its empty-label behavior, and fails
       on a `4096 + 1` row sentinel instead of allocating an unlimited result.
+  - [x] Route Label health aggregates through parameterized embedded Cypher.
+    - `/labels/health` receives bounded Label fan-in and per-Memory label-count
+      inputs from Skein, then keeps percentile, coverage, and canonical-group
+      calculations in Mem. Oversized vocabulary or Memory scans fail rather
+      than yielding partial health statistics.
   - [x] Add a bounded community-members graph contract that returns Entity and
     Memory members plus member-internal edges. Entity and Memory reads are
     separately bounded; edges are read only for the returned member IDs and
