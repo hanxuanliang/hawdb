@@ -919,6 +919,11 @@ LanceDB for that path.
     - Route ownership now includes `/fs/recall`, and an integration test writes
       a canonical Memory, catches up the projection, and proves the route
       candidate helper returns its stable ID without a legacy search index.
+  - [x] Keep `POST /memories/search` entirely on the selected search plane.
+    - When Skein search is selected, construct its full `MemoryNode` response
+      from the bounded Skein projection card and do not reopen Kuzu only for
+      response hydration. The legacy search selection retains its existing
+      graph hydration path.
   - Acceptance: no active search route requires a LanceDB handle when the Skein
     search engine is selected.
 
