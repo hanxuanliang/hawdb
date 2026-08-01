@@ -547,6 +547,11 @@ LanceDB for that path.
       and `(space_id, thread_id)` deduplication in Mem. Candidate pages and
       total candidate work are bounded; exhausted candidate budgets fail rather
       than returning a silent partial list.
+  - [x] Route favorite Memory reads through parameterized embedded Cypher.
+    - `/favorites/memories` uses bounded candidate pages followed by bounded
+      `HAS_LABEL` and `COMPACTS_TO` joins, then reuses Mem's canonical payload
+      shaping. Skein-selected reads do not construct `MemoryRepo` or reopen
+      Kuzu for labels or source Threads.
   - [x] Add a bounded community-members graph contract that returns Entity and
     Memory members plus member-internal edges. Entity and Memory reads are
     separately bounded; edges are read only for the returned member IDs and
