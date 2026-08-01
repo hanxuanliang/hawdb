@@ -650,6 +650,11 @@ LanceDB for that path.
       bounded exact Skill version query in Skein mode. Mem retains local
       benchmark/proof-file reads and legacy pre-version Skills normalize to
       version 1 without reopening Kuzu.
+  - [x] Route Thread export through parameterized embedded Cypher.
+    - `/threads/{thread_id}/export` reads the scoped exact Thread and, when the
+      content store has no readable rows, a bounded ordered `CONTAINS` Message
+      fallback through Skein. The content-store preference and export rendering
+      remain in Mem; oversized graph message exports fail rather than truncate.
   - [x] Add a bounded community-members graph contract that returns Entity and
     Memory members plus member-internal edges. Entity and Memory reads are
     separately bounded; edges are read only for the returned member IDs and
