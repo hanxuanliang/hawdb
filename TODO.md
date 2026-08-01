@@ -697,6 +697,11 @@ LanceDB for that path.
       fields, and caches the completed payload.
     - Global and resolved-space fixtures prove that graph filtering and
       aggregation remain in Skein rather than becoming a host-owned scan.
+  - [x] Route `GET /library/wiki-export-summary` through parameterized embedded
+    Cypher.
+    - Three bounded single-row count statements preserve the entity, crystal,
+      and eligible-community summary contract. The full ZIP exporter remains a
+      separate migration because it has a materially larger graph-read surface.
   - [x] Route monthly Memory-growth analytics through parameterized embedded
     Cypher.
     - `/stats/growth` computes total, crystal, and default-visible non-crystal
