@@ -702,6 +702,14 @@ LanceDB for that path.
     - Three bounded single-row count statements preserve the entity, crystal,
       and eligible-community summary contract. The full ZIP exporter remains a
       separate migration because it has a materially larger graph-read surface.
+  - [x] Route `GET /library/wiki-index` through parameterized embedded Cypher.
+    - Community pages, Entity mention inputs, Crystal provenance inputs, and
+      direct and mention-derived representative Memory inputs use five named
+      queries through one shared row reader. Existing topic-card projection and
+      response shaping remain a single host implementation for both engines.
+    - The community query is request-page bounded; every unpaged input uses a
+      `100000 + 1` sentinel and payload budget, failing rather than presenting
+      a partial Library index as complete.
   - [x] Route monthly Memory-growth analytics through parameterized embedded
     Cypher.
     - `/stats/growth` computes total, crystal, and default-visible non-crystal
