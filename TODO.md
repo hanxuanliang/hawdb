@@ -601,6 +601,11 @@ LanceDB for that path.
     - `/communities` applies its summary-presence gate, member-count ordering,
       and request limit in Skein; Mem only shapes the legacy response envelope
       under an explicit row and payload budget.
+  - [x] Route Community detail through parameterized embedded Cypher.
+    - `/communities/{community_id}` reads the exact Community, Entity-Memory
+      fanout, and sample Memories in Skein. Mem retains visibility, aggregate
+      ranking, and preview shaping; oversized fanout scans fail instead of
+      returning a partial Community detail response.
   - [x] Add a bounded community-members graph contract that returns Entity and
     Memory members plus member-internal edges. Entity and Memory reads are
     separately bounded; edges are read only for the returned member IDs and
