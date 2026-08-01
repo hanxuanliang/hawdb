@@ -392,7 +392,8 @@ pub use search::{
     SearchRetrieverCandidateSetReport, SearchTruncationReasonCode, VectorRecallValidationBlocker,
     VectorRecallValidationOptions, VectorRecallValidationReport,
     MAX_VECTOR_RECALL_VALIDATION_SAMPLES, MAX_VECTOR_RECALL_VALIDATION_TOP_K,
-    NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, VECTOR_RECALL_VALIDATION_PROTOCOL,
+    NOWLEDGE_MEMORY_MATERIALIZED_METADATA_PATHS, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
+    VECTOR_RECALL_VALIDATION_PROTOCOL,
 };
 pub use search_candidate_shadow_evidence::parse_search_candidate_shadow_probe;
 pub use search_projection_evidence::{

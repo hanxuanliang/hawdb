@@ -204,7 +204,7 @@ LanceDB for that path.
       - The cross-domain Space merge remains a separate composite
         Memory/Source/Thread obligation; do not decompose it into independent
         Thread patches.
-    - [ ] Cover the Source node mutation family.
+    - [x] Cover the Source node mutation family.
       - [x] Define versioned, replayable Source patch/delete obligations with
         grouped Kuzu/Skein apply and crash-window tests (Mem PR #384 commit
         `9ae06454d`).
@@ -218,7 +218,7 @@ LanceDB for that path.
           extracted-to-indexed chunk recovery reuse the replayable Label,
           SourceLabel, and Source mutation obligations instead of writing only
           to Kuzu.
-      - [ ] Route Source ingest/create, content refresh/reparse, indexed
+      - [x] Route Source ingest/create, content refresh/reparse, indexed
         transition, revision edges, and search-projection effects through a
         frozen composite Source obligation.
         - [x] Strengthen the Skein transaction kernel so a composite Source
@@ -252,15 +252,42 @@ LanceDB for that path.
         - [x] Persist Source operation identities in projection-repair entries
           and frozen mutation payloads, so recovery can correlate an
           unfinished graph write with its derived-search repair.
+        - [x] Bind every Source mutation target to the durable projection
+          descriptor before either graph applies it. A request cannot attach an
+          unrelated create, patch, or delete to another Source's pending
+          projection operation.
         - [x] Freeze a unique request-scoped operation identity for content
           ingest, reparse, OCR reparse, URL refetch, lifecycle updates, and
           delete. Each covered route carries it through the repair marker and
           its graph/projection obligations. Older replay payloads remain
           compatible with the legacy single-Source identity.
-        - Mem still needs to freeze and replay the full Source ingest/create,
-          refresh/reparse, indexed transition, revision-edge, and
-          search-projection payload through its durable dual-write coordinator
-          before this item can close.
+        - [x] Persist Source projection operation stages in the durable
+          dual-write coordinator. Prepared descriptors freeze the marker cache
+          and Source targets before the graph mutation; recovery recreates a
+          missing marker idempotently during startup even without a later
+          Source write, graph obligations remain until projection completion,
+          and both foreground and background repair paths retire the grouped
+          operation only after projection convergence.
+        - [x] Persist an immutable bounded Source projection workload after
+          content chunks are durable and before the indexed-state mutation.
+          The coordinator stores source/content/chunk digests and count, rather
+          than duplicating large source text in its WAL, and rejects a retry
+          that tries to replace the frozen content-store snapshot. Startup
+          verifies every pending frozen chunk snapshot before restoring its
+          projection marker and fails closed on a mismatch; it also replays the
+          frozen `indexed` lifecycle/chunk-count mutation without synthesizing
+          a new timestamp.
+        - [x] Route AI-Now and MCP text-artifact Sources through the same
+          content-store chunk persistence and frozen workload boundary before
+          their indexed mutation. Missing content storage fails before the
+          artifact graph create, so a successful artifact cannot lack a
+          recoverable projection snapshot.
+        - Every active Source create, refresh/reparse, indexed transition,
+          revision-edge, and search-projection route now carries one frozen
+          operation identity. Content chunks are durable before the indexed
+          mutation; the coordinator replays graph writes and the frozen
+          indexed state, and projection completion retires the shared
+          obligation only after both graph engines converge.
   - Inject one long-lived writable Skein handle into Mem write resources.
   - Cover Memory create, update, lifecycle, and delete first, then Label,
     Entity, Thread, Source, and relationship mutations.
@@ -382,6 +409,29 @@ LanceDB for that path.
       controls, integration readiness, and final previous-wrapper preflight, so
       active initial import remains blocked by default but can pass read cutover
       only when the library-owned catch-up proof is ready.
+    - [x] Fail closed when a running initial-import step errors: revoke any
+      previously ready host cutover gate and retain the typed failure blocker
+      until a later successful catch-up report replaces it.
+    - [x] Report `ReadyForCutover` from the host session only when the typed
+      live catch-up report is ready. A graph import that is durable but not yet
+      caught up remains explicitly in progress.
+    - [x] Keep the imported legacy graph watermark distinct from Skein's new
+      local WAL epoch. Session readiness validates the frozen logical source
+      epoch from the durable checkpoint, while live catch-up separately reads
+      the local runtime epoch; a six-kind import can therefore become ready
+      without forging physical commit history.
+    - [ ] Persist a typed local-epoch fence alongside the completed initial
+      import receipt. A later local graph commit must invalidate the import
+      cutover gate until its derived projection catches up; source logical
+      epochs and local WAL epochs are different domains and must never be
+      compared as interchangeable counters.
+      - [x] Persist a host-owned atomic local-epoch fence with the completed
+        receipt and fail closed on a missing, mismatched, or advanced local WAL
+        epoch before a session can report read cutover ready.
+      - [ ] Carry a separate local projection watermark through the embedded
+        search projection. Advance the fence only from a durable live
+        projection catch-up receipt; legacy import source epochs must remain
+        provenance, never the scheduler's local changefeed cursor.
     - [x] Expose a typed initial-import session-bundle readiness helper that
       combines source-bundle readiness, durable session state, resume action,
       and optional live cutover catch-up proof so Mem startup can fail closed
@@ -498,6 +548,13 @@ LanceDB for that path.
 - [ ] Replace every active LanceDB search projection read.
   - Wire Mem to Skein candidate reads for Memory, Message, Community, Entity,
     Source, and SourceChunk projections.
+  - [x] Materialize the bounded Nowledge Memory nested metadata registry from
+    the canonical JSON `metadata` payload into the search projection.
+    `state`, `topic`, `customer.tier`, `purpose`, project/agent identity, and
+    source attribution paths have stable scalar/list semantics and can be
+    lowered into `WHERE metadata.*` predicates. Unknown paths remain bounded
+    residual predicates; lowering an unmaterialized path is a false-negative
+    correctness bug.
   - [x] Expose a typed search projection route-ownership contract for Memory,
     Message, Community, Entity, Source, and SourceChunk, so production cutover
     can fail closed while any route family still selects LanceDB.
@@ -529,6 +586,11 @@ LanceDB for that path.
   - [x] Cover thread/message FTS, entity/community discovery, source and
     source chunk recall, `/fs/recall`, MCP search, and deep-search graph
     expansion with a typed active search route read requirement catalog.
+  - [x] Migrate active MCP and Scheduler evidence searches to the embedded
+    search runtime. `memory_search`, `search_guidance_evidence`, and the
+    Scheduler-owned guidance evidence harvest use the process-lifetime Skein
+    runtime when Skein search is selected; the background route does not open
+    LanceDB in that mode and retains its bounded ranking and time filter.
   - [x] Preserve embedding identity, zero-vector semantics, CJK tokenization,
     ranking windows, fail-soft reason codes, and repair/rebuild markers in the
     active search route read evidence, replacement summary, and integration
@@ -542,6 +604,14 @@ LanceDB for that path.
       is not reduced to graph-name or summary matching. Label aliases and
       nested metadata retain bounded residual verification after candidate
       selection.
+  - [x] Migrate `GET /fs/recall` candidate retrieval to the embedded Skein
+    Memory projection.
+    - The selected search plane retrieves ordered Memory candidates through the
+      persistent Skein projection; the route retains its existing bounded
+      graph hydration and unit-type residual filter.
+    - Route ownership now includes `/fs/recall`, and an integration test writes
+      a canonical Memory, catches up the projection, and proves the route
+      candidate helper returns its stable ID without a legacy search index.
   - Acceptance: no active search route requires a LanceDB handle when the Skein
     search engine is selected.
 

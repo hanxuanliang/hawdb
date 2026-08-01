@@ -6896,6 +6896,20 @@ impl NowledgeMemEmbeddedStoreHandle {
             .apply_search_projection_delta_and_checkpoint(delta)
     }
 
+    /// Applies one externally materialized import batch, records its immutable
+    /// source provenance, and checkpoints both before acknowledging success.
+    pub fn apply_initial_import_projection_delta_and_checkpoint(
+        &self,
+        delta: SearchProjectionDelta,
+        import_source_graph_commit_epoch: u64,
+    ) -> Result<SearchProjectionDeltaReport> {
+        self.write_store()?
+            .apply_initial_import_projection_delta_and_checkpoint(
+                delta,
+                import_source_graph_commit_epoch,
+            )
+    }
+
     pub fn query_with_params_with_report_options(
         &self,
         cypher: &str,
@@ -7314,6 +7328,20 @@ impl NowledgeMemEmbeddedStore {
         delta: SearchProjectionDelta,
     ) -> Result<SearchProjectionDeltaReport> {
         let projection = require_search_projection_mut(&mut self.search_projection)?;
+        let report = projection.index_mut().apply_projection_delta(delta)?;
+        projection.index().checkpoint()?;
+        Ok(report)
+    }
+
+    pub fn apply_initial_import_projection_delta_and_checkpoint(
+        &mut self,
+        delta: SearchProjectionDelta,
+        import_source_graph_commit_epoch: u64,
+    ) -> Result<SearchProjectionDeltaReport> {
+        let projection = require_search_projection_mut(&mut self.search_projection)?;
+        projection
+            .index_mut()
+            .record_import_source_graph_commit_epoch(import_source_graph_commit_epoch)?;
         let report = projection.index_mut().apply_projection_delta(delta)?;
         projection.index().checkpoint()?;
         Ok(report)
@@ -14590,6 +14618,7 @@ mod tests {
         };
         let freshness = SearchProjectionFreshness {
             document_count: 6,
+            import_source_graph_commit_epoch: Some(export.manifest.graph_commit_epoch),
             source_graph_commit_epoch: Some(export.manifest.graph_commit_epoch),
             durable_source_graph_commit_epoch: Some(export.manifest.graph_commit_epoch),
             has_uncheckpointed_changes: false,

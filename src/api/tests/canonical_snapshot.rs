@@ -116,6 +116,7 @@ fn initial_import_projection_freshness(
 ) -> SearchProjectionFreshness {
     SearchProjectionFreshness {
         document_count: manifest.node_count + manifest.relationship_count,
+        import_source_graph_commit_epoch: Some(manifest.graph_commit_epoch),
         source_graph_commit_epoch: Some(manifest.graph_commit_epoch),
         durable_source_graph_commit_epoch: Some(manifest.graph_commit_epoch),
         has_uncheckpointed_changes: false,
@@ -578,6 +579,7 @@ fn graph_lightning_initial_import_readiness_requires_graph_and_projection_waterm
         .manifest;
     let projection = SearchProjectionFreshness {
         document_count: 2,
+        import_source_graph_commit_epoch: None,
         source_graph_commit_epoch: Some(1),
         durable_source_graph_commit_epoch: Some(1),
         has_uncheckpointed_changes: false,
@@ -619,6 +621,7 @@ fn graph_lightning_initial_import_readiness_blocks_missing_or_stale_projection()
 
     let stale_projection = SearchProjectionFreshness {
         document_count: 2,
+        import_source_graph_commit_epoch: None,
         source_graph_commit_epoch: Some(1),
         durable_source_graph_commit_epoch: Some(1),
         has_uncheckpointed_changes: true,

@@ -83,6 +83,21 @@ pub const NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS: &[&str] = &[
     "event_end",
     "is_latest",
 ];
+
+/// Nested Memory metadata paths with stable scalar/list semantics that are
+/// materialized into the search projection. Unknown paths remain residual
+/// predicates instead of expanding every segment descriptor for arbitrary
+/// application metadata.
+pub const NOWLEDGE_MEMORY_MATERIALIZED_METADATA_PATHS: &[&str] = &[
+    "state",
+    "topic",
+    "customer.tier",
+    "purpose",
+    "project_id",
+    "agent_id",
+    "host_agent_id",
+    "source_app",
+];
 #[cfg(not(test))]
 const SEARCH_FILTER_SEGMENT_TARGET_DOCUMENTS: usize = 128;
 #[cfg(test)]
@@ -141,6 +156,9 @@ pub struct SearchEmbeddingManifest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchProjectionFreshness {
     pub document_count: usize,
+    /// Immutable provenance of a completed external bootstrap import. This is
+    /// not a local changefeed cursor and must never drive local catch-up.
+    pub import_source_graph_commit_epoch: Option<u64>,
     pub source_graph_commit_epoch: Option<u64>,
     pub durable_source_graph_commit_epoch: Option<u64>,
     pub has_uncheckpointed_changes: bool,
@@ -989,6 +1007,7 @@ pub struct SearchIndex {
     path: Option<PathBuf>,
     embedding_dimension: Option<usize>,
     embedding_manifest: Option<SearchEmbeddingManifest>,
+    import_source_graph_commit_epoch: Option<u64>,
     source_graph_commit_epoch: Option<u64>,
     durable_source_graph_commit_epoch: Mutex<Option<u64>>,
     marker_lines: Mutex<BTreeMap<String, Vec<String>>>,
@@ -1257,6 +1276,7 @@ impl SearchIndex {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         SearchProjectionFreshness {
             document_count: self.documents.len(),
+            import_source_graph_commit_epoch: self.import_source_graph_commit_epoch,
             source_graph_commit_epoch: self.source_graph_commit_epoch,
             durable_source_graph_commit_epoch,
             has_uncheckpointed_changes: self.source_graph_commit_epoch
@@ -1278,6 +1298,21 @@ impl SearchIndex {
                 .as_ref()
                 .map(|manifest| manifest.dimension)
                 .or(self.embedding_dimension),
+        }
+    }
+
+    /// Records immutable provenance for an external graph bootstrap. The
+    /// mutable local projection cursor remains independent.
+    pub fn record_import_source_graph_commit_epoch(&mut self, epoch: u64) -> Result<()> {
+        match self.import_source_graph_commit_epoch {
+            Some(existing) if existing != epoch => Err(SkeinError::Storage(
+                "search projection import provenance conflicts with existing source".to_string(),
+            )),
+            Some(_) => Ok(()),
+            None => {
+                self.import_source_graph_commit_epoch = Some(epoch);
+                Ok(())
+            }
         }
     }
 
@@ -1693,6 +1728,9 @@ impl SearchIndex {
             body.push_str("SKEIN_SEARCH_PROJECTION_V1\n");
             if let Some(epoch) = self.source_graph_commit_epoch {
                 body.push_str(&format!("source_graph_commit_epoch\t{epoch}\n"));
+            }
+            if let Some(epoch) = self.import_source_graph_commit_epoch {
+                body.push_str(&format!("import_source_graph_commit_epoch\t{epoch}\n"));
             }
             if let Some(manifest) = &self.embedding_manifest {
                 body.push_str(&format!(
@@ -2666,6 +2704,10 @@ impl SearchIndex {
                         .get_mut()
                         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(epoch);
                 }
+                ["import_source_graph_commit_epoch", raw] => {
+                    self.import_source_graph_commit_epoch =
+                        Some(parse_u64(raw, "import source graph commit epoch")?);
+                }
                 ["embedding_manifest", raw_model, raw_version, raw_dimension] => {
                     let version = decode_string(raw_version)?;
                     let manifest = SearchEmbeddingManifest {
@@ -2875,6 +2917,7 @@ impl Default for SearchIndex {
             path: None,
             embedding_dimension: None,
             embedding_manifest: None,
+            import_source_graph_commit_epoch: None,
             source_graph_commit_epoch: None,
             durable_source_graph_commit_epoch: Mutex::new(None),
             marker_lines: Mutex::new(BTreeMap::new()),
@@ -3559,6 +3602,9 @@ pub(crate) fn projection_row_from_node(
     {
         metadata.insert("space_id".to_string(), DEFAULT_SPACE_ID.to_string());
     }
+    if kind == SearchProjectionKind::Memory {
+        materialize_memory_metadata_paths(node, &mut metadata);
+    }
     Some(SearchProjectionRow {
         kind,
         external_id,
@@ -3656,6 +3702,66 @@ fn projection_metadata_value(key: &str, value: &Value) -> String {
         DEFAULT_SPACE_ID.to_string()
     } else {
         text
+    }
+}
+
+fn materialize_memory_metadata_paths(node: &NodeRecord, metadata: &mut BTreeMap<String, String>) {
+    let Some(raw) = node
+        .properties
+        .get("metadata")
+        .and_then(|value| match value {
+            Value::String(raw) => Some(raw),
+            _ => None,
+        })
+    else {
+        return;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return;
+    };
+    for path in NOWLEDGE_MEMORY_MATERIALIZED_METADATA_PATHS {
+        let values = metadata_json_values_at_path(&value, path);
+        if values.is_empty() {
+            continue;
+        }
+        let key = format!("metadata.{path}");
+        let value = if values.len() == 1 {
+            values.into_iter().next().unwrap_or_default()
+        } else {
+            serde_json::to_string(&values).unwrap_or_default()
+        };
+        metadata.insert(key, value);
+    }
+}
+
+fn metadata_json_values_at_path(value: &serde_json::Value, path: &str) -> Vec<String> {
+    let mut values = vec![value];
+    for segment in path.split('.') {
+        values = values
+            .into_iter()
+            .filter_map(|value| value.as_object()?.get(segment))
+            .collect();
+        if values.is_empty() {
+            return Vec::new();
+        }
+    }
+    values
+        .into_iter()
+        .flat_map(|value| match value {
+            serde_json::Value::Array(values) => values.iter().collect::<Vec<_>>(),
+            value => vec![value],
+        })
+        .filter_map(metadata_json_scalar)
+        .collect()
+}
+
+fn metadata_json_scalar(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Null => Some("null".to_string()),
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => None,
     }
 }
 
@@ -4929,7 +5035,7 @@ fn search_document_field_value<'a>(document: &'a SearchDocument, key: &str) -> O
 }
 
 fn search_document_field_values<'a>(document: &'a SearchDocument, key: &str) -> Vec<Cow<'a, str>> {
-    if key == "labels" {
+    if key == "labels" || key.starts_with("metadata.") {
         return document
             .metadata
             .get(key)
@@ -6361,6 +6467,39 @@ mod tests {
             high_filter_selectivity_per_million: u32::MAX,
             flat_scan_memory_budget_bytes: 0,
         }
+    }
+
+    #[test]
+    fn memory_projection_materializes_only_registered_nested_metadata_paths() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        let node_id = store
+            .create_node(
+                &mut catalog,
+                "Memory",
+                BTreeMap::from([
+                    ("id".to_string(), Value::String("memory-metadata".to_string())),
+                    (
+                        "metadata".to_string(),
+                        Value::String(
+                            r#"{"topic":"Graph","customer":{"tier":"Enterprise"},"ignored":{"deep":"value"}}"#
+                                .to_string(),
+                        ),
+                    ),
+                ]),
+            )
+            .unwrap();
+        let row = projection_row_from_node(&catalog, store.node(node_id).unwrap()).unwrap();
+
+        assert_eq!(
+            row.metadata.get("metadata.topic"),
+            Some(&"Graph".to_string())
+        );
+        assert_eq!(
+            row.metadata.get("metadata.customer.tier"),
+            Some(&"Enterprise".to_string())
+        );
+        assert!(!row.metadata.contains_key("metadata.ignored.deep"));
     }
 
     #[test]
@@ -11221,6 +11360,26 @@ mod tests {
         assert_eq!(freshness.source_graph_commit_epoch, Some(7));
         assert_eq!(freshness.durable_source_graph_commit_epoch, None);
         assert!(freshness.has_uncheckpointed_changes);
+    }
+
+    #[test]
+    fn import_provenance_is_independent_from_the_local_projection_cursor() {
+        let root = unique_test_dir("import_provenance_is_independent_from_local_cursor");
+        let mut index = SearchIndex::open(&root).unwrap();
+        index.record_import_source_graph_commit_epoch(7).unwrap();
+        index
+            .apply_projection_delta(SearchProjectionDelta {
+                source_graph_commit_epoch: Some(1),
+                ..Default::default()
+            })
+            .unwrap();
+        index.checkpoint().unwrap();
+        let reopened = SearchIndex::open(&root).unwrap();
+        let freshness = reopened.projection_freshness();
+        assert_eq!(freshness.import_source_graph_commit_epoch, Some(7));
+        assert_eq!(freshness.source_graph_commit_epoch, Some(1));
+        assert_eq!(freshness.durable_source_graph_commit_epoch, Some(1));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
