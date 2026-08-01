@@ -445,10 +445,14 @@ LanceDB for that path.
     - The route has explicit row and payload budgets and does not fall back to
       Kuzu when Skein graph mode is selected.
   - [ ] Upgrade `GET /sources` to a storage-facing bounded Source scan.
-    - [x] Expose a library-owned Source candidate scan with a stable node-id
-      cursor, property allowlist, sidecar I/O report, and canonical GraphStore
-      fallback. The scan returns a candidate superset; Mem retains exact label
-      alias and nested metadata residual evaluation.
+    - [x] Expose a library-owned Source candidate scan with a stable
+      `created_at`/node-id cursor, property allowlist, sidecar I/O report, and
+      canonical GraphStore fallback. The scan returns a candidate superset;
+      Mem retains exact label alias and nested metadata residual evaluation.
+    - [x] Route Mem `GET /sources` through the embedded candidate scan. Skein
+      owns `created_at`-descending cursor ordering and storage fallback; Mem
+      keeps scope/type/lifecycle verification and exact label/metadata
+      residuals over bounded candidate pages.
     - Preserve strict/shared/all space scope, source type and lifecycle
       predicates, conjunctive label aliases, nested metadata criteria, stable
       created-at ordering, offset/page semantics, and the exact filtered total.
