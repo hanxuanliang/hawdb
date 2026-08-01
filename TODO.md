@@ -27,6 +27,11 @@ query family, or cutover gate requires them.
     route-level Skein readiness evidence.
   - Avoid direct hand-written execution paths in application routes when the
     AST, fast-path detector, optimizer, and executor can own the path.
+  - [x] Make the production health liveness probe follow the selected graph
+    engine.
+    - Skein mode uses a bounded `RETURN 1 AS probe` query through the embedded
+      runtime and never opens Kuzu merely to report health. Legacy buffer-pool
+      telemetry remains explicitly legacy-only diagnostic state.
 - [x] Complete dual-engine cutover readiness.
   - Replacement summary must fail closed when route parity, storage recovery,
     background maintenance, search projection parity, or bounded-read coverage is
