@@ -715,6 +715,11 @@ LanceDB for that path.
     - The community query is request-page bounded; every unpaged input uses a
       `100000 + 1` sentinel and payload budget, failing rather than presenting
       a partial Library index as complete.
+  - [x] Route `GET /library/wiki-page/crystal/{crystal_id}` through bounded
+    embedded Cypher.
+    - The exact-or-short-key Crystal query returns one bounded Memory row;
+      Mem reuses the existing YAML and deeplink-cleanup rendering rules. Entity
+      and Topic wiki pages remain separate multi-query migrations.
   - [x] Route monthly Memory-growth analytics through parameterized embedded
     Cypher.
     - `/stats/growth` computes total, crystal, and default-visible non-crystal
