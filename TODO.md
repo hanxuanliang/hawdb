@@ -509,6 +509,11 @@ LanceDB for that path.
     GraphMeta and bounded community-assignment count reads.
   - [x] Route `/graph/augmentation/pagerank/plan` through the embedded runtime
     and derive the changed-count cutoff from canonical GraphMeta state.
+  - [x] Route augmentation job list and detail reads through parameterized
+    embedded Cypher.
+    - `/graph/augmentation/jobs` and `/graph/augmentation/status/{job_id}` use
+      bounded query-runtime reads, preserve lifecycle/error/result shaping in
+      Mem, and do not introduce route-specific typed library wrappers.
   - [x] Route `/library/community/{community_id}/recent-memories` through the
     embedded runtime with the existing bounded ordering and response shape.
   - [x] Route `/library/community/{community_id}/related` through the embedded
