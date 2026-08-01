@@ -468,9 +468,12 @@ LanceDB for that path.
     - Express each route's graph lookup, predicate filtering, traversal/join,
       aggregation, ordering, and pagination as readable parameterized Cypher
       statements through the embedded query runtime.
-    - Use separate bounded statements for exact lookup, count, candidate-page,
-      and hydration phases when that keeps the query and resource limits clear.
-      Query count is not a reason to reimplement graph semantics in Rust.
+    - Prefer separate bounded, named statements for exact lookup, count,
+      candidate-page, and hydration phases. A migration must not force distinct
+      phases into one complex query, or reimplement graph semantics in Rust,
+      merely to reduce query count.
+    - Every statement must own a clear row/payload budget; the route must
+      account for the aggregate cross-statement budget and fail on overflow.
     - Host code may normalize requests, enforce a cross-query budget, perform
       non-graph local reads, and shape the established response only. It must
       not materialize an unbounded graph scan or implement a route-specific
