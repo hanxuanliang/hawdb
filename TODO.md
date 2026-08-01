@@ -612,6 +612,11 @@ LanceDB for that path.
       canonical payload/proof shaping. The query response is row and payload
       bounded; Skein-selected reads do not open Kuzu or add a route-specific
       typed API.
+  - [x] Route Skill detail through parameterized embedded Cypher.
+    - `/skills/{skill_id}` reads the exact Skill, evidence count, bounded full
+      evidence-ID list, and bounded newest evidence preview through Skein.
+      Oversized ID lists fail rather than returning a partial detail response;
+      Mem retains metadata/health shaping and local bundle/body file reads.
   - [x] Add a bounded community-members graph contract that returns Entity and
     Memory members plus member-internal edges. Entity and Memory reads are
     separately bounded; edges are read only for the returned member IDs and
