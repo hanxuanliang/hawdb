@@ -542,6 +542,11 @@ LanceDB for that path.
       cross-node `HAS_LABEL` usage count; `/labels/{label_id}` retains exact
       lookup and 404 behavior. Both keep response shaping in Mem without a
       route-specific typed API.
+  - [x] Route favorite Thread reads through parameterized embedded Cypher.
+    - `/favorites/threads` retains updated-at ordering, JSON boolean validation,
+      and `(space_id, thread_id)` deduplication in Mem. Candidate pages and
+      total candidate work are bounded; exhausted candidate budgets fail rather
+      than returning a silent partial list.
   - [x] Add a bounded community-members graph contract that returns Entity and
     Memory members plus member-internal edges. Entity and Memory reads are
     separately bounded; edges are read only for the returned member IDs and
