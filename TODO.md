@@ -552,6 +552,10 @@ LanceDB for that path.
       `HAS_LABEL` and `COMPACTS_TO` joins, then reuses Mem's canonical payload
       shaping. Skein-selected reads do not construct `MemoryRepo` or reopen
       Kuzu for labels or source Threads.
+  - [x] Route Thread coverage through parameterized embedded Cypher.
+    - `/threads/{thread_id}/coverage` reads the exact Thread and its
+      `COMPACTS_TO` Memory count with one-row query budgets, while preserving
+      content-store message-count precedence and metadata defaults in Mem.
   - [x] Add a bounded community-members graph contract that returns Entity and
     Memory members plus member-internal edges. Entity and Memory reads are
     separately bounded; edges are read only for the returned member IDs and
