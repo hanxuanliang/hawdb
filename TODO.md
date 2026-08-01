@@ -632,6 +632,12 @@ LanceDB for that path.
       Skein, then retains Mem's existing pure rot detection and optional
       embedding-backed merge candidate evaluation. Skein mode does not open
       Kuzu for the active-scan input.
+  - [x] Route Skill curator dry-run through parameterized embedded Cypher.
+    - `/skills/curator/dry-run` uses the same bounded active Skill scan, then
+      reads bounded `SYNTHESIZED_FROM` evidence, superseded Memory IDs, and up
+      to 16 bounded `EVOLVES` frontiers through Skein. Any row-budget overflow
+      fails instead of returning a partial staleness plan; Mem retains pure
+      selection, summary, and optional merge evaluation.
   - [x] Add a bounded community-members graph contract that returns Entity and
     Memory members plus member-internal edges. Entity and Memory reads are
     separately bounded; edges are read only for the returned member IDs and
