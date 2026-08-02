@@ -13,6 +13,27 @@ pub struct BlockingOperatorMemoryReport {
     pub spilled_rows: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PipelineMemoryReport {
+    /// Sum of rows emitted at every physical operator boundary.
+    pub intermediate_rows: usize,
+    /// Sum of retained payload estimates emitted at every physical operator boundary.
+    pub intermediate_payload_bytes: usize,
+    pub peak_batch_rows: usize,
+    pub peak_batch_payload_bytes: usize,
+    pub output_rows: usize,
+    pub output_payload_bytes: usize,
+    /// Resident memory before execution, when process sampling is supported.
+    pub start_resident_bytes: Option<u64>,
+    /// Resident memory after the output rows have been materialized.
+    pub steady_resident_bytes: Option<u64>,
+    /// Process high-water resident memory at completion.
+    pub peak_resident_bytes: Option<u64>,
+    /// Page-fault deltas observed during execution and output materialization.
+    pub minor_page_faults: Option<u64>,
+    pub major_page_faults: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadExecutionProfile<TScanPruningReport> {
     pub max_rows: Option<usize>,
@@ -24,6 +45,7 @@ pub struct ReadExecutionProfile<TScanPruningReport> {
     pub vector_execution_reports: Vec<crate::VectorExecutionReport>,
     pub graph_expansion_reports: Vec<crate::GraphExpansionExecutionReport>,
     pub blocking_operator_memory_reports: Vec<BlockingOperatorMemoryReport>,
+    pub pipeline_memory_report: PipelineMemoryReport,
 }
 
 impl<TScanPruningReport> ReadExecutionProfile<TScanPruningReport> {
@@ -54,6 +76,7 @@ mod tests {
             vector_execution_reports: Vec::new(),
             graph_expansion_reports: Vec::new(),
             blocking_operator_memory_reports: Vec::new(),
+            pipeline_memory_report: PipelineMemoryReport::default(),
         };
         assert_eq!(profile.blocking_operator_count(), 2);
     }

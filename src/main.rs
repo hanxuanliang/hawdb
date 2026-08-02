@@ -4629,6 +4629,19 @@ fn read_execution_profile_json(
             "spill_run_count": report.spill_run_count,
             "spilled_rows": report.spilled_rows,
         })).collect::<Vec<_>>(),
+        "pipeline_memory_report": {
+            "intermediate_rows": profile.pipeline_memory_report.intermediate_rows,
+            "intermediate_payload_bytes": profile.pipeline_memory_report.intermediate_payload_bytes,
+            "peak_batch_rows": profile.pipeline_memory_report.peak_batch_rows,
+            "peak_batch_payload_bytes": profile.pipeline_memory_report.peak_batch_payload_bytes,
+            "output_rows": profile.pipeline_memory_report.output_rows,
+            "output_payload_bytes": profile.pipeline_memory_report.output_payload_bytes,
+            "start_resident_bytes": profile.pipeline_memory_report.start_resident_bytes,
+            "steady_resident_bytes": profile.pipeline_memory_report.steady_resident_bytes,
+            "peak_resident_bytes": profile.pipeline_memory_report.peak_resident_bytes,
+            "minor_page_faults": profile.pipeline_memory_report.minor_page_faults,
+            "major_page_faults": profile.pipeline_memory_report.major_page_faults,
+        },
         "scan_pruning_report_count": profile.scan_pruning_reports.len(),
         "scan_pruning_reports": profile
             .scan_pruning_reports
@@ -4995,6 +5008,13 @@ mod tests {
         assert_eq!(report["execution_row_cap"], 5);
         assert_eq!(report["row_limit_enforced_before_output"], true);
         assert_eq!(report["operator_row_cap_enabled"], true);
+        assert!(report["intermediate_rows"].as_u64().unwrap() >= 1);
+        assert!(report["intermediate_payload_bytes"].as_u64().unwrap() > 0);
+        assert!(report["output_payload_bytes"].as_u64().unwrap() > 0);
+        assert!(report["steady_resident_bytes"].as_u64().unwrap() > 0);
+        assert!(report["peak_resident_bytes"].as_u64().unwrap() > 0);
+        assert!(report["minor_page_faults"].is_u64());
+        assert!(report["major_page_faults"].is_u64());
         assert!(report.get("rows").is_none());
         std::fs::remove_dir_all(db_path).unwrap();
     }

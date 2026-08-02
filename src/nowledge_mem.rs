@@ -1862,6 +1862,13 @@ pub struct NowledgeMemReadReport {
     pub operator_row_cap_enabled: bool,
     pub blocking_operator_count: usize,
     pub blocking_operator_kinds: Vec<String>,
+    pub intermediate_rows: usize,
+    pub intermediate_payload_bytes: usize,
+    pub output_payload_bytes: usize,
+    pub steady_resident_bytes: Option<u64>,
+    pub peak_resident_bytes: Option<u64>,
+    pub minor_page_faults: Option<u64>,
+    pub major_page_faults: Option<u64>,
     pub streaming: bool,
 }
 
@@ -1881,6 +1888,13 @@ impl NowledgeMemReadReport {
             "operator_row_cap_enabled": self.operator_row_cap_enabled,
             "blocking_operator_count": self.blocking_operator_count,
             "blocking_operator_kinds": self.blocking_operator_kinds,
+            "intermediate_rows": self.intermediate_rows,
+            "intermediate_payload_bytes": self.intermediate_payload_bytes,
+            "output_payload_bytes": self.output_payload_bytes,
+            "steady_resident_bytes": self.steady_resident_bytes,
+            "peak_resident_bytes": self.peak_resident_bytes,
+            "minor_page_faults": self.minor_page_faults,
+            "major_page_faults": self.major_page_faults,
             "streaming": self.streaming,
         })
     }
@@ -3821,6 +3835,7 @@ pub struct NowledgeMemQueryReport {
     pub scan_pruning_reports: Vec<ScanPruningReport>,
     pub vector_execution_reports: Vec<skein_executor::VectorExecutionReport>,
     pub graph_expansion_reports: Vec<skein_executor::GraphExpansionExecutionReport>,
+    pub pipeline_memory_report: Option<skein_executor::PipelineMemoryReport>,
     pub output_row_shape: NowledgeMemQueryOutputRowShape,
     pub api_behavior: NowledgeMemQueryApiBehavior,
 }
@@ -3861,6 +3876,7 @@ impl NowledgeMemQueryReport {
             "vector_execution_reports": self.vector_execution_reports.iter().map(vector_execution_report_json).collect::<Vec<_>>(),
             "graph_expansion_report_count": self.graph_expansion_reports.len(),
             "graph_expansion_reports": self.graph_expansion_reports.iter().map(graph_expansion_report_json).collect::<Vec<_>>(),
+            "pipeline_memory_report": self.pipeline_memory_report.as_ref().map(pipeline_memory_report_json),
             "output_row_shape": self.output_row_shape.json(),
             "api_behavior": self.api_behavior.json(),
         })
@@ -8633,6 +8649,9 @@ fn nowledge_mem_query_report(input: NowledgeMemQueryReportInput<'_>) -> Nowledge
             .execution_profile
             .map(|profile| profile.graph_expansion_reports.clone())
             .unwrap_or_default(),
+        pipeline_memory_report: input
+            .execution_profile
+            .map(|profile| profile.pipeline_memory_report.clone()),
         output_row_shape: NowledgeMemQueryOutputRowShape::from_output(input.output),
         api_behavior: NowledgeMemQueryApiBehavior::from_statement(input.statement),
     }
@@ -8662,6 +8681,22 @@ fn vector_execution_report_json(
         "index_candidate_document_count": report.index_candidate_document_count,
         "index_coverage_complete": report.index_coverage_complete,
         "fallback_reason_codes": report.fallback_reason_codes.iter().map(|code| code.as_str()).collect::<Vec<_>>(),
+    })
+}
+
+fn pipeline_memory_report_json(report: &skein_executor::PipelineMemoryReport) -> serde_json::Value {
+    serde_json::json!({
+        "intermediate_rows": report.intermediate_rows,
+        "intermediate_payload_bytes": report.intermediate_payload_bytes,
+        "peak_batch_rows": report.peak_batch_rows,
+        "peak_batch_payload_bytes": report.peak_batch_payload_bytes,
+        "output_rows": report.output_rows,
+        "output_payload_bytes": report.output_payload_bytes,
+        "start_resident_bytes": report.start_resident_bytes,
+        "steady_resident_bytes": report.steady_resident_bytes,
+        "peak_resident_bytes": report.peak_resident_bytes,
+        "minor_page_faults": report.minor_page_faults,
+        "major_page_faults": report.major_page_faults,
     })
 }
 
@@ -10719,6 +10754,19 @@ fn nowledge_mem_read_report(
         operator_row_cap_enabled: execution_profile.operator_row_cap_enabled,
         blocking_operator_count: execution_profile.blocking_operator_count(),
         blocking_operator_kinds: execution_profile.blocking_operator_kinds.clone(),
+        intermediate_rows: execution_profile.pipeline_memory_report.intermediate_rows,
+        intermediate_payload_bytes: execution_profile
+            .pipeline_memory_report
+            .intermediate_payload_bytes,
+        output_payload_bytes: execution_profile
+            .pipeline_memory_report
+            .output_payload_bytes,
+        steady_resident_bytes: execution_profile
+            .pipeline_memory_report
+            .steady_resident_bytes,
+        peak_resident_bytes: execution_profile.pipeline_memory_report.peak_resident_bytes,
+        minor_page_faults: execution_profile.pipeline_memory_report.minor_page_faults,
+        major_page_faults: execution_profile.pipeline_memory_report.major_page_faults,
         streaming: false,
     }
 }
@@ -12709,11 +12757,27 @@ mod tests {
         assert!(read.report.operator_row_cap_enabled);
         assert_eq!(read.report.blocking_operator_count, 0);
         assert!(read.report.blocking_operator_kinds.is_empty());
+        assert!(read.report.intermediate_rows >= read.report.row_count);
+        assert!(read.report.intermediate_payload_bytes >= read.report.output_payload_bytes);
+        assert!(read.report.output_payload_bytes > 0);
+        assert!(read.report.steady_resident_bytes.is_some());
+        assert!(read.report.peak_resident_bytes.is_some());
+        assert!(read.report.minor_page_faults.is_some());
+        assert!(read.report.major_page_faults.is_some());
         assert!(!read.report.streaming);
         assert_eq!(read.report.json()["execution_row_cap"], 5);
         assert_eq!(read.report.json()["row_limit_enforced_before_output"], true);
         assert_eq!(read.report.json()["operator_row_cap_enabled"], true);
         assert_eq!(read.report.json()["blocking_operator_count"], 0);
+        assert!(read.report.json()["intermediate_rows"].as_u64().unwrap() >= 1);
+        assert!(read.report.json()["output_payload_bytes"].as_u64().unwrap() > 0);
+        assert!(
+            read.report.json()["steady_resident_bytes"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert!(read.report.json()["peak_resident_bytes"].as_u64().unwrap() > 0);
         assert_eq!(read.report.json()["streaming"], false);
         assert_eq!(
             read.report.bounded_read_evidence_json()["protocol"],
@@ -12759,6 +12823,13 @@ mod tests {
             operator_row_cap_enabled: false,
             blocking_operator_count: 1,
             blocking_operator_kinds: vec!["Sort".to_string()],
+            intermediate_rows: 0,
+            intermediate_payload_bytes: 0,
+            output_payload_bytes: 0,
+            steady_resident_bytes: None,
+            peak_resident_bytes: None,
+            minor_page_faults: None,
+            major_page_faults: None,
             streaming: false,
         };
 
@@ -12800,6 +12871,13 @@ mod tests {
             operator_row_cap_enabled: true,
             blocking_operator_count: 0,
             blocking_operator_kinds: Vec::new(),
+            intermediate_rows: 0,
+            intermediate_payload_bytes: 0,
+            output_payload_bytes: 0,
+            steady_resident_bytes: None,
+            peak_resident_bytes: None,
+            minor_page_faults: None,
+            major_page_faults: None,
             streaming: false,
         };
 

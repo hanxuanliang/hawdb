@@ -94,6 +94,14 @@ pub fn parse_read_report_json(value: &serde_json::Value) -> Result<NowledgeMemRe
         operator_row_cap_enabled: required_bool(value, "operator_row_cap_enabled")?,
         blocking_operator_count: required_usize(value, "blocking_operator_count")?,
         blocking_operator_kinds: required_string_array(value, "blocking_operator_kinds")?,
+        intermediate_rows: optional_usize(value, "intermediate_rows")?.unwrap_or_default(),
+        intermediate_payload_bytes: optional_usize(value, "intermediate_payload_bytes")?
+            .unwrap_or_default(),
+        output_payload_bytes: optional_usize(value, "output_payload_bytes")?.unwrap_or_default(),
+        steady_resident_bytes: optional_u64(value, "steady_resident_bytes")?,
+        peak_resident_bytes: optional_u64(value, "peak_resident_bytes")?,
+        minor_page_faults: optional_u64(value, "minor_page_faults")?,
+        major_page_faults: optional_u64(value, "major_page_faults")?,
         streaming: required_bool(value, "streaming")?,
     })
 }
@@ -176,6 +184,19 @@ fn optional_usize(value: &serde_json::Value, field: &str) -> Result<Option<usize
     usize::try_from(raw).map(Some).map_err(|_| {
         SkeinError::Semantic(format!("read report field '{field}' exceeds usize range"))
     })
+}
+
+fn optional_u64(value: &serde_json::Value, field: &str) -> Result<Option<u64>> {
+    let Some(value) = value.get(field) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    value
+        .as_u64()
+        .map(Some)
+        .ok_or_else(|| invalid_field(field, "integer"))
 }
 
 fn required_string_array(value: &serde_json::Value, field: &str) -> Result<Vec<String>> {

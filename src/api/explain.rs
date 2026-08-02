@@ -147,6 +147,10 @@ pub(super) fn explain_analyze_output_row(
         ),
     );
     row.insert(
+        "pipeline_memory_report".to_string(),
+        pipeline_memory_report_value(&profile.pipeline_memory_report),
+    );
+    row.insert(
         "row_limit_enforced_before_output".to_string(),
         Value::Bool(profile.row_limit_enforced_before_output),
     );
@@ -176,6 +180,52 @@ fn blocking_operator_memory_report_value(
             usize_value(report.spill_run_count),
         ),
         ("spilled_rows".to_string(), usize_value(report.spilled_rows)),
+    ]))
+}
+
+fn pipeline_memory_report_value(report: &skein_executor::PipelineMemoryReport) -> Value {
+    Value::Map(BTreeMap::from([
+        (
+            "intermediate_rows".to_string(),
+            usize_value(report.intermediate_rows),
+        ),
+        (
+            "intermediate_payload_bytes".to_string(),
+            usize_value(report.intermediate_payload_bytes),
+        ),
+        (
+            "peak_batch_rows".to_string(),
+            usize_value(report.peak_batch_rows),
+        ),
+        (
+            "peak_batch_payload_bytes".to_string(),
+            usize_value(report.peak_batch_payload_bytes),
+        ),
+        ("output_rows".to_string(), usize_value(report.output_rows)),
+        (
+            "output_payload_bytes".to_string(),
+            usize_value(report.output_payload_bytes),
+        ),
+        (
+            "start_resident_bytes".to_string(),
+            optional_u64_value(report.start_resident_bytes),
+        ),
+        (
+            "steady_resident_bytes".to_string(),
+            optional_u64_value(report.steady_resident_bytes),
+        ),
+        (
+            "peak_resident_bytes".to_string(),
+            optional_u64_value(report.peak_resident_bytes),
+        ),
+        (
+            "minor_page_faults".to_string(),
+            optional_u64_value(report.minor_page_faults),
+        ),
+        (
+            "major_page_faults".to_string(),
+            optional_u64_value(report.major_page_faults),
+        ),
     ]))
 }
 
@@ -354,6 +404,7 @@ pub(super) fn empty_read_execution_profile() -> executor::ReadExecutionProfile {
         vector_execution_reports: Vec::new(),
         graph_expansion_reports: Vec::new(),
         blocking_operator_memory_reports: Vec::new(),
+        pipeline_memory_report: skein_executor::PipelineMemoryReport::default(),
     }
 }
 
@@ -680,6 +731,10 @@ fn usize_value(value: usize) -> Value {
 
 fn u64_value(value: u64) -> Value {
     Value::Int(i64::try_from(value).unwrap_or(i64::MAX))
+}
+
+fn optional_u64_value(value: Option<u64>) -> Value {
+    value.map(u64_value).unwrap_or(Value::Null)
 }
 
 fn option_usize_value(value: Option<usize>) -> Value {

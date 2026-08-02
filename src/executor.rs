@@ -71,6 +71,7 @@ thread_local! {
     static VECTOR_EXECUTION_REPORT_CAPTURE: RefCell<Option<Vec<VectorExecutionReport>>> = const { RefCell::new(None) };
     static GRAPH_EXPANSION_REPORT_CAPTURE: RefCell<Option<Vec<skein_executor::GraphExpansionExecutionReport>>> = const { RefCell::new(None) };
     static BLOCKING_MEMORY_REPORT_CAPTURE: RefCell<Option<Vec<skein_executor::BlockingOperatorMemoryReport>>> = const { RefCell::new(None) };
+    static PIPELINE_MEMORY_REPORT_CAPTURE: RefCell<Option<skein_executor::PipelineMemoryReport>> = const { RefCell::new(None) };
 }
 
 pub struct VectorSeedExecutionRequest<'a> {
@@ -235,6 +236,7 @@ pub fn execute_with_row_limit_profile_and_external_and_memory(
     max_rows: Option<usize>,
     memory: &ExecutionMemoryConfig,
 ) -> Result<ProfiledQueryRows> {
+    let process_memory_start = skein_qos::ProcessMemorySnapshot::capture().ok();
     let execution_limit = ExecutionLimit::from_user_max_rows(max_rows)?;
     let mut profile = read_execution_profile(plan, max_rows)?;
     let mut context = ExecutionContext {
@@ -243,13 +245,24 @@ pub fn execute_with_row_limit_profile_and_external_and_memory(
         memory,
     };
     let (
-        (((bindings, scan_pruning_reports), vector_execution_reports), graph_expansion_reports),
-        blocking_operator_memory_reports,
-    ) = capture_blocking_memory_reports(|| {
-        capture_graph_expansion_reports(|| {
-            capture_vector_execution_reports(|| {
-                capture_scan_pruning_reports(|| {
-                    execute_bindings_with_limit(plan, catalog, store, &mut context, execution_limit)
+        (
+            (((bindings, scan_pruning_reports), vector_execution_reports), graph_expansion_reports),
+            blocking_operator_memory_reports,
+        ),
+        mut pipeline_memory_report,
+    ) = capture_pipeline_memory_report(|| {
+        capture_blocking_memory_reports(|| {
+            capture_graph_expansion_reports(|| {
+                capture_vector_execution_reports(|| {
+                    capture_scan_pruning_reports(|| {
+                        execute_bindings_with_limit(
+                            plan,
+                            catalog,
+                            store,
+                            &mut context,
+                            execution_limit,
+                        )
+                    })
                 })
             })
         })
@@ -259,6 +272,22 @@ pub fn execute_with_row_limit_profile_and_external_and_memory(
     profile.graph_expansion_reports = graph_expansion_reports;
     profile.blocking_operator_memory_reports = blocking_operator_memory_reports;
     let rows = collect_rows(bindings, max_rows)?;
+    pipeline_memory_report.output_rows = rows.len();
+    pipeline_memory_report.output_payload_bytes = rows.iter().fold(0usize, |total, row| {
+        total.saturating_add(map_payload_bytes(row))
+    });
+    if let Ok(process_memory_end) = skein_qos::ProcessMemorySnapshot::capture() {
+        pipeline_memory_report.steady_resident_bytes = Some(process_memory_end.resident_bytes);
+        pipeline_memory_report.peak_resident_bytes = Some(process_memory_end.peak_resident_bytes);
+        if let Some(process_memory_start) = process_memory_start {
+            let process_memory =
+                skein_qos::ProcessMemoryProfile::between(process_memory_start, process_memory_end);
+            pipeline_memory_report.start_resident_bytes = Some(process_memory.start_resident_bytes);
+            pipeline_memory_report.minor_page_faults = Some(process_memory.minor_page_faults);
+            pipeline_memory_report.major_page_faults = Some(process_memory.major_page_faults);
+        }
+    }
+    profile.pipeline_memory_report = pipeline_memory_report;
     Ok(ProfiledQueryRows { rows, profile })
 }
 
@@ -279,6 +308,7 @@ pub fn read_execution_profile(
         vector_execution_reports: Vec::new(),
         graph_expansion_reports: Vec::new(),
         blocking_operator_memory_reports: Vec::new(),
+        pipeline_memory_report: skein_executor::PipelineMemoryReport::default(),
     })
 }
 
@@ -336,6 +366,35 @@ fn record_graph_expansion_report(report: skein_executor::GraphExpansionExecution
         if let Some(reports) = capture.borrow_mut().as_mut() {
             reports.push(report);
         }
+    });
+}
+
+fn capture_pipeline_memory_report<T>(
+    f: impl FnOnce() -> Result<T>,
+) -> Result<(T, skein_executor::PipelineMemoryReport)> {
+    PIPELINE_MEMORY_REPORT_CAPTURE.with(|capture| {
+        let previous = capture.replace(Some(skein_executor::PipelineMemoryReport::default()));
+        let result = f();
+        let captured = capture.replace(previous).unwrap_or_default();
+        result.map(|value| (value, captured))
+    })
+}
+
+fn record_pipeline_batch(batch: &[Binding]) {
+    PIPELINE_MEMORY_REPORT_CAPTURE.with(|capture| {
+        let mut capture = capture.borrow_mut();
+        let Some(report) = capture.as_mut() else {
+            return;
+        };
+        let payload_bytes = batch.iter().fold(0usize, |total, binding| {
+            total.saturating_add(binding_payload_bytes(binding))
+        });
+        report.intermediate_rows = report.intermediate_rows.saturating_add(batch.len());
+        report.intermediate_payload_bytes = report
+            .intermediate_payload_bytes
+            .saturating_add(payload_bytes);
+        report.peak_batch_rows = report.peak_batch_rows.max(batch.len());
+        report.peak_batch_payload_bytes = report.peak_batch_payload_bytes.max(payload_bytes);
     });
 }
 
@@ -1139,6 +1198,19 @@ fn collect_batch_pipeline(
 }
 
 fn execute_binding_batches(
+    plan: &PhysicalPlan,
+    context: BatchReadContext<'_>,
+    execution_limit: ExecutionLimit,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    let mut measured_emit = |batch: BindingBatch| {
+        record_pipeline_batch(&batch);
+        emit(batch)
+    };
+    execute_binding_batches_inner(plan, context, execution_limit, &mut measured_emit)
+}
+
+fn execute_binding_batches_inner(
     plan: &PhysicalPlan,
     context: BatchReadContext<'_>,
     execution_limit: ExecutionLimit,
@@ -7170,6 +7242,17 @@ mod tests {
         assert_eq!(report.input_rows, 12);
         assert!(report.spill_run_count > 1);
         assert_eq!(report.spilled_rows, 12);
+        let pipeline = &output.profile.pipeline_memory_report;
+        assert_eq!(pipeline.intermediate_rows, 36);
+        assert!(pipeline.intermediate_payload_bytes >= pipeline.output_payload_bytes);
+        assert_eq!(pipeline.peak_batch_rows, 2);
+        assert_eq!(pipeline.output_rows, 12);
+        assert!(pipeline.output_payload_bytes > 0);
+        assert!(pipeline.start_resident_bytes.is_some());
+        assert!(pipeline.steady_resident_bytes.is_some());
+        assert!(pipeline.peak_resident_bytes.is_some());
+        assert!(pipeline.minor_page_faults.is_some());
+        assert!(pipeline.major_page_faults.is_some());
         assert!(std::fs::read_dir(&memory.spill_directory)
             .unwrap()
             .next()
