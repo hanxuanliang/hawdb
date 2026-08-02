@@ -129,6 +129,7 @@ impl PhysicalPlan {
             | PhysicalPlan::AggregateExec { .. }
             | PhysicalPlan::DistinctExec { .. }
             | PhysicalPlan::SortExec { .. }
+            | PhysicalPlan::TopNExec { .. }
             | PhysicalPlan::LimitExec { .. } => {
                 PhysicalPlanDomainRef::Relational(RelationalPhysicalPlanRef::new(self))
             }

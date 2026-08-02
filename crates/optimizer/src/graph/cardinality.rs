@@ -199,6 +199,7 @@ fn physical_plan_node_variable_distinct_count(
         | PhysicalPlan::AggregateExec { input, .. }
         | PhysicalPlan::DistinctExec { input }
         | PhysicalPlan::SortExec { input, .. }
+        | PhysicalPlan::TopNExec { input, .. }
         | PhysicalPlan::LimitExec { input, .. } => {
             physical_plan_node_variable_distinct_count(input, variable, catalog)
         }
@@ -375,6 +376,7 @@ fn physical_plan_access_path_covers_property(
         | PhysicalPlan::AggregateExec { input, .. }
         | PhysicalPlan::DistinctExec { input }
         | PhysicalPlan::SortExec { input, .. }
+        | PhysicalPlan::TopNExec { input, .. }
         | PhysicalPlan::LimitExec { input, .. } => {
             physical_plan_access_path_covers_property(input, variable, property)
         }
@@ -444,6 +446,7 @@ fn physical_plan_node_label<'a>(plan: &'a PhysicalPlan, variable: &str) -> Optio
         | PhysicalPlan::AggregateExec { input, .. }
         | PhysicalPlan::DistinctExec { input }
         | PhysicalPlan::SortExec { input, .. }
+        | PhysicalPlan::TopNExec { input, .. }
         | PhysicalPlan::LimitExec { input, .. } => physical_plan_node_label(input, variable),
         _ => None,
     }
@@ -473,6 +476,7 @@ fn physical_plan_relationship_type<'a>(plan: &'a PhysicalPlan, variable: &str) -
         | PhysicalPlan::AggregateExec { input, .. }
         | PhysicalPlan::DistinctExec { input }
         | PhysicalPlan::SortExec { input, .. }
+        | PhysicalPlan::TopNExec { input, .. }
         | PhysicalPlan::LimitExec { input, .. } => physical_plan_relationship_type(input, variable),
         _ => None,
     }

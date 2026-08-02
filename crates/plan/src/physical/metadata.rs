@@ -59,6 +59,7 @@ pub enum PhysicalPlanKind {
     AggregateExec,
     DistinctExec,
     SortExec,
+    TopNExec,
     LimitExec,
 }
 
@@ -148,6 +149,7 @@ impl PhysicalPlanKind {
             PhysicalPlanKind::AggregateExec,
             PhysicalPlanKind::DistinctExec,
             PhysicalPlanKind::SortExec,
+            PhysicalPlanKind::TopNExec,
             PhysicalPlanKind::LimitExec,
         ];
         ALL
@@ -223,6 +225,7 @@ impl PhysicalPlanKind {
             PhysicalPlanKind::AggregateExec => "AggregateExec",
             PhysicalPlanKind::DistinctExec => "DistinctExec",
             PhysicalPlanKind::SortExec => "SortExec",
+            PhysicalPlanKind::TopNExec => "TopNExec",
             PhysicalPlanKind::LimitExec => "LimitExec",
         }
     }
@@ -281,6 +284,7 @@ impl PhysicalPlanKind {
             | PhysicalPlanKind::AggregateExec
             | PhysicalPlanKind::DistinctExec
             | PhysicalPlanKind::SortExec
+            | PhysicalPlanKind::TopNExec
             | PhysicalPlanKind::LimitExec => PhysicalPlanClass::Relational,
             PhysicalPlanKind::ProjectGraph
             | PhysicalPlanKind::GraphAlgorithm

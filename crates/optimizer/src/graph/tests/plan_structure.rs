@@ -321,3 +321,42 @@ fn selected_plan_properties_report_distribution_and_sort_ordering() {
         MemoryBudgetClass::Blocking
     );
 }
+
+#[test]
+fn sort_with_bounded_limit_lowers_to_top_n() {
+    let logical = LogicalPlan::Limit {
+        offset: 5,
+        limit: Some(10),
+        input: Box::new(LogicalPlan::Sort {
+            items: vec![SortItem {
+                key: SortKey::Property {
+                    variable: "m".to_string(),
+                    property: "score".to_string(),
+                },
+                direction: SortDirection::Desc,
+            }],
+            input: Box::new(LogicalPlan::NodeScan {
+                variable: "m".to_string(),
+                label: "Memory".to_string(),
+            }),
+        }),
+    };
+
+    let (plan, trace) =
+        CascadesOptimizer::default().optimize_with_catalog(&logical, &OptimizerCatalog::default());
+
+    assert_eq!(plan.kind(), PhysicalPlanKind::TopNExec);
+    assert_eq!(trace.selected_plan_operator_counts["TopNExec"], 1);
+    assert!(!trace.selected_plan_operator_counts.contains_key("SortExec"));
+    assert!(!trace
+        .selected_plan_operator_counts
+        .contains_key("LimitExec"));
+    assert_eq!(
+        trace.selected_plan_properties.ordering,
+        vec!["m.score desc".to_string()]
+    );
+    assert!(trace
+        .decisions
+        .iter()
+        .any(|decision| decision == "rewrite Sort + Limit to TopN: offset=5 limit=10"));
+}

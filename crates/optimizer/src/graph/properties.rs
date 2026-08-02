@@ -19,6 +19,12 @@ pub(super) fn selected_plan_properties(plan: &PhysicalPlan) -> PhysicalPropertie
             properties.memory_budget = MemoryBudgetClass::Blocking;
             properties
         }
+        PhysicalPlan::TopNExec { items, input, .. } => {
+            let mut properties = selected_plan_properties(input);
+            properties.ordering = sort_ordering_keys(items);
+            properties.memory_budget = MemoryBudgetClass::RowLinear;
+            properties
+        }
         PhysicalPlan::AggregateExec { input, .. } | PhysicalPlan::DistinctExec { input } => {
             let mut properties = selected_plan_properties(input);
             properties.ordering.clear();

@@ -838,7 +838,7 @@ fn cypher_explain_analyze_rejects_mutation() {
 }
 
 #[test]
-fn plan_cache_reuses_exact_parameterized_physical_plan() {
+fn plan_cache_reuses_parameterized_physical_plan_template() {
     let db = Database::new_with_config(DatabaseConfig {
         max_plan_cache_entries: Some(8),
         ..DatabaseConfig::default()
@@ -852,19 +852,17 @@ fn plan_cache_reuses_exact_parameterized_physical_plan() {
 
     assert_eq!(first.plan_cache_lookup, PlanCacheLookup::Miss);
     assert_eq!(second.plan_cache_lookup, PlanCacheLookup::Hit);
-    assert!(
-        first
-            .trace
-            .decisions
-            .iter()
-            .any(|decision| decision
-                == "plan cache miss: optimized exact parameterized physical plan")
-    );
+    assert!(first
+        .trace
+        .decisions
+        .iter()
+        .any(|decision| decision
+            == "plan cache miss: optimized parameterized physical plan template"));
     assert!(second
         .trace
         .decisions
         .iter()
-        .any(|decision| decision == "plan cache hit: exact parameterized physical plan"));
+        .any(|decision| decision == "plan cache hit: parameterized physical plan template"));
     assert_eq!(
         first.trace.selected_plan_fingerprint,
         second.trace.selected_plan_fingerprint
@@ -877,6 +875,182 @@ fn plan_cache_reuses_exact_parameterized_physical_plan() {
     assert_eq!(stats.disabled_misses, 0);
     assert_eq!(stats.bypasses, 0);
     assert_eq!(stats.memory_pressure_events, 0);
+}
+
+#[test]
+fn plan_cache_rebinds_equality_parameters_without_reoptimizing() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 'first', title: 'First'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'second', title: 'Second'})")
+        .unwrap();
+    let query = "MATCH (m:Memory) WHERE m.id = $id RETURN m.title AS title";
+
+    let first = db
+        .query_with_params(
+            query,
+            &BTreeMap::from([("id".to_string(), Value::String("first".to_string()))]),
+        )
+        .unwrap();
+    let second = db
+        .query_with_params(
+            query,
+            &BTreeMap::from([("id".to_string(), Value::String("second".to_string()))]),
+        )
+        .unwrap();
+
+    assert_eq!(
+        first.rows[0].get("title"),
+        Some(&Value::String("First".to_string()))
+    );
+    assert_eq!(
+        second.rows[0].get("title"),
+        Some(&Value::String("Second".to_string()))
+    );
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.misses, 1);
+    assert_eq!(stats.hits, 1);
+    assert_eq!(stats.entries, 1);
+}
+
+#[test]
+fn plan_cache_rebinds_in_list_parameters_with_the_same_shape() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'first', title: 'First'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'second', title: 'Second'})")
+        .unwrap();
+    let query = "MATCH (m:Memory) WHERE m.id IN $ids RETURN m.title AS title";
+
+    let first = db
+        .query_with_params(
+            query,
+            &BTreeMap::from([(
+                "ids".to_string(),
+                Value::List(vec![Value::String("first".to_string())]),
+            )]),
+        )
+        .unwrap();
+    let second = db
+        .query_with_params(
+            query,
+            &BTreeMap::from([(
+                "ids".to_string(),
+                Value::List(vec![Value::String("second".to_string())]),
+            )]),
+        )
+        .unwrap();
+
+    assert_eq!(
+        first.rows[0].get("title"),
+        Some(&Value::String("First".to_string()))
+    );
+    assert_eq!(
+        second.rows[0].get("title"),
+        Some(&Value::String("Second".to_string()))
+    );
+    assert_eq!(db.plan_cache_stats().hits, 1);
+}
+
+#[test]
+fn plan_cache_invalidates_after_data_commits() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 'first', title: 'First'})")
+        .unwrap();
+    let query = "MATCH (m:Memory) WHERE m.id = $id RETURN m.title AS title";
+    let first_parameters = BTreeMap::from([("id".to_string(), Value::String("first".to_string()))]);
+
+    let first = db
+        .explain_query_with_params(query, &first_parameters)
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'second', title: 'Second'})")
+        .unwrap();
+    let second = db
+        .explain_query_with_params(
+            query,
+            &BTreeMap::from([("id".to_string(), Value::String("second".to_string()))]),
+        )
+        .unwrap();
+
+    assert_eq!(first.plan_cache_lookup, PlanCacheLookup::Miss);
+    assert_eq!(second.plan_cache_lookup, PlanCacheLookup::Miss);
+}
+
+#[test]
+fn optimizer_reuses_statistics_snapshot_within_a_commit() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'first', title: 'First'})")
+        .unwrap();
+    db.explain_query("MATCH (m:Memory) WHERE m.id = 'first' RETURN m.id AS id")
+        .unwrap();
+    let output = db
+        .explain_query("MATCH (m:Memory) RETURN m.id AS id")
+        .unwrap();
+
+    assert!(output.trace.decisions.iter().any(|decision| {
+        decision.starts_with("optimizer statistics cache hit: statistics_epoch=")
+    }));
+    assert!(output.trace.decisions.iter().any(|decision| {
+        decision.starts_with("optimizer catalog cache hit: statistics_epoch=")
+    }));
+}
+
+#[test]
+fn pagination_parameters_keep_distinct_plan_variants() {
+    let db = Database::new();
+    let query = "MATCH (m:Memory) RETURN m.id AS id ORDER BY m.id LIMIT $limit";
+
+    let first = db
+        .explain_query_with_params(
+            query,
+            &BTreeMap::from([("limit".to_string(), Value::Int(1))]),
+        )
+        .unwrap();
+    let second = db
+        .explain_query_with_params(
+            query,
+            &BTreeMap::from([("limit".to_string(), Value::Int(2))]),
+        )
+        .unwrap();
+
+    assert_eq!(first.plan_cache_lookup, PlanCacheLookup::Miss);
+    assert_eq!(second.plan_cache_lookup, PlanCacheLookup::Miss);
+    assert_eq!(db.plan_cache_stats().entries, 2);
+}
+
+#[test]
+fn order_by_limit_uses_top_n_and_preserves_stable_order() {
+    let mut db = Database::new();
+    for (id, score) in [("a", 3), ("b", 3), ("c", 2), ("d", 1)] {
+        db.query(&format!("CREATE (:Memory {{id: '{id}', score: {score}}})"))
+            .unwrap();
+    }
+    let query = "MATCH (m:Memory) RETURN m.id AS id, m.score AS score \
+                 ORDER BY m.score DESC, m.id ASC SKIP 1 LIMIT 2";
+
+    let explain = db.explain_query(query).unwrap();
+    let output = db.query(query).unwrap();
+
+    assert!(explain.trace.selected_plan.contains("TopNExec"));
+    assert!(!explain.trace.selected_plan.contains("SortExec"));
+    assert!(!explain.trace.selected_plan.contains("LimitExec"));
+    assert_eq!(
+        output
+            .rows
+            .iter()
+            .map(|row| row.get("id").cloned().unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            Value::String("b".to_string()),
+            Value::String("c".to_string())
+        ]
+    );
 }
 
 #[test]
@@ -1194,14 +1368,12 @@ fn plan_cache_misses_after_graph_commit_epoch_changes() {
     let after_commit = db.explain_query(query).unwrap();
 
     assert_eq!(after_commit.plan_cache_lookup, PlanCacheLookup::Miss);
-    assert!(
-        after_commit
-            .trace
-            .decisions
-            .iter()
-            .any(|decision| decision
-                == "plan cache miss: optimized exact parameterized physical plan")
-    );
+    assert!(after_commit
+        .trace
+        .decisions
+        .iter()
+        .any(|decision| decision
+            == "plan cache miss: optimized parameterized physical plan template"));
     let stats = db.plan_cache_stats();
     assert_eq!(stats.hits, 1);
     assert_eq!(stats.misses, 2);
@@ -1240,15 +1412,13 @@ fn plan_cache_misses_after_index_descriptor_changes() {
         .trace
         .decisions
         .iter()
-        .any(|decision| decision == "plan cache hit: exact parameterized physical plan"));
-    assert!(
-        after_index
-            .trace
-            .decisions
-            .iter()
-            .any(|decision| decision
-                == "plan cache miss: optimized exact parameterized physical plan")
-    );
+        .any(|decision| decision == "plan cache hit: parameterized physical plan template"));
+    assert!(after_index
+        .trace
+        .decisions
+        .iter()
+        .any(|decision| decision
+            == "plan cache miss: optimized parameterized physical plan template"));
     assert!(after_index
         .trace
         .selected_plan
@@ -1287,15 +1457,13 @@ fn plan_cache_evicts_least_frequently_used_plan() {
         .trace
         .decisions
         .iter()
-        .any(|decision| decision == "plan cache hit: exact parameterized physical plan"));
-    assert!(
-        evicted
-            .trace
-            .decisions
-            .iter()
-            .any(|decision| decision
-                == "plan cache miss: optimized exact parameterized physical plan")
-    );
+        .any(|decision| decision == "plan cache hit: parameterized physical plan template"));
+    assert!(evicted
+        .trace
+        .decisions
+        .iter()
+        .any(|decision| decision
+            == "plan cache miss: optimized parameterized physical plan template"));
     let stats = db.plan_cache_stats();
     assert_eq!(stats.entries, 2);
     assert_eq!(stats.hits, 2);
@@ -1320,22 +1488,18 @@ fn plan_cache_can_be_disabled_with_zero_capacity() {
 
     assert_eq!(first.plan_cache_lookup, PlanCacheLookup::Miss);
     assert_eq!(second.plan_cache_lookup, PlanCacheLookup::Miss);
-    assert!(
-        first
-            .trace
-            .decisions
-            .iter()
-            .any(|decision| decision
-                == "plan cache miss: optimized exact parameterized physical plan")
-    );
-    assert!(
-        second
-            .trace
-            .decisions
-            .iter()
-            .any(|decision| decision
-                == "plan cache miss: optimized exact parameterized physical plan")
-    );
+    assert!(first
+        .trace
+        .decisions
+        .iter()
+        .any(|decision| decision
+            == "plan cache miss: optimized parameterized physical plan template"));
+    assert!(second
+        .trace
+        .decisions
+        .iter()
+        .any(|decision| decision
+            == "plan cache miss: optimized parameterized physical plan template"));
     let stats = db.plan_cache_stats();
     assert_eq!(stats.max_entries, Some(0));
     assert_eq!(stats.entries, 0);

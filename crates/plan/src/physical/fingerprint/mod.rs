@@ -1028,6 +1028,22 @@ impl PhysicalPlan {
                 input.write_fingerprint(output);
                 output.push(')');
             }
+            PhysicalPlan::TopNExec {
+                items,
+                offset,
+                limit,
+                input,
+            } => {
+                output.push_str("TopNExec(");
+                write_sort_list(output, items);
+                output.push_str(",offset=");
+                output.push_str(&offset.to_string());
+                output.push_str(",limit=");
+                output.push_str(&limit.to_string());
+                output.push_str(",input=");
+                input.write_fingerprint(output);
+                output.push(')');
+            }
             PhysicalPlan::LimitExec {
                 offset,
                 limit,

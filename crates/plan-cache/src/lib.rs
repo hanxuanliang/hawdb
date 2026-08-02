@@ -71,6 +71,27 @@ where
         Some(entry.value.clone())
     }
 
+    pub fn get_matching(&mut self, mut predicate: impl FnMut(&K) -> bool) -> Option<V> {
+        if self.max_entries == Some(0) {
+            self.misses += 1;
+            self.disabled_misses += 1;
+            return None;
+        }
+        self.access_tick = self.access_tick.saturating_add(1);
+        let Some(key) = self.entries.keys().find(|key| predicate(key)).cloned() else {
+            self.misses += 1;
+            return None;
+        };
+        let entry = self
+            .entries
+            .get_mut(&key)
+            .expect("matching cache key must remain present");
+        self.hits += 1;
+        entry.frequency = entry.frequency.saturating_add(1);
+        entry.last_access_tick = self.access_tick;
+        Some(entry.value.clone())
+    }
+
     pub fn record_bypass(&mut self) {
         self.bypasses = self.bypasses.saturating_add(1);
     }
@@ -192,6 +213,18 @@ mod tests {
         assert_eq!(cache.stats().disabled_misses, 1);
         assert_eq!(cache.stats().admissions, 0);
         assert_eq!(cache.stats().memory_pressure_events, 0);
+    }
+
+    #[test]
+    fn matching_lookup_updates_lfu_accounting_once() {
+        let mut cache = LfuCache::new(Some(2));
+        cache.insert("query-a", 1);
+        cache.insert("query-b", 2);
+
+        assert_eq!(cache.get_matching(|key| key.ends_with('b')), Some(2));
+        assert_eq!(cache.get_matching(|key| key.ends_with('c')), None);
+        assert_eq!(cache.stats().hits, 1);
+        assert_eq!(cache.stats().misses, 1);
     }
 
     #[test]

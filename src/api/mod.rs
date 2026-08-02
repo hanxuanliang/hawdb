@@ -43,8 +43,9 @@ use crate::value::Value;
 use canonical_snapshot::export_canonical_graph_snapshot_for;
 use explain::{empty_read_execution_profile, explain_analyze_output_row, explain_output_row};
 use plan_cache::{
-    optimized_query_plan_for, statement_uses_plan_cache, OptimizedQueryPlan, PlanCache,
-    PlanCacheContext, PlanCacheMode, DEFAULT_PLAN_CACHE_MAX_ENTRIES,
+    optimized_query_plan_for, statement_uses_plan_cache, OptimizedQueryPlan,
+    OptimizerPlanningCache, PlanCache, PlanCacheContext, PlanCacheMode,
+    DEFAULT_PLAN_CACHE_MAX_ENTRIES,
 };
 use query_domains::*;
 pub use skein_api_types::{
@@ -81,6 +82,7 @@ mod canonical_snapshot;
 mod explain;
 mod observability;
 mod plan_cache;
+mod plan_template;
 mod query_domains;
 mod query_runtime;
 mod schema_guidance;
@@ -178,6 +180,7 @@ pub struct Database {
     store: GraphStore,
     optimizer: CascadesOptimizer,
     plan_cache: SharedState<PlanCache>,
+    optimizer_planning_cache: SharedState<OptimizerPlanningCache>,
     slow_query_log: SharedState<system_sql::SlowQueryLog>,
     statement_summary: SharedState<system_sql::StatementSummary>,
     config: DatabaseConfig,
@@ -5470,6 +5473,7 @@ pub struct DatabaseReadTransaction {
     store: GraphStore,
     optimizer: CascadesOptimizer,
     plan_cache: SharedState<PlanCache>,
+    optimizer_planning_cache: SharedState<OptimizerPlanningCache>,
     slow_query_snapshot: Vec<system_sql::SlowQueryRecord>,
     statement_summary_snapshot: Vec<system_sql::StatementSummaryRecord>,
     config: DatabaseConfig,
@@ -5505,6 +5509,7 @@ impl Default for Database {
             store,
             optimizer: CascadesOptimizer::new(optimizer_config_from_database_config(&config)),
             plan_cache: SharedState::new(PlanCache::new(config.max_plan_cache_entries)),
+            optimizer_planning_cache: SharedState::new(OptimizerPlanningCache::default()),
             slow_query_log: SharedState::new(system_sql::SlowQueryLog::new(
                 config.slow_query_log_capacity,
             )),
@@ -5538,6 +5543,7 @@ impl Database {
             store,
             optimizer,
             plan_cache: SharedState::new(PlanCache::new(config.max_plan_cache_entries)),
+            optimizer_planning_cache: SharedState::new(OptimizerPlanningCache::default()),
             slow_query_log: SharedState::new(system_sql::SlowQueryLog::new(
                 config.slow_query_log_capacity,
             )),
@@ -5629,6 +5635,7 @@ impl Database {
             store,
             optimizer: CascadesOptimizer::new(optimizer_config_from_database_config(&config)),
             plan_cache: SharedState::new(PlanCache::new(config.max_plan_cache_entries)),
+            optimizer_planning_cache: SharedState::new(OptimizerPlanningCache::default()),
             slow_query_log: SharedState::new(system_sql::SlowQueryLog::new(
                 config.slow_query_log_capacity,
             )),
@@ -5785,6 +5792,9 @@ impl Database {
             store: self.store.snapshot(),
             optimizer: self.optimizer.clone(),
             plan_cache: SharedState::new(PlanCache::new(self.config.max_plan_cache_entries)),
+            optimizer_planning_cache: SharedState::new(
+                self.optimizer_planning_cache.borrow().clone(),
+            ),
             slow_query_snapshot: self.slow_query_log.borrow().snapshot(),
             statement_summary_snapshot: self.statement_summary.borrow().snapshot(),
             config: self.config.clone(),
@@ -5943,6 +5953,7 @@ impl Database {
                 optimizer: &self.optimizer,
                 config: &self.config,
                 cache: &self.plan_cache,
+                planning_cache: &self.optimizer_planning_cache,
                 access_control,
             },
         )
@@ -35909,6 +35920,7 @@ fn mutation_command_for_statement(
             optimizer: &db.optimizer,
             config: &db.config,
             cache: &db.plan_cache,
+            planning_cache: &db.optimizer_planning_cache,
             access_control: None,
         },
     )?;
@@ -36182,6 +36194,7 @@ impl DatabaseReadTransaction {
                 optimizer: &self.optimizer,
                 config: &self.config,
                 cache: &self.plan_cache,
+                planning_cache: &self.optimizer_planning_cache,
                 access_control,
             },
         )

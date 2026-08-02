@@ -511,6 +511,17 @@ impl PhysicalPlan {
                     input.explain(indent + 2)
                 )
             }
+            PhysicalPlan::TopNExec {
+                items,
+                offset,
+                limit,
+                input,
+            } => {
+                format!(
+                    "{pad}TopNExec keys={items:?} offset={offset} limit={limit}\n{}",
+                    input.explain(indent + 2)
+                )
+            }
             PhysicalPlan::LimitExec {
                 offset,
                 limit,

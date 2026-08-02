@@ -272,6 +272,28 @@ pub(super) fn estimate_physical_plan_cost(
                     .saturating_add(input_cost.estimated_rows.saturating_mul(2)),
             }
         }
+        PhysicalPlan::TopNExec {
+            offset,
+            limit,
+            input,
+            ..
+        } => {
+            let input_cost = estimate_physical_plan_cost(input, catalog);
+            let retained_rows = offset.saturating_add(*limit) as u64;
+            let rows = input_cost
+                .estimated_rows
+                .saturating_sub(*offset as u64)
+                .min(*limit as u64);
+            let comparisons_per_row = retained_rows.max(2).ilog2().max(1) as u64;
+            PlanCost {
+                estimated_rows: rows,
+                cost: input_cost.cost.saturating_add(
+                    input_cost
+                        .estimated_rows
+                        .saturating_mul(comparisons_per_row),
+                ),
+            }
+        }
         PhysicalPlan::LimitExec {
             offset,
             limit,
@@ -545,6 +567,27 @@ pub(super) fn estimate_physical_plan_cost_breakdown(
             input_cost.with_cpu(
                 input_cost.estimated_rows,
                 input_cost.estimated_rows.saturating_mul(2),
+                0,
+            )
+        }
+        PhysicalPlan::TopNExec {
+            offset,
+            limit,
+            input,
+            ..
+        } => {
+            let input_cost = estimate_physical_plan_cost_breakdown(input, catalog);
+            let retained_rows = offset.saturating_add(*limit) as u64;
+            let rows = input_cost
+                .estimated_rows
+                .saturating_sub(*offset as u64)
+                .min(*limit as u64);
+            let comparisons_per_row = retained_rows.max(2).ilog2().max(1) as u64;
+            input_cost.with_cpu(
+                rows,
+                input_cost
+                    .estimated_rows
+                    .saturating_mul(comparisons_per_row),
                 0,
             )
         }

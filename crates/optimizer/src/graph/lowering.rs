@@ -223,6 +223,19 @@ impl GroupExpr {
                     insert_logical_group(memo, right),
                 ],
             },
+            LogicalPlan::Limit {
+                limit: Some(_),
+                input,
+                ..
+            } if matches!(input.as_ref(), LogicalPlan::Sort { .. }) => {
+                let LogicalPlan::Sort { input, .. } = input.as_ref() else {
+                    unreachable!("guard requires a sort input");
+                };
+                Self {
+                    logical: logical.clone(),
+                    children: vec![insert_logical_group(memo, input)],
+                }
+            }
             LogicalPlan::Expand { input, .. }
             | LogicalPlan::NodeColumnLookup { input, .. }
             | LogicalPlan::OptionalDegree { input, .. }
@@ -441,6 +454,30 @@ impl GroupExpr {
                     stage_events,
                 )),
             },
+            LogicalPlan::Limit {
+                offset,
+                limit: Some(limit),
+                input,
+            } if matches!(input.as_ref(), LogicalPlan::Sort { .. }) => {
+                let LogicalPlan::Sort { items, .. } = input.as_ref() else {
+                    unreachable!("guard requires a sort input");
+                };
+                decisions.push(format!(
+                    "rewrite Sort + Limit to TopN: offset={offset} limit={limit}"
+                ));
+                PhysicalPlan::TopNExec {
+                    items: items.clone(),
+                    offset: *offset,
+                    limit: *limit,
+                    input: Box::new(best_physical(
+                        memo,
+                        self.children[0],
+                        catalog,
+                        decisions,
+                        stage_events,
+                    )),
+                }
+            }
             LogicalPlan::Limit { offset, limit, .. } => PhysicalPlan::LimitExec {
                 offset: *offset,
                 limit: *limit,
@@ -866,16 +903,35 @@ fn logical_to_physical_direct(
             offset,
             limit,
             input,
-        } => PhysicalPlan::LimitExec {
-            offset: *offset,
-            limit: *limit,
-            input: Box::new(logical_to_physical_direct(
-                input,
-                catalog,
-                decisions,
-                stage_events,
-            )),
-        },
+        } => {
+            if let (Some(limit), LogicalPlan::Sort { items, input }) = (limit, input.as_ref()) {
+                decisions.push(format!(
+                    "rewrite Sort + Limit to TopN: offset={offset} limit={limit}"
+                ));
+                PhysicalPlan::TopNExec {
+                    items: items.clone(),
+                    offset: *offset,
+                    limit: *limit,
+                    input: Box::new(logical_to_physical_direct(
+                        input,
+                        catalog,
+                        decisions,
+                        stage_events,
+                    )),
+                }
+            } else {
+                PhysicalPlan::LimitExec {
+                    offset: *offset,
+                    limit: *limit,
+                    input: Box::new(logical_to_physical_direct(
+                        input,
+                        catalog,
+                        decisions,
+                        stage_events,
+                    )),
+                }
+            }
+        }
         _ => unreachable!("leaf logical plans are lowered before direct child planning"),
     }
 }

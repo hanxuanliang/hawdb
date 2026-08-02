@@ -89,6 +89,7 @@ impl PhysicalPlan {
             PhysicalPlan::AggregateExec { .. } => PhysicalPlanKind::AggregateExec,
             PhysicalPlan::DistinctExec { .. } => PhysicalPlanKind::DistinctExec,
             PhysicalPlan::SortExec { .. } => PhysicalPlanKind::SortExec,
+            PhysicalPlan::TopNExec { .. } => PhysicalPlanKind::TopNExec,
             PhysicalPlan::LimitExec { .. } => PhysicalPlanKind::LimitExec,
         }
     }
@@ -110,6 +111,7 @@ impl PhysicalPlan {
             | PhysicalPlan::AggregateExec { input, .. }
             | PhysicalPlan::DistinctExec { input }
             | PhysicalPlan::SortExec { input, .. }
+            | PhysicalPlan::TopNExec { input, .. }
             | PhysicalPlan::LimitExec { input, .. } => PlanChildren::Unary(input),
             _ => PlanChildren::None,
         }

@@ -130,7 +130,7 @@ fn database_config_caps_optimizer_groups_for_explain() {
         .warnings
         .iter()
         .any(|warning| warning.contains("optimizer memo budget exceeded")));
-    assert!(explain.trace.selected_plan.contains("LimitExec"));
+    assert!(explain.trace.selected_plan.contains("TopNExec"));
 }
 
 #[test]

@@ -6413,12 +6413,12 @@ fn graph_community_members_scan_limit(
     let scan_limit = options.limit.checked_add(1).ok_or_else(|| {
         SkeinError::Semantic("graph community members limit exceeds supported range".to_string())
     })?;
-    if let Some(max_rows) = options.read_options.max_rows {
-        if max_rows < scan_limit {
-            return Err(SkeinError::Semantic(format!(
-                "graph community member pagination requires max_rows of at least {scan_limit}"
-            )));
-        }
+    if let Some(max_rows) = options.read_options.max_rows
+        && max_rows < scan_limit
+    {
+        return Err(SkeinError::Semantic(format!(
+            "graph community member pagination requires max_rows of at least {scan_limit}"
+        )));
     }
     Ok(scan_limit)
 }
@@ -6510,12 +6510,12 @@ fn graph_orphans_scan_limit(options: &NowledgeMemGraphOrphansOptions) -> Result<
     let scan_limit = options.limit.checked_add(1).ok_or_else(|| {
         SkeinError::Semantic("graph orphans limit exceeds supported range".to_string())
     })?;
-    if let Some(max_rows) = options.read_options.max_rows {
-        if max_rows < scan_limit {
-            return Err(SkeinError::Semantic(format!(
-                "graph orphan pagination requires max_rows of at least {scan_limit}"
-            )));
-        }
+    if let Some(max_rows) = options.read_options.max_rows
+        && max_rows < scan_limit
+    {
+        return Err(SkeinError::Semantic(format!(
+            "graph orphan pagination requires max_rows of at least {scan_limit}"
+        )));
     }
     Ok(scan_limit)
 }
@@ -12089,7 +12089,7 @@ mod tests {
         assert!(query
             .report
             .physical_operator_counts
-            .contains_key("SortExec"));
+            .contains_key("TopNExec"));
         assert_eq!(query.report.plan_cache_lookup.as_deref(), Some("miss"));
         assert_eq!(query.report.plan_cache_bypass_reason, None);
         assert!(query.report.slow_log_candidate);
@@ -12100,7 +12100,7 @@ mod tests {
         assert_eq!(query.report.json()["plan_cache_lookup"], "miss");
         assert_eq!(query.report.json()["slow_log_candidate"], true);
         assert_eq!(
-            query.report.json()["physical_operator_counts"]["SortExec"],
+            query.report.json()["physical_operator_counts"]["TopNExec"],
             1
         );
     }
@@ -13164,9 +13164,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(read.output.rows.len(), 1);
-        assert_eq!(read.report.blocking_operator_kinds, vec!["SortExec"]);
+        assert_eq!(read.report.blocking_operator_kinds, vec!["TopNExec"]);
         assert_eq!(read.report.blocking_operator_count, 1);
-        assert_eq!(read.report.json()["blocking_operator_kinds"][0], "SortExec");
+        assert_eq!(read.report.json()["blocking_operator_kinds"][0], "TopNExec");
     }
 
     #[test]

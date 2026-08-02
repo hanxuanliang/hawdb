@@ -25,7 +25,8 @@ use skein_ddl::{object_state_to_core, property_type_to_core, table_kind_to_core}
 use skein_executor::{ExecutionLimit, VectorExecutionReport};
 use skein_storage::RangeBound;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 use std::num::{NonZeroU64, NonZeroUsize};
 
 pub type Row = skein_executor::Row;
@@ -86,6 +87,37 @@ struct Binding {
     values: BTreeMap<String, Value>,
     nodes: BTreeMap<String, NodeRecord>,
     relationships: BTreeMap<String, RelRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TopNBinding {
+    sort_values: Vec<(Value, SortDirection)>,
+    ordinal: usize,
+    binding: Binding,
+}
+
+impl Ord for TopNBinding {
+    fn cmp(&self, other: &Self) -> Ordering {
+        for ((left, direction), (right, other_direction)) in
+            self.sort_values.iter().zip(&other.sort_values)
+        {
+            debug_assert_eq!(direction, other_direction);
+            let ordering = match direction {
+                SortDirection::Asc => left.cmp(right),
+                SortDirection::Desc => left.cmp(right).reverse(),
+            };
+            if ordering != Ordering::Equal {
+                return ordering;
+            }
+        }
+        self.ordinal.cmp(&other.ordinal)
+    }
+}
+
+impl PartialOrd for TopNBinding {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 struct NodeColumnLookupSpec<'a> {
@@ -278,6 +310,10 @@ fn collect_blocking_operator_kinds(plan: &PhysicalPlan, output: &mut BTreeSet<St
         }
         PhysicalPlan::SortExec { input, .. } => {
             output.insert("SortExec".to_string());
+            collect_blocking_operator_kinds(input, output);
+        }
+        PhysicalPlan::TopNExec { input, .. } => {
+            output.insert("TopNExec".to_string());
             collect_blocking_operator_kinds(input, output);
         }
         PhysicalPlan::NodeCartesianProductExec { left, right } => {
@@ -847,6 +883,7 @@ pub fn mutation_command(plan: &PhysicalPlan) -> Result<Option<GraphMutation>> {
         | PhysicalPlan::AggregateExec { .. }
         | PhysicalPlan::DistinctExec { .. }
         | PhysicalPlan::SortExec { .. }
+        | PhysicalPlan::TopNExec { .. }
         | PhysicalPlan::LimitExec { .. }
         | PhysicalPlan::SetNodePropertiesReturn { .. }
         | PhysicalPlan::ProjectGraph { .. }
@@ -2539,6 +2576,12 @@ fn execute_bindings_with_limit(
             input.sort_by(|left, right| compare_bindings(catalog, left, right, items));
             Ok(input)
         }
+        PhysicalPlan::TopNExec {
+            items,
+            offset,
+            limit,
+            input,
+        } => execute_top_n_bindings(input, items, *offset, *limit, catalog, store, context),
         PhysicalPlan::LimitExec {
             offset,
             limit: query_limit,
@@ -2554,6 +2597,48 @@ fn execute_bindings_with_limit(
             Ok(rows)
         }
     }
+}
+
+fn execute_top_n_bindings(
+    input: &PhysicalPlan,
+    items: &[SortItem],
+    offset: usize,
+    limit: usize,
+    catalog: &mut Catalog,
+    store: &mut GraphStore,
+    context: &mut ExecutionContext<'_>,
+) -> Result<Vec<Binding>> {
+    let retained = offset.saturating_add(limit);
+    if retained == 0 {
+        return Ok(Vec::new());
+    }
+    let input = execute_child_bindings(input, catalog, store, context)?;
+    let mut heap = BinaryHeap::with_capacity(retained.min(input.len()));
+    for (ordinal, binding) in input.into_iter().enumerate() {
+        let sort_values = items
+            .iter()
+            .map(|item| (sort_value(catalog, &binding, &item.key), item.direction))
+            .collect();
+        let candidate = TopNBinding {
+            sort_values,
+            ordinal,
+            binding,
+        };
+        if heap.len() < retained {
+            heap.push(candidate);
+        } else if heap.peek().is_some_and(|worst| candidate < *worst) {
+            heap.pop();
+            heap.push(candidate);
+        }
+    }
+    let mut selected = heap.into_vec();
+    selected.sort();
+    Ok(selected
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|entry| entry.binding)
+        .collect())
 }
 
 fn execute_child_bindings(

@@ -395,6 +395,12 @@ pub enum PhysicalPlan {
         items: Vec<SortItem>,
         input: Box<PhysicalPlan>,
     },
+    TopNExec {
+        items: Vec<SortItem>,
+        offset: usize,
+        limit: usize,
+        input: Box<PhysicalPlan>,
+    },
     LimitExec {
         offset: usize,
         limit: Option<usize>,
