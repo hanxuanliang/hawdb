@@ -80,6 +80,7 @@ mod access_control;
 mod artifact_jobs;
 mod canonical_snapshot;
 mod explain;
+mod explain_format;
 mod observability;
 mod plan_cache;
 mod query_domains;

@@ -327,6 +327,46 @@ fn main() -> Result<()> {
             }
             return Ok(());
         }
+        if command == "explain" || command == "explain-analyze" {
+            let mut parameters = BTreeMap::new();
+            while let Some(flag) = args.peek() {
+                match flag.as_str() {
+                    "--params-json" => {
+                        args.next();
+                        let raw_parameters = args
+                            .next()
+                            .ok_or_else(|| SkeinError::Semantic(explain_table_usage(&command)))?;
+                        parameters = parse_parameters_json(&raw_parameters)?;
+                    }
+                    _ => break,
+                }
+            }
+            let path = args
+                .next()
+                .ok_or_else(|| SkeinError::Semantic(explain_table_usage(&command)))?;
+            let query = args
+                .next()
+                .ok_or_else(|| SkeinError::Semantic(explain_table_usage(&command)))?;
+            if args.next().is_some() {
+                return Err(SkeinError::Semantic(explain_table_usage(&command)));
+            }
+            let mut db = Database::open_with_config(
+                path,
+                DatabaseConfig {
+                    read_only: true,
+                    ..DatabaseConfig::default()
+                },
+            )?;
+            if command == "explain" {
+                println!("{}", db.explain_query_with_params(&query, &parameters)?);
+            } else {
+                println!(
+                    "{}",
+                    db.explain_analyze_query_with_params(&query, &parameters)?
+                );
+            }
+            return Ok(());
+        }
         if command == "explain-json" {
             let mut parameters = BTreeMap::new();
             while let Some(flag) = args.peek() {
@@ -1300,6 +1340,10 @@ fn compatibility_tools_enabled_from_value(value: Option<&str>) -> bool {
 
 fn explain_json_usage() -> String {
     "explain-json requires [--params-json <json-object>] <database-path> <cypher>".to_string()
+}
+
+fn explain_table_usage(command: &str) -> String {
+    format!("{command} requires [--params-json <json-object>] <database-path> <cypher>")
 }
 
 fn explain_analyze_json_usage() -> String {
@@ -4838,7 +4882,7 @@ mod tests {
         background_maintenance_report_usage, canonical_snapshot_validation_json,
         cutover_evidence_is_eligible, enforce_external_shadow_adapter_smoke_requirements,
         enforce_storage_recovery_requirements, explain_analyze_json_usage,
-        explain_analyze_output_json, explain_json_usage, explain_output_json,
+        explain_analyze_output_json, explain_json_usage, explain_output_json, explain_table_usage,
         external_shadow_adapter_smoke_fixture, external_shadow_adapter_smoke_report_json,
         graph_lightning_bootstrap_bundle_json,
         graph_lightning_bootstrap_bundle_json_with_storage_recovery,
@@ -8093,6 +8137,15 @@ mod tests {
         assert!(explain_json_usage().contains("<database-path>"));
         assert!(explain_json_usage().contains("<cypher>"));
         assert!(explain_json_usage().contains("--params-json"));
+    }
+
+    #[test]
+    fn validates_printable_explain_usage_text() {
+        let usage = explain_table_usage("explain-analyze");
+        assert!(usage.contains("explain-analyze"));
+        assert!(usage.contains("<database-path>"));
+        assert!(usage.contains("<cypher>"));
+        assert!(usage.contains("--params-json"));
     }
 
     #[test]

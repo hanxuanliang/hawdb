@@ -1525,6 +1525,10 @@ Current implemented slice:
   legacy decision strings remain for compatibility, while `rule_events` exposes
   `rule`, `outcome`, and `detail` fields for implementation-rule diagnostics
   without parsing English explain text
+- `skein explain` and `skein explain-analyze` use the same read-only embedded
+  API path and print a TiDB-style operator tree table for interactive use;
+  unavailable per-operator estimates or runtime counters are rendered as
+  `N/A` instead of being inferred from root-level metrics
 - endpoint cartesian products whose flattened inputs all estimate to one row
   choose a stable left-deep physical input order by child cost and fingerprint,
   covering Nowledge endpoint-existence checks without changing broader

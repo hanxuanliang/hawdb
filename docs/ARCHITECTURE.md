@@ -103,6 +103,13 @@ system variables instead of query-shape-specific typed APIs.
 variables for one statement without mutating the session or database defaults.
 `DatabaseSession::explain_query` and `skein explain-json` surface the effective
 `WorkRequest` so callers can audit scheduling intent beside optimizer evidence.
+`ExplainOutput` and `ExplainAnalyzeOutput` also implement `Display` with a
+TiDB-style tree table. `skein explain` and `skein explain-analyze` print that
+table directly, while the existing JSON commands remain the stable
+machine-readable artifact path. Per-operator row estimates and runtime rows are
+rendered as `N/A` until the executor measures them; root estimates, root output
+rows, blocking-operator memory/spill reports, RSS, and page faults are emitted
+only from existing typed measurements.
 Hard limits and background admission remain owned by `DatabaseConfig`,
 `LocalQosPolicy`, and caller-owned schedulers.
 These variables are runtime state only: they do not write WAL, are rejected
