@@ -4,6 +4,16 @@ use std::collections::BTreeMap;
 pub type Row = BTreeMap<String, Value>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockingOperatorMemoryReport {
+    pub operator: String,
+    pub budget_bytes: usize,
+    pub peak_tracked_bytes: usize,
+    pub input_rows: usize,
+    pub spill_run_count: usize,
+    pub spilled_rows: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadExecutionProfile<TScanPruningReport> {
     pub max_rows: Option<usize>,
     pub detection_row_cap: Option<usize>,
@@ -13,6 +23,7 @@ pub struct ReadExecutionProfile<TScanPruningReport> {
     pub scan_pruning_reports: Vec<TScanPruningReport>,
     pub vector_execution_reports: Vec<crate::VectorExecutionReport>,
     pub graph_expansion_reports: Vec<crate::GraphExpansionExecutionReport>,
+    pub blocking_operator_memory_reports: Vec<BlockingOperatorMemoryReport>,
 }
 
 impl<TScanPruningReport> ReadExecutionProfile<TScanPruningReport> {
@@ -42,6 +53,7 @@ mod tests {
             scan_pruning_reports: Vec::new(),
             vector_execution_reports: Vec::new(),
             graph_expansion_reports: Vec::new(),
+            blocking_operator_memory_reports: Vec::new(),
         };
         assert_eq!(profile.blocking_operator_count(), 2);
     }

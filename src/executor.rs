@@ -28,6 +28,10 @@ use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 use std::num::{NonZeroU64, NonZeroUsize};
+use std::path::PathBuf;
+
+#[path = "executor/spill.rs"]
+mod spill;
 
 pub type Row = skein_executor::Row;
 pub type ReadExecutionProfile = skein_executor::ReadExecutionProfile<ScanPruningReport>;
@@ -38,11 +42,33 @@ type ValueRangeBounds = (Option<ValueRangeBound>, Option<ValueRangeBound>);
 const SOURCE_SEGMENT_SCAN_IO_DEPTH: usize = 2;
 const SOURCE_SEGMENT_SCAN_MAX_COALESCED_BYTES: u64 = 512 * 1024;
 const SOURCE_SEGMENT_SCAN_MAX_WAVE_BYTES: u64 = 2 * 1024 * 1024;
+const DEFAULT_EXECUTION_BATCH_ROWS: usize = 256;
+const DEFAULT_BLOCKING_OPERATOR_MEMORY_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionMemoryConfig {
+    pub batch_rows: NonZeroUsize,
+    pub blocking_operator_bytes: NonZeroUsize,
+    pub spill_directory: PathBuf,
+}
+
+impl Default for ExecutionMemoryConfig {
+    fn default() -> Self {
+        Self {
+            batch_rows: NonZeroUsize::new(DEFAULT_EXECUTION_BATCH_ROWS)
+                .expect("default execution batch size is non-zero"),
+            blocking_operator_bytes: NonZeroUsize::new(DEFAULT_BLOCKING_OPERATOR_MEMORY_BYTES)
+                .expect("default blocking operator memory budget is non-zero"),
+            spill_directory: std::env::temp_dir(),
+        }
+    }
+}
 
 thread_local! {
     static SCAN_PRUNING_REPORT_CAPTURE: RefCell<Option<Vec<ScanPruningReport>>> = const { RefCell::new(None) };
     static VECTOR_EXECUTION_REPORT_CAPTURE: RefCell<Option<Vec<VectorExecutionReport>>> = const { RefCell::new(None) };
     static GRAPH_EXPANSION_REPORT_CAPTURE: RefCell<Option<Vec<skein_executor::GraphExpansionExecutionReport>>> = const { RefCell::new(None) };
+    static BLOCKING_MEMORY_REPORT_CAPTURE: RefCell<Option<Vec<skein_executor::BlockingOperatorMemoryReport>>> = const { RefCell::new(None) };
 }
 
 pub struct VectorSeedExecutionRequest<'a> {
@@ -131,6 +157,7 @@ struct NodeColumnLookupSpec<'a> {
 struct ExecutionContext<'a> {
     parameters: &'a BTreeMap<String, Value>,
     external: &'a mut dyn ExternalReadOperator,
+    memory: &'a ExecutionMemoryConfig,
 }
 
 pub fn execute(
@@ -150,9 +177,11 @@ pub fn execute_with_row_limit(
     let execution_limit = ExecutionLimit::from_user_max_rows(max_rows)?;
     let parameters = BTreeMap::new();
     let mut external = NoExternalReadOperator;
+    let memory = ExecutionMemoryConfig::default();
     let mut context = ExecutionContext {
         parameters: &parameters,
         external: &mut external,
+        memory: &memory,
     };
     let bindings =
         execute_bindings_with_limit(plan, catalog, store, &mut context, execution_limit)?;
@@ -184,23 +213,49 @@ pub fn execute_with_row_limit_profile_and_external(
     external: &mut dyn ExternalReadOperator,
     max_rows: Option<usize>,
 ) -> Result<ProfiledQueryRows> {
+    execute_with_row_limit_profile_and_external_and_memory(
+        plan,
+        catalog,
+        store,
+        parameters,
+        external,
+        max_rows,
+        &ExecutionMemoryConfig::default(),
+    )
+}
+
+pub fn execute_with_row_limit_profile_and_external_and_memory(
+    plan: &PhysicalPlan,
+    catalog: &mut Catalog,
+    store: &mut GraphStore,
+    parameters: &BTreeMap<String, Value>,
+    external: &mut dyn ExternalReadOperator,
+    max_rows: Option<usize>,
+    memory: &ExecutionMemoryConfig,
+) -> Result<ProfiledQueryRows> {
     let execution_limit = ExecutionLimit::from_user_max_rows(max_rows)?;
     let mut profile = read_execution_profile(plan, max_rows)?;
     let mut context = ExecutionContext {
         parameters,
         external,
+        memory,
     };
-    let (((bindings, scan_pruning_reports), vector_execution_reports), graph_expansion_reports) =
+    let (
+        (((bindings, scan_pruning_reports), vector_execution_reports), graph_expansion_reports),
+        blocking_operator_memory_reports,
+    ) = capture_blocking_memory_reports(|| {
         capture_graph_expansion_reports(|| {
             capture_vector_execution_reports(|| {
                 capture_scan_pruning_reports(|| {
                     execute_bindings_with_limit(plan, catalog, store, &mut context, execution_limit)
                 })
             })
-        })?;
+        })
+    })?;
     profile.scan_pruning_reports = scan_pruning_reports;
     profile.vector_execution_reports = vector_execution_reports;
     profile.graph_expansion_reports = graph_expansion_reports;
+    profile.blocking_operator_memory_reports = blocking_operator_memory_reports;
     let rows = collect_rows(bindings, max_rows)?;
     Ok(ProfiledQueryRows { rows, profile })
 }
@@ -221,6 +276,7 @@ pub fn read_execution_profile(
         scan_pruning_reports: Vec::new(),
         vector_execution_reports: Vec::new(),
         graph_expansion_reports: Vec::new(),
+        blocking_operator_memory_reports: Vec::new(),
     })
 }
 
@@ -275,6 +331,25 @@ fn capture_graph_expansion_reports<T>(
 
 fn record_graph_expansion_report(report: skein_executor::GraphExpansionExecutionReport) {
     GRAPH_EXPANSION_REPORT_CAPTURE.with(|capture| {
+        if let Some(reports) = capture.borrow_mut().as_mut() {
+            reports.push(report);
+        }
+    });
+}
+
+fn capture_blocking_memory_reports<T>(
+    f: impl FnOnce() -> Result<T>,
+) -> Result<(T, Vec<skein_executor::BlockingOperatorMemoryReport>)> {
+    BLOCKING_MEMORY_REPORT_CAPTURE.with(|capture| {
+        let previous = capture.replace(Some(Vec::new()));
+        let result = f();
+        let captured = capture.replace(previous).unwrap_or_default();
+        result.map(|value| (value, captured))
+    })
+}
+
+fn record_blocking_memory_report(report: skein_executor::BlockingOperatorMemoryReport) {
+    BLOCKING_MEMORY_REPORT_CAPTURE.with(|capture| {
         if let Some(reports) = capture.borrow_mut().as_mut() {
             reports.push(report);
         }
@@ -982,6 +1057,1266 @@ fn projected_graph_with_node_filter(
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BatchControl {
+    Continue,
+    Stop,
+}
+
+type BindingBatch = Vec<Binding>;
+
+#[derive(Clone, Copy)]
+struct BatchReadContext<'a> {
+    catalog: &'a Catalog,
+    store: &'a GraphStore,
+    memory: &'a ExecutionMemoryConfig,
+}
+
+fn batch_pipeline_capable(plan: &PhysicalPlan) -> bool {
+    match plan {
+        PhysicalPlan::SeqNodeScan { .. }
+        | PhysicalPlan::SourceSegmentScan { .. }
+        | PhysicalPlan::IndexNodeSeek { .. }
+        | PhysicalPlan::IndexNodeMultiSeek { .. }
+        | PhysicalPlan::IndexNodeCompositeSeek { .. }
+        | PhysicalPlan::IndexNodeRangeSeek { .. }
+        | PhysicalPlan::IndexNodeTextSeek { .. } => true,
+        PhysicalPlan::FilterExec { input, .. }
+        | PhysicalPlan::ProjectExec { input, .. }
+        | PhysicalPlan::LimitExec { input, .. }
+        | PhysicalPlan::TopNExec { input, .. }
+        | PhysicalPlan::SortExec { input, .. }
+        | PhysicalPlan::AggregateExec { input, .. } => batch_pipeline_capable(input),
+        PhysicalPlan::AdjacencyExpandExec { input, .. } => batch_pipeline_capable(input),
+        _ => false,
+    }
+}
+
+fn collect_batch_pipeline(
+    plan: &PhysicalPlan,
+    catalog: &Catalog,
+    store: &GraphStore,
+    memory: &ExecutionMemoryConfig,
+    execution_limit: ExecutionLimit,
+) -> Result<Vec<Binding>> {
+    let mut output = Vec::new();
+    let context = BatchReadContext {
+        catalog,
+        store,
+        memory,
+    };
+    execute_binding_batches(plan, context, execution_limit, &mut |batch| {
+        for binding in batch {
+            output.push(binding);
+            if execution_limit.is_reached(output.len()) {
+                return Ok(BatchControl::Stop);
+            }
+        }
+        Ok(BatchControl::Continue)
+    })?;
+    Ok(output)
+}
+
+fn execute_binding_batches(
+    plan: &PhysicalPlan,
+    context: BatchReadContext<'_>,
+    execution_limit: ExecutionLimit,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    debug_assert!(batch_pipeline_capable(plan));
+    let BatchReadContext {
+        catalog,
+        store,
+        memory,
+    } = context;
+    match plan {
+        PhysicalPlan::SeqNodeScan { variable, label } => {
+            stream_node_scan_batches(variable, label, None, context, execution_limit, emit)
+        }
+        PhysicalPlan::SourceSegmentScan {
+            variable,
+            predicate,
+        } => {
+            let bindings =
+                execute_source_segment_scan(variable, predicate, catalog, store, execution_limit)?;
+            emit_owned_binding_batches(bindings, memory.batch_rows.get(), emit)
+        }
+        PhysicalPlan::IndexNodeSeek {
+            variable,
+            label,
+            property,
+            value,
+        } => stream_index_node_seek_batches(
+            variable,
+            label,
+            property,
+            std::slice::from_ref(value),
+            context,
+            execution_limit,
+            emit,
+        ),
+        PhysicalPlan::IndexNodeMultiSeek {
+            variable,
+            label,
+            property,
+            values,
+        } => stream_index_node_seek_batches(
+            variable,
+            label,
+            property,
+            values,
+            context,
+            execution_limit,
+            emit,
+        ),
+        PhysicalPlan::IndexNodeCompositeSeek {
+            variable,
+            label,
+            predicates,
+        } => {
+            let Some(label_id) = catalog.label_id(label) else {
+                return Ok(BatchControl::Continue);
+            };
+            let bindings = store
+                .seek_nodes_by_composite_property(label_id, predicates)
+                .into_iter()
+                .take(execution_limit.output_rows.unwrap_or(usize::MAX))
+                .cloned()
+                .map(|node| node_binding(variable, node));
+            emit_binding_iterator(bindings, memory.batch_rows.get(), emit)
+        }
+        PhysicalPlan::IndexNodeRangeSeek {
+            variable,
+            label,
+            property,
+            lower,
+            upper,
+        } => {
+            let Some(label_id) = catalog.label_id(label) else {
+                return Ok(BatchControl::Continue);
+            };
+            let bindings = store
+                .seek_nodes_by_property_range(label_id, property, lower.as_ref(), upper.as_ref())
+                .into_iter()
+                .take(execution_limit.output_rows.unwrap_or(usize::MAX))
+                .cloned()
+                .map(|node| node_binding(variable, node));
+            emit_binding_iterator(bindings, memory.batch_rows.get(), emit)
+        }
+        PhysicalPlan::IndexNodeTextSeek {
+            variable,
+            label,
+            property,
+            query,
+        } => {
+            let Some(label_id) = catalog.label_id(label) else {
+                return Ok(BatchControl::Continue);
+            };
+            let bindings = store
+                .seek_nodes_by_full_text_property(label_id, property, query)
+                .into_iter()
+                .take(execution_limit.output_rows.unwrap_or(usize::MAX))
+                .cloned()
+                .map(|node| node_binding(variable, node));
+            emit_binding_iterator(bindings, memory.batch_rows.get(), emit)
+        }
+        PhysicalPlan::AdjacencyExpandExec { input, .. } => stream_adjacency_expand_batches(
+            plan,
+            input,
+            context,
+            execution_limit,
+            AdjacencyExpandFilters::default(),
+            emit,
+        ),
+        PhysicalPlan::FilterExec { predicate, input } => {
+            if let PhysicalPlan::SeqNodeScan { variable, label } = input.as_ref()
+                && let Ok(filter) = property_filter_from_predicate(predicate)
+            {
+                return stream_node_scan_batches(
+                    variable,
+                    label,
+                    Some((predicate, &filter)),
+                    context,
+                    execution_limit,
+                    emit,
+                );
+            }
+            if let PhysicalPlan::AdjacencyExpandExec {
+                rel_variable: Some(rel_variable),
+                input: expand_input,
+                ..
+            } = input.as_ref()
+                && let Some(filter) =
+                    exact_relationship_scan_filter_from_predicate(predicate, rel_variable)
+            {
+                return stream_filtered_adjacency_expand_batches(
+                    input,
+                    expand_input,
+                    predicate,
+                    context,
+                    execution_limit,
+                    AdjacencyExpandFilters {
+                        relationship_scan_filter: Some(&filter),
+                        target_scan_filter: None,
+                    },
+                    emit,
+                );
+            }
+            if let PhysicalPlan::AdjacencyExpandExec {
+                target_variable,
+                input: expand_input,
+                ..
+            } = input.as_ref()
+                && predicate_references_only_variable(predicate, target_variable)
+                && let Ok(filter) = property_filter_from_predicate(predicate)
+            {
+                return stream_filtered_adjacency_expand_batches(
+                    input,
+                    expand_input,
+                    predicate,
+                    context,
+                    execution_limit,
+                    AdjacencyExpandFilters {
+                        relationship_scan_filter: None,
+                        target_scan_filter: Some(&filter),
+                    },
+                    emit,
+                );
+            }
+            let mut emitted = 0usize;
+            execute_binding_batches(input, context, ExecutionLimit::unlimited(), &mut |batch| {
+                let filtered = batch
+                    .into_iter()
+                    .filter(|binding| evaluate_predicate(predicate, catalog, store, binding))
+                    .take(
+                        execution_limit
+                            .output_rows
+                            .unwrap_or(usize::MAX)
+                            .saturating_sub(emitted),
+                    )
+                    .collect::<Vec<_>>();
+                emitted = emitted.saturating_add(filtered.len());
+                if !filtered.is_empty() && emit(filtered)? == BatchControl::Stop {
+                    return Ok(BatchControl::Stop);
+                }
+                Ok(if execution_limit.is_reached(emitted) {
+                    BatchControl::Stop
+                } else {
+                    BatchControl::Continue
+                })
+            })
+        }
+        PhysicalPlan::ProjectExec { items, input } => {
+            let mut emitted = 0usize;
+            execute_binding_batches(input, context, execution_limit, &mut |batch| {
+                let mut projected = Vec::with_capacity(batch.len());
+                for binding in batch {
+                    let mut values = BTreeMap::new();
+                    for item in items {
+                        let value = project_value(item, catalog, &binding)?;
+                        insert_projected_value(&mut values, &item.name, value);
+                    }
+                    projected.push(Binding {
+                        values,
+                        nodes: binding.nodes,
+                        relationships: binding.relationships,
+                    });
+                }
+                emitted = emitted.saturating_add(projected.len());
+                if !projected.is_empty() && emit(projected)? == BatchControl::Stop {
+                    return Ok(BatchControl::Stop);
+                }
+                Ok(if execution_limit.is_reached(emitted) {
+                    BatchControl::Stop
+                } else {
+                    BatchControl::Continue
+                })
+            })
+        }
+        PhysicalPlan::LimitExec {
+            offset,
+            limit,
+            input,
+        } => {
+            let mut skipped = 0usize;
+            let mut emitted = 0usize;
+            let output_cap = match (limit, execution_limit.output_rows) {
+                (Some(limit), Some(parent)) => (*limit).min(parent),
+                (Some(limit), None) => *limit,
+                (None, Some(parent)) => parent,
+                (None, None) => usize::MAX,
+            };
+            execute_binding_batches(
+                input,
+                context,
+                ExecutionLimit {
+                    output_rows: Some(offset.saturating_add(output_cap)),
+                },
+                &mut |batch| {
+                    let mut output = Vec::new();
+                    for binding in batch {
+                        if skipped < *offset {
+                            skipped += 1;
+                            continue;
+                        }
+                        if emitted == output_cap {
+                            break;
+                        }
+                        output.push(binding);
+                        emitted += 1;
+                    }
+                    if !output.is_empty() && emit(output)? == BatchControl::Stop {
+                        return Ok(BatchControl::Stop);
+                    }
+                    Ok(if emitted == output_cap {
+                        BatchControl::Stop
+                    } else {
+                        BatchControl::Continue
+                    })
+                },
+            )
+        }
+        PhysicalPlan::TopNExec {
+            items,
+            offset,
+            limit,
+            input,
+        } => {
+            let retained = offset.saturating_add(*limit);
+            if retained == 0 {
+                return Ok(BatchControl::Continue);
+            }
+            let mut heap = BinaryHeap::with_capacity(retained);
+            let mut ordinal = 0usize;
+            execute_binding_batches(input, context, ExecutionLimit::unlimited(), &mut |batch| {
+                for binding in batch {
+                    let sort_values = items
+                        .iter()
+                        .map(|item| (sort_value(catalog, &binding, &item.key), item.direction))
+                        .collect();
+                    let candidate = TopNBinding {
+                        sort_values,
+                        ordinal,
+                        binding,
+                    };
+                    ordinal = ordinal.saturating_add(1);
+                    if heap.len() < retained {
+                        heap.push(candidate);
+                    } else if heap.peek().is_some_and(|worst| candidate < *worst) {
+                        heap.pop();
+                        heap.push(candidate);
+                    }
+                }
+                Ok(BatchControl::Continue)
+            })?;
+            let mut selected = heap.into_vec();
+            selected.sort();
+            let bindings = selected
+                .into_iter()
+                .skip(*offset)
+                .take(*limit)
+                .take(execution_limit.output_rows.unwrap_or(usize::MAX))
+                .map(|entry| entry.binding);
+            emit_binding_iterator(bindings, memory.batch_rows.get(), emit)
+        }
+        PhysicalPlan::SortExec { items, input } => {
+            stream_sort_batches(input, items, context, execution_limit, emit)
+        }
+        PhysicalPlan::AggregateExec {
+            group_keys,
+            items,
+            input,
+        } => stream_aggregate_batches(input, group_keys, items, context, execution_limit, emit),
+        _ => unreachable!("batch pipeline capability check rejected this operator"),
+    }
+}
+
+struct OperatorMemoryTracker {
+    budget_bytes: usize,
+    used_bytes: usize,
+    peak_bytes: usize,
+}
+
+impl OperatorMemoryTracker {
+    fn new(budget_bytes: NonZeroUsize) -> Self {
+        Self {
+            budget_bytes: budget_bytes.get(),
+            used_bytes: 0,
+            peak_bytes: 0,
+        }
+    }
+
+    fn would_exceed(&self, bytes: usize) -> bool {
+        self.used_bytes > 0 && self.used_bytes.saturating_add(bytes) > self.budget_bytes
+    }
+
+    fn charge(&mut self, bytes: usize) {
+        self.used_bytes = self.used_bytes.saturating_add(bytes);
+        self.peak_bytes = self.peak_bytes.max(self.used_bytes);
+    }
+
+    fn reset(&mut self) {
+        self.used_bytes = 0;
+    }
+}
+
+fn binding_memory_bytes(binding: &Binding) -> usize {
+    std::mem::size_of::<Binding>()
+        .saturating_add(binding_payload_bytes(binding))
+        .saturating_add(
+            binding
+                .values
+                .len()
+                .saturating_add(binding.nodes.len())
+                .saturating_add(binding.relationships.len())
+                .saturating_mul(std::mem::size_of::<usize>() * 6),
+        )
+}
+
+struct SortRunRow {
+    sort_values: Vec<(Value, SortDirection)>,
+    ordinal: u64,
+    binding: Binding,
+}
+
+impl SortRunRow {
+    fn new(catalog: &Catalog, items: &[SortItem], ordinal: u64, binding: Binding) -> Self {
+        let sort_values = items
+            .iter()
+            .map(|item| (sort_value(catalog, &binding, &item.key), item.direction))
+            .collect();
+        Self {
+            sort_values,
+            ordinal,
+            binding,
+        }
+    }
+
+    fn cmp_key(&self, other: &Self) -> Ordering {
+        compare_sort_values(&self.sort_values, &other.sort_values)
+            .then_with(|| self.ordinal.cmp(&other.ordinal))
+    }
+}
+
+fn compare_sort_values(
+    left: &[(Value, SortDirection)],
+    right: &[(Value, SortDirection)],
+) -> Ordering {
+    for ((left, direction), (right, other_direction)) in left.iter().zip(right) {
+        debug_assert_eq!(direction, other_direction);
+        let ordering = match direction {
+            SortDirection::Asc => left.cmp(right),
+            SortDirection::Desc => left.cmp(right).reverse(),
+        };
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    Ordering::Equal
+}
+
+struct SortMergeEntry {
+    row: SortRunRow,
+    run_index: usize,
+}
+
+impl PartialEq for SortMergeEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.row.cmp_key(&other.row) == Ordering::Equal && self.run_index == other.run_index
+    }
+}
+
+impl Eq for SortMergeEntry {}
+
+impl Ord for SortMergeEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .row
+            .cmp_key(&self.row)
+            .then_with(|| other.run_index.cmp(&self.run_index))
+    }
+}
+
+impl PartialOrd for SortMergeEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn stream_sort_batches(
+    input: &PhysicalPlan,
+    items: &[SortItem],
+    context: BatchReadContext<'_>,
+    execution_limit: ExecutionLimit,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    let BatchReadContext {
+        catalog, memory, ..
+    } = context;
+    let mut tracker = OperatorMemoryTracker::new(memory.blocking_operator_bytes);
+    let mut rows = Vec::<SortRunRow>::new();
+    let mut runs = Vec::<spill::SpillRun>::new();
+    let mut ordinal = 0u64;
+    execute_binding_batches(input, context, ExecutionLimit::unlimited(), &mut |batch| {
+        for binding in batch {
+            let row = SortRunRow::new(catalog, items, ordinal, binding);
+            let bytes = binding_memory_bytes(&row.binding).saturating_add(
+                row.sort_values.iter().fold(0usize, |total, (value, _)| {
+                    total.saturating_add(value_payload_bytes(value))
+                }),
+            );
+            if tracker.would_exceed(bytes) {
+                runs.push(spill_sort_run(&mut rows, &memory.spill_directory)?);
+                tracker.reset();
+            }
+            tracker.charge(bytes);
+            rows.push(row);
+            ordinal = ordinal.saturating_add(1);
+        }
+        Ok(BatchControl::Continue)
+    })?;
+
+    if runs.is_empty() {
+        record_blocking_memory_report(skein_executor::BlockingOperatorMemoryReport {
+            operator: "SortExec".to_string(),
+            budget_bytes: tracker.budget_bytes,
+            peak_tracked_bytes: tracker.peak_bytes,
+            input_rows: ordinal as usize,
+            spill_run_count: 0,
+            spilled_rows: 0,
+        });
+        rows.sort_by(SortRunRow::cmp_key);
+        return emit_binding_iterator(
+            rows.into_iter()
+                .take(execution_limit.output_rows.unwrap_or(usize::MAX))
+                .map(|row| row.binding),
+            memory.batch_rows.get(),
+            emit,
+        );
+    }
+    if !rows.is_empty() {
+        runs.push(spill_sort_run(&mut rows, &memory.spill_directory)?);
+    }
+    record_blocking_memory_report(skein_executor::BlockingOperatorMemoryReport {
+        operator: "SortExec".to_string(),
+        budget_bytes: tracker.budget_bytes,
+        peak_tracked_bytes: tracker.peak_bytes,
+        input_rows: ordinal as usize,
+        spill_run_count: runs.len(),
+        spilled_rows: ordinal as usize,
+    });
+    merge_sort_runs(
+        &runs,
+        items,
+        catalog,
+        memory.batch_rows.get(),
+        execution_limit,
+        emit,
+    )
+}
+
+fn spill_sort_run(
+    rows: &mut Vec<SortRunRow>,
+    directory: &std::path::Path,
+) -> Result<spill::SpillRun> {
+    rows.sort_by(SortRunRow::cmp_key);
+    let (run, mut writer) = spill::SpillRun::create(directory, "sort")?;
+    for row in rows.drain(..) {
+        writer.write(row.ordinal, &row.binding)?;
+    }
+    writer.finish()?;
+    Ok(run)
+}
+
+fn merge_sort_runs(
+    runs: &[spill::SpillRun],
+    items: &[SortItem],
+    catalog: &Catalog,
+    batch_rows: usize,
+    execution_limit: ExecutionLimit,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    let mut readers = runs
+        .iter()
+        .map(spill::SpillRun::reader)
+        .collect::<Result<Vec<_>>>()?;
+    let mut heap = BinaryHeap::new();
+    for (run_index, reader) in readers.iter_mut().enumerate() {
+        if let Some((ordinal, binding)) = reader.read()? {
+            heap.push(SortMergeEntry {
+                row: SortRunRow::new(catalog, items, ordinal, binding),
+                run_index,
+            });
+        }
+    }
+    let cap = execution_limit.output_rows.unwrap_or(usize::MAX);
+    let mut emitted = 0usize;
+    let mut batch = Vec::with_capacity(batch_rows);
+    while let Some(entry) = heap.pop() {
+        let run_index = entry.run_index;
+        batch.push(entry.row.binding);
+        emitted = emitted.saturating_add(1);
+        if let Some((ordinal, binding)) = readers[run_index].read()? {
+            heap.push(SortMergeEntry {
+                row: SortRunRow::new(catalog, items, ordinal, binding),
+                run_index,
+            });
+        }
+        if (batch.len() == batch_rows || emitted == cap)
+            && emit(std::mem::replace(
+                &mut batch,
+                Vec::with_capacity(batch_rows),
+            ))? == BatchControl::Stop
+        {
+            return Ok(BatchControl::Stop);
+        }
+        if emitted == cap {
+            return Ok(BatchControl::Stop);
+        }
+    }
+    if !batch.is_empty() && emit(batch)? == BatchControl::Stop {
+        return Ok(BatchControl::Stop);
+    }
+    Ok(BatchControl::Continue)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum AggregateDistinctValue {
+    Identity(u8, u64),
+    Value(Value),
+}
+
+enum AggregateState {
+    Count {
+        count: usize,
+        distinct: Option<BTreeSet<AggregateDistinctValue>>,
+    },
+    Min(Option<Value>),
+    Max(Option<Value>),
+    Avg {
+        sum: f64,
+        count: usize,
+    },
+    Collect {
+        values: Vec<Value>,
+        distinct: Option<BTreeSet<Value>>,
+    },
+}
+
+impl AggregateState {
+    fn new(item: &Aggregation) -> Self {
+        match item.function {
+            AggregateFunction::Count => Self::Count {
+                count: 0,
+                distinct: item.distinct.then(BTreeSet::new),
+            },
+            AggregateFunction::Min => Self::Min(None),
+            AggregateFunction::Max => Self::Max(None),
+            AggregateFunction::Avg => Self::Avg { sum: 0.0, count: 0 },
+            AggregateFunction::Collect => Self::Collect {
+                values: Vec::new(),
+                distinct: item.distinct.then(BTreeSet::new),
+            },
+        }
+    }
+
+    fn update(&mut self, item: &Aggregation, catalog: &Catalog, binding: &Binding) {
+        match self {
+            Self::Count { count, distinct } => {
+                if distinct.is_none() {
+                    let matched = match &item.target {
+                        AggregateTarget::All => true,
+                        AggregateTarget::Variable(variable) => {
+                            binding_has_variable(binding, variable)
+                        }
+                        AggregateTarget::Property { variable, property } => {
+                            binding_property(binding, variable, property)
+                                .is_some_and(|value| value != &Value::Null)
+                        }
+                    };
+                    if matched {
+                        *count = count.saturating_add(1);
+                    }
+                    return;
+                }
+                let value = match &item.target {
+                    AggregateTarget::All => {
+                        *count = count.saturating_add(1);
+                        return;
+                    }
+                    AggregateTarget::Variable(variable) => binding_identity_key(binding, variable)
+                        .map(|(kind, id)| AggregateDistinctValue::Identity(kind, id)),
+                    AggregateTarget::Property { variable, property } => binding
+                        .nodes
+                        .get(variable)
+                        .and_then(|node| node.properties.get(property))
+                        .or_else(|| {
+                            binding
+                                .relationships
+                                .get(variable)
+                                .and_then(|relationship| relationship.properties.get(property))
+                        })
+                        .filter(|value| *value != &Value::Null)
+                        .cloned()
+                        .map(AggregateDistinctValue::Value),
+                };
+                let Some(value) = value else {
+                    return;
+                };
+                if let Some(distinct) = distinct {
+                    if distinct.insert(value) {
+                        *count = count.saturating_add(1);
+                    }
+                } else {
+                    *count = count.saturating_add(1);
+                }
+            }
+            Self::Min(current) => {
+                if let Some(value) = aggregate_property_value(&item.target, binding)
+                    && current.as_ref().is_none_or(|current| value < *current)
+                {
+                    *current = Some(value);
+                }
+            }
+            Self::Max(current) => {
+                if let Some(value) = aggregate_property_value(&item.target, binding)
+                    && current.as_ref().is_none_or(|current| value > *current)
+                {
+                    *current = Some(value);
+                }
+            }
+            Self::Avg { sum, count } => {
+                if let Some(value) = aggregate_property_value(&item.target, binding) {
+                    match value {
+                        Value::Int(value) => {
+                            *sum += value as f64;
+                            *count = count.saturating_add(1);
+                        }
+                        Value::Float(value) if value.is_finite() => {
+                            *sum += value;
+                            *count = count.saturating_add(1);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Self::Collect { values, distinct } => {
+                let value = match &item.target {
+                    AggregateTarget::Variable(variable) => {
+                        binding_value(binding, catalog, variable)
+                    }
+                    AggregateTarget::Property { .. } => {
+                        aggregate_property_value(&item.target, binding)
+                    }
+                    AggregateTarget::All => None,
+                };
+                let Some(value) = value.filter(|value| value != &Value::Null) else {
+                    return;
+                };
+                if let Some(distinct) = distinct {
+                    distinct.insert(value);
+                } else {
+                    values.push(value);
+                }
+            }
+        }
+    }
+
+    fn finish(self) -> Value {
+        match self {
+            Self::Count { count, .. } => Value::Int(count as i64),
+            Self::Min(value) | Self::Max(value) => value.unwrap_or(Value::Null),
+            Self::Avg { sum, count } if count > 0 => Value::Float(sum / count as f64),
+            Self::Avg { .. } => Value::Null,
+            Self::Collect {
+                values,
+                distinct: None,
+            } => Value::List(values),
+            Self::Collect {
+                distinct: Some(values),
+                ..
+            } => Value::List(values.into_iter().collect()),
+        }
+    }
+}
+
+fn aggregate_property_value(target: &AggregateTarget, binding: &Binding) -> Option<Value> {
+    let AggregateTarget::Property { variable, property } = target else {
+        return None;
+    };
+    binding_property(binding, variable, property)
+        .filter(|value| *value != &Value::Null)
+        .cloned()
+}
+
+struct GroupAccumulator<'a> {
+    key: Vec<Value>,
+    group_keys: &'a [Projection],
+    items: &'a [Aggregation],
+    states: Vec<AggregateState>,
+}
+
+impl<'a> GroupAccumulator<'a> {
+    fn new(key: Vec<Value>, group_keys: &'a [Projection], items: &'a [Aggregation]) -> Self {
+        Self {
+            key,
+            group_keys,
+            items,
+            states: items.iter().map(AggregateState::new).collect(),
+        }
+    }
+
+    fn update(&mut self, catalog: &Catalog, binding: &Binding) {
+        for (state, item) in self.states.iter_mut().zip(self.items) {
+            state.update(item, catalog, binding);
+        }
+    }
+
+    fn finish(self) -> Binding {
+        let mut values = BTreeMap::new();
+        for (item, value) in self.group_keys.iter().zip(self.key) {
+            insert_projected_value(&mut values, &item.name, value);
+        }
+        for (item, state) in self.items.iter().zip(self.states) {
+            insert_projected_value(&mut values, &item.name, state.finish());
+        }
+        Binding {
+            values,
+            nodes: BTreeMap::new(),
+            relationships: BTreeMap::new(),
+        }
+    }
+}
+
+struct GroupRunRow {
+    key: Vec<Value>,
+    ordinal: u64,
+    binding: Binding,
+}
+
+impl GroupRunRow {
+    fn cmp_key(&self, other: &Self) -> Ordering {
+        self.key
+            .cmp(&other.key)
+            .then_with(|| self.ordinal.cmp(&other.ordinal))
+    }
+}
+
+struct GroupMergeEntry {
+    row: GroupRunRow,
+    run_index: usize,
+}
+
+impl PartialEq for GroupMergeEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.row.cmp_key(&other.row) == Ordering::Equal && self.run_index == other.run_index
+    }
+}
+
+impl Eq for GroupMergeEntry {}
+
+impl Ord for GroupMergeEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .row
+            .cmp_key(&self.row)
+            .then_with(|| other.run_index.cmp(&self.run_index))
+    }
+}
+
+impl PartialOrd for GroupMergeEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn stream_aggregate_batches(
+    input: &PhysicalPlan,
+    group_keys: &[Projection],
+    items: &[Aggregation],
+    context: BatchReadContext<'_>,
+    execution_limit: ExecutionLimit,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    let BatchReadContext {
+        catalog, memory, ..
+    } = context;
+    if group_keys.is_empty() {
+        let mut accumulator = GroupAccumulator::new(Vec::new(), group_keys, items);
+        let mut input_rows = 0usize;
+        execute_binding_batches(input, context, ExecutionLimit::unlimited(), &mut |batch| {
+            for binding in &batch {
+                accumulator.update(catalog, binding);
+                input_rows = input_rows.saturating_add(1);
+            }
+            Ok(BatchControl::Continue)
+        })?;
+        record_blocking_memory_report(skein_executor::BlockingOperatorMemoryReport {
+            operator: "AggregateExec".to_string(),
+            budget_bytes: memory.blocking_operator_bytes.get(),
+            peak_tracked_bytes: 0,
+            input_rows,
+            spill_run_count: 0,
+            spilled_rows: 0,
+        });
+        return emit(vec![accumulator.finish()]);
+    }
+
+    let mut tracker = OperatorMemoryTracker::new(memory.blocking_operator_bytes);
+    let mut rows = Vec::<GroupRunRow>::new();
+    let mut runs = Vec::<spill::SpillRun>::new();
+    let mut ordinal = 0u64;
+    execute_binding_batches(input, context, ExecutionLimit::unlimited(), &mut |batch| {
+        for binding in batch {
+            let key = group_keys
+                .iter()
+                .map(|item| group_key_value(item, catalog, &binding))
+                .collect::<Vec<_>>();
+            let bytes = binding_memory_bytes(&binding).saturating_add(
+                key.iter().fold(0usize, |total, value| {
+                    total.saturating_add(value_payload_bytes(value))
+                }),
+            );
+            if tracker.would_exceed(bytes) {
+                runs.push(spill_group_run(&mut rows, &memory.spill_directory)?);
+                tracker.reset();
+            }
+            tracker.charge(bytes);
+            rows.push(GroupRunRow {
+                key,
+                ordinal,
+                binding,
+            });
+            ordinal = ordinal.saturating_add(1);
+        }
+        Ok(BatchControl::Continue)
+    })?;
+
+    if runs.is_empty() {
+        record_blocking_memory_report(skein_executor::BlockingOperatorMemoryReport {
+            operator: "AggregateExec".to_string(),
+            budget_bytes: tracker.budget_bytes,
+            peak_tracked_bytes: tracker.peak_bytes,
+            input_rows: ordinal as usize,
+            spill_run_count: 0,
+            spilled_rows: 0,
+        });
+        rows.sort_by(GroupRunRow::cmp_key);
+        return aggregate_sorted_group_rows(
+            rows,
+            group_keys,
+            items,
+            catalog,
+            memory.batch_rows.get(),
+            execution_limit,
+            emit,
+        );
+    }
+    if !rows.is_empty() {
+        runs.push(spill_group_run(&mut rows, &memory.spill_directory)?);
+    }
+    record_blocking_memory_report(skein_executor::BlockingOperatorMemoryReport {
+        operator: "AggregateExec".to_string(),
+        budget_bytes: tracker.budget_bytes,
+        peak_tracked_bytes: tracker.peak_bytes,
+        input_rows: ordinal as usize,
+        spill_run_count: runs.len(),
+        spilled_rows: ordinal as usize,
+    });
+    merge_group_runs(
+        &runs,
+        group_keys,
+        items,
+        catalog,
+        memory.batch_rows.get(),
+        execution_limit,
+        emit,
+    )
+}
+
+fn spill_group_run(
+    rows: &mut Vec<GroupRunRow>,
+    directory: &std::path::Path,
+) -> Result<spill::SpillRun> {
+    rows.sort_by(GroupRunRow::cmp_key);
+    let (run, mut writer) = spill::SpillRun::create(directory, "aggregate")?;
+    for row in rows.drain(..) {
+        writer.write(row.ordinal, &row.binding)?;
+    }
+    writer.finish()?;
+    Ok(run)
+}
+
+fn aggregate_sorted_group_rows(
+    rows: Vec<GroupRunRow>,
+    group_keys: &[Projection],
+    items: &[Aggregation],
+    catalog: &Catalog,
+    batch_rows: usize,
+    execution_limit: ExecutionLimit,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    let mut batch = Vec::with_capacity(batch_rows);
+    let mut accumulator: Option<GroupAccumulator<'_>> = None;
+    let mut emitted = 0usize;
+    for row in rows {
+        if accumulator
+            .as_ref()
+            .is_some_and(|accumulator| accumulator.key != row.key)
+        {
+            batch.push(accumulator.take().expect("group exists").finish());
+            emitted = emitted.saturating_add(1);
+            if flush_aggregate_batch(&mut batch, batch_rows, emitted, execution_limit, emit)?
+                == BatchControl::Stop
+            {
+                return Ok(BatchControl::Stop);
+            }
+        }
+        let accumulator = accumulator
+            .get_or_insert_with(|| GroupAccumulator::new(row.key.clone(), group_keys, items));
+        accumulator.update(catalog, &row.binding);
+    }
+    if let Some(accumulator) = accumulator {
+        batch.push(accumulator.finish());
+    }
+    if !batch.is_empty() && emit(batch)? == BatchControl::Stop {
+        return Ok(BatchControl::Stop);
+    }
+    Ok(BatchControl::Continue)
+}
+
+fn merge_group_runs(
+    runs: &[spill::SpillRun],
+    group_keys: &[Projection],
+    items: &[Aggregation],
+    catalog: &Catalog,
+    batch_rows: usize,
+    execution_limit: ExecutionLimit,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    let mut readers = runs
+        .iter()
+        .map(spill::SpillRun::reader)
+        .collect::<Result<Vec<_>>>()?;
+    let mut heap = BinaryHeap::new();
+    for (run_index, reader) in readers.iter_mut().enumerate() {
+        if let Some((ordinal, binding)) = reader.read()? {
+            let key = group_keys
+                .iter()
+                .map(|item| group_key_value(item, catalog, &binding))
+                .collect();
+            heap.push(GroupMergeEntry {
+                row: GroupRunRow {
+                    key,
+                    ordinal,
+                    binding,
+                },
+                run_index,
+            });
+        }
+    }
+    let mut batch = Vec::with_capacity(batch_rows);
+    let mut accumulator: Option<GroupAccumulator<'_>> = None;
+    let mut emitted = 0usize;
+    while let Some(entry) = heap.pop() {
+        let run_index = entry.run_index;
+        let row = entry.row;
+        if accumulator
+            .as_ref()
+            .is_some_and(|accumulator| accumulator.key != row.key)
+        {
+            batch.push(accumulator.take().expect("group exists").finish());
+            emitted = emitted.saturating_add(1);
+            if flush_aggregate_batch(&mut batch, batch_rows, emitted, execution_limit, emit)?
+                == BatchControl::Stop
+            {
+                return Ok(BatchControl::Stop);
+            }
+        }
+        accumulator
+            .get_or_insert_with(|| GroupAccumulator::new(row.key.clone(), group_keys, items))
+            .update(catalog, &row.binding);
+        if let Some((ordinal, binding)) = readers[run_index].read()? {
+            let key = group_keys
+                .iter()
+                .map(|item| group_key_value(item, catalog, &binding))
+                .collect();
+            heap.push(GroupMergeEntry {
+                row: GroupRunRow {
+                    key,
+                    ordinal,
+                    binding,
+                },
+                run_index,
+            });
+        }
+    }
+    if let Some(accumulator) = accumulator {
+        batch.push(accumulator.finish());
+    }
+    if !batch.is_empty() && emit(batch)? == BatchControl::Stop {
+        return Ok(BatchControl::Stop);
+    }
+    Ok(BatchControl::Continue)
+}
+
+fn flush_aggregate_batch(
+    batch: &mut BindingBatch,
+    batch_rows: usize,
+    emitted: usize,
+    execution_limit: ExecutionLimit,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    if (batch.len() == batch_rows || execution_limit.is_reached(emitted))
+        && (emit(std::mem::replace(batch, Vec::with_capacity(batch_rows)))? == BatchControl::Stop
+            || execution_limit.is_reached(emitted))
+    {
+        return Ok(BatchControl::Stop);
+    }
+    Ok(BatchControl::Continue)
+}
+
+fn stream_node_scan_batches(
+    variable: &str,
+    label: &str,
+    filter: Option<(&Predicate, &PropertyFilter)>,
+    context: BatchReadContext<'_>,
+    execution_limit: ExecutionLimit,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    let BatchReadContext {
+        catalog,
+        store,
+        memory,
+    } = context;
+    let batch_rows = memory.batch_rows.get();
+    if let Some(label_id) = exact_scan_label_id(catalog, label) {
+        let scan = store.scan_nodes_with_filter_pruning(label_id, filter.map(|(_, filter)| filter));
+        record_scan_pruning_report(scan.report.clone());
+        let bindings = scan
+            .nodes
+            .into_iter()
+            .map(|node| node_binding(variable, node.clone()))
+            .filter(|binding| {
+                filter
+                    .map(|(predicate, _)| evaluate_predicate(predicate, catalog, store, binding))
+                    .unwrap_or(true)
+            })
+            .take(execution_limit.output_rows.unwrap_or(usize::MAX));
+        return emit_binding_iterator(bindings, batch_rows, emit);
+    }
+
+    let label_ids = label_ids_for_pattern(catalog, label);
+    let bindings = store
+        .scan_nodes(None)
+        .filter(|node| node_matches_label_pattern(node, label_ids.as_deref()))
+        .map(|node| node_binding(variable, node.clone()))
+        .filter(|binding| {
+            filter
+                .map(|(predicate, _)| evaluate_predicate(predicate, catalog, store, binding))
+                .unwrap_or(true)
+        })
+        .take(execution_limit.output_rows.unwrap_or(usize::MAX));
+    emit_binding_iterator(bindings, batch_rows, emit)
+}
+
+fn stream_index_node_seek_batches(
+    variable: &str,
+    label: &str,
+    property: &str,
+    values: &[Value],
+    context: BatchReadContext<'_>,
+    execution_limit: ExecutionLimit,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    let BatchReadContext {
+        catalog,
+        store,
+        memory,
+    } = context;
+    let batch_rows = memory.batch_rows.get();
+    let Some(label_id) = catalog.label_id(label) else {
+        return Ok(BatchControl::Continue);
+    };
+    let mut seen = BTreeSet::new();
+    let mut nodes = Vec::new();
+    for value in values {
+        for node in store.seek_nodes_by_property(label_id, property, value) {
+            if seen.insert(node.id) {
+                nodes.push(node);
+            }
+        }
+    }
+    let candidate_count_before_pruning = store.node_count_for_label(Some(label_id));
+    record_scan_pruning_report(ScanPruningReport {
+        target_kind: crate::store::ScanPruningTargetKind::Node,
+        label_id: Some(label_id),
+        rel_type_id: None,
+        strategy: if values.len() == 1 {
+            ScanPruningStrategy::PropertyEq {
+                property: property.to_string(),
+            }
+        } else {
+            ScanPruningStrategy::PropertyIn {
+                property: property.to_string(),
+            }
+        },
+        pruned: true,
+        exact_empty: nodes.is_empty(),
+        candidate_count_before_pruning,
+        pruned_candidate_count: candidate_count_before_pruning.saturating_sub(nodes.len()),
+        candidate_count_before_filter: nodes.len(),
+        output_count: nodes
+            .len()
+            .min(execution_limit.output_rows.unwrap_or(usize::MAX)),
+        filtered_out_count: 0,
+    });
+    let bindings = nodes
+        .into_iter()
+        .take(execution_limit.output_rows.unwrap_or(usize::MAX))
+        .map(|node| node_binding(variable, node.clone()));
+    emit_binding_iterator(bindings, batch_rows, emit)
+}
+
+fn node_binding(variable: &str, node: NodeRecord) -> Binding {
+    Binding {
+        values: BTreeMap::new(),
+        nodes: BTreeMap::from([(variable.to_string(), node)]),
+        relationships: BTreeMap::new(),
+    }
+}
+
+fn emit_owned_binding_batches(
+    bindings: Vec<Binding>,
+    batch_rows: usize,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    emit_binding_iterator(bindings, batch_rows, emit)
+}
+
+fn emit_binding_iterator(
+    bindings: impl IntoIterator<Item = Binding>,
+    batch_rows: usize,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    let mut batch = Vec::with_capacity(batch_rows);
+    for binding in bindings {
+        batch.push(binding);
+        if batch.len() == batch_rows
+            && emit(std::mem::replace(
+                &mut batch,
+                Vec::with_capacity(batch_rows),
+            ))? == BatchControl::Stop
+        {
+            return Ok(BatchControl::Stop);
+        }
+    }
+    if !batch.is_empty() && emit(batch)? == BatchControl::Stop {
+        return Ok(BatchControl::Stop);
+    }
+    Ok(BatchControl::Continue)
+}
+
 fn execute_bindings_with_limit(
     plan: &PhysicalPlan,
     catalog: &mut Catalog,
@@ -989,6 +2324,9 @@ fn execute_bindings_with_limit(
     context: &mut ExecutionContext<'_>,
     execution_limit: ExecutionLimit,
 ) -> Result<Vec<Binding>> {
+    if batch_pipeline_capable(plan) {
+        return collect_batch_pipeline(plan, catalog, store, context.memory, execution_limit);
+    }
     match plan {
         PhysicalPlan::CreateNodeLabel { label } => {
             let existed = catalog.label_id(label);
@@ -3085,6 +4423,270 @@ struct AdjacencyExpandFilters<'a> {
     target_scan_filter: Option<&'a PropertyFilter>,
 }
 
+struct ExpandedBinding {
+    binding: Binding,
+    target_id: Option<NodeId>,
+    hop: usize,
+}
+
+struct AdjacencyExpandSpec<'a> {
+    source_variable: &'a str,
+    rel_variable: Option<&'a str>,
+    rel_properties: &'a BTreeMap<String, Value>,
+    direction: RelationshipDirection,
+    target_variable: &'a str,
+    min_hops: usize,
+    max_hops: usize,
+    optional: bool,
+}
+
+fn expand_binding(
+    binding: Binding,
+    spec: AdjacencyExpandSpec<'_>,
+    rel_type_id: Option<crate::schema::RelTypeId>,
+    target_label_ids: Option<&[crate::schema::LabelId]>,
+    filters: &AdjacencyExpandFilters<'_>,
+    store: &GraphStore,
+) -> Result<Vec<ExpandedBinding>> {
+    let source = binding.nodes.get(spec.source_variable).ok_or_else(|| {
+        SkeinError::Execution(format!(
+            "missing variable '{}' during expand",
+            spec.source_variable
+        ))
+    })?;
+    let bound_target_id = binding.nodes.get(spec.target_variable).map(|node| node.id);
+    let mut output = Vec::new();
+    if spec.rel_variable.is_some()
+        || !spec.rel_properties.is_empty()
+        || filters.relationship_scan_filter.is_some()
+        || spec.direction != RelationshipDirection::Outgoing
+    {
+        for (relationship, target) in one_hop_relationships(
+            store,
+            source.id,
+            rel_type_id,
+            target_label_ids,
+            spec.rel_properties,
+            filters.relationship_scan_filter,
+            spec.direction,
+        ) {
+            if bound_target_id.is_some_and(|node_id| node_id != target.id)
+                || filters
+                    .target_scan_filter
+                    .is_some_and(|filter| !node_matches_property_filter(target, filter))
+            {
+                continue;
+            }
+            let mut nodes = binding.nodes.clone();
+            nodes.insert(spec.target_variable.to_string(), target.clone());
+            let mut relationships = binding.relationships.clone();
+            if let Some(rel_variable) = spec.rel_variable {
+                relationships.insert(rel_variable.to_string(), relationship.clone());
+            }
+            output.push(ExpandedBinding {
+                binding: Binding {
+                    values: binding.values.clone(),
+                    nodes,
+                    relationships,
+                },
+                target_id: Some(target.id),
+                hop: 1,
+            });
+        }
+    } else {
+        for (target, hop) in bounded_expand_targets(
+            store,
+            source.id,
+            rel_type_id.expect("typed bounded expand checked by planner"),
+            target_label_ids,
+            spec.min_hops,
+            spec.max_hops,
+        ) {
+            if bound_target_id.is_some_and(|node_id| node_id != target.id)
+                || filters
+                    .target_scan_filter
+                    .is_some_and(|filter| !node_matches_property_filter(target, filter))
+            {
+                continue;
+            }
+            let mut nodes = binding.nodes.clone();
+            nodes.insert(spec.target_variable.to_string(), target.clone());
+            output.push(ExpandedBinding {
+                binding: Binding {
+                    values: binding.values.clone(),
+                    nodes,
+                    relationships: binding.relationships.clone(),
+                },
+                target_id: Some(target.id),
+                hop,
+            });
+        }
+    }
+    if spec.optional && output.is_empty() {
+        let mut nodes = binding.nodes;
+        nodes.insert(spec.target_variable.to_string(), null_lookup_node());
+        output.push(ExpandedBinding {
+            binding: Binding {
+                values: binding.values,
+                nodes,
+                relationships: binding.relationships,
+            },
+            target_id: None,
+            hop: 0,
+        });
+    }
+    Ok(output)
+}
+
+fn stream_filtered_adjacency_expand_batches(
+    plan: &PhysicalPlan,
+    input: &PhysicalPlan,
+    predicate: &Predicate,
+    context: BatchReadContext<'_>,
+    execution_limit: ExecutionLimit,
+    filters: AdjacencyExpandFilters<'_>,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    let BatchReadContext { catalog, store, .. } = context;
+    let mut emitted = 0usize;
+    stream_adjacency_expand_batches(
+        plan,
+        input,
+        context,
+        execution_limit,
+        filters,
+        &mut |batch| {
+            let filtered = batch
+                .into_iter()
+                .filter(|binding| evaluate_predicate(predicate, catalog, store, binding))
+                .take(
+                    execution_limit
+                        .output_rows
+                        .unwrap_or(usize::MAX)
+                        .saturating_sub(emitted),
+                )
+                .collect::<Vec<_>>();
+            emitted = emitted.saturating_add(filtered.len());
+            if !filtered.is_empty() && emit(filtered)? == BatchControl::Stop {
+                return Ok(BatchControl::Stop);
+            }
+            Ok(if execution_limit.is_reached(emitted) {
+                BatchControl::Stop
+            } else {
+                BatchControl::Continue
+            })
+        },
+    )
+}
+
+fn stream_adjacency_expand_batches(
+    plan: &PhysicalPlan,
+    input: &PhysicalPlan,
+    context: BatchReadContext<'_>,
+    execution_limit: ExecutionLimit,
+    filters: AdjacencyExpandFilters<'_>,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    let BatchReadContext {
+        catalog,
+        store,
+        memory,
+    } = context;
+    let PhysicalPlan::AdjacencyExpandExec {
+        source_variable,
+        rel_variable,
+        rel_type,
+        rel_properties,
+        direction,
+        target_variable,
+        target_label,
+        min_hops,
+        max_hops,
+        optional,
+        graph_budget,
+        ..
+    } = plan
+    else {
+        return Err(SkeinError::Execution(
+            "expected adjacency expand plan".to_string(),
+        ));
+    };
+    let mut graph_expansion =
+        GraphExpansionExecutionState::new(*graph_budget, 0, current_vector_rerank_count());
+    let rel_type_id = if rel_type.is_empty() {
+        None
+    } else {
+        let Some(rel_type_id) = catalog.rel_type_id(rel_type) else {
+            graph_expansion.record(rel_type, *min_hops, *max_hops, 0);
+            return Ok(BatchControl::Continue);
+        };
+        Some(rel_type_id)
+    };
+    let target_label_ids = label_ids_for_pattern(catalog, target_label);
+    let batch_rows = memory.batch_rows.get();
+    let mut output = Vec::with_capacity(batch_rows);
+    let control =
+        execute_binding_batches(input, context, ExecutionLimit::unlimited(), &mut |batch| {
+            for binding in batch {
+                graph_expansion.seed_count = graph_expansion.seed_count.saturating_add(1);
+                for candidate in expand_binding(
+                    binding,
+                    AdjacencyExpandSpec {
+                        source_variable,
+                        rel_variable: rel_variable.as_deref(),
+                        rel_properties,
+                        direction: *direction,
+                        target_variable,
+                        min_hops: *min_hops,
+                        max_hops: *max_hops,
+                        optional: *optional,
+                    },
+                    rel_type_id,
+                    target_label_ids.as_deref(),
+                    &filters,
+                    store,
+                )? {
+                    if !graph_expansion.try_push(
+                        &mut output,
+                        candidate.binding,
+                        candidate.target_id,
+                        candidate.hop,
+                    ) {
+                        return Ok(BatchControl::Stop);
+                    }
+                    if output.len() == batch_rows
+                        && emit(std::mem::replace(
+                            &mut output,
+                            Vec::with_capacity(batch_rows),
+                        ))? == BatchControl::Stop
+                    {
+                        return Ok(BatchControl::Stop);
+                    }
+                    if execution_limit.is_reached(graph_expansion.returned_count) {
+                        return Ok(BatchControl::Stop);
+                    }
+                }
+            }
+            Ok(BatchControl::Continue)
+        })?;
+    if !output.is_empty() && emit(output)? == BatchControl::Stop {
+        graph_expansion.record(
+            rel_type,
+            *min_hops,
+            *max_hops,
+            graph_expansion.returned_count,
+        );
+        return Ok(BatchControl::Stop);
+    }
+    graph_expansion.record(
+        rel_type,
+        *min_hops,
+        *max_hops,
+        graph_expansion.returned_count,
+    );
+    Ok(control)
+}
+
 fn execute_adjacency_expand(
     plan: &PhysicalPlan,
     input: &PhysicalPlan,
@@ -3133,107 +4735,30 @@ fn execute_adjacency_expand(
     let target_label_ids = label_ids_for_pattern(catalog, target_label);
     let mut output = Vec::new();
     for binding in input {
-        let source = binding.nodes.get(source_variable).ok_or_else(|| {
-            SkeinError::Execution(format!(
-                "missing variable '{source_variable}' during expand"
-            ))
-        })?;
-        let output_len_before = output.len();
-        if rel_variable.is_some()
-            || !rel_properties.is_empty()
-            || filters.relationship_scan_filter.is_some()
-            || *direction != RelationshipDirection::Outgoing
-        {
-            let bound_target_id = binding.nodes.get(target_variable).map(|node| node.id);
-            for (relationship, target) in one_hop_relationships(
-                store,
-                source.id,
-                rel_type_id,
-                target_label_ids.as_deref(),
+        for candidate in expand_binding(
+            binding,
+            AdjacencyExpandSpec {
+                source_variable,
+                rel_variable: rel_variable.as_deref(),
                 rel_properties,
-                filters.relationship_scan_filter,
-                *direction,
-            ) {
-                if bound_target_id.is_some_and(|node_id| node_id != target.id) {
-                    continue;
-                }
-                if filters
-                    .target_scan_filter
-                    .map(|filter| !node_matches_property_filter(target, filter))
-                    .unwrap_or(false)
-                {
-                    continue;
-                }
-                let mut nodes = binding.nodes.clone();
-                nodes.insert(target_variable.clone(), target.clone());
-                let mut relationships = binding.relationships.clone();
-                if let Some(rel_variable) = rel_variable {
-                    relationships.insert(rel_variable.clone(), relationship.clone());
-                }
-                let candidate = Binding {
-                    values: binding.values.clone(),
-                    nodes,
-                    relationships,
-                };
-                if !graph_expansion.try_push(&mut output, candidate, Some(target.id), 1) {
-                    graph_expansion.record(rel_type, *min_hops, *max_hops, output.len());
-                    return Ok(output);
-                }
-                if execution_limit.is_reached(output.len()) {
-                    graph_expansion.record(rel_type, *min_hops, *max_hops, output.len());
-                    return Ok(output);
-                }
-            }
-        } else {
-            let bound_target_id = binding.nodes.get(target_variable).map(|node| node.id);
-            for (target, hop) in bounded_expand_targets(
-                store,
-                source.id,
-                rel_type_id.expect("typed bounded expand checked by planner"),
-                target_label_ids.as_deref(),
-                *min_hops,
-                *max_hops,
-            ) {
-                if bound_target_id.is_some_and(|node_id| node_id != target.id) {
-                    continue;
-                }
-                if filters
-                    .target_scan_filter
-                    .map(|filter| !node_matches_property_filter(target, filter))
-                    .unwrap_or(false)
-                {
-                    continue;
-                }
-                let mut nodes = binding.nodes.clone();
-                nodes.insert(target_variable.clone(), target.clone());
-                let candidate = Binding {
-                    values: binding.values.clone(),
-                    nodes,
-                    relationships: binding.relationships.clone(),
-                };
-                if !graph_expansion.try_push(&mut output, candidate, Some(target.id), hop) {
-                    graph_expansion.record(rel_type, *min_hops, *max_hops, output.len());
-                    return Ok(output);
-                }
-                if execution_limit.is_reached(output.len()) {
-                    graph_expansion.record(rel_type, *min_hops, *max_hops, output.len());
-                    return Ok(output);
-                }
-            }
-        }
-        if *optional && output.len() == output_len_before {
-            let mut nodes = binding.nodes.clone();
-            nodes.insert(target_variable.clone(), null_lookup_node());
-            let candidate = Binding {
-                values: binding.values,
-                nodes,
-                relationships: binding.relationships,
-            };
-            if !graph_expansion.try_push(&mut output, candidate, None, 0) {
-                graph_expansion.record(rel_type, *min_hops, *max_hops, output.len());
-                return Ok(output);
-            }
-            if execution_limit.is_reached(output.len()) {
+                direction: *direction,
+                target_variable,
+                min_hops: *min_hops,
+                max_hops: *max_hops,
+                optional: *optional,
+            },
+            rel_type_id,
+            target_label_ids.as_deref(),
+            &filters,
+            store,
+        )? {
+            if !graph_expansion.try_push(
+                &mut output,
+                candidate.binding,
+                candidate.target_id,
+                candidate.hop,
+            ) || execution_limit.is_reached(output.len())
+            {
                 graph_expansion.record(rel_type, *min_hops, *max_hops, output.len());
                 return Ok(output);
             }
@@ -3250,6 +4775,7 @@ struct GraphExpansionExecutionState {
     expanded_edge_count: usize,
     reranked_seed_count: usize,
     payload_bytes_used: usize,
+    returned_count: usize,
     truncation_reason: Option<skein_executor::GraphExpansionTruncationReason>,
 }
 
@@ -3266,6 +4792,7 @@ impl GraphExpansionExecutionState {
             expanded_edge_count: 0,
             reranked_seed_count,
             payload_bytes_used: 0,
+            returned_count: 0,
             truncation_reason: None,
         }
     }
@@ -3278,10 +4805,11 @@ impl GraphExpansionExecutionState {
         hop: usize,
     ) -> bool {
         let Some(budget) = self.budget else {
+            self.returned_count = self.returned_count.saturating_add(1);
             output.push(candidate);
             return true;
         };
-        if output.len() >= budget.candidate_limit {
+        if self.returned_count >= budget.candidate_limit {
             self.truncation_reason =
                 Some(skein_executor::GraphExpansionTruncationReason::CandidateLimit);
             return false;
@@ -3293,6 +4821,7 @@ impl GraphExpansionExecutionState {
             return false;
         }
         self.payload_bytes_used = self.payload_bytes_used.saturating_add(candidate_bytes);
+        self.returned_count = self.returned_count.saturating_add(1);
         if let Some(target_id) = target_id {
             self.expanded_nodes.insert(target_id);
         }
@@ -5530,6 +7059,163 @@ fn range_bounds_from_comparison(op: ComparisonOp, value: Value) -> ValueRangeBou
 mod tests {
     use super::*;
 
+    fn spill_test_config(name: &str) -> ExecutionMemoryConfig {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        ExecutionMemoryConfig {
+            batch_rows: NonZeroUsize::new(2).unwrap(),
+            blocking_operator_bytes: NonZeroUsize::new(128).unwrap(),
+            spill_directory: std::env::temp_dir().join(format!("skein-{name}-{nonce}")),
+        }
+    }
+
+    #[test]
+    fn sort_pipeline_spills_runs_under_a_tight_memory_budget() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        for rank in (0..12).rev() {
+            store
+                .create_node(
+                    &mut catalog,
+                    "Item",
+                    properties([("rank", Value::Int(rank))]),
+                )
+                .unwrap();
+        }
+        let plan = PhysicalPlan::ProjectExec {
+            items: vec![Projection {
+                expression: ProjectionExpression::Property {
+                    variable: "n".to_string(),
+                    property: "rank".to_string(),
+                },
+                name: "rank".to_string(),
+            }],
+            input: Box::new(PhysicalPlan::SortExec {
+                items: vec![SortItem {
+                    key: SortKey::Property {
+                        variable: "n".to_string(),
+                        property: "rank".to_string(),
+                    },
+                    direction: SortDirection::Asc,
+                }],
+                input: Box::new(PhysicalPlan::SeqNodeScan {
+                    variable: "n".to_string(),
+                    label: "Item".to_string(),
+                }),
+            }),
+        };
+        let memory = spill_test_config("sort-spill");
+        let mut external = NoExternalReadOperator;
+        let output = execute_with_row_limit_profile_and_external_and_memory(
+            &plan,
+            &mut catalog,
+            &mut store,
+            &BTreeMap::new(),
+            &mut external,
+            None,
+            &memory,
+        )
+        .unwrap();
+
+        assert_eq!(
+            output
+                .rows
+                .iter()
+                .map(|row| row["rank"].clone())
+                .collect::<Vec<_>>(),
+            (0..12).map(Value::Int).collect::<Vec<_>>()
+        );
+        let report = output
+            .profile
+            .blocking_operator_memory_reports
+            .iter()
+            .find(|report| report.operator == "SortExec")
+            .unwrap();
+        assert_eq!(report.input_rows, 12);
+        assert!(report.spill_run_count > 1);
+        assert_eq!(report.spilled_rows, 12);
+        assert!(std::fs::read_dir(&memory.spill_directory)
+            .unwrap()
+            .next()
+            .is_none());
+        std::fs::remove_dir(memory.spill_directory).unwrap();
+    }
+
+    #[test]
+    fn grouped_aggregate_pipeline_spills_and_merges_groups() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        for value in 0..20 {
+            store
+                .create_node(
+                    &mut catalog,
+                    "Item",
+                    properties([("group", Value::Int(value % 3))]),
+                )
+                .unwrap();
+        }
+        let plan = PhysicalPlan::AggregateExec {
+            group_keys: vec![Projection {
+                expression: ProjectionExpression::Property {
+                    variable: "n".to_string(),
+                    property: "group".to_string(),
+                },
+                name: "group".to_string(),
+            }],
+            items: vec![Aggregation {
+                function: AggregateFunction::Count,
+                target: AggregateTarget::All,
+                distinct: false,
+                name: "count".to_string(),
+            }],
+            input: Box::new(PhysicalPlan::SeqNodeScan {
+                variable: "n".to_string(),
+                label: "Item".to_string(),
+            }),
+        };
+        let memory = spill_test_config("aggregate-spill");
+        let mut external = NoExternalReadOperator;
+        let output = execute_with_row_limit_profile_and_external_and_memory(
+            &plan,
+            &mut catalog,
+            &mut store,
+            &BTreeMap::new(),
+            &mut external,
+            None,
+            &memory,
+        )
+        .unwrap();
+
+        assert_eq!(
+            output
+                .rows
+                .iter()
+                .map(|row| (row["group"].clone(), row["count"].clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (Value::Int(0), Value::Int(7)),
+                (Value::Int(1), Value::Int(7)),
+                (Value::Int(2), Value::Int(6)),
+            ]
+        );
+        let report = output
+            .profile
+            .blocking_operator_memory_reports
+            .iter()
+            .find(|report| report.operator == "AggregateExec")
+            .unwrap();
+        assert_eq!(report.input_rows, 20);
+        assert!(report.spill_run_count > 1);
+        assert_eq!(report.spilled_rows, 20);
+        assert!(std::fs::read_dir(&memory.spill_directory)
+            .unwrap()
+            .next()
+            .is_none());
+        std::fs::remove_dir(memory.spill_directory).unwrap();
+    }
+
     #[test]
     fn evaluates_nested_projection_expression_without_rebuilding_projection() {
         let expression = ProjectionExpression::Coalesce(vec![
@@ -5762,9 +7448,11 @@ mod tests {
         };
         let parameters = BTreeMap::new();
         let mut external = NoExternalReadOperator;
+        let memory = ExecutionMemoryConfig::default();
         let mut context = ExecutionContext {
             parameters: &parameters,
             external: &mut external,
+            memory: &memory,
         };
         let bindings = execute_bindings_with_limit(
             &plan,

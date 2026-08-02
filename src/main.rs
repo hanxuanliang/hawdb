@@ -4621,6 +4621,14 @@ fn read_execution_profile_json(
         "row_limit_enforced_before_output": profile.row_limit_enforced_before_output,
         "operator_row_cap_enabled": profile.operator_row_cap_enabled,
         "blocking_operator_kinds": profile.blocking_operator_kinds,
+        "blocking_operator_memory_reports": profile.blocking_operator_memory_reports.iter().map(|report| serde_json::json!({
+            "operator": report.operator,
+            "budget_bytes": report.budget_bytes,
+            "peak_tracked_bytes": report.peak_tracked_bytes,
+            "input_rows": report.input_rows,
+            "spill_run_count": report.spill_run_count,
+            "spilled_rows": report.spilled_rows,
+        })).collect::<Vec<_>>(),
         "scan_pruning_report_count": profile.scan_pruning_reports.len(),
         "scan_pruning_reports": profile
             .scan_pruning_reports

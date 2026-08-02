@@ -137,6 +137,16 @@ pub(super) fn explain_analyze_output_row(
         ),
     );
     row.insert(
+        "blocking_operator_memory_reports".to_string(),
+        Value::List(
+            profile
+                .blocking_operator_memory_reports
+                .iter()
+                .map(blocking_operator_memory_report_value)
+                .collect(),
+        ),
+    );
+    row.insert(
         "row_limit_enforced_before_output".to_string(),
         Value::Bool(profile.row_limit_enforced_before_output),
     );
@@ -145,6 +155,28 @@ pub(super) fn explain_analyze_output_row(
         Value::Bool(profile.operator_row_cap_enabled),
     );
     row
+}
+
+fn blocking_operator_memory_report_value(
+    report: &skein_executor::BlockingOperatorMemoryReport,
+) -> Value {
+    Value::Map(BTreeMap::from([
+        (
+            "operator".to_string(),
+            Value::String(report.operator.clone()),
+        ),
+        ("budget_bytes".to_string(), usize_value(report.budget_bytes)),
+        (
+            "peak_tracked_bytes".to_string(),
+            usize_value(report.peak_tracked_bytes),
+        ),
+        ("input_rows".to_string(), usize_value(report.input_rows)),
+        (
+            "spill_run_count".to_string(),
+            usize_value(report.spill_run_count),
+        ),
+        ("spilled_rows".to_string(), usize_value(report.spilled_rows)),
+    ]))
 }
 
 fn graph_expansion_report_value(report: &skein_executor::GraphExpansionExecutionReport) -> Value {
@@ -321,6 +353,7 @@ pub(super) fn empty_read_execution_profile() -> executor::ReadExecutionProfile {
         scan_pruning_reports: Vec::new(),
         vector_execution_reports: Vec::new(),
         graph_expansion_reports: Vec::new(),
+        blocking_operator_memory_reports: Vec::new(),
     }
 }
 
