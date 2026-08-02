@@ -35,6 +35,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Cursor, Write};
 use std::num::{NonZeroU64, NonZeroUsize};
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -156,6 +157,54 @@ type CompositePropertyKey = Vec<(String, Value)>;
 type CompositePropertyIndex = BTreeMap<(LabelId, CompositePropertyKey), BTreeSet<NodeId>>;
 type FullTextPropertyIndex = BTreeMap<(LabelId, String, String), BTreeSet<NodeId>>;
 type RelationshipPropertyIndex = BTreeMap<(RelTypeId, String, Value), BTreeSet<RelId>>;
+
+/// An immutable snapshot segment that is cloned only when a writer mutates it.
+///
+/// Read transactions clone the `Arc`, so creating a graph snapshot is
+/// proportional to the number of segments rather than the number of graph
+/// records. Writers retain the existing `&mut GraphStore` API and detach only
+/// the segment they modify.
+#[derive(Debug)]
+struct CowSegment<T>(Arc<T>);
+
+impl<T> Clone for CowSegment<T> {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl<T: Default> Default for CowSegment<T> {
+    fn default() -> Self {
+        Self(Arc::new(T::default()))
+    }
+}
+
+impl<T> From<T> for CowSegment<T> {
+    fn from(value: T) -> Self {
+        Self(Arc::new(value))
+    }
+}
+
+impl<T> Deref for CowSegment<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref()
+    }
+}
+
+impl<T: Clone> DerefMut for CowSegment<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        Arc::make_mut(&mut self.0)
+    }
+}
+
+#[cfg(test)]
+impl<T> CowSegment<T> {
+    fn shares_storage_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ScanPrunedNodeScan<'a> {
@@ -428,23 +477,23 @@ pub struct GraphStore {
     next_node_id: u64,
     next_rel_id: u64,
     commit_epoch: u64,
-    nodes: BTreeMap<NodeId, NodeRecord>,
-    relationships: BTreeMap<RelId, RelRecord>,
+    nodes: CowSegment<BTreeMap<NodeId, NodeRecord>>,
+    relationships: CowSegment<BTreeMap<RelId, RelRecord>>,
     basic_statistics: BasicGraphStatistics,
-    outgoing: BTreeMap<(NodeId, RelTypeId), BTreeSet<RelId>>,
-    incoming: BTreeMap<(NodeId, RelTypeId), BTreeSet<RelId>>,
-    property_index: BTreeMap<(LabelId, String, Value), BTreeSet<NodeId>>,
-    composite_property_index: CompositePropertyIndex,
-    full_text_property_index: FullTextPropertyIndex,
-    relationship_property_index: RelationshipPropertyIndex,
-    projected_graphs: BTreeMap<String, ProjectedGraphDefinition>,
-    projected_graph_artifacts: BTreeMap<String, ProjectedGraphArtifact>,
-    stable_id_mapping: StoreStableIdMapping,
+    outgoing: CowSegment<BTreeMap<(NodeId, RelTypeId), BTreeSet<RelId>>>,
+    incoming: CowSegment<BTreeMap<(NodeId, RelTypeId), BTreeSet<RelId>>>,
+    property_index: CowSegment<BTreeMap<(LabelId, String, Value), BTreeSet<NodeId>>>,
+    composite_property_index: CowSegment<CompositePropertyIndex>,
+    full_text_property_index: CowSegment<FullTextPropertyIndex>,
+    relationship_property_index: CowSegment<RelationshipPropertyIndex>,
+    projected_graphs: CowSegment<BTreeMap<String, ProjectedGraphDefinition>>,
+    projected_graph_artifacts: CowSegment<BTreeMap<String, ProjectedGraphArtifact>>,
+    stable_id_mapping: CowSegment<StoreStableIdMapping>,
     initial_import_source_fingerprint: Option<String>,
     search_projection_change_log_start_epoch: u64,
-    search_projection_graph_changes: Vec<SearchProjectionGraphChange>,
+    search_projection_graph_changes: CowSegment<Vec<SearchProjectionGraphChange>>,
     max_search_projection_change_log_entries: Option<usize>,
-    source_scan_manifest: Option<ScanSegmentManifest>,
+    source_scan_manifest: CowSegment<Option<ScanSegmentManifest>>,
     storage_recovery_report: StorageRecoveryReport,
     durable: Option<DurableStore>,
 }
@@ -603,23 +652,23 @@ impl GraphStore {
             next_node_id: 0,
             next_rel_id: 0,
             commit_epoch: 0,
-            nodes: BTreeMap::new(),
-            relationships: BTreeMap::new(),
+            nodes: CowSegment::default(),
+            relationships: CowSegment::default(),
             basic_statistics: BasicGraphStatistics::default(),
-            outgoing: BTreeMap::new(),
-            incoming: BTreeMap::new(),
-            property_index: BTreeMap::new(),
-            composite_property_index: BTreeMap::new(),
-            full_text_property_index: BTreeMap::new(),
-            relationship_property_index: BTreeMap::new(),
-            projected_graphs: BTreeMap::new(),
-            projected_graph_artifacts: BTreeMap::new(),
-            stable_id_mapping: StoreStableIdMapping::default(),
+            outgoing: CowSegment::default(),
+            incoming: CowSegment::default(),
+            property_index: CowSegment::default(),
+            composite_property_index: CowSegment::default(),
+            full_text_property_index: CowSegment::default(),
+            relationship_property_index: CowSegment::default(),
+            projected_graphs: CowSegment::default(),
+            projected_graph_artifacts: CowSegment::default(),
+            stable_id_mapping: CowSegment::default(),
             initial_import_source_fingerprint: None,
             search_projection_change_log_start_epoch: 0,
-            search_projection_graph_changes: Vec::new(),
+            search_projection_graph_changes: CowSegment::default(),
             max_search_projection_change_log_entries: None,
-            source_scan_manifest: None,
+            source_scan_manifest: CowSegment::default(),
             storage_recovery_report: StorageRecoveryReport::default(),
             durable: Some(durable),
         };
@@ -4492,12 +4541,13 @@ impl GraphStore {
             oldest_reader_commit_epoch,
             Some(source_scan_publication),
         )?;
-        self.projected_graph_artifacts = artifacts;
+        self.projected_graph_artifacts = artifacts.into();
         self.source_scan_manifest = source_scan::load(
             durable.root_path(),
             self.commit_epoch,
             source_scan_publication.descriptor_checksum(),
-        )?;
+        )?
+        .into();
         Ok(())
     }
 
@@ -4509,7 +4559,7 @@ impl GraphStore {
         if let Some(durable) = &self.durable {
             durable.write_projected_graph_artifacts(&projected_graph_artifacts)?;
         }
-        self.projected_graph_artifacts = artifacts;
+        self.projected_graph_artifacts = artifacts.into();
         Ok(())
     }
 
@@ -4565,7 +4615,7 @@ impl GraphStore {
     }
 
     pub fn stable_id_mapping(&self) -> StoreStableIdMapping {
-        self.stable_id_mapping.clone()
+        (*self.stable_id_mapping).clone()
     }
 
     pub fn initial_import_source_fingerprint(&self) -> Option<&str> {
@@ -4582,7 +4632,7 @@ impl GraphStore {
                 "stable id mapping persistence is not allowed in read-only mode".to_string(),
             ));
         }
-        self.stable_id_mapping = mapping;
+        self.stable_id_mapping = mapping.into();
         self.write_stable_id_mapping()
     }
 
@@ -6590,7 +6640,7 @@ impl GraphStore {
         let Some(durable) = &self.durable else {
             return Ok(());
         };
-        self.source_scan_manifest = durable.load_source_scan_manifest(self.commit_epoch)?;
+        self.source_scan_manifest = durable.load_source_scan_manifest(self.commit_epoch)?.into();
         Ok(())
     }
 
@@ -6678,7 +6728,8 @@ impl GraphStore {
                         .get(name)
                         .is_some_and(|definition| definition == &artifact.definition)
             })
-            .collect();
+            .collect::<BTreeMap<_, _>>()
+            .into();
         Ok(())
     }
 
@@ -6686,7 +6737,7 @@ impl GraphStore {
         let Some(durable) = &self.durable else {
             return Ok(());
         };
-        self.stable_id_mapping = durable.load_stable_id_mapping()?;
+        self.stable_id_mapping = durable.load_stable_id_mapping()?.into();
         Ok(())
     }
 
@@ -9538,7 +9589,7 @@ fn encode_projected_graph_artifacts(
     ));
     body.push_str(&format!("projection_epoch\t{projection_epoch}\n"));
     body.push_str(&format!("commit_epoch\t{}\n", store.commit_epoch));
-    for (name, definition) in &store.projected_graphs {
+    for (name, definition) in store.projected_graphs.iter() {
         let graph = projected_graph_from_definition(catalog, store, definition);
         body.push_str(&format!(
             "graph\t{}\t{}\t{}\t{}\t{}\n",
@@ -11853,6 +11904,40 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::io::Write;
     use std::num::{NonZeroU64, NonZeroUsize};
+
+    #[test]
+    fn snapshot_shares_segments_until_the_live_store_mutates_them() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        store
+            .create_node(
+                &mut catalog,
+                "Memory",
+                properties([("id", Value::String("memory-a".to_string()))]),
+            )
+            .unwrap();
+
+        let snapshot = store.snapshot();
+        assert!(store.nodes.shares_storage_with(&snapshot.nodes));
+        assert!(store
+            .relationships
+            .shares_storage_with(&snapshot.relationships));
+
+        store
+            .create_node(
+                &mut catalog,
+                "Memory",
+                properties([("id", Value::String("memory-b".to_string()))]),
+            )
+            .unwrap();
+
+        assert_eq!(snapshot.nodes.len(), 1);
+        assert_eq!(store.nodes.len(), 2);
+        assert!(!store.nodes.shares_storage_with(&snapshot.nodes));
+        assert!(store
+            .relationships
+            .shares_storage_with(&snapshot.relationships));
+    }
 
     #[test]
     fn replays_relationships_from_wal_and_rebuilds_adjacency() {
