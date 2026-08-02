@@ -471,6 +471,83 @@ jobs:
             }
           }
           JSON
+          cat > "$root/cutover-controls.json" <<'JSON'
+          {
+            "protocol": "skein-nowledge-mem-cutover-controls-v1",
+            "ready": true,
+            "controls": {
+              "graph_reads": "skein",
+              "search_reads": "skein",
+              "dual_writes": "enabled",
+              "initial_import": "disabled",
+              "projection_catch_up": "enabled"
+            },
+            "graph": {
+              "read_selected_skein": true,
+              "read_effective": true
+            },
+            "search": {
+              "read_selected_skein": true,
+              "read_effective": true
+            },
+            "work": {
+              "dual_writes_enabled": true,
+              "initial_import_enabled": false,
+              "initial_import_inactive_for_cutover": true,
+              "initial_import_cutover_catch_up_ready": false,
+              "initial_import_safe_for_read_cutover": true,
+              "projection_catch_up_enabled": true
+            },
+            "production_status": {
+              "graph": {
+                "skein_cutover_effective": true
+              },
+              "search": {
+                "skein_cutover_effective": true
+              }
+            },
+            "redaction": {
+              "query_text_copied": false,
+              "parameters_copied": false,
+              "local_paths_copied": false
+            },
+            "blocker_codes": []
+          }
+          JSON
+          cat > "$root/operations-readiness.json" <<'JSON'
+          {
+            "protocol": "skein-nowledge-mem-operations-readiness-v1",
+            "present": true,
+            "ready": true,
+            "mode": "writable_cutover",
+            "graph": {
+              "open": true,
+              "read_only": false,
+              "commit_epoch": 42
+            },
+            "search_projection": {
+              "open": true,
+              "commit_lag": 0,
+              "stale": false
+            },
+            "storage_lifecycle": {
+              "ready": true,
+              "action": "ready"
+            },
+            "readiness": {
+              "storage_lifecycle_ready": true,
+              "storage_recovery_ready": true,
+              "slow_query_ready": true,
+              "background_maintenance_ready": true
+            },
+            "redaction": {
+              "query_text_copied": false,
+              "parameters_copied": false,
+              "local_paths_copied": false
+            },
+            "blocker_codes": []
+          }
+          JSON
           mkdir -p "$root/crates/nmem-graph/src"
           cat > "$root/crates/nmem-graph/src/repo.rs" <<'RS'
           pub fn query() -> &'static str {
