@@ -53,6 +53,8 @@ pub mod sql {
 
 pub use analytics::{
     CommunityAssignment, LouvainOptions, PageRankOptions, PageRankScore, ProjectedGraph,
+    ProjectionLayout, ProjectionMemoryAdmissionError, ProjectionMemoryBudget,
+    ProjectionMemoryEstimate,
 };
 pub use api::{
     graph_lightning_initial_import_advance_checkpoint,

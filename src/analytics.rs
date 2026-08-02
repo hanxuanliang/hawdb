@@ -2,14 +2,101 @@ use crate::schema::RelTypeId;
 use crate::store::{GraphStore, NodeId, NodeRecord};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::{Display, Formatter};
+use std::num::NonZeroUsize;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectionLayout {
+    Outgoing,
+    Incoming,
+    Bidirectional,
+    Undirected,
+}
+
+impl ProjectionLayout {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Outgoing => "outgoing",
+            Self::Incoming => "incoming",
+            Self::Bidirectional => "bidirectional",
+            Self::Undirected => "undirected",
+        }
+    }
+
+    fn stores_outgoing(self) -> bool {
+        matches!(
+            self,
+            Self::Outgoing | Self::Bidirectional | Self::Undirected
+        )
+    }
+
+    fn stores_incoming(self) -> bool {
+        matches!(self, Self::Incoming | Self::Bidirectional)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectionMemoryBudget {
+    max_bytes: Option<NonZeroUsize>,
+}
+
+impl ProjectionMemoryBudget {
+    pub const fn unlimited() -> Self {
+        Self { max_bytes: None }
+    }
+
+    pub const fn new(max_bytes: NonZeroUsize) -> Self {
+        Self {
+            max_bytes: Some(max_bytes),
+        }
+    }
+
+    pub fn max_bytes(self) -> Option<usize> {
+        self.max_bytes.map(NonZeroUsize::get)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectionMemoryEstimate {
+    pub layout: ProjectionLayout,
+    pub node_count: usize,
+    pub relationship_count: usize,
+    pub projected_edge_count: usize,
+    pub estimated_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectionMemoryAdmissionError {
+    pub estimate: ProjectionMemoryEstimate,
+    pub budget_bytes: usize,
+}
+
+impl Display for ProjectionMemoryAdmissionError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "analytics projection layout '{}' requires an estimated {} bytes for {} nodes and {} relationships, exceeding the {} byte budget",
+            self.estimate.layout.as_str(),
+            self.estimate.estimated_bytes,
+            self.estimate.node_count,
+            self.estimate.relationship_count,
+            self.budget_bytes,
+        )
+    }
+}
+
+impl std::error::Error for ProjectionMemoryAdmissionError {}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProjectedGraph {
     nodes: Vec<NodeId>,
     offsets: Vec<usize>,
     targets: Vec<usize>,
-    incoming_offsets: Vec<usize>,
-    incoming_sources: Vec<usize>,
+    incoming_offsets: Option<Vec<usize>>,
+    incoming_sources: Option<Vec<usize>>,
+    layout: ProjectionLayout,
+    edge_count: usize,
+    memory_estimate: ProjectionMemoryEstimate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -43,6 +130,22 @@ pub struct HierarchicalCommunityAssignment {
     pub community: NodeId,
 }
 
+enum UndirectedNeighborIndexes<'a> {
+    Projected(std::iter::Copied<std::slice::Iter<'a, usize>>),
+    Materialized(std::iter::Copied<std::collections::btree_set::Iter<'a, usize>>),
+}
+
+impl Iterator for UndirectedNeighborIndexes<'_> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Projected(iter) => iter.next(),
+            Self::Materialized(iter) => iter.next(),
+        }
+    }
+}
+
 impl Default for PageRankOptions {
     fn default() -> Self {
         Self {
@@ -63,13 +166,7 @@ impl Default for LouvainOptions {
 
 impl ProjectedGraph {
     pub fn empty() -> Self {
-        Self {
-            nodes: Vec::new(),
-            offsets: vec![0],
-            targets: Vec::new(),
-            incoming_offsets: vec![0],
-            incoming_sources: Vec::new(),
-        }
+        Self::from_nodes_without_edges(Vec::new(), ProjectionLayout::Bidirectional)
     }
 
     pub fn from_parts(
@@ -88,12 +185,21 @@ impl ProjectedGraph {
         )?;
         validate_indexes("csr_targets", nodes.len(), &targets)?;
         validate_indexes("csc_sources", nodes.len(), &incoming_sources)?;
+        let relationship_count = targets.len();
+        let memory_estimate = projection_memory_estimate(
+            ProjectionLayout::Bidirectional,
+            nodes.len(),
+            relationship_count,
+        );
         Ok(Self {
             nodes,
             offsets,
             targets,
-            incoming_offsets,
-            incoming_sources,
+            incoming_offsets: Some(incoming_offsets),
+            incoming_sources: Some(incoming_sources),
+            layout: ProjectionLayout::Bidirectional,
+            edge_count: relationship_count,
+            memory_estimate,
         })
     }
 
@@ -106,16 +212,39 @@ impl ProjectedGraph {
         rel_type: Option<RelTypeId>,
         include_node: impl Fn(&NodeRecord) -> bool,
     ) -> Self {
+        Self::try_from_store_with_node_filter_and_layout(
+            store,
+            rel_type,
+            include_node,
+            ProjectionLayout::Bidirectional,
+            ProjectionMemoryBudget::unlimited(),
+        )
+        .expect("unlimited analytics projection is admitted")
+    }
+
+    pub fn try_from_store_with_node_filter_and_layout(
+        store: &GraphStore,
+        rel_type: Option<RelTypeId>,
+        include_node: impl Fn(&NodeRecord) -> bool,
+        layout: ProjectionLayout,
+        budget: ProjectionMemoryBudget,
+    ) -> std::result::Result<Self, ProjectionMemoryAdmissionError> {
         let nodes = store
             .scan_nodes(None)
             .filter(|node| include_node(node))
             .map(|node| node.id)
             .collect::<Vec<_>>();
-        Self::from_nodes_and_relationships(store, nodes, move |relationship| {
-            rel_type
-                .map(|rel_type| relationship.rel_type == rel_type)
-                .unwrap_or(true)
-        })
+        Self::try_from_nodes_and_relationships(
+            store,
+            nodes,
+            move |relationship| {
+                rel_type
+                    .map(|rel_type| relationship.rel_type == rel_type)
+                    .unwrap_or(true)
+            },
+            layout,
+            budget,
+        )
     }
 
     pub fn from_store_labels_and_rel_types(
@@ -132,6 +261,25 @@ impl ProjectedGraph {
         rel_types: &[RelTypeId],
         include_node: impl Fn(&NodeRecord) -> bool,
     ) -> Self {
+        Self::try_from_store_labels_and_rel_types_with_node_filter_and_layout(
+            store,
+            labels,
+            rel_types,
+            include_node,
+            ProjectionLayout::Bidirectional,
+            ProjectionMemoryBudget::unlimited(),
+        )
+        .expect("unlimited analytics projection is admitted")
+    }
+
+    pub fn try_from_store_labels_and_rel_types_with_node_filter_and_layout(
+        store: &GraphStore,
+        labels: &[crate::schema::LabelId],
+        rel_types: &[RelTypeId],
+        include_node: impl Fn(&NodeRecord) -> bool,
+        layout: ProjectionLayout,
+        budget: ProjectionMemoryBudget,
+    ) -> std::result::Result<Self, ProjectionMemoryAdmissionError> {
         let labels = labels.iter().copied().collect::<BTreeSet<_>>();
         let nodes = store
             .scan_nodes(None)
@@ -142,9 +290,13 @@ impl ProjectedGraph {
             .map(|node| node.id)
             .collect::<Vec<_>>();
         let rel_types = rel_types.iter().copied().collect::<BTreeSet<_>>();
-        Self::from_nodes_and_relationships(store, nodes, move |relationship| {
-            rel_types.is_empty() || rel_types.contains(&relationship.rel_type)
-        })
+        Self::try_from_nodes_and_relationships(
+            store,
+            nodes,
+            move |relationship| rel_types.is_empty() || rel_types.contains(&relationship.rel_type),
+            layout,
+            budget,
+        )
     }
 
     pub fn from_store_without_edges(store: &GraphStore) -> Self {
@@ -155,12 +307,27 @@ impl ProjectedGraph {
         store: &GraphStore,
         include_node: impl Fn(&NodeRecord) -> bool,
     ) -> Self {
+        Self::try_from_store_without_edges_with_node_filter_and_layout(
+            store,
+            include_node,
+            ProjectionLayout::Bidirectional,
+            ProjectionMemoryBudget::unlimited(),
+        )
+        .expect("unlimited analytics projection is admitted")
+    }
+
+    pub fn try_from_store_without_edges_with_node_filter_and_layout(
+        store: &GraphStore,
+        include_node: impl Fn(&NodeRecord) -> bool,
+        layout: ProjectionLayout,
+        budget: ProjectionMemoryBudget,
+    ) -> std::result::Result<Self, ProjectionMemoryAdmissionError> {
         let nodes = store
             .scan_nodes(None)
             .filter(|node| include_node(node))
             .map(|node| node.id)
             .collect::<Vec<_>>();
-        Self::from_nodes_without_edges(nodes)
+        Self::try_from_nodes_without_edges(nodes, layout, budget)
     }
 
     pub fn from_store_labels_without_edges(
@@ -175,6 +342,23 @@ impl ProjectedGraph {
         labels: &[crate::schema::LabelId],
         include_node: impl Fn(&NodeRecord) -> bool,
     ) -> Self {
+        Self::try_from_store_labels_without_edges_with_node_filter_and_layout(
+            store,
+            labels,
+            include_node,
+            ProjectionLayout::Bidirectional,
+            ProjectionMemoryBudget::unlimited(),
+        )
+        .expect("unlimited analytics projection is admitted")
+    }
+
+    pub fn try_from_store_labels_without_edges_with_node_filter_and_layout(
+        store: &GraphStore,
+        labels: &[crate::schema::LabelId],
+        include_node: impl Fn(&NodeRecord) -> bool,
+        layout: ProjectionLayout,
+        budget: ProjectionMemoryBudget,
+    ) -> std::result::Result<Self, ProjectionMemoryAdmissionError> {
         let labels = labels.iter().copied().collect::<BTreeSet<_>>();
         let nodes = store
             .scan_nodes(None)
@@ -183,57 +367,113 @@ impl ProjectedGraph {
             })
             .map(|node| node.id)
             .collect::<Vec<_>>();
-        Self::from_nodes_without_edges(nodes)
+        Self::try_from_nodes_without_edges(nodes, layout, budget)
     }
 
-    fn from_nodes_without_edges(nodes: Vec<NodeId>) -> Self {
+    fn from_nodes_without_edges(nodes: Vec<NodeId>, layout: ProjectionLayout) -> Self {
+        Self::try_from_nodes_without_edges(nodes, layout, ProjectionMemoryBudget::unlimited())
+            .expect("unlimited analytics projection is admitted")
+    }
+
+    fn try_from_nodes_without_edges(
+        nodes: Vec<NodeId>,
+        layout: ProjectionLayout,
+        budget: ProjectionMemoryBudget,
+    ) -> std::result::Result<Self, ProjectionMemoryAdmissionError> {
+        let memory_estimate = projection_memory_estimate(layout, nodes.len(), 0);
+        admit_projection(memory_estimate, budget)?;
         let offsets = vec![0; nodes.len() + 1];
-        Self {
+        let incoming_offsets = layout.stores_incoming().then(|| offsets.clone());
+        Ok(Self {
             nodes,
-            offsets: offsets.clone(),
+            offsets,
             targets: Vec::new(),
-            incoming_offsets: offsets,
-            incoming_sources: Vec::new(),
-        }
+            incoming_offsets,
+            incoming_sources: layout.stores_incoming().then(Vec::new),
+            layout,
+            edge_count: 0,
+            memory_estimate,
+        })
     }
 
-    fn from_nodes_and_relationships(
+    fn try_from_nodes_and_relationships(
         store: &GraphStore,
         nodes: Vec<NodeId>,
         include_relationship: impl Fn(&crate::store::RelRecord) -> bool,
-    ) -> Self {
-        let node_positions = nodes
-            .iter()
-            .enumerate()
-            .map(|(index, node)| (*node, index))
-            .collect::<BTreeMap<_, _>>();
-        let mut adjacency = vec![Vec::new(); nodes.len()];
-        let mut incoming = vec![Vec::new(); nodes.len()];
+        layout: ProjectionLayout,
+        budget: ProjectionMemoryBudget,
+    ) -> std::result::Result<Self, ProjectionMemoryAdmissionError> {
+        let relationship_count = store
+            .scan_relationships(None)
+            .filter(|relationship| include_relationship(relationship))
+            .filter(|relationship| {
+                nodes.binary_search(&relationship.source).is_ok()
+                    && nodes.binary_search(&relationship.target).is_ok()
+            })
+            .count();
+        let memory_estimate = projection_memory_estimate(layout, nodes.len(), relationship_count);
+        admit_projection(memory_estimate, budget)?;
+
+        let mut adjacency = layout
+            .stores_outgoing()
+            .then(|| vec![Vec::new(); nodes.len()]);
+        let mut incoming = layout
+            .stores_incoming()
+            .then(|| vec![Vec::new(); nodes.len()]);
 
         for relationship in store.scan_relationships(None) {
             if !include_relationship(relationship) {
                 continue;
             }
-            let Some(source) = node_positions.get(&relationship.source).copied() else {
+            let Ok(source) = nodes.binary_search(&relationship.source) else {
                 continue;
             };
-            let Some(target) = node_positions.get(&relationship.target).copied() else {
+            let Ok(target) = nodes.binary_search(&relationship.target) else {
                 continue;
             };
-            adjacency[source].push(target);
-            incoming[target].push(source);
+            if let Some(adjacency) = adjacency.as_mut() {
+                adjacency[source].push(target);
+                if layout == ProjectionLayout::Undirected && source != target {
+                    adjacency[target].push(source);
+                }
+            }
+            if let Some(incoming) = incoming.as_mut() {
+                incoming[target].push(source);
+            }
         }
 
-        let (offsets, targets) = build_compressed_adjacency(adjacency);
-        let (incoming_offsets, incoming_sources) = build_compressed_adjacency(incoming);
+        let (offsets, targets) = adjacency
+            .map(build_compressed_adjacency)
+            .unwrap_or_else(|| (vec![0; nodes.len() + 1], Vec::new()));
+        let (incoming_offsets, incoming_sources) = incoming
+            .map(build_compressed_adjacency)
+            .map(|(offsets, sources)| (Some(offsets), Some(sources)))
+            .unwrap_or((None, None));
+        let edge_count = match layout {
+            ProjectionLayout::Incoming => incoming_sources
+                .as_deref()
+                .map_or(0, |sources| sources.len()),
+            ProjectionLayout::Undirected => (0..nodes.len())
+                .map(|source| {
+                    targets[offsets[source]..offsets[source + 1]]
+                        .iter()
+                        .filter(|target| source <= **target)
+                        .count()
+                })
+                .sum(),
+            ProjectionLayout::Outgoing | ProjectionLayout::Bidirectional => targets.len(),
+        };
 
-        Self {
+        Ok(Self {
             nodes,
             offsets,
             targets,
             incoming_offsets,
             incoming_sources,
-        }
+            layout,
+            edge_count,
+            memory_estimate,
+        })
     }
 
     pub fn node_count(&self) -> usize {
@@ -241,7 +481,15 @@ impl ProjectedGraph {
     }
 
     pub fn edge_count(&self) -> usize {
-        self.targets.len()
+        self.edge_count
+    }
+
+    pub fn layout(&self) -> ProjectionLayout {
+        self.layout
+    }
+
+    pub fn memory_estimate(&self) -> ProjectionMemoryEstimate {
+        self.memory_estimate
     }
 
     pub fn nodes(&self) -> &[NodeId] {
@@ -257,14 +505,17 @@ impl ProjectedGraph {
     }
 
     pub fn csc_offsets(&self) -> &[usize] {
-        &self.incoming_offsets
+        self.incoming_offsets.as_deref().unwrap_or(&[])
     }
 
     pub fn csc_sources(&self) -> &[usize] {
-        &self.incoming_sources
+        self.incoming_sources.as_deref().unwrap_or(&[])
     }
 
     pub fn outgoing_targets(&self, node: NodeId) -> Option<impl Iterator<Item = NodeId> + '_> {
+        if !self.layout.stores_outgoing() {
+            return None;
+        }
         let index = self.nodes.iter().position(|candidate| *candidate == node)?;
         Some(
             self.outgoing_target_indexes(index)
@@ -273,6 +524,9 @@ impl ProjectedGraph {
     }
 
     pub fn incoming_sources(&self, node: NodeId) -> Option<impl Iterator<Item = NodeId> + '_> {
+        if !self.layout.stores_incoming() {
+            return None;
+        }
         let index = self.nodes.iter().position(|candidate| *candidate == node)?;
         Some(
             self.incoming_source_indexes(index)
@@ -281,6 +535,9 @@ impl ProjectedGraph {
     }
 
     pub fn page_rank(&self, options: PageRankOptions) -> Vec<PageRankScore> {
+        if !self.layout.stores_outgoing() {
+            return Vec::new();
+        }
         let node_count = self.nodes.len();
         if node_count == 0 {
             return Vec::new();
@@ -391,10 +648,13 @@ impl ProjectedGraph {
             return Vec::new();
         }
 
-        let adjacency = self.undirected_adjacency();
-        let degrees = adjacency
-            .iter()
-            .map(|neighbors| neighbors.len() as f64)
+        let materialized_adjacency =
+            (self.layout != ProjectionLayout::Undirected).then(|| self.undirected_adjacency());
+        let degrees = (0..node_count)
+            .map(|node| {
+                self.undirected_neighbor_indexes(node, materialized_adjacency.as_deref())
+                    .count() as f64
+            })
             .collect::<Vec<_>>();
         let total_degree = degrees.iter().sum::<f64>();
         if total_degree == 0.0 {
@@ -419,16 +679,18 @@ impl ProjectedGraph {
                 community_degrees[current] -= node_degree;
 
                 let mut candidates = BTreeSet::from([current]);
-                for neighbor in &adjacency[node] {
-                    candidates.insert(communities[*neighbor]);
+                for neighbor in
+                    self.undirected_neighbor_indexes(node, materialized_adjacency.as_deref())
+                {
+                    candidates.insert(communities[neighbor]);
                 }
 
                 let mut best = current;
                 let mut best_gain = 0.0;
                 for candidate in candidates {
-                    let links_to_candidate = adjacency[node]
-                        .iter()
-                        .filter(|neighbor| communities[**neighbor] == candidate)
+                    let links_to_candidate = self
+                        .undirected_neighbor_indexes(node, materialized_adjacency.as_deref())
+                        .filter(|neighbor| communities[*neighbor] == candidate)
                         .count() as f64;
                     let gain = links_to_candidate
                         - (node_degree * community_degrees[candidate] / total_degree);
@@ -497,32 +759,67 @@ impl ProjectedGraph {
             .map(|(index, node)| (*node, index))
             .collect::<BTreeMap<_, _>>();
         let mut adjacency = vec![Vec::new(); nodes.len()];
-        let mut incoming = vec![Vec::new(); nodes.len()];
+        let mut incoming = self
+            .layout
+            .stores_incoming()
+            .then(|| vec![Vec::new(); nodes.len()]);
 
-        for source in 0..self.nodes.len() {
-            for target in self.outgoing_target_indexes(source) {
-                let source_community = assignments[source].community;
-                let target_community = assignments[target].community;
-                if source_community == target_community {
-                    continue;
-                }
-                let source_position = node_positions[&source_community];
-                let target_position = node_positions[&target_community];
-                adjacency[source_position].push(target_position);
+        let mut add_edge = |source: usize, target: usize| {
+            let source_community = assignments[source].community;
+            let target_community = assignments[target].community;
+            if source_community == target_community {
+                return;
+            }
+            let source_position = node_positions[&source_community];
+            let target_position = node_positions[&target_community];
+            adjacency[source_position].push(target_position);
+            if let Some(incoming) = incoming.as_mut() {
                 incoming[target_position].push(source_position);
+            }
+        };
+        if self.layout == ProjectionLayout::Incoming {
+            for target in 0..self.nodes.len() {
+                for source in self.incoming_source_indexes(target) {
+                    add_edge(source, target);
+                }
+            }
+        } else {
+            for source in 0..self.nodes.len() {
+                for target in self.outgoing_target_indexes(source) {
+                    add_edge(source, target);
+                }
             }
         }
         for assignment in assignments {
             debug_assert!(original_positions.contains_key(&assignment.node));
         }
         let (offsets, targets) = build_compressed_adjacency(adjacency);
-        let (incoming_offsets, incoming_sources) = build_compressed_adjacency(incoming);
+        let (incoming_offsets, incoming_sources) = incoming
+            .map(build_compressed_adjacency)
+            .map(|(offsets, sources)| (Some(offsets), Some(sources)))
+            .unwrap_or((None, None));
+        let edge_count = if self.layout == ProjectionLayout::Undirected {
+            (0..nodes.len())
+                .map(|source| {
+                    targets[offsets[source]..offsets[source + 1]]
+                        .iter()
+                        .filter(|target| source <= **target)
+                        .count()
+                })
+                .sum()
+        } else {
+            targets.len()
+        };
+        let memory_estimate = projection_memory_estimate(self.layout, nodes.len(), edge_count);
         Self {
             nodes,
             offsets,
             targets,
             incoming_offsets,
             incoming_sources,
+            layout: self.layout,
+            edge_count,
+            memory_estimate,
         }
     }
 
@@ -537,13 +834,32 @@ impl ProjectedGraph {
     }
 
     fn incoming_source_indexes(&self, index: usize) -> impl Iterator<Item = usize> + '_ {
-        self.incoming_sources[self.incoming_offsets[index]..self.incoming_offsets[index + 1]]
+        let offsets = self
+            .incoming_offsets
+            .as_deref()
+            .expect("incoming indexes require an incoming projection");
+        self.incoming_sources
+            .as_deref()
+            .expect("incoming indexes require an incoming projection")
+            [offsets[index]..offsets[index + 1]]
             .iter()
             .copied()
     }
 
     fn undirected_adjacency(&self) -> Vec<BTreeSet<usize>> {
         let mut adjacency = vec![BTreeSet::new(); self.nodes.len()];
+        if self.layout == ProjectionLayout::Incoming {
+            for target in 0..self.nodes.len() {
+                for source in self.incoming_source_indexes(target) {
+                    if source == target {
+                        continue;
+                    }
+                    adjacency[source].insert(target);
+                    adjacency[target].insert(source);
+                }
+            }
+            return adjacency;
+        }
         for source in 0..self.nodes.len() {
             for target in self.outgoing_target_indexes(source) {
                 if source == target {
@@ -555,6 +871,25 @@ impl ProjectedGraph {
         }
         adjacency
     }
+
+    fn undirected_neighbor_indexes<'a>(
+        &'a self,
+        index: usize,
+        materialized: Option<&'a [BTreeSet<usize>]>,
+    ) -> UndirectedNeighborIndexes<'a> {
+        if self.layout == ProjectionLayout::Undirected {
+            return UndirectedNeighborIndexes::Projected(
+                self.targets[self.offsets[index]..self.offsets[index + 1]]
+                    .iter()
+                    .copied(),
+            );
+        }
+        UndirectedNeighborIndexes::Materialized(
+            materialized.expect("directed projection requires an undirected view")[index]
+                .iter()
+                .copied(),
+        )
+    }
 }
 
 fn community_representative(community: usize, assignments: &[usize], nodes: &[NodeId]) -> NodeId {
@@ -564,6 +899,65 @@ fn community_representative(community: usize, assignments: &[usize], nodes: &[No
         .filter_map(|(index, assigned)| (*assigned == community).then_some(nodes[index]))
         .min()
         .unwrap_or(nodes[community])
+}
+
+fn projection_memory_estimate(
+    layout: ProjectionLayout,
+    node_count: usize,
+    relationship_count: usize,
+) -> ProjectionMemoryEstimate {
+    let outgoing_edge_count = match layout {
+        ProjectionLayout::Incoming => 0,
+        ProjectionLayout::Undirected => relationship_count.saturating_mul(2),
+        ProjectionLayout::Outgoing | ProjectionLayout::Bidirectional => relationship_count,
+    };
+    let incoming_edge_count = if layout.stores_incoming() {
+        relationship_count
+    } else {
+        0
+    };
+    let projected_edge_count = outgoing_edge_count.saturating_add(incoming_edge_count);
+    let direction_count =
+        usize::from(layout.stores_outgoing()).saturating_add(usize::from(layout.stores_incoming()));
+    let offset_direction_count = 1usize.saturating_add(usize::from(layout.stores_incoming()));
+    let node_bytes = node_count.saturating_mul(std::mem::size_of::<NodeId>());
+    let outer_adjacency_bytes = node_count
+        .saturating_mul(std::mem::size_of::<Vec<usize>>())
+        .saturating_mul(direction_count);
+    let offset_bytes = node_count
+        .saturating_add(1)
+        .saturating_mul(std::mem::size_of::<usize>())
+        .saturating_mul(offset_direction_count);
+    // Building compressed adjacency temporarily overlaps the per-node vectors
+    // and their final compressed neighbor array, so account for both copies.
+    let edge_bytes = projected_edge_count
+        .saturating_mul(std::mem::size_of::<usize>())
+        .saturating_mul(2);
+    ProjectionMemoryEstimate {
+        layout,
+        node_count,
+        relationship_count,
+        projected_edge_count,
+        estimated_bytes: node_bytes
+            .saturating_add(outer_adjacency_bytes)
+            .saturating_add(offset_bytes)
+            .saturating_add(edge_bytes),
+    }
+}
+
+fn admit_projection(
+    estimate: ProjectionMemoryEstimate,
+    budget: ProjectionMemoryBudget,
+) -> std::result::Result<(), ProjectionMemoryAdmissionError> {
+    if let Some(budget_bytes) = budget.max_bytes()
+        && estimate.estimated_bytes > budget_bytes
+    {
+        return Err(ProjectionMemoryAdmissionError {
+            estimate,
+            budget_bytes,
+        });
+    }
+    Ok(())
 }
 
 fn build_compressed_adjacency(mut adjacency: Vec<Vec<usize>>) -> (Vec<usize>, Vec<usize>) {
@@ -616,11 +1010,101 @@ fn validate_indexes(
 
 #[cfg(test)]
 mod tests {
-    use super::{LouvainOptions, PageRankOptions, ProjectedGraph};
+    use super::{
+        LouvainOptions, PageRankOptions, ProjectedGraph, ProjectionLayout, ProjectionMemoryBudget,
+    };
     use crate::schema::Catalog;
     use crate::store::{GraphStore, NodeId};
     use crate::Value;
     use std::collections::BTreeMap;
+    use std::num::NonZeroUsize;
+
+    #[test]
+    fn algorithm_layouts_only_materialize_required_directions() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        let source = store
+            .create_node(&mut catalog, "Memory", properties(&[("id", 1)]))
+            .unwrap();
+        let target = store
+            .create_node(&mut catalog, "Memory", properties(&[("id", 2)]))
+            .unwrap();
+        store
+            .create_relationship(&mut catalog, source, target, "MENTIONS", BTreeMap::new())
+            .unwrap();
+        let rel_type = catalog.rel_type_id("MENTIONS");
+
+        let page_rank = ProjectedGraph::try_from_store_with_node_filter_and_layout(
+            &store,
+            rel_type,
+            |_| true,
+            ProjectionLayout::Outgoing,
+            ProjectionMemoryBudget::unlimited(),
+        )
+        .unwrap();
+        assert_eq!(page_rank.layout(), ProjectionLayout::Outgoing);
+        assert_eq!(page_rank.edge_count(), 1);
+        assert_eq!(page_rank.csr_targets().len(), 1);
+        assert!(page_rank.csc_offsets().is_empty());
+        assert!(page_rank.incoming_sources(target).is_none());
+
+        let louvain = ProjectedGraph::try_from_store_with_node_filter_and_layout(
+            &store,
+            rel_type,
+            |_| true,
+            ProjectionLayout::Undirected,
+            ProjectionMemoryBudget::unlimited(),
+        )
+        .unwrap();
+        assert_eq!(louvain.layout(), ProjectionLayout::Undirected);
+        assert_eq!(louvain.edge_count(), 1);
+        assert_eq!(louvain.csr_targets().len(), 2);
+        assert!(louvain.csc_offsets().is_empty());
+        assert_eq!(
+            louvain.louvain_communities(LouvainOptions::default()).len(),
+            2
+        );
+
+        let bidirectional = ProjectedGraph::from_store(&store, rel_type);
+        assert!(
+            page_rank.memory_estimate().estimated_bytes
+                < bidirectional.memory_estimate().estimated_bytes
+        );
+        assert!(
+            louvain.memory_estimate().estimated_bytes
+                < bidirectional.memory_estimate().estimated_bytes
+        );
+    }
+
+    #[test]
+    fn projection_memory_admission_fails_before_adjacency_allocation() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        let source = store
+            .create_node(&mut catalog, "Memory", properties(&[("id", 1)]))
+            .unwrap();
+        let target = store
+            .create_node(&mut catalog, "Memory", properties(&[("id", 2)]))
+            .unwrap();
+        store
+            .create_relationship(&mut catalog, source, target, "MENTIONS", BTreeMap::new())
+            .unwrap();
+
+        let error = ProjectedGraph::try_from_store_with_node_filter_and_layout(
+            &store,
+            catalog.rel_type_id("MENTIONS"),
+            |_| true,
+            ProjectionLayout::Outgoing,
+            ProjectionMemoryBudget::new(NonZeroUsize::new(1).unwrap()),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.budget_bytes, 1);
+        assert_eq!(error.estimate.layout, ProjectionLayout::Outgoing);
+        assert_eq!(error.estimate.node_count, 2);
+        assert_eq!(error.estimate.relationship_count, 1);
+        assert!(error.estimate.estimated_bytes > error.budget_bytes);
+    }
 
     #[test]
     fn projects_relationships_into_csr() {

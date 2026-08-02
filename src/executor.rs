@@ -1,4 +1,6 @@
-use crate::analytics::{LouvainOptions, PageRankOptions, ProjectedGraph};
+use crate::analytics::{
+    LouvainOptions, PageRankOptions, ProjectedGraph, ProjectionLayout, ProjectionMemoryBudget,
+};
 use crate::cypher::RelationshipDirection;
 use crate::error::{Result, SkeinError};
 use crate::optimizer::PhysicalPlan;
@@ -1009,31 +1011,38 @@ fn relationship_on_create_property_value(
     }
 }
 
-fn projected_graph(
-    catalog: &Catalog,
-    store: &GraphStore,
-    node_labels: &[String],
-    rel_types: &[String],
-) -> ProjectedGraph {
-    projected_graph_with_node_filter(catalog, store, node_labels, rel_types, |_| true)
-}
-
-fn projected_graph_with_node_filter(
+fn try_projected_graph_with_node_filter(
     catalog: &Catalog,
     store: &GraphStore,
     node_labels: &[String],
     rel_types: &[String],
     include_node: impl Fn(&NodeRecord) -> bool,
-) -> ProjectedGraph {
+    layout: ProjectionLayout,
+    budget: ProjectionMemoryBudget,
+) -> Result<ProjectedGraph> {
     if node_labels.is_empty() && rel_types.is_empty() {
-        return ProjectedGraph::from_store_with_node_filter(store, None, include_node);
+        return ProjectedGraph::try_from_store_with_node_filter_and_layout(
+            store,
+            None,
+            include_node,
+            layout,
+            budget,
+        )
+        .map_err(|error| SkeinError::Execution(error.to_string()));
     }
     let label_ids = node_labels
         .iter()
         .filter_map(|label| catalog.label_id(label))
         .collect::<Vec<_>>();
     if !node_labels.is_empty() && label_ids.is_empty() {
-        return ProjectedGraph::empty();
+        return ProjectedGraph::try_from_store_labels_without_edges_with_node_filter_and_layout(
+            store,
+            &[],
+            include_node,
+            layout,
+            budget,
+        )
+        .map_err(|error| SkeinError::Execution(error.to_string()));
     }
     let rel_type_ids = rel_types
         .iter()
@@ -1041,20 +1050,32 @@ fn projected_graph_with_node_filter(
         .collect::<Vec<_>>();
     if !rel_types.is_empty() && rel_type_ids.is_empty() {
         if label_ids.is_empty() {
-            return ProjectedGraph::from_store_without_edges_with_node_filter(store, include_node);
+            return ProjectedGraph::try_from_store_without_edges_with_node_filter_and_layout(
+                store,
+                include_node,
+                layout,
+                budget,
+            )
+            .map_err(|error| SkeinError::Execution(error.to_string()));
         }
-        return ProjectedGraph::from_store_labels_without_edges_with_node_filter(
+        return ProjectedGraph::try_from_store_labels_without_edges_with_node_filter_and_layout(
             store,
             &label_ids,
             include_node,
-        );
+            layout,
+            budget,
+        )
+        .map_err(|error| SkeinError::Execution(error.to_string()));
     }
-    ProjectedGraph::from_store_labels_and_rel_types_with_node_filter(
+    ProjectedGraph::try_from_store_labels_and_rel_types_with_node_filter_and_layout(
         store,
         &label_ids,
         &rel_type_ids,
         include_node,
+        layout,
+        budget,
     )
+    .map_err(|error| SkeinError::Execution(error.to_string()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2583,7 +2604,15 @@ fn execute_bindings_with_limit(
             node_labels,
             rel_types,
         } => {
-            let graph = projected_graph(catalog, store, node_labels, rel_types);
+            let graph = try_projected_graph_with_node_filter(
+                catalog,
+                store,
+                node_labels,
+                rel_types,
+                |_| true,
+                ProjectionLayout::Outgoing,
+                ProjectionMemoryBudget::new(context.memory.blocking_operator_bytes),
+            )?;
             store.register_projected_graph(
                 name,
                 ProjectedGraphDefinition {
@@ -2623,27 +2652,32 @@ fn execute_bindings_with_limit(
                 .as_ref()
                 .map(property_filter_from_predicate)
                 .transpose()?;
+            let layout = match algorithm {
+                GraphAlgorithmKind::PageRank => ProjectionLayout::Outgoing,
+                GraphAlgorithmKind::Louvain => ProjectionLayout::Undirected,
+            };
+            let budget = ProjectionMemoryBudget::new(context.memory.blocking_operator_bytes);
             let graph = if let Some(filter) = node_visibility_filter.as_ref() {
-                projected_graph_with_node_filter(
+                try_projected_graph_with_node_filter(
                     catalog,
                     store,
                     &definition.node_labels,
                     &definition.rel_types,
                     |node| node_matches_property_filter(node, filter),
+                    layout,
+                    budget,
                 )
             } else {
-                store
-                    .projected_graph_artifact(graph_name, definition)
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        projected_graph(
-                            catalog,
-                            store,
-                            &definition.node_labels,
-                            &definition.rel_types,
-                        )
-                    })
-            };
+                try_projected_graph_with_node_filter(
+                    catalog,
+                    store,
+                    &definition.node_labels,
+                    &definition.rel_types,
+                    |_| true,
+                    layout,
+                    budget,
+                )
+            }?;
             Ok(match algorithm {
                 GraphAlgorithmKind::PageRank => graph
                     .page_rank(PageRankOptions {
@@ -7214,6 +7248,60 @@ mod tests {
             .next()
             .is_none());
         std::fs::remove_dir(memory.spill_directory).unwrap();
+    }
+
+    #[test]
+    fn graph_algorithms_admit_direction_specific_projections() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        let source = store
+            .create_node(&mut catalog, "Memory", properties([("id", Value::Int(1))]))
+            .unwrap();
+        let target = store
+            .create_node(&mut catalog, "Memory", properties([("id", Value::Int(2))]))
+            .unwrap();
+        store
+            .create_relationship(&mut catalog, source, target, "MENTIONS", BTreeMap::new())
+            .unwrap();
+        store
+            .register_projected_graph(
+                "MemoryGraph",
+                ProjectedGraphDefinition {
+                    node_labels: vec!["Memory".to_string()],
+                    rel_types: vec!["MENTIONS".to_string()],
+                },
+            )
+            .unwrap();
+        let memory = ExecutionMemoryConfig {
+            blocking_operator_bytes: NonZeroUsize::new(128).unwrap(),
+            ..spill_test_config("algorithm-admission")
+        };
+
+        for algorithm in [GraphAlgorithmKind::PageRank, GraphAlgorithmKind::Louvain] {
+            let plan = PhysicalPlan::GraphAlgorithm {
+                algorithm,
+                graph_name: "MemoryGraph".to_string(),
+                options: crate::planner::GraphAlgorithmOptions {
+                    damping: None,
+                    max_iterations: Some(2),
+                    max_levels: Some(1),
+                },
+                score_column: "score".to_string(),
+                node_visibility_predicate: None,
+            };
+            let mut external = NoExternalReadOperator;
+            let output = execute_with_row_limit_profile_and_external_and_memory(
+                &plan,
+                &mut catalog,
+                &mut store,
+                &BTreeMap::new(),
+                &mut external,
+                None,
+                &memory,
+            )
+            .unwrap();
+            assert_eq!(output.rows.len(), 2);
+        }
     }
 
     #[test]
