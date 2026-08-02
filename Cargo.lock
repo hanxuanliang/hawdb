@@ -1322,6 +1322,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "skein-fuzz"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "skein",
+]
+
+[[package]]
 name = "skein-optimizer"
 version = "0.1.0"
 dependencies = [

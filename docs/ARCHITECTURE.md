@@ -77,6 +77,7 @@ crates/
   cypher/              token cursor, parser, AST, parameter model
   storage/             embedded persistence, WAL, MVCC, indexes
   executor/            physical operators and query execution
+  fuzz/                development-only differential oracles and replay bundles
   api/                 stable embedded API facade
 ```
 
@@ -115,6 +116,14 @@ Hard limits and background admission remain owned by `DatabaseConfig`,
 These variables are runtime state only: they do not write WAL, are rejected
 inside graph transactions and read snapshots, and are meant to guide resource
 scheduling rather than change query semantics.
+
+The `skein-fuzz` package is intentionally outside the production dependency
+graph. Its first oracle applies the same deterministic Mem-shaped mutations to
+two independent `Database` instances, then compares default memo planning with
+the direct fallback selected by `max_optimizer_groups = Some(0)`. The fallback
+is a differential surface, not a correctness authority. Failures include a
+typed replay bundle; `src/nowledge_fuzz.rs` remains a readiness smoke rather
+than a semantic oracle.
 
 The current Cypher crate uses:
 

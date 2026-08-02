@@ -54,6 +54,7 @@ members = [
   "crates/cypher",
   "crates/ddl",
   "crates/executor",
+  "crates/fuzz",
   "crates/optimizer",
   "crates/plan",
   "crates/plan-cache",
