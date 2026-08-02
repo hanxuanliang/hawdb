@@ -5484,6 +5484,25 @@ impl NowledgeMemGraph {
             )
     }
 
+    /// Collects host-owned rows through the streaming consumer boundary.
+    /// This retains the legacy `NowledgeMemReadOutput` shape while avoiding a
+    /// second executor-owned result vector and enforcing payload bytes before
+    /// each row crosses into the host.
+    pub fn read_query_with_params_streaming_collect(
+        &self,
+        cypher: &str,
+        parameters: &BTreeMap<String, Value>,
+        options: &NowledgeMemReadOptions,
+    ) -> Result<NowledgeMemReadOutput> {
+        let mut rows = Vec::new();
+        let streamed =
+            self.read_query_with_params_streaming(cypher, parameters, options, |row| {
+                rows.push(row);
+                Ok(())
+            })?;
+        streamed_nowledge_mem_read_output(self.mode, rows, streamed, options)
+    }
+
     pub fn graph_rag_schema_context(
         &self,
         options: GraphRagSchemaContextOptions,
@@ -7398,6 +7417,16 @@ impl NowledgeMemEmbeddedStoreHandle {
             .read_query_with_params_streaming(cypher, parameters, options, consumer)
     }
 
+    pub fn read_query_with_params_streaming_collect(
+        &self,
+        cypher: &str,
+        parameters: &BTreeMap<String, Value>,
+        options: &NowledgeMemReadOptions,
+    ) -> Result<NowledgeMemReadOutput> {
+        self.read_store()?
+            .read_query_with_params_streaming_collect(cypher, parameters, options)
+    }
+
     pub fn graph_rag_schema_context(
         &self,
         options: GraphRagSchemaContextOptions,
@@ -8278,6 +8307,16 @@ impl NowledgeMemEmbeddedStore {
     ) -> Result<QueryStreamReport> {
         self.graph
             .read_query_with_params_streaming(cypher, parameters, options, consumer)
+    }
+
+    pub fn read_query_with_params_streaming_collect(
+        &self,
+        cypher: &str,
+        parameters: &BTreeMap<String, Value>,
+        options: &NowledgeMemReadOptions,
+    ) -> Result<NowledgeMemReadOutput> {
+        self.graph
+            .read_query_with_params_streaming_collect(cypher, parameters, options)
     }
 
     pub fn graph_rag_schema_context(
@@ -10841,6 +10880,23 @@ fn bounded_nowledge_mem_read_output(
     })
 }
 
+fn streamed_nowledge_mem_read_output(
+    mode: NowledgeMemGraphMode,
+    rows: Vec<BTreeMap<String, Value>>,
+    streamed: QueryStreamReport,
+    options: &NowledgeMemReadOptions,
+) -> Result<NowledgeMemReadOutput> {
+    let output = QueryOutput { rows };
+    let mut report = nowledge_mem_read_report(mode, &output, options, &streamed.execution_profile);
+    report.streaming = true;
+    debug_assert_eq!(report.row_count, streamed.output_rows);
+    debug_assert_eq!(
+        report.estimated_payload_bytes,
+        streamed.output_payload_bytes
+    );
+    Ok(NowledgeMemReadOutput { output, report })
+}
+
 fn estimate_query_output_payload_bytes(output: &QueryOutput) -> usize {
     output
         .rows
@@ -12848,6 +12904,46 @@ mod tests {
             serde_json::json!(covered_routes)
         );
         assert_eq!(evidence["missing_covered_routes"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn graph_read_query_streaming_collect_enforces_payload_before_host_ownership() {
+        let db = Database::new();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::ShadowReadOnly);
+        graph
+            .database_mut()
+            .query("CREATE (:Memory {id: 'mem-stream', title: 'streamed payload'})")
+            .unwrap();
+        let query = "MATCH (m:Memory {id: 'mem-stream'}) RETURN m.title AS title";
+
+        let read = graph
+            .read_query_with_params_streaming_collect(
+                query,
+                &BTreeMap::new(),
+                &NowledgeMemReadOptions {
+                    max_rows: Some(1),
+                    max_estimated_payload_bytes: Some(1024),
+                },
+            )
+            .unwrap();
+        assert!(read.report.streaming);
+        assert_eq!(read.report.row_count, 1);
+        assert_eq!(
+            read.output.rows[0].get("title"),
+            Some(&Value::String("streamed payload".to_string()))
+        );
+
+        let error = graph
+            .read_query_with_params_streaming_collect(
+                query,
+                &BTreeMap::new(),
+                &NowledgeMemReadOptions {
+                    max_rows: Some(1),
+                    max_estimated_payload_bytes: Some(1),
+                },
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("max_payload_bytes 1"));
     }
 
     #[test]
