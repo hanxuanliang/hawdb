@@ -691,6 +691,29 @@ jobs:
           grep -q '"shadow_ready"' "$root/gate.json"
           grep -q "nowledge migration gate is blocked" "$root/gate.err"
 
+  runtime-platform:
+    name: Runtime Platform (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - name: Check Tokio facade
+        run: cargo check -p skein --features tokio-runtime
+
+      - name: Test resource detection
+        run: cargo test -p skein-qos resource::tests
+
+      - name: Test Tokio adapter
+        run: cargo test -p skein-runtime-tokio
+
   concurrency-model:
     name: Concurrency Model
     runs-on: ubuntu-latest
