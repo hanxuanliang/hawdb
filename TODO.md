@@ -462,9 +462,9 @@ LanceDB for that path.
     cutover remains blocked until imported state and live mutations reach the
     same durable watermark.
 
-- [ ] Migrate the complete Mem graph read route inventory.
+- [x] Migrate the complete Mem graph read route inventory.
   - Treat the shared route catalog as an inventory, not proof of live ownership.
-  - [ ] Keep remaining route migrations query-first.
+  - [x] Keep remaining route migrations query-first.
     - Express each route's graph lookup, predicate filtering, traversal/join,
       aggregation, ordering, and pagination as readable parameterized Cypher
       statements through the embedded query runtime.
@@ -862,7 +862,7 @@ LanceDB for that path.
   - Acceptance: each migrated route executes with Skein selected and contains
     no direct Kuzu/Ladybug read in its request path.
 
-- [ ] Replace every active LanceDB search projection read.
+- [x] Replace every active LanceDB search projection read.
   - Wire Mem to Skein candidate reads for Memory, Message, Community, Entity,
     Source, and SourceChunk projections.
   - [x] Materialize the bounded Nowledge Memory nested metadata registry from
