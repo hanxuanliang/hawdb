@@ -342,8 +342,11 @@ fn sort_with_bounded_limit_lowers_to_top_n() {
         }),
     };
 
-    let (plan, trace) =
-        CascadesOptimizer::default().optimize_with_catalog(&logical, &OptimizerCatalog::default());
+    let catalog = OptimizerCatalog::new(
+        OptimizerCatalogIndexes::default(),
+        OptimizerCatalogStatistics::new([("Memory".to_string(), 1_000)], [], [], [], [], [], []),
+    );
+    let (plan, trace) = CascadesOptimizer::default().optimize_with_catalog(&logical, &catalog);
 
     assert_eq!(plan.kind(), PhysicalPlanKind::TopNExec);
     assert_eq!(trace.selected_plan_operator_counts["TopNExec"], 1);
@@ -358,5 +361,55 @@ fn sort_with_bounded_limit_lowers_to_top_n() {
     assert!(trace
         .decisions
         .iter()
-        .any(|decision| decision == "rewrite Sort + Limit to TopN: offset=5 limit=10"));
+        .any(|decision| decision.starts_with("choose TopN for bounded sort: offset=5 limit=10")));
+
+    let (fallback_plan, fallback_trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 1 })
+        .optimize_with_catalog(&logical, &catalog);
+    assert_eq!(fallback_plan.kind(), PhysicalPlanKind::TopNExec);
+    assert!(fallback_trace
+        .decisions
+        .iter()
+        .any(|decision| decision.starts_with("choose TopN for bounded sort: offset=5 limit=10")));
+}
+
+#[test]
+fn bounded_sort_keeps_full_sort_when_limit_covers_the_input() {
+    let logical = LogicalPlan::Limit {
+        offset: 0,
+        limit: Some(20),
+        input: Box::new(LogicalPlan::Sort {
+            items: vec![SortItem {
+                key: SortKey::Property {
+                    variable: "m".to_string(),
+                    property: "score".to_string(),
+                },
+                direction: SortDirection::Desc,
+            }],
+            input: Box::new(LogicalPlan::NodeScan {
+                variable: "m".to_string(),
+                label: "Memory".to_string(),
+            }),
+        }),
+    };
+    let catalog = OptimizerCatalog::new(
+        OptimizerCatalogIndexes::default(),
+        OptimizerCatalogStatistics::new([("Memory".to_string(), 10)], [], [], [], [], [], []),
+    );
+
+    let (plan, trace) = CascadesOptimizer::default().optimize_with_catalog(&logical, &catalog);
+
+    assert_eq!(plan.kind(), PhysicalPlanKind::LimitExec);
+    assert_eq!(trace.selected_plan_operator_counts["SortExec"], 1);
+    assert_eq!(trace.selected_plan_operator_counts["LimitExec"], 1);
+    assert!(!trace.selected_plan_operator_counts.contains_key("TopNExec"));
+    assert!(trace.decisions.iter().any(|decision| {
+        decision.starts_with("keep Sort + Limit for bounded sort: offset=0 limit=20")
+    }));
+
+    let (fallback_plan, fallback_trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 1 })
+        .optimize_with_catalog(&logical, &catalog);
+    assert_eq!(fallback_plan.kind(), PhysicalPlanKind::LimitExec);
+    assert!(fallback_trace.decisions.iter().any(|decision| {
+        decision.starts_with("keep Sort + Limit for bounded sort: offset=0 limit=20")
+    }));
 }

@@ -266,13 +266,14 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             catalog: memory_seed_entity_mentions_catalog(),
             expected_cost: PlanCost {
                 estimated_rows: 1,
-                cost: 19,
+                cost: 18,
             },
             fingerprint_contains: "IndexNodeSeek",
             decision_contains: &[
                 "choose IndexNodeSeek for Memory.id",
                 "estimate AdjacencyExpand",
-                "selected physical plan cost: estimated_rows=1 cost=19",
+                "choose TopN for bounded sort",
+                "selected physical plan cost: estimated_rows=1 cost=18",
             ],
         },
         OptimizerSmokeCase {
@@ -346,6 +347,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 "choose IndexNodeSeek for Source.id",
                 "estimate AdjacencyExpand for Source-[:SOURCED_FROM*1..1]->Memory",
                 "estimate AdjacencyExpand for Memory-[:HAS_LABEL*1..1]->Label",
+                "keep Sort + Limit for bounded sort",
                 "selected physical plan cost: estimated_rows=10 cost=1884",
             ],
         },
@@ -355,15 +357,16 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             catalog: source_memory_entity_label_workload_catalog(),
             expected_cost: PlanCost {
                 estimated_rows: 25,
-                cost: 3093,
+                cost: 3088,
             },
-            fingerprint_contains: "SortExec",
+            fingerprint_contains: "TopNExec",
             decision_contains: &[
                 "choose IndexNodeSeek for Source.id",
                 "estimate AdjacencyExpand for Source-[:SOURCED_FROM*1..1]->Memory",
                 "estimate AdjacencyExpand for Memory-[:MENTIONS*1..1]->Entity",
                 "estimate AdjacencyExpand for Memory-[:HAS_LABEL*1..1]->Label",
-                "selected physical plan cost: estimated_rows=25 cost=3093",
+                "choose TopN for bounded sort",
+                "selected physical plan cost: estimated_rows=25 cost=3088",
             ],
         },
         OptimizerSmokeCase {
@@ -372,14 +375,15 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             catalog: source_entity_community_export_workload_catalog(),
             expected_cost: PlanCost {
                 estimated_rows: 10,
-                cost: 1074,
+                cost: 986,
             },
-            fingerprint_contains: "SortExec",
+            fingerprint_contains: "TopNExec",
             decision_contains: &[
                 "choose IndexNodeSeek for Source.id",
                 "estimate AdjacencyExpand for Source-[:SOURCED_FROM*1..1]->Memory",
                 "estimate AdjacencyExpand for Memory-[:MENTIONS*1..1]->Entity",
-                "selected physical plan cost: estimated_rows=10 cost=1074",
+                "choose TopN for bounded sort",
+                "selected physical plan cost: estimated_rows=10 cost=986",
             ],
         },
         OptimizerSmokeCase {
@@ -433,14 +437,15 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             catalog: skill_thread_source_provenance_workload_catalog(),
             expected_cost: PlanCost {
                 estimated_rows: 2,
-                cost: 44,
+                cost: 42,
             },
             fingerprint_contains: "COMPACTS_TO",
             decision_contains: &[
                 "choose IndexNodeSeek for Skill.id",
                 "estimate AdjacencyExpand for Skill-[:SYNTHESIZED_FROM*1..1]->Memory",
                 "estimate AdjacencyExpand for Memory-[:COMPACTS_TO*1..1]->Thread",
-                "selected physical plan cost: estimated_rows=2 cost=44",
+                "choose TopN for bounded sort",
+                "selected physical plan cost: estimated_rows=2 cost=42",
             ],
         },
         OptimizerSmokeCase {
@@ -449,14 +454,15 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             catalog: community_member_memory_evidence_workload_catalog(),
             expected_cost: PlanCost {
                 estimated_rows: 1,
-                cost: 12,
+                cost: 11,
             },
             fingerprint_contains: "BELONGS_TO",
             decision_contains: &[
                 "choose IndexNodeSeek for Community.id",
                 "estimate AdjacencyExpand for Community-[:BELONGS_TO*1..1]->Entity",
                 "estimate AdjacencyExpand for Entity-[:MENTIONS*1..1]->Memory",
-                "selected physical plan cost: estimated_rows=1 cost=12",
+                "choose TopN for bounded sort",
+                "selected physical plan cost: estimated_rows=1 cost=11",
             ],
         },
         OptimizerSmokeCase {
@@ -465,12 +471,13 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             catalog: entity_bridge_span_aggregate_catalog(),
             expected_cost: PlanCost {
                 estimated_rows: 10,
-                cost: 145_514,
+                cost: 143_734,
             },
             fingerprint_contains: "count(distinct 2:e2.12:community_id)",
             decision_contains: &[
                 "estimate AdjacencyExpand for Entity-[:RELATES_TO*1..1]->Entity",
-                "selected physical plan cost: estimated_rows=10 cost=145514",
+                "choose TopN for bounded sort",
+                "selected physical plan cost: estimated_rows=10 cost=143734",
             ],
         },
         OptimizerSmokeCase {

@@ -279,19 +279,19 @@ pub(super) fn estimate_physical_plan_cost(
             ..
         } => {
             let input_cost = estimate_physical_plan_cost(input, catalog);
-            let retained_rows = offset.saturating_add(*limit) as u64;
+            let retained_rows =
+                (offset.saturating_add(*limit) as u64).min(input_cost.estimated_rows);
             let rows = input_cost
                 .estimated_rows
                 .saturating_sub(*offset as u64)
                 .min(*limit as u64);
-            let comparisons_per_row = retained_rows.max(2).ilog2().max(1) as u64;
+            let heap_depth = retained_rows.max(2).ilog2().max(1) as u64;
+            let selection_cost = input_cost
+                .estimated_rows
+                .saturating_add(retained_rows.saturating_mul(heap_depth));
             PlanCost {
                 estimated_rows: rows,
-                cost: input_cost.cost.saturating_add(
-                    input_cost
-                        .estimated_rows
-                        .saturating_mul(comparisons_per_row),
-                ),
+                cost: input_cost.cost.saturating_add(selection_cost),
             }
         }
         PhysicalPlan::LimitExec {
@@ -577,19 +577,17 @@ pub(super) fn estimate_physical_plan_cost_breakdown(
             ..
         } => {
             let input_cost = estimate_physical_plan_cost_breakdown(input, catalog);
-            let retained_rows = offset.saturating_add(*limit) as u64;
+            let retained_rows =
+                (offset.saturating_add(*limit) as u64).min(input_cost.estimated_rows);
             let rows = input_cost
                 .estimated_rows
                 .saturating_sub(*offset as u64)
                 .min(*limit as u64);
-            let comparisons_per_row = retained_rows.max(2).ilog2().max(1) as u64;
-            input_cost.with_cpu(
-                rows,
-                input_cost
-                    .estimated_rows
-                    .saturating_mul(comparisons_per_row),
-                0,
-            )
+            let heap_depth = retained_rows.max(2).ilog2().max(1) as u64;
+            let selection_cost = input_cost
+                .estimated_rows
+                .saturating_add(retained_rows.saturating_mul(heap_depth));
+            input_cost.with_cpu(rows, selection_cost, 0)
         }
         PhysicalPlan::LimitExec {
             offset,

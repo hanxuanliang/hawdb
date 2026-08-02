@@ -14,7 +14,7 @@ use super::{
 };
 use crate::{GroupId, Memo, OptimizerContext, StageTrace};
 use skein_core::Value;
-use skein_plan::{GraphExpansionBudget, LogicalPlan};
+use skein_plan::{GraphExpansionBudget, LogicalPlan, SortItem};
 use std::collections::BTreeMap;
 
 mod access;
@@ -157,6 +157,45 @@ fn best_physical(
         .first_expression()
         .expect("memo group should contain at least one expression")
         .to_physical(memo, catalog, decisions, stage_events)
+}
+
+fn select_bounded_sort_plan(
+    items: Vec<SortItem>,
+    offset: usize,
+    limit: usize,
+    input: PhysicalPlan,
+    catalog: &OptimizerCatalog,
+    decisions: &mut Vec<String>,
+) -> PhysicalPlan {
+    let top_n = PhysicalPlan::TopNExec {
+        items: items.clone(),
+        offset,
+        limit,
+        input: Box::new(input.clone()),
+    };
+    let sort_limit = PhysicalPlan::LimitExec {
+        offset,
+        limit: Some(limit),
+        input: Box::new(PhysicalPlan::SortExec {
+            items,
+            input: Box::new(input),
+        }),
+    };
+    let top_n_cost = estimate_physical_plan_cost(&top_n, catalog);
+    let sort_limit_cost = estimate_physical_plan_cost(&sort_limit, catalog);
+    if top_n_cost.cost < sort_limit_cost.cost {
+        decisions.push(format!(
+            "choose TopN for bounded sort: offset={offset} limit={limit} top_n_cost={} sort_limit_cost={}",
+            top_n_cost.cost, sort_limit_cost.cost
+        ));
+        top_n
+    } else {
+        decisions.push(format!(
+            "keep Sort + Limit for bounded sort: offset={offset} limit={limit} top_n_cost={} sort_limit_cost={}",
+            top_n_cost.cost, sort_limit_cost.cost
+        ));
+        sort_limit
+    }
 }
 
 fn stage_rule_counts(stage_events: &[StageTrace]) -> (usize, usize) {
@@ -462,21 +501,8 @@ impl GroupExpr {
                 let LogicalPlan::Sort { items, .. } = input.as_ref() else {
                     unreachable!("guard requires a sort input");
                 };
-                decisions.push(format!(
-                    "rewrite Sort + Limit to TopN: offset={offset} limit={limit}"
-                ));
-                PhysicalPlan::TopNExec {
-                    items: items.clone(),
-                    offset: *offset,
-                    limit: *limit,
-                    input: Box::new(best_physical(
-                        memo,
-                        self.children[0],
-                        catalog,
-                        decisions,
-                        stage_events,
-                    )),
-                }
+                let input = best_physical(memo, self.children[0], catalog, decisions, stage_events);
+                select_bounded_sort_plan(items.clone(), *offset, *limit, input, catalog, decisions)
             }
             LogicalPlan::Limit { offset, limit, .. } => PhysicalPlan::LimitExec {
                 offset: *offset,
@@ -905,20 +931,8 @@ fn logical_to_physical_direct(
             input,
         } => {
             if let (Some(limit), LogicalPlan::Sort { items, input }) = (limit, input.as_ref()) {
-                decisions.push(format!(
-                    "rewrite Sort + Limit to TopN: offset={offset} limit={limit}"
-                ));
-                PhysicalPlan::TopNExec {
-                    items: items.clone(),
-                    offset: *offset,
-                    limit: *limit,
-                    input: Box::new(logical_to_physical_direct(
-                        input,
-                        catalog,
-                        decisions,
-                        stage_events,
-                    )),
-                }
+                let input = logical_to_physical_direct(input, catalog, decisions, stage_events);
+                select_bounded_sort_plan(items.clone(), *offset, *limit, input, catalog, decisions)
             } else {
                 PhysicalPlan::LimitExec {
                     offset: *offset,
