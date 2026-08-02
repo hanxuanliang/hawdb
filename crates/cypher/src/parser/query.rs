@@ -686,6 +686,31 @@ impl Parser<'_> {
                 aggregate_with: Some(WithAggregateProjection { items }),
             });
         }
+        if self.next_keyword_is("CASE") {
+            let items = self.parse_return_items()?;
+            let has_aggregate = items.iter().any(|item| {
+                matches!(
+                    item.expression,
+                    ReturnExpression::CountAll
+                        | ReturnExpression::CountProperty { .. }
+                        | ReturnExpression::CountVariable { .. }
+                        | ReturnExpression::MinProperty { .. }
+                        | ReturnExpression::MaxProperty { .. }
+                        | ReturnExpression::AvgProperty { .. }
+                        | ReturnExpression::CollectProperty { .. }
+                        | ReturnExpression::CollectVariable { .. }
+                )
+            });
+            return Ok(ParsedWithClause {
+                optional_with: None,
+                collect_with: None,
+                distinct_with: None,
+                with_projection: (!has_aggregate).then_some(WithProjection {
+                    items: items.clone(),
+                }),
+                aggregate_with: has_aggregate.then_some(WithAggregateProjection { items }),
+            });
+        }
         let group_variable = self.parse_ident()?;
         if self.consume_char('.') {
             let first_item = ReturnItem {

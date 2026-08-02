@@ -127,6 +127,26 @@ fn grouped_count_aggregates_by_projected_property() {
 }
 
 #[test]
+fn aggregate_with_can_count_its_grouped_rows() {
+    let mut db = Database::new();
+    db.query("CREATE (:Thread {id: 'one', thread_id: 'shared', space_id: ''})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'two', thread_id: 'shared', space_id: ''})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'three', thread_id: 'other', space_id: ''})")
+        .unwrap();
+
+    let output = db
+        .query(
+            "MATCH (t:Thread) WITH CASE WHEN t.space_id IS NULL OR t.space_id = '' THEN 'default' ELSE t.space_id END AS space_id, t.thread_id AS thread_id, MAX(t.id) AS representative_id RETURN COUNT(*) AS total",
+        )
+        .unwrap();
+
+    assert_eq!(output.rows.len(), 1);
+    assert_eq!(output.rows[0].get("total"), Some(&Value::Int(2)));
+}
+
+#[test]
 fn grouped_count_aggregates_relationship_matches() {
     let mut db = Database::new();
     db.query(

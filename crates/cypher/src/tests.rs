@@ -2074,6 +2074,28 @@ fn parses_normalized_space_case_predicates() {
 }
 
 #[test]
+fn parses_normalized_space_case_as_first_aggregate_with_item() {
+    let statement = parse(
+        "MATCH (t:Thread) WITH CASE WHEN t.space_id IS NULL OR t.space_id = '' THEN 'default' ELSE t.space_id END AS space_id, t.thread_id AS thread_id, MAX(t.updated_at) AS last_activity RETURN space_id, thread_id, last_activity",
+    )
+    .unwrap();
+    let Statement::MatchReturn(query) = statement else {
+        panic!("expected match return");
+    };
+    let aggregate_with = query.aggregate_with.expect("expected aggregate WITH");
+    assert_eq!(aggregate_with.items.len(), 3);
+    assert!(matches!(
+        aggregate_with.items[0].expression,
+        ReturnExpression::DefaultIfNullOrEq { .. }
+    ));
+    assert_eq!(aggregate_with.items[0].alias.as_deref(), Some("space_id"));
+    assert!(matches!(
+        aggregate_with.items[2].expression,
+        ReturnExpression::MaxProperty { .. }
+    ));
+}
+
+#[test]
 fn parses_count_return_items() {
     let statement = parse(
         "MATCH (m:Memory) RETURN count(*) AS total, count(m) AS memories, min(m.score), max(m.score), avg(m.score)",

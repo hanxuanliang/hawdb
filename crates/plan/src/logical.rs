@@ -2416,11 +2416,24 @@ fn validate_aggregate_with_match_return(
         .as_ref()
         .map(|lookup| BTreeSet::from([lookup.variable.clone()]))
         .unwrap_or_default();
+    let has_post_aggregate = query
+        .returns
+        .iter()
+        .any(|item| is_aggregate_return_expression(&item.expression));
+    if has_post_aggregate
+        && (query.post_with_match.is_some()
+            || !query.order_by.is_empty()
+            || query.returns.len() != 1
+            || !matches!(query.returns[0].expression, ReturnExpression::CountAll))
+    {
+        return Err(SkeinError::Semantic(
+            "WITH aggregate post-aggregation supports only one COUNT(*) projection without MATCH or ORDER BY"
+                .to_string(),
+        ));
+    }
     for item in &query.returns {
         if is_aggregate_return_expression(&item.expression) {
-            return Err(SkeinError::Semantic(
-                "WITH aggregate RETURN currently supports only projected columns".to_string(),
-            ));
+            continue;
         }
         if let Some(lookup) = &query.post_with_match
             && matches!(&item.expression, ReturnExpression::Variable(variable) if variable == &lookup.variable)
@@ -2628,6 +2641,40 @@ fn plan_aggregate_with_match_return(
             predicate: plan_with_alias_filter(filter, parameters)?,
             input: Box::new(input),
         };
+    }
+    if query
+        .returns
+        .iter()
+        .any(|item| is_aggregate_return_expression(&item.expression))
+    {
+        input = LogicalPlan::Aggregate {
+            group_keys: Vec::new(),
+            items: query
+                .returns
+                .iter()
+                .map(|item| plan_aggregation(&BTreeSet::new(), item))
+                .collect::<Result<Vec<_>>>()?,
+            input: Box::new(input),
+        };
+        let offset = query
+            .offset
+            .as_ref()
+            .map(|offset| bind_pagination_value(offset, parameters, "offset"))
+            .transpose()?
+            .unwrap_or(0);
+        let limit = query
+            .limit
+            .as_ref()
+            .map(|limit| bind_pagination_value(limit, parameters, "limit"))
+            .transpose()?;
+        if offset > 0 || limit.is_some() {
+            input = LogicalPlan::Limit {
+                offset,
+                limit,
+                input: Box::new(input),
+            };
+        }
+        return Ok(input);
     }
     if !query.order_by.is_empty() {
         input = LogicalPlan::Sort {
