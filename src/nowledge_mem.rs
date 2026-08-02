@@ -26,8 +26,8 @@ use crate::{
     KnowledgeMemoryLifecycleBatchRequest, KnowledgeRetrievalOutput, KnowledgeRetrievalRequest,
     KnowledgeSourceCandidateScanOutput, KnowledgeSourceCandidateScanRequest, LocalQosPolicy,
     LocalQosScheduler, LocalQosState, NowledgeGraphStatement, PlanCacheLookup, QueryOutput,
-    ReadExecutionProfile, Result, ScheduledSearchProjectionCatchUpReport, SearchIndex,
-    SearchProjectionCatchUpReport, SearchProjectionChangefeedReadiness,
+    ReadExecutionProfile, Result, ScheduledSearchProjectionCatchUpReport, SearchDocument,
+    SearchIndex, SearchProjectionCatchUpReport, SearchProjectionChangefeedReadiness,
     SearchProjectionChangefeedStatus, SearchProjectionDelta, SearchProjectionDeltaReport,
     SearchProjectionFreshness, SearchProjectionGraphDeltaRequest, SearchProjectionMutationId,
     SearchProjectionProbeOptions, SearchResultSet, SkeinError, SlowQueryLogRecordSummary,
@@ -7146,6 +7146,30 @@ impl NowledgeMemEmbeddedStoreHandle {
     ) -> Result<NowledgeMemQueryOutput> {
         self.write_store()?
             .query_with_params_with_report(cypher, parameters)
+    }
+
+    /// Hydrates an explicitly bounded set of search-projection documents.
+    ///
+    /// Candidate search intentionally returns compact identities. Embedded
+    /// hosts use this method for projection-owned payloads, such as source
+    /// chunks, that have no authoritative graph node to hydrate from.
+    pub fn search_projection_documents(
+        &self,
+        document_ids: &[String],
+        max_documents: usize,
+    ) -> Result<Vec<SearchDocument>> {
+        if document_ids.len() > max_documents {
+            return Err(SkeinError::Execution(format!(
+                "search projection document hydration requested {} rows, limit is {max_documents}",
+                document_ids.len()
+            )));
+        }
+        let store = self.read_store()?;
+        let projection = store.require_search_projection()?;
+        Ok(document_ids
+            .iter()
+            .filter_map(|id| projection.index().document(id).cloned())
+            .collect())
     }
 
     pub fn knowledge_source_candidates(
@@ -15879,6 +15903,46 @@ mod tests {
             true
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn embedded_handle_hydrates_only_explicitly_bounded_search_documents() {
+        let root = unique_nowledge_mem_test_dir("bounded_search_document_hydration");
+        let mut index = SearchIndex::open(&root).unwrap();
+        index
+            .upsert_projection_row(SearchProjectionRow {
+                kind: SearchProjectionKind::SourceChunk,
+                external_id: "source-1-chunk-0".to_string(),
+                title: "Introduction".to_string(),
+                body: "bounded projection payload".to_string(),
+                embedding: None,
+                source_id: Some("source-1".to_string()),
+                metadata: BTreeMap::from([("chunk_index".to_string(), "0".to_string())]),
+            })
+            .unwrap();
+        let graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::ShadowReadOnly);
+        let handle = NowledgeMemEmbeddedStoreHandle::new(NowledgeMemEmbeddedStore::new(
+            graph,
+            Some(NowledgeMemSearchProjection::from_index(index)),
+        ));
+
+        let documents = handle
+            .search_projection_documents(&["source_chunk:source-1-chunk-0".to_string()], 1)
+            .unwrap();
+
+        assert_eq!(documents.len(), 1);
+        assert_eq!(documents[0].content, "bounded projection payload");
+        assert_eq!(documents[0].metadata["chunk_index"], "0");
+        assert!(handle
+            .search_projection_documents(
+                &[
+                    "source_chunk:source-1-chunk-0".to_string(),
+                    "source_chunk:source-1-chunk-1".to_string(),
+                ],
+                1,
+            )
+            .is_err());
     }
 
     #[test]
