@@ -36,6 +36,34 @@ fn filters_with_null_predicates() {
 }
 
 #[test]
+fn nullable_predicates_preserve_three_valued_logic() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 1, optional_note: 'present'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 2, optional_note: 'other'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 3, optional_note: null})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 4})").unwrap();
+
+    let matching = db
+        .query("MATCH (m:Memory) WHERE m.optional_note = 'present' RETURN m.id AS id")
+        .unwrap();
+    let negated = db
+        .query("MATCH (m:Memory) WHERE NOT (m.optional_note = 'present') RETURN m.id AS id")
+        .unwrap();
+    let nulls = db
+        .query("MATCH (m:Memory) WHERE m.optional_note IS NULL RETURN m.id AS id")
+        .unwrap();
+
+    assert_eq!(matching.rows.len(), 1);
+    assert_eq!(negated.rows.len(), 1);
+    assert_eq!(nulls.rows.len(), 2);
+    assert_eq!(matching.rows[0].get("id"), Some(&Value::Int(1)));
+    assert_eq!(negated.rows[0].get("id"), Some(&Value::Int(2)));
+}
+
+#[test]
 fn filters_with_literal_and_parameterized_in_predicates() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 1, title: 'One'})").unwrap();

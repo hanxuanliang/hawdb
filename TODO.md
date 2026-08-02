@@ -1248,6 +1248,10 @@ contract.
   - [x] Expose a deterministic library-only query fuzz harness for Nowledge
     graph-read shapes so CI can exercise parser, query runtime, scan pruning,
     plan-cache reporting, and system hints without production dual-read compare.
+  - [x] Replace the bounded reference-executor path with a SQLancer-style
+    state-aware generator and Graph TLP oracle so shared planner and executor
+    bugs can be checked without maintaining a second Cypher execution engine;
+    retain oracle-specific replay and reduction.
   - [x] Add a library-first Skein read runtime entrypoint for the low-risk
     `/graph/overview` memory ranking shape, returning typed rows and bounded
     route execution evidence without request-time dual-read compare.
@@ -2188,6 +2192,19 @@ contract.
     readiness area map so cutover gates can require real route, bounded
     expansion, and metadata-filtered search evidence without production CLI
     wrappers.
+
+- [ ] Expand the offline optimizer correctness fuzzing after the Graph TLP
+   baseline.
+   - [ ] Replace the remaining 12 fixed DQP query shapes with schema-aware typed
+     Cypher AST generation while keeping generated queries inside supported
+     production semantics.
+   - [ ] Add graph-isomorphism and direction-reversal metamorphic oracles with
+     explicit applicability guards and independent failure signatures.
+   - [ ] Extend oracle-specific reduction from graph mutations to query AST
+     nodes without accepting setup, parse, or execution errors as reproduction
+     of a semantic mismatch.
+   - [ ] Add NoREC only after the supported Cypher subset can express the
+     general row-wise boolean-count relation without a fuzz-only executor.
 
 ## P2: Deferred Capabilities
 

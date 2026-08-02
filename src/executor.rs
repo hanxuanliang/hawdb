@@ -6873,21 +6873,114 @@ fn evaluate_predicate(
     store: &GraphStore,
     binding: &Binding,
 ) -> bool {
+    evaluate_predicate_truth(predicate, catalog, store, binding).is_true()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PredicateTruth {
+    True,
+    False,
+    Unknown,
+}
+
+impl PredicateTruth {
+    const fn from_bool(value: bool) -> Self {
+        if value {
+            Self::True
+        } else {
+            Self::False
+        }
+    }
+
+    const fn is_true(self) -> bool {
+        matches!(self, Self::True)
+    }
+
+    const fn not(self) -> Self {
+        match self {
+            Self::True => Self::False,
+            Self::False => Self::True,
+            Self::Unknown => Self::Unknown,
+        }
+    }
+
+    const fn and(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::False, _) | (_, Self::False) => Self::False,
+            (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
+            (Self::True, Self::True) => Self::True,
+        }
+    }
+
+    const fn or(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::True, _) | (_, Self::True) => Self::True,
+            (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
+            (Self::False, Self::False) => Self::False,
+        }
+    }
+}
+
+fn predicate_comparison_truth(
+    actual: Option<&Value>,
+    expected: &Value,
+    compare: impl FnOnce(&Value, &Value) -> bool,
+) -> PredicateTruth {
+    match actual {
+        Some(actual) if actual != &Value::Null && expected != &Value::Null => {
+            PredicateTruth::from_bool(compare(actual, expected))
+        }
+        _ => PredicateTruth::Unknown,
+    }
+}
+
+fn predicate_in_truth(actual: Option<&Value>, values: &[Value]) -> PredicateTruth {
+    let Some(actual) = actual.filter(|actual| *actual != &Value::Null) else {
+        return PredicateTruth::Unknown;
+    };
+    if values
+        .iter()
+        .any(|value| value != &Value::Null && value == actual)
+    {
+        PredicateTruth::True
+    } else if values.iter().any(|value| value == &Value::Null) {
+        PredicateTruth::Unknown
+    } else {
+        PredicateTruth::False
+    }
+}
+
+fn evaluate_predicate_truth(
+    predicate: &Predicate,
+    catalog: &Catalog,
+    store: &GraphStore,
+    binding: &Binding,
+) -> PredicateTruth {
     match predicate {
-        Predicate::And(predicates) => predicates
-            .iter()
-            .all(|predicate| evaluate_predicate(predicate, catalog, store, binding)),
-        Predicate::Or(predicates) => predicates
-            .iter()
-            .any(|predicate| evaluate_predicate(predicate, catalog, store, binding)),
-        Predicate::Not(predicate) => !evaluate_predicate(predicate, catalog, store, binding),
-        Predicate::ConstantBool(value) => *value,
+        Predicate::And(predicates) => {
+            predicates
+                .iter()
+                .fold(PredicateTruth::True, |truth, predicate| {
+                    truth.and(evaluate_predicate_truth(predicate, catalog, store, binding))
+                })
+        }
+        Predicate::Or(predicates) => {
+            predicates
+                .iter()
+                .fold(PredicateTruth::False, |truth, predicate| {
+                    truth.or(evaluate_predicate_truth(predicate, catalog, store, binding))
+                })
+        }
+        Predicate::Not(predicate) => {
+            evaluate_predicate_truth(predicate, catalog, store, binding).not()
+        }
+        Predicate::ConstantBool(value) => PredicateTruth::from_bool(*value),
         Predicate::RelationshipExists {
             variable,
             rel_type,
             direction,
             target_label,
-        } => relationship_exists(
+        } => PredicateTruth::from_bool(relationship_exists(
             catalog,
             store,
             binding,
@@ -6895,13 +6988,13 @@ fn evaluate_predicate(
             rel_type,
             *direction,
             target_label,
-        ),
+        )),
         Predicate::BoundRelationshipExists {
             source_variable,
             rel_type,
             direction,
             target_variable,
-        } => bound_relationship_exists(
+        } => PredicateTruth::from_bool(bound_relationship_exists(
             catalog,
             store,
             binding,
@@ -6909,167 +7002,182 @@ fn evaluate_predicate(
             rel_type,
             *direction,
             target_variable,
-        ),
-        Predicate::IdEq { variable, value } => binding_id(binding, variable)
-            .map(|actual| actual == *value)
-            .unwrap_or(false),
-        Predicate::IdNotEq { variable, value } => binding_id(binding, variable)
-            .map(|actual| actual != *value)
-            .unwrap_or(false),
+        )),
+        Predicate::IdEq { variable, value } => {
+            let actual = binding_id(binding, variable);
+            predicate_comparison_truth(actual.as_ref(), value, |actual, expected| {
+                actual == expected
+            })
+        }
+        Predicate::IdNotEq { variable, value } => {
+            let actual = binding_id(binding, variable);
+            predicate_comparison_truth(actual.as_ref(), value, |actual, expected| {
+                actual != expected
+            })
+        }
         Predicate::IdCompare {
             variable,
             op,
             value,
-        } => binding_id(binding, variable)
-            .map(|actual| compare_property_values(&actual, *op, value))
-            .unwrap_or(false),
-        Predicate::IdIn { variable, values } => binding_id(binding, variable)
-            .map(|actual| values.iter().any(|value| value == &actual))
-            .unwrap_or(false),
+        } => {
+            let actual = binding_id(binding, variable);
+            predicate_comparison_truth(actual.as_ref(), value, |actual, expected| {
+                compare_property_values(actual, *op, expected)
+            })
+        }
+        Predicate::IdIn { variable, values } => {
+            let actual = binding_id(binding, variable);
+            predicate_in_truth(actual.as_ref(), values)
+        }
         Predicate::PropertyEq {
             variable,
             property,
             value,
-        } => binding_property(binding, variable, property)
-            .map(|actual| actual == value)
-            .unwrap_or(false),
+        } => predicate_comparison_truth(
+            binding_property(binding, variable, property),
+            value,
+            |actual, expected| actual == expected,
+        ),
         Predicate::PropertyNotEq {
             variable,
             property,
             value,
-        } => binding_property(binding, variable, property)
-            .map(|actual| actual != value)
-            .unwrap_or(false),
+        } => predicate_comparison_truth(
+            binding_property(binding, variable, property),
+            value,
+            |actual, expected| actual != expected,
+        ),
         Predicate::PropertyCompare {
             variable,
             property,
             op,
             value,
-        } => binding_property(binding, variable, property)
-            .map(|actual| compare_property_values(actual, *op, value))
-            .unwrap_or(false),
+        } => predicate_comparison_truth(
+            binding_property(binding, variable, property),
+            value,
+            |actual, expected| compare_property_values(actual, *op, expected),
+        ),
         Predicate::ExpressionEq { expression, value } => {
-            match (
-                predicate_expression_value(expression, catalog, binding),
-                predicate_expression_value(value, catalog, binding),
-            ) {
-                (Some(actual), Some(expected)) => actual == expected,
-                _ => false,
-            }
+            let actual = predicate_expression_value(expression, catalog, binding);
+            let expected = predicate_expression_value(value, catalog, binding);
+            predicate_comparison_truth(
+                actual.as_ref(),
+                expected.as_ref().unwrap_or(&Value::Null),
+                |actual, expected| actual == expected,
+            )
         }
         Predicate::ExpressionNotEq { expression, value } => {
-            match (
-                predicate_expression_value(expression, catalog, binding),
-                predicate_expression_value(value, catalog, binding),
-            ) {
-                (Some(actual), Some(expected)) => actual != expected,
-                _ => false,
-            }
+            let actual = predicate_expression_value(expression, catalog, binding);
+            let expected = predicate_expression_value(value, catalog, binding);
+            predicate_comparison_truth(
+                actual.as_ref(),
+                expected.as_ref().unwrap_or(&Value::Null),
+                |actual, expected| actual != expected,
+            )
         }
         Predicate::ExpressionCompare {
             expression,
             op,
             value,
         } => {
-            match (
-                predicate_expression_value(expression, catalog, binding),
-                predicate_expression_value(value, catalog, binding),
-            ) {
-                (Some(actual), Some(expected)) => compare_property_values(&actual, *op, &expected),
-                _ => false,
-            }
+            let actual = predicate_expression_value(expression, catalog, binding);
+            let expected = predicate_expression_value(value, catalog, binding);
+            predicate_comparison_truth(
+                actual.as_ref(),
+                expected.as_ref().unwrap_or(&Value::Null),
+                |actual, expected| compare_property_values(actual, *op, expected),
+            )
         }
         Predicate::ExpressionContains { expression, value } => {
             match (
                 predicate_expression_value(expression, catalog, binding),
                 predicate_expression_value(value, catalog, binding),
             ) {
-                (Some(Value::String(actual)), Some(Value::String(expected))) => {
-                    actual.contains(&expected)
+                (Some(Value::Null) | None, _) | (_, Some(Value::Null) | None) => {
+                    PredicateTruth::Unknown
                 }
-                _ => false,
+                (Some(Value::String(actual)), Some(Value::String(expected))) => {
+                    PredicateTruth::from_bool(actual.contains(&expected))
+                }
+                _ => PredicateTruth::False,
             }
         }
         Predicate::PropertyListContains {
             variable,
             property,
             value,
-        } => binding_property(binding, variable, property)
-            .and_then(|actual| match actual {
-                Value::List(values) => Some(values.iter().any(|actual| actual == value)),
-                _ => None,
-            })
-            .unwrap_or(false),
+        } => match binding_property(binding, variable, property) {
+            None | Some(Value::Null) => PredicateTruth::Unknown,
+            Some(Value::List(values)) => {
+                PredicateTruth::from_bool(values.iter().any(|actual| actual == value))
+            }
+            Some(_) => PredicateTruth::False,
+        },
         Predicate::PropertyListContainsLower {
             variable,
             property,
             value,
-        } => binding_property(binding, variable, property)
-            .and_then(|actual| match actual {
-                Value::List(values) => Some(values.iter().any(|actual| match actual {
+        } => match binding_property(binding, variable, property) {
+            None | Some(Value::Null) => PredicateTruth::Unknown,
+            Some(Value::List(values)) => {
+                PredicateTruth::from_bool(values.iter().any(|actual| match actual {
                     Value::String(actual) => actual.to_lowercase().contains(value),
                     _ => false,
-                })),
-                _ => None,
-            })
-            .unwrap_or(false),
+                }))
+            }
+            Some(_) => PredicateTruth::False,
+        },
         Predicate::PropertyContains {
             variable,
             property,
             value,
-        } => binding_property(binding, variable, property)
-            .and_then(|actual| match actual {
-                Value::String(actual) => Some(actual.contains(value)),
-                _ => None,
-            })
-            .unwrap_or(false),
+        } => match binding_property(binding, variable, property) {
+            None | Some(Value::Null) => PredicateTruth::Unknown,
+            Some(Value::String(actual)) => PredicateTruth::from_bool(actual.contains(value)),
+            Some(_) => PredicateTruth::False,
+        },
         Predicate::PropertyStartsWith {
             variable,
             property,
             value,
-        } => binding_property(binding, variable, property)
-            .and_then(|actual| match actual {
-                Value::String(actual) => Some(actual.starts_with(value)),
-                _ => None,
-            })
-            .unwrap_or(false),
+        } => match binding_property(binding, variable, property) {
+            None | Some(Value::Null) => PredicateTruth::Unknown,
+            Some(Value::String(actual)) => PredicateTruth::from_bool(actual.starts_with(value)),
+            Some(_) => PredicateTruth::False,
+        },
         Predicate::PropertyEndsWith {
             variable,
             property,
             value,
-        } => binding_property(binding, variable, property)
-            .and_then(|actual| match actual {
-                Value::String(actual) => Some(actual.ends_with(value)),
-                _ => None,
-            })
-            .unwrap_or(false),
+        } => match binding_property(binding, variable, property) {
+            None | Some(Value::Null) => PredicateTruth::Unknown,
+            Some(Value::String(actual)) => PredicateTruth::from_bool(actual.ends_with(value)),
+            Some(_) => PredicateTruth::False,
+        },
         Predicate::PropertyRegexMatch {
             variable,
             property,
             pattern,
-        } => binding_property(binding, variable, property)
-            .and_then(|actual| match actual {
-                Value::String(actual) => Some(pattern.is_match(actual)),
-                _ => None,
-            })
-            .unwrap_or(false),
-        Predicate::PropertyIsNull { variable, property } => {
+        } => match binding_property(binding, variable, property) {
+            None | Some(Value::Null) => PredicateTruth::Unknown,
+            Some(Value::String(actual)) => PredicateTruth::from_bool(pattern.is_match(actual)),
+            Some(_) => PredicateTruth::False,
+        },
+        Predicate::PropertyIsNull { variable, property } => PredicateTruth::from_bool(
             binding_property(binding, variable, property)
                 .map(|actual| actual == &Value::Null)
-                .unwrap_or(true)
-        }
-        Predicate::PropertyIsNotNull { variable, property } => {
+                .unwrap_or(true),
+        ),
+        Predicate::PropertyIsNotNull { variable, property } => PredicateTruth::from_bool(
             binding_property(binding, variable, property)
                 .map(|actual| actual != &Value::Null)
-                .unwrap_or(false)
-        }
+                .unwrap_or(false),
+        ),
         Predicate::PropertyIn {
             variable,
             property,
             values,
-        } => binding_property(binding, variable, property)
-            .map(|actual| values.iter().any(|value| value == actual))
-            .unwrap_or(false),
+        } => predicate_in_truth(binding_property(binding, variable, property), values),
     }
 }
 

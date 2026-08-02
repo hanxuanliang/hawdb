@@ -1,17 +1,25 @@
 use serde_json::{json, Map as JsonMap, Value as JsonValue};
-use skein::api::{Database, DatabaseConfig};
+use skein::api::{Database, DatabaseReadTransaction};
 use skein::executor::Row;
+use skein::optimizer::OptimizerSearchDirective;
 use skein::{SkeinError, Value};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
+mod generator;
+
+use generator::StateAwareCaseGenerator;
+
+pub const CAMPAIGN_PROTOCOL: &str = "skein-multi-oracle-fuzz-v2";
+pub const GRAPH_TLP_PROTOCOL: &str = "skein-graph-tlp-fuzz-v1";
 pub const PLAN_DIFFERENTIAL_PROTOCOL: &str = "skein-plan-differential-fuzz-v1";
-pub const REPLAY_BUNDLE_PROTOCOL: &str = "skein-plan-differential-replay-v1";
-const TEMPLATE_COUNT: usize = 12;
+pub const REPLAY_BUNDLE_PROTOCOL: &str = "skein-multi-oracle-replay-v2";
+const QUERY_SHAPE_COUNT: usize = 12;
 const DEFAULT_CASE_COUNT: usize = 128;
 const MAX_CASE_COUNT: usize = 10_000;
+const MAX_REDUCTION_ATTEMPTS: usize = 64;
 
 pub type Parameters = BTreeMap<String, Value>;
 
@@ -48,17 +56,32 @@ impl Mutation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FuzzCase {
     pub seed: u64,
-    pub template: &'static str,
+    pub shape: String,
     pub mutations: Vec<Mutation>,
-    pub cypher: &'static str,
-    pub parameters: Parameters,
-    pub result_semantics: ResultSemantics,
+    pub query: QueryInvocation,
+    pub graph_tlp: GraphTlpCase,
     pub index_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryInvocation {
+    pub cypher: String,
+    pub parameters: Parameters,
+    pub result_semantics: ResultSemantics,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphTlpCase {
+    pub name: String,
+    pub original: QueryInvocation,
+    pub predicate_true: QueryInvocation,
+    pub predicate_false: QueryInvocation,
+    pub predicate_null: QueryInvocation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityProfile {
-    pub templates: Vec<&'static str>,
+    pub shapes: Vec<&'static str>,
     pub compares_duplicates: bool,
     pub compares_missing_and_null: bool,
     pub compares_float_bit_patterns: bool,
@@ -68,7 +91,7 @@ pub struct CapabilityProfile {
 impl CapabilityProfile {
     pub fn plan_differential_v1() -> Self {
         Self {
-            templates: vec![
+            shapes: vec![
                 "node_scan",
                 "equality_filter",
                 "in_filter",
@@ -88,11 +111,23 @@ impl CapabilityProfile {
             compares_path_values: false,
         }
     }
+
+    pub fn graph_tlp_v1() -> Self {
+        Self {
+            shapes: vec!["nullable_node_property", "node_range", "relationship_range"],
+            compares_duplicates: true,
+            compares_missing_and_null: true,
+            compares_float_bit_patterns: true,
+            compares_path_values: false,
+        }
+    }
 }
 
 pub trait Oracle {
+    type Output;
+
     fn capability_profile(&self) -> CapabilityProfile;
-    fn evaluate(&self, case: &FuzzCase) -> OracleResult;
+    fn evaluate(&self, case: &FuzzCase) -> Self::Output;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,6 +152,7 @@ pub struct DifferentialEvidence {
 pub struct FailureReport {
     pub reason: String,
     pub replay: ReplayBundle,
+    pub reduction: ReductionReport,
     pub memo: ExecutionObservation,
     pub direct_fallback: ExecutionObservation,
 }
@@ -126,6 +162,7 @@ impl FailureReport {
         json!({
             "reason": self.reason,
             "replay": self.replay.json(),
+            "reduction": self.reduction.json(),
             "memo": self.memo.json(),
             "direct_fallback": self.direct_fallback.json(),
         })
@@ -133,13 +170,54 @@ impl FailureReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GraphTlpOracleResult {
+    Equivalent(GraphTlpEvidence),
+    Failure(GraphTlpFailureReport),
+}
+
+impl GraphTlpOracleResult {
+    pub const fn is_equivalent(&self) -> bool {
+        matches!(self, Self::Equivalent(_))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphTlpEvidence {
+    pub original: ExecutionObservation,
+    pub predicate_true: ExecutionObservation,
+    pub predicate_false: ExecutionObservation,
+    pub predicate_null: ExecutionObservation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphTlpFailureReport {
+    pub reason: String,
+    pub replay: ReplayBundle,
+    pub reduction: ReductionReport,
+    pub evidence: GraphTlpEvidence,
+}
+
+impl GraphTlpFailureReport {
+    pub fn json(&self) -> JsonValue {
+        json!({
+            "reason": self.reason,
+            "replay": self.replay.json(),
+            "reduction": self.reduction.json(),
+            "original": self.evidence.original.json(),
+            "predicate_true": self.evidence.predicate_true.json(),
+            "predicate_false": self.evidence.predicate_false.json(),
+            "predicate_null": self.evidence.predicate_null.json(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayBundle {
     pub seed: u64,
-    pub template: &'static str,
+    pub shape: String,
     pub mutations: Vec<Mutation>,
-    pub cypher: &'static str,
-    pub parameters: Parameters,
-    pub result_semantics: ResultSemantics,
+    pub query: QueryInvocation,
+    pub graph_tlp: GraphTlpCase,
     pub index_enabled: bool,
 }
 
@@ -147,11 +225,10 @@ impl ReplayBundle {
     pub fn from_case(case: &FuzzCase) -> Self {
         Self {
             seed: case.seed,
-            template: case.template,
+            shape: case.shape.clone(),
             mutations: case.mutations.clone(),
-            cypher: case.cypher,
-            parameters: case.parameters.clone(),
-            result_semantics: case.result_semantics,
+            query: case.query.clone(),
+            graph_tlp: case.graph_tlp.clone(),
             index_enabled: case.index_enabled,
         }
     }
@@ -160,20 +237,41 @@ impl ReplayBundle {
         json!({
             "protocol": REPLAY_BUNDLE_PROTOCOL,
             "seed": self.seed,
-            "template": self.template,
+            "shape": self.shape,
             "index_enabled": self.index_enabled,
-            "result_semantics": self.result_semantics.as_str(),
+            "optimizer_search_variants": ["memo", "direct_fallback"],
             "mutations": self.mutations.iter().map(mutation_json).collect::<Vec<_>>(),
-            "query": {
-                "cypher": self.cypher,
-                "parameters": parameters_json(&self.parameters),
-            },
+            "query": query_invocation_json(&self.query),
+            "graph_tlp": graph_tlp_case_json(&self.graph_tlp),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReductionReport {
+    pub oracle: &'static str,
+    pub original_mutation_count: usize,
+    pub reduced_mutation_count: usize,
+    pub attempts: usize,
+    pub replay: ReplayBundle,
+}
+
+impl ReductionReport {
+    fn json(&self) -> JsonValue {
+        json!({
+            "oracle": self.oracle,
+            "original_mutation_count": self.original_mutation_count,
+            "reduced_mutation_count": self.reduced_mutation_count,
+            "attempts": self.attempts,
+            "replay": self.replay.json(),
         })
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionObservation {
+    pub snapshot_epoch: Option<u64>,
+    pub optimizer_search: Option<String>,
     pub search_mode: Option<String>,
     pub plan_fingerprint: Option<String>,
     pub optimizer_stages: Vec<String>,
@@ -183,6 +281,8 @@ pub struct ExecutionObservation {
 impl ExecutionObservation {
     fn json(&self) -> JsonValue {
         json!({
+            "snapshot_epoch": self.snapshot_epoch,
+            "optimizer_search": self.optimizer_search,
             "search_mode": self.search_mode,
             "plan_fingerprint": self.plan_fingerprint,
             "optimizer_stages": self.optimizer_stages,
@@ -227,26 +327,26 @@ impl ExecutionOutcome {
 pub struct PlanDifferentialOracle;
 
 impl Oracle for PlanDifferentialOracle {
+    type Output = OracleResult;
+
     fn capability_profile(&self) -> CapabilityProfile {
         CapabilityProfile::plan_differential_v1()
     }
 
     fn evaluate(&self, case: &FuzzCase) -> OracleResult {
-        let memo = execute_case(case, None);
-        let direct_fallback = execute_case(case, Some(0));
-
-        let failure_reason = compare_outcomes(
+        let (memo, direct_fallback) = execute_case(case);
+        let failure = classify_plan_failure(
             &memo.outcome,
             &direct_fallback.outcome,
-            case.result_semantics,
+            case.query.result_semantics,
         )
-        .err()
-        .or_else(|| validate_search_modes(&memo, &direct_fallback));
+        .or_else(|| classify_search_mode_failure(&memo, &direct_fallback));
 
-        if let Some(reason) = failure_reason {
+        if let Some(failure) = failure {
             OracleResult::Failure(FailureReport {
-                reason,
+                reason: failure.reason,
                 replay: ReplayBundle::from_case(case),
+                reduction: reduce_failure(case, OracleKind::PlanDifferential, &failure.signature),
                 memo,
                 direct_fallback,
             })
@@ -259,22 +359,94 @@ impl Oracle for PlanDifferentialOracle {
     }
 }
 
-fn execute_case(case: &FuzzCase, max_optimizer_groups: Option<usize>) -> ExecutionObservation {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_optimizer_groups,
-        max_plan_cache_entries: Some(0),
-        ..DatabaseConfig::default()
-    });
+#[derive(Debug, Default, Clone, Copy)]
+pub struct GraphTlpOracle;
+
+impl Oracle for GraphTlpOracle {
+    type Output = GraphTlpOracleResult;
+
+    fn capability_profile(&self) -> CapabilityProfile {
+        CapabilityProfile::graph_tlp_v1()
+    }
+
+    fn evaluate(&self, case: &FuzzCase) -> GraphTlpOracleResult {
+        let evidence = execute_graph_tlp_case(case);
+        let failure = classify_graph_tlp_failure(&evidence);
+
+        if let Some(failure) = failure {
+            GraphTlpOracleResult::Failure(GraphTlpFailureReport {
+                reason: failure.reason,
+                replay: ReplayBundle::from_case(case),
+                reduction: reduce_failure(case, OracleKind::GraphTlp, &failure.signature),
+                evidence,
+            })
+        } else {
+            GraphTlpOracleResult::Equivalent(evidence)
+        }
+    }
+}
+
+fn execute_case(case: &FuzzCase) -> (ExecutionObservation, ExecutionObservation) {
+    let (mut snapshot, snapshot_epoch) = match prepare_case(case) {
+        Ok(prepared) => prepared,
+        Err(observation) => {
+            let observation = *observation;
+            return (observation.clone(), observation);
+        }
+    };
+    let memo = execute_snapshot_case(
+        &mut snapshot,
+        snapshot_epoch,
+        &case.query,
+        OptimizerSearchDirective::Memo,
+    );
+    let direct_fallback = execute_snapshot_case(
+        &mut snapshot,
+        snapshot_epoch,
+        &case.query,
+        OptimizerSearchDirective::DirectFallback,
+    );
+    (memo, direct_fallback)
+}
+
+fn prepare_case(
+    case: &FuzzCase,
+) -> Result<(DatabaseReadTransaction, u64), Box<ExecutionObservation>> {
+    let mut db = Database::new();
 
     for mutation in &case.mutations {
         if let Err(error) = db.query_with_params(&mutation.cypher, &mutation.parameters) {
-            return error_observation("mutation", error);
+            return Err(Box::new(error_observation("mutation", error)));
         }
     }
 
-    let explain = match db.explain_query_with_params(case.cypher, &case.parameters) {
+    let snapshot_epoch = db.commit_epoch();
+    Ok((db.begin_read_transaction(), snapshot_epoch))
+}
+
+fn execute_snapshot_case(
+    snapshot: &mut DatabaseReadTransaction,
+    snapshot_epoch: u64,
+    query: &QueryInvocation,
+    optimizer_search: OptimizerSearchDirective,
+) -> ExecutionObservation {
+    let snapshot_epoch = Some(snapshot_epoch);
+    let optimizer_search_name = optimizer_search.as_str();
+    let hinted_cypher = format!(
+        "CYPHER system.optimizer_search = '{optimizer_search_name}' {}",
+        query.cypher
+    );
+
+    let explain = match snapshot.explain_query_with_params(&hinted_cypher, &query.parameters) {
         Ok(explain) => explain,
-        Err(error) => return error_observation("explain", error),
+        Err(error) => {
+            return snapshot_error_observation(
+                snapshot_epoch,
+                Some(optimizer_search_name.to_string()),
+                "explain",
+                error,
+            );
+        }
     };
     let search_mode = Some(explain.trace.search_mode.as_str().to_string());
     let plan_fingerprint = Some(explain.trace.selected_plan_fingerprint.clone());
@@ -296,14 +468,18 @@ fn execute_case(case: &FuzzCase, max_optimizer_groups: Option<usize>) -> Executi
         })
         .collect();
 
-    match db.query_with_params(case.cypher, &case.parameters) {
+    match snapshot.query_with_params(&hinted_cypher, &query.parameters) {
         Ok(output) => ExecutionObservation {
+            snapshot_epoch,
+            optimizer_search: Some(optimizer_search_name.to_string()),
             search_mode,
             plan_fingerprint,
             optimizer_stages,
             outcome: ExecutionOutcome::Rows(output.rows),
         },
         Err(error) => ExecutionObservation {
+            snapshot_epoch,
+            optimizer_search: Some(optimizer_search_name.to_string()),
             search_mode,
             plan_fingerprint,
             optimizer_stages,
@@ -312,8 +488,156 @@ fn execute_case(case: &FuzzCase, max_optimizer_groups: Option<usize>) -> Executi
     }
 }
 
+fn execute_graph_tlp_case(case: &FuzzCase) -> GraphTlpEvidence {
+    let (mut snapshot, snapshot_epoch) = match prepare_case(case) {
+        Ok(prepared) => prepared,
+        Err(observation) => {
+            let observation = *observation;
+            return GraphTlpEvidence {
+                original: observation.clone(),
+                predicate_true: observation.clone(),
+                predicate_false: observation.clone(),
+                predicate_null: observation,
+            };
+        }
+    };
+    let mut execute = |query: &QueryInvocation| {
+        execute_snapshot_case(
+            &mut snapshot,
+            snapshot_epoch,
+            query,
+            OptimizerSearchDirective::Memo,
+        )
+    };
+
+    GraphTlpEvidence {
+        original: execute(&case.graph_tlp.original),
+        predicate_true: execute(&case.graph_tlp.predicate_true),
+        predicate_false: execute(&case.graph_tlp.predicate_false),
+        predicate_null: execute(&case.graph_tlp.predicate_null),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DetectedFailure {
+    signature: FailureSignature,
+    reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FailureSignature {
+    PlanResultMismatch,
+    PlanBothErrored {
+        memo_phase: &'static str,
+        memo_class: &'static str,
+        direct_phase: &'static str,
+        direct_class: &'static str,
+    },
+    PlanMemoErrored {
+        phase: &'static str,
+        class: &'static str,
+    },
+    PlanDirectFallbackErrored {
+        phase: &'static str,
+        class: &'static str,
+    },
+    PlanSnapshotMismatch,
+    PlanDirectiveMismatch {
+        path: &'static str,
+    },
+    PlanSearchModeMismatch {
+        path: &'static str,
+    },
+    GraphTlpErrored {
+        variant: &'static str,
+        phase: &'static str,
+        class: &'static str,
+    },
+    GraphTlpSnapshotMismatch,
+    GraphTlpPartitionMismatch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OracleKind {
+    PlanDifferential,
+    GraphTlp,
+}
+
+impl OracleKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::PlanDifferential => "plan_differential",
+            Self::GraphTlp => "graph_tlp",
+        }
+    }
+}
+
+fn classify_graph_tlp_failure(evidence: &GraphTlpEvidence) -> Option<DetectedFailure> {
+    let observations = [
+        ("original", &evidence.original),
+        ("predicate_true", &evidence.predicate_true),
+        ("predicate_false", &evidence.predicate_false),
+        ("predicate_null", &evidence.predicate_null),
+    ];
+    for (variant, observation) in observations {
+        if let ExecutionOutcome::Error { phase, class, .. } = &observation.outcome {
+            let phase = *phase;
+            let class = *class;
+            return Some(DetectedFailure {
+                signature: FailureSignature::GraphTlpErrored {
+                    variant,
+                    phase,
+                    class,
+                },
+                reason: format!("graph TLP {variant} failed in {phase}/{class}"),
+            });
+        }
+    }
+
+    let snapshot_epoch = evidence.original.snapshot_epoch;
+    if snapshot_epoch.is_none()
+        || observations
+            .iter()
+            .any(|(_, observation)| observation.snapshot_epoch != snapshot_epoch)
+    {
+        return Some(DetectedFailure {
+            signature: FailureSignature::GraphTlpSnapshotMismatch,
+            reason: "graph TLP variants did not execute on one pinned snapshot".to_string(),
+        });
+    }
+
+    let ExecutionOutcome::Rows(original) = &evidence.original.outcome else {
+        unreachable!("error outcomes were classified above")
+    };
+    let mut partitioned = Vec::new();
+    for (_, observation) in observations.into_iter().skip(1) {
+        let ExecutionOutcome::Rows(rows) = &observation.outcome else {
+            unreachable!("error outcomes were classified above")
+        };
+        partitioned.extend_from_slice(rows);
+    }
+
+    compare_rows(original, &partitioned, ResultSemantics::Bag)
+        .err()
+        .map(|reason| DetectedFailure {
+            signature: FailureSignature::GraphTlpPartitionMismatch,
+            reason: format!("graph TLP partition mismatch: {reason}"),
+        })
+}
+
 fn error_observation(phase: &'static str, error: SkeinError) -> ExecutionObservation {
+    snapshot_error_observation(None, None, phase, error)
+}
+
+fn snapshot_error_observation(
+    snapshot_epoch: Option<u64>,
+    optimizer_search: Option<String>,
+    phase: &'static str,
+    error: SkeinError,
+) -> ExecutionObservation {
     ExecutionObservation {
+        snapshot_epoch,
+        optimizer_search,
         search_mode: None,
         plan_fingerprint: None,
         optimizer_stages: Vec::new(),
@@ -329,33 +653,75 @@ fn error_outcome(phase: &'static str, error: SkeinError) -> ExecutionOutcome {
     }
 }
 
-fn validate_search_modes(
+fn classify_search_mode_failure(
     memo: &ExecutionObservation,
     direct_fallback: &ExecutionObservation,
-) -> Option<String> {
+) -> Option<DetectedFailure> {
+    if memo.snapshot_epoch.is_none() || memo.snapshot_epoch != direct_fallback.snapshot_epoch {
+        return Some(DetectedFailure {
+            signature: FailureSignature::PlanSnapshotMismatch,
+            reason: format!(
+                "optimizer paths did not execute on the same pinned snapshot: memo={:?} direct_fallback={:?}",
+                memo.snapshot_epoch, direct_fallback.snapshot_epoch
+            ),
+        });
+    }
+    if memo.optimizer_search.as_deref() != Some("memo") {
+        return Some(DetectedFailure {
+            signature: FailureSignature::PlanDirectiveMismatch { path: "memo" },
+            reason: format!(
+                "memo execution recorded unexpected optimizer hint {:?}",
+                memo.optimizer_search
+            ),
+        });
+    }
+    if direct_fallback.optimizer_search.as_deref() != Some("direct_fallback") {
+        return Some(DetectedFailure {
+            signature: FailureSignature::PlanDirectiveMismatch {
+                path: "direct_fallback",
+            },
+            reason: format!(
+                "direct fallback execution recorded unexpected optimizer hint {:?}",
+                direct_fallback.optimizer_search
+            ),
+        });
+    }
     if memo.search_mode.as_deref() != Some("memo") {
-        return Some(format!(
-            "memo configuration selected unexpected search mode {:?}",
-            memo.search_mode
-        ));
+        return Some(DetectedFailure {
+            signature: FailureSignature::PlanSearchModeMismatch { path: "memo" },
+            reason: format!(
+                "memo configuration selected unexpected search mode {:?}",
+                memo.search_mode
+            ),
+        });
     }
     if direct_fallback.search_mode.as_deref() != Some("direct_fallback") {
-        return Some(format!(
-            "direct fallback configuration selected unexpected search mode {:?}",
-            direct_fallback.search_mode
-        ));
+        return Some(DetectedFailure {
+            signature: FailureSignature::PlanSearchModeMismatch {
+                path: "direct_fallback",
+            },
+            reason: format!(
+                "direct fallback configuration selected unexpected search mode {:?}",
+                direct_fallback.search_mode
+            ),
+        });
     }
     None
 }
 
-fn compare_outcomes(
+fn classify_plan_failure(
     memo: &ExecutionOutcome,
     direct_fallback: &ExecutionOutcome,
     semantics: ResultSemantics,
-) -> Result<(), String> {
+) -> Option<DetectedFailure> {
     match (memo, direct_fallback) {
-        (ExecutionOutcome::Rows(left), ExecutionOutcome::Rows(right)) => {
-            compare_rows(left, right, semantics)
+        (ExecutionOutcome::Rows(memo), ExecutionOutcome::Rows(direct_fallback)) => {
+            compare_rows(memo, direct_fallback, semantics)
+                .err()
+                .map(|reason| DetectedFailure {
+                    signature: FailureSignature::PlanResultMismatch,
+                    reason: format!("memo/direct_fallback result mismatch: {reason}"),
+                })
         }
         (
             ExecutionOutcome::Error {
@@ -364,20 +730,107 @@ fn compare_outcomes(
                 ..
             },
             ExecutionOutcome::Error {
-                phase: fallback_phase,
-                class: fallback_class,
+                phase: direct_phase,
+                class: direct_class,
                 ..
             },
-        ) => Err(format!(
-            "generated case failed in both optimizer paths: memo={memo_phase}/{memo_class} direct_fallback={fallback_phase}/{fallback_class}"
-        )),
-        (ExecutionOutcome::Error { .. }, ExecutionOutcome::Rows(_)) => {
-            Err("memo optimizer failed while direct fallback returned rows".to_string())
+        ) => Some(DetectedFailure {
+            signature: FailureSignature::PlanBothErrored {
+                memo_phase,
+                memo_class,
+                direct_phase,
+                direct_class,
+            },
+            reason: format!(
+                "generated case failed in both oracle paths: memo={memo_phase}/{memo_class} direct_fallback={direct_phase}/{direct_class}"
+            ),
+        }),
+        (ExecutionOutcome::Error { phase, class, .. }, ExecutionOutcome::Rows(_)) => {
+            Some(DetectedFailure {
+                signature: FailureSignature::PlanMemoErrored { phase, class },
+                reason: "memo failed while direct_fallback returned rows".to_string(),
+            })
         }
-        (ExecutionOutcome::Rows(_), ExecutionOutcome::Error { .. }) => {
-            Err("direct fallback failed while memo optimizer returned rows".to_string())
+        (ExecutionOutcome::Rows(_), ExecutionOutcome::Error { phase, class, .. }) => {
+            Some(DetectedFailure {
+                signature: FailureSignature::PlanDirectFallbackErrored { phase, class },
+                reason: "direct_fallback failed while memo returned rows".to_string(),
+            })
         }
     }
+}
+
+fn reduce_failure(
+    case: &FuzzCase,
+    oracle: OracleKind,
+    expected: &FailureSignature,
+) -> ReductionReport {
+    let original_mutation_count = case.mutations.len();
+    let mut reduced = case.clone();
+    let mut attempts = 0;
+    let mut granularity = 2;
+
+    while !reduced.mutations.is_empty() && attempts < MAX_REDUCTION_ATTEMPTS {
+        let mutation_count = reduced.mutations.len();
+        let chunk_size = mutation_count.div_ceil(granularity);
+        let mut start = 0;
+        let mut removed_chunk = false;
+
+        while start < mutation_count && attempts < MAX_REDUCTION_ATTEMPTS {
+            let end = (start + chunk_size).min(mutation_count);
+            let mut candidate = reduced.clone();
+            candidate.mutations.drain(start..end);
+            candidate.index_enabled = has_index_mutation(&candidate.mutations);
+            attempts += 1;
+
+            if failure_signature(&candidate, oracle).as_ref() == Some(expected) {
+                reduced = candidate;
+                granularity = granularity.saturating_sub(1).max(2);
+                removed_chunk = true;
+                break;
+            }
+            start = end;
+        }
+
+        if !removed_chunk {
+            if granularity >= mutation_count {
+                break;
+            }
+            granularity = (granularity * 2).min(mutation_count);
+        }
+    }
+
+    ReductionReport {
+        oracle: oracle.as_str(),
+        original_mutation_count,
+        reduced_mutation_count: reduced.mutations.len(),
+        attempts,
+        replay: ReplayBundle::from_case(&reduced),
+    }
+}
+
+fn failure_signature(case: &FuzzCase, oracle: OracleKind) -> Option<FailureSignature> {
+    match oracle {
+        OracleKind::PlanDifferential => {
+            let (memo, direct_fallback) = execute_case(case);
+            classify_plan_failure(
+                &memo.outcome,
+                &direct_fallback.outcome,
+                case.query.result_semantics,
+            )
+            .or_else(|| classify_search_mode_failure(&memo, &direct_fallback))
+            .map(|failure| failure.signature)
+        }
+        OracleKind::GraphTlp => classify_graph_tlp_failure(&execute_graph_tlp_case(case))
+            .map(|failure| failure.signature),
+    }
+}
+
+fn has_index_mutation(mutations: &[Mutation]) -> bool {
+    mutations.iter().any(|mutation| {
+        mutation.cypher.starts_with("CREATE INDEX")
+            || mutation.cypher.starts_with("CREATE RANGE INDEX")
+    })
 }
 
 pub fn compare_rows(left: &[Row], right: &[Row], semantics: ResultSemantics) -> Result<(), String> {
@@ -387,7 +840,7 @@ pub fn compare_rows(left: &[Row], right: &[Row], semantics: ResultSemantics) -> 
                 Ok(())
             } else {
                 Err(format!(
-                    "ordered result mismatch: memo_rows={} direct_fallback_rows={}",
+                    "ordered rows differ: left_rows={} right_rows={}",
                     left.len(),
                     right.len()
                 ))
@@ -402,7 +855,7 @@ pub fn compare_rows(left: &[Row], right: &[Row], semantics: ResultSemantics) -> 
                 Ok(())
             } else {
                 Err(format!(
-                    "bag result mismatch: memo_rows={} direct_fallback_rows={}",
+                    "bag rows differ: left_rows={} right_rows={}",
                     left.len(),
                     right.len()
                 ))
@@ -434,12 +887,17 @@ impl Default for CampaignOptions {
 pub struct CampaignCaseReport {
     pub index: usize,
     pub seed: u64,
-    pub template: &'static str,
+    pub shape: String,
+    pub graph_tlp_shape: String,
     pub index_enabled: bool,
     pub success: bool,
+    pub plan_differential_success: bool,
+    pub graph_tlp_success: bool,
+    pub reproduction_command: Option<String>,
     pub memo_plan_fingerprint: Option<String>,
     pub direct_fallback_plan_fingerprint: Option<String>,
     pub failure: Option<FailureReport>,
+    pub graph_tlp_failure: Option<GraphTlpFailureReport>,
 }
 
 impl CampaignCaseReport {
@@ -447,12 +905,17 @@ impl CampaignCaseReport {
         json!({
             "index": self.index,
             "seed": self.seed,
-            "template": self.template,
+            "shape": self.shape,
+            "graph_tlp_shape": self.graph_tlp_shape,
             "index_enabled": self.index_enabled,
             "success": self.success,
+            "plan_differential_success": self.plan_differential_success,
+            "graph_tlp_success": self.graph_tlp_success,
+            "reproduction_command": self.reproduction_command,
             "memo_plan_fingerprint": self.memo_plan_fingerprint,
             "direct_fallback_plan_fingerprint": self.direct_fallback_plan_fingerprint,
             "failure": self.failure.as_ref().map(FailureReport::json),
+            "graph_tlp_failure": self.graph_tlp_failure.as_ref().map(GraphTlpFailureReport::json),
         })
     }
 }
@@ -464,7 +927,7 @@ pub struct CampaignReport {
     pub executed_case_count: usize,
     pub passed_case_count: usize,
     pub failed_case_count: usize,
-    pub complete_template_coverage: bool,
+    pub complete_shape_coverage: bool,
     pub cases: Vec<CampaignCaseReport>,
 }
 
@@ -474,22 +937,25 @@ impl CampaignReport {
     }
 
     pub fn json(&self) -> JsonValue {
-        let profile = CapabilityProfile::plan_differential_v1();
+        let plan_profile = CapabilityProfile::plan_differential_v1();
+        let tlp_profile = CapabilityProfile::graph_tlp_v1();
         json!({
-            "protocol": PLAN_DIFFERENTIAL_PROTOCOL,
+            "protocol": CAMPAIGN_PROTOCOL,
             "success": self.success(),
             "seed": self.seed,
             "requested_case_count": self.requested_case_count,
             "executed_case_count": self.executed_case_count,
             "passed_case_count": self.passed_case_count,
             "failed_case_count": self.failed_case_count,
-            "complete_template_coverage": self.complete_template_coverage,
-            "capability_profile": {
-                "templates": profile.templates,
-                "compares_duplicates": profile.compares_duplicates,
-                "compares_missing_and_null": profile.compares_missing_and_null,
-                "compares_float_bit_patterns": profile.compares_float_bit_patterns,
-                "compares_path_values": profile.compares_path_values,
+            "complete_shape_coverage": self.complete_shape_coverage,
+            "oracles": ["plan_differential", "graph_tlp"],
+            "oracle_protocols": {
+                "plan_differential": PLAN_DIFFERENTIAL_PROTOCOL,
+                "graph_tlp": GRAPH_TLP_PROTOCOL,
+            },
+            "capability_profiles": {
+                "plan_differential": capability_profile_json(&plan_profile),
+                "graph_tlp": capability_profile_json(&tlp_profile),
             },
             "cases": self.cases.iter().map(CampaignCaseReport::json).collect::<Vec<_>>(),
         })
@@ -506,34 +972,57 @@ pub fn run_campaign(options: CampaignOptions) -> Result<CampaignReport, FuzzErro
         )));
     }
 
-    let oracle = PlanDifferentialOracle;
-    let mut generator = MemCaseGenerator::new(options.seed);
+    let plan_oracle = PlanDifferentialOracle;
+    let graph_tlp_oracle = GraphTlpOracle;
+    let mut generator = StateAwareCaseGenerator::new(options.seed);
     let mut cases = Vec::with_capacity(options.case_count);
     for index in 0..options.case_count {
         let case = generator.case(index);
-        let report = match oracle.evaluate(&case) {
-            OracleResult::Equivalent(evidence) => CampaignCaseReport {
-                index,
-                seed: case.seed,
-                template: case.template,
-                index_enabled: case.index_enabled,
-                success: true,
-                memo_plan_fingerprint: evidence.memo.plan_fingerprint,
-                direct_fallback_plan_fingerprint: evidence.direct_fallback.plan_fingerprint,
-                failure: None,
-            },
-            OracleResult::Failure(failure) => CampaignCaseReport {
-                index,
-                seed: case.seed,
-                template: case.template,
-                index_enabled: case.index_enabled,
-                success: false,
-                memo_plan_fingerprint: failure.memo.plan_fingerprint.clone(),
-                direct_fallback_plan_fingerprint: failure.direct_fallback.plan_fingerprint.clone(),
-                failure: Some(failure),
-            },
+        let (
+            plan_differential_success,
+            memo_plan_fingerprint,
+            direct_fallback_plan_fingerprint,
+            failure,
+        ) = match plan_oracle.evaluate(&case) {
+            OracleResult::Equivalent(evidence) => (
+                true,
+                evidence.memo.plan_fingerprint,
+                evidence.direct_fallback.plan_fingerprint,
+                None,
+            ),
+            OracleResult::Failure(failure) => (
+                false,
+                failure.memo.plan_fingerprint.clone(),
+                failure.direct_fallback.plan_fingerprint.clone(),
+                Some(failure),
+            ),
         };
-        cases.push(report);
+        let (graph_tlp_success, graph_tlp_failure) = match graph_tlp_oracle.evaluate(&case) {
+            GraphTlpOracleResult::Equivalent(_) => (true, None),
+            GraphTlpOracleResult::Failure(failure) => (false, Some(failure)),
+        };
+        let success = plan_differential_success && graph_tlp_success;
+        cases.push(CampaignCaseReport {
+            index,
+            seed: case.seed,
+            shape: case.shape,
+            graph_tlp_shape: case.graph_tlp.name,
+            index_enabled: case.index_enabled,
+            success,
+            plan_differential_success,
+            graph_tlp_success,
+            reproduction_command: (!success).then(|| {
+                format!(
+                    "cargo run -p skein-fuzz -- --seed {} --cases {}",
+                    options.seed,
+                    index + 1
+                )
+            }),
+            memo_plan_fingerprint,
+            direct_fallback_plan_fingerprint,
+            failure,
+            graph_tlp_failure,
+        });
     }
 
     let failed_case_count = cases.iter().filter(|case| !case.success).count();
@@ -543,203 +1032,9 @@ pub fn run_campaign(options: CampaignOptions) -> Result<CampaignReport, FuzzErro
         executed_case_count: cases.len(),
         passed_case_count: cases.len().saturating_sub(failed_case_count),
         failed_case_count,
-        complete_template_coverage: options.case_count >= TEMPLATE_COUNT,
+        complete_shape_coverage: options.case_count >= QUERY_SHAPE_COUNT,
         cases,
     })
-}
-
-#[derive(Debug, Clone, Copy)]
-struct MemCaseGenerator {
-    rng: DeterministicRng,
-}
-
-impl MemCaseGenerator {
-    fn new(seed: u64) -> Self {
-        Self {
-            rng: DeterministicRng::new(seed),
-        }
-    }
-
-    fn case(&mut self, index: usize) -> FuzzCase {
-        let seed = self.rng.next_u64();
-        let index_enabled = seed & 1 == 0;
-        let memory_count = 12 + ((seed >> 8) as usize % 5);
-        let mutations = mem_mutations(memory_count, index_enabled);
-        let template_index = index % TEMPLATE_COUNT;
-        let selected_memory = (seed as usize) % memory_count;
-        let alternate_memory = ((seed >> 16) as usize) % memory_count;
-        let kind = if seed & 2 == 0 { "note" } else { "thread" };
-
-        let mut parameters = Parameters::new();
-        let (template, cypher, result_semantics) = match template_index {
-            0 => (
-                "node_scan",
-                "MATCH (m:Memory) RETURN m.id AS id, m.kind AS kind ORDER BY id ASC",
-                ResultSemantics::Ordered,
-            ),
-            1 => {
-                parameters.insert("kind".to_string(), Value::String(kind.to_string()));
-                (
-                    "equality_filter",
-                    "MATCH (m:Memory) WHERE m.kind = $kind RETURN m.id AS id",
-                    ResultSemantics::Bag,
-                )
-            }
-            2 => {
-                parameters.insert(
-                    "ids".to_string(),
-                    Value::List(vec![
-                        memory_id(selected_memory),
-                        memory_id(alternate_memory),
-                        memory_id(selected_memory),
-                    ]),
-                );
-                (
-                    "in_filter",
-                    "MATCH (m:Memory) WHERE m.id IN $ids RETURN m.id AS id ORDER BY id ASC",
-                    ResultSemantics::Ordered,
-                )
-            }
-            3 => {
-                parameters.insert(
-                    "minimum".to_string(),
-                    Value::Int((seed % memory_count as u64) as i64),
-                );
-                (
-                    "range_filter",
-                    "MATCH (m:Memory) WHERE m.importance >= $minimum RETURN m.id AS id, m.importance AS importance ORDER BY importance ASC, id ASC",
-                    ResultSemantics::Ordered,
-                )
-            }
-            4 => {
-                parameters.insert("id".to_string(), memory_id(selected_memory));
-                (
-                    "one_hop_expand",
-                    "MATCH (m:Memory {id: $id})-[r:MENTIONS]->(e:Entity) RETURN m.id AS memory_id, e.id AS entity_id ORDER BY entity_id ASC",
-                    ResultSemantics::Ordered,
-                )
-            }
-            5 => (
-                "self_loop",
-                "MATCH (e:Entity)-[r:RELATES_TO]->(e) RETURN e.id AS id",
-                ResultSemantics::Bag,
-            ),
-            6 => {
-                parameters.insert("source".to_string(), entity_id(1));
-                parameters.insert("target".to_string(), entity_id(2));
-                (
-                    "parallel_edges",
-                    "MATCH (a:Entity {id: $source})-[r:RELATES_TO]->(b:Entity {id: $target}) RETURN a.id AS source, b.id AS target",
-                    ResultSemantics::Bag,
-                )
-            }
-            7 => (
-                "cartesian_product",
-                "MATCH (m:Memory), (e:Entity) RETURN m.id AS memory_id, e.id AS entity_id",
-                ResultSemantics::Bag,
-            ),
-            8 => (
-                "distinct_projection",
-                "MATCH (m:Memory) RETURN DISTINCT m.kind AS kind ORDER BY kind ASC",
-                ResultSemantics::Ordered,
-            ),
-            9 => (
-                "aggregate",
-                "MATCH (m:Memory) RETURN m.kind AS kind, count(m) AS count ORDER BY kind ASC",
-                ResultSemantics::Ordered,
-            ),
-            10 => (
-                "top_n",
-                "MATCH (m:Memory) RETURN m.id AS id, m.importance AS importance ORDER BY importance DESC, id ASC LIMIT 5",
-                ResultSemantics::Ordered,
-            ),
-            _ => (
-                "missing_or_null",
-                "MATCH (m:Memory) WHERE m.optional_note IS NULL RETURN m.id AS id ORDER BY id ASC",
-                ResultSemantics::Ordered,
-            ),
-        };
-
-        FuzzCase {
-            seed,
-            template,
-            mutations,
-            cypher,
-            parameters,
-            result_semantics,
-            index_enabled,
-        }
-    }
-}
-
-fn mem_mutations(memory_count: usize, index_enabled: bool) -> Vec<Mutation> {
-    let mut mutations = Vec::new();
-    for index in 0..memory_count {
-        let kind = if index % 2 == 0 { "note" } else { "thread" };
-        let optional_note = match index % 3 {
-            0 => ", optional_note: null",
-            1 => ", optional_note: 'present'",
-            _ => "",
-        };
-        mutations.push(Mutation::new(format!(
-            "CREATE (:Memory {{id: 'mem-{index}', kind: '{kind}', title: 'Memory {index}', importance: {index}{optional_note}}})"
-        )));
-    }
-    for index in 0..6 {
-        mutations.push(Mutation::new(format!(
-            "CREATE (:Entity {{id: 'entity-{index}', name: 'Entity {index}'}})"
-        )));
-    }
-    for index in 0..memory_count {
-        mutations.push(Mutation::new(format!(
-            "MATCH (m:Memory {{id: 'mem-{index}'}}), (e:Entity {{id: 'entity-{}'}}) CREATE (m)-[:MENTIONS {{weight: {}}}]->(e)",
-            index % 6,
-            index % 4,
-        )));
-    }
-    mutations.push(Mutation::new(
-        "MATCH (source:Entity {id: 'entity-0'}), (target:Entity {id: 'entity-0'}) CREATE (source)-[:RELATES_TO {weight: 0}]->(target)",
-    ));
-    for weight in [1, 2] {
-        mutations.push(Mutation::new(format!(
-            "MATCH (a:Entity {{id: 'entity-1'}}), (b:Entity {{id: 'entity-2'}}) CREATE (a)-[:RELATES_TO {{weight: {weight}}}]->(b)"
-        )));
-    }
-    mutations.push(Mutation::new(
-        "MATCH (a:Entity {id: 'entity-2'}), (b:Entity {id: 'entity-3'}) CREATE (a)-[:RELATES_TO {weight: 3}]->(b)",
-    ));
-    if index_enabled {
-        mutations.push(Mutation::new("CREATE INDEX ON :Memory(id)"));
-        mutations.push(Mutation::new("CREATE RANGE INDEX ON :Memory(importance)"));
-    }
-    mutations
-}
-
-fn memory_id(index: usize) -> Value {
-    Value::String(format!("mem-{index}"))
-}
-
-fn entity_id(index: usize) -> Value {
-    Value::String(format!("entity-{index}"))
-}
-
-#[derive(Debug, Clone, Copy)]
-struct DeterministicRng {
-    state: u64,
-}
-
-impl DeterministicRng {
-    const fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        self.state
-    }
 }
 
 fn error_class(error: &SkeinError) -> &'static str {
@@ -756,6 +1051,34 @@ fn mutation_json(mutation: &Mutation) -> JsonValue {
     json!({
         "cypher": mutation.cypher,
         "parameters": parameters_json(&mutation.parameters),
+    })
+}
+
+fn query_invocation_json(query: &QueryInvocation) -> JsonValue {
+    json!({
+        "cypher": query.cypher,
+        "parameters": parameters_json(&query.parameters),
+        "result_semantics": query.result_semantics.as_str(),
+    })
+}
+
+fn graph_tlp_case_json(case: &GraphTlpCase) -> JsonValue {
+    json!({
+        "name": case.name,
+        "original": query_invocation_json(&case.original),
+        "predicate_true": query_invocation_json(&case.predicate_true),
+        "predicate_false": query_invocation_json(&case.predicate_false),
+        "predicate_null": query_invocation_json(&case.predicate_null),
+    })
+}
+
+fn capability_profile_json(profile: &CapabilityProfile) -> JsonValue {
+    json!({
+        "shapes": profile.shapes,
+        "compares_duplicates": profile.compares_duplicates,
+        "compares_missing_and_null": profile.compares_missing_and_null,
+        "compares_float_bit_patterns": profile.compares_float_bit_patterns,
+        "compares_path_values": profile.compares_path_values,
     })
 }
 
@@ -876,16 +1199,16 @@ mod tests {
     }
 
     #[test]
-    fn campaign_covers_every_mem_template_and_both_optimizer_paths() {
+    fn campaign_covers_every_query_shape_and_both_oracles() {
         let report = run_campaign(CampaignOptions {
             seed: 7,
-            case_count: TEMPLATE_COUNT,
+            case_count: QUERY_SHAPE_COUNT,
         })
         .unwrap();
 
         assert!(report.success(), "{}", report.json());
-        assert!(report.complete_template_coverage);
-        assert_eq!(report.executed_case_count, TEMPLATE_COUNT);
+        assert!(report.complete_shape_coverage);
+        assert_eq!(report.executed_case_count, QUERY_SHAPE_COUNT);
         assert_eq!(report.failed_case_count, 0);
         assert!(report
             .cases
@@ -895,24 +1218,130 @@ mod tests {
             .cases
             .iter()
             .all(|case| case.direct_fallback_plan_fingerprint.is_some()));
+        assert!(report.cases.iter().all(|case| case.graph_tlp_success));
         assert!(report.cases.iter().any(|case| case.index_enabled));
         assert!(report.cases.iter().any(|case| !case.index_enabled));
+        let json = report.json();
+        assert_eq!(json["protocol"], CAMPAIGN_PROTOCOL);
+        assert_eq!(json["oracles"][0], "plan_differential");
+        assert_eq!(json["oracles"][1], "graph_tlp");
+        assert_eq!(
+            json["oracle_protocols"]["plan_differential"],
+            PLAN_DIFFERENTIAL_PROTOCOL
+        );
+        assert_eq!(json["oracle_protocols"]["graph_tlp"], GRAPH_TLP_PROTOCOL);
+    }
+
+    #[test]
+    fn oracle_runs_both_hints_on_one_pinned_snapshot() {
+        let mut generator = StateAwareCaseGenerator::new(7);
+        let case = generator.case(0);
+
+        let OracleResult::Equivalent(evidence) = PlanDifferentialOracle.evaluate(&case) else {
+            panic!("generated case should be equivalent");
+        };
+        assert!(evidence.memo.snapshot_epoch.is_some());
+        assert_eq!(
+            evidence.memo.snapshot_epoch,
+            evidence.direct_fallback.snapshot_epoch
+        );
+        assert_eq!(evidence.memo.optimizer_search.as_deref(), Some("memo"));
+        assert_eq!(evidence.memo.search_mode.as_deref(), Some("memo"));
+        assert_eq!(
+            evidence.direct_fallback.optimizer_search.as_deref(),
+            Some("direct_fallback")
+        );
+        assert_eq!(
+            evidence.direct_fallback.search_mode.as_deref(),
+            Some("direct_fallback")
+        );
+    }
+
+    #[test]
+    fn state_aware_generator_emits_parseable_queries_for_both_oracles() {
+        let mut generator = StateAwareCaseGenerator::new(7);
+
+        for index in 0..QUERY_SHAPE_COUNT {
+            let case = generator.case(index);
+            let queries = [
+                &case.query,
+                &case.graph_tlp.original,
+                &case.graph_tlp.predicate_true,
+                &case.graph_tlp.predicate_false,
+                &case.graph_tlp.predicate_null,
+            ];
+            for query in queries {
+                skein::cypher::parse(&query.cypher).unwrap_or_else(|error| {
+                    panic!("generated query failed to parse: {}: {error}", query.cypher)
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn graph_tlp_detects_an_invalid_partition_relation() {
+        let mut generator = StateAwareCaseGenerator::new(7);
+        let mut case = generator.case(0);
+        case.graph_tlp.predicate_false = case.graph_tlp.predicate_true.clone();
+
+        assert!(PlanDifferentialOracle.evaluate(&case).is_equivalent());
+        let GraphTlpOracleResult::Failure(failure) = GraphTlpOracle.evaluate(&case) else {
+            panic!("graph TLP must reject overlapping partitions");
+        };
+        assert!(failure.reason.contains("graph TLP partition mismatch"));
+        assert_eq!(
+            failure.replay.graph_tlp.predicate_false,
+            failure.replay.graph_tlp.predicate_true
+        );
+        assert_eq!(failure.reduction.oracle, "graph_tlp");
+        assert!(
+            failure.reduction.reduced_mutation_count < failure.reduction.original_mutation_count
+        );
+    }
+
+    #[test]
+    fn graph_tlp_covers_nullable_and_relationship_predicates() {
+        let mut generator = StateAwareCaseGenerator::new(7);
+        let mut observed_nullable = false;
+        let mut observed_relationship = false;
+
+        for index in 0..32 {
+            let case = generator.case(index);
+            observed_nullable |= case.graph_tlp.name == "nullable_node_property";
+            observed_relationship |= case.graph_tlp.name == "relationship_range";
+            let GraphTlpOracleResult::Equivalent(evidence) = GraphTlpOracle.evaluate(&case) else {
+                panic!("generated graph TLP relation must be equivalent");
+            };
+            let ExecutionOutcome::Rows(null_rows) = evidence.predicate_null.outcome else {
+                panic!("generated null partition must execute successfully");
+            };
+            assert!(!null_rows.is_empty());
+        }
+
+        assert!(observed_nullable);
+        assert!(observed_relationship);
     }
 
     #[test]
     fn replay_bundle_retains_typed_parameters() {
-        let mut generator = MemCaseGenerator::new(9);
+        let mut generator = StateAwareCaseGenerator::new(9);
         let case = generator.case(2);
         let replay = ReplayBundle::from_case(&case).json();
 
         assert_eq!(replay["protocol"], REPLAY_BUNDLE_PROTOCOL);
-        assert_eq!(replay["template"], "in_filter");
+        assert_eq!(replay["shape"], "in_filter");
+        assert_eq!(replay["optimizer_search_variants"][0], "memo");
+        assert_eq!(replay["optimizer_search_variants"][1], "direct_fallback");
         assert_eq!(replay["query"]["parameters"]["ids"]["type"], "list");
+        assert!(replay["graph_tlp"]["predicate_true"]["cypher"]
+            .as_str()
+            .unwrap()
+            .contains("WHERE"));
     }
 
     #[test]
     fn invalid_generated_case_fails_closed_with_replay() {
-        let mut generator = MemCaseGenerator::new(11);
+        let mut generator = StateAwareCaseGenerator::new(11);
         let mut case = generator.case(0);
         case.mutations.push(Mutation::new("CREATE invalid"));
 
@@ -923,6 +1352,12 @@ mod tests {
         assert_eq!(failure.replay.seed, case.seed);
         assert_eq!(
             failure.replay.mutations.last().unwrap().cypher,
+            "CREATE invalid"
+        );
+        assert_eq!(failure.reduction.oracle, "plan_differential");
+        assert_eq!(failure.reduction.reduced_mutation_count, 1);
+        assert_eq!(
+            failure.reduction.replay.mutations[0].cypher,
             "CREATE invalid"
         );
     }

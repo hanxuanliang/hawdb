@@ -118,12 +118,19 @@ inside graph transactions and read snapshots, and are meant to guide resource
 scheduling rather than change query semantics.
 
 The `skein-fuzz` package is intentionally outside the production dependency
-graph. Its first oracle applies the same deterministic Mem-shaped mutations to
-two independent `Database` instances, then compares default memo planning with
-the direct fallback selected by `max_optimizer_groups = Some(0)`. The fallback
-is a differential surface, not a correctness authority. Failures include a
-typed replay bundle; `src/nowledge_fuzz.rs` remains a readiness smoke rather
-than a semantic oracle.
+graph. Its state-aware generator creates a deterministic graph before selecting
+valid query shapes and typed predicates. The plan-differential oracle applies
+the mutations once, pins one read snapshot, and compares memo planning with
+direct fallback through the statement-scoped
+`CYPHER system.optimizer_search` hint. Plan-shaping hints are typed, fail
+closed, and bypass the plan cache. The fallback is a differential surface, not
+a correctness authority. A Graph TLP oracle independently checks that a query
+result equals the bag union of its predicate-true, predicate-false, and
+predicate-null partitions on the same snapshot. This supplies a semantic
+relation without maintaining a second Cypher or graph executor. Failures
+include exact typed replay data, a direct reproduction command, and an
+oracle-specific reduced mutation sequence; `src/nowledge_fuzz.rs` remains a
+readiness smoke rather than a semantic oracle.
 
 The current Cypher crate uses:
 
