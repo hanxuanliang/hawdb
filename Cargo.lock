@@ -1294,6 +1294,9 @@ dependencies = [
 [[package]]
 name = "skein-core"
 version = "0.1.0"
+dependencies = [
+ "regex",
+]
 
 [[package]]
 name = "skein-cypher"
