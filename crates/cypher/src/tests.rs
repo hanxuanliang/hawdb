@@ -84,13 +84,14 @@ fn parses_set_system_variable_keyword_statement() {
 fn parses_cypher_system_hints() {
     let statement = parse(
         "CYPHER system.work_priority = 'background' system.work_class = 'analytics' \
-         system.estimated_operations = 64 MATCH (m:Memory) RETURN m.id AS id",
+         system.estimated_operations = 64 system.optimizer_search = 'memo' \
+         MATCH (m:Memory) RETURN m.id AS id",
     )
     .unwrap();
     let Statement::CypherQuery(query) = statement else {
         panic!("expected cypher query");
     };
-    assert_eq!(query.system_variables.len(), 3);
+    assert_eq!(query.system_variables.len(), 4);
     assert_eq!(query.system_variables[0].name, "work_priority");
     assert_eq!(
         query.system_variables[0].value,
@@ -105,6 +106,11 @@ fn parses_cypher_system_hints() {
     assert_eq!(
         query.system_variables[2].value,
         ValueExpression::Literal(Value::Int(64))
+    );
+    assert_eq!(query.system_variables[3].name, "optimizer_search");
+    assert_eq!(
+        query.system_variables[3].value,
+        ValueExpression::Literal(Value::String("memo".to_string()))
     );
     let Statement::MatchReturn(match_return) = query.statement else {
         panic!("expected inner match return");

@@ -12,7 +12,10 @@ use super::{
     LogicalPlanRoot, OptimizationSearchReport, OptimizedLogicalPlanRoot, OptimizerCatalog,
     OptimizerConfig, OptimizerTrace, PhysicalPlan, PhysicalPlanRoot, StageStats,
 };
-use crate::{GroupId, Memo, OptimizerContext, StageTrace};
+use crate::{
+    GroupId, Memo, OptimizerContext, OptimizerSearchDirective, OptimizerSearchDirectiveError,
+    StageTrace,
+};
 use skein_core::Value;
 use skein_plan::{GraphExpansionBudget, LogicalPlan, SortItem};
 use std::collections::BTreeMap;
@@ -85,7 +88,12 @@ impl CascadesOptimizer {
         root: &LogicalPlanRoot,
         catalog: &OptimizerCatalog,
     ) -> PhysicalPlanRoot {
-        self.optimize_optimized_root_with_catalog(&root.clone().into_optimized(), catalog)
+        self.optimize_optimized_root_with_catalog_and_directive(
+            &root.clone().into_optimized(),
+            catalog,
+            OptimizerSearchDirective::Auto,
+        )
+        .expect("automatic optimizer search cannot reject its directive")
     }
 
     pub fn optimize_optimized_root_with_catalog(
@@ -93,15 +101,54 @@ impl CascadesOptimizer {
         root: &OptimizedLogicalPlanRoot,
         catalog: &OptimizerCatalog,
     ) -> PhysicalPlanRoot {
+        self.optimize_optimized_root_with_catalog_and_directive(
+            root,
+            catalog,
+            OptimizerSearchDirective::Auto,
+        )
+        .expect("automatic optimizer search cannot reject its directive")
+    }
+
+    pub fn optimize_root_with_catalog_and_directive(
+        &self,
+        root: &LogicalPlanRoot,
+        catalog: &OptimizerCatalog,
+        directive: OptimizerSearchDirective,
+    ) -> Result<PhysicalPlanRoot, OptimizerSearchDirectiveError> {
+        self.optimize_optimized_root_with_catalog_and_directive(
+            &root.clone().into_optimized(),
+            catalog,
+            directive,
+        )
+    }
+
+    pub fn optimize_optimized_root_with_catalog_and_directive(
+        &self,
+        root: &OptimizedLogicalPlanRoot,
+        catalog: &OptimizerCatalog,
+        directive: OptimizerSearchDirective,
+    ) -> Result<PhysicalPlanRoot, OptimizerSearchDirectiveError> {
         let logical = root.plan();
         let required_groups = logical_group_count(logical);
         let max_groups = self.context.optimizer_config().max_groups;
-        if required_groups > max_groups {
+        if directive == OptimizerSearchDirective::Memo && required_groups > max_groups {
+            return Err(OptimizerSearchDirectiveError::MemoGroupBudgetExceeded {
+                required_groups,
+                max_groups,
+            });
+        }
+        if directive == OptimizerSearchDirective::DirectFallback
+            || (directive == OptimizerSearchDirective::Auto && required_groups > max_groups)
+        {
             let mut decisions = Vec::new();
             let mut stage_events = Vec::new();
             let plan =
                 logical_to_physical_direct(logical, catalog, &mut decisions, &mut stage_events);
-            let mut report = OptimizationSearchReport::direct_fallback(required_groups, max_groups);
+            let mut report = if directive == OptimizerSearchDirective::DirectFallback {
+                OptimizationSearchReport::forced_direct_fallback(required_groups)
+            } else {
+                OptimizationSearchReport::direct_fallback(required_groups, max_groups)
+            };
             report.push_stage_event(
                 LOGICAL_GROUPING_STAGE.trace(StageStats::new(1, required_groups)),
             );
@@ -115,7 +162,7 @@ impl CascadesOptimizer {
             let selected = selected_plan_trace(&plan, catalog);
             report.push_stage_event(SELECTED_PLAN_COSTING_STAGE.trace(StageStats::new(1, 1)));
             report.record_selected_plan_cost(selected.cost);
-            return PhysicalPlanRoot::new(plan, report.into_trace(selected));
+            return Ok(PhysicalPlanRoot::new(plan, report.into_trace(selected)));
         }
         let mut memo = GraphMemo::default();
         let root = insert_logical_group(&mut memo, logical);
@@ -136,7 +183,10 @@ impl CascadesOptimizer {
         let selected = selected_plan_trace(&plan, catalog);
         report.push_stage_event(SELECTED_PLAN_COSTING_STAGE.trace(StageStats::new(1, 1)));
         report.record_selected_plan_cost(selected.cost);
-        PhysicalPlanRoot::new(plan, report.into_trace(selected))
+        if directive == OptimizerSearchDirective::Memo {
+            report.push_decision("selected memo search: explicit optimizer search directive");
+        }
+        Ok(PhysicalPlanRoot::new(plan, report.into_trace(selected)))
     }
 }
 

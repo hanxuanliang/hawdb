@@ -4,7 +4,7 @@ use crate::error::{Result, SkeinError};
 use crate::executor::{self, Row};
 use crate::optimizer::{
     CascadesOptimizer, OptimizerCatalog, OptimizerCatalogIndexes, OptimizerCatalogStatistics,
-    OptimizerConfig, OptimizerTrace, PhysicalPlan,
+    OptimizerConfig, OptimizerSearchDirective, OptimizerTrace, PhysicalPlan,
 };
 use crate::qos::{
     BackgroundWorkDecision, BackgroundWorkHint, BackgroundWorkPlan, LocalQosPolicy,
@@ -74,7 +74,10 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, MutexGuard};
-use system_variables::{query_work_request_for_statement, reject_system_variable_parameters};
+use system_variables::{
+    query_statement_variables_for_statement, query_work_request_for_statement,
+    reject_system_variable_parameters,
+};
 
 mod access_control;
 mod artifact_jobs;
@@ -5951,7 +5954,12 @@ impl Database {
         parameters: &BTreeMap<String, Value>,
         access_control: Option<&QueryAccessControlContext>,
     ) -> Result<OptimizedQueryPlan> {
-        let cache_mode = if statement_uses_plan_cache(statement) {
+        let optimizer_search =
+            query_statement_variables_for_statement(&self.system_variables, statement)?
+                .optimizer_search;
+        let cache_mode = if optimizer_search != OptimizerSearchDirective::Auto {
+            PlanCacheMode::Bypass(PlanCacheBypassReason::OptimizerDirective)
+        } else if statement_uses_plan_cache(statement) {
             PlanCacheMode::Use
         } else {
             PlanCacheMode::Bypass(PlanCacheBypassReason::StatementNotCacheable)
@@ -5969,6 +5977,7 @@ impl Database {
                 cache: &self.plan_cache,
                 planning_cache: &self.optimizer_planning_cache,
                 access_control,
+                optimizer_search,
             },
         )
     }
@@ -35923,6 +35932,9 @@ fn mutation_command_for_statement(
     statement: &cypher::Statement,
     parameters: &BTreeMap<String, Value>,
 ) -> Result<Option<GraphMutation>> {
+    let optimizer_search =
+        query_statement_variables_for_statement(&QuerySystemVariables::default(), statement)?
+            .optimizer_search;
     let optimized = optimized_query_plan_for(
         cypher_text,
         statement,
@@ -35936,6 +35948,7 @@ fn mutation_command_for_statement(
             cache: &db.plan_cache,
             planning_cache: &db.optimizer_planning_cache,
             access_control: None,
+            optimizer_search,
         },
     )?;
     executor::mutation_command(&optimized.physical_plan)
@@ -36319,7 +36332,12 @@ impl DatabaseReadTransaction {
         parameters: &BTreeMap<String, Value>,
         access_control: Option<&QueryAccessControlContext>,
     ) -> Result<OptimizedQueryPlan> {
-        let cache_mode = if statement_uses_plan_cache(statement) {
+        let optimizer_search =
+            query_statement_variables_for_statement(&QuerySystemVariables::default(), statement)?
+                .optimizer_search;
+        let cache_mode = if optimizer_search != OptimizerSearchDirective::Auto {
+            PlanCacheMode::Bypass(PlanCacheBypassReason::OptimizerDirective)
+        } else if statement_uses_plan_cache(statement) {
             PlanCacheMode::Use
         } else {
             PlanCacheMode::Bypass(PlanCacheBypassReason::StatementNotCacheable)
@@ -36337,6 +36355,7 @@ impl DatabaseReadTransaction {
                 cache: &self.plan_cache,
                 planning_cache: &self.optimizer_planning_cache,
                 access_control,
+                optimizer_search,
             },
         )
     }

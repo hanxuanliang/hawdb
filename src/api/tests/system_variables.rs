@@ -124,6 +124,110 @@ fn cypher_system_hints_are_session_relative() {
 }
 
 #[test]
+fn optimizer_search_hint_is_statement_scoped_on_one_read_snapshot() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 1, title: 'Graph'})")
+        .unwrap();
+    let snapshot_epoch = db.commit_epoch();
+    let mut snapshot = db.begin_read_transaction();
+
+    let memo_cypher = "CYPHER system.optimizer_search = 'memo' \
+                       MATCH (m:Memory) RETURN m.id AS id";
+    let fallback_cypher = "CYPHER system.optimizer_search = 'direct_fallback' \
+                           MATCH (m:Memory) RETURN m.id AS id";
+
+    let memo_explain = snapshot.explain_query(memo_cypher).unwrap();
+    let fallback_explain = snapshot.explain_query(fallback_cypher).unwrap();
+    assert_eq!(memo_explain.trace.search_mode.as_str(), "memo");
+    assert_eq!(
+        fallback_explain.trace.search_mode.as_str(),
+        "direct_fallback"
+    );
+    assert_eq!(
+        memo_explain.plan_cache_lookup,
+        PlanCacheLookup::Bypass(PlanCacheBypassReason::OptimizerDirective)
+    );
+    assert_eq!(
+        fallback_explain.plan_cache_lookup,
+        PlanCacheLookup::Bypass(PlanCacheBypassReason::OptimizerDirective)
+    );
+    assert!(fallback_explain
+        .trace
+        .warnings
+        .iter()
+        .all(|warning| !warning.contains("memo budget exceeded")));
+
+    let memo = snapshot.query(memo_cypher).unwrap();
+    let fallback = snapshot.query(fallback_cypher).unwrap();
+    let auto_explain = snapshot
+        .explain_query("MATCH (m:Memory) RETURN m.id AS id")
+        .unwrap();
+    assert_eq!(memo, fallback);
+    assert_eq!(auto_explain.trace.search_mode.as_str(), "memo");
+    drop(snapshot);
+    assert_eq!(db.commit_epoch(), snapshot_epoch);
+}
+
+#[test]
+fn optimizer_search_hint_fails_closed_for_invalid_or_conflicting_values() {
+    let db = Database::new();
+
+    let invalid = db
+        .explain_query(
+            "CYPHER system.optimizer_search = 'unknown' \
+             MATCH (m:Memory) RETURN m.id AS id",
+        )
+        .unwrap_err();
+    assert!(invalid
+        .to_string()
+        .contains("accepts auto, memo, or direct_fallback"));
+
+    let duplicate = db
+        .explain_query(
+            "CYPHER system.optimizer_search = 'memo' \
+             system.optimizer_search = 'direct_fallback' \
+             MATCH (m:Memory) RETURN m.id AS id",
+        )
+        .unwrap_err();
+    assert!(duplicate
+        .to_string()
+        .contains("duplicate CYPHER system hint system.optimizer_search"));
+}
+
+#[test]
+fn optimizer_search_is_query_only_and_memo_respects_the_group_budget() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_optimizer_groups: Some(0),
+        ..DatabaseConfig::default()
+    });
+
+    let set_error = db
+        .query("SET system.optimizer_search = 'direct_fallback'")
+        .unwrap_err();
+    assert!(set_error
+        .to_string()
+        .contains("unknown system variable system.optimizer_search"));
+
+    let memo_error = db
+        .explain_query(
+            "CYPHER system.optimizer_search = 'memo' \
+             MATCH (m:Memory) RETURN m.id AS id",
+        )
+        .unwrap_err();
+    let memo_error = memo_error.to_string();
+    assert!(memo_error.contains("memo search directive requires"));
+    assert!(memo_error.contains("max_groups is 0"));
+
+    let fallback = db
+        .explain_query(
+            "CYPHER system.optimizer_search = 'direct_fallback' \
+             MATCH (m:Memory) RETURN m.id AS id",
+        )
+        .unwrap();
+    assert_eq!(fallback.trace.search_mode.as_str(), "direct_fallback");
+}
+
+#[test]
 fn session_explain_reports_session_scoped_resource_intent() {
     let mut db = Database::new();
     let mut session = db.session();

@@ -37,7 +37,10 @@ pub use rule::{
     apply_rule_batch, AppliedRule, OptimizerRule, RuleApplication, RuleBatch, RuleId, RuleKind,
     RulePromise,
 };
-pub use search::{OptimizationSearchReport, RuleEvent, RuleOutcome, SearchMode, SelectedPlanTrace};
+pub use search::{
+    OptimizationSearchReport, OptimizerSearchDirective, OptimizerSearchDirectiveError, RuleEvent,
+    RuleOutcome, SearchMode, SelectedPlanTrace,
+};
 pub use skein_plan::PhysicalPlanNode as PlanNode;
 pub use skein_plan::{
     plan_class_counts, plan_operator_counts, visit_plan, PhysicalPlanClass, PhysicalPlanKind,

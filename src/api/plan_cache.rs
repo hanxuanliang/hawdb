@@ -3,9 +3,10 @@ use super::{
     QueryAccessControlContext, SharedState,
 };
 use crate::cypher;
-use crate::error::Result;
+use crate::error::{Result, SkeinError};
 use crate::optimizer::{
-    CascadesOptimizer, LogicalPlanRoot, OptimizerCatalog, OptimizerTrace, PhysicalPlan,
+    CascadesOptimizer, LogicalPlanRoot, OptimizerCatalog, OptimizerSearchDirective, OptimizerTrace,
+    PhysicalPlan,
 };
 use crate::planner::{self, LogicalPlan, Predicate};
 use crate::schema::{Catalog, GraphStatistics, IndexKind};
@@ -47,6 +48,7 @@ impl PlanCacheLookup {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanCacheBypassReason {
     MutationPlanning,
+    OptimizerDirective,
     StatementNotCacheable,
 }
 
@@ -54,6 +56,7 @@ impl PlanCacheBypassReason {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::MutationPlanning => "mutation_planning",
+            Self::OptimizerDirective => "optimizer_directive",
             Self::StatementNotCacheable => "statement_not_cacheable",
         }
     }
@@ -73,6 +76,7 @@ pub(super) struct PlanCacheContext<'a> {
     pub(super) cache: &'a SharedState<PlanCache>,
     pub(super) planning_cache: &'a SharedState<OptimizerPlanningCache>,
     pub(super) access_control: Option<&'a QueryAccessControlContext>,
+    pub(super) optimizer_search: OptimizerSearchDirective,
 }
 
 pub(super) struct OptimizedQueryPlan {
@@ -358,7 +362,16 @@ pub(super) fn optimized_query_plan_for(
     let logical_root = LogicalPlanRoot::new(logical);
     let physical_root = context
         .optimizer
-        .optimize_root_with_catalog(&logical_root, &catalog_access.catalog);
+        .optimize_root_with_catalog_and_directive(
+            &logical_root,
+            &catalog_access.catalog,
+            context.optimizer_search,
+        )
+        .map_err(|error| {
+            SkeinError::Execution(format!(
+                "optimizer search directive could not be honored: {error}"
+            ))
+        })?;
     let (physical_template, mut trace) = physical_root.into_parts();
     trace.decisions.extend(catalog_access.decisions);
     let has_parameter_slots = parameterized

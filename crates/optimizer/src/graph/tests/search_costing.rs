@@ -1,7 +1,10 @@
 use super::super::{
     CascadesOptimizer, OptimizerCatalog, OptimizerCatalogIndexes, OptimizerCatalogStatistics,
 };
-use crate::{OptimizerConfig, PlanCost};
+use crate::{
+    LogicalPlanRoot, OptimizerConfig, OptimizerSearchDirective, OptimizerSearchDirectiveError,
+    PlanCost, SearchMode,
+};
 use skein_core::Value;
 use skein_cypher::RelationshipDirection;
 use skein_plan::{LogicalPlan, Predicate, Projection, ProjectionExpression};
@@ -66,6 +69,43 @@ fn optimizer_budget_uses_direct_fallback_with_trace_warning() {
         budgeted_trace.selected_plan_fingerprint,
         full_trace.selected_plan_fingerprint
     );
+}
+
+#[test]
+fn explicit_search_directives_preserve_the_optimizer_budget_contract() {
+    let logical_root = LogicalPlanRoot::new(LogicalPlan::NodeScan {
+        variable: "m".to_string(),
+        label: "Memory".to_string(),
+    });
+    let optimizer = CascadesOptimizer::new(OptimizerConfig { max_groups: 0 });
+    let catalog = OptimizerCatalog::default();
+
+    assert_eq!(
+        optimizer.optimize_root_with_catalog_and_directive(
+            &logical_root,
+            &catalog,
+            OptimizerSearchDirective::Memo,
+        ),
+        Err(OptimizerSearchDirectiveError::MemoGroupBudgetExceeded {
+            required_groups: 1,
+            max_groups: 0,
+        })
+    );
+
+    let fallback = optimizer
+        .optimize_root_with_catalog_and_directive(
+            &logical_root,
+            &catalog,
+            OptimizerSearchDirective::DirectFallback,
+        )
+        .unwrap();
+    assert_eq!(fallback.trace().search_mode, SearchMode::DirectFallback);
+    assert!(fallback.trace().warnings.is_empty());
+    assert!(fallback
+        .trace()
+        .decisions
+        .iter()
+        .any(|decision| decision.contains("explicit optimizer search directive")));
 }
 
 #[test]

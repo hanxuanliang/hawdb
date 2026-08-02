@@ -1,8 +1,10 @@
 use super::{QueryOutput, Result, SkeinError};
 use crate::cypher;
+use crate::optimizer::OptimizerSearchDirective;
 use crate::qos::{WorkClass, WorkPriority, WorkRequest};
 use crate::value::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuerySystemVariables {
@@ -18,6 +20,25 @@ impl Default for QuerySystemVariables {
             work_class: WorkClass::Query,
             estimated_operations: 1,
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct QueryStatementVariables {
+    query_variables: QuerySystemVariables,
+    pub(super) optimizer_search: OptimizerSearchDirective,
+}
+
+impl QueryStatementVariables {
+    fn from_query_variables(query_variables: QuerySystemVariables) -> Self {
+        Self {
+            query_variables,
+            optimizer_search: OptimizerSearchDirective::Auto,
+        }
+    }
+
+    fn query_work_request(&self) -> WorkRequest {
+        self.query_variables.query_work_request()
     }
 }
 
@@ -86,10 +107,29 @@ impl QuerySystemVariables {
     fn apply_system_variable_hints(
         &self,
         hints: &[cypher::SetSystemVariable],
-    ) -> Result<QuerySystemVariables> {
-        let mut variables = self.clone();
+    ) -> Result<QueryStatementVariables> {
+        let mut variables = QueryStatementVariables::from_query_variables(self.clone());
+        let mut seen = BTreeSet::new();
         for hint in hints {
-            variables.apply_set_system_variable(hint)?;
+            if !seen.insert(hint.name.as_str()) {
+                return Err(SkeinError::Semantic(format!(
+                    "duplicate CYPHER system hint system.{}",
+                    hint.name
+                )));
+            }
+            if hint.name == "optimizer_search" {
+                let value = literal_system_variable_value(&hint.value)?;
+                let value = string_system_variable_value(&hint.name, &value)?;
+                variables.optimizer_search =
+                    OptimizerSearchDirective::from_str(&value).map_err(|_| {
+                        SkeinError::Semantic(
+                            "CYPHER system.optimizer_search accepts auto, memo, or direct_fallback"
+                                .to_string(),
+                        )
+                    })?;
+            } else {
+                variables.query_variables.apply_set_system_variable(hint)?;
+            }
         }
         Ok(variables)
     }
@@ -111,14 +151,24 @@ pub(super) fn query_work_request_for_statement(
     variables: &QuerySystemVariables,
     statement: &cypher::Statement,
 ) -> Result<WorkRequest> {
+    query_statement_variables_for_statement(variables, statement)
+        .map(|variables| variables.query_work_request())
+}
+
+pub(super) fn query_statement_variables_for_statement(
+    variables: &QuerySystemVariables,
+    statement: &cypher::Statement,
+) -> Result<QueryStatementVariables> {
     match statement {
-        cypher::Statement::CypherQuery(query) => variables
-            .apply_system_variable_hints(&query.system_variables)
-            .map(|variables| variables.query_work_request()),
-        cypher::Statement::Explain(explain) => {
-            query_work_request_for_statement(variables, &explain.statement)
+        cypher::Statement::CypherQuery(query) => {
+            variables.apply_system_variable_hints(&query.system_variables)
         }
-        _ => Ok(variables.query_work_request()),
+        cypher::Statement::Explain(explain) => {
+            query_statement_variables_for_statement(variables, &explain.statement)
+        }
+        _ => Ok(QueryStatementVariables::from_query_variables(
+            variables.clone(),
+        )),
     }
 }
 

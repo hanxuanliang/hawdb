@@ -3,12 +3,29 @@ use crate::properties::PhysicalProperties;
 use crate::stage::StageTrace;
 use crate::trace::OptimizerTrace;
 use std::collections::BTreeMap;
+use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchMode {
     Memo,
     DirectFallback,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum OptimizerSearchDirective {
+    #[default]
+    Auto,
+    Memo,
+    DirectFallback,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptimizerSearchDirectiveError {
+    MemoGroupBudgetExceeded {
+        required_groups: usize,
+        max_groups: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +88,21 @@ impl OptimizationSearchReport {
         report.warnings.push(format!(
             "optimizer memo budget exceeded: required_groups={required_groups} max_groups={max_groups}; used deterministic direct physical fallback"
         ));
+        report
+    }
+
+    pub fn forced_direct_fallback(required_groups: usize) -> Self {
+        let mut report = Self {
+            groups: required_groups,
+            mode: SearchMode::DirectFallback,
+            warnings: Vec::new(),
+            decisions: Vec::new(),
+            rule_events: Vec::new(),
+            stage_events: Vec::new(),
+        };
+        report.push_decision(
+            "selected direct physical fallback: explicit optimizer search directive",
+        );
         report
     }
 
@@ -213,6 +245,45 @@ impl SearchMode {
     }
 }
 
+impl OptimizerSearchDirective {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Memo => "memo",
+            Self::DirectFallback => "direct_fallback",
+        }
+    }
+}
+
+impl FromStr for OptimizerSearchDirective {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "auto" => Ok(Self::Auto),
+            "memo" => Ok(Self::Memo),
+            "direct_fallback" => Ok(Self::DirectFallback),
+            _ => Err("unknown optimizer search directive"),
+        }
+    }
+}
+
+impl Display for OptimizerSearchDirectiveError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MemoGroupBudgetExceeded {
+                required_groups,
+                max_groups,
+            } => write!(
+                formatter,
+                "memo search directive requires {required_groups} groups but max_groups is {max_groups}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for OptimizerSearchDirectiveError {}
+
 impl RuleOutcome {
     pub fn all() -> &'static [Self] {
         const ALL: &[RuleOutcome] = &[
@@ -260,7 +331,10 @@ impl FromStr for RuleOutcome {
 
 #[cfg(test)]
 mod tests {
-    use super::{OptimizationSearchReport, RuleEvent, RuleOutcome, SearchMode, SelectedPlanTrace};
+    use super::{
+        OptimizationSearchReport, OptimizerSearchDirective, RuleEvent, RuleOutcome, SearchMode,
+        SelectedPlanTrace,
+    };
     use crate::{ApplyOrder, OptimizationStage, PlanCost, PlanCostBreakdown, StageStats};
     use std::collections::BTreeMap;
 
@@ -275,6 +349,34 @@ mod tests {
         assert!(report.decisions().is_empty());
         assert!(report.rule_events().is_empty());
         assert!(report.stage_events().is_empty());
+    }
+
+    #[test]
+    fn forced_direct_fallback_reports_directive_without_budget_warning() {
+        let report = OptimizationSearchReport::forced_direct_fallback(9);
+
+        assert_eq!(report.groups(), 9);
+        assert_eq!(report.mode(), SearchMode::DirectFallback);
+        assert!(report.warnings().is_empty());
+        assert!(report
+            .decisions()
+            .iter()
+            .any(|decision| decision.contains("explicit optimizer search directive")));
+    }
+
+    #[test]
+    fn optimizer_search_directive_strings_round_trip() {
+        for directive in [
+            OptimizerSearchDirective::Auto,
+            OptimizerSearchDirective::Memo,
+            OptimizerSearchDirective::DirectFallback,
+        ] {
+            assert_eq!(
+                directive.as_str().parse::<OptimizerSearchDirective>(),
+                Ok(directive)
+            );
+        }
+        assert!("unknown".parse::<OptimizerSearchDirective>().is_err());
     }
 
     #[test]
