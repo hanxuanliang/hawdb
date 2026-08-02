@@ -23,6 +23,7 @@ env:
     //crates/plan:skein_plan_tests
     //crates/qos:skein_qos_tests
     //crates/readiness:skein_readiness_tests
+    //crates/route-ownership:skein_route_ownership_tests
     //crates/sql:skein_sql_tests
     //crates/storage:skein_storage_tests
 

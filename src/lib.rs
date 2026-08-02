@@ -26,7 +26,7 @@ pub mod replacement_summary;
 pub mod route_ownership;
 pub mod search;
 pub mod search_candidate_shadow_evidence;
-pub mod search_route_ownership;
+pub use skein_route_ownership as search_route_ownership;
 pub mod storage_recovery_evidence;
 pub mod store;
 pub mod telemetry;

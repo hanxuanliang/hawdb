@@ -6,6 +6,12 @@ license.workspace = true
 
 [dependencies]
 loom = { version = "0.7", optional = true }
+skein-core = { path = "../core" }
+skein-cypher = { path = "../cypher" }
+skein-plan = { path = "../plan" }
+
+[dev-dependencies]
+skein-optimizer = { path = "../optimizer" }
 
 [features]
 default = []

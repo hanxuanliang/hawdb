@@ -1,24 +1,22 @@
-use crate::cypher;
-use crate::error::{Result, SkeinError};
-use crate::optimizer::PhysicalPlan;
-use crate::planner::{
-    self, LogicalPlan, Predicate, Projection, ProjectionExpression, RelationshipCountFilter,
-    SortItem, SortKey,
+use skein_core::{Result, SkeinError, Value};
+use skein_cypher as cypher;
+use skein_plan::{
+    self as planner, LogicalPlan, PhysicalPlan, Predicate, Projection, ProjectionExpression,
+    RelationshipCountFilter, SortItem, SortKey,
 };
-use crate::value::Value;
 use std::collections::BTreeMap;
 
 const PARAMETER_SLOT_NAME_KEY: &str = "\0skein_parameter_slot";
 const PARAMETER_SLOT_PATH_KEY: &str = "\0skein_parameter_path";
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) enum ParameterCacheValue {
+enum ParameterCacheValue {
     Slot(ParameterValueShape),
     Exact(Value),
 }
 
 impl ParameterCacheValue {
-    pub(super) fn matches(&self, value: &Value) -> bool {
+    fn matches(&self, value: &Value) -> bool {
         match self {
             Self::Slot(shape) => *shape == parameter_value_shape(value),
             Self::Exact(expected) => expected == value,
@@ -27,7 +25,7 @@ impl ParameterCacheValue {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) enum ParameterValueShape {
+enum ParameterValueShape {
     Null,
     Bool,
     Int,
@@ -38,10 +36,44 @@ pub(super) enum ParameterValueShape {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct ParameterizedLogicalPlan {
-    pub(super) logical: LogicalPlan,
-    pub(super) cache_values: BTreeMap<String, ParameterCacheValue>,
-    pub(super) slot_count: usize,
+pub struct ParameterizedLogicalPlan {
+    logical: LogicalPlan,
+    cache_key: PlanParameterCacheKey,
+    slot_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PlanParameterCacheKey {
+    values: BTreeMap<String, ParameterCacheValue>,
+}
+
+impl PlanParameterCacheKey {
+    pub fn matches(&self, parameters: &BTreeMap<String, Value>) -> bool {
+        self.values.len() == parameters.len()
+            && self.values.iter().all(|(name, cached)| {
+                parameters
+                    .get(name)
+                    .is_some_and(|value| cached.matches(value))
+            })
+    }
+}
+
+impl ParameterizedLogicalPlan {
+    pub fn logical(&self) -> &LogicalPlan {
+        &self.logical
+    }
+
+    pub fn cache_key(&self) -> &PlanParameterCacheKey {
+        &self.cache_key
+    }
+
+    pub fn slot_count(&self) -> usize {
+        self.slot_count
+    }
+
+    pub fn exact_variant_count(&self) -> usize {
+        self.cache_key.values.len() - self.slot_count
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,7 +93,7 @@ impl MarkerUse {
     }
 }
 
-pub(super) fn parameterize_logical_plan(
+pub fn parameterize_logical_plan(
     statement: &cypher::Statement,
     parameters: &BTreeMap<String, Value>,
 ) -> Result<ParameterizedLogicalPlan> {
@@ -69,10 +101,12 @@ pub(super) fn parameterize_logical_plan(
     if parameters.values().any(value_contains_any_marker) {
         return Ok(ParameterizedLogicalPlan {
             logical: actual,
-            cache_values: parameters
-                .iter()
-                .map(|(name, value)| (name.clone(), ParameterCacheValue::Exact(value.clone())))
-                .collect(),
+            cache_key: PlanParameterCacheKey {
+                values: parameters
+                    .iter()
+                    .map(|(name, value)| (name.clone(), ParameterCacheValue::Exact(value.clone())))
+                    .collect(),
+            },
             slot_count: 0,
         });
     }
@@ -128,12 +162,14 @@ pub(super) fn parameterize_logical_plan(
     };
     Ok(ParameterizedLogicalPlan {
         logical,
-        cache_values,
+        cache_key: PlanParameterCacheKey {
+            values: cache_values,
+        },
         slot_count,
     })
 }
 
-pub(super) fn bind_physical_plan_parameters(
+pub fn bind_physical_plan_parameters(
     template: &PhysicalPlan,
     parameters: &BTreeMap<String, Value>,
     has_slots: bool,
@@ -859,10 +895,10 @@ mod tests {
         bind_physical_plan_parameters, parameterize_logical_plan, ParameterCacheValue,
         PARAMETER_SLOT_NAME_KEY, PARAMETER_SLOT_PATH_KEY,
     };
-    use crate::cypher;
-    use crate::optimizer::{CascadesOptimizer, OptimizerCatalog};
-    use crate::planner::LogicalPlanRoot;
-    use crate::value::Value;
+    use skein_core::Value;
+    use skein_cypher as cypher;
+    use skein_optimizer::{CascadesOptimizer, OptimizerCatalog};
+    use skein_plan::LogicalPlanRoot;
     use std::collections::BTreeMap;
 
     #[test]
@@ -873,7 +909,7 @@ mod tests {
             BTreeMap::from([("id".to_string(), Value::String("first".to_string()))]);
         let parameterized = parameterize_logical_plan(&statement, &first_parameters).unwrap();
         assert!(matches!(
-            parameterized.cache_values.get("id"),
+            parameterized.cache_key.values.get("id"),
             Some(ParameterCacheValue::Slot(_))
         ));
 
@@ -904,7 +940,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            parameterized.cache_values.get("limit"),
+            parameterized.cache_key.values.get("limit"),
             Some(&ParameterCacheValue::Exact(Value::Int(10)))
         );
     }
@@ -922,7 +958,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            parameterized.cache_values.get("source"),
+            parameterized.cache_key.values.get("source"),
             Some(&ParameterCacheValue::Exact(Value::Null))
         );
     }
@@ -943,7 +979,8 @@ mod tests {
 
         assert_eq!(parameterized.slot_count, 2);
         assert!(parameterized
-            .cache_values
+            .cache_key
+            .values
             .values()
             .all(|cached| matches!(cached, ParameterCacheValue::Slot(_))));
     }
@@ -968,7 +1005,7 @@ mod tests {
 
         assert_eq!(parameterized.slot_count, 0);
         assert_eq!(
-            parameterized.cache_values.get("metadata"),
+            parameterized.cache_key.values.get("metadata"),
             Some(&ParameterCacheValue::Exact(marker_shaped))
         );
     }

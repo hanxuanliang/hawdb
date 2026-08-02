@@ -82,7 +82,6 @@ mod canonical_snapshot;
 mod explain;
 mod observability;
 mod plan_cache;
-mod plan_template;
 mod query_domains;
 mod query_runtime;
 mod schema_guidance;

@@ -1,5 +1,12 @@
 use std::collections::BTreeMap;
 
+mod template;
+
+pub use template::{
+    bind_physical_plan_parameters, parameterize_logical_plan, ParameterizedLogicalPlan,
+    PlanParameterCacheKey,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanCacheStats {
     pub max_entries: Option<usize>,

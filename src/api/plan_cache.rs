@@ -1,6 +1,3 @@
-use super::plan_template::{
-    bind_physical_plan_parameters, parameterize_logical_plan, ParameterCacheValue,
-};
 use super::{
     optimizer_catalog, optimizer_config_from_database_config, statement_body, DatabaseConfig,
     QueryAccessControlContext, SharedState,
@@ -14,8 +11,10 @@ use crate::planner::{self, LogicalPlan, Predicate};
 use crate::schema::{Catalog, GraphStatistics, IndexKind};
 use crate::store::GraphStore;
 use crate::value::Value;
-use skein_plan_cache::LfuCache;
 pub use skein_plan_cache::PlanCacheStats;
+use skein_plan_cache::{
+    bind_physical_plan_parameters, parameterize_logical_plan, LfuCache, PlanParameterCacheKey,
+};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -96,7 +95,7 @@ pub(super) type PlanCache = LfuCache<PlanCacheKey, CachedPlan>;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct PlanCacheKey {
     cypher: String,
-    parameters: BTreeMap<String, ParameterCacheValue>,
+    parameters: PlanParameterCacheKey,
     environment: OptimizerEnvironmentKey,
     max_optimizer_groups: Option<usize>,
     access_control_policy_epoch: Option<u64>,
@@ -115,12 +114,7 @@ impl PlanCacheKey {
             && &self.environment == environment
             && self.max_optimizer_groups == max_optimizer_groups
             && self.access_control_policy_epoch == access_control_policy_epoch
-            && self.parameters.len() == parameters.len()
-            && self.parameters.iter().all(|(name, cached)| {
-                parameters
-                    .get(name)
-                    .is_some_and(|value| cached.matches(value))
-            })
+            && self.parameters.matches(parameters)
     }
 }
 
@@ -340,7 +334,7 @@ pub(super) fn optimized_query_plan_for(
         .then(|| parameterize_logical_plan(statement_body(statement), parameters))
         .transpose()?;
     let mut logical = if let Some(parameterized) = &parameterized {
-        parameterized.logical.clone()
+        parameterized.logical().clone()
     } else {
         planner::plan_with_params(statement_body(statement), parameters)?
     };
@@ -349,7 +343,7 @@ pub(super) fn optimized_query_plan_for(
     }
     let mut key = parameterized.as_ref().map(|parameterized| PlanCacheKey {
         cypher: cypher_text.to_string(),
-        parameters: parameterized.cache_values.clone(),
+        parameters: parameterized.cache_key().clone(),
         environment: environment_hint
             .clone()
             .expect("optimizer environment exists for a parameterized plan"),
@@ -369,15 +363,15 @@ pub(super) fn optimized_query_plan_for(
     trace.decisions.extend(catalog_access.decisions);
     let has_parameter_slots = parameterized
         .as_ref()
-        .is_some_and(|parameterized| parameterized.slot_count > 0);
+        .is_some_and(|parameterized| parameterized.slot_count() > 0);
     let physical_plan =
         bind_physical_plan_parameters(&physical_template, parameters, has_parameter_slots)?;
     refresh_materialized_plan_trace(&mut trace, &physical_plan);
     if let Some(parameterized) = &parameterized {
         trace.decisions.push(format!(
             "parameterized plan template: slots={} exact_variants={}",
-            parameterized.slot_count,
-            parameterized.cache_values.len() - parameterized.slot_count
+            parameterized.slot_count(),
+            parameterized.exact_variant_count()
         ));
     }
     let cached_trace = trace.clone();

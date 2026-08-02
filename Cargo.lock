@@ -1248,6 +1248,7 @@ dependencies = [
  "skein-plan-cache",
  "skein-qos",
  "skein-readiness",
+ "skein-route-ownership",
  "skein-sql",
  "skein-storage",
  "turbovec",
@@ -1314,6 +1315,10 @@ name = "skein-plan-cache"
 version = "0.1.0"
 dependencies = [
  "loom",
+ "skein-core",
+ "skein-cypher",
+ "skein-optimizer",
+ "skein-plan",
 ]
 
 [[package]]
@@ -1326,6 +1331,13 @@ dependencies = [
 
 [[package]]
 name = "skein-readiness"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "skein-route-ownership"
 version = "0.1.0"
 dependencies = [
  "serde_json",

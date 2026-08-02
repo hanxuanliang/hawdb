@@ -33,6 +33,7 @@ rust_library(
         "//crates/plan-cache:skein_plan_cache",
         "//crates/qos:skein_qos",
         "//crates/readiness:skein_readiness",
+        "//crates/route-ownership:skein_route_ownership",
         "//crates/sql:skein_sql",
         "//crates/storage:skein_storage",
     ],
