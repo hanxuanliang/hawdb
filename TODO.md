@@ -2123,6 +2123,32 @@ contract.
     APIs are stable.
   - Migration should be mechanical and test-preserving first; behavioral
     refactors happen after crate boundaries compile cleanly.
+- [x] Add an adaptive Tokio integration without coupling the database kernel to
+  an async runtime.
+  - Keep parser, optimizer, executor, and storage contracts runtime-neutral and
+    preserve synchronous batch or iterator execution inside the kernel.
+  - Add an optional Tokio adapter with two explicit lifecycle modes: borrow the
+    host `tokio::runtime::Handle` for application-bound embedding, or own a
+    runtime whose lifetime is tied to the embedded Skein handle. Do not create
+    an implicit global or nested runtime.
+  - Keep resource policy in a Skein-owned `RuntimeGovernor`. Derive effective
+    CPU and memory budgets from Linux cgroup v2 CPU quota, cpuset,
+    `memory.max`, and `memory.high`; use platform capacity and pressure
+    fallbacks on Windows and macOS.
+  - Separate foreground query, background maintenance, blocking CPU, and I/O
+    admission. Bound `spawn_blocking` through Skein permits instead of relying
+    on Tokio's default blocking-pool limit.
+  - Check deadline and cancellation state cooperatively at batch, expansion,
+    spill, and I/O-wave boundaries because a running blocking task cannot be
+    forcibly cancelled.
+  - Control query and operator memory admission, result bytes, I/O depth, and
+    background concurrency independently of Tokio worker counts.
+  - Add cross-platform tests for borrowed and owned runtime lifecycles, nested
+    runtime rejection, Linux cgroup limit parsing, platform fallbacks, bounded
+    blocking admission, cancellation latency, and adaptive budget changes.
+  - Expose configured and effective CPU slots, memory budgets, I/O depth,
+    admission waits, cancellations, and pressure-driven adjustments through
+    typed, low-cardinality host-owned telemetry.
 - [x] Improve statistics maintenance.
   - Prefer incremental label, relationship, distinct-value, and degree summaries
     once correctness is proven.
