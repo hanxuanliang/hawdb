@@ -8,8 +8,8 @@ pub use concurrent::BoundedExecutor;
 pub use graph::{GraphExpansionExecutionReport, GraphExpansionTruncationReason};
 pub use limit::ExecutionLimit;
 pub use profile::{
-    BlockingOperatorMemoryReport, PipelineMemoryReport, ProfiledQueryRows, ReadExecutionProfile,
-    Row,
+    BlockingOperatorMemoryReport, PipelineMemoryReport, ProfiledQueryRows, ProfiledQueryStream,
+    ReadExecutionProfile, Row,
 };
 pub use vector::{
     execute_vector_plan, VectorCandidate, VectorCandidateBatch, VectorCandidateScanRequest,

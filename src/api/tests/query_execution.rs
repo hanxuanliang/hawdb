@@ -391,3 +391,77 @@ fn variable_return_items_project_graph_records() {
     assert_eq!(relationship.get("source_id"), Some(&Value::Int(0)));
     assert_eq!(relationship.get("target_id"), Some(&Value::Int(1)));
 }
+
+#[test]
+fn read_transaction_streams_rows_with_row_and_payload_budgets() {
+    let mut db = Database::new();
+    for (id, title) in [(1, "alpha"), (2, "beta"), (3, "gamma")] {
+        db.query(&format!("CREATE (:Memory {{id: {id}, title: '{title}'}})"))
+            .unwrap();
+    }
+
+    let mut tx = db.begin_read_transaction();
+    let mut titles = Vec::new();
+    let report = tx
+        .query_streaming(
+            "MATCH (m:Memory) RETURN m.title AS title ORDER BY title ASC LIMIT 2",
+            QueryStreamOptions {
+                max_rows: Some(2),
+                max_payload_bytes: Some(1024),
+            },
+            |row| {
+                titles.push(row["title"].clone());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+    assert!(report.fully_streamed);
+    assert_eq!(report.output_rows, 2);
+    assert!(report.output_payload_bytes > 0);
+    assert_eq!(
+        titles,
+        vec![
+            Value::String("alpha".to_string()),
+            Value::String("beta".to_string())
+        ]
+    );
+
+    let mut tx = db.begin_read_transaction();
+    let mut provisional_rows = 0usize;
+    let error = tx
+        .query_streaming(
+            "MATCH (m:Memory) RETURN m.title AS title ORDER BY title ASC",
+            QueryStreamOptions {
+                max_rows: Some(1),
+                max_payload_bytes: Some(1024),
+            },
+            |_| {
+                provisional_rows += 1;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+    assert_eq!(provisional_rows, 1);
+    assert!(error
+        .to_string()
+        .contains("exceeding max_read_result_rows 1"));
+
+    let mut tx = db.begin_read_transaction();
+    let mut delivered_rows = 0usize;
+    let error = tx
+        .query_streaming(
+            "MATCH (m:Memory) RETURN m.title AS title LIMIT 1",
+            QueryStreamOptions {
+                max_rows: Some(1),
+                max_payload_bytes: Some(1),
+            },
+            |_| {
+                delivered_rows += 1;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+    assert_eq!(delivered_rows, 0);
+    assert!(error.to_string().contains("max_payload_bytes 1"));
+}

@@ -253,6 +253,20 @@ pub struct QueryOutput {
     pub rows: Vec<Row>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct QueryStreamOptions {
+    pub max_rows: Option<usize>,
+    pub max_payload_bytes: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryStreamReport {
+    pub fully_streamed: bool,
+    pub output_rows: usize,
+    pub output_payload_bytes: usize,
+    pub execution_profile: executor::ReadExecutionProfile,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct QueryAccessControlContext {
     policy_epoch: u64,
@@ -35995,6 +36009,74 @@ impl DatabaseReadTransaction {
             None,
             None,
         )
+    }
+
+    pub fn query_streaming(
+        &mut self,
+        cypher_text: &str,
+        options: QueryStreamOptions,
+        consumer: impl FnMut(Row) -> Result<()>,
+    ) -> Result<QueryStreamReport> {
+        self.query_with_params_streaming(cypher_text, &BTreeMap::new(), options, consumer)
+    }
+
+    /// Streams rows from a read plan through a budgeted consumer boundary.
+    ///
+    /// Consumer calls are provisional until this method returns `Ok`. A host
+    /// that cannot surface a terminal query error must not publish consumed
+    /// rows before the final report is available.
+    pub fn query_with_params_streaming(
+        &mut self,
+        cypher_text: &str,
+        parameters: &BTreeMap<String, Value>,
+        options: QueryStreamOptions,
+        mut consumer: impl FnMut(Row) -> Result<()>,
+    ) -> Result<QueryStreamReport> {
+        let statement = cypher::parse(cypher_text)?;
+        let body = statement_body(&statement);
+        if matches!(statement, cypher::Statement::Explain(_)) {
+            return Err(SkeinError::Execution(
+                "streaming query does not support EXPLAIN".to_string(),
+            ));
+        }
+        if matches!(body, cypher::Statement::Checkpoint) {
+            return Err(SkeinError::Execution(
+                "CHECKPOINT is not allowed inside a read transaction".to_string(),
+            ));
+        }
+        if matches!(body, cypher::Statement::SetSystemVariable(_)) {
+            return Err(SkeinError::Execution(
+                "SET system variable is not allowed inside a read transaction".to_string(),
+            ));
+        }
+        query_work_request_for_statement(&QuerySystemVariables::default(), &statement)?;
+        let optimized = self.optimized_query_plan_with_access_control(
+            cypher_text,
+            &statement,
+            parameters,
+            None,
+        )?;
+        if executor::is_mutation_plan(&optimized.physical_plan)? {
+            return Err(SkeinError::Execution(
+                "read transaction query must not be a mutation".to_string(),
+            ));
+        }
+        let streamed = executor::execute_with_row_consumer_profile(
+            &optimized.physical_plan,
+            &mut self.catalog,
+            &mut self.store,
+            parameters,
+            options.max_rows,
+            options.max_payload_bytes,
+            &mut consumer,
+        )?;
+        let pipeline = &streamed.profile.pipeline_memory_report;
+        Ok(QueryStreamReport {
+            fully_streamed: streamed.fully_streamed,
+            output_rows: pipeline.output_rows,
+            output_payload_bytes: pipeline.output_payload_bytes,
+            execution_profile: streamed.profile,
+        })
     }
 
     pub fn query_with_params_bounded_profile_access_control(

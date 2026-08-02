@@ -60,6 +60,15 @@ pub struct ProfiledQueryRows<TScanPruningReport> {
     pub profile: ReadExecutionProfile<TScanPruningReport>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfiledQueryStream<TScanPruningReport> {
+    /// True when the physical plan emitted batches directly to the consumer.
+    /// False means an unsupported operator still materialized bindings before
+    /// the bounded consumer boundary.
+    pub fully_streamed: bool,
+    pub profile: ReadExecutionProfile<TScanPruningReport>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

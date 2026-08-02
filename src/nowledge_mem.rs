@@ -26,8 +26,9 @@ use crate::{
     KnowledgeMemoryLifecycleBatchRequest, KnowledgeRetrievalOutput, KnowledgeRetrievalRequest,
     KnowledgeSourceCandidateScanOutput, KnowledgeSourceCandidateScanRequest, LocalQosPolicy,
     LocalQosScheduler, LocalQosState, NowledgeGraphStatement, PlanCacheLookup, QueryOutput,
-    ReadExecutionProfile, Result, ScheduledSearchProjectionCatchUpReport, SearchDocument,
-    SearchIndex, SearchProjectionCatchUpReport, SearchProjectionChangefeedReadiness,
+    QueryStreamOptions, QueryStreamReport, ReadExecutionProfile, Result,
+    ScheduledSearchProjectionCatchUpReport, SearchDocument, SearchIndex,
+    SearchProjectionCatchUpReport, SearchProjectionChangefeedReadiness,
     SearchProjectionChangefeedStatus, SearchProjectionDelta, SearchProjectionDeltaReport,
     SearchProjectionFreshness, SearchProjectionGraphDeltaRequest, SearchProjectionMutationId,
     SearchProjectionProbeOptions, SearchResultSet, SkeinError, SlowQueryLogRecordSummary,
@@ -5463,6 +5464,26 @@ impl NowledgeMemGraph {
         bounded_nowledge_mem_read_output(self.mode, bounded, options)
     }
 
+    pub fn read_query_with_params_streaming(
+        &self,
+        cypher: &str,
+        parameters: &BTreeMap<String, Value>,
+        options: &NowledgeMemReadOptions,
+        consumer: impl FnMut(BTreeMap<String, Value>) -> Result<()>,
+    ) -> Result<QueryStreamReport> {
+        self.db
+            .begin_read_transaction()
+            .query_with_params_streaming(
+                cypher,
+                parameters,
+                QueryStreamOptions {
+                    max_rows: options.max_rows,
+                    max_payload_bytes: options.max_estimated_payload_bytes,
+                },
+                consumer,
+            )
+    }
+
     pub fn graph_rag_schema_context(
         &self,
         options: GraphRagSchemaContextOptions,
@@ -7366,6 +7387,17 @@ impl NowledgeMemEmbeddedStoreHandle {
             .read_query_with_params(cypher, parameters, options)
     }
 
+    pub fn read_query_with_params_streaming(
+        &self,
+        cypher: &str,
+        parameters: &BTreeMap<String, Value>,
+        options: &NowledgeMemReadOptions,
+        consumer: impl FnMut(BTreeMap<String, Value>) -> Result<()>,
+    ) -> Result<QueryStreamReport> {
+        self.read_store()?
+            .read_query_with_params_streaming(cypher, parameters, options, consumer)
+    }
+
     pub fn graph_rag_schema_context(
         &self,
         options: GraphRagSchemaContextOptions,
@@ -8235,6 +8267,17 @@ impl NowledgeMemEmbeddedStore {
     ) -> Result<NowledgeMemReadOutput> {
         self.graph
             .read_query_with_params(cypher, parameters, options)
+    }
+
+    pub fn read_query_with_params_streaming(
+        &self,
+        cypher: &str,
+        parameters: &BTreeMap<String, Value>,
+        options: &NowledgeMemReadOptions,
+        consumer: impl FnMut(BTreeMap<String, Value>) -> Result<()>,
+    ) -> Result<QueryStreamReport> {
+        self.graph
+            .read_query_with_params_streaming(cypher, parameters, options, consumer)
     }
 
     pub fn graph_rag_schema_context(

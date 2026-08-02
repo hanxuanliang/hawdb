@@ -39,6 +39,7 @@ mod spill;
 pub type Row = skein_executor::Row;
 pub type ReadExecutionProfile = skein_executor::ReadExecutionProfile<ScanPruningReport>;
 pub type ProfiledQueryRows = skein_executor::ProfiledQueryRows<ScanPruningReport>;
+pub type ProfiledQueryStream = skein_executor::ProfiledQueryStream<ScanPruningReport>;
 type ValueRangeBound = (Value, bool);
 type ValueRangeBounds = (Option<ValueRangeBound>, Option<ValueRangeBound>);
 
@@ -301,6 +302,180 @@ pub fn execute_with_row_limit_profile_and_external_and_context(
             task_context: Some(task_context),
         },
     )
+}
+
+/// Executes a read plan and transfers ownership of each output row to a
+/// bounded consumer. Consumer calls are provisional until this function
+/// returns `Ok`: callers that cannot surface a terminal error must buffer or
+/// otherwise roll back their response when a later row exceeds a budget.
+pub fn execute_with_row_consumer_profile(
+    plan: &PhysicalPlan,
+    catalog: &mut Catalog,
+    store: &mut GraphStore,
+    parameters: &BTreeMap<String, Value>,
+    max_rows: Option<usize>,
+    max_payload_bytes: Option<usize>,
+    consumer: &mut dyn FnMut(Row) -> Result<()>,
+) -> Result<ProfiledQueryStream> {
+    let mut external = NoExternalReadOperator;
+    execute_with_row_consumer_profile_and_external(
+        plan,
+        catalog,
+        store,
+        parameters,
+        &mut external,
+        max_rows,
+        max_payload_bytes,
+        consumer,
+    )
+}
+
+pub fn execute_with_row_consumer_profile_and_external(
+    plan: &PhysicalPlan,
+    catalog: &mut Catalog,
+    store: &mut GraphStore,
+    parameters: &BTreeMap<String, Value>,
+    external: &mut dyn ExternalReadOperator,
+    max_rows: Option<usize>,
+    max_payload_bytes: Option<usize>,
+    consumer: &mut dyn FnMut(Row) -> Result<()>,
+) -> Result<ProfiledQueryStream> {
+    execute_with_row_consumer_profile_internal(
+        plan,
+        catalog,
+        store,
+        parameters,
+        external,
+        max_rows,
+        max_payload_bytes,
+        consumer,
+        ExecutionRuntimeControl {
+            memory: &ExecutionMemoryConfig::default(),
+            task_context: None,
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_with_row_consumer_profile_internal(
+    plan: &PhysicalPlan,
+    catalog: &mut Catalog,
+    store: &mut GraphStore,
+    parameters: &BTreeMap<String, Value>,
+    external: &mut dyn ExternalReadOperator,
+    max_rows: Option<usize>,
+    max_payload_bytes: Option<usize>,
+    consumer: &mut dyn FnMut(Row) -> Result<()>,
+    runtime: ExecutionRuntimeControl<'_>,
+) -> Result<ProfiledQueryStream> {
+    let ExecutionRuntimeControl {
+        memory,
+        task_context,
+    } = runtime;
+    let process_memory_start = skein_qos::ProcessMemorySnapshot::capture().ok();
+    let execution_limit = ExecutionLimit::from_user_max_rows(max_rows)?;
+    let mut profile = read_execution_profile(plan, max_rows)?;
+    let fully_streamed = batch_pipeline_capable(plan);
+    let mut output_rows = 0usize;
+    let mut output_payload_bytes = 0usize;
+    let mut emit_binding = |binding: Binding| -> Result<()> {
+        if max_rows.is_some_and(|limit| output_rows >= limit) {
+            return Err(SkeinError::Execution(format!(
+                "read query returned more than {} rows, exceeding max_read_result_rows {}",
+                output_rows.saturating_add(1),
+                max_rows.unwrap_or_default()
+            )));
+        }
+        let row = binding.values;
+        let row_payload_bytes = map_payload_bytes(&row);
+        let next_payload_bytes = output_payload_bytes.saturating_add(row_payload_bytes);
+        if max_payload_bytes.is_some_and(|limit| next_payload_bytes > limit) {
+            return Err(SkeinError::Execution(format!(
+                "read query payload would exceed max_payload_bytes {} (next total {})",
+                max_payload_bytes.unwrap_or_default(),
+                next_payload_bytes
+            )));
+        }
+        consumer(row)?;
+        output_rows = output_rows.saturating_add(1);
+        output_payload_bytes = next_payload_bytes;
+        Ok(())
+    };
+    let mut context = ExecutionContext {
+        parameters,
+        external,
+        memory,
+        task_context,
+    };
+    let (
+        (
+            ((((), scan_pruning_reports), vector_execution_reports), graph_expansion_reports),
+            blocking_operator_memory_reports,
+        ),
+        mut pipeline_memory_report,
+    ) = capture_pipeline_memory_report(|| {
+        capture_blocking_memory_reports(|| {
+            capture_graph_expansion_reports(|| {
+                capture_vector_execution_reports(|| {
+                    capture_scan_pruning_reports(|| {
+                        if fully_streamed {
+                            let batch_context = BatchReadContext {
+                                catalog,
+                                store,
+                                memory,
+                                task_context,
+                            };
+                            execute_binding_batches(
+                                plan,
+                                batch_context,
+                                execution_limit,
+                                &mut |batch| {
+                                    for binding in batch {
+                                        emit_binding(binding)?;
+                                    }
+                                    Ok(BatchControl::Continue)
+                                },
+                            )?;
+                        } else {
+                            let bindings = execute_bindings_with_limit(
+                                plan,
+                                catalog,
+                                store,
+                                &mut context,
+                                execution_limit,
+                            )?;
+                            for binding in bindings {
+                                emit_binding(binding)?;
+                            }
+                        }
+                        Ok(())
+                    })
+                })
+            })
+        })
+    })?;
+    profile.scan_pruning_reports = scan_pruning_reports;
+    profile.vector_execution_reports = vector_execution_reports;
+    profile.graph_expansion_reports = graph_expansion_reports;
+    profile.blocking_operator_memory_reports = blocking_operator_memory_reports;
+    pipeline_memory_report.output_rows = output_rows;
+    pipeline_memory_report.output_payload_bytes = output_payload_bytes;
+    if let Ok(process_memory_end) = skein_qos::ProcessMemorySnapshot::capture() {
+        pipeline_memory_report.steady_resident_bytes = Some(process_memory_end.resident_bytes);
+        pipeline_memory_report.peak_resident_bytes = Some(process_memory_end.peak_resident_bytes);
+        if let Some(process_memory_start) = process_memory_start {
+            let process_memory =
+                skein_qos::ProcessMemoryProfile::between(process_memory_start, process_memory_end);
+            pipeline_memory_report.start_resident_bytes = Some(process_memory.start_resident_bytes);
+            pipeline_memory_report.minor_page_faults = Some(process_memory.minor_page_faults);
+            pipeline_memory_report.major_page_faults = Some(process_memory.major_page_faults);
+        }
+    }
+    profile.pipeline_memory_report = pipeline_memory_report;
+    Ok(ProfiledQueryStream {
+        fully_streamed,
+        profile,
+    })
 }
 
 fn execute_with_row_limit_profile_and_external_and_memory_internal(
