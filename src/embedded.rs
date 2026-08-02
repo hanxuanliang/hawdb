@@ -7,7 +7,10 @@ use crate::{
     AdaptiveVectorBackendPolicy, Database, DatabaseConfig, Result, RuntimeCapabilities,
     SearchIndex, SearchRangeReadConfig,
 };
-use skein_qos::{IoConcurrencyBudget, RuntimeResourceBudget, StorageDeviceProfile};
+use skein_qos::{
+    IoConcurrencyBudget, RuntimeGovernor, RuntimeGovernorConfig, RuntimeMemorySnapshot,
+    RuntimeResourceBudget, RuntimeResourceSnapshot, StorageDeviceProfile,
+};
 use skein_storage::SegmentReadScheduler;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
@@ -22,6 +25,7 @@ pub enum EmbeddedDeploymentProfile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EmbeddedRuntimeResources {
     pub cpu: RuntimeResourceBudget,
+    pub memory: RuntimeMemorySnapshot,
     pub storage_device: StorageDeviceProfile,
     pub storage_io: IoConcurrencyBudget,
 }
@@ -50,6 +54,8 @@ pub struct SkeinEmbeddedOpenOptions {
     pub deployment_profile: EmbeddedDeploymentProfile,
     pub storage_device: Option<StorageDeviceProfile>,
     pub storage_io: Option<IoConcurrencyBudget>,
+    pub resource_snapshot: Option<RuntimeResourceSnapshot>,
+    pub runtime_governor_config: Option<RuntimeGovernorConfig>,
 }
 
 #[derive(Debug)]
@@ -58,6 +64,7 @@ pub struct SkeinEmbedded {
     database: Database,
     deployment_profile: EmbeddedDeploymentProfile,
     runtime_resources: EmbeddedRuntimeResources,
+    runtime_governor: RuntimeGovernor,
 }
 
 impl SkeinEmbeddedOpenOptions {
@@ -80,6 +87,8 @@ impl SkeinEmbeddedOpenOptions {
             deployment_profile,
             storage_device: None,
             storage_io: None,
+            resource_snapshot: None,
+            runtime_governor_config: None,
         }
     }
 
@@ -107,6 +116,19 @@ impl SkeinEmbeddedOpenOptions {
         self.storage_device = Some(storage_device);
         self
     }
+
+    pub fn with_resource_snapshot(mut self, resource_snapshot: RuntimeResourceSnapshot) -> Self {
+        self.resource_snapshot = Some(resource_snapshot);
+        self
+    }
+
+    pub fn with_runtime_governor_config(
+        mut self,
+        runtime_governor_config: RuntimeGovernorConfig,
+    ) -> Self {
+        self.runtime_governor_config = Some(runtime_governor_config);
+        self
+    }
 }
 
 impl SkeinEmbedded {
@@ -115,13 +137,23 @@ impl SkeinEmbedded {
     }
 
     pub fn open_with_options(options: SkeinEmbeddedOpenOptions) -> Result<Self> {
-        let cpu = RuntimeResourceBudget::detect();
+        let resource_snapshot = options
+            .resource_snapshot
+            .unwrap_or_else(RuntimeResourceSnapshot::detect);
+        let cpu = resource_snapshot.cpu;
         let storage_device = options
             .storage_device
             .unwrap_or_else(|| StorageDeviceProfile::detect(&options.path));
         let storage_io = options
             .storage_io
             .unwrap_or_else(|| default_io_budget(options.deployment_profile, storage_device));
+        let runtime_governor = RuntimeGovernor::new(
+            options
+                .runtime_governor_config
+                .unwrap_or_else(|| default_runtime_governor_config(options.deployment_profile)),
+            resource_snapshot,
+            storage_io,
+        );
         let database = Database::open_with_durability_and_config(
             &options.path,
             options.durability,
@@ -133,9 +165,11 @@ impl SkeinEmbedded {
             deployment_profile: options.deployment_profile,
             runtime_resources: EmbeddedRuntimeResources {
                 cpu,
+                memory: resource_snapshot.memory,
                 storage_device,
                 storage_io,
             },
+            runtime_governor,
         })
     }
 
@@ -155,6 +189,22 @@ impl SkeinEmbedded {
 
     pub fn runtime_resources(&self) -> EmbeddedRuntimeResources {
         self.runtime_resources
+    }
+
+    pub fn runtime_governor(&self) -> &RuntimeGovernor {
+        &self.runtime_governor
+    }
+
+    pub fn refresh_runtime_resources(&mut self) -> bool {
+        self.update_runtime_resources(RuntimeResourceSnapshot::detect())
+    }
+
+    pub fn update_runtime_resources(&mut self, resources: RuntimeResourceSnapshot) -> bool {
+        let changed = self.runtime_governor.update_resources(resources);
+        let snapshot = self.runtime_governor.snapshot();
+        self.runtime_resources.cpu = snapshot.resources.cpu;
+        self.runtime_resources.memory = snapshot.resources.memory;
+        changed
     }
 
     pub fn runtime_capabilities(&self) -> RuntimeCapabilities {
@@ -242,6 +292,13 @@ fn default_io_budget(
         EmbeddedDeploymentProfile::MobileEmbedded => {
             IoConcurrencyBudget::mobile_embedded_for_device(device)
         }
+    }
+}
+
+fn default_runtime_governor_config(profile: EmbeddedDeploymentProfile) -> RuntimeGovernorConfig {
+    match profile {
+        EmbeddedDeploymentProfile::DesktopBound => RuntimeGovernorConfig::desktop_bound(),
+        EmbeddedDeploymentProfile::MobileEmbedded => RuntimeGovernorConfig::mobile_embedded(),
     }
 }
 
@@ -418,6 +475,61 @@ mod tests {
             engine.runtime_resources().storage_io,
             IoConcurrencyBudget::new(12, 3)
         );
+    }
+
+    #[test]
+    fn embedded_governor_applies_adaptive_resource_updates() {
+        let root = unique_test_dir("embedded-adaptive-runtime");
+        let initial = RuntimeResourceSnapshot::from_parts(
+            RuntimeResourceBudget::from_limits(NonZeroUsize::new(4).unwrap(), None, None),
+            RuntimeMemorySnapshot::from_limits(
+                Some(8_u64 << 30),
+                Some(4_u64 << 30),
+                None,
+                None,
+                None,
+            ),
+        );
+        let mut engine = SkeinEmbedded::open_with_options(
+            SkeinEmbeddedOpenOptions::new(root.join("graph"))
+                .with_resource_snapshot(initial)
+                .with_storage_io_budget(IoConcurrencyBudget::new(8, 2)),
+        )
+        .unwrap();
+        assert_eq!(
+            engine
+                .runtime_governor()
+                .snapshot()
+                .limits
+                .effective_cpu_slots
+                .get(),
+            4
+        );
+
+        let constrained = RuntimeResourceSnapshot::from_parts(
+            RuntimeResourceBudget::from_limits(
+                NonZeroUsize::new(8).unwrap(),
+                NonZeroUsize::new(1),
+                NonZeroUsize::new(2),
+            ),
+            RuntimeMemorySnapshot::from_limits(
+                Some(8_u64 << 30),
+                Some(256_u64 << 20),
+                Some(1_u64 << 30),
+                Some(768_u64 << 20),
+                Some(600_u64 << 20),
+            ),
+        );
+        assert!(engine.update_runtime_resources(constrained));
+        let snapshot = engine.runtime_governor().snapshot();
+        assert_eq!(snapshot.limits.effective_cpu_slots.get(), 1);
+        assert_eq!(snapshot.resources.memory.pressure.as_str(), "elevated");
+        assert_eq!(
+            engine.runtime_resources().cpu.effective_parallelism.get(),
+            1
+        );
+        assert_eq!(engine.runtime_resources().memory, constrained.memory);
+        assert_eq!(snapshot.pressure_adjustments, 1);
     }
 
     #[test]

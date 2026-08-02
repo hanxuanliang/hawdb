@@ -10,6 +10,29 @@ impl Database {
         query_work_request_for_statement(&self.system_variables, &statement)
     }
 
+    pub(crate) fn runtime_admission_for(
+        &mut self,
+        cypher_text: &str,
+        parameters: &BTreeMap<String, Value>,
+    ) -> Result<(WorkRequest, bool)> {
+        let statement = cypher::parse(cypher_text)?;
+        let work_request = query_work_request_for_statement(&self.system_variables, &statement)?;
+        let body = statement_body(&statement);
+        let is_mutation = match body {
+            cypher::Statement::Explain(_) => false,
+            cypher::Statement::SetSystemVariable(_)
+            | cypher::Statement::Checkpoint
+            | cypher::Statement::BeginTransaction
+            | cypher::Statement::Commit
+            | cypher::Statement::Rollback => true,
+            _ => {
+                let optimized = self.optimized_query_plan(cypher_text, &statement, parameters)?;
+                executor::is_mutation_plan(&optimized.physical_plan)?
+            }
+        };
+        Ok((work_request, is_mutation))
+    }
+
     pub fn query(&mut self, cypher_text: &str) -> Result<QueryOutput> {
         self.query_with_params(cypher_text, &BTreeMap::new())
     }
@@ -19,8 +42,32 @@ impl Database {
         cypher_text: &str,
         parameters: &BTreeMap<String, Value>,
     ) -> Result<QueryOutput> {
-        self.query_with_params_trace_internal(cypher_text, parameters, false, None)
+        self.query_with_params_trace_internal(cypher_text, parameters, false, None, None)
             .map(|(output, _)| output)
+    }
+
+    pub fn query_with_context(
+        &mut self,
+        cypher_text: &str,
+        task_context: &skein_core::RuntimeTaskContext,
+    ) -> Result<QueryOutput> {
+        self.query_with_params_context(cypher_text, &BTreeMap::new(), task_context)
+    }
+
+    pub fn query_with_params_context(
+        &mut self,
+        cypher_text: &str,
+        parameters: &BTreeMap<String, Value>,
+        task_context: &skein_core::RuntimeTaskContext,
+    ) -> Result<QueryOutput> {
+        self.query_with_params_trace_internal(
+            cypher_text,
+            parameters,
+            false,
+            None,
+            Some(task_context),
+        )
+        .map(|(output, _)| output)
     }
 
     pub fn query_with_params_access_control(
@@ -29,8 +76,14 @@ impl Database {
         parameters: &BTreeMap<String, Value>,
         access_control: QueryAccessControlContext,
     ) -> Result<QueryOutput> {
-        self.query_with_params_trace_internal(cypher_text, parameters, false, Some(access_control))
-            .map(|(output, _)| output)
+        self.query_with_params_trace_internal(
+            cypher_text,
+            parameters,
+            false,
+            Some(access_control),
+            None,
+        )
+        .map(|(output, _)| output)
     }
 
     fn query_with_params_trace_internal(
@@ -39,14 +92,16 @@ impl Database {
         parameters: &BTreeMap<String, Value>,
         capture_trace: bool,
         access_control: Option<QueryAccessControlContext>,
+        task_context: Option<&skein_core::RuntimeTaskContext>,
     ) -> Result<(QueryOutput, QueryExecutionTrace)> {
         let mut external = executor::NoExternalReadOperator;
-        self.query_with_params_trace_and_external(
+        self.query_with_params_trace_and_external_with_context(
             cypher_text,
             parameters,
             capture_trace,
             &mut external,
             access_control,
+            task_context,
         )
     }
 
@@ -58,7 +113,27 @@ impl Database {
         external: &mut dyn executor::ExternalReadOperator,
         access_control: Option<QueryAccessControlContext>,
     ) -> Result<(QueryOutput, QueryExecutionTrace)> {
+        self.query_with_params_trace_and_external_with_context(
+            cypher_text,
+            parameters,
+            capture_trace,
+            external,
+            access_control,
+            None,
+        )
+    }
+
+    pub(crate) fn query_with_params_trace_and_external_with_context(
+        &mut self,
+        cypher_text: &str,
+        parameters: &BTreeMap<String, Value>,
+        capture_trace: bool,
+        external: &mut dyn executor::ExternalReadOperator,
+        access_control: Option<QueryAccessControlContext>,
+        task_context: Option<&skein_core::RuntimeTaskContext>,
+    ) -> Result<(QueryOutput, QueryExecutionTrace)> {
         let started = std::time::Instant::now();
+        query_runtime_checkpoint(task_context)?;
         let statement = cypher::parse(cypher_text)?;
         let body = statement_body(&statement);
         let statement_kind_name = statement_kind(&statement);
@@ -70,6 +145,7 @@ impl Database {
                     parameters,
                     external,
                     access_control.as_ref(),
+                    task_context,
                 )
                 .map(|output| (output, QueryExecutionTrace::uncached(statement)));
             let statement_result = match &query_result {
@@ -109,6 +185,7 @@ impl Database {
             ));
         }
         let query_result = (|| {
+            query_runtime_checkpoint(task_context)?;
             query_work_request_for_statement(&self.system_variables, &statement)?;
             let optimized = self.optimized_query_plan_with_access_control(
                 cypher_text,
@@ -121,6 +198,7 @@ impl Database {
                 self.ensure_writable()?;
             }
             let (rows, execution_profile) = if is_mutation {
+                query_runtime_checkpoint(task_context)?;
                 (
                     executor::execute(
                         &optimized.physical_plan,
@@ -130,16 +208,32 @@ impl Database {
                     None,
                 )
             } else {
-                let profiled = executor::execute_with_row_limit_profile_and_external(
-                    &optimized.physical_plan,
-                    &mut self.catalog,
-                    &mut self.store,
-                    parameters,
-                    external,
-                    self.config.max_read_result_rows,
-                )?;
+                let profiled = match task_context {
+                    Some(task_context) => {
+                        executor::execute_with_row_limit_profile_and_external_and_context(
+                            &optimized.physical_plan,
+                            &mut self.catalog,
+                            &mut self.store,
+                            parameters,
+                            external,
+                            self.config.max_read_result_rows,
+                            task_context,
+                        )
+                    }
+                    None => executor::execute_with_row_limit_profile_and_external(
+                        &optimized.physical_plan,
+                        &mut self.catalog,
+                        &mut self.store,
+                        parameters,
+                        external,
+                        self.config.max_read_result_rows,
+                    ),
+                }?;
                 (profiled.rows, Some(profiled.profile))
             };
+            if !is_mutation {
+                query_runtime_checkpoint(task_context)?;
+            }
             Ok((
                 QueryOutput { rows },
                 QueryExecutionTrace {
@@ -179,7 +273,9 @@ impl Database {
         parameters: &BTreeMap<String, Value>,
         external: &mut dyn executor::ExternalReadOperator,
         access_control: Option<&QueryAccessControlContext>,
+        task_context: Option<&skein_core::RuntimeTaskContext>,
     ) -> Result<QueryOutput> {
+        query_runtime_checkpoint(task_context)?;
         let work_request =
             query_work_request_for_statement(&self.system_variables, &explain.statement)?;
         let optimized = self.optimized_query_plan_with_access_control(
@@ -195,14 +291,27 @@ impl Database {
                     "EXPLAIN ANALYZE only supports read queries".to_string(),
                 ));
             }
-            let profiled = executor::execute_with_row_limit_profile_and_external(
-                &optimized.physical_plan,
-                &mut self.catalog,
-                &mut self.store,
-                parameters,
-                external,
-                self.config.max_read_result_rows,
-            )?;
+            let profiled = match task_context {
+                Some(task_context) => {
+                    executor::execute_with_row_limit_profile_and_external_and_context(
+                        &optimized.physical_plan,
+                        &mut self.catalog,
+                        &mut self.store,
+                        parameters,
+                        external,
+                        self.config.max_read_result_rows,
+                        task_context,
+                    )
+                }
+                None => executor::execute_with_row_limit_profile_and_external(
+                    &optimized.physical_plan,
+                    &mut self.catalog,
+                    &mut self.store,
+                    parameters,
+                    external,
+                    self.config.max_read_result_rows,
+                ),
+            }?;
             return Ok(QueryOutput {
                 rows: vec![explain_analyze_output_row(
                     &optimized,
@@ -220,5 +329,16 @@ impl Database {
                 inner_statement_kind,
             )],
         })
+    }
+}
+
+pub(super) fn query_runtime_checkpoint(
+    task_context: Option<&skein_core::RuntimeTaskContext>,
+) -> Result<()> {
+    match task_context {
+        Some(task_context) => task_context
+            .checkpoint()
+            .map_err(|reason| SkeinError::Execution(format!("runtime task stopped: {reason}"))),
+        None => Ok(()),
     }
 }

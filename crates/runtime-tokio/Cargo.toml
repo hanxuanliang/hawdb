@@ -1,0 +1,10 @@
+[package]
+name = "skein-runtime-tokio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+skein-core = { path = "../core" }
+skein-qos = { path = "../qos" }
+tokio = { version = "1.49", features = ["rt-multi-thread", "sync", "time"] }

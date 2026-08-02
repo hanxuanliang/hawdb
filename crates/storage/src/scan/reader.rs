@@ -1,4 +1,5 @@
 use super::{SegmentReadRange, SegmentReadSchedule};
+use skein_core::{RuntimeCancellationReason, RuntimeTaskContext};
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -82,6 +83,7 @@ impl Error for SegmentReadError {
 pub enum SegmentReadExecutionError<E> {
     Read(SegmentReadError),
     Consume(E),
+    Stopped(RuntimeCancellationReason),
 }
 
 impl<E: Display> Display for SegmentReadExecutionError<E> {
@@ -89,6 +91,7 @@ impl<E: Display> Display for SegmentReadExecutionError<E> {
         match self {
             Self::Read(error) => Display::fmt(error, formatter),
             Self::Consume(error) => write!(formatter, "segment payload consumer failed: {error}"),
+            Self::Stopped(reason) => write!(formatter, "segment payload read stopped: {reason}"),
         }
     }
 }
@@ -98,6 +101,7 @@ impl<E: Error + 'static> Error for SegmentReadExecutionError<E> {
         match self {
             Self::Read(error) => Some(error),
             Self::Consume(error) => Some(error),
+            Self::Stopped(reason) => Some(reason),
         }
     }
 }
@@ -172,16 +176,46 @@ impl SegmentReadExecutor {
         self,
         reader: &R,
         schedule: &SegmentReadSchedule,
+        consume: F,
+    ) -> Result<SegmentReadExecutionReport, SegmentReadExecutionError<E>>
+    where
+        R: SegmentRangeReader,
+        F: FnMut(SegmentReadPayload) -> Result<(), E>,
+    {
+        self.execute_inner(reader, schedule, None, consume)
+    }
+
+    pub fn execute_with_context<R, F, E>(
+        self,
+        reader: &R,
+        schedule: &SegmentReadSchedule,
+        context: &RuntimeTaskContext,
+        consume: F,
+    ) -> Result<SegmentReadExecutionReport, SegmentReadExecutionError<E>>
+    where
+        R: SegmentRangeReader,
+        F: FnMut(SegmentReadPayload) -> Result<(), E>,
+    {
+        self.execute_inner(reader, schedule, Some(context), consume)
+    }
+
+    fn execute_inner<R, F, E>(
+        self,
+        reader: &R,
+        schedule: &SegmentReadSchedule,
+        context: Option<&RuntimeTaskContext>,
         mut consume: F,
     ) -> Result<SegmentReadExecutionReport, SegmentReadExecutionError<E>>
     where
         R: SegmentRangeReader,
         F: FnMut(SegmentReadPayload) -> Result<(), E>,
     {
+        segment_read_checkpoint(context)?;
         let mut range_count = 0usize;
         let mut bytes_read = 0u64;
         let mut max_wave_bytes_read = 0u64;
         for (wave_index, wave) in schedule.waves.iter().enumerate() {
+            segment_read_checkpoint(context)?;
             let wave_bytes = wave
                 .ranges
                 .iter()
@@ -224,19 +258,33 @@ impl SegmentReadExecutor {
             })
             .map_err(SegmentReadExecutionError::Read)?;
 
+            segment_read_checkpoint(context)?;
             for payload in payloads {
+                segment_read_checkpoint(context)?;
                 range_count = range_count.saturating_add(1);
                 bytes_read = bytes_read.saturating_add(payload.range.length.get());
                 consume(payload).map_err(SegmentReadExecutionError::Consume)?;
             }
             max_wave_bytes_read = max_wave_bytes_read.max(wave_bytes);
         }
+        segment_read_checkpoint(context)?;
         Ok(SegmentReadExecutionReport {
             wave_count: schedule.wave_count(),
             range_count,
             bytes_read,
             max_wave_bytes_read,
         })
+    }
+}
+
+fn segment_read_checkpoint<E>(
+    context: Option<&RuntimeTaskContext>,
+) -> Result<(), SegmentReadExecutionError<E>> {
+    match context {
+        Some(context) => context
+            .checkpoint()
+            .map_err(SegmentReadExecutionError::Stopped),
+        None => Ok(()),
     }
 }
 
@@ -253,6 +301,7 @@ fn range_io_error(range: &SegmentReadRange, source: std::io::Error) -> SegmentRe
 mod tests {
     use super::*;
     use crate::scan::SegmentReadScheduler;
+    use skein_core::{RuntimeCancellationReason, RuntimeCancellationToken, RuntimeTaskContext};
     use std::num::NonZeroUsize;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -311,6 +360,42 @@ mod tests {
                 max_wave_bytes: 8,
             })
         ));
+    }
+
+    #[test]
+    fn controlled_reader_stops_between_io_waves() {
+        let path = unique_test_file("cancelled");
+        std::fs::write(&path, b"abcdefgh").unwrap();
+        let mut reader = FileSegmentRangeReader::new();
+        reader.register(1, &path);
+        let schedule = SegmentReadScheduler::new(NonZeroUsize::MIN, NonZeroU64::new(4).unwrap())
+            .schedule([
+                SegmentReadRange::new(1, 1, 0, NonZeroU64::new(4).unwrap()),
+                SegmentReadRange::new(1, 2, 4, NonZeroU64::new(4).unwrap()),
+            ]);
+        let token = RuntimeCancellationToken::new();
+        let context = RuntimeTaskContext::without_deadline(token.clone());
+        let mut consumed = 0usize;
+
+        let result = SegmentReadExecutor::new(NonZeroU64::new(4).unwrap()).execute_with_context(
+            &reader,
+            &schedule,
+            &context,
+            |_| {
+                consumed += 1;
+                token.cancel();
+                Ok::<(), std::convert::Infallible>(())
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(SegmentReadExecutionError::Stopped(
+                RuntimeCancellationReason::Cancelled
+            ))
+        ));
+        assert_eq!(consumed, 1);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

@@ -9,6 +9,7 @@ use crate::search::{
 };
 use crate::telemetry::{KernelTelemetry, KernelTelemetryOperation, TelemetrySink};
 use crate::value::Value;
+use skein_core::RuntimeTaskContext;
 #[path = "store/source_scan.rs"]
 mod source_scan;
 pub use skein_storage::{
@@ -6531,6 +6532,40 @@ impl GraphStore {
         max_coalesced_bytes: NonZeroU64,
         max_wave_bytes: NonZeroU64,
     ) -> Result<SourceScanCandidateRead> {
+        self.read_published_source_scan_candidates_internal(
+            predicate,
+            io_depth,
+            max_coalesced_bytes,
+            max_wave_bytes,
+            None,
+        )
+    }
+
+    pub fn read_published_source_scan_candidates_with_context(
+        &self,
+        predicate: &ScanPredicate,
+        io_depth: NonZeroUsize,
+        max_coalesced_bytes: NonZeroU64,
+        max_wave_bytes: NonZeroU64,
+        task_context: &RuntimeTaskContext,
+    ) -> Result<SourceScanCandidateRead> {
+        self.read_published_source_scan_candidates_internal(
+            predicate,
+            io_depth,
+            max_coalesced_bytes,
+            max_wave_bytes,
+            Some(task_context),
+        )
+    }
+
+    fn read_published_source_scan_candidates_internal(
+        &self,
+        predicate: &ScanPredicate,
+        io_depth: NonZeroUsize,
+        max_coalesced_bytes: NonZeroU64,
+        max_wave_bytes: NonZeroU64,
+        task_context: Option<&RuntimeTaskContext>,
+    ) -> Result<SourceScanCandidateRead> {
         let plan = self.plan_published_source_scan(predicate);
         let ScanSegmentAccessPlan::Read(plan) = plan else {
             let ScanSegmentAccessPlan::Fallback(reason) = plan else {
@@ -6580,54 +6615,62 @@ impl GraphStore {
         let schedule = SegmentReadScheduler::new(io_depth, max_coalesced_bytes)
             .schedule(ranges.values().cloned());
         let mut rows = Vec::new();
-        let report = SegmentReadExecutor::new(max_wave_bytes)
-            .execute(&reader, &schedule, |payload| {
-                for segment_id in &payload.range.segment_ids {
-                    let range = ranges.get(segment_id).ok_or_else(|| {
-                        SkeinError::Storage(format!(
-                            "source scan reader returned unknown segment {segment_id}"
-                        ))
-                    })?;
-                    let start = usize::try_from(range.offset.saturating_sub(payload.range.offset))
-                        .map_err(|_| {
-                            SkeinError::Storage(
-                                "source scan payload offset exceeds address space".to_string(),
-                            )
-                        })?;
-                    let end = start
-                        .checked_add(usize::try_from(range.length.get()).map_err(|_| {
-                            SkeinError::Storage(
-                                "source scan payload length exceeds address space".to_string(),
-                            )
-                        })?)
-                        .ok_or_else(|| {
-                            SkeinError::Storage("source scan payload slice overflows".to_string())
-                        })?;
-                    let bytes = payload.bytes.get(start..end).ok_or_else(|| {
+        let mut consume = |payload: SegmentReadPayload| {
+            for segment_id in &payload.range.segment_ids {
+                let range = ranges.get(segment_id).ok_or_else(|| {
+                    SkeinError::Storage(format!(
+                        "source scan reader returned unknown segment {segment_id}"
+                    ))
+                })?;
+                let start = usize::try_from(range.offset.saturating_sub(payload.range.offset))
+                    .map_err(|_| {
                         SkeinError::Storage(
-                            "source scan coalesced payload does not cover a segment".to_string(),
+                            "source scan payload offset exceeds address space".to_string(),
                         )
                     })?;
-                    if checksum_bytes(bytes) != checksums[segment_id] {
-                        return Err(SkeinError::Storage(format!(
+                let end = start
+                    .checked_add(usize::try_from(range.length.get()).map_err(|_| {
+                        SkeinError::Storage(
+                            "source scan payload length exceeds address space".to_string(),
+                        )
+                    })?)
+                    .ok_or_else(|| {
+                        SkeinError::Storage("source scan payload slice overflows".to_string())
+                    })?;
+                let bytes = payload.bytes.get(start..end).ok_or_else(|| {
+                    SkeinError::Storage(
+                        "source scan coalesced payload does not cover a segment".to_string(),
+                    )
+                })?;
+                if checksum_bytes(bytes) != checksums[segment_id] {
+                    return Err(SkeinError::Storage(format!(
                             "source scan segment {segment_id} checksum changed after manifest validation"
                         )));
-                    }
-                    let segment_rows = source_scan::decode_payload(bytes)?;
-                    if let Some(positions) = candidates.remove(segment_id).flatten() {
-                        rows.extend(
-                            segment_rows
-                                .into_iter()
-                                .enumerate()
-                                .filter_map(|(row_id, row)| positions.contains(&(row_id as u64)).then_some(row)),
-                        );
-                    } else {
-                        rows.extend(segment_rows);
-                    }
                 }
-                Ok::<_, SkeinError>(())
-            })
-            .map_err(|error| SkeinError::Storage(error.to_string()))?;
+                let segment_rows = source_scan::decode_payload(bytes)?;
+                if let Some(positions) = candidates.remove(segment_id).flatten() {
+                    rows.extend(segment_rows.into_iter().enumerate().filter_map(
+                        |(row_id, row)| positions.contains(&(row_id as u64)).then_some(row),
+                    ));
+                } else {
+                    rows.extend(segment_rows);
+                }
+            }
+            Ok::<_, SkeinError>(())
+        };
+        let executor = SegmentReadExecutor::new(max_wave_bytes);
+        let report = match task_context {
+            Some(task_context) => {
+                executor.execute_with_context(&reader, &schedule, task_context, &mut consume)
+            }
+            None => executor.execute(&reader, &schedule, &mut consume),
+        }
+        .map_err(|error| match error {
+            SegmentReadExecutionError::Stopped(reason) => {
+                SkeinError::Execution(format!("runtime task stopped: {reason}"))
+            }
+            error => SkeinError::Storage(error.to_string()),
+        })?;
         Ok(SourceScanCandidateRead::Rows {
             graph_epoch: plan.graph_epoch,
             skipped_segment_count: plan.skipped_segment_count,

@@ -1,0 +1,612 @@
+use skein_core::{RuntimeCancellationReason, RuntimeTaskContext};
+use skein_qos::{
+    RuntimeAdmissionError, RuntimeGovernor, RuntimeGovernorSnapshot, RuntimeWorkKind,
+    RuntimeWorkRequest,
+};
+use std::error::Error;
+use std::fmt::{self, Debug, Display, Formatter};
+use std::future::Future;
+use std::num::NonZeroUsize;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use tokio::runtime::{Builder, Runtime};
+use tokio::task::{JoinError, JoinHandle};
+
+pub use tokio::runtime::Handle as TokioHandle;
+pub use tokio::runtime::{Builder as TokioRuntimeBuilder, Runtime as TokioRuntime};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokioRuntimeOwnership {
+    Borrowed,
+    Owned,
+}
+
+impl TokioRuntimeOwnership {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Borrowed => "borrowed",
+            Self::Owned => "owned",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokioRuntimeConfig {
+    pub async_worker_threads: Option<NonZeroUsize>,
+    pub max_blocking_threads: Option<NonZeroUsize>,
+    pub admission_poll_interval: Duration,
+    pub resource_refresh_interval: Duration,
+    pub blocking_thread_keep_alive: Duration,
+}
+
+impl TokioRuntimeConfig {
+    pub fn from_governor(governor: &RuntimeGovernor) -> Self {
+        let snapshot = governor.snapshot();
+        let limits = snapshot.limits;
+        let async_workers = limits.effective_cpu_slots.get().clamp(1, 2);
+        let max_blocking_threads = snapshot
+            .resources
+            .cpu
+            .host_parallelism
+            .get()
+            .saturating_add(limits.foreground_io_depth.get())
+            .max(4);
+        Self {
+            async_worker_threads: NonZeroUsize::new(async_workers),
+            max_blocking_threads: NonZeroUsize::new(max_blocking_threads),
+            ..Self::default()
+        }
+    }
+}
+
+impl Default for TokioRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            async_worker_threads: NonZeroUsize::new(1),
+            max_blocking_threads: NonZeroUsize::new(4),
+            admission_poll_interval: Duration::from_millis(5),
+            resource_refresh_interval: Duration::from_secs(1),
+            blocking_thread_keep_alive: Duration::from_secs(10),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct TokioRuntimeAdapter {
+    handle: TokioHandle,
+    ownership: TokioRuntimeOwnership,
+    owned_runtime: Option<Arc<OwnedRuntime>>,
+    governor: RuntimeGovernor,
+    config: TokioRuntimeConfig,
+    last_resource_refresh: Arc<Mutex<Instant>>,
+}
+
+impl Debug for TokioRuntimeAdapter {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TokioRuntimeAdapter")
+            .field("ownership", &self.ownership)
+            .field("governor", &self.governor.snapshot())
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
+struct OwnedRuntime {
+    runtime: Option<Runtime>,
+}
+
+impl Debug for OwnedRuntime {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OwnedRuntime")
+            .field("running", &self.runtime.is_some())
+            .finish()
+    }
+}
+
+impl Drop for OwnedRuntime {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum TokioRuntimeError {
+    NestedOwnedRuntime,
+    BlockOnWithinRuntime,
+    Build(std::io::Error),
+}
+
+impl Display for TokioRuntimeError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NestedOwnedRuntime => formatter.write_str(
+                "an owned Skein Tokio runtime cannot be created inside an active Tokio runtime",
+            ),
+            Self::BlockOnWithinRuntime => formatter.write_str(
+                "blocking on the Skein Tokio adapter is not allowed inside an active Tokio runtime",
+            ),
+            Self::Build(error) => write!(formatter, "failed to build Skein Tokio runtime: {error}"),
+        }
+    }
+}
+
+impl Error for TokioRuntimeError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Build(error) => Some(error),
+            Self::NestedOwnedRuntime | Self::BlockOnWithinRuntime => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum TokioTaskError<E> {
+    Admission(RuntimeAdmissionError),
+    Stopped(RuntimeCancellationReason),
+    Join(JoinError),
+    Operation(E),
+}
+
+impl<E: Display> Display for TokioTaskError<E> {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Admission(error) => Display::fmt(error, formatter),
+            Self::Stopped(reason) => write!(formatter, "runtime task stopped: {reason}"),
+            Self::Join(error) => write!(formatter, "runtime task join failed: {error}"),
+            Self::Operation(error) => write!(formatter, "runtime task failed: {error}"),
+        }
+    }
+}
+
+impl<E: Error + 'static> Error for TokioTaskError<E> {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Admission(error) => Some(error),
+            Self::Stopped(reason) => Some(reason),
+            Self::Join(error) => Some(error),
+            Self::Operation(error) => Some(error),
+        }
+    }
+}
+
+impl TokioRuntimeAdapter {
+    pub fn borrowed(
+        handle: TokioHandle,
+        governor: RuntimeGovernor,
+        config: TokioRuntimeConfig,
+    ) -> Self {
+        Self {
+            handle,
+            ownership: TokioRuntimeOwnership::Borrowed,
+            owned_runtime: None,
+            governor,
+            config,
+            last_resource_refresh: Arc::new(Mutex::new(Instant::now())),
+        }
+    }
+
+    pub fn owned(
+        governor: RuntimeGovernor,
+        config: TokioRuntimeConfig,
+    ) -> Result<Self, TokioRuntimeError> {
+        if TokioHandle::try_current().is_ok() {
+            return Err(TokioRuntimeError::NestedOwnedRuntime);
+        }
+        let mut builder = Builder::new_multi_thread();
+        builder.enable_time();
+        builder.thread_name("skein-runtime");
+        builder.thread_keep_alive(config.blocking_thread_keep_alive);
+        if let Some(worker_threads) = config.async_worker_threads {
+            builder.worker_threads(worker_threads.get());
+        }
+        if let Some(max_blocking_threads) = config.max_blocking_threads {
+            builder.max_blocking_threads(max_blocking_threads.get());
+        }
+        let runtime = builder.build().map_err(TokioRuntimeError::Build)?;
+        let handle = runtime.handle().clone();
+        Ok(Self {
+            handle,
+            ownership: TokioRuntimeOwnership::Owned,
+            owned_runtime: Some(Arc::new(OwnedRuntime {
+                runtime: Some(runtime),
+            })),
+            governor,
+            config,
+            last_resource_refresh: Arc::new(Mutex::new(Instant::now())),
+        })
+    }
+
+    pub fn ownership(&self) -> TokioRuntimeOwnership {
+        self.ownership
+    }
+
+    pub fn handle(&self) -> &TokioHandle {
+        &self.handle
+    }
+
+    pub fn governor(&self) -> &RuntimeGovernor {
+        &self.governor
+    }
+
+    pub fn governor_snapshot(&self) -> RuntimeGovernorSnapshot {
+        self.governor.snapshot()
+    }
+
+    pub fn config(&self) -> TokioRuntimeConfig {
+        self.config
+    }
+
+    pub fn owns_runtime(&self) -> bool {
+        self.owned_runtime.is_some()
+    }
+
+    pub fn block_on<F>(&self, future: F) -> Result<F::Output, TokioRuntimeError>
+    where
+        F: Future,
+    {
+        if TokioHandle::try_current().is_ok() {
+            return Err(TokioRuntimeError::BlockOnWithinRuntime);
+        }
+        Ok(self.handle.block_on(future))
+    }
+
+    pub async fn execute_blocking<T, E, F>(
+        &self,
+        request: RuntimeWorkRequest,
+        context: RuntimeTaskContext,
+        operation: F,
+    ) -> Result<T, TokioTaskError<E>>
+    where
+        T: Send + 'static,
+        E: Send + 'static,
+        F: FnOnce(&RuntimeTaskContext) -> Result<T, E> + Send + 'static,
+    {
+        let request = request.with_blocking(true);
+        let observe_post_operation_cancellation = request.kind != RuntimeWorkKind::Mutation;
+        let permit = self.acquire(request, &context).await?;
+        let task_context = context.clone();
+        let join = self.handle.spawn_blocking(move || {
+            let _permit = permit;
+            task_context.checkpoint().map_err(TokioTaskError::Stopped)?;
+            let result = operation(&task_context);
+            if observe_post_operation_cancellation {
+                task_context.checkpoint().map_err(TokioTaskError::Stopped)?;
+            }
+            result.map_err(TokioTaskError::Operation)
+        });
+        self.await_join(join).await
+    }
+
+    pub async fn execute_async<T, E, F, Fut>(
+        &self,
+        request: RuntimeWorkRequest,
+        context: RuntimeTaskContext,
+        operation: F,
+    ) -> Result<T, TokioTaskError<E>>
+    where
+        T: Send + 'static,
+        E: Send + 'static,
+        F: FnOnce(RuntimeTaskContext) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, E>> + Send + 'static,
+    {
+        let observe_post_operation_cancellation = request.kind != RuntimeWorkKind::Mutation;
+        let permit = self.acquire(request, &context).await?;
+        let task_context = context.clone();
+        let join = self.handle.spawn(async move {
+            let _permit = permit;
+            task_context.checkpoint().map_err(TokioTaskError::Stopped)?;
+            let checkpoint = task_context.clone();
+            let result = operation(task_context).await;
+            if observe_post_operation_cancellation {
+                checkpoint.checkpoint().map_err(TokioTaskError::Stopped)?;
+            }
+            result.map_err(TokioTaskError::Operation)
+        });
+        self.await_join(join).await
+    }
+
+    async fn acquire<E>(
+        &self,
+        request: RuntimeWorkRequest,
+        context: &RuntimeTaskContext,
+    ) -> Result<skein_qos::RuntimePermit, TokioTaskError<E>> {
+        let mut recorded_wait = false;
+        loop {
+            if let Err(reason) = context.checkpoint() {
+                self.governor.record_cancellation(reason);
+                return Err(TokioTaskError::Stopped(reason));
+            }
+            self.refresh_resources_if_due();
+            match self.governor.try_admit(request) {
+                Ok(permit) => return Ok(permit),
+                Err(error) if !error.is_retryable() => {
+                    return Err(TokioTaskError::Admission(error));
+                }
+                Err(error) => {
+                    if !recorded_wait {
+                        self.governor.record_admission_wait(request, error.code);
+                        recorded_wait = true;
+                    }
+                }
+            }
+            tokio::time::sleep(self.poll_interval(context)).await;
+        }
+    }
+
+    async fn await_join<T, E>(
+        &self,
+        join: JoinHandle<Result<T, TokioTaskError<E>>>,
+    ) -> Result<T, TokioTaskError<E>>
+    where
+        T: Send + 'static,
+        E: Send + 'static,
+    {
+        let result = join.await.map_err(TokioTaskError::Join)?;
+        if let Err(TokioTaskError::Stopped(reason)) = &result {
+            self.governor.record_cancellation(*reason);
+        }
+        result
+    }
+
+    fn poll_interval(&self, context: &RuntimeTaskContext) -> Duration {
+        context
+            .remaining()
+            .map(|remaining| remaining.min(self.config.admission_poll_interval))
+            .unwrap_or(self.config.admission_poll_interval)
+    }
+
+    fn refresh_resources_if_due(&self) {
+        let now = Instant::now();
+        let should_refresh = {
+            let mut last_refresh = self
+                .last_resource_refresh
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if now.duration_since(*last_refresh) < self.config.resource_refresh_interval {
+                false
+            } else {
+                *last_refresh = now;
+                true
+            }
+        };
+        if should_refresh {
+            self.governor.refresh_from_host();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use skein_qos::{
+        IoConcurrencyBudget, RuntimeCancellationToken, RuntimeGovernorConfig,
+        RuntimeMemorySnapshot, RuntimeResourceBudget, RuntimeResourceSnapshot, RuntimeWorkPriority,
+    };
+    use std::convert::Infallible;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn governor(cpu: usize) -> RuntimeGovernor {
+        let resources = RuntimeResourceSnapshot::from_parts(
+            RuntimeResourceBudget::from_limits(NonZeroUsize::new(cpu).unwrap(), None, None),
+            RuntimeMemorySnapshot::from_limits(
+                Some(8 * 1024 * 1024 * 1024),
+                Some(4 * 1024 * 1024 * 1024),
+                None,
+                None,
+                None,
+            ),
+        );
+        RuntimeGovernor::new(
+            RuntimeGovernorConfig::desktop_bound(),
+            resources,
+            IoConcurrencyBudget::new(4, 1),
+        )
+    }
+
+    #[test]
+    fn borrowed_runtime_does_not_take_host_lifecycle_ownership() {
+        let host = Builder::new_multi_thread().enable_time().build().unwrap();
+        let adapter = TokioRuntimeAdapter::borrowed(
+            host.handle().clone(),
+            governor(2),
+            TokioRuntimeConfig::default(),
+        );
+        assert_eq!(adapter.ownership(), TokioRuntimeOwnership::Borrowed);
+        assert!(!adapter.owns_runtime());
+        let value = host
+            .block_on(adapter.execute_async(
+                RuntimeWorkRequest::io(RuntimeWorkPriority::Foreground, 1, 0),
+                RuntimeTaskContext::default(),
+                |_| async { Ok::<_, Infallible>(42) },
+            ))
+            .unwrap();
+        assert_eq!(value, 42);
+        drop(adapter);
+        assert_eq!(host.block_on(async { 7 }), 7);
+    }
+
+    #[test]
+    fn owned_runtime_rejects_nested_creation() {
+        let host = Builder::new_current_thread().enable_time().build().unwrap();
+        let result = host.block_on(async {
+            TokioRuntimeAdapter::owned(governor(1), TokioRuntimeConfig::default())
+        });
+        assert!(matches!(result, Err(TokioRuntimeError::NestedOwnedRuntime)));
+    }
+
+    #[test]
+    fn owned_runtime_drop_is_safe_inside_another_runtime() {
+        let adapter =
+            TokioRuntimeAdapter::owned(governor(1), TokioRuntimeConfig::default()).unwrap();
+        let host = Builder::new_current_thread().enable_time().build().unwrap();
+        host.block_on(async move { drop(adapter) });
+    }
+
+    #[test]
+    fn admission_resource_refresh_is_shared_and_throttled() {
+        let host = Builder::new_current_thread().enable_time().build().unwrap();
+        let adapter = TokioRuntimeAdapter::borrowed(
+            host.handle().clone(),
+            governor(1),
+            TokioRuntimeConfig {
+                resource_refresh_interval: Duration::ZERO,
+                ..TokioRuntimeConfig::default()
+            },
+        );
+        let initial = *adapter
+            .last_resource_refresh
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        adapter.refresh_resources_if_due();
+        let refreshed = *adapter
+            .last_resource_refresh
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut clone = adapter.clone();
+        clone.config.resource_refresh_interval = Duration::from_secs(60 * 60);
+        clone.refresh_resources_if_due();
+        let throttled = *adapter
+            .last_resource_refresh
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        assert!(refreshed >= initial);
+        assert_eq!(throttled, refreshed);
+    }
+
+    #[test]
+    fn blocking_execution_respects_governor_parallelism() {
+        let adapter = Arc::new(
+            TokioRuntimeAdapter::owned(
+                governor(2),
+                TokioRuntimeConfig {
+                    max_blocking_threads: NonZeroUsize::new(8),
+                    ..TokioRuntimeConfig::default()
+                },
+            )
+            .unwrap(),
+        );
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let workers = (0..6)
+            .map(|_| {
+                let adapter = Arc::clone(&adapter);
+                let active = Arc::clone(&active);
+                let peak = Arc::clone(&peak);
+                std::thread::spawn(move || {
+                    adapter
+                        .block_on(adapter.execute_blocking(
+                            RuntimeWorkRequest::blocking_cpu(RuntimeWorkPriority::Foreground, 0),
+                            RuntimeTaskContext::default(),
+                            move |_| {
+                                let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                                peak.fetch_max(current, Ordering::SeqCst);
+                                std::thread::sleep(Duration::from_millis(10));
+                                active.fetch_sub(1, Ordering::SeqCst);
+                                Ok::<_, Infallible>(())
+                            },
+                        ))
+                        .unwrap()
+                        .unwrap();
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert!(peak.load(Ordering::SeqCst) <= 2);
+        assert_eq!(adapter.governor_snapshot().completions, 6);
+        assert!(adapter.governor_snapshot().admission_waits > 0);
+    }
+
+    #[test]
+    fn cancellation_returns_at_a_cooperative_blocking_checkpoint() {
+        let adapter =
+            TokioRuntimeAdapter::owned(governor(1), TokioRuntimeConfig::default()).unwrap();
+        let token = RuntimeCancellationToken::new();
+        let context = RuntimeTaskContext::without_deadline(token.clone());
+        let handle = adapter.handle().clone();
+        handle.spawn(async move {
+            tokio::time::sleep(Duration::from_millis(15)).await;
+            token.cancel();
+        });
+        let started = Instant::now();
+        let result = adapter
+            .block_on(adapter.execute_blocking(
+                RuntimeWorkRequest::blocking_cpu(RuntimeWorkPriority::Foreground, 0),
+                context,
+                |context| -> Result<(), RuntimeCancellationReason> {
+                    loop {
+                        context.checkpoint()?;
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                },
+            ))
+            .unwrap();
+        assert!(matches!(
+            result,
+            Err(TokioTaskError::Stopped(
+                RuntimeCancellationReason::Cancelled
+            ))
+        ));
+        assert!(started.elapsed() < Duration::from_millis(200));
+        assert!(adapter.governor_snapshot().cancellations >= 1);
+    }
+
+    #[test]
+    fn deadline_stops_a_task_waiting_for_admission() {
+        let governor = governor(1);
+        let held = governor
+            .try_admit(RuntimeWorkRequest::blocking_cpu(
+                RuntimeWorkPriority::Foreground,
+                0,
+            ))
+            .unwrap();
+        let adapter =
+            TokioRuntimeAdapter::owned(governor.clone(), TokioRuntimeConfig::default()).unwrap();
+        let result = adapter
+            .block_on(adapter.execute_blocking(
+                RuntimeWorkRequest::blocking_cpu(RuntimeWorkPriority::Foreground, 0),
+                RuntimeTaskContext::with_timeout(Duration::from_millis(20)),
+                |_| Ok::<_, Infallible>(()),
+            ))
+            .unwrap();
+        assert!(matches!(
+            result,
+            Err(TokioTaskError::Stopped(
+                RuntimeCancellationReason::DeadlineExceeded
+            ))
+        ));
+        assert_eq!(adapter.governor_snapshot().deadline_exceeded, 1);
+        drop(held);
+    }
+
+    #[test]
+    fn mutation_reports_the_committed_result_after_starting() {
+        let adapter =
+            TokioRuntimeAdapter::owned(governor(1), TokioRuntimeConfig::default()).unwrap();
+        let token = RuntimeCancellationToken::new();
+        let context = RuntimeTaskContext::without_deadline(token.clone());
+        let handle = adapter.handle().clone();
+        handle.spawn(async move {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            token.cancel();
+        });
+        let result = adapter
+            .block_on(adapter.execute_blocking(
+                RuntimeWorkRequest::foreground_mutation(0),
+                context,
+                |_| {
+                    std::thread::sleep(Duration::from_millis(20));
+                    Ok::<_, Infallible>(42)
+                },
+            ))
+            .unwrap();
+        assert_eq!(result.unwrap(), 42);
+    }
+}

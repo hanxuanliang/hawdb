@@ -23,6 +23,7 @@ use crate::store::{
     SourceScanCandidateRead,
 };
 use crate::value::Value;
+use skein_core::RuntimeTaskContext;
 use skein_ddl::{object_state_to_core, property_type_to_core, table_kind_to_core};
 use skein_executor::{ExecutionLimit, VectorExecutionReport};
 use skein_storage::RangeBound;
@@ -161,6 +162,13 @@ struct ExecutionContext<'a> {
     parameters: &'a BTreeMap<String, Value>,
     external: &'a mut dyn ExternalReadOperator,
     memory: &'a ExecutionMemoryConfig,
+    task_context: Option<&'a RuntimeTaskContext>,
+}
+
+#[derive(Clone, Copy)]
+struct ExecutionRuntimeControl<'a> {
+    memory: &'a ExecutionMemoryConfig,
+    task_context: Option<&'a RuntimeTaskContext>,
 }
 
 pub fn execute(
@@ -177,6 +185,26 @@ pub fn execute_with_row_limit(
     store: &mut GraphStore,
     max_rows: Option<usize>,
 ) -> Result<Vec<Row>> {
+    execute_with_row_limit_internal(plan, catalog, store, max_rows, None)
+}
+
+pub fn execute_with_row_limit_and_context(
+    plan: &PhysicalPlan,
+    catalog: &mut Catalog,
+    store: &mut GraphStore,
+    max_rows: Option<usize>,
+    task_context: &RuntimeTaskContext,
+) -> Result<Vec<Row>> {
+    execute_with_row_limit_internal(plan, catalog, store, max_rows, Some(task_context))
+}
+
+fn execute_with_row_limit_internal(
+    plan: &PhysicalPlan,
+    catalog: &mut Catalog,
+    store: &mut GraphStore,
+    max_rows: Option<usize>,
+    task_context: Option<&RuntimeTaskContext>,
+) -> Result<Vec<Row>> {
     let execution_limit = ExecutionLimit::from_user_max_rows(max_rows)?;
     let parameters = BTreeMap::new();
     let mut external = NoExternalReadOperator;
@@ -185,6 +213,7 @@ pub fn execute_with_row_limit(
         parameters: &parameters,
         external: &mut external,
         memory: &memory,
+        task_context,
     };
     let bindings =
         execute_bindings_with_limit(plan, catalog, store, &mut context, execution_limit)?;
@@ -236,6 +265,57 @@ pub fn execute_with_row_limit_profile_and_external_and_memory(
     max_rows: Option<usize>,
     memory: &ExecutionMemoryConfig,
 ) -> Result<ProfiledQueryRows> {
+    execute_with_row_limit_profile_and_external_and_memory_internal(
+        plan,
+        catalog,
+        store,
+        parameters,
+        external,
+        max_rows,
+        ExecutionRuntimeControl {
+            memory,
+            task_context: None,
+        },
+    )
+}
+
+pub fn execute_with_row_limit_profile_and_external_and_context(
+    plan: &PhysicalPlan,
+    catalog: &mut Catalog,
+    store: &mut GraphStore,
+    parameters: &BTreeMap<String, Value>,
+    external: &mut dyn ExternalReadOperator,
+    max_rows: Option<usize>,
+    task_context: &RuntimeTaskContext,
+) -> Result<ProfiledQueryRows> {
+    let memory = ExecutionMemoryConfig::default();
+    execute_with_row_limit_profile_and_external_and_memory_internal(
+        plan,
+        catalog,
+        store,
+        parameters,
+        external,
+        max_rows,
+        ExecutionRuntimeControl {
+            memory: &memory,
+            task_context: Some(task_context),
+        },
+    )
+}
+
+fn execute_with_row_limit_profile_and_external_and_memory_internal(
+    plan: &PhysicalPlan,
+    catalog: &mut Catalog,
+    store: &mut GraphStore,
+    parameters: &BTreeMap<String, Value>,
+    external: &mut dyn ExternalReadOperator,
+    max_rows: Option<usize>,
+    runtime: ExecutionRuntimeControl<'_>,
+) -> Result<ProfiledQueryRows> {
+    let ExecutionRuntimeControl {
+        memory,
+        task_context,
+    } = runtime;
     let process_memory_start = skein_qos::ProcessMemorySnapshot::capture().ok();
     let execution_limit = ExecutionLimit::from_user_max_rows(max_rows)?;
     let mut profile = read_execution_profile(plan, max_rows)?;
@@ -243,6 +323,7 @@ pub fn execute_with_row_limit_profile_and_external_and_memory(
         parameters,
         external,
         memory,
+        task_context,
     };
     let (
         (
@@ -1150,6 +1231,16 @@ struct BatchReadContext<'a> {
     catalog: &'a Catalog,
     store: &'a GraphStore,
     memory: &'a ExecutionMemoryConfig,
+    task_context: Option<&'a RuntimeTaskContext>,
+}
+
+fn runtime_checkpoint(task_context: Option<&RuntimeTaskContext>) -> Result<()> {
+    match task_context {
+        Some(task_context) => task_context
+            .checkpoint()
+            .map_err(|reason| SkeinError::Execution(format!("runtime task stopped: {reason}"))),
+        None => Ok(()),
+    }
 }
 
 fn batch_pipeline_capable(plan: &PhysicalPlan) -> bool {
@@ -1177,6 +1268,7 @@ fn collect_batch_pipeline(
     catalog: &Catalog,
     store: &GraphStore,
     memory: &ExecutionMemoryConfig,
+    task_context: Option<&RuntimeTaskContext>,
     execution_limit: ExecutionLimit,
 ) -> Result<Vec<Binding>> {
     let mut output = Vec::new();
@@ -1184,6 +1276,7 @@ fn collect_batch_pipeline(
         catalog,
         store,
         memory,
+        task_context,
     };
     execute_binding_batches(plan, context, execution_limit, &mut |batch| {
         for binding in batch {
@@ -1203,9 +1296,13 @@ fn execute_binding_batches(
     execution_limit: ExecutionLimit,
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
+    runtime_checkpoint(context.task_context)?;
     let mut measured_emit = |batch: BindingBatch| {
+        runtime_checkpoint(context.task_context)?;
         record_pipeline_batch(&batch);
-        emit(batch)
+        let control = emit(batch)?;
+        runtime_checkpoint(context.task_context)?;
+        Ok(control)
     };
     execute_binding_batches_inner(plan, context, execution_limit, &mut measured_emit)
 }
@@ -1216,11 +1313,13 @@ fn execute_binding_batches_inner(
     execution_limit: ExecutionLimit,
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
+    runtime_checkpoint(context.task_context)?;
     debug_assert!(batch_pipeline_capable(plan));
     let BatchReadContext {
         catalog,
         store,
         memory,
+        task_context: _,
     } = context;
     match plan {
         PhysicalPlan::SeqNodeScan { variable, label } => {
@@ -1230,8 +1329,14 @@ fn execute_binding_batches_inner(
             variable,
             predicate,
         } => {
-            let bindings =
-                execute_source_segment_scan(variable, predicate, catalog, store, execution_limit)?;
+            let bindings = execute_source_segment_scan(
+                variable,
+                predicate,
+                catalog,
+                store,
+                execution_limit,
+                context.task_context,
+            )?;
             emit_owned_binding_batches(bindings, memory.batch_rows.get(), emit)
         }
         PhysicalPlan::IndexNodeSeek {
@@ -1643,6 +1748,7 @@ fn stream_sort_batches(
     execution_limit: ExecutionLimit,
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
+    runtime_checkpoint(context.task_context)?;
     let BatchReadContext {
         catalog, memory, ..
     } = context;
@@ -1651,6 +1757,7 @@ fn stream_sort_batches(
     let mut runs = Vec::<spill::SpillRun>::new();
     let mut ordinal = 0u64;
     execute_binding_batches(input, context, ExecutionLimit::unlimited(), &mut |batch| {
+        runtime_checkpoint(context.task_context)?;
         for binding in batch {
             let row = SortRunRow::new(catalog, items, ordinal, binding);
             let bytes = binding_memory_bytes(&row.binding).saturating_add(
@@ -1659,7 +1766,11 @@ fn stream_sort_batches(
                 }),
             );
             if tracker.would_exceed(bytes) {
-                runs.push(spill_sort_run(&mut rows, &memory.spill_directory)?);
+                runs.push(spill_sort_run(
+                    &mut rows,
+                    &memory.spill_directory,
+                    context.task_context,
+                )?);
                 tracker.reset();
             }
             tracker.charge(bytes);
@@ -1670,6 +1781,7 @@ fn stream_sort_batches(
     })?;
 
     if runs.is_empty() {
+        runtime_checkpoint(context.task_context)?;
         record_blocking_memory_report(skein_executor::BlockingOperatorMemoryReport {
             operator: "SortExec".to_string(),
             budget_bytes: tracker.budget_bytes,
@@ -1688,7 +1800,11 @@ fn stream_sort_batches(
         );
     }
     if !rows.is_empty() {
-        runs.push(spill_sort_run(&mut rows, &memory.spill_directory)?);
+        runs.push(spill_sort_run(
+            &mut rows,
+            &memory.spill_directory,
+            context.task_context,
+        )?);
     }
     record_blocking_memory_report(skein_executor::BlockingOperatorMemoryReport {
         operator: "SortExec".to_string(),
@@ -1704,6 +1820,7 @@ fn stream_sort_batches(
         catalog,
         memory.batch_rows.get(),
         execution_limit,
+        context.task_context,
         emit,
     )
 }
@@ -1711,12 +1828,16 @@ fn stream_sort_batches(
 fn spill_sort_run(
     rows: &mut Vec<SortRunRow>,
     directory: &std::path::Path,
+    task_context: Option<&RuntimeTaskContext>,
 ) -> Result<spill::SpillRun> {
+    runtime_checkpoint(task_context)?;
     rows.sort_by(SortRunRow::cmp_key);
     let (run, mut writer) = spill::SpillRun::create(directory, "sort")?;
     for row in rows.drain(..) {
+        runtime_checkpoint(task_context)?;
         writer.write(row.ordinal, &row.binding)?;
     }
+    runtime_checkpoint(task_context)?;
     writer.finish()?;
     Ok(run)
 }
@@ -1727,14 +1848,17 @@ fn merge_sort_runs(
     catalog: &Catalog,
     batch_rows: usize,
     execution_limit: ExecutionLimit,
+    task_context: Option<&RuntimeTaskContext>,
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
+    runtime_checkpoint(task_context)?;
     let mut readers = runs
         .iter()
         .map(spill::SpillRun::reader)
         .collect::<Result<Vec<_>>>()?;
     let mut heap = BinaryHeap::new();
     for (run_index, reader) in readers.iter_mut().enumerate() {
+        runtime_checkpoint(task_context)?;
         if let Some((ordinal, binding)) = reader.read()? {
             heap.push(SortMergeEntry {
                 row: SortRunRow::new(catalog, items, ordinal, binding),
@@ -1746,6 +1870,7 @@ fn merge_sort_runs(
     let mut emitted = 0usize;
     let mut batch = Vec::with_capacity(batch_rows);
     while let Some(entry) = heap.pop() {
+        runtime_checkpoint(task_context)?;
         let run_index = entry.run_index;
         batch.push(entry.row.binding);
         emitted = emitted.saturating_add(1);
@@ -1767,6 +1892,7 @@ fn merge_sort_runs(
             return Ok(BatchControl::Stop);
         }
     }
+    runtime_checkpoint(task_context)?;
     if !batch.is_empty() && emit(batch)? == BatchControl::Stop {
         return Ok(BatchControl::Stop);
     }
@@ -2000,6 +2126,16 @@ struct GroupMergeEntry {
     run_index: usize,
 }
 
+#[derive(Clone, Copy)]
+struct AggregateExecutionContext<'a> {
+    group_keys: &'a [Projection],
+    items: &'a [Aggregation],
+    catalog: &'a Catalog,
+    batch_rows: usize,
+    execution_limit: ExecutionLimit,
+    task_context: Option<&'a RuntimeTaskContext>,
+}
+
 impl PartialEq for GroupMergeEntry {
     fn eq(&self, other: &Self) -> bool {
         self.row.cmp_key(&other.row) == Ordering::Equal && self.run_index == other.run_index
@@ -2031,6 +2167,7 @@ fn stream_aggregate_batches(
     execution_limit: ExecutionLimit,
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
+    runtime_checkpoint(context.task_context)?;
     let BatchReadContext {
         catalog, memory, ..
     } = context;
@@ -2038,6 +2175,7 @@ fn stream_aggregate_batches(
         let mut accumulator = GroupAccumulator::new(Vec::new(), group_keys, items);
         let mut input_rows = 0usize;
         execute_binding_batches(input, context, ExecutionLimit::unlimited(), &mut |batch| {
+            runtime_checkpoint(context.task_context)?;
             for binding in &batch {
                 accumulator.update(catalog, binding);
                 input_rows = input_rows.saturating_add(1);
@@ -2060,6 +2198,7 @@ fn stream_aggregate_batches(
     let mut runs = Vec::<spill::SpillRun>::new();
     let mut ordinal = 0u64;
     execute_binding_batches(input, context, ExecutionLimit::unlimited(), &mut |batch| {
+        runtime_checkpoint(context.task_context)?;
         for binding in batch {
             let key = group_keys
                 .iter()
@@ -2071,7 +2210,11 @@ fn stream_aggregate_batches(
                 }),
             );
             if tracker.would_exceed(bytes) {
-                runs.push(spill_group_run(&mut rows, &memory.spill_directory)?);
+                runs.push(spill_group_run(
+                    &mut rows,
+                    &memory.spill_directory,
+                    context.task_context,
+                )?);
                 tracker.reset();
             }
             tracker.charge(bytes);
@@ -2095,18 +2238,22 @@ fn stream_aggregate_batches(
             spilled_rows: 0,
         });
         rows.sort_by(GroupRunRow::cmp_key);
-        return aggregate_sorted_group_rows(
-            rows,
+        let aggregate_context = AggregateExecutionContext {
             group_keys,
             items,
             catalog,
-            memory.batch_rows.get(),
+            batch_rows: memory.batch_rows.get(),
             execution_limit,
-            emit,
-        );
+            task_context: context.task_context,
+        };
+        return aggregate_sorted_group_rows(rows, aggregate_context, emit);
     }
     if !rows.is_empty() {
-        runs.push(spill_group_run(&mut rows, &memory.spill_directory)?);
+        runs.push(spill_group_run(
+            &mut rows,
+            &memory.spill_directory,
+            context.task_context,
+        )?);
     }
     record_blocking_memory_report(skein_executor::BlockingOperatorMemoryReport {
         operator: "AggregateExec".to_string(),
@@ -2116,43 +2263,53 @@ fn stream_aggregate_batches(
         spill_run_count: runs.len(),
         spilled_rows: ordinal as usize,
     });
-    merge_group_runs(
-        &runs,
+    let aggregate_context = AggregateExecutionContext {
         group_keys,
         items,
         catalog,
-        memory.batch_rows.get(),
+        batch_rows: memory.batch_rows.get(),
         execution_limit,
-        emit,
-    )
+        task_context: context.task_context,
+    };
+    merge_group_runs(&runs, aggregate_context, emit)
 }
 
 fn spill_group_run(
     rows: &mut Vec<GroupRunRow>,
     directory: &std::path::Path,
+    task_context: Option<&RuntimeTaskContext>,
 ) -> Result<spill::SpillRun> {
+    runtime_checkpoint(task_context)?;
     rows.sort_by(GroupRunRow::cmp_key);
     let (run, mut writer) = spill::SpillRun::create(directory, "aggregate")?;
     for row in rows.drain(..) {
+        runtime_checkpoint(task_context)?;
         writer.write(row.ordinal, &row.binding)?;
     }
+    runtime_checkpoint(task_context)?;
     writer.finish()?;
     Ok(run)
 }
 
 fn aggregate_sorted_group_rows(
     rows: Vec<GroupRunRow>,
-    group_keys: &[Projection],
-    items: &[Aggregation],
-    catalog: &Catalog,
-    batch_rows: usize,
-    execution_limit: ExecutionLimit,
+    context: AggregateExecutionContext<'_>,
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
+    let AggregateExecutionContext {
+        group_keys,
+        items,
+        catalog,
+        batch_rows,
+        execution_limit,
+        task_context,
+    } = context;
+    runtime_checkpoint(task_context)?;
     let mut batch = Vec::with_capacity(batch_rows);
     let mut accumulator: Option<GroupAccumulator<'_>> = None;
     let mut emitted = 0usize;
     for row in rows {
+        runtime_checkpoint(task_context)?;
         if accumulator
             .as_ref()
             .is_some_and(|accumulator| accumulator.key != row.key)
@@ -2169,6 +2326,7 @@ fn aggregate_sorted_group_rows(
             .get_or_insert_with(|| GroupAccumulator::new(row.key.clone(), group_keys, items));
         accumulator.update(catalog, &row.binding);
     }
+    runtime_checkpoint(task_context)?;
     if let Some(accumulator) = accumulator {
         batch.push(accumulator.finish());
     }
@@ -2180,19 +2338,25 @@ fn aggregate_sorted_group_rows(
 
 fn merge_group_runs(
     runs: &[spill::SpillRun],
-    group_keys: &[Projection],
-    items: &[Aggregation],
-    catalog: &Catalog,
-    batch_rows: usize,
-    execution_limit: ExecutionLimit,
+    context: AggregateExecutionContext<'_>,
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
+    let AggregateExecutionContext {
+        group_keys,
+        items,
+        catalog,
+        batch_rows,
+        execution_limit,
+        task_context,
+    } = context;
+    runtime_checkpoint(task_context)?;
     let mut readers = runs
         .iter()
         .map(spill::SpillRun::reader)
         .collect::<Result<Vec<_>>>()?;
     let mut heap = BinaryHeap::new();
     for (run_index, reader) in readers.iter_mut().enumerate() {
+        runtime_checkpoint(task_context)?;
         if let Some((ordinal, binding)) = reader.read()? {
             let key = group_keys
                 .iter()
@@ -2212,6 +2376,7 @@ fn merge_group_runs(
     let mut accumulator: Option<GroupAccumulator<'_>> = None;
     let mut emitted = 0usize;
     while let Some(entry) = heap.pop() {
+        runtime_checkpoint(task_context)?;
         let run_index = entry.run_index;
         let row = entry.row;
         if accumulator
@@ -2244,6 +2409,7 @@ fn merge_group_runs(
             });
         }
     }
+    runtime_checkpoint(task_context)?;
     if let Some(accumulator) = accumulator {
         batch.push(accumulator.finish());
     }
@@ -2281,6 +2447,7 @@ fn stream_node_scan_batches(
         catalog,
         store,
         memory,
+        ..
     } = context;
     let batch_rows = memory.batch_rows.get();
     if let Some(label_id) = exact_scan_label_id(catalog, label) {
@@ -2326,6 +2493,7 @@ fn stream_index_node_seek_batches(
         catalog,
         store,
         memory,
+        ..
     } = context;
     let batch_rows = memory.batch_rows.get();
     let Some(label_id) = catalog.label_id(label) else {
@@ -2417,8 +2585,16 @@ fn execute_bindings_with_limit(
     context: &mut ExecutionContext<'_>,
     execution_limit: ExecutionLimit,
 ) -> Result<Vec<Binding>> {
+    runtime_checkpoint(context.task_context)?;
     if batch_pipeline_capable(plan) {
-        return collect_batch_pipeline(plan, catalog, store, context.memory, execution_limit);
+        return collect_batch_pipeline(
+            plan,
+            catalog,
+            store,
+            context.memory,
+            context.task_context,
+            execution_limit,
+        );
     }
     match plan {
         PhysicalPlan::CreateNodeLabel { label } => {
@@ -3527,7 +3703,14 @@ fn execute_bindings_with_limit(
         PhysicalPlan::SourceSegmentScan {
             variable,
             predicate,
-        } => execute_source_segment_scan(variable, predicate, catalog, store, execution_limit),
+        } => execute_source_segment_scan(
+            variable,
+            predicate,
+            catalog,
+            store,
+            execution_limit,
+            context.task_context,
+        ),
         PhysicalPlan::NodeCartesianProductExec { left, right } => {
             let left = execute_child_bindings(left, catalog, store, context)?;
             let right = execute_child_bindings(right, catalog, store, context)?;
@@ -4145,7 +4328,9 @@ fn execute_source_segment_scan(
     catalog: &Catalog,
     store: &GraphStore,
     execution_limit: ExecutionLimit,
+    task_context: Option<&RuntimeTaskContext>,
 ) -> Result<Vec<Binding>> {
+    runtime_checkpoint(task_context)?;
     let Some(storage_predicate) = source_storage_scan_predicate(predicate, variable) else {
         return execute_node_scan_with_optional_filter(
             variable,
@@ -4156,15 +4341,28 @@ fn execute_source_segment_scan(
             execution_limit,
         );
     };
-    let read = store.read_published_source_scan_candidates(
-        &storage_predicate,
-        NonZeroUsize::new(SOURCE_SEGMENT_SCAN_IO_DEPTH)
-            .expect("source segment scan I/O depth is non-zero"),
-        NonZeroU64::new(SOURCE_SEGMENT_SCAN_MAX_COALESCED_BYTES)
-            .expect("source segment scan coalesced range limit is non-zero"),
-        NonZeroU64::new(SOURCE_SEGMENT_SCAN_MAX_WAVE_BYTES)
-            .expect("source segment scan wave byte limit is non-zero"),
-    );
+    let io_depth = NonZeroUsize::new(SOURCE_SEGMENT_SCAN_IO_DEPTH)
+        .expect("source segment scan I/O depth is non-zero");
+    let max_coalesced_bytes = NonZeroU64::new(SOURCE_SEGMENT_SCAN_MAX_COALESCED_BYTES)
+        .expect("source segment scan coalesced range limit is non-zero");
+    let max_wave_bytes = NonZeroU64::new(SOURCE_SEGMENT_SCAN_MAX_WAVE_BYTES)
+        .expect("source segment scan wave byte limit is non-zero");
+    let read = match task_context {
+        Some(task_context) => store.read_published_source_scan_candidates_with_context(
+            &storage_predicate,
+            io_depth,
+            max_coalesced_bytes,
+            max_wave_bytes,
+            task_context,
+        ),
+        None => store.read_published_source_scan_candidates(
+            &storage_predicate,
+            io_depth,
+            max_coalesced_bytes,
+            max_wave_bytes,
+        ),
+    };
+    runtime_checkpoint(task_context)?;
     let rows = match read {
         Ok(SourceScanCandidateRead::Rows {
             skipped_segment_count,
@@ -4553,7 +4751,9 @@ fn expand_binding(
     target_label_ids: Option<&[crate::schema::LabelId]>,
     filters: &AdjacencyExpandFilters<'_>,
     store: &GraphStore,
+    task_context: Option<&RuntimeTaskContext>,
 ) -> Result<Vec<ExpandedBinding>> {
+    runtime_checkpoint(task_context)?;
     let source = binding.nodes.get(spec.source_variable).ok_or_else(|| {
         SkeinError::Execution(format!(
             "missing variable '{}' during expand",
@@ -4576,6 +4776,7 @@ fn expand_binding(
             filters.relationship_scan_filter,
             spec.direction,
         ) {
+            runtime_checkpoint(task_context)?;
             if bound_target_id.is_some_and(|node_id| node_id != target.id)
                 || filters
                     .target_scan_filter
@@ -4608,6 +4809,7 @@ fn expand_binding(
             spec.min_hops,
             spec.max_hops,
         ) {
+            runtime_checkpoint(task_context)?;
             if bound_target_id.is_some_and(|node_id| node_id != target.id)
                 || filters
                     .target_scan_filter
@@ -4693,10 +4895,12 @@ fn stream_adjacency_expand_batches(
     filters: AdjacencyExpandFilters<'_>,
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
+    runtime_checkpoint(context.task_context)?;
     let BatchReadContext {
         catalog,
         store,
         memory,
+        ..
     } = context;
     let PhysicalPlan::AdjacencyExpandExec {
         source_variable,
@@ -4733,7 +4937,9 @@ fn stream_adjacency_expand_batches(
     let mut output = Vec::with_capacity(batch_rows);
     let control =
         execute_binding_batches(input, context, ExecutionLimit::unlimited(), &mut |batch| {
+            runtime_checkpoint(context.task_context)?;
             for binding in batch {
+                runtime_checkpoint(context.task_context)?;
                 graph_expansion.seed_count = graph_expansion.seed_count.saturating_add(1);
                 for candidate in expand_binding(
                     binding,
@@ -4751,7 +4957,9 @@ fn stream_adjacency_expand_batches(
                     target_label_ids.as_deref(),
                     &filters,
                     store,
+                    context.task_context,
                 )? {
+                    runtime_checkpoint(context.task_context)?;
                     if !graph_expansion.try_push(
                         &mut output,
                         candidate.binding,
@@ -4824,6 +5032,7 @@ fn execute_adjacency_expand(
     };
 
     let input = execute_child_bindings(input, catalog, store, context)?;
+    runtime_checkpoint(context.task_context)?;
     let mut graph_expansion = GraphExpansionExecutionState::new(
         *graph_budget,
         input.len(),
@@ -4841,6 +5050,7 @@ fn execute_adjacency_expand(
     let target_label_ids = label_ids_for_pattern(catalog, target_label);
     let mut output = Vec::new();
     for binding in input {
+        runtime_checkpoint(context.task_context)?;
         for candidate in expand_binding(
             binding,
             AdjacencyExpandSpec {
@@ -4857,7 +5067,9 @@ fn execute_adjacency_expand(
             target_label_ids.as_deref(),
             &filters,
             store,
+            context.task_context,
         )? {
+            runtime_checkpoint(context.task_context)?;
             if !graph_expansion.try_push(
                 &mut output,
                 candidate.binding,
@@ -7624,6 +7836,7 @@ mod tests {
             parameters: &parameters,
             external: &mut external,
             memory: &memory,
+            task_context: None,
         };
         let bindings = execute_bindings_with_limit(
             &plan,

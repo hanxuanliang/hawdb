@@ -7,6 +7,8 @@ pub mod compat;
 mod compiled_capabilities;
 pub mod cypher;
 pub mod embedded;
+#[cfg(feature = "tokio-runtime")]
+pub mod embedded_tokio;
 pub mod executor;
 pub mod graph_route_evidence;
 pub mod graph_route_readiness;
@@ -171,6 +173,8 @@ pub use cypher::RelationshipDirection;
 pub use embedded::{
     EmbeddedDeploymentProfile, EmbeddedRuntimeResources, SkeinEmbedded, SkeinEmbeddedOpenOptions,
 };
+#[cfg(feature = "tokio-runtime")]
+pub use embedded_tokio::{SkeinTokioEmbedded, SkeinTokioEmbeddedError};
 pub use error::{Result, SkeinError};
 pub use executor::ReadExecutionProfile;
 pub use graph_route_evidence::{
@@ -437,18 +441,28 @@ pub use skein_core::{
     GraphRagQueryParameterRequirement, GraphRagQueryPattern, GraphRagQueryPredicate,
     GraphRagQueryPredicateOperator, GraphRagQueryProjection, GraphRagRelationshipTypeSummary,
     GraphRagRouteSummary, GraphRagSchemaContext, GraphRagSchemaContextOptions,
-    GraphRagSchemaContextTruncation, RuntimeCapabilities, RuntimeCapability,
-    DEFAULT_GRAPH_RAG_MAX_COMMON_PATHS, DEFAULT_GRAPH_RAG_MAX_LABELS,
-    DEFAULT_GRAPH_RAG_MAX_PROPERTIES_PER_SUBJECT, DEFAULT_GRAPH_RAG_MAX_RELATIONSHIP_TYPES,
-    DEFAULT_GRAPH_RAG_MAX_ROUTES, GRAPH_RAG_SCHEMA_CONTEXT_PROTOCOL, MAX_GRAPH_RAG_QUERY_LIMIT,
+    GraphRagSchemaContextTruncation, RuntimeCancellationReason, RuntimeCancellationToken,
+    RuntimeCapabilities, RuntimeCapability, RuntimeTaskContext, DEFAULT_GRAPH_RAG_MAX_COMMON_PATHS,
+    DEFAULT_GRAPH_RAG_MAX_LABELS, DEFAULT_GRAPH_RAG_MAX_PROPERTIES_PER_SUBJECT,
+    DEFAULT_GRAPH_RAG_MAX_RELATIONSHIP_TYPES, DEFAULT_GRAPH_RAG_MAX_ROUTES,
+    GRAPH_RAG_SCHEMA_CONTEXT_PROTOCOL, MAX_GRAPH_RAG_QUERY_LIMIT,
 };
 pub use skein_optimizer::{
     AdaptiveVectorBackendPolicy, Distribution, GroupId, Memo as OptimizerMemo,
     MemoGroup as OptimizerMemoGroup, PhysicalProperties, RequiredProperties,
 };
 pub use skein_qos::{
-    IoConcurrencyBudget, ProcessMemoryProfile, ProcessMemorySnapshot, RuntimeResourceBudget,
+    IoConcurrencyBudget, ProcessMemoryProfile, ProcessMemorySnapshot, RuntimeAdmissionCode,
+    RuntimeAdmissionError, RuntimeGovernor, RuntimeGovernorConfig, RuntimeGovernorLimits,
+    RuntimeGovernorSnapshot, RuntimeMemoryPressure, RuntimeMemorySnapshot, RuntimeResourceBudget,
+    RuntimeResourceSnapshot, RuntimeTelemetryEvent, RuntimeTelemetryEventKind,
+    RuntimeTelemetrySink, RuntimeWorkKind, RuntimeWorkPriority, RuntimeWorkRequest,
     StorageDeviceDiscoverySource, StorageDeviceProfile, StorageMediaKind,
+};
+#[cfg(feature = "tokio-runtime")]
+pub use skein_runtime_tokio::{
+    TokioRuntimeAdapter, TokioRuntimeConfig, TokioRuntimeError, TokioRuntimeOwnership,
+    TokioTaskError,
 };
 pub use skein_storage::ScanPredicate;
 pub use storage_recovery_evidence::nowledge_storage_recovery_evidence_json;

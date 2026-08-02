@@ -1,6 +1,7 @@
 mod device;
 mod process_memory;
 mod resource;
+mod runtime;
 
 use std::fmt::Debug;
 use std::str::FromStr;
@@ -9,7 +10,17 @@ use std::time::Instant;
 
 pub use device::{StorageDeviceDiscoverySource, StorageDeviceProfile, StorageMediaKind};
 pub use process_memory::{ProcessMemoryProfile, ProcessMemorySnapshot};
-pub use resource::{IoConcurrencyBudget, RuntimeResourceBudget};
+pub use resource::{
+    IoConcurrencyBudget, RuntimeMemoryPressure, RuntimeMemorySnapshot, RuntimeResourceBudget,
+    RuntimeResourceSnapshot,
+};
+pub use runtime::{
+    RuntimeAdmissionCode, RuntimeAdmissionError, RuntimeGovernor, RuntimeGovernorConfig,
+    RuntimeGovernorLimits, RuntimeGovernorSnapshot, RuntimePermit, RuntimeTelemetryEvent,
+    RuntimeTelemetryEventKind, RuntimeTelemetrySink, RuntimeWorkKind, RuntimeWorkPriority,
+    RuntimeWorkRequest,
+};
+pub use skein_core::{RuntimeCancellationReason, RuntimeCancellationToken, RuntimeTaskContext};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkPriority {

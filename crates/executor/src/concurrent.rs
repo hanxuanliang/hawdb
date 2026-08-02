@@ -1,3 +1,4 @@
+use skein_core::{RuntimeCancellationReason, RuntimeTaskContext};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -57,6 +58,69 @@ impl BoundedExecutor {
             .map(|output| output.expect("each bounded executor input must produce one output"))
             .collect()
     }
+
+    pub fn map_ordered_with_context<T, R, F>(
+        self,
+        inputs: &[T],
+        context: &RuntimeTaskContext,
+        operation: F,
+    ) -> Result<Vec<R>, RuntimeCancellationReason>
+    where
+        T: Sync,
+        R: Send,
+        F: Fn(&T) -> R + Sync,
+    {
+        context.checkpoint()?;
+        if inputs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let worker_count = self.max_parallelism().min(inputs.len());
+        let next = AtomicUsize::new(0);
+        let stopped = Mutex::new(None);
+        let outputs = Mutex::new(
+            std::iter::repeat_with(|| None)
+                .take(inputs.len())
+                .collect::<Vec<Option<R>>>(),
+        );
+
+        std::thread::scope(|scope| {
+            for _ in 0..worker_count {
+                scope.spawn(|| loop {
+                    if let Err(reason) = context.checkpoint() {
+                        let mut stopped = stopped
+                            .lock()
+                            .expect("bounded executor cancellation lock should not be poisoned");
+                        stopped.get_or_insert(reason);
+                        break;
+                    }
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(input) = inputs.get(index) else {
+                        break;
+                    };
+                    let output = operation(input);
+                    outputs
+                        .lock()
+                        .expect("bounded executor output lock should not be poisoned")[index] =
+                        Some(output);
+                });
+            }
+        });
+
+        if let Some(reason) = *stopped
+            .lock()
+            .expect("bounded executor cancellation lock should not be poisoned")
+        {
+            return Err(reason);
+        }
+        context.checkpoint()?;
+        Ok(outputs
+            .into_inner()
+            .expect("bounded executor output lock should not be poisoned")
+            .into_iter()
+            .map(|output| output.expect("each bounded executor input must produce one output"))
+            .collect())
+    }
 }
 
 impl Default for BoundedExecutor {
@@ -68,6 +132,7 @@ impl Default for BoundedExecutor {
 #[cfg(test)]
 mod tests {
     use super::BoundedExecutor;
+    use skein_core::{RuntimeCancellationReason, RuntimeCancellationToken, RuntimeTaskContext};
     use std::num::NonZeroUsize;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -94,5 +159,24 @@ mod tests {
 
         assert_eq!(output, vec![2, 4, 6, 8]);
         assert!(peak.load(Ordering::SeqCst) <= 2);
+    }
+
+    #[test]
+    fn controlled_parallel_map_stops_between_inputs() {
+        let executor = BoundedExecutor::new(NonZeroUsize::MIN);
+        let token = RuntimeCancellationToken::new();
+        let context = RuntimeTaskContext::without_deadline(token.clone());
+        let visited = AtomicUsize::new(0);
+
+        let result = executor.map_ordered_with_context(&[1, 2, 3], &context, |value| {
+            visited.fetch_add(1, Ordering::SeqCst);
+            if *value == 1 {
+                token.cancel();
+            }
+            value * 2
+        });
+
+        assert_eq!(result, Err(RuntimeCancellationReason::Cancelled));
+        assert_eq!(visited.load(Ordering::SeqCst), 1);
     }
 }

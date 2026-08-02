@@ -21,6 +21,7 @@ skein-plan-cache = { path = "crates/plan-cache" }
 skein-qos = { path = "crates/qos" }
 skein-readiness = { path = "crates/readiness" }
 skein-route-ownership = { path = "crates/route-ownership" }
+skein-runtime-tokio = { path = "crates/runtime-tokio", optional = true }
 skein-sql = { path = "crates/sql" }
 skein-storage = { path = "crates/storage" }
 zstd = "0.13"
@@ -43,6 +44,7 @@ vector-search = []
 turbovec = ["vector-search", "dep:turbovec"]
 loom-tests = ["dep:loom"]
 opentelemetry = ["dep:opentelemetry"]
+tokio-runtime = ["dep:skein-runtime-tokio"]
 
 [workspace]
 members = [
@@ -59,6 +61,7 @@ members = [
   "crates/route-ownership",
   "crates/sql",
   "crates/storage",
+  "crates/runtime-tokio",
 ]
 resolver = "2"
 

@@ -35939,6 +35939,23 @@ impl DatabaseReadTransaction {
         self.query_with_params_bounded(cypher_text, parameters, self.config.max_read_result_rows)
     }
 
+    pub fn query_with_params_context(
+        &mut self,
+        cypher_text: &str,
+        parameters: &BTreeMap<String, Value>,
+        task_context: &skein_core::RuntimeTaskContext,
+    ) -> Result<QueryOutput> {
+        Ok(self
+            .query_with_params_bounded_profile_internal(
+                cypher_text,
+                parameters,
+                self.config.max_read_result_rows,
+                None,
+                Some(task_context),
+            )?
+            .output)
+    }
+
     pub fn query_with_params_access_control(
         &mut self,
         cypher_text: &str,
@@ -35971,7 +35988,13 @@ impl DatabaseReadTransaction {
         parameters: &BTreeMap<String, Value>,
         max_rows: Option<usize>,
     ) -> Result<BoundedReadQueryOutput> {
-        self.query_with_params_bounded_profile_internal(cypher_text, parameters, max_rows, None)
+        self.query_with_params_bounded_profile_internal(
+            cypher_text,
+            parameters,
+            max_rows,
+            None,
+            None,
+        )
     }
 
     pub fn query_with_params_bounded_profile_access_control(
@@ -35986,6 +36009,7 @@ impl DatabaseReadTransaction {
             parameters,
             max_rows,
             Some(access_control),
+            None,
         )
     }
 
@@ -35995,7 +36019,9 @@ impl DatabaseReadTransaction {
         parameters: &BTreeMap<String, Value>,
         max_rows: Option<usize>,
         access_control: Option<QueryAccessControlContext>,
+        task_context: Option<&skein_core::RuntimeTaskContext>,
     ) -> Result<BoundedReadQueryOutput> {
+        query_runtime::query_runtime_checkpoint(task_context)?;
         let statement = cypher::parse(cypher_text)?;
         let body = statement_body(&statement);
         if let cypher::Statement::Explain(explain) = &statement {
@@ -36005,6 +36031,7 @@ impl DatabaseReadTransaction {
                 parameters,
                 max_rows,
                 access_control,
+                task_context,
             );
         }
         if matches!(body, cypher::Statement::Checkpoint) {
@@ -36031,12 +36058,27 @@ impl DatabaseReadTransaction {
                 "read transaction query must not be a mutation".to_string(),
             ));
         }
-        let profiled = executor::execute_with_row_limit_profile(
-            &optimized.physical_plan,
-            &mut self.catalog,
-            &mut self.store,
-            max_rows,
-        )?;
+        let profiled = match task_context {
+            Some(task_context) => {
+                let mut external = executor::NoExternalReadOperator;
+                executor::execute_with_row_limit_profile_and_external_and_context(
+                    &optimized.physical_plan,
+                    &mut self.catalog,
+                    &mut self.store,
+                    parameters,
+                    &mut external,
+                    max_rows,
+                    task_context,
+                )
+            }
+            None => executor::execute_with_row_limit_profile(
+                &optimized.physical_plan,
+                &mut self.catalog,
+                &mut self.store,
+                max_rows,
+            ),
+        }?;
+        query_runtime::query_runtime_checkpoint(task_context)?;
         Ok(BoundedReadQueryOutput {
             output: QueryOutput {
                 rows: profiled.rows,
@@ -36052,7 +36094,9 @@ impl DatabaseReadTransaction {
         parameters: &BTreeMap<String, Value>,
         max_rows: Option<usize>,
         access_control: Option<QueryAccessControlContext>,
+        task_context: Option<&skein_core::RuntimeTaskContext>,
     ) -> Result<BoundedReadQueryOutput> {
+        query_runtime::query_runtime_checkpoint(task_context)?;
         let work_request =
             query_work_request_for_statement(&QuerySystemVariables::default(), &explain.statement)?;
         let optimized = self.optimized_query_plan_with_access_control(
@@ -36073,12 +36117,27 @@ impl DatabaseReadTransaction {
             ));
         }
         if explain.analyze {
-            let profiled = executor::execute_with_row_limit_profile(
-                &optimized.physical_plan,
-                &mut self.catalog,
-                &mut self.store,
-                max_rows,
-            )?;
+            let profiled = match task_context {
+                Some(task_context) => {
+                    let mut external = executor::NoExternalReadOperator;
+                    executor::execute_with_row_limit_profile_and_external_and_context(
+                        &optimized.physical_plan,
+                        &mut self.catalog,
+                        &mut self.store,
+                        parameters,
+                        &mut external,
+                        max_rows,
+                        task_context,
+                    )
+                }
+                None => executor::execute_with_row_limit_profile(
+                    &optimized.physical_plan,
+                    &mut self.catalog,
+                    &mut self.store,
+                    max_rows,
+                ),
+            }?;
+            query_runtime::query_runtime_checkpoint(task_context)?;
             let row_count = profiled.rows.len();
             return Ok(BoundedReadQueryOutput {
                 output: QueryOutput {
