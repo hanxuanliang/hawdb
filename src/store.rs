@@ -155,9 +155,9 @@ pub struct PropertyIndexConsistencyReport {
 }
 
 type CompositePropertyKey = Vec<(String, Value)>;
-type CompositePropertyIndex = BTreeMap<(LabelId, CompositePropertyKey), BTreeSet<NodeId>>;
-type FullTextPropertyIndex = BTreeMap<(LabelId, String, String), BTreeSet<NodeId>>;
-type RelationshipPropertyIndex = BTreeMap<(RelTypeId, String, Value), BTreeSet<RelId>>;
+type CompositePropertyIndex = CowSegmentedMap<(LabelId, CompositePropertyKey), BTreeSet<NodeId>>;
+type FullTextPropertyIndex = CowSegmentedMap<(LabelId, String, String), BTreeSet<NodeId>>;
+type RelationshipPropertyIndex = CowSegmentedMap<(RelTypeId, String, Value), BTreeSet<RelId>>;
 
 /// An immutable snapshot segment that is cloned only when a writer mutates it.
 ///
@@ -200,10 +200,195 @@ impl<T: Clone> DerefMut for CowSegment<T> {
     }
 }
 
+const COW_MAP_MAX_SEGMENT_ENTRIES: usize = 512;
+
+/// An ordered map backed by immutable COW pages.
+///
+/// A snapshot clones one outer `Arc`. A writer clones the small page directory
+/// and only the page containing the modified key, avoiding an O(graph size)
+/// first write while a read snapshot is alive.
+#[derive(Debug)]
+struct CowSegmentedMap<K, V> {
+    segments: Arc<Vec<Arc<BTreeMap<K, V>>>>,
+    len: usize,
+}
+
+impl<K, V> Clone for CowSegmentedMap<K, V> {
+    fn clone(&self) -> Self {
+        Self {
+            segments: Arc::clone(&self.segments),
+            len: self.len,
+        }
+    }
+}
+
+impl<K, V> Default for CowSegmentedMap<K, V> {
+    fn default() -> Self {
+        Self {
+            segments: Arc::new(Vec::new()),
+            len: 0,
+        }
+    }
+}
+
+impl<K: Ord, V> From<BTreeMap<K, V>> for CowSegmentedMap<K, V> {
+    fn from(values: BTreeMap<K, V>) -> Self {
+        let len = values.len();
+        let mut entries = values.into_iter().peekable();
+        let mut segments = Vec::new();
+        while entries.peek().is_some() {
+            segments.push(Arc::new(
+                entries.by_ref().take(COW_MAP_MAX_SEGMENT_ENTRIES).collect(),
+            ));
+        }
+        Self {
+            segments: Arc::new(segments),
+            len,
+        }
+    }
+}
+
+impl<K: Ord, V> CowSegmentedMap<K, V> {
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn segment_index(&self, key: &K) -> Option<usize> {
+        if self.segments.is_empty() {
+            return None;
+        }
+        let index = self.segments.partition_point(|segment| {
+            segment
+                .last_key_value()
+                .is_some_and(|(last_key, _)| last_key < key)
+        });
+        Some(index.min(self.segments.len() - 1))
+    }
+
+    fn get(&self, key: &K) -> Option<&V> {
+        self.segment_index(key)
+            .and_then(|index| self.segments[index].get(key))
+    }
+
+    fn contains_key(&self, key: &K) -> bool {
+        self.get(key).is_some()
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
+        self.segments.iter().flat_map(|segment| segment.iter())
+    }
+
+    fn keys(&self) -> impl Iterator<Item = &K> {
+        self.iter().map(|(key, _)| key)
+    }
+
+    fn values(&self) -> impl Iterator<Item = &V> {
+        self.iter().map(|(_, value)| value)
+    }
+}
+
+impl<K: Ord + Clone, V: Clone> CowSegmentedMap<K, V> {
+    fn insert(&mut self, key: K, value: V) -> Option<V> {
+        if self.segments.is_empty() {
+            self.segments = Arc::new(vec![Arc::new(BTreeMap::from([(key, value)]))]);
+            self.len = 1;
+            return None;
+        }
+        let index = self
+            .segment_index(&key)
+            .expect("non-empty segmented map has a target page");
+        let segments = Arc::make_mut(&mut self.segments);
+        let segment = Arc::make_mut(&mut segments[index]);
+        let previous = segment.insert(key, value);
+        if previous.is_none() {
+            self.len = self.len.saturating_add(1);
+        }
+        if segment.len() > COW_MAP_MAX_SEGMENT_ENTRIES {
+            let split_key = segment
+                .keys()
+                .nth(segment.len() / 2)
+                .cloned()
+                .expect("oversized segmented map page is non-empty");
+            let right = segment.split_off(&split_key);
+            segments.insert(index + 1, Arc::new(right));
+        }
+        previous
+    }
+
+    fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        let index = self.segment_index(key)?;
+        if !self.segments[index].contains_key(key) {
+            return None;
+        }
+        let segments = Arc::make_mut(&mut self.segments);
+        Arc::make_mut(&mut segments[index]).get_mut(key)
+    }
+
+    fn entry_or_default(&mut self, key: K) -> &mut V
+    where
+        V: Default,
+    {
+        if !self.contains_key(&key) {
+            self.insert(key.clone(), V::default());
+        }
+        self.get_mut(&key)
+            .expect("inserted segmented map entry must be available")
+    }
+
+    fn remove(&mut self, key: &K) -> Option<V> {
+        let index = self.segment_index(key)?;
+        if !self.segments[index].contains_key(key) {
+            return None;
+        }
+        let segments = Arc::make_mut(&mut self.segments);
+        let removed = Arc::make_mut(&mut segments[index]).remove(key);
+        if removed.is_some() {
+            self.len = self.len.saturating_sub(1);
+        }
+        if segments[index].is_empty() {
+            segments.remove(index);
+        }
+        removed
+    }
+
+    fn retain(&mut self, mut keep: impl FnMut(&K, &mut V) -> bool) {
+        let segments = Arc::make_mut(&mut self.segments);
+        for segment in segments.iter_mut() {
+            let segment = Arc::make_mut(segment);
+            let previous_len = segment.len();
+            segment.retain(|key, value| keep(key, value));
+            self.len = self
+                .len
+                .saturating_sub(previous_len.saturating_sub(segment.len()));
+        }
+        segments.retain(|segment| !segment.is_empty());
+    }
+}
+
 #[cfg(test)]
-impl<T> CowSegment<T> {
+impl<K, V> CowSegmentedMap<K, V> {
     fn shares_storage_with(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
+        Arc::ptr_eq(&self.segments, &other.segments)
+    }
+
+    fn segment_count(&self) -> usize {
+        self.segments.len()
+    }
+
+    fn shared_segment_count_with(&self, other: &Self) -> usize {
+        self.segments
+            .iter()
+            .filter(|segment| {
+                other
+                    .segments
+                    .iter()
+                    .any(|other_segment| Arc::ptr_eq(segment, other_segment))
+            })
+            .count()
     }
 }
 
@@ -277,7 +462,7 @@ impl AdjacencyConsistencyReport {
         relationship_count: usize,
         maintained: AdjacencyGroups,
         recomputed: AdjacencyGroups,
-        relationships: &BTreeMap<RelId, RelRecord>,
+        relationships: &CowSegmentedMap<RelId, RelRecord>,
     ) -> Self {
         let mut missing_group_count = 0;
         let mut extra_group_count = 0;
@@ -420,8 +605,8 @@ impl DistinctValueStatisticsConsistencyReport {
 impl PropertyIndexConsistencyReport {
     fn new(
         computed_at_commit_epoch: u64,
-        maintained_node_index: &BTreeMap<(LabelId, String, Value), BTreeSet<NodeId>>,
-        recomputed_node_index: &BTreeMap<(LabelId, String, Value), BTreeSet<NodeId>>,
+        maintained_node_index: &CowSegmentedMap<(LabelId, String, Value), BTreeSet<NodeId>>,
+        recomputed_node_index: &CowSegmentedMap<(LabelId, String, Value), BTreeSet<NodeId>>,
         maintained_relationship_index: &RelationshipPropertyIndex,
         recomputed_relationship_index: &RelationshipPropertyIndex,
     ) -> Self {
@@ -478,15 +663,15 @@ pub struct GraphStore {
     next_node_id: u64,
     next_rel_id: u64,
     commit_epoch: u64,
-    nodes: CowSegment<BTreeMap<NodeId, NodeRecord>>,
-    relationships: CowSegment<BTreeMap<RelId, RelRecord>>,
+    nodes: CowSegmentedMap<NodeId, NodeRecord>,
+    relationships: CowSegmentedMap<RelId, RelRecord>,
     basic_statistics: BasicGraphStatistics,
-    outgoing: CowSegment<BTreeMap<(NodeId, RelTypeId), BTreeSet<RelId>>>,
-    incoming: CowSegment<BTreeMap<(NodeId, RelTypeId), BTreeSet<RelId>>>,
-    property_index: CowSegment<BTreeMap<(LabelId, String, Value), BTreeSet<NodeId>>>,
-    composite_property_index: CowSegment<CompositePropertyIndex>,
-    full_text_property_index: CowSegment<FullTextPropertyIndex>,
-    relationship_property_index: CowSegment<RelationshipPropertyIndex>,
+    outgoing: CowSegmentedMap<(NodeId, RelTypeId), BTreeSet<RelId>>,
+    incoming: CowSegmentedMap<(NodeId, RelTypeId), BTreeSet<RelId>>,
+    property_index: CowSegmentedMap<(LabelId, String, Value), BTreeSet<NodeId>>,
+    composite_property_index: CompositePropertyIndex,
+    full_text_property_index: FullTextPropertyIndex,
+    relationship_property_index: RelationshipPropertyIndex,
     projected_graphs: CowSegment<BTreeMap<String, ProjectedGraphDefinition>>,
     projected_graph_artifacts: CowSegment<BTreeMap<String, ProjectedGraphArtifact>>,
     stable_id_mapping: CowSegment<StoreStableIdMapping>,
@@ -653,15 +838,15 @@ impl GraphStore {
             next_node_id: 0,
             next_rel_id: 0,
             commit_epoch: 0,
-            nodes: CowSegment::default(),
-            relationships: CowSegment::default(),
+            nodes: CowSegmentedMap::default(),
+            relationships: CowSegmentedMap::default(),
             basic_statistics: BasicGraphStatistics::default(),
-            outgoing: CowSegment::default(),
-            incoming: CowSegment::default(),
-            property_index: CowSegment::default(),
-            composite_property_index: CowSegment::default(),
-            full_text_property_index: CowSegment::default(),
-            relationship_property_index: CowSegment::default(),
+            outgoing: CowSegmentedMap::default(),
+            incoming: CowSegmentedMap::default(),
+            property_index: CowSegmentedMap::default(),
+            composite_property_index: CowSegmentedMap::default(),
+            full_text_property_index: CowSegmentedMap::default(),
+            relationship_property_index: CowSegmentedMap::default(),
             projected_graphs: CowSegment::default(),
             projected_graph_artifacts: CowSegment::default(),
             stable_id_mapping: CowSegment::default(),
@@ -5122,8 +5307,7 @@ impl GraphStore {
             for label_id in &node.labels {
                 for (property, value) in &node.properties {
                     self.property_index
-                        .entry((*label_id, property.clone(), value.clone()))
-                        .or_default()
+                        .entry_or_default((*label_id, property.clone(), value.clone()))
                         .insert(id);
                 }
             }
@@ -5141,8 +5325,7 @@ impl GraphStore {
                 continue;
             };
             self.composite_property_index
-                .entry((index.label_id, key))
-                .or_default()
+                .entry_or_default((index.label_id, key))
                 .insert(node.id);
         }
     }
@@ -5200,8 +5383,7 @@ impl GraphStore {
                 continue;
             };
             self.composite_property_index
-                .entry((label_id, key))
-                .or_default()
+                .entry_or_default((label_id, key))
                 .insert(node.id);
             indexed_entries = indexed_entries.saturating_add(1);
         }
@@ -5218,8 +5400,7 @@ impl GraphStore {
             };
             for token in full_text_index_tokens(value) {
                 self.full_text_property_index
-                    .entry((index.label_id, index.property.clone(), token))
-                    .or_default()
+                    .entry_or_default((index.label_id, index.property.clone(), token))
                     .insert(node.id);
             }
         }
@@ -5277,8 +5458,7 @@ impl GraphStore {
             };
             for token in full_text_index_tokens(value) {
                 self.full_text_property_index
-                    .entry((label_id, property.to_string(), token))
-                    .or_default()
+                    .entry_or_default((label_id, property.to_string(), token))
                     .insert(node.id);
                 indexed_entries = indexed_entries.saturating_add(1);
             }
@@ -5358,12 +5538,10 @@ impl GraphStore {
             self.add_relationship_to_property_index(&relationship);
         }
         self.outgoing
-            .entry((source, rel_type))
-            .or_default()
+            .entry_or_default((source, rel_type))
             .insert(id);
         self.incoming
-            .entry((target, rel_type))
-            .or_default()
+            .entry_or_default((target, rel_type))
             .insert(id);
     }
 
@@ -6951,8 +7129,7 @@ impl GraphStore {
                 }
             }
             self.property_index
-                .entry((label_id, property.clone(), value.clone()))
-                .or_default()
+                .entry_or_default((label_id, property.clone(), value.clone()))
                 .insert(id);
         }
         if let Some(node) = self.nodes.get(&id).cloned() {
@@ -6979,8 +7156,7 @@ impl GraphStore {
             }
         }
         self.relationship_property_index
-            .entry((rel_type, property, value))
-            .or_default()
+            .entry_or_default((rel_type, property, value))
             .insert(id);
     }
 
@@ -7103,8 +7279,7 @@ impl GraphStore {
     fn add_relationship_to_property_index(&mut self, relationship: &RelRecord) {
         for (property, value) in &relationship.properties {
             self.relationship_property_index
-                .entry((relationship.rel_type, property.clone(), value.clone()))
-                .or_default()
+                .entry_or_default((relationship.rel_type, property.clone(), value.clone()))
                 .insert(relationship.id);
         }
     }
@@ -7701,8 +7876,8 @@ struct CheckpointImage<'a> {
     next_rel_id: u64,
     search_projection_change_log_start_epoch: u64,
     search_projection_graph_changes: &'a [SearchProjectionGraphChange],
-    nodes: &'a BTreeMap<NodeId, NodeRecord>,
-    relationships: &'a BTreeMap<RelId, RelRecord>,
+    nodes: &'a CowSegmentedMap<NodeId, NodeRecord>,
+    relationships: &'a CowSegmentedMap<RelId, RelRecord>,
     projected_graphs: &'a BTreeMap<String, ProjectedGraphDefinition>,
     initial_import_source_fingerprint: Option<&'a str>,
 }
@@ -9526,8 +9701,8 @@ fn validate_table_descriptor(
 
 fn apply_wal_op_to_snapshot(
     catalog: &Catalog,
-    nodes: &mut BTreeMap<NodeId, NodeRecord>,
-    relationships: &mut BTreeMap<RelId, RelRecord>,
+    nodes: &mut CowSegmentedMap<NodeId, NodeRecord>,
+    relationships: &mut CowSegmentedMap<RelId, RelRecord>,
     op: &WalOp,
 ) {
     match op {
@@ -9840,8 +10015,8 @@ fn decode_projected_graph_usize_line(line: Option<&str>, expected: &str) -> Resu
 
 fn validate_property_schemas(
     catalog: &Catalog,
-    nodes: &BTreeMap<NodeId, NodeRecord>,
-    relationships: &BTreeMap<RelId, RelRecord>,
+    nodes: &CowSegmentedMap<NodeId, NodeRecord>,
+    relationships: &CowSegmentedMap<RelId, RelRecord>,
 ) -> Result<()> {
     for property in catalog.property_descriptors() {
         if property.state != SchemaObjectState::Public {
@@ -9952,7 +10127,7 @@ fn property_schema_error(table: &str, property: &str, record: &str, reason: &str
 
 fn validate_unique_constraints(
     catalog: &Catalog,
-    nodes: &BTreeMap<NodeId, NodeRecord>,
+    nodes: &CowSegmentedMap<NodeId, NodeRecord>,
 ) -> Result<()> {
     for constraint in catalog.unique_constraints() {
         let crate::schema::ConstraintSubject::Node(label_id) = constraint.subject else {
@@ -9965,7 +10140,7 @@ fn validate_unique_constraints(
 
 fn validate_relationship_unique_constraints(
     catalog: &Catalog,
-    relationships: &BTreeMap<RelId, RelRecord>,
+    relationships: &CowSegmentedMap<RelId, RelRecord>,
 ) -> Result<()> {
     for constraint in catalog.relationship_unique_constraints() {
         let crate::schema::ConstraintSubject::Relationship(rel_type_id) = constraint.subject else {
@@ -9983,7 +10158,7 @@ fn validate_relationship_unique_constraints(
 
 fn validate_node_property_exists_constraints(
     catalog: &Catalog,
-    nodes: &BTreeMap<NodeId, NodeRecord>,
+    nodes: &CowSegmentedMap<NodeId, NodeRecord>,
 ) -> Result<()> {
     for constraint in catalog.node_property_exists_constraints() {
         let crate::schema::ConstraintSubject::Node(label_id) = constraint.subject else {
@@ -9996,7 +10171,7 @@ fn validate_node_property_exists_constraints(
 
 fn validate_relationship_property_exists_constraints(
     catalog: &Catalog,
-    relationships: &BTreeMap<RelId, RelRecord>,
+    relationships: &CowSegmentedMap<RelId, RelRecord>,
 ) -> Result<()> {
     for constraint in catalog.relationship_property_exists_constraints() {
         let crate::schema::ConstraintSubject::Relationship(rel_type_id) = constraint.subject else {
@@ -10014,7 +10189,7 @@ fn validate_relationship_property_exists_constraints(
 
 fn validate_node_property_exists(
     catalog: &Catalog,
-    nodes: &BTreeMap<NodeId, NodeRecord>,
+    nodes: &CowSegmentedMap<NodeId, NodeRecord>,
     label_id: LabelId,
     property: &str,
 ) -> Result<()> {
@@ -10038,7 +10213,7 @@ fn validate_node_property_exists(
 
 fn validate_relationship_property_exists(
     catalog: &Catalog,
-    relationships: &BTreeMap<RelId, RelRecord>,
+    relationships: &CowSegmentedMap<RelId, RelRecord>,
     rel_type_id: RelTypeId,
     property: &str,
 ) -> Result<()> {
@@ -10062,7 +10237,7 @@ fn validate_relationship_property_exists(
 
 fn validate_unique_property(
     catalog: &Catalog,
-    nodes: &BTreeMap<NodeId, NodeRecord>,
+    nodes: &CowSegmentedMap<NodeId, NodeRecord>,
     label_id: LabelId,
     property: &str,
 ) -> Result<()> {
@@ -10090,7 +10265,7 @@ fn validate_unique_property(
 
 fn validate_unique_relationship_property(
     catalog: &Catalog,
-    relationships: &BTreeMap<RelId, RelRecord>,
+    relationships: &CowSegmentedMap<RelId, RelRecord>,
     rel_type_id: RelTypeId,
     property: &str,
 ) -> Result<()> {
@@ -10117,8 +10292,8 @@ fn validate_unique_relationship_property(
 }
 
 fn compute_statistics(
-    nodes: &BTreeMap<NodeId, NodeRecord>,
-    relationships: &BTreeMap<RelId, RelRecord>,
+    nodes: &CowSegmentedMap<NodeId, NodeRecord>,
+    relationships: &CowSegmentedMap<RelId, RelRecord>,
     computed_at_commit_epoch: u64,
 ) -> GraphStatistics {
     compute_statistics_with_basic(
@@ -10129,8 +10304,8 @@ fn compute_statistics(
 }
 
 fn compute_statistics_with_basic(
-    nodes: &BTreeMap<NodeId, NodeRecord>,
-    relationships: &BTreeMap<RelId, RelRecord>,
+    nodes: &CowSegmentedMap<NodeId, NodeRecord>,
+    relationships: &CowSegmentedMap<RelId, RelRecord>,
     basic_statistics: BasicGraphStatistics,
 ) -> GraphStatistics {
     let mut statistics = GraphStatistics {
@@ -10253,7 +10428,7 @@ fn compute_statistics_with_basic(
 }
 
 fn compute_node_property_distinct_counts_from_index(
-    property_index: &BTreeMap<(LabelId, String, Value), BTreeSet<NodeId>>,
+    property_index: &CowSegmentedMap<(LabelId, String, Value), BTreeSet<NodeId>>,
 ) -> BTreeMap<(LabelId, String), u64> {
     let mut counts = BTreeMap::new();
     for (label_id, property, _) in property_index.keys() {
@@ -10273,15 +10448,14 @@ fn compute_relationship_property_distinct_counts_from_index(
 }
 
 fn recompute_node_property_index(
-    nodes: &BTreeMap<NodeId, NodeRecord>,
-) -> BTreeMap<(LabelId, String, Value), BTreeSet<NodeId>> {
-    let mut index = BTreeMap::new();
+    nodes: &CowSegmentedMap<NodeId, NodeRecord>,
+) -> CowSegmentedMap<(LabelId, String, Value), BTreeSet<NodeId>> {
+    let mut index = CowSegmentedMap::<(LabelId, String, Value), BTreeSet<NodeId>>::default();
     for node in nodes.values() {
         for label_id in &node.labels {
             for (property, value) in &node.properties {
                 index
-                    .entry((*label_id, property.clone(), value.clone()))
-                    .or_insert_with(BTreeSet::new)
+                    .entry_or_default((*label_id, property.clone(), value.clone()))
                     .insert(node.id);
             }
         }
@@ -10290,14 +10464,13 @@ fn recompute_node_property_index(
 }
 
 fn recompute_relationship_property_index(
-    relationships: &BTreeMap<RelId, RelRecord>,
+    relationships: &CowSegmentedMap<RelId, RelRecord>,
 ) -> RelationshipPropertyIndex {
-    let mut index = BTreeMap::new();
+    let mut index = RelationshipPropertyIndex::default();
     for relationship in relationships.values() {
         for (property, value) in &relationship.properties {
             index
-                .entry((relationship.rel_type, property.clone(), value.clone()))
-                .or_insert_with(BTreeSet::new)
+                .entry_or_default((relationship.rel_type, property.clone(), value.clone()))
                 .insert(relationship.id);
         }
     }
@@ -10305,7 +10478,7 @@ fn recompute_relationship_property_index(
 }
 
 fn node_property_index_reference_count(
-    index: &BTreeMap<(LabelId, String, Value), BTreeSet<NodeId>>,
+    index: &CowSegmentedMap<(LabelId, String, Value), BTreeSet<NodeId>>,
 ) -> usize {
     index.values().map(BTreeSet::len).sum()
 }
@@ -10315,8 +10488,8 @@ fn relationship_property_index_reference_count(index: &RelationshipPropertyIndex
 }
 
 fn property_index_mismatch_summary(
-    maintained: &BTreeMap<(LabelId, String, Value), BTreeSet<NodeId>>,
-    recomputed: &BTreeMap<(LabelId, String, Value), BTreeSet<NodeId>>,
+    maintained: &CowSegmentedMap<(LabelId, String, Value), BTreeSet<NodeId>>,
+    recomputed: &CowSegmentedMap<(LabelId, String, Value), BTreeSet<NodeId>>,
 ) -> (usize, usize, usize, Vec<(LabelId, String, Value)>) {
     let mut missing_key_count = 0usize;
     let mut extra_key_count = 0usize;
@@ -10385,8 +10558,8 @@ fn relationship_property_index_mismatch_summary(
 }
 
 fn compute_basic_statistics(
-    nodes: &BTreeMap<NodeId, NodeRecord>,
-    relationships: &BTreeMap<RelId, RelRecord>,
+    nodes: &CowSegmentedMap<NodeId, NodeRecord>,
+    relationships: &CowSegmentedMap<RelId, RelRecord>,
     computed_at_commit_epoch: u64,
 ) -> BasicGraphStatistics {
     let mut statistics = BasicGraphStatistics {
@@ -10430,7 +10603,7 @@ struct BoundedPathStatistics {
 }
 
 fn compute_bounded_path_statistics(
-    nodes: &BTreeMap<NodeId, NodeRecord>,
+    nodes: &CowSegmentedMap<NodeId, NodeRecord>,
     outgoing_by_source_type: &BTreeMap<(NodeId, RelTypeId), Vec<NodeId>>,
     max_hops: usize,
 ) -> BoundedPathStatistics {
@@ -10474,7 +10647,7 @@ fn compute_bounded_path_statistics(
 }
 
 struct BoundedPathStatContext<'a> {
-    nodes: &'a BTreeMap<NodeId, NodeRecord>,
+    nodes: &'a CowSegmentedMap<NodeId, NodeRecord>,
     outgoing_by_source_type: &'a BTreeMap<(NodeId, RelTypeId), Vec<NodeId>>,
     max_hops: usize,
 }
@@ -10692,11 +10865,11 @@ fn adjacency_layout_for_degree(degree: usize) -> AdjacencyLayout {
 }
 
 fn maintained_adjacency_groups(
-    outgoing: &BTreeMap<(NodeId, RelTypeId), BTreeSet<RelId>>,
-    incoming: &BTreeMap<(NodeId, RelTypeId), BTreeSet<RelId>>,
+    outgoing: &CowSegmentedMap<(NodeId, RelTypeId), BTreeSet<RelId>>,
+    incoming: &CowSegmentedMap<(NodeId, RelTypeId), BTreeSet<RelId>>,
 ) -> AdjacencyGroups {
     let mut groups = AdjacencyGroups::new();
-    for ((node_id, rel_type), rel_ids) in outgoing {
+    for ((node_id, rel_type), rel_ids) in outgoing.iter() {
         groups.insert(
             AdjacencyGroupKey {
                 node_id: *node_id,
@@ -10706,7 +10879,7 @@ fn maintained_adjacency_groups(
             rel_ids.clone(),
         );
     }
-    for ((node_id, rel_type), rel_ids) in incoming {
+    for ((node_id, rel_type), rel_ids) in incoming.iter() {
         groups.insert(
             AdjacencyGroupKey {
                 node_id: *node_id,
@@ -10719,7 +10892,9 @@ fn maintained_adjacency_groups(
     groups
 }
 
-fn recompute_adjacency_groups(relationships: &BTreeMap<RelId, RelRecord>) -> AdjacencyGroups {
+fn recompute_adjacency_groups(
+    relationships: &CowSegmentedMap<RelId, RelRecord>,
+) -> AdjacencyGroups {
     let mut groups = AdjacencyGroups::new();
     for relationship in relationships.values() {
         groups
@@ -10743,22 +10918,22 @@ fn recompute_adjacency_groups(relationships: &BTreeMap<RelId, RelRecord>) -> Adj
 }
 
 fn compute_degree_statistics_from_adjacency(
-    nodes: &BTreeMap<NodeId, NodeRecord>,
-    outgoing: &BTreeMap<(NodeId, RelTypeId), BTreeSet<RelId>>,
-    incoming: &BTreeMap<(NodeId, RelTypeId), BTreeSet<RelId>>,
+    nodes: &CowSegmentedMap<NodeId, NodeRecord>,
+    outgoing: &CowSegmentedMap<(NodeId, RelTypeId), BTreeSet<RelId>>,
+    incoming: &CowSegmentedMap<(NodeId, RelTypeId), BTreeSet<RelId>>,
 ) -> BTreeMap<DegreeStatisticsKey, DegreeStatisticsEntry> {
     compute_degree_statistics_from_groups(nodes, maintained_adjacency_groups(outgoing, incoming))
 }
 
 fn compute_degree_statistics_from_relationships(
-    nodes: &BTreeMap<NodeId, NodeRecord>,
-    relationships: &BTreeMap<RelId, RelRecord>,
+    nodes: &CowSegmentedMap<NodeId, NodeRecord>,
+    relationships: &CowSegmentedMap<RelId, RelRecord>,
 ) -> BTreeMap<DegreeStatisticsKey, DegreeStatisticsEntry> {
     compute_degree_statistics_from_groups(nodes, recompute_adjacency_groups(relationships))
 }
 
 fn compute_degree_statistics_from_groups(
-    nodes: &BTreeMap<NodeId, NodeRecord>,
+    nodes: &CowSegmentedMap<NodeId, NodeRecord>,
     groups: AdjacencyGroups,
 ) -> BTreeMap<DegreeStatisticsKey, DegreeStatisticsEntry> {
     let rel_types = groups
@@ -10818,7 +10993,7 @@ fn compute_degree_statistics_from_groups(
 }
 
 fn label_counts_for_degree_statistics(
-    nodes: &BTreeMap<NodeId, NodeRecord>,
+    nodes: &CowSegmentedMap<NodeId, NodeRecord>,
 ) -> BTreeMap<LabelId, u64> {
     let mut label_counts = BTreeMap::new();
     for node in nodes.values() {
@@ -11932,8 +12107,8 @@ mod tests {
     use super::{
         checksum_bytes, compute_statistics, encode_durable_text, read_durable_text, source_scan,
         AdjacencyDirection, AdjacencyGroupStats, AdjacencyLayout, ConnectedNodesCreate,
-        DegreeStatisticsEntry, DegreeStatisticsKey, DurableCompression, GraphStore, NodeId,
-        NodeRecord, NodeSetAssignment, NodeSetValue, OrderedAdjacencyEntry,
+        CowSegmentedMap, DegreeStatisticsEntry, DegreeStatisticsKey, DurableCompression,
+        GraphStore, NodeId, NodeRecord, NodeSetAssignment, NodeSetValue, OrderedAdjacencyEntry,
         ProjectedGraphDefinition, PropertyFilter, RelId, RelRecord, RelTypeId,
         RelationshipDeleteRequest, ScanPruningStrategy, ScanPruningTargetKind,
         SearchProjectionGraphChange, SourceScanCandidateRead, DENSE_ADJACENCY_DEGREE_THRESHOLD,
@@ -11980,6 +12155,50 @@ mod tests {
         assert!(store
             .relationships
             .shares_storage_with(&snapshot.relationships));
+    }
+
+    #[test]
+    fn active_snapshot_detaches_only_the_mutated_map_page() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        for id in 0..1_100 {
+            store
+                .create_node(&mut catalog, "Memory", properties([("id", Value::Int(id))]))
+                .unwrap();
+        }
+        let snapshot = store.snapshot();
+        let segment_count = store.nodes.segment_count();
+        assert!(segment_count >= 3);
+        assert_eq!(
+            store.nodes.shared_segment_count_with(&snapshot.nodes),
+            segment_count
+        );
+
+        store.apply_set_node_property(
+            &catalog,
+            NodeId(0),
+            "title".to_string(),
+            Value::String("updated".to_string()),
+        );
+
+        assert_eq!(store.nodes.segment_count(), segment_count);
+        assert_eq!(
+            store.nodes.shared_segment_count_with(&snapshot.nodes),
+            segment_count - 1
+        );
+        assert_eq!(
+            snapshot
+                .nodes
+                .get(&NodeId(0))
+                .unwrap()
+                .properties
+                .get("title"),
+            None
+        );
+        assert_eq!(
+            store.nodes.get(&NodeId(0)).unwrap().properties.get("title"),
+            Some(&Value::String("updated".to_string()))
+        );
     }
 
     #[test]
@@ -13880,7 +14099,7 @@ mod tests {
     #[test]
     fn adaptive_histograms_use_medium_sample_for_medium_cardinality() {
         let nodes = histogram_nodes("score", 2_000);
-        let statistics = compute_statistics(&nodes, &BTreeMap::new(), 1);
+        let statistics = compute_statistics(&nodes, &CowSegmentedMap::default(), 1);
         let histogram = statistics
             .property_histograms
             .get(&(LabelId(0), "score".to_string()))
@@ -13907,7 +14126,7 @@ mod tests {
     #[test]
     fn adaptive_histograms_use_max_sample_for_large_cardinality() {
         let nodes = histogram_nodes("score", 5_000);
-        let statistics = compute_statistics(&nodes, &BTreeMap::new(), 1);
+        let statistics = compute_statistics(&nodes, &CowSegmentedMap::default(), 1);
         let histogram = statistics
             .property_histograms
             .get(&(LabelId(0), "score".to_string()))
@@ -14398,9 +14617,10 @@ mod tests {
                     },
                 )
             })
-            .collect::<BTreeMap<_, _>>();
+            .collect::<BTreeMap<_, _>>()
+            .into();
 
-        let statistics = compute_statistics(&BTreeMap::new(), &relationships, 1);
+        let statistics = compute_statistics(&CowSegmentedMap::default(), &relationships, 1);
 
         assert_eq!(
             statistics
@@ -14452,7 +14672,8 @@ mod tests {
                 },
             )
         })
-        .collect::<BTreeMap<_, _>>();
+        .collect::<BTreeMap<_, _>>()
+        .into();
         let relationships = [
             (0, 0, 10),
             (1, 0, 11),
@@ -14476,7 +14697,8 @@ mod tests {
                 },
             )
         })
-        .collect::<BTreeMap<_, _>>();
+        .collect::<BTreeMap<_, _>>()
+        .into();
 
         let statistics = compute_statistics(&nodes, &relationships, 1);
         let path = (LabelId(0), RelTypeId(0), LabelId(1));
@@ -14516,9 +14738,10 @@ mod tests {
                     },
                 )
             })
-            .collect::<BTreeMap<_, _>>();
+            .collect::<BTreeMap<_, _>>()
+            .into();
 
-        let statistics = compute_statistics(&BTreeMap::new(), &relationships, 1);
+        let statistics = compute_statistics(&CowSegmentedMap::default(), &relationships, 1);
         let histogram = statistics
             .rel_property_histograms
             .get(&(RelTypeId(0), "score".to_string()))
@@ -14542,7 +14765,7 @@ mod tests {
             .collect()
     }
 
-    fn histogram_nodes(property: &str, count: u64) -> BTreeMap<NodeId, NodeRecord> {
+    fn histogram_nodes(property: &str, count: u64) -> CowSegmentedMap<NodeId, NodeRecord> {
         (0..count)
             .map(|id| {
                 (
@@ -14554,7 +14777,8 @@ mod tests {
                     },
                 )
             })
-            .collect()
+            .collect::<BTreeMap<_, _>>()
+            .into()
     }
 
     fn unique_test_dir(name: &str) -> std::path::PathBuf {
