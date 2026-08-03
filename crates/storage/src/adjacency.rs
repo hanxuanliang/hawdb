@@ -1,10 +1,13 @@
 use crate::{NodeId, RelId};
 use skein_core::RelTypeId;
-use std::collections::{btree_set, BTreeMap, BTreeSet};
+use std::collections::{btree_map, btree_set, BTreeMap, BTreeSet};
+use std::iter::{FusedIterator, Peekable};
 use std::sync::{Arc, OnceLock};
 
 pub const ADJACENCY_PIVOT_MIN_DEGREE: usize = 64;
 pub const ADJACENCY_MINI_DELTA_MAX_ENTRIES: usize = 64;
+pub const ADJACENCY_DELTA_CONSOLIDATION_ENTRIES: usize = ADJACENCY_MINI_DELTA_MAX_ENTRIES * 2;
+pub const ADJACENCY_DELTA_HARD_MAX_ENTRIES: usize = ADJACENCY_MINI_DELTA_MAX_ENTRIES * 8;
 
 /// A snapshot-friendly adjacency posting list with an immutable pivot and a
 /// bounded mini-delta for high-degree mutations.
@@ -13,8 +16,9 @@ pub const ADJACENCY_MINI_DELTA_MAX_ENTRIES: usize = 64;
 /// path. A shared high-degree pivot records overrides in a mini-delta, avoiding
 /// a full posting-list clone for every mutation while an older snapshot is
 /// alive. Consolidation materializes one replacement pivot after a bounded
-/// number of overrides. The posting handle remains pointer-sized, and a delta
-/// version materializes its immutable read view at most once.
+/// number of overrides. Full scans merge the pivot and delta blocks without
+/// materializing a replacement pivot. The legacy borrowed iterator keeps a
+/// lazily materialized view for API compatibility.
 #[derive(Debug, Clone)]
 pub struct AdjacencyPostingList {
     state: Arc<AdjacencyPostingState>,
@@ -25,7 +29,9 @@ enum AdjacencyPostingState {
     Pivot(BTreeSet<RelId>),
     Delta {
         pivot: Arc<AdjacencyPostingState>,
-        overrides: BTreeMap<RelId, bool>,
+        sealed: Vec<Arc<BTreeMap<RelId, bool>>>,
+        active: BTreeMap<RelId, bool>,
+        len: usize,
         read_view: OnceLock<Arc<BTreeSet<RelId>>>,
     },
 }
@@ -35,10 +41,16 @@ impl Clone for AdjacencyPostingState {
         match self {
             Self::Pivot(pivot) => Self::Pivot(pivot.clone()),
             Self::Delta {
-                pivot, overrides, ..
+                pivot,
+                sealed,
+                active,
+                len,
+                ..
             } => Self::Delta {
                 pivot: Arc::clone(pivot),
-                overrides: overrides.clone(),
+                sealed: sealed.clone(),
+                active: active.clone(),
+                len: *len,
                 read_view: OnceLock::new(),
             },
         }
@@ -63,7 +75,7 @@ impl From<BTreeSet<RelId>> for AdjacencyPostingList {
 
 impl PartialEq for AdjacencyPostingList {
     fn eq(&self, other: &Self) -> bool {
-        self.len() == other.len() && self.iter().eq(other.iter())
+        self.len() == other.len() && self.iter_copied().eq(other.iter_copied())
     }
 }
 
@@ -74,17 +86,7 @@ impl AdjacencyPostingList {
     pub fn len(&self) -> usize {
         match self.state.as_ref() {
             AdjacencyPostingState::Pivot(pivot) => pivot.len(),
-            AdjacencyPostingState::Delta {
-                pivot, overrides, ..
-            } => overrides
-                .iter()
-                .fold(pivot_set(pivot).len(), |len, (id, present)| {
-                    match (pivot_set(pivot).contains(id), present) {
-                        (false, true) => len.saturating_add(1),
-                        (true, false) => len.saturating_sub(1),
-                        _ => len,
-                    }
-                }),
+            AdjacencyPostingState::Delta { len, .. } => *len,
         }
     }
 
@@ -98,10 +100,11 @@ impl AdjacencyPostingList {
         match self.state.as_ref() {
             AdjacencyPostingState::Pivot(pivot) => pivot.contains(id),
             AdjacencyPostingState::Delta {
-                pivot, overrides, ..
-            } => overrides
-                .get(id)
-                .copied()
+                pivot,
+                sealed,
+                active,
+                ..
+            } => override_presence(sealed, active, id)
                 .unwrap_or_else(|| pivot_set(pivot).contains(id)),
         }
     }
@@ -117,7 +120,9 @@ impl AdjacencyPostingList {
             {
                 self.state = Arc::new(AdjacencyPostingState::Delta {
                     pivot: Arc::clone(&self.state),
-                    overrides: BTreeMap::from([(id, true)]),
+                    sealed: Vec::new(),
+                    active: BTreeMap::from([(id, true)]),
+                    len: pivot.len().saturating_add(1),
                     read_view: OnceLock::new(),
                 });
             }
@@ -130,18 +135,21 @@ impl AdjacencyPostingList {
             AdjacencyPostingState::Delta { .. } => {
                 let AdjacencyPostingState::Delta {
                     pivot,
-                    overrides,
+                    sealed,
+                    active,
+                    len,
                     read_view,
                 } = Arc::make_mut(&mut self.state)
                 else {
                     unreachable!("matched delta state");
                 };
                 read_view.take();
-                if pivot_set(pivot).contains(&id) {
-                    overrides.remove(&id);
+                if presence_before_active(pivot, sealed, &id) {
+                    active.remove(&id);
                 } else {
-                    overrides.insert(id, true);
+                    active.insert(id, true);
                 }
+                *len = len.saturating_add(1);
             }
         }
         self.finish_mutation();
@@ -159,7 +167,9 @@ impl AdjacencyPostingList {
             {
                 self.state = Arc::new(AdjacencyPostingState::Delta {
                     pivot: Arc::clone(&self.state),
-                    overrides: BTreeMap::from([(*id, false)]),
+                    sealed: Vec::new(),
+                    active: BTreeMap::from([(*id, false)]),
+                    len: pivot.len().saturating_sub(1),
                     read_view: OnceLock::new(),
                 });
             }
@@ -172,18 +182,21 @@ impl AdjacencyPostingList {
             AdjacencyPostingState::Delta { .. } => {
                 let AdjacencyPostingState::Delta {
                     pivot,
-                    overrides,
+                    sealed,
+                    active,
+                    len,
                     read_view,
                 } = Arc::make_mut(&mut self.state)
                 else {
                     unreachable!("matched delta state");
                 };
                 read_view.take();
-                if pivot_set(pivot).contains(id) {
-                    overrides.insert(*id, false);
+                if presence_before_active(pivot, sealed, id) {
+                    active.insert(*id, false);
                 } else {
-                    overrides.remove(id);
+                    active.remove(id);
                 }
+                *len = len.saturating_sub(1);
             }
         }
         self.finish_mutation();
@@ -193,6 +206,12 @@ impl AdjacencyPostingList {
     #[inline]
     pub fn iter(&self) -> btree_set::Iter<'_, RelId> {
         self.read_view().iter()
+    }
+
+    /// Iterates relationship IDs in order without constructing a full read
+    /// view for delta-backed postings.
+    pub fn iter_copied(&self) -> AdjacencyPostingIter<'_> {
+        AdjacencyPostingIter::new(self)
     }
 
     pub fn pivot_len(&self) -> usize {
@@ -205,8 +224,29 @@ impl AdjacencyPostingList {
     pub fn mini_delta_len(&self) -> usize {
         match self.state.as_ref() {
             AdjacencyPostingState::Pivot(_) => 0,
-            AdjacencyPostingState::Delta { overrides, .. } => overrides.len(),
+            AdjacencyPostingState::Delta { sealed, active, .. } => {
+                sealed.iter().map(|block| block.len()).sum::<usize>() + active.len()
+            }
         }
+    }
+
+    pub fn sealed_delta_count(&self) -> usize {
+        match self.state.as_ref() {
+            AdjacencyPostingState::Pivot(_) => 0,
+            AdjacencyPostingState::Delta { sealed, .. } => sealed.len(),
+        }
+    }
+
+    pub fn needs_consolidation(&self) -> bool {
+        self.mini_delta_len() >= ADJACENCY_DELTA_CONSOLIDATION_ENTRIES
+    }
+
+    pub fn consolidate(&mut self) -> bool {
+        if !matches!(self.state.as_ref(), AdjacencyPostingState::Delta { .. }) {
+            return false;
+        }
+        self.state = Arc::new(AdjacencyPostingState::Pivot(self.materialize()));
+        true
     }
 
     pub fn shares_pivot_with(&self, other: &Self) -> bool {
@@ -214,13 +254,29 @@ impl AdjacencyPostingList {
     }
 
     fn finish_mutation(&mut self) {
+        if let AdjacencyPostingState::Delta {
+            sealed,
+            active,
+            read_view,
+            ..
+        } = Arc::make_mut(&mut self.state)
+            && active.len() >= ADJACENCY_MINI_DELTA_MAX_ENTRIES
+        {
+            read_view.take();
+            sealed.push(Arc::new(std::mem::take(active)));
+        }
+
         let next_state = match self.state.as_ref() {
             AdjacencyPostingState::Pivot(_) => None,
             AdjacencyPostingState::Delta {
-                pivot, overrides, ..
-            } if overrides.is_empty() => Some(Arc::clone(pivot)),
-            AdjacencyPostingState::Delta { overrides, .. }
-                if overrides.len() >= ADJACENCY_MINI_DELTA_MAX_ENTRIES =>
+                pivot,
+                sealed,
+                active,
+                ..
+            } if sealed.is_empty() && active.is_empty() => Some(Arc::clone(pivot)),
+            AdjacencyPostingState::Delta { sealed, active, .. }
+                if sealed.iter().map(|block| block.len()).sum::<usize>() + active.len()
+                    >= ADJACENCY_DELTA_HARD_MAX_ENTRIES =>
             {
                 Some(Arc::new(AdjacencyPostingState::Pivot(self.materialize())))
             }
@@ -232,24 +288,15 @@ impl AdjacencyPostingList {
     }
 
     fn materialize(&self) -> BTreeSet<RelId> {
-        match self.state.as_ref() {
-            AdjacencyPostingState::Pivot(pivot) => pivot.clone(),
-            AdjacencyPostingState::Delta {
-                pivot, overrides, ..
-            } => materialize_delta(pivot_set(pivot), overrides),
-        }
+        self.iter_copied().collect()
     }
 
     #[inline]
     fn read_view(&self) -> &BTreeSet<RelId> {
         match self.state.as_ref() {
             AdjacencyPostingState::Pivot(pivot) => pivot,
-            AdjacencyPostingState::Delta {
-                pivot,
-                overrides,
-                read_view,
-            } => read_view
-                .get_or_init(|| Arc::new(materialize_delta(pivot_set(pivot), overrides)))
+            AdjacencyPostingState::Delta { read_view, .. } => read_view
+                .get_or_init(|| Arc::new(self.materialize()))
                 .as_ref(),
         }
     }
@@ -262,6 +309,109 @@ impl AdjacencyPostingList {
     }
 }
 
+pub struct AdjacencyPostingIter<'a> {
+    inner: AdjacencyPostingIterInner<'a>,
+}
+
+enum AdjacencyPostingIterInner<'a> {
+    Pivot(btree_set::Iter<'a, RelId>),
+    Delta(DeltaAdjacencyPostingIter<'a>),
+}
+
+struct DeltaAdjacencyPostingIter<'a> {
+    pivot: Peekable<btree_set::Iter<'a, RelId>>,
+    deltas: Vec<Peekable<btree_map::Iter<'a, RelId, bool>>>,
+    remaining: usize,
+}
+
+impl<'a> AdjacencyPostingIter<'a> {
+    fn new(posting: &'a AdjacencyPostingList) -> Self {
+        match posting.state.as_ref() {
+            AdjacencyPostingState::Pivot(pivot) => Self {
+                inner: AdjacencyPostingIterInner::Pivot(pivot.iter()),
+            },
+            AdjacencyPostingState::Delta {
+                pivot,
+                sealed,
+                active,
+                len,
+                ..
+            } => {
+                let mut deltas = Vec::with_capacity(sealed.len() + usize::from(!active.is_empty()));
+                deltas.extend(sealed.iter().map(|block| block.iter().peekable()));
+                if !active.is_empty() {
+                    deltas.push(active.iter().peekable());
+                }
+                Self {
+                    inner: AdjacencyPostingIterInner::Delta(DeltaAdjacencyPostingIter {
+                        pivot: pivot_set(pivot).iter().peekable(),
+                        deltas,
+                        remaining: *len,
+                    }),
+                }
+            }
+        }
+    }
+}
+
+impl Iterator for DeltaAdjacencyPostingIter<'_> {
+    type Item = RelId;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let mut next_id = self.pivot.peek().map(|id| **id);
+            for delta in &mut self.deltas {
+                if let Some(id) = delta.peek().map(|entry| *entry.0) {
+                    next_id = Some(next_id.map_or(id, |current| current.min(id)));
+                }
+            }
+            let next_id = next_id?;
+            let mut present = false;
+            if self.pivot.peek().is_some_and(|id| **id == next_id) {
+                self.pivot.next();
+                present = true;
+            }
+            for delta in &mut self.deltas {
+                if delta.peek().is_some_and(|entry| *entry.0 == next_id) {
+                    let (_, override_present) =
+                        delta.next().expect("peeked delta entry must exist");
+                    present = *override_present;
+                }
+            }
+            if present {
+                self.remaining = self.remaining.saturating_sub(1);
+                return Some(next_id);
+            }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+impl Iterator for AdjacencyPostingIter<'_> {
+    type Item = RelId;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        match &mut self.inner {
+            AdjacencyPostingIterInner::Pivot(pivot) => pivot.next().copied(),
+            AdjacencyPostingIterInner::Delta(delta) => delta.next(),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match &self.inner {
+            AdjacencyPostingIterInner::Pivot(pivot) => pivot.size_hint(),
+            AdjacencyPostingIterInner::Delta(delta) => delta.size_hint(),
+        }
+    }
+}
+
+impl ExactSizeIterator for AdjacencyPostingIter<'_> {}
+impl FusedIterator for AdjacencyPostingIter<'_> {}
+
 fn pivot_set(state: &AdjacencyPostingState) -> &BTreeSet<RelId> {
     let AdjacencyPostingState::Pivot(pivot) = state else {
         unreachable!("mini-delta pivots are always consolidated states");
@@ -269,19 +419,27 @@ fn pivot_set(state: &AdjacencyPostingState) -> &BTreeSet<RelId> {
     pivot
 }
 
-fn materialize_delta(
-    pivot: &BTreeSet<RelId>,
-    overrides: &BTreeMap<RelId, bool>,
-) -> BTreeSet<RelId> {
-    let mut read_view = pivot.clone();
-    for (id, present) in overrides {
-        if *present {
-            read_view.insert(*id);
-        } else {
-            read_view.remove(id);
-        }
-    }
-    read_view
+fn presence_before_active(
+    pivot: &AdjacencyPostingState,
+    sealed: &[Arc<BTreeMap<RelId, bool>>],
+    id: &RelId,
+) -> bool {
+    sealed
+        .iter()
+        .rev()
+        .find_map(|block| block.get(id).copied())
+        .unwrap_or_else(|| pivot_set(pivot).contains(id))
+}
+
+fn override_presence(
+    sealed: &[Arc<BTreeMap<RelId, bool>>],
+    active: &BTreeMap<RelId, bool>,
+    id: &RelId,
+) -> Option<bool> {
+    active
+        .get(id)
+        .copied()
+        .or_else(|| sealed.iter().rev().find_map(|block| block.get(id).copied()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -373,17 +531,88 @@ mod tests {
     }
 
     #[test]
-    fn bounded_delta_consolidates_into_a_replacement_pivot() {
+    fn full_active_delta_seals_without_detaching_the_pivot() {
         let mut posting = AdjacencyPostingList::from(rel_ids(0..128));
         let snapshot = posting.clone();
         for id in 0..ADJACENCY_MINI_DELTA_MAX_ENTRIES {
             assert!(posting.insert(RelId(1_000 + id as u64)));
         }
 
+        assert!(posting.shares_pivot_with(&snapshot));
+        assert_eq!(posting.sealed_delta_count(), 1);
+        assert_eq!(posting.mini_delta_len(), ADJACENCY_MINI_DELTA_MAX_ENTRIES);
+        assert_eq!(posting.pivot_len(), 128);
+        assert_eq!(posting.len(), 128 + ADJACENCY_MINI_DELTA_MAX_ENTRIES);
+        assert_eq!(snapshot.len(), 128);
+    }
+
+    #[test]
+    fn soft_limit_requests_explicit_consolidation() {
+        let mut posting = AdjacencyPostingList::from(rel_ids(0..128));
+        let snapshot = posting.clone();
+        for id in 0..ADJACENCY_DELTA_CONSOLIDATION_ENTRIES {
+            assert!(posting.insert(RelId(1_000 + id as u64)));
+        }
+
+        assert!(posting.shares_pivot_with(&snapshot));
+        assert!(posting.needs_consolidation());
+        assert_eq!(posting.sealed_delta_count(), 2);
+        assert!(posting.consolidate());
+        assert!(!posting.shares_pivot_with(&snapshot));
+        assert!(!posting.needs_consolidation());
+        assert_eq!(posting.mini_delta_len(), 0);
+        assert_eq!(posting.len(), 128 + ADJACENCY_DELTA_CONSOLIDATION_ENTRIES);
+        assert_eq!(snapshot.len(), 128);
+    }
+
+    #[test]
+    fn hard_limit_bounds_delta_growth_without_maintenance() {
+        let mut posting = AdjacencyPostingList::from(rel_ids(0..128));
+        let snapshot = posting.clone();
+        for id in 0..ADJACENCY_DELTA_HARD_MAX_ENTRIES {
+            assert!(posting.insert(RelId(1_000 + id as u64)));
+        }
+
         assert!(!posting.shares_pivot_with(&snapshot));
         assert_eq!(posting.mini_delta_len(), 0);
-        assert_eq!(posting.pivot_len(), 128 + ADJACENCY_MINI_DELTA_MAX_ENTRIES);
+        assert_eq!(posting.len(), 128 + ADJACENCY_DELTA_HARD_MAX_ENTRIES);
         assert_eq!(snapshot.len(), 128);
+    }
+
+    #[test]
+    fn streaming_read_merges_multiple_blocks_without_materializing_read_view() {
+        let mut posting = AdjacencyPostingList::from(rel_ids(0..256));
+        let snapshot = posting.clone();
+        let mut reference = rel_ids(0..256);
+        for id in (0..128_u64).step_by(2) {
+            assert!(posting.remove(&RelId(id)));
+            reference.remove(&RelId(id));
+        }
+        for id in 1_000..1_064_u64 {
+            assert!(posting.insert(RelId(id)));
+            reference.insert(RelId(id));
+        }
+        assert!(posting.insert(RelId(2)));
+        reference.insert(RelId(2));
+        assert!(posting.remove(&RelId(1_001)));
+        reference.remove(&RelId(1_001));
+
+        let AdjacencyPostingState::Delta { read_view, .. } = posting.state.as_ref() else {
+            panic!("posting should retain delta state");
+        };
+        assert!(read_view.get().is_none());
+        let mut iter = posting.iter_copied();
+        assert_eq!(iter.len(), reference.len());
+        assert_eq!(iter.by_ref().collect::<BTreeSet<_>>(), reference);
+        assert_eq!(iter.len(), 0);
+        let AdjacencyPostingState::Delta { read_view, .. } = posting.state.as_ref() else {
+            panic!("posting should retain delta state");
+        };
+        assert!(read_view.get().is_none());
+        assert_eq!(
+            snapshot.iter_copied().collect::<BTreeSet<_>>(),
+            rel_ids(0..256)
+        );
     }
 
     #[test]
@@ -402,11 +631,11 @@ mod tests {
                 snapshots.push((posting.clone(), reference.clone()));
             }
             assert_eq!(posting.len(), reference.len());
-            assert_eq!(posting.iter().copied().collect::<BTreeSet<_>>(), reference);
+            assert_eq!(posting.iter_copied().collect::<BTreeSet<_>>(), reference);
         }
 
         for (snapshot, expected) in snapshots {
-            assert_eq!(snapshot.iter().copied().collect::<BTreeSet<_>>(), expected);
+            assert_eq!(snapshot.iter_copied().collect::<BTreeSet<_>>(), expected);
         }
     }
 

@@ -27,13 +27,13 @@ use crate::search::{
     SearchTruncationReasonCode,
 };
 use crate::store::{
-    AdjacencyConsistencyReport, AdjacencyDirection, AdjacencyLayout,
-    BasicStatisticsConsistencyReport, DegreeStatisticsConsistencyReport,
-    DistinctValueStatisticsConsistencyReport, DurabilityPolicy, GraphMutation,
-    GraphSnapshotNodeImport, GraphSnapshotRelationshipImport, GraphStore, NodeId, NodeRecord,
-    ProjectedGraphStatus, PropertyIndexConsistencyReport, PropertyIndexProjectionRebuildAction,
-    RecoveryMode, RelId, RelRecord, SchemaMaintenanceAction, StorageReclamationWatermark,
-    StorageRecoveryReport, StoreStableIdMapping, WalReplayConfig,
+    AdjacencyConsistencyReport, AdjacencyConsolidationPlan, AdjacencyConsolidationReport,
+    AdjacencyDirection, AdjacencyLayout, BasicStatisticsConsistencyReport,
+    DegreeStatisticsConsistencyReport, DistinctValueStatisticsConsistencyReport, DurabilityPolicy,
+    GraphMutation, GraphSnapshotNodeImport, GraphSnapshotRelationshipImport, GraphStore, NodeId,
+    NodeRecord, ProjectedGraphStatus, PropertyIndexConsistencyReport,
+    PropertyIndexProjectionRebuildAction, RecoveryMode, RelId, RelRecord, SchemaMaintenanceAction,
+    StorageReclamationWatermark, StorageRecoveryReport, StoreStableIdMapping, WalReplayConfig,
 };
 use crate::telemetry::{
     operations_telemetry_readiness, qos_telemetry_sink, KernelTelemetry, KernelTelemetryOperation,
@@ -6434,6 +6434,95 @@ impl Database {
 
     pub fn adjacency_consistency_report(&self) -> AdjacencyConsistencyReport {
         self.store.adjacency_consistency_report()
+    }
+
+    pub fn adjacency_consolidation_plan(&self) -> AdjacencyConsolidationPlan {
+        self.store.adjacency_consolidation_plan()
+    }
+
+    pub fn adjacency_consolidation_background_work_plan(
+        &self,
+        max_estimated_entries: usize,
+        hint: BackgroundWorkHint,
+    ) -> Option<BackgroundWorkPlan> {
+        let estimated_entries = self
+            .store
+            .bounded_adjacency_consolidation_estimated_entries(max_estimated_entries);
+        (estimated_entries > 0)
+            .then(|| BackgroundWorkPlan::background(WorkClass::Mutation, estimated_entries, hint))
+    }
+
+    pub fn consolidate_bounded_adjacency_deltas(
+        &mut self,
+        max_estimated_entries: usize,
+    ) -> AdjacencyConsolidationReport {
+        self.store
+            .consolidate_bounded_adjacency_deltas(max_estimated_entries)
+    }
+
+    pub fn consolidate_bounded_background_adjacency_deltas(
+        &mut self,
+        policy: &LocalQosPolicy,
+        state: &LocalQosState,
+        max_estimated_entries: usize,
+    ) -> Result<AdjacencyConsolidationReport> {
+        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
+        let estimated_entries = self
+            .store
+            .bounded_adjacency_consolidation_estimated_entries(max_estimated_entries);
+        if estimated_entries == 0 {
+            return Ok(self.consolidate_bounded_adjacency_deltas(max_estimated_entries));
+        }
+        match policy.admit(
+            state,
+            &WorkRequest::background(WorkClass::Mutation, estimated_entries),
+        ) {
+            QosAdmission::Admit => {
+                Ok(self.consolidate_bounded_adjacency_deltas(max_estimated_entries))
+            }
+            QosAdmission::Defer { reason, .. } => Err(SkeinError::Storage(format!(
+                "background adjacency consolidation deferred: {reason}"
+            ))),
+            QosAdmission::Reject { reason, .. } => Err(SkeinError::Storage(format!(
+                "background adjacency consolidation rejected: {reason}"
+            ))),
+        }
+    }
+
+    pub fn consolidate_bounded_scheduled_background_adjacency_deltas(
+        &mut self,
+        scheduler: &mut LocalQosScheduler,
+        max_estimated_entries: usize,
+    ) -> Result<AdjacencyConsolidationReport> {
+        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
+        let estimated_entries = self
+            .store
+            .bounded_adjacency_consolidation_estimated_entries(max_estimated_entries);
+        if estimated_entries == 0 {
+            return Ok(self.consolidate_bounded_adjacency_deltas(max_estimated_entries));
+        }
+        self.configure_qos_scheduler_telemetry(scheduler);
+        let permit = match scheduler.try_start(WorkRequest::background(
+            WorkClass::Mutation,
+            estimated_entries,
+        )) {
+            Ok(permit) => permit,
+            Err(QosAdmission::Defer { reason, .. }) => {
+                return Err(SkeinError::Storage(format!(
+                    "background adjacency consolidation deferred: {reason}"
+                )));
+            }
+            Err(QosAdmission::Reject { reason, .. }) => {
+                return Err(SkeinError::Storage(format!(
+                    "background adjacency consolidation rejected: {reason}"
+                )));
+            }
+            Err(QosAdmission::Admit) => unreachable!("admitted work returns a permit"),
+        };
+
+        let result = Ok(self.consolidate_bounded_adjacency_deltas(max_estimated_entries));
+        scheduler.finish_with_outcome(permit, result.is_ok());
+        result
     }
 
     pub fn degree_statistics_consistency_report(&self) -> DegreeStatisticsConsistencyReport {

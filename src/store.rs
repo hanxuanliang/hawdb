@@ -443,6 +443,30 @@ pub struct BasicStatisticsConsistencyReport {
     pub mismatched_fields: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AdjacencyConsolidationPlan {
+    pub group_count: usize,
+    pub delta_entry_count: usize,
+    pub estimated_entries: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AdjacencyConsolidationReport {
+    pub planned: AdjacencyConsolidationPlan,
+    pub consolidated_group_count: usize,
+    pub consolidated_delta_entry_count: usize,
+    pub consolidated_estimated_entries: usize,
+    pub remaining: AdjacencyConsolidationPlan,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AdjacencyConsolidationCandidate {
+    direction: AdjacencyDirection,
+    key: (NodeId, RelTypeId),
+    delta_entry_count: usize,
+    estimated_entries: usize,
+}
+
 impl BasicStatisticsConsistencyReport {
     fn new(incremental: BasicGraphStatistics, recomputed: BasicGraphStatistics) -> Self {
         let mut mismatched_fields = Vec::new();
@@ -6099,8 +6123,8 @@ impl GraphStore {
         self.outgoing
             .get(&(source, rel_type))
             .into_iter()
-            .flat_map(|rel_ids| rel_ids.iter())
-            .filter_map(|rel_id| self.relationships.get(rel_id))
+            .flat_map(AdjacencyPostingList::iter_copied)
+            .filter_map(|rel_id| self.relationships.get(&rel_id))
     }
 
     #[inline]
@@ -6112,8 +6136,8 @@ impl GraphStore {
         self.incoming
             .get(&(target, rel_type))
             .into_iter()
-            .flat_map(|rel_ids| rel_ids.iter())
-            .filter_map(|rel_id| self.relationships.get(rel_id))
+            .flat_map(AdjacencyPostingList::iter_copied)
+            .filter_map(|rel_id| self.relationships.get(&rel_id))
     }
 
     pub fn adjacency_group_stats(
@@ -6132,6 +6156,72 @@ impl GraphStore {
             direction,
             degree,
             layout: adjacency_layout_for_degree(degree),
+        }
+    }
+
+    /// Plans physical adjacency consolidation without changing graph contents,
+    /// epochs, WAL, or checkpoint state.
+    pub fn adjacency_consolidation_plan(&self) -> AdjacencyConsolidationPlan {
+        adjacency_consolidation_plan(&self.adjacency_consolidation_candidates())
+    }
+
+    pub fn bounded_adjacency_consolidation_estimated_entries(
+        &self,
+        max_estimated_entries: usize,
+    ) -> usize {
+        let mut remaining_budget = max_estimated_entries;
+        let mut estimated_entries = 0usize;
+        for candidate in self.adjacency_consolidation_candidates() {
+            if candidate.estimated_entries > remaining_budget {
+                continue;
+            }
+            remaining_budget = remaining_budget.saturating_sub(candidate.estimated_entries);
+            estimated_entries = estimated_entries.saturating_add(candidate.estimated_entries);
+        }
+        estimated_entries
+    }
+
+    /// Consolidates complete posting groups whose estimated entry work fits in
+    /// the caller-provided budget. Oversized groups remain streaming deltas.
+    pub fn consolidate_bounded_adjacency_deltas(
+        &mut self,
+        max_estimated_entries: usize,
+    ) -> AdjacencyConsolidationReport {
+        let candidates = self.adjacency_consolidation_candidates();
+        let planned = adjacency_consolidation_plan(&candidates);
+        let mut remaining_budget = max_estimated_entries;
+        let mut consolidated_group_count = 0usize;
+        let mut consolidated_delta_entry_count = 0usize;
+        let mut consolidated_estimated_entries = 0usize;
+
+        for candidate in candidates {
+            if candidate.estimated_entries > remaining_budget {
+                continue;
+            }
+            let adjacency = match candidate.direction {
+                AdjacencyDirection::Outgoing => &mut self.outgoing,
+                AdjacencyDirection::Incoming => &mut self.incoming,
+            };
+            let Some(posting) = adjacency.get_mut(&candidate.key) else {
+                continue;
+            };
+            if !posting.needs_consolidation() || !posting.consolidate() {
+                continue;
+            }
+            remaining_budget = remaining_budget.saturating_sub(candidate.estimated_entries);
+            consolidated_group_count = consolidated_group_count.saturating_add(1);
+            consolidated_delta_entry_count =
+                consolidated_delta_entry_count.saturating_add(candidate.delta_entry_count);
+            consolidated_estimated_entries =
+                consolidated_estimated_entries.saturating_add(candidate.estimated_entries);
+        }
+
+        AdjacencyConsolidationReport {
+            planned,
+            consolidated_group_count,
+            consolidated_delta_entry_count,
+            consolidated_estimated_entries,
+            remaining: self.adjacency_consolidation_plan(),
         }
     }
 
@@ -6174,9 +6264,9 @@ impl GraphStore {
         let mut entries = self
             .adjacency_relationship_ids(node_id, rel_type, direction)
             .into_iter()
-            .flat_map(|rel_ids| rel_ids.iter())
+            .flat_map(AdjacencyPostingList::iter_copied)
             .filter_map(|rel_id| {
-                let relationship = self.relationships.get(rel_id)?;
+                let relationship = self.relationships.get(&rel_id)?;
                 Some(OrderedAdjacencyEntry {
                     relationship_id: relationship.id,
                     neighbor_id: match direction {
@@ -6202,9 +6292,9 @@ impl GraphStore {
         let mut entries = adjacency
             .iter()
             .filter(|((group_node, _), _)| *group_node == node_id)
-            .flat_map(|(_, rel_ids)| rel_ids.iter())
+            .flat_map(|(_, rel_ids)| rel_ids.iter_copied())
             .filter_map(|rel_id| {
-                let relationship = self.relationships.get(rel_id)?;
+                let relationship = self.relationships.get(&rel_id)?;
                 Some(OrderedAdjacencyEntry {
                     relationship_id: relationship.id,
                     neighbor_id: match direction {
@@ -6894,6 +6984,29 @@ impl GraphStore {
             AdjacencyDirection::Outgoing => self.outgoing.get(&(node_id, rel_type)),
             AdjacencyDirection::Incoming => self.incoming.get(&(node_id, rel_type)),
         }
+    }
+
+    fn adjacency_consolidation_candidates(&self) -> Vec<AdjacencyConsolidationCandidate> {
+        [
+            (AdjacencyDirection::Outgoing, &self.outgoing),
+            (AdjacencyDirection::Incoming, &self.incoming),
+        ]
+        .into_iter()
+        .flat_map(|(direction, adjacency)| {
+            adjacency.iter().filter_map(move |(key, posting)| {
+                posting
+                    .needs_consolidation()
+                    .then_some(AdjacencyConsolidationCandidate {
+                        direction,
+                        key: *key,
+                        delta_entry_count: posting.mini_delta_len(),
+                        estimated_entries: posting
+                            .pivot_len()
+                            .saturating_add(posting.mini_delta_len()),
+                    })
+            })
+        })
+        .collect()
     }
 
     pub fn register_projected_graph(
@@ -10879,6 +10992,24 @@ fn adjacency_layout_for_degree(degree: usize) -> AdjacencyLayout {
     }
 }
 
+fn adjacency_consolidation_plan(
+    candidates: &[AdjacencyConsolidationCandidate],
+) -> AdjacencyConsolidationPlan {
+    candidates.iter().fold(
+        AdjacencyConsolidationPlan::default(),
+        |mut plan, candidate| {
+            plan.group_count = plan.group_count.saturating_add(1);
+            plan.delta_entry_count = plan
+                .delta_entry_count
+                .saturating_add(candidate.delta_entry_count);
+            plan.estimated_entries = plan
+                .estimated_entries
+                .saturating_add(candidate.estimated_entries);
+            plan
+        },
+    )
+}
+
 fn maintained_adjacency_groups(
     outgoing: &CowSegmentedMap<(NodeId, RelTypeId), AdjacencyPostingList>,
     incoming: &CowSegmentedMap<(NodeId, RelTypeId), AdjacencyPostingList>,
@@ -10891,7 +11022,7 @@ fn maintained_adjacency_groups(
                 rel_type: *rel_type,
                 direction: AdjacencyDirection::Outgoing,
             },
-            rel_ids.iter().copied().collect(),
+            rel_ids.iter_copied().collect(),
         );
     }
     for ((node_id, rel_type), rel_ids) in incoming.iter() {
@@ -10901,7 +11032,7 @@ fn maintained_adjacency_groups(
                 rel_type: *rel_type,
                 direction: AdjacencyDirection::Incoming,
             },
-            rel_ids.iter().copied().collect(),
+            rel_ids.iter_copied().collect(),
         );
     }
     groups
@@ -12121,11 +12252,11 @@ fn validate_storage_version(version: &str) -> Result<()> {
 mod tests {
     use super::{
         checksum_bytes, compute_statistics, encode_durable_text, read_durable_text, source_scan,
-        AdjacencyDirection, AdjacencyGroupStats, AdjacencyLayout, ConnectedNodesCreate,
-        CowSegmentedMap, DegreeStatisticsEntry, DegreeStatisticsKey, DurableCompression,
-        GraphStore, NodeId, NodeRecord, NodeSetAssignment, NodeSetValue, OrderedAdjacencyEntry,
-        ProjectedGraphDefinition, PropertyFilter, RelId, RelRecord, RelTypeId,
-        RelationshipDeleteRequest, ScanPruningStrategy, ScanPruningTargetKind,
+        AdjacencyConsolidationPlan, AdjacencyDirection, AdjacencyGroupStats, AdjacencyLayout,
+        ConnectedNodesCreate, CowSegmentedMap, DegreeStatisticsEntry, DegreeStatisticsKey,
+        DurableCompression, GraphStore, NodeId, NodeRecord, NodeSetAssignment, NodeSetValue,
+        OrderedAdjacencyEntry, ProjectedGraphDefinition, PropertyFilter, RelId, RelRecord,
+        RelTypeId, RelationshipDeleteRequest, ScanPruningStrategy, ScanPruningTargetKind,
         SearchProjectionGraphChange, SourceScanCandidateRead, DENSE_ADJACENCY_DEGREE_THRESHOLD,
         DURABLE_COMPRESSION_HEADER,
     };
@@ -12288,6 +12419,70 @@ mod tests {
         assert_eq!(
             store.outgoing_relationships(source, rel_type).count(),
             DENSE_ADJACENCY_DEGREE_THRESHOLD + 1
+        );
+        assert_eq!(
+            snapshot.outgoing_relationships(source, rel_type).count(),
+            DENSE_ADJACENCY_DEGREE_THRESHOLD
+        );
+    }
+
+    #[test]
+    fn bounded_adjacency_consolidation_preserves_snapshot_and_graph_epoch() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        let source = store
+            .create_node(&mut catalog, "Source", BTreeMap::new())
+            .unwrap();
+        let target_count =
+            DENSE_ADJACENCY_DEGREE_THRESHOLD + skein_storage::ADJACENCY_DELTA_CONSOLIDATION_ENTRIES;
+        let targets = (0..target_count)
+            .map(|_| {
+                store
+                    .create_node(&mut catalog, "Target", BTreeMap::new())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        for target in targets.iter().take(DENSE_ADJACENCY_DEGREE_THRESHOLD) {
+            store
+                .create_relationship(&mut catalog, source, *target, "LINKS_TO", BTreeMap::new())
+                .unwrap();
+        }
+        let rel_type = catalog.rel_type_id("LINKS_TO").unwrap();
+        let snapshot = store.snapshot();
+        for target in targets.iter().skip(DENSE_ADJACENCY_DEGREE_THRESHOLD) {
+            store
+                .create_relationship(&mut catalog, source, *target, "LINKS_TO", BTreeMap::new())
+                .unwrap();
+        }
+        let commit_epoch = store.commit_epoch();
+        let plan = store.adjacency_consolidation_plan();
+        assert_eq!(plan.group_count, 1);
+        assert_eq!(
+            plan.delta_entry_count,
+            skein_storage::ADJACENCY_DELTA_CONSOLIDATION_ENTRIES
+        );
+
+        let deferred =
+            store.consolidate_bounded_adjacency_deltas(plan.estimated_entries.saturating_sub(1));
+        assert_eq!(deferred.consolidated_group_count, 0);
+        assert_eq!(deferred.remaining, plan);
+
+        let report = store.consolidate_bounded_adjacency_deltas(plan.estimated_entries);
+        assert_eq!(report.planned, plan);
+        assert_eq!(report.consolidated_group_count, 1);
+        assert_eq!(
+            report.consolidated_delta_entry_count,
+            plan.delta_entry_count
+        );
+        assert_eq!(
+            report.consolidated_estimated_entries,
+            plan.estimated_entries
+        );
+        assert_eq!(report.remaining, AdjacencyConsolidationPlan::default());
+        assert_eq!(store.commit_epoch(), commit_epoch);
+        assert_eq!(
+            store.outgoing_relationships(source, rel_type).count(),
+            target_count
         );
         assert_eq!(
             snapshot.outgoing_relationships(source, rel_type).count(),

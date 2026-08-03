@@ -467,16 +467,17 @@ pub use skein_runtime_tokio::{
 pub use skein_storage::ScanPredicate;
 pub use storage_recovery_evidence::nowledge_storage_recovery_evidence_json;
 pub use store::{
-    AdjacencyConsistencyReport, AdjacencyDirection, AdjacencyGroupConsistencyMismatch,
-    AdjacencyGroupKey, AdjacencyGroupStats, AdjacencyLayout, BasicStatisticsConsistencyReport,
-    DegreeStatisticsConsistencyReport, DegreeStatisticsEntry, DegreeStatisticsKey,
-    DistinctValueStatisticsConsistencyReport, DurabilityPolicy, FileSegmentRangeReader,
-    OrderedAdjacencyEntry, PropertyIndexConsistencyReport, RecoveryMode,
-    SearchProjectionChangefeedReadiness, SearchProjectionChangefeedStatus,
-    SearchProjectionMutationId, SegmentRangeReader, SegmentReadError, SegmentReadExecutionError,
-    SegmentReadExecutionReport, SegmentReadExecutor, SegmentReadPayload, SegmentReadRange,
-    SegmentReadSchedule, SegmentReadScheduler, SegmentReadWave, StorageReclamationWatermark,
-    StorageRecoveryReport, WalReplayConfig, DENSE_ADJACENCY_DEGREE_THRESHOLD,
+    AdjacencyConsistencyReport, AdjacencyConsolidationPlan, AdjacencyConsolidationReport,
+    AdjacencyDirection, AdjacencyGroupConsistencyMismatch, AdjacencyGroupKey, AdjacencyGroupStats,
+    AdjacencyLayout, BasicStatisticsConsistencyReport, DegreeStatisticsConsistencyReport,
+    DegreeStatisticsEntry, DegreeStatisticsKey, DistinctValueStatisticsConsistencyReport,
+    DurabilityPolicy, FileSegmentRangeReader, OrderedAdjacencyEntry,
+    PropertyIndexConsistencyReport, RecoveryMode, SearchProjectionChangefeedReadiness,
+    SearchProjectionChangefeedStatus, SearchProjectionMutationId, SegmentRangeReader,
+    SegmentReadError, SegmentReadExecutionError, SegmentReadExecutionReport, SegmentReadExecutor,
+    SegmentReadPayload, SegmentReadRange, SegmentReadSchedule, SegmentReadScheduler,
+    SegmentReadWave, StorageReclamationWatermark, StorageRecoveryReport, WalReplayConfig,
+    DENSE_ADJACENCY_DEGREE_THRESHOLD,
 };
 #[cfg(feature = "opentelemetry")]
 pub use telemetry::OpenTelemetryMetrics;

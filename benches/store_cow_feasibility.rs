@@ -11,6 +11,8 @@ const TARGET_COUNT: usize = 64;
 const RETAINED_MUTATIONS: usize = 64;
 const DENSE_TARGET_COUNT: usize = 8_192;
 const DENSE_RETAINED_MUTATIONS: usize = 64;
+const DENSE_WRITER_MUTATIONS: usize = 256;
+const DENSE_READ_AFTER_WRITE_POINTS: [usize; 7] = [1, 32, 63, 64, 65, 128, 256];
 const LOOKUP_ITERATIONS: usize = 20_000;
 const LOOKUP_SAMPLES: usize = 7;
 
@@ -27,6 +29,9 @@ fn main() {
     lookup_samples.sort_unstable_by_key(|sample| sample.elapsed_ns);
     let lookup = lookup_samples[lookup_samples.len() / 2];
     let (dense_base, mut dense_catalog, dense_sources, dense_targets) = dense_fixture();
+    let dense_rel_type = dense_catalog
+        .rel_type_id("LINKS_TO")
+        .expect("dense fixture relationship type must exist");
 
     let memory_start = ProcessMemorySnapshot::capture().ok();
     let (retained, mutation_elapsed_ns) =
@@ -38,7 +43,15 @@ fn main() {
         &dense_targets,
         DENSE_RETAINED_MUTATIONS,
     );
-    black_box((&retained, &dense_retained));
+    let dense_writer = measure_dense_writer_mutations(
+        &dense_base,
+        &mut dense_catalog,
+        dense_sources[0],
+        &dense_targets,
+        dense_rel_type,
+        DENSE_WRITER_MUTATIONS,
+    );
+    black_box((&retained, &dense_retained, &dense_writer.retained));
     let memory_end = ProcessMemorySnapshot::capture().ok();
 
     let resident_delta_bytes = memory_start
@@ -56,6 +69,17 @@ fn main() {
         "dense_retained_mutations": DENSE_RETAINED_MUTATIONS,
         "dense_mutation_elapsed_ns": dense_mutation_elapsed_ns,
         "dense_mutation_ns_per_op": dense_mutation_elapsed_ns / DENSE_RETAINED_MUTATIONS as u128,
+        "dense_writer_mutations": DENSE_WRITER_MUTATIONS,
+        "dense_writer_mutation_ns_p50": percentile(&dense_writer.mutation_elapsed_ns, 50),
+        "dense_writer_mutation_ns_p95": percentile(&dense_writer.mutation_elapsed_ns, 95),
+        "dense_writer_mutation_ns_p99": percentile(&dense_writer.mutation_elapsed_ns, 99),
+        "dense_writer_mutation_ns_max": percentile(&dense_writer.mutation_elapsed_ns, 100),
+        "dense_writer_resident_delta_bytes": dense_writer.resident_delta_bytes,
+        "dense_writer_read_after_write": dense_writer.read_after_write,
+        "dense_writer_consolidation_plan_entries": dense_writer.consolidation_plan_entries,
+        "dense_writer_consolidated_groups": dense_writer.consolidated_groups,
+        "dense_writer_consolidation_elapsed_ns": dense_writer.consolidation_elapsed_ns,
+        "dense_writer_consolidated_resident_delta_bytes": dense_writer.consolidated_resident_delta_bytes,
         "resident_delta_bytes": resident_delta_bytes,
         "lookup_iterations": LOOKUP_ITERATIONS,
         "lookup_samples": LOOKUP_SAMPLES,
@@ -64,6 +88,93 @@ fn main() {
         "lookup_ns_per_op_p50": lookup.elapsed_ns / LOOKUP_ITERATIONS as u128,
     });
     println!("store_cow_feasibility {report}");
+}
+
+struct DenseWriterSample {
+    retained: (GraphStore, GraphStore, GraphStore),
+    mutation_elapsed_ns: Vec<u128>,
+    resident_delta_bytes: Option<u64>,
+    read_after_write: Vec<serde_json::Value>,
+    consolidation_plan_entries: usize,
+    consolidated_groups: usize,
+    consolidation_elapsed_ns: u128,
+    consolidated_resident_delta_bytes: Option<u64>,
+}
+
+fn measure_dense_writer_mutations(
+    base: &GraphStore,
+    catalog: &mut Catalog,
+    source: NodeId,
+    targets: &[NodeId],
+    rel_type: RelTypeId,
+    mutation_count: usize,
+) -> DenseWriterSample {
+    let mut working = base.snapshot();
+    let reader = working.snapshot();
+    let memory_start = ProcessMemorySnapshot::capture().ok();
+    let mut mutation_elapsed_ns = Vec::with_capacity(mutation_count);
+    let mut read_after_write = Vec::with_capacity(DENSE_READ_AFTER_WRITE_POINTS.len());
+    for mutation in 1..=mutation_count {
+        let started = Instant::now();
+        working
+            .create_relationship(
+                catalog,
+                source,
+                targets[(mutation - 1) % targets.len()],
+                "LINKS_TO",
+                BTreeMap::new(),
+            )
+            .expect("dense writer mutation must succeed");
+        mutation_elapsed_ns.push(started.elapsed().as_nanos());
+
+        if DENSE_READ_AFTER_WRITE_POINTS.contains(&mutation) {
+            let read_started = Instant::now();
+            let rows = black_box(&working)
+                .outgoing_relationships(source, rel_type)
+                .count();
+            read_after_write.push(json!({
+                "mutation_count": mutation,
+                "rows": rows,
+                "elapsed_ns": read_started.elapsed().as_nanos(),
+            }));
+        }
+    }
+    let memory_after_delta = ProcessMemorySnapshot::capture().ok();
+    let resident_delta_bytes = memory_start
+        .zip(memory_after_delta)
+        .map(|(start, end)| end.resident_bytes.saturating_sub(start.resident_bytes));
+
+    let mut consolidated = working.snapshot();
+    let plan = consolidated.adjacency_consolidation_plan();
+    let consolidation_started = Instant::now();
+    let consolidation = consolidated.consolidate_bounded_adjacency_deltas(plan.estimated_entries);
+    let consolidation_elapsed_ns = consolidation_started.elapsed().as_nanos();
+    let memory_after_consolidation = ProcessMemorySnapshot::capture().ok();
+    let consolidated_resident_delta_bytes = memory_start
+        .zip(memory_after_consolidation)
+        .map(|(start, end)| end.resident_bytes.saturating_sub(start.resident_bytes));
+
+    DenseWriterSample {
+        retained: (working, reader, consolidated),
+        mutation_elapsed_ns,
+        resident_delta_bytes,
+        read_after_write,
+        consolidation_plan_entries: plan.estimated_entries,
+        consolidated_groups: consolidation.consolidated_group_count,
+        consolidation_elapsed_ns,
+        consolidated_resident_delta_bytes,
+    }
+}
+
+fn percentile(samples: &[u128], percentile: usize) -> u128 {
+    let mut samples = samples.to_vec();
+    samples.sort_unstable();
+    let index = samples
+        .len()
+        .saturating_sub(1)
+        .saturating_mul(percentile.min(100))
+        / 100;
+    samples.get(index).copied().unwrap_or_default()
 }
 
 fn measure_retained_mutations(

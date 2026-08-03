@@ -33,6 +33,97 @@ fn background_maintenance_candidates_are_empty_without_pending_work() {
 }
 
 #[test]
+fn adjacency_consolidation_is_bounded_and_background_admitted() {
+    let mut db = Database::new();
+    let source = db
+        .store
+        .create_node(&mut db.catalog, "Source", BTreeMap::new())
+        .unwrap();
+    let base_degree = crate::store::DENSE_ADJACENCY_DEGREE_THRESHOLD;
+    let delta_count = skein_storage::ADJACENCY_DELTA_CONSOLIDATION_ENTRIES;
+    let targets = (0..base_degree + delta_count)
+        .map(|_| {
+            db.store
+                .create_node(&mut db.catalog, "Target", BTreeMap::new())
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    for target in targets.iter().take(base_degree) {
+        db.store
+            .create_relationship(
+                &mut db.catalog,
+                source,
+                *target,
+                "LINKS_TO",
+                BTreeMap::new(),
+            )
+            .unwrap();
+    }
+    let rel_type = db.catalog.rel_type_id("LINKS_TO").unwrap();
+    let snapshot = db.store.snapshot();
+    for target in targets.iter().skip(base_degree) {
+        db.store
+            .create_relationship(
+                &mut db.catalog,
+                source,
+                *target,
+                "LINKS_TO",
+                BTreeMap::new(),
+            )
+            .unwrap();
+    }
+
+    let plan = db.adjacency_consolidation_plan();
+    let background_plan = db
+        .adjacency_consolidation_background_work_plan(
+            plan.estimated_entries,
+            BackgroundWorkHint::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        background_plan.request,
+        WorkRequest::background(WorkClass::Mutation, plan.estimated_entries)
+    );
+
+    let disabled = LocalQosPolicy {
+        background_enabled: false,
+        ..LocalQosPolicy::default()
+    };
+    let error = db
+        .consolidate_bounded_background_adjacency_deltas(
+            &disabled,
+            &LocalQosState::default(),
+            plan.estimated_entries,
+        )
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("background adjacency consolidation deferred"));
+    assert_eq!(db.adjacency_consolidation_plan(), plan);
+
+    let report = db
+        .consolidate_bounded_background_adjacency_deltas(
+            &LocalQosPolicy::default(),
+            &LocalQosState::default(),
+            plan.estimated_entries,
+        )
+        .unwrap();
+    assert_eq!(report.consolidated_group_count, 1);
+    assert_eq!(
+        report.remaining,
+        crate::store::AdjacencyConsolidationPlan::default()
+    );
+    assert_eq!(
+        db.store.outgoing_relationships(source, rel_type).count(),
+        base_degree + delta_count
+    );
+    assert_eq!(
+        snapshot.outgoing_relationships(source, rel_type).count(),
+        base_degree
+    );
+}
+
+#[test]
 fn background_maintenance_kinds_have_stable_string_encodings() {
     let cases = [
         (
