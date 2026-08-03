@@ -10,6 +10,7 @@ use std::num::{NonZeroU64, NonZeroUsize};
 const SOURCE_SCAN_IO_DEPTH: usize = 2;
 const SOURCE_SCAN_MAX_COALESCED_BYTES: u64 = 512 * 1024;
 const SOURCE_SCAN_MAX_WAVE_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_SOURCE_CANDIDATE_ROWS: usize = 10_000;
 
 /// A bounded Source candidate scan. The predicate is used for storage pruning;
 /// callers must retain semantic residual evaluation for unsupported terms.
@@ -18,6 +19,7 @@ pub struct KnowledgeSourceCandidateScanRequest {
     pub predicate: ScanPredicate,
     pub after: Option<KnowledgeSourceCandidateCursor>,
     pub limit: usize,
+    pub max_payload_bytes: usize,
     pub property_names: Vec<String>,
 }
 
@@ -94,7 +96,7 @@ fn knowledge_source_candidates(
         }) => {
             let mut nodes = Vec::with_capacity(rows.len());
             for row in rows {
-                let Some(node) = store.node(crate::store::NodeId(row.node_id)) else {
+                let Some(node) = store.node_owned(crate::store::NodeId(row.node_id))? else {
                     return canonical_fallback(
                         catalog,
                         store,
@@ -112,7 +114,7 @@ fn knowledge_source_candidates(
                         ScanSegmentFallback::NoManifest,
                     );
                 }
-                nodes.push(node.clone());
+                nodes.push(node);
             }
             (
                 nodes,
@@ -140,11 +142,20 @@ fn canonical_fallback(
     request: &KnowledgeSourceCandidateScanRequest,
     reason: ScanSegmentFallback,
 ) -> Result<KnowledgeSourceCandidateScanOutput> {
-    let nodes = catalog
-        .label_id("Source")
-        .map_or_else(Vec::new, |label_id| {
-            store.scan_nodes(Some(label_id)).cloned().collect()
-        });
+    let mut nodes = Vec::with_capacity(request.limit.saturating_add(1));
+    let mut callback_error = None;
+    if let Some(label_id) = catalog.label_id("Source") {
+        store.visit_nodes_owned(Some(label_id), |node| {
+            if let Err(error) = push_bounded_source_candidate(&mut nodes, node, request) {
+                callback_error = Some(error);
+                return crate::store::GraphScanControl::Stop;
+            }
+            crate::store::GraphScanControl::Continue
+        })?;
+    }
+    if let Some(error) = callback_error {
+        return Err(error);
+    }
     render_page(
         store.commit_epoch(),
         nodes,
@@ -161,16 +172,11 @@ fn render_page(
     origin: KnowledgeSourceCandidateScanOrigin,
     read_report: Option<SegmentReadExecutionReport>,
 ) -> Result<KnowledgeSourceCandidateScanOutput> {
-    nodes.sort_unstable_by(compare_source_candidates);
-    let mut nodes = nodes
-        .into_iter()
-        .filter(|node| {
-            request
-                .after
-                .as_ref()
-                .is_none_or(|after| compare_source_candidate_to_cursor(node, after).is_gt())
-        })
-        .collect::<Vec<_>>();
+    let mut bounded = Vec::with_capacity(request.limit.saturating_add(1));
+    for node in nodes.drain(..) {
+        push_bounded_source_candidate(&mut bounded, node, request)?;
+    }
+    nodes = bounded;
     let has_more = nodes.len() > request.limit;
     nodes.truncate(request.limit);
     let next_cursor = has_more
@@ -208,6 +214,69 @@ fn render_page(
         origin,
         read_report,
     })
+}
+
+fn push_bounded_source_candidate(
+    nodes: &mut Vec<NodeRecord>,
+    mut node: NodeRecord,
+    request: &KnowledgeSourceCandidateScanRequest,
+) -> Result<()> {
+    if request
+        .after
+        .as_ref()
+        .is_some_and(|after| !compare_source_candidate_to_cursor(&node, after).is_gt())
+    {
+        return Ok(());
+    }
+    node.properties.retain(|name, _| {
+        name == "id" || name == "created_at" || request.property_names.contains(name)
+    });
+    let insertion = nodes
+        .binary_search_by(|existing| compare_source_candidates(existing, &node))
+        .unwrap_or_else(|index| index);
+    nodes.insert(insertion, node);
+    if nodes.len() > request.limit.saturating_add(1) {
+        nodes.pop();
+    }
+    let payload_bytes = nodes
+        .iter()
+        .map(estimated_source_candidate_payload_bytes)
+        .fold(0usize, usize::saturating_add);
+    if payload_bytes > request.max_payload_bytes {
+        return Err(SkeinError::Execution(format!(
+            "knowledge source candidate payload budget exceeded: estimated_payload_bytes={payload_bytes}, max_payload_bytes={}",
+            request.max_payload_bytes
+        )));
+    }
+    Ok(())
+}
+
+fn estimated_source_candidate_payload_bytes(node: &NodeRecord) -> usize {
+    node.properties
+        .iter()
+        .fold(16usize, |bytes, (name, value)| {
+            bytes
+                .saturating_add(name.len())
+                .saturating_add(estimated_value_bytes(value))
+        })
+}
+
+fn estimated_value_bytes(value: &Value) -> usize {
+    match value {
+        Value::Null => 1,
+        Value::Bool(_) => 1,
+        Value::Int(_) | Value::Float(_) => 8,
+        Value::String(value) => value.len(),
+        Value::List(values) => values
+            .iter()
+            .map(estimated_value_bytes)
+            .fold(16usize, usize::saturating_add),
+        Value::Map(values) => values.iter().fold(16usize, |bytes, (name, value)| {
+            bytes
+                .saturating_add(name.len())
+                .saturating_add(estimated_value_bytes(value))
+        }),
+    }
 }
 
 fn compare_source_candidates(left: &NodeRecord, right: &NodeRecord) -> std::cmp::Ordering {
@@ -248,6 +317,17 @@ fn validate_request(request: &KnowledgeSourceCandidateScanRequest) -> Result<()>
             "knowledge source candidate scan requires a positive limit".to_string(),
         ));
     }
+    if request.limit > MAX_SOURCE_CANDIDATE_ROWS {
+        return Err(SkeinError::Semantic(format!(
+            "knowledge source candidate scan limit {} exceeds {MAX_SOURCE_CANDIDATE_ROWS}",
+            request.limit
+        )));
+    }
+    if request.max_payload_bytes == 0 {
+        return Err(SkeinError::Semantic(
+            "knowledge source candidate scan requires a positive payload budget".to_string(),
+        ));
+    }
     if request
         .property_names
         .iter()
@@ -263,6 +343,7 @@ fn validate_request(request: &KnowledgeSourceCandidateScanRequest) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{DatabaseConfig, StorageResidencyMode};
     use std::path::PathBuf;
 
     fn test_dir(name: &str) -> PathBuf {
@@ -285,6 +366,7 @@ mod tests {
             },
             after: None,
             limit: 8,
+            max_payload_bytes: 1024 * 1024,
             property_names: vec!["id".to_string(), "source_type".to_string()],
         }
     }
@@ -369,6 +451,46 @@ mod tests {
         assert_eq!(second.rows[0].source_id.as_deref(), Some("source-a"));
         assert_ne!(second.rows[0].source_id, first.rows[0].source_id);
         assert!(second.next_cursor.is_none());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn out_of_core_fallback_keeps_only_the_bounded_candidate_page() {
+        let directory = test_dir("out_of_core_bounded_fallback");
+        let mut db = Database::open_with_config(
+            &directory,
+            DatabaseConfig {
+                storage_residency_mode: StorageResidencyMode::OutOfCore,
+                ..DatabaseConfig::default()
+            },
+        )
+        .unwrap();
+        for id in 0..100 {
+            db.query_with_params(
+                "CREATE (:Source {id: $id, source_type: 'file', created_at: $created_at})",
+                &BTreeMap::from([
+                    ("id".to_string(), Value::String(format!("source-{id}"))),
+                    ("created_at".to_string(), Value::Int(id)),
+                ]),
+            )
+            .unwrap();
+        }
+        db.checkpoint().unwrap();
+
+        let mut bounded = request();
+        bounded.limit = 3;
+        let output = db.knowledge_source_candidates(&bounded).unwrap();
+        assert!(matches!(
+            output.origin,
+            KnowledgeSourceCandidateScanOrigin::CanonicalFallback { .. }
+        ));
+        assert_eq!(output.rows.len(), 3);
+        assert_eq!(output.rows[0].source_id.as_deref(), Some("source-99"));
+        assert!(output.next_cursor.is_some());
+
+        bounded.max_payload_bytes = 1;
+        let error = db.knowledge_source_candidates(&bounded).unwrap_err();
+        assert!(error.to_string().contains("payload budget exceeded"));
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

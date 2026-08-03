@@ -169,6 +169,18 @@ pub fn parameterize_logical_plan(
     })
 }
 
+/// Creates internal parameter markers for a list whose shape is part of a
+/// cached plan while its values are bound for every execution.
+///
+/// The caller must include `Value::List(values.to_vec())` under `name` when
+/// calling `bind_physical_plan_parameters`.
+pub fn parameterize_value_list(name: &str, values: &[Value]) -> Vec<Value> {
+    match parameter_marker(name, &Value::List(values.to_vec()), &[]) {
+        Value::List(markers) => markers,
+        _ => unreachable!("list parameterization always produces a list"),
+    }
+}
+
 pub fn bind_physical_plan_parameters(
     template: &PhysicalPlan,
     parameters: &BTreeMap<String, Value>,

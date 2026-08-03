@@ -9,6 +9,13 @@ pub struct QueryTelemetry<'a> {
     pub success: bool,
     pub elapsed_micros: u64,
     pub row_count: usize,
+    pub intermediate_rows: usize,
+    pub intermediate_payload_bytes: usize,
+    pub output_payload_bytes: usize,
+    pub steady_resident_bytes: Option<u64>,
+    pub peak_resident_bytes: Option<u64>,
+    pub minor_page_faults: Option<u64>,
+    pub major_page_faults: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +86,9 @@ pub struct KernelTelemetry {
     pub success: bool,
     pub elapsed_micros: u64,
     pub item_count: usize,
+    pub byte_count: u64,
+    pub fsync_micros: u64,
+    pub generation: Option<u64>,
 }
 
 pub trait TelemetrySink: Debug + Send + Sync {
@@ -110,9 +120,18 @@ pub struct OpenTelemetryMetrics {
     query_count: opentelemetry::metrics::Counter<u64>,
     query_duration_micros: opentelemetry::metrics::Histogram<u64>,
     query_rows: opentelemetry::metrics::Histogram<u64>,
+    query_intermediate_rows: opentelemetry::metrics::Histogram<u64>,
+    query_intermediate_bytes: opentelemetry::metrics::Histogram<u64>,
+    query_output_bytes: opentelemetry::metrics::Histogram<u64>,
+    query_steady_resident_bytes: opentelemetry::metrics::Histogram<u64>,
+    query_peak_resident_bytes: opentelemetry::metrics::Histogram<u64>,
+    query_minor_page_faults: opentelemetry::metrics::Histogram<u64>,
+    query_major_page_faults: opentelemetry::metrics::Histogram<u64>,
     kernel_operation_count: opentelemetry::metrics::Counter<u64>,
     kernel_operation_duration_micros: opentelemetry::metrics::Histogram<u64>,
     kernel_operation_items: opentelemetry::metrics::Histogram<u64>,
+    kernel_operation_bytes: opentelemetry::metrics::Histogram<u64>,
+    kernel_operation_fsync_micros: opentelemetry::metrics::Histogram<u64>,
 }
 
 #[cfg(feature = "opentelemetry")]
@@ -125,12 +144,26 @@ impl OpenTelemetryMetrics {
                 .with_unit("us")
                 .build(),
             query_rows: meter.u64_histogram("skein.query.rows").build(),
+            query_intermediate_rows: meter.u64_histogram("skein.query.intermediate.rows").build(),
+            query_intermediate_bytes: meter
+                .u64_histogram("skein.query.intermediate.bytes")
+                .build(),
+            query_output_bytes: meter.u64_histogram("skein.query.output.bytes").build(),
+            query_steady_resident_bytes: meter.u64_histogram("skein.query.resident.steady").build(),
+            query_peak_resident_bytes: meter.u64_histogram("skein.query.resident.peak").build(),
+            query_minor_page_faults: meter.u64_histogram("skein.query.page_faults.minor").build(),
+            query_major_page_faults: meter.u64_histogram("skein.query.page_faults.major").build(),
             kernel_operation_count: meter.u64_counter("skein.kernel.operation.count").build(),
             kernel_operation_duration_micros: meter
                 .u64_histogram("skein.kernel.operation.duration")
                 .with_unit("us")
                 .build(),
             kernel_operation_items: meter.u64_histogram("skein.kernel.operation.items").build(),
+            kernel_operation_bytes: meter.u64_histogram("skein.kernel.operation.bytes").build(),
+            kernel_operation_fsync_micros: meter
+                .u64_histogram("skein.kernel.operation.fsync_duration")
+                .with_unit("us")
+                .build(),
         }
     }
 }
@@ -150,6 +183,24 @@ impl TelemetrySink for OpenTelemetryMetrics {
         self.query_duration_micros
             .record(event.elapsed_micros, &attributes);
         self.query_rows.record(event.row_count as u64, &attributes);
+        self.query_intermediate_rows
+            .record(event.intermediate_rows as u64, &attributes);
+        self.query_intermediate_bytes
+            .record(event.intermediate_payload_bytes as u64, &attributes);
+        self.query_output_bytes
+            .record(event.output_payload_bytes as u64, &attributes);
+        if let Some(bytes) = event.steady_resident_bytes {
+            self.query_steady_resident_bytes.record(bytes, &attributes);
+        }
+        if let Some(bytes) = event.peak_resident_bytes {
+            self.query_peak_resident_bytes.record(bytes, &attributes);
+        }
+        if let Some(faults) = event.minor_page_faults {
+            self.query_minor_page_faults.record(faults, &attributes);
+        }
+        if let Some(faults) = event.major_page_faults {
+            self.query_major_page_faults.record(faults, &attributes);
+        }
     }
 
     fn record_kernel(&self, event: KernelTelemetry) {
@@ -172,6 +223,10 @@ impl TelemetrySink for OpenTelemetryMetrics {
             .record(event.elapsed_micros, &attributes);
         self.kernel_operation_items
             .record(event.item_count as u64, &attributes);
+        self.kernel_operation_bytes
+            .record(event.byte_count, &attributes);
+        self.kernel_operation_fsync_micros
+            .record(event.fsync_micros, &attributes);
     }
 
     fn record_qos(&self, event: QosTelemetryEvent) {
@@ -245,6 +300,13 @@ mod tests {
             success: true,
             elapsed_micros: 12,
             row_count: 3,
+            intermediate_rows: 7,
+            intermediate_payload_bytes: 128,
+            output_payload_bytes: 64,
+            steady_resident_bytes: Some(1024),
+            peak_resident_bytes: Some(2048),
+            minor_page_faults: Some(3),
+            major_page_faults: Some(1),
         });
 
         assert_eq!(*sink.events.lock().unwrap(), vec![(true, 12, 3)]);
@@ -258,6 +320,9 @@ mod tests {
             success: true,
             elapsed_micros: 18,
             item_count: 4,
+            byte_count: 128,
+            fsync_micros: 7,
+            generation: Some(3),
         });
 
         assert_eq!(
@@ -267,6 +332,9 @@ mod tests {
                 success: true,
                 elapsed_micros: 18,
                 item_count: 4,
+                byte_count: 128,
+                fsync_micros: 7,
+                generation: Some(3),
             }]
         );
     }

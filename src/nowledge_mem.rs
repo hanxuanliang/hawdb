@@ -5,9 +5,11 @@ use crate::api::{
 };
 use crate::search::{
     AdaptiveVectorSearchOptions, CompressedVectorSearchMode, SearchCandidateSetReport,
-    SearchFallbackReasonCode, SearchFusionWeights, SearchMode, SearchQueryOptions,
-    SearchRangeReadConfig, VectorRecallValidationOptions, VectorRecallValidationReport,
-    NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, VECTOR_RECALL_VALIDATION_PROTOCOL,
+    SearchFallbackReasonCode, SearchFusionWeights, SearchMode, SearchOutOfCoreConfig,
+    SearchOutOfCoreHydrationOutput, SearchOutOfCoreMetrics, SearchOutOfCoreReader,
+    SearchQueryOptions, SearchRangeReadConfig, VectorRecallValidationOptions,
+    VectorRecallValidationReport, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
+    VECTOR_RECALL_VALIDATION_PROTOCOL,
 };
 use crate::search_projection_evidence::{
     nowledge_search_projection_evidence_json, nowledge_search_projection_shadow_evidence_json,
@@ -4419,11 +4421,17 @@ pub struct NowledgeMemStorageRecoveryReport {
     pub checkpoint_epoch: Option<u64>,
     pub checkpoint_commit_epoch: Option<u64>,
     pub wal_present: bool,
+    pub wal_generation: Option<u64>,
     pub wal_replay_start_lsn: Option<u64>,
     pub next_lsn_after_replay: Option<u64>,
     pub replayed_wal_entries: usize,
+    pub replayed_wal_bytes: u64,
     pub max_wal_replay_entries: Option<usize>,
+    pub max_wal_replay_bytes: Option<u64>,
+    pub max_wal_record_bytes: Option<usize>,
     pub torn_tail_ignored: bool,
+    pub torn_tail_repaired: bool,
+    pub discarded_wal_tail_bytes: u64,
     pub torn_tail_reason: Option<String>,
     pub recovered_commit_epoch: u64,
     pub durable_recovery_observed: bool,
@@ -4441,9 +4449,14 @@ impl NowledgeMemStorageRecoveryReport {
             report.checkpoint_epoch.is_some() && report.checkpoint_commit_epoch.is_some();
         let wal_replay_bounded = report
             .max_wal_replay_entries
-            .is_some_and(|limit| report.replayed_wal_entries <= limit);
+            .is_some_and(|limit| report.replayed_wal_entries <= limit)
+            && report
+                .max_wal_replay_bytes
+                .is_some_and(|limit| report.replayed_wal_bytes <= limit)
+            && report.max_wal_record_bytes.is_some();
         let replay_boundary_consistent = storage_recovery_replay_boundary_consistent(report);
-        let torn_tail_clean = !report.torn_tail_ignored && report.torn_tail_reason.is_none();
+        let torn_tail_clean = (!report.torn_tail_ignored && report.torn_tail_reason.is_none())
+            || report.torn_tail_repaired;
         let mut blocker_codes = Vec::new();
         if !durable_recovery_observed {
             blocker_codes.push("durable_recovery_not_observed".to_string());
@@ -4470,11 +4483,17 @@ impl NowledgeMemStorageRecoveryReport {
             checkpoint_epoch: report.checkpoint_epoch,
             checkpoint_commit_epoch: report.checkpoint_commit_epoch,
             wal_present: report.wal_present,
+            wal_generation: report.wal_generation,
             wal_replay_start_lsn: report.wal_replay_start_lsn,
             next_lsn_after_replay: report.next_lsn_after_replay,
             replayed_wal_entries: report.replayed_wal_entries,
+            replayed_wal_bytes: report.replayed_wal_bytes,
             max_wal_replay_entries: report.max_wal_replay_entries,
+            max_wal_replay_bytes: report.max_wal_replay_bytes,
+            max_wal_record_bytes: report.max_wal_record_bytes,
             torn_tail_ignored: report.torn_tail_ignored,
+            torn_tail_repaired: report.torn_tail_repaired,
+            discarded_wal_tail_bytes: report.discarded_wal_tail_bytes,
             torn_tail_reason: report.torn_tail_reason.clone(),
             recovered_commit_epoch: report.recovered_commit_epoch,
             durable_recovery_observed,
@@ -4496,11 +4515,17 @@ impl NowledgeMemStorageRecoveryReport {
             "checkpoint_epoch": self.checkpoint_epoch,
             "checkpoint_commit_epoch": self.checkpoint_commit_epoch,
             "wal_present": self.wal_present,
+            "wal_generation": self.wal_generation,
             "wal_replay_start_lsn": self.wal_replay_start_lsn,
             "next_lsn_after_replay": self.next_lsn_after_replay,
             "replayed_wal_entries": self.replayed_wal_entries,
+            "replayed_wal_bytes": self.replayed_wal_bytes,
             "max_wal_replay_entries": self.max_wal_replay_entries,
+            "max_wal_replay_bytes": self.max_wal_replay_bytes,
+            "max_wal_record_bytes": self.max_wal_record_bytes,
             "torn_tail_ignored": self.torn_tail_ignored,
+            "torn_tail_repaired": self.torn_tail_repaired,
+            "discarded_wal_tail_bytes": self.discarded_wal_tail_bytes,
             "torn_tail_reason": self.torn_tail_reason,
             "recovered_commit_epoch": self.recovered_commit_epoch,
             "readiness": {
@@ -6821,6 +6846,112 @@ pub struct NowledgeMemSearchProjection {
     index: SearchIndex,
 }
 
+#[derive(Debug)]
+pub struct NowledgeMemOutOfCoreSearchProjection {
+    reader: SearchOutOfCoreReader,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemOutOfCoreSearchCandidateOutput {
+    pub result: SearchResultSet,
+    pub report: NowledgeMemSearchCandidateReport,
+    pub metrics: SearchOutOfCoreMetrics,
+}
+
+impl NowledgeMemOutOfCoreSearchProjection {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Ok(Self {
+            reader: SearchOutOfCoreReader::open(path)?,
+        })
+    }
+
+    pub fn open_with_config(path: impl AsRef<Path>, config: SearchOutOfCoreConfig) -> Result<Self> {
+        Ok(Self {
+            reader: SearchOutOfCoreReader::open_with_config(path, config)?,
+        })
+    }
+
+    pub fn reader(&self) -> &SearchOutOfCoreReader {
+        &self.reader
+    }
+
+    pub fn freshness(&self) -> SearchProjectionFreshness {
+        self.reader.projection_freshness()
+    }
+
+    pub fn hydrate_documents(
+        &self,
+        document_ids: &[String],
+    ) -> Result<SearchOutOfCoreHydrationOutput> {
+        self.reader.hydrate_documents(document_ids)
+    }
+
+    pub fn search_candidates(
+        &self,
+        request: &NowledgeMemSearchCandidateRequest,
+    ) -> Result<SearchResultSet> {
+        Ok(self.search_candidates_with_report(request)?.result)
+    }
+
+    pub fn search_candidates_with_report(
+        &self,
+        request: &NowledgeMemSearchCandidateRequest,
+    ) -> Result<NowledgeMemOutOfCoreSearchCandidateOutput> {
+        let effective_compressed_vector_search_mode =
+            request.effective_compressed_vector_search_mode();
+        if effective_compressed_vector_search_mode == CompressedVectorSearchMode::Required {
+            return Err(SkeinError::Storage(
+                "out-of-core search currently provides exact scalar vector segment scans; a required compressed vector projection is unavailable"
+                    .to_string(),
+            ));
+        }
+        let mut output = self.reader.search_with_options(
+            &request.query_text,
+            request.query_embedding.as_deref(),
+            request.mode,
+            SearchQueryOptions {
+                limit: request.limit,
+                offset: request.offset,
+                rank_window: request.rank_window,
+                fusion_weights: request.fusion_weights,
+                metadata_filters: request.metadata_filters.clone(),
+                policy_epoch: None,
+            },
+        )?;
+        if effective_compressed_vector_search_mode == CompressedVectorSearchMode::Preferred
+            && request.mode != SearchMode::Text
+        {
+            let code = SearchFallbackReasonCode::CompressedVectorProjectionUnavailable;
+            let reason = "out-of-core search used an exact scalar vector segment scan because the compressed projection is not attached to this reader".to_string();
+            output.result.fallback_reason_codes.push(code);
+            output.result.fallback_reasons.push(reason.clone());
+            for hit in &mut output.result.hits {
+                hit.fallback_reason_codes.push(code);
+                hit.fallback_reasons.push(reason.clone());
+            }
+            if let Some(retriever) = output
+                .result
+                .retrievers
+                .iter_mut()
+                .find(|retriever| retriever.name == "vector")
+            {
+                retriever.fallback_reason_codes.push(code);
+                retriever.fallback_reasons.push(reason);
+            }
+        }
+        let report = nowledge_mem_search_candidate_report(
+            request,
+            effective_compressed_vector_search_mode,
+            &output.result,
+        );
+        Ok(NowledgeMemOutOfCoreSearchCandidateOutput {
+            result: output.result,
+            report,
+            metrics: output.metrics,
+        })
+    }
+}
+
 impl NowledgeMemSearchProjection {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Ok(Self {
@@ -7247,7 +7378,7 @@ impl NowledgeMemEmbeddedStoreHandle {
             .read_store()?
             .graph
             .database()
-            .knowledge_subgraph(request))
+            .knowledge_subgraph(request)?)
     }
 
     /// Reads relationships induced by a bounded external-id set through the
@@ -14064,6 +14195,8 @@ mod tests {
                 durable: true,
                 recovery_mode: RecoveryMode::Strict,
                 max_wal_replay_entries: Some(16),
+                max_wal_replay_bytes: Some(4096),
+                max_wal_record_bytes: Some(1024),
                 checkpoint_epoch: Some(3),
                 checkpoint_commit_epoch: Some(11),
                 wal_present: true,
@@ -14073,6 +14206,7 @@ mod tests {
                 torn_tail_ignored: false,
                 torn_tail_reason: None,
                 recovered_commit_epoch: 14,
+                ..StorageRecoveryReport::default()
             });
         let json = report.json();
 
@@ -14098,6 +14232,8 @@ mod tests {
                 durable: true,
                 recovery_mode: RecoveryMode::Strict,
                 max_wal_replay_entries: Some(16),
+                max_wal_replay_bytes: Some(4096),
+                max_wal_record_bytes: Some(1024),
                 checkpoint_epoch: Some(3),
                 checkpoint_commit_epoch: Some(11),
                 wal_present: true,
@@ -14107,6 +14243,7 @@ mod tests {
                 torn_tail_ignored: false,
                 torn_tail_reason: None,
                 recovered_commit_epoch: 14,
+                ..StorageRecoveryReport::default()
             });
 
         let decision = NowledgeMemStorageLifecycleDecision::from_storage_recovery(recovery);
@@ -14138,6 +14275,8 @@ mod tests {
                 durable: true,
                 recovery_mode: RecoveryMode::TolerateTornTail,
                 max_wal_replay_entries: Some(16),
+                max_wal_replay_bytes: Some(4096),
+                max_wal_record_bytes: Some(1024),
                 checkpoint_epoch: Some(3),
                 checkpoint_commit_epoch: Some(11),
                 wal_present: true,
@@ -14147,6 +14286,7 @@ mod tests {
                 torn_tail_ignored: true,
                 torn_tail_reason: Some("partial wal entry".to_string()),
                 recovered_commit_epoch: 14,
+                ..StorageRecoveryReport::default()
             });
 
         let decision = NowledgeMemStorageLifecycleDecision::from_storage_recovery(recovery);
@@ -14198,6 +14338,8 @@ mod tests {
                 durable: true,
                 recovery_mode: RecoveryMode::Strict,
                 max_wal_replay_entries: Some(16),
+                max_wal_replay_bytes: Some(4096),
+                max_wal_record_bytes: Some(1024),
                 checkpoint_epoch: None,
                 checkpoint_commit_epoch: None,
                 wal_present: true,
@@ -14207,6 +14349,7 @@ mod tests {
                 torn_tail_ignored: false,
                 torn_tail_reason: None,
                 recovered_commit_epoch: 4,
+                ..StorageRecoveryReport::default()
             });
 
         let decision = NowledgeMemStorageLifecycleDecision::from_storage_recovery(recovery);
@@ -14234,6 +14377,8 @@ mod tests {
                 durable: true,
                 recovery_mode: RecoveryMode::Strict,
                 max_wal_replay_entries: Some(2),
+                max_wal_replay_bytes: Some(4096),
+                max_wal_record_bytes: Some(1024),
                 checkpoint_epoch: Some(3),
                 checkpoint_commit_epoch: None,
                 wal_present: true,
@@ -14243,6 +14388,7 @@ mod tests {
                 torn_tail_ignored: false,
                 torn_tail_reason: Some("partial wal entry".to_string()),
                 recovered_commit_epoch: 13,
+                ..StorageRecoveryReport::default()
             });
         let json = report.json();
 
@@ -14274,6 +14420,8 @@ mod tests {
                 durable: true,
                 recovery_mode: RecoveryMode::Strict,
                 max_wal_replay_entries: Some(16),
+                max_wal_replay_bytes: Some(4096),
+                max_wal_record_bytes: Some(1024),
                 checkpoint_epoch: Some(3),
                 checkpoint_commit_epoch: Some(11),
                 wal_present: true,
@@ -14283,6 +14431,7 @@ mod tests {
                 torn_tail_ignored: false,
                 torn_tail_reason: None,
                 recovered_commit_epoch: 13,
+                ..StorageRecoveryReport::default()
             });
         let json = report.json();
 

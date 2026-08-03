@@ -325,7 +325,7 @@ fn typed_knowledge_relationship_batch_delete_persists_as_one_wal_batch_and_repla
         db.query("CREATE (:Memory {id: 'memory_2'})-[:HAS_LABEL]->(:Label {id: 'label_2'})")
             .unwrap();
     }
-    let setup_wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let setup_wal = read_test_wal(&path).unwrap();
     let setup_batch_count = setup_wal.matches("\tbatch\t").count();
     {
         let mut db = Database::open(&path).unwrap();
@@ -359,7 +359,7 @@ fn typed_knowledge_relationship_batch_delete_persists_as_one_wal_batch_and_repla
         })
         .unwrap();
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("delete_rel"));
     assert_eq!(wal.matches("\tbatch\t").count(), setup_batch_count + 1);
     {

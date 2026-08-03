@@ -66,7 +66,7 @@ fn community_cleanup_without_candidates_does_not_write_wal() {
         let mut db = Database::open(&path).unwrap();
         db.query("CREATE (:Entity {id: 'entity_1'})").unwrap();
     }
-    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_before = read_test_wal(&path).unwrap();
     {
         let mut db = Database::open(&path).unwrap();
         let graph_commit_epoch_before = db.store.commit_epoch();
@@ -78,7 +78,7 @@ fn community_cleanup_without_candidates_does_not_write_wal() {
         assert_eq!(output.candidate_count, 0);
         assert_eq!(output.deleted_count, 0);
     }
-    let wal_after = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_after = read_test_wal(&path).unwrap();
     assert_eq!(wal_after, wal_before);
     std::fs::remove_dir_all(path).unwrap();
 }
@@ -94,7 +94,7 @@ fn typed_community_cleanup_persists_as_one_wal_batch_and_replays() {
         .unwrap();
         db.query("CREATE (:Community {id: 'community_2'})").unwrap();
     }
-    let setup_wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let setup_wal = read_test_wal(&path).unwrap();
     let setup_batch_count = setup_wal.matches("\tbatch\t").count();
     {
         let mut db = Database::open(&path).unwrap();
@@ -103,7 +103,7 @@ fn typed_community_cleanup_persists_as_one_wal_batch_and_replays() {
             .unwrap();
         assert_eq!(output.deleted_count, 2);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("delete_node"));
     assert!(wal.contains("delete_rel"));
     assert_eq!(wal.matches("\tbatch\t").count(), setup_batch_count + 1);

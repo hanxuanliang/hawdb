@@ -311,7 +311,7 @@ fn typed_knowledge_relationship_batch_create_persists_as_one_wal_batch_and_repla
         })
         .unwrap();
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("create_rel"));
     assert_eq!(wal.matches("\tbatch\t").count(), 1);
     {

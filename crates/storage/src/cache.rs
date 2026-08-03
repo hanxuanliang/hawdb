@@ -1,0 +1,399 @@
+use std::collections::{BTreeMap, VecDeque};
+use std::error::Error;
+use std::fmt::{self, Display, Formatter};
+use std::ops::Deref;
+use std::sync::{Arc, Mutex, MutexGuard};
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StoreId(pub u128);
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ManifestGeneration(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ContentDigest(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum RepresentationKind {
+    RawBytes,
+    DecodedMetadata,
+    NodeSegment,
+    RelationshipSegment,
+    PropertySegment,
+    AdjacencySegment,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SegmentCacheKey {
+    pub store_id: StoreId,
+    pub manifest_generation: ManifestGeneration,
+    pub segment_id: u64,
+    pub content_digest: ContentDigest,
+    pub representation: RepresentationKind,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SegmentCacheSnapshot {
+    pub capacity_bytes: u64,
+    pub resident_bytes: u64,
+    pub pinned_bytes: u64,
+    pub reclaimable_bytes: u64,
+    pub entry_count: usize,
+    pub hit_count: u64,
+    pub miss_count: u64,
+    pub insertion_count: u64,
+    pub eviction_count: u64,
+    pub digest_mismatch_count: u64,
+    pub admission_rejection_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SegmentCacheError {
+    DigestMismatch {
+        expected: ContentDigest,
+        actual: ContentDigest,
+    },
+    DigestCollision {
+        key: SegmentCacheKey,
+    },
+    EntryTooLarge {
+        entry_bytes: u64,
+        capacity_bytes: u64,
+    },
+    PinnedCapacity {
+        requested_bytes: u64,
+        resident_bytes: u64,
+        pinned_bytes: u64,
+        capacity_bytes: u64,
+    },
+}
+
+impl Display for SegmentCacheError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DigestMismatch { expected, actual } => write!(
+                formatter,
+                "segment content digest mismatch: expected {}, got {}",
+                expected.0, actual.0
+            ),
+            Self::DigestCollision { key } => write!(
+                formatter,
+                "segment cache key collision for generation {} segment {}",
+                key.manifest_generation.0, key.segment_id
+            ),
+            Self::EntryTooLarge {
+                entry_bytes,
+                capacity_bytes,
+            } => write!(
+                formatter,
+                "segment cache entry uses {entry_bytes} bytes, exceeding the {capacity_bytes} byte capacity"
+            ),
+            Self::PinnedCapacity {
+                requested_bytes,
+                resident_bytes,
+                pinned_bytes,
+                capacity_bytes,
+            } => write!(
+                formatter,
+                "segment cache cannot admit {requested_bytes} bytes with {resident_bytes} resident and {pinned_bytes} pinned under the {capacity_bytes} byte capacity"
+            ),
+        }
+    }
+}
+
+impl Error for SegmentCacheError {}
+
+#[derive(Debug, Clone)]
+pub struct SegmentCacheLease {
+    bytes: Arc<[u8]>,
+}
+
+impl SegmentCacheLease {
+    pub fn into_arc(self) -> Arc<[u8]> {
+        self.bytes
+    }
+}
+
+impl Deref for SegmentCacheLease {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.bytes
+    }
+}
+
+#[derive(Debug)]
+pub struct SegmentCache {
+    inner: Mutex<SegmentCacheInner>,
+}
+
+#[derive(Debug)]
+struct SegmentCacheInner {
+    capacity_bytes: u64,
+    resident_bytes: u64,
+    entries: BTreeMap<SegmentCacheKey, SegmentCacheEntry>,
+    clock: VecDeque<SegmentCacheKey>,
+    hit_count: u64,
+    miss_count: u64,
+    insertion_count: u64,
+    eviction_count: u64,
+    digest_mismatch_count: u64,
+    admission_rejection_count: u64,
+}
+
+#[derive(Debug)]
+struct SegmentCacheEntry {
+    bytes: Arc<[u8]>,
+    referenced: bool,
+}
+
+impl SegmentCache {
+    pub fn new(capacity_bytes: u64) -> Self {
+        Self {
+            inner: Mutex::new(SegmentCacheInner {
+                capacity_bytes,
+                resident_bytes: 0,
+                entries: BTreeMap::new(),
+                clock: VecDeque::new(),
+                hit_count: 0,
+                miss_count: 0,
+                insertion_count: 0,
+                eviction_count: 0,
+                digest_mismatch_count: 0,
+                admission_rejection_count: 0,
+            }),
+        }
+    }
+
+    pub fn get(&self, key: &SegmentCacheKey) -> Option<SegmentCacheLease> {
+        let mut inner = self.lock();
+        let bytes = match inner.entries.get_mut(key) {
+            Some(entry) => {
+                entry.referenced = true;
+                Arc::clone(&entry.bytes)
+            }
+            None => {
+                inner.miss_count = inner.miss_count.saturating_add(1);
+                return None;
+            }
+        };
+        inner.hit_count = inner.hit_count.saturating_add(1);
+        Some(SegmentCacheLease { bytes })
+    }
+
+    pub fn insert(
+        &self,
+        key: SegmentCacheKey,
+        bytes: impl Into<Arc<[u8]>>,
+    ) -> Result<SegmentCacheLease, SegmentCacheError> {
+        let bytes = bytes.into();
+        let actual_digest = content_digest(&bytes);
+        let mut inner = self.lock();
+        if actual_digest != key.content_digest {
+            inner.digest_mismatch_count = inner.digest_mismatch_count.saturating_add(1);
+            return Err(SegmentCacheError::DigestMismatch {
+                expected: key.content_digest,
+                actual: actual_digest,
+            });
+        }
+        if let Some(entry) = inner.entries.get_mut(&key) {
+            if entry.bytes.as_ref() != bytes.as_ref() {
+                return Err(SegmentCacheError::DigestCollision { key });
+            }
+            entry.referenced = true;
+            let bytes = Arc::clone(&entry.bytes);
+            inner.hit_count = inner.hit_count.saturating_add(1);
+            return Ok(SegmentCacheLease { bytes });
+        }
+
+        let entry_bytes = bytes.len() as u64;
+        if entry_bytes > inner.capacity_bytes {
+            inner.admission_rejection_count = inner.admission_rejection_count.saturating_add(1);
+            return Err(SegmentCacheError::EntryTooLarge {
+                entry_bytes,
+                capacity_bytes: inner.capacity_bytes,
+            });
+        }
+        if !inner.evict_for(entry_bytes) {
+            inner.admission_rejection_count = inner.admission_rejection_count.saturating_add(1);
+            return Err(SegmentCacheError::PinnedCapacity {
+                requested_bytes: entry_bytes,
+                resident_bytes: inner.resident_bytes,
+                pinned_bytes: inner.pinned_bytes(),
+                capacity_bytes: inner.capacity_bytes,
+            });
+        }
+
+        inner.resident_bytes = inner.resident_bytes.saturating_add(entry_bytes);
+        inner.insertion_count = inner.insertion_count.saturating_add(1);
+        inner.clock.push_back(key);
+        inner.entries.insert(
+            key,
+            SegmentCacheEntry {
+                bytes: Arc::clone(&bytes),
+                referenced: true,
+            },
+        );
+        Ok(SegmentCacheLease { bytes })
+    }
+
+    pub fn snapshot(&self) -> SegmentCacheSnapshot {
+        let inner = self.lock();
+        let pinned_bytes = inner.pinned_bytes();
+        SegmentCacheSnapshot {
+            capacity_bytes: inner.capacity_bytes,
+            resident_bytes: inner.resident_bytes,
+            pinned_bytes,
+            reclaimable_bytes: inner.resident_bytes.saturating_sub(pinned_bytes),
+            entry_count: inner.entries.len(),
+            hit_count: inner.hit_count,
+            miss_count: inner.miss_count,
+            insertion_count: inner.insertion_count,
+            eviction_count: inner.eviction_count,
+            digest_mismatch_count: inner.digest_mismatch_count,
+            admission_rejection_count: inner.admission_rejection_count,
+        }
+    }
+
+    pub(crate) fn record_digest_mismatch(&self) {
+        let mut inner = self.lock();
+        inner.digest_mismatch_count = inner.digest_mismatch_count.saturating_add(1);
+    }
+
+    fn lock(&self) -> MutexGuard<'_, SegmentCacheInner> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl SegmentCacheInner {
+    fn pinned_bytes(&self) -> u64 {
+        self.entries
+            .values()
+            .filter(|entry| Arc::strong_count(&entry.bytes) > 1)
+            .map(|entry| entry.bytes.len() as u64)
+            .fold(0, u64::saturating_add)
+    }
+
+    fn evict_for(&mut self, requested_bytes: u64) -> bool {
+        if self.resident_bytes.saturating_add(requested_bytes) <= self.capacity_bytes {
+            return true;
+        }
+        let max_scans = self.clock.len().saturating_mul(2).saturating_add(1);
+        for _ in 0..max_scans {
+            if self.resident_bytes.saturating_add(requested_bytes) <= self.capacity_bytes {
+                return true;
+            }
+            let Some(key) = self.clock.pop_front() else {
+                break;
+            };
+            let Some(entry) = self.entries.get_mut(&key) else {
+                continue;
+            };
+            if Arc::strong_count(&entry.bytes) > 1 {
+                self.clock.push_back(key);
+                continue;
+            }
+            if entry.referenced {
+                entry.referenced = false;
+                self.clock.push_back(key);
+                continue;
+            }
+            let entry = self
+                .entries
+                .remove(&key)
+                .expect("clock key remains resident");
+            self.resident_bytes = self.resident_bytes.saturating_sub(entry.bytes.len() as u64);
+            self.eviction_count = self.eviction_count.saturating_add(1);
+        }
+        self.resident_bytes.saturating_add(requested_bytes) <= self.capacity_bytes
+    }
+}
+
+pub fn content_digest(bytes: &[u8]) -> ContentDigest {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    ContentDigest(hash)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(segment_id: u64, bytes: &[u8]) -> SegmentCacheKey {
+        SegmentCacheKey {
+            store_id: StoreId(7),
+            manifest_generation: ManifestGeneration(3),
+            segment_id,
+            content_digest: content_digest(bytes),
+            representation: RepresentationKind::RawBytes,
+        }
+    }
+
+    #[test]
+    fn clock_evicts_unpinned_entries_under_a_byte_budget() {
+        let cache = SegmentCache::new(8);
+        let first = cache.insert(key(1, b"aaaa"), &b"aaaa"[..]).unwrap();
+        drop(first);
+        let second = cache.insert(key(2, b"bbbb"), &b"bbbb"[..]).unwrap();
+        drop(second);
+        let third = cache.insert(key(3, b"cccc"), &b"cccc"[..]).unwrap();
+        drop(third);
+
+        let snapshot = cache.snapshot();
+        assert_eq!(snapshot.resident_bytes, 8);
+        assert_eq!(snapshot.entry_count, 2);
+        assert_eq!(snapshot.eviction_count, 1);
+    }
+
+    #[test]
+    fn pinned_leases_are_not_evicted_or_hidden_from_accounting() {
+        let cache = SegmentCache::new(4);
+        let pinned = cache.insert(key(1, b"aaaa"), &b"aaaa"[..]).unwrap();
+        let error = cache.insert(key(2, b"bbbb"), &b"bbbb"[..]).unwrap_err();
+
+        assert!(matches!(error, SegmentCacheError::PinnedCapacity { .. }));
+        assert_eq!(&*pinned, b"aaaa");
+        let snapshot = cache.snapshot();
+        assert_eq!(snapshot.pinned_bytes, 4);
+        assert_eq!(snapshot.reclaimable_bytes, 0);
+        assert_eq!(snapshot.admission_rejection_count, 1);
+    }
+
+    #[test]
+    fn digest_mismatch_fails_closed_without_residency() {
+        let cache = SegmentCache::new(16);
+        let mut wrong_key = key(1, b"expected");
+        wrong_key.content_digest = ContentDigest(0);
+        let error = cache.insert(wrong_key, &b"actual"[..]).unwrap_err();
+
+        assert!(matches!(error, SegmentCacheError::DigestMismatch { .. }));
+        let snapshot = cache.snapshot();
+        assert_eq!(snapshot.resident_bytes, 0);
+        assert_eq!(snapshot.digest_mismatch_count, 1);
+    }
+
+    #[test]
+    fn cache_identity_separates_store_generation_and_representation() {
+        let cache = SegmentCache::new(64);
+        let bytes = &b"same"[..];
+        let base = key(1, bytes);
+        let first = cache.insert(base, bytes).unwrap();
+        drop(first);
+        let mut next_generation = base;
+        next_generation.manifest_generation = ManifestGeneration(4);
+        let second = cache.insert(next_generation, bytes).unwrap();
+        drop(second);
+        let mut decoded = base;
+        decoded.representation = RepresentationKind::DecodedMetadata;
+        let third = cache.insert(decoded, bytes).unwrap();
+        drop(third);
+
+        assert_eq!(cache.snapshot().entry_count, 3);
+    }
+}

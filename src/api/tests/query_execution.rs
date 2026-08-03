@@ -236,6 +236,91 @@ fn database_config_caps_read_query_result_rows() {
 }
 
 #[test]
+fn database_config_defaults_to_bounded_read_results() {
+    let config = DatabaseConfig::default();
+
+    assert_eq!(
+        config.max_read_result_rows,
+        Some(crate::DEFAULT_MAX_READ_RESULT_ROWS)
+    );
+    assert_eq!(
+        config.max_read_result_payload_bytes,
+        Some(crate::DEFAULT_MAX_READ_RESULT_PAYLOAD_BYTES)
+    );
+}
+
+#[test]
+fn database_config_caps_collected_read_query_payload() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_read_result_payload_bytes: Some(16),
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 1, title: 'payload exceeds the configured budget'})")
+        .unwrap();
+
+    let error = db
+        .query("MATCH (m:Memory) RETURN m.title AS title")
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("max_read_result_payload_bytes 16"),
+        "unexpected payload budget error: {error}"
+    );
+}
+
+#[test]
+fn read_transaction_streaming_options_cannot_relax_database_payload_cap() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_read_result_payload_bytes: Some(16),
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 1, title: 'payload exceeds the configured budget'})")
+        .unwrap();
+
+    let mut read = db.begin_read_transaction();
+    let mut delivered_rows = 0usize;
+    let error = read
+        .query_streaming(
+            "MATCH (m:Memory) RETURN m.title AS title",
+            QueryStreamOptions {
+                max_rows: Some(usize::MAX),
+                max_payload_bytes: Some(usize::MAX),
+            },
+            |_| {
+                delivered_rows += 1;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+    assert_eq!(delivered_rows, 0);
+    assert!(
+        error.to_string().contains("max_payload_bytes 16"),
+        "unexpected streaming payload budget error: {error}"
+    );
+}
+
+#[test]
+fn database_config_can_explicitly_allow_unbounded_read_results() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_read_result_rows: None,
+        max_read_result_payload_bytes: None,
+        ..DatabaseConfig::default()
+    });
+    let title = "x".repeat(128 * 1024);
+    db.query_with_params(
+        "CREATE (:Memory {id: 1, title: $title})",
+        &BTreeMap::from([("title".to_string(), Value::String(title.clone()))]),
+    )
+    .unwrap();
+
+    let output = db
+        .query("MATCH (m:Memory) RETURN m.title AS title")
+        .unwrap();
+    assert_eq!(output.rows[0].get("title"), Some(&Value::String(title)));
+}
+
+#[test]
 fn read_transaction_inherits_database_result_row_cap() {
     let mut db = Database::new_with_config(DatabaseConfig {
         max_read_result_rows: Some(1),

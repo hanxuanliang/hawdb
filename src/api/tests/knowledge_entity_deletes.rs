@@ -170,7 +170,7 @@ fn typed_knowledge_entity_delete_persists_and_replays_from_wal() {
         })
         .unwrap();
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("delete_node"));
     {
         let db = Database::open(&path).unwrap();
@@ -283,7 +283,7 @@ fn entity_delete_guard_rejects_empty_inputs_without_wal() {
     let mut db = Database::open(&path).unwrap();
     db.query("CREATE (:Entity {id: 'entity'})").unwrap();
     let graph_commit_epoch_before = db.store.commit_epoch();
-    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_before = read_test_wal(&path).unwrap();
 
     let entity_error = db
         .knowledge_entity_delete_guard(&KnowledgeEntityDeleteGuardRequest {
@@ -302,9 +302,6 @@ fn entity_delete_guard_rejects_empty_inputs_without_wal() {
     assert!(memory_error.to_string().contains("excluded memory id"));
 
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
-    assert_eq!(
-        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
-        wal_before
-    );
+    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
     std::fs::remove_dir_all(path).unwrap();
 }

@@ -167,7 +167,7 @@ fn source_reference_delete_reads_reject_empty_inputs_without_wal() {
     db.query("CREATE (:Entity {id: 'entity_1'})-[:RELATES_TO {source_reference: 'source_1'}]->(:Entity {id: 'entity_2'})")
         .unwrap();
     let graph_commit_epoch_before = db.store.commit_epoch();
-    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_before = read_test_wal(&path).unwrap();
 
     let entities_error = db
         .knowledge_source_reference_entities(&KnowledgeSourceReferenceEntityListRequest {
@@ -191,10 +191,7 @@ fn source_reference_delete_reads_reject_empty_inputs_without_wal() {
         .contains("non-empty source_reference"));
 
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
-    assert_eq!(
-        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
-        wal_before
-    );
+    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
     std::fs::remove_dir_all(path).unwrap();
 }
 
@@ -279,7 +276,7 @@ fn source_reference_relationship_cleanup_rejects_empty_reference_before_wal() {
         db.query("CREATE (:Entity {id: 'entity_1'})-[:RELATES_TO {source_reference: 'source_1'}]->(:Entity {id: 'entity_2'})")
             .unwrap();
     }
-    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_before = read_test_wal(&path).unwrap();
     {
         let mut db = Database::open(&path).unwrap();
         let epoch_before = db.store.commit_epoch();
@@ -293,7 +290,7 @@ fn source_reference_relationship_cleanup_rejects_empty_reference_before_wal() {
         assert!(error.to_string().contains("non-empty source_reference"));
         assert_eq!(db.store.commit_epoch(), epoch_before);
     }
-    let wal_after = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_after = read_test_wal(&path).unwrap();
     assert_eq!(wal_after, wal_before);
     std::fs::remove_dir_all(path).unwrap();
 }
@@ -323,7 +320,7 @@ fn typed_source_reference_relationship_cleanup_persists_as_one_wal_batch_and_rep
         })
         .unwrap();
     }
-    let setup_wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let setup_wal = read_test_wal(&path).unwrap();
     let setup_batch_count = setup_wal.matches("\tbatch\t").count();
     {
         let mut db = Database::open(&path).unwrap();
@@ -337,7 +334,7 @@ fn typed_source_reference_relationship_cleanup_persists_as_one_wal_batch_and_rep
         assert_eq!(output.candidate_count, 2);
         assert_eq!(output.deleted_relationship_count, 2);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("delete_rel"));
     assert_eq!(wal.matches("\tbatch\t").count(), setup_batch_count + 1);
     {

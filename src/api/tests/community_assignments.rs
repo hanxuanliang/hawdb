@@ -87,7 +87,7 @@ fn community_assignment_clear_rejects_invalid_label_before_wal() {
     db.query("CREATE (:Memory {id: 'memory_community_1', community_id: 7})")
         .unwrap();
     let graph_commit_epoch_before = db.store.commit_epoch();
-    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_before = read_test_wal(&path).unwrap();
 
     let error = db
         .clear_knowledge_community_assignments(&KnowledgeCommunityAssignmentClearRequest {
@@ -97,10 +97,7 @@ fn community_assignment_clear_rejects_invalid_label_before_wal() {
 
     assert!(error.to_string().contains("node label identifier is empty"));
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
-    assert_eq!(
-        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
-        wal_before
-    );
+    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
     std::fs::remove_dir_all(path).unwrap();
 }
 
@@ -113,21 +110,15 @@ fn typed_community_assignment_clear_persists_as_one_wal_batch_and_replays() {
             .unwrap();
         db.query("CREATE (:Entity {id: 'entity_community_1', community_id: 8})")
             .unwrap();
-        let batch_count_before_clear = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_clear = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.clear_knowledge_community_assignments(&KnowledgeCommunityAssignmentClearRequest {
             labels: Vec::new(),
         })
         .unwrap();
-        let batch_count_after_clear = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_clear = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_clear, batch_count_before_clear + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("set_node_property"));
     {
         let db = Database::open(&path).unwrap();

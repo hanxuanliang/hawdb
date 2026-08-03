@@ -116,7 +116,7 @@ fn community_lifecycle_rejects_invalid_create_before_wal() {
         db.query("CREATE (:Community {id: 'community_existing'})")
             .unwrap();
     }
-    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_before = read_test_wal(&path).unwrap();
     {
         let mut db = Database::open(&path).unwrap();
         let graph_commit_epoch_before = db.store.commit_epoch();
@@ -139,7 +139,7 @@ fn community_lifecycle_rejects_invalid_create_before_wal() {
         assert!(error.to_string().contains("resolution must be finite"));
         assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
     }
-    let wal_after = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_after = read_test_wal(&path).unwrap();
     assert_eq!(wal_after, wal_before);
     std::fs::remove_dir_all(path).unwrap();
 }
@@ -152,7 +152,7 @@ fn typed_community_lifecycle_persists_as_one_wal_batch_and_replays() {
         db.query("CREATE (:Community {id: 'community_existing', name: 'Old'})")
             .unwrap();
     }
-    let setup_wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let setup_wal = read_test_wal(&path).unwrap();
     let setup_batch_count = setup_wal.matches("\tbatch\t").count();
     {
         let mut db = Database::open(&path).unwrap();
@@ -181,7 +181,7 @@ fn typed_community_lifecycle_persists_as_one_wal_batch_and_replays() {
         assert_eq!(output.created_node_count, 1);
         assert_eq!(output.updated_count, 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("create_node"));
     assert!(wal.contains("set_node_property"));
     assert_eq!(wal.matches("\tbatch\t").count(), setup_batch_count + 1);

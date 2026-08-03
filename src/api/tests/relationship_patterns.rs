@@ -244,7 +244,7 @@ fn relationship_pattern_create_uses_single_wal_batch() {
         .unwrap();
     }
 
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert_eq!(wal.lines().count(), 1);
     assert!(wal.contains("\tbatch\t"));
     assert!(wal.contains("create_node"));

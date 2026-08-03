@@ -187,7 +187,7 @@ fn set_persists_and_replays_from_wal() {
         )
         .unwrap();
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("set_node_property"));
     {
         let mut db = Database::open(&path).unwrap();

@@ -345,12 +345,12 @@ fn persisted_stable_id_mapping_survives_reopen_without_wal_write() {
                 "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {weight: 7}]->(:Entity {id: 'mid', name: 'Mid'})",
             )
             .unwrap();
-        let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+        let wal_before = read_test_wal(&path).unwrap();
         let snapshot = db
             .export_canonical_graph_snapshot_with_persisted_stable_ids()
             .unwrap();
         let validation = snapshot.validate();
-        let wal_after = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+        let wal_after = read_test_wal(&path).unwrap();
 
         assert!(path.join("stable_ids.skein").exists());
         assert_eq!(wal_after, wal_before);

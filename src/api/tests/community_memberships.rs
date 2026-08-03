@@ -80,7 +80,7 @@ fn community_membership_create_rejects_invalid_input_before_wal() {
         db.query("CREATE (:Entity {id: 'entity_1'})").unwrap();
         db.query("CREATE (:Community {id: 'community_1'})").unwrap();
     }
-    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_before = read_test_wal(&path).unwrap();
     {
         let mut db = Database::open(&path).unwrap();
         let graph_commit_epoch_before = db.store.commit_epoch();
@@ -100,7 +100,7 @@ fn community_membership_create_rejects_invalid_input_before_wal() {
         assert!(error.to_string().contains("strength must be finite"));
         assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
     }
-    let wal_after = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_after = read_test_wal(&path).unwrap();
     assert_eq!(wal_after, wal_before);
     std::fs::remove_dir_all(path).unwrap();
 }
@@ -114,7 +114,7 @@ fn typed_community_membership_create_persists_as_one_wal_batch_and_replays() {
         db.query("CREATE (:Entity {id: 'entity_2'})").unwrap();
         db.query("CREATE (:Community {id: 'community_1'})").unwrap();
     }
-    let setup_wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let setup_wal = read_test_wal(&path).unwrap();
     let setup_batch_count = setup_wal.matches("\tbatch\t").count();
     {
         let mut db = Database::open(&path).unwrap();
@@ -142,7 +142,7 @@ fn typed_community_membership_create_persists_as_one_wal_batch_and_replays() {
             .unwrap();
         assert_eq!(output.created_relationship_count, 2);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("create_rel"));
     assert_eq!(wal.matches("\tbatch\t").count(), setup_batch_count + 1);
     {

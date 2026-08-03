@@ -647,36 +647,54 @@ pub(super) fn export_canonical_graph_snapshot_for(
     catalog: &Catalog,
     store: &GraphStore,
 ) -> CanonicalGraphSnapshotExport {
+    try_export_canonical_graph_snapshot_for(catalog, store)
+        .expect("unchecked canonical snapshot export encountered a storage read error")
+}
+
+pub(super) fn try_export_canonical_graph_snapshot_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+) -> Result<CanonicalGraphSnapshotExport> {
     let nodes = store
-        .scan_nodes(None)
-        .map(|node| CanonicalSnapshotNode {
-            node_id: node.id.0,
-            stable_id: canonical_stable_id(&node.properties),
-            labels: node
-                .labels
-                .iter()
-                .filter_map(|label_id| catalog.label_name(*label_id))
-                .map(str::to_string)
-                .collect(),
-            properties: node.properties.clone(),
+        .node_records_owned()
+        .map(|node| {
+            let node = node?;
+            Ok(CanonicalSnapshotNode {
+                node_id: node.id.0,
+                stable_id: canonical_stable_id(&node.properties),
+                labels: node
+                    .labels
+                    .iter()
+                    .filter_map(|label_id| catalog.label_name(*label_id))
+                    .map(str::to_string)
+                    .collect(),
+                properties: node.properties.clone(),
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     let relationships = store
-        .scan_relationships(None)
-        .map(|relationship| CanonicalSnapshotRelationship {
-            relationship_id: relationship.id.0,
-            stable_id: canonical_stable_id(&relationship.properties),
-            source_node_id: relationship.source.0,
-            target_node_id: relationship.target.0,
-            rel_type: catalog
-                .rel_type_name(relationship.rel_type)
-                .unwrap_or_default()
-                .to_string(),
-            properties: relationship.properties.clone(),
+        .relationship_records_owned()
+        .map(|relationship| {
+            let relationship = relationship?;
+            Ok(CanonicalSnapshotRelationship {
+                relationship_id: relationship.id.0,
+                stable_id: canonical_stable_id(&relationship.properties),
+                source_node_id: relationship.source.0,
+                target_node_id: relationship.target.0,
+                rel_type: catalog
+                    .rel_type_name(relationship.rel_type)
+                    .unwrap_or_default()
+                    .to_string(),
+                properties: relationship.properties.clone(),
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     let graph_commit_epoch = store.commit_epoch();
-    CanonicalGraphSnapshotExport::from_rows(graph_commit_epoch, nodes, relationships)
+    Ok(CanonicalGraphSnapshotExport::from_rows(
+        graph_commit_epoch,
+        nodes,
+        relationships,
+    ))
 }
 
 fn canonical_stable_id(properties: &BTreeMap<String, Value>) -> Option<Value> {

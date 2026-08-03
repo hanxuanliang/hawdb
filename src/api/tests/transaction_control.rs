@@ -58,7 +58,7 @@ fn transaction_commit_replays_as_one_wal_batch() {
         tx.commit().unwrap();
     }
 
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert_eq!(wal.lines().count(), 1);
     assert!(wal.contains("\tbatch\t"));
     {

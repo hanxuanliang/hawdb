@@ -1,3 +1,4 @@
+use crate::ContentDigest;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6,6 +7,7 @@ pub struct SegmentReadRange {
     pub segment_ids: Vec<u64>,
     pub offset: u64,
     pub length: NonZeroU64,
+    pub content_digest: Option<ContentDigest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,7 +36,13 @@ impl SegmentReadRange {
             segment_ids: vec![segment_id],
             offset,
             length,
+            content_digest: None,
         }
+    }
+
+    pub const fn with_content_digest(mut self, content_digest: ContentDigest) -> Self {
+        self.content_digest = Some(content_digest);
+        self
     }
 
     pub fn end_offset(&self) -> u64 {
@@ -134,6 +142,8 @@ impl SegmentReadScheduler {
                     self.max_coalesced_bytes.get().min(budget.get())
                 });
             let can_merge = previous.artifact_id == range.artifact_id
+                && previous.content_digest.is_none()
+                && range.content_digest.is_none()
                 && range.offset <= previous.end_offset()
                 && merged_length <= max_coalesced_bytes;
             if can_merge {

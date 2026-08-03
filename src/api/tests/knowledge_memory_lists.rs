@@ -368,7 +368,7 @@ fn projected_memory_list_rejects_empty_property_names_without_wal() {
     db.query("CREATE (:Memory {id: 'memory_projected_wal', unit_type: 'fact'})")
         .unwrap();
     let graph_commit_epoch = db.store.commit_epoch();
-    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_before = read_test_wal(&path).unwrap();
 
     let error = db
         .knowledge_memory_projected_list(&KnowledgeMemoryProjectedListRequest {
@@ -388,10 +388,7 @@ fn projected_memory_list_rejects_empty_property_names_without_wal() {
 
     assert!(error.to_string().contains("non-empty property names"));
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(
-        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
-        wal_before
-    );
+    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
 }
 
 #[test]

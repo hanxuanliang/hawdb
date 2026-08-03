@@ -123,10 +123,7 @@ fn typed_graph_meta_stamp_persists_as_one_wal_batch_and_replays() {
         let mut db = Database::open(&path).unwrap();
         db.query("CREATE (:GraphMeta {meta_id: 'main', pagerank_applied: false})")
             .unwrap();
-        let batch_count_before_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.stamp_knowledge_graph_meta_batch(&KnowledgeGraphMetaStampBatchRequest {
             stamps: vec![
                 KnowledgeGraphMetaStamp {
@@ -155,13 +152,10 @@ fn typed_graph_meta_stamp_persists_as_one_wal_batch_and_replays() {
             ],
         })
         .unwrap();
-        let batch_count_after_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_update, batch_count_before_update + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("set_node_property"));
     assert!(wal.contains("create_node"));
     {
@@ -356,7 +350,7 @@ fn graph_meta_projected_read_rejects_empty_fields_without_wal() {
         db.query("CREATE (:GraphMeta {meta_id: 'main', pagerank_applied: true})")
             .unwrap();
     }
-    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_before = read_test_wal(&path).unwrap();
     {
         let db = Database::open(&path).unwrap();
         let graph_commit_epoch_before = db.store.commit_epoch();
@@ -384,7 +378,7 @@ fn graph_meta_projected_read_rejects_empty_fields_without_wal() {
             .contains("non-empty property names"));
         assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
     }
-    let wal_after = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_after = read_test_wal(&path).unwrap();
     assert_eq!(wal_after, wal_before);
     std::fs::remove_dir_all(path).unwrap();
 }
@@ -397,7 +391,7 @@ fn graph_meta_delete_missing_does_not_write_wal() {
         db.query("CREATE (:GraphMeta {meta_id: 'main', pagerank_applied: true})")
             .unwrap();
     }
-    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_before = read_test_wal(&path).unwrap();
     {
         let mut db = Database::open(&path).unwrap();
         let graph_commit_epoch_before = db.store.commit_epoch();
@@ -412,7 +406,7 @@ fn graph_meta_delete_missing_does_not_write_wal() {
         assert!(!output.matched);
         assert!(!output.deleted);
     }
-    let wal_after = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_after = read_test_wal(&path).unwrap();
     assert_eq!(wal_after, wal_before);
     std::fs::remove_dir_all(path).unwrap();
 }
@@ -427,7 +421,7 @@ fn typed_graph_meta_delete_persists_and_replays() {
         db.query("CREATE (:GraphMeta {meta_id: 'community', community_detection_applied: true})")
             .unwrap();
     }
-    let setup_wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let setup_wal = read_test_wal(&path).unwrap();
     let setup_batch_count = setup_wal.matches("\tbatch\t").count();
     {
         let mut db = Database::open(&path).unwrap();
@@ -440,7 +434,7 @@ fn typed_graph_meta_delete_persists_and_replays() {
         assert!(output.deleted);
         assert!(output.node_id.is_some());
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("delete_node"));
     assert_eq!(wal.matches("\tbatch\t").count(), setup_batch_count + 1);
     {

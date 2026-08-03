@@ -348,7 +348,7 @@ fn set_system_variables_reject_invalid_values_without_wal() {
     let mut db = Database::open(&path).unwrap();
     db.query("CREATE (:Memory {id: 'stable'})").unwrap();
     let graph_commit_epoch = db.store.commit_epoch();
-    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_before = read_test_wal(&path).unwrap();
 
     let bad_priority = db.query("SET system.work_priority = 'urgent'").unwrap_err();
     let bad_estimate = db
@@ -362,10 +362,7 @@ fn set_system_variables_reject_invalid_values_without_wal() {
     assert!(bad_estimate.to_string().contains("non-negative integer"));
     assert!(unknown.to_string().contains("unknown system variable"));
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(
-        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
-        wal_before
-    );
+    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
 }
 
 #[test]

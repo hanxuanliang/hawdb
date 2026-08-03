@@ -1,5 +1,17 @@
 use super::*;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(feature = "tokio-runtime"), allow(dead_code))]
+pub(crate) struct RuntimeAdmissionPlan {
+    pub work_request: WorkRequest,
+    pub is_mutation: bool,
+    pub estimated_memory_bytes: u64,
+    pub streaming_eligible: bool,
+}
+
+#[cfg_attr(not(feature = "tokio-runtime"), allow(dead_code))]
+const CONTROL_STATEMENT_MEMORY_BYTES: u64 = 1024 * 1024;
+
 impl Database {
     pub fn query_work_request(&self) -> WorkRequest {
         self.system_variables.query_work_request()
@@ -10,27 +22,37 @@ impl Database {
         query_work_request_for_statement(&self.system_variables, &statement)
     }
 
-    pub(crate) fn runtime_admission_for(
+    #[cfg_attr(not(feature = "tokio-runtime"), allow(dead_code))]
+    pub(crate) fn runtime_admission_plan(
         &mut self,
         cypher_text: &str,
         parameters: &BTreeMap<String, Value>,
-    ) -> Result<(WorkRequest, bool)> {
+    ) -> Result<RuntimeAdmissionPlan> {
         let statement = cypher::parse(cypher_text)?;
         let work_request = query_work_request_for_statement(&self.system_variables, &statement)?;
         let body = statement_body(&statement);
-        let is_mutation = match body {
-            cypher::Statement::Explain(_) => false,
+        let streaming_eligible = !matches!(body, cypher::Statement::Explain(_));
+        let (is_mutation, estimated_memory_bytes) = match body {
+            cypher::Statement::Explain(_) => (false, CONTROL_STATEMENT_MEMORY_BYTES),
             cypher::Statement::SetSystemVariable(_)
             | cypher::Statement::Checkpoint
             | cypher::Statement::BeginTransaction
             | cypher::Statement::Commit
-            | cypher::Statement::Rollback => true,
+            | cypher::Statement::Rollback => (true, CONTROL_STATEMENT_MEMORY_BYTES),
             _ => {
                 let optimized = self.optimized_query_plan(cypher_text, &statement, parameters)?;
-                executor::is_mutation_plan(&optimized.physical_plan)?
+                (
+                    executor::is_mutation_plan(&optimized.physical_plan)?,
+                    executor::estimated_execution_memory_bytes(&optimized.physical_plan),
+                )
             }
         };
-        Ok((work_request, is_mutation))
+        Ok(RuntimeAdmissionPlan {
+            work_request,
+            is_mutation,
+            estimated_memory_bytes,
+            streaming_eligible,
+        })
     }
 
     pub fn query(&mut self, cypher_text: &str) -> Result<QueryOutput> {
@@ -210,23 +232,25 @@ impl Database {
             } else {
                 let profiled = match task_context {
                     Some(task_context) => {
-                        executor::execute_with_row_limit_profile_and_external_and_context(
+                        executor::execute_with_output_limits_profile_and_external_and_context(
                             &optimized.physical_plan,
                             &mut self.catalog,
                             &mut self.store,
                             parameters,
                             external,
                             self.config.max_read_result_rows,
+                            self.config.max_read_result_payload_bytes,
                             task_context,
                         )
                     }
-                    None => executor::execute_with_row_limit_profile_and_external(
+                    None => executor::execute_with_output_limits_profile_and_external(
                         &optimized.physical_plan,
                         &mut self.catalog,
                         &mut self.store,
                         parameters,
                         external,
                         self.config.max_read_result_rows,
+                        self.config.max_read_result_payload_bytes,
                     ),
                 }?;
                 (profiled.rows, Some(profiled.profile))
@@ -293,23 +317,25 @@ impl Database {
             }
             let profiled = match task_context {
                 Some(task_context) => {
-                    executor::execute_with_row_limit_profile_and_external_and_context(
+                    executor::execute_with_output_limits_profile_and_external_and_context(
                         &optimized.physical_plan,
                         &mut self.catalog,
                         &mut self.store,
                         parameters,
                         external,
                         self.config.max_read_result_rows,
+                        self.config.max_read_result_payload_bytes,
                         task_context,
                     )
                 }
-                None => executor::execute_with_row_limit_profile_and_external(
+                None => executor::execute_with_output_limits_profile_and_external(
                     &optimized.physical_plan,
                     &mut self.catalog,
                     &mut self.store,
                     parameters,
                     external,
                     self.config.max_read_result_rows,
+                    self.config.max_read_result_payload_bytes,
                 ),
             }?;
             return Ok(QueryOutput {

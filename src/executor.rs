@@ -13,14 +13,13 @@ use crate::planner::{
 };
 use crate::schema::Catalog;
 use crate::store::{
-    AdjacencyDirection, ConnectedNodesCreate, GraphMutation, GraphStore,
+    AdjacencyDirection, ConnectedNodesCreate, GraphMutation, GraphScanControl, GraphStore,
     MatchedRelationshipCopyMerge, MatchedRelationshipCreate, MatchedRelationshipMerge,
     MatchedRelationshipRetargetMerge, MatchedRelationshipSourceRetargetMerge, NodeId, NodeRecord,
-    NodeSetAssignment, NodeSetValue, OrderedAdjacencyEntry, ProjectedGraphDefinition,
-    PropertyFilter, RelRecord, RelationshipDeleteRequest, RelationshipOnCreatePropertyValue,
-    RelationshipPropertiesUpdate, RelationshipPropertyUpdate, RelationshipSetAssignment,
-    RelationshipTargetNodeDelete, ScanPredicate, ScanPruningReport, ScanPruningStrategy,
-    SourceScanCandidateRead,
+    NodeSetAssignment, NodeSetValue, ProjectedGraphDefinition, PropertyFilter, RelRecord,
+    RelationshipDeleteRequest, RelationshipOnCreatePropertyValue, RelationshipPropertiesUpdate,
+    RelationshipPropertyUpdate, RelationshipSetAssignment, RelationshipTargetNodeDelete,
+    ScanPredicate, ScanPruningReport, ScanPruningStrategy, SourceScanCandidateRead,
 };
 use crate::value::Value;
 use skein_core::RuntimeTaskContext;
@@ -47,11 +46,15 @@ const SOURCE_SEGMENT_SCAN_IO_DEPTH: usize = 2;
 const SOURCE_SEGMENT_SCAN_MAX_COALESCED_BYTES: u64 = 512 * 1024;
 const SOURCE_SEGMENT_SCAN_MAX_WAVE_BYTES: u64 = 2 * 1024 * 1024;
 const DEFAULT_EXECUTION_BATCH_ROWS: usize = 256;
+const DEFAULT_EXECUTION_BATCH_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_BLOCKING_OPERATOR_MEMORY_BYTES: usize = 64 * 1024 * 1024;
+#[cfg_attr(not(feature = "tokio-runtime"), allow(dead_code))]
+const DEFAULT_STREAMING_OPERATOR_MEMORY_BYTES: u64 = DEFAULT_EXECUTION_BATCH_PAYLOAD_BYTES as u64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionMemoryConfig {
     pub batch_rows: NonZeroUsize,
+    pub batch_payload_bytes: NonZeroUsize,
     pub blocking_operator_bytes: NonZeroUsize,
     pub spill_directory: PathBuf,
 }
@@ -61,10 +64,23 @@ impl Default for ExecutionMemoryConfig {
         Self {
             batch_rows: NonZeroUsize::new(DEFAULT_EXECUTION_BATCH_ROWS)
                 .expect("default execution batch size is non-zero"),
+            batch_payload_bytes: NonZeroUsize::new(DEFAULT_EXECUTION_BATCH_PAYLOAD_BYTES)
+                .expect("default execution batch byte size is non-zero"),
             blocking_operator_bytes: NonZeroUsize::new(DEFAULT_BLOCKING_OPERATOR_MEMORY_BYTES)
                 .expect("default blocking operator memory budget is non-zero"),
             spill_directory: std::env::temp_dir(),
         }
+    }
+}
+
+#[cfg_attr(not(feature = "tokio-runtime"), allow(dead_code))]
+pub(crate) fn estimated_execution_memory_bytes(plan: &PhysicalPlan) -> u64 {
+    let mut blocking_operator_kinds = BTreeSet::new();
+    collect_blocking_operator_kinds(plan, &mut blocking_operator_kinds);
+    if blocking_operator_kinds.is_empty() {
+        DEFAULT_STREAMING_OPERATOR_MEMORY_BYTES
+    } else {
+        DEFAULT_BLOCKING_OPERATOR_MEMORY_BYTES as u64
     }
 }
 
@@ -218,7 +234,7 @@ fn execute_with_row_limit_internal(
     };
     let bindings =
         execute_bindings_with_limit(plan, catalog, store, &mut context, execution_limit)?;
-    collect_rows(bindings, max_rows)
+    collect_rows(bindings, max_rows, None)
 }
 
 pub fn execute_with_row_limit_profile(
@@ -257,6 +273,30 @@ pub fn execute_with_row_limit_profile_and_external(
     )
 }
 
+pub fn execute_with_output_limits_profile_and_external(
+    plan: &PhysicalPlan,
+    catalog: &mut Catalog,
+    store: &mut GraphStore,
+    parameters: &BTreeMap<String, Value>,
+    external: &mut dyn ExternalReadOperator,
+    max_rows: Option<usize>,
+    max_payload_bytes: Option<usize>,
+) -> Result<ProfiledQueryRows> {
+    execute_with_row_limit_profile_and_external_and_memory_internal(
+        plan,
+        catalog,
+        store,
+        parameters,
+        external,
+        max_rows,
+        max_payload_bytes,
+        ExecutionRuntimeControl {
+            memory: &ExecutionMemoryConfig::default(),
+            task_context: None,
+        },
+    )
+}
+
 pub fn execute_with_row_limit_profile_and_external_and_memory(
     plan: &PhysicalPlan,
     catalog: &mut Catalog,
@@ -273,6 +313,7 @@ pub fn execute_with_row_limit_profile_and_external_and_memory(
         parameters,
         external,
         max_rows,
+        None,
         ExecutionRuntimeControl {
             memory,
             task_context: None,
@@ -297,6 +338,34 @@ pub fn execute_with_row_limit_profile_and_external_and_context(
         parameters,
         external,
         max_rows,
+        None,
+        ExecutionRuntimeControl {
+            memory: &memory,
+            task_context: Some(task_context),
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn execute_with_output_limits_profile_and_external_and_context(
+    plan: &PhysicalPlan,
+    catalog: &mut Catalog,
+    store: &mut GraphStore,
+    parameters: &BTreeMap<String, Value>,
+    external: &mut dyn ExternalReadOperator,
+    max_rows: Option<usize>,
+    max_payload_bytes: Option<usize>,
+    task_context: &RuntimeTaskContext,
+) -> Result<ProfiledQueryRows> {
+    let memory = ExecutionMemoryConfig::default();
+    execute_with_row_limit_profile_and_external_and_memory_internal(
+        plan,
+        catalog,
+        store,
+        parameters,
+        external,
+        max_rows,
+        max_payload_bytes,
         ExecutionRuntimeControl {
             memory: &memory,
             task_context: Some(task_context),
@@ -353,6 +422,35 @@ pub fn execute_with_row_consumer_profile_and_external(
         ExecutionRuntimeControl {
             memory: &ExecutionMemoryConfig::default(),
             task_context: None,
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn execute_with_row_consumer_profile_and_external_and_context(
+    plan: &PhysicalPlan,
+    catalog: &mut Catalog,
+    store: &mut GraphStore,
+    parameters: &BTreeMap<String, Value>,
+    external: &mut dyn ExternalReadOperator,
+    max_rows: Option<usize>,
+    max_payload_bytes: Option<usize>,
+    consumer: &mut dyn FnMut(Row) -> Result<()>,
+    task_context: &RuntimeTaskContext,
+) -> Result<ProfiledQueryStream> {
+    let memory = ExecutionMemoryConfig::default();
+    execute_with_row_consumer_profile_internal(
+        plan,
+        catalog,
+        store,
+        parameters,
+        external,
+        max_rows,
+        max_payload_bytes,
+        consumer,
+        ExecutionRuntimeControl {
+            memory: &memory,
+            task_context: Some(task_context),
         },
     )
 }
@@ -486,6 +584,7 @@ fn execute_with_row_limit_profile_and_external_and_memory_internal(
     parameters: &BTreeMap<String, Value>,
     external: &mut dyn ExternalReadOperator,
     max_rows: Option<usize>,
+    max_payload_bytes: Option<usize>,
     runtime: ExecutionRuntimeControl<'_>,
 ) -> Result<ProfiledQueryRows> {
     let ExecutionRuntimeControl {
@@ -528,7 +627,7 @@ fn execute_with_row_limit_profile_and_external_and_memory_internal(
     profile.vector_execution_reports = vector_execution_reports;
     profile.graph_expansion_reports = graph_expansion_reports;
     profile.blocking_operator_memory_reports = blocking_operator_memory_reports;
-    let rows = collect_rows(bindings, max_rows)?;
+    let rows = collect_rows(bindings, max_rows, max_payload_bytes)?;
     pipeline_memory_report.output_rows = rows.len();
     pipeline_memory_report.output_payload_bytes = rows.iter().fold(0usize, |total, row| {
         total.saturating_add(map_payload_bytes(row))
@@ -725,18 +824,35 @@ fn collect_blocking_operator_kinds(plan: &PhysicalPlan, output: &mut BTreeSet<St
     }
 }
 
-fn collect_rows(bindings: Vec<Binding>, max_rows: Option<usize>) -> Result<Vec<Row>> {
-    let Some(max_rows) = max_rows else {
-        return Ok(bindings.into_iter().map(|binding| binding.values).collect());
-    };
-    let mut rows = Vec::with_capacity(bindings.len().min(max_rows));
+fn collect_rows(
+    bindings: Vec<Binding>,
+    max_rows: Option<usize>,
+    max_payload_bytes: Option<usize>,
+) -> Result<Vec<Row>> {
+    let capacity = max_rows
+        .map(|max_rows| bindings.len().min(max_rows))
+        .unwrap_or(bindings.len());
+    let mut rows = Vec::with_capacity(capacity);
+    let mut payload_bytes = 0usize;
     for binding in bindings {
-        if rows.len() == max_rows {
+        if max_rows.is_some_and(|max_rows| rows.len() == max_rows) {
             return Err(SkeinError::Execution(format!(
-                "read query returned more than {max_rows} rows, exceeding max_read_result_rows {max_rows}"
+                "read query returned more than {} rows, exceeding max_read_result_rows {}",
+                max_rows.unwrap_or_default(),
+                max_rows.unwrap_or_default()
             )));
         }
-        rows.push(binding.values);
+        let row = binding.values;
+        let next_payload_bytes = payload_bytes.saturating_add(map_payload_bytes(&row));
+        if max_payload_bytes.is_some_and(|limit| next_payload_bytes > limit) {
+            return Err(SkeinError::Execution(format!(
+                "read query payload would exceed max_read_result_payload_bytes {} (next total {})",
+                max_payload_bytes.unwrap_or_default(),
+                next_payload_bytes
+            )));
+        }
+        rows.push(row);
+        payload_bytes = next_payload_bytes;
     }
     Ok(rows)
 }
@@ -1475,12 +1591,45 @@ fn execute_binding_batches(
     runtime_checkpoint(context.task_context)?;
     let mut measured_emit = |batch: BindingBatch| {
         runtime_checkpoint(context.task_context)?;
-        record_pipeline_batch(&batch);
-        let control = emit(batch)?;
+        let control =
+            emit_byte_bounded_batches(batch, context.memory.batch_payload_bytes.get(), emit)?;
         runtime_checkpoint(context.task_context)?;
         Ok(control)
     };
     execute_binding_batches_inner(plan, context, execution_limit, &mut measured_emit)
+}
+
+fn emit_byte_bounded_batches(
+    batch: BindingBatch,
+    max_payload_bytes: usize,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    let mut bounded = Vec::with_capacity(batch.len());
+    let mut bounded_bytes = 0usize;
+    for binding in batch {
+        let binding_bytes = binding_memory_bytes(&binding);
+        if binding_bytes > max_payload_bytes {
+            return Err(SkeinError::Execution(format!(
+                "intermediate row uses {binding_bytes} bytes, exceeding batch_payload_bytes {max_payload_bytes}"
+            )));
+        }
+        if !bounded.is_empty() && bounded_bytes.saturating_add(binding_bytes) > max_payload_bytes {
+            record_pipeline_batch(&bounded);
+            if emit(std::mem::take(&mut bounded))? == BatchControl::Stop {
+                return Ok(BatchControl::Stop);
+            }
+            bounded_bytes = 0;
+        }
+        bounded_bytes = bounded_bytes.saturating_add(binding_bytes);
+        bounded.push(binding);
+    }
+    if !bounded.is_empty() {
+        record_pipeline_batch(&bounded);
+        if emit(bounded)? == BatchControl::Stop {
+            return Ok(BatchControl::Stop);
+        }
+    }
+    Ok(BatchControl::Continue)
 }
 
 fn execute_binding_batches_inner(
@@ -1551,13 +1700,15 @@ fn execute_binding_batches_inner(
             let Some(label_id) = catalog.label_id(label) else {
                 return Ok(BatchControl::Continue);
             };
-            let bindings = store
-                .seek_nodes_by_composite_property(label_id, predicates)
-                .into_iter()
-                .take(execution_limit.output_rows.unwrap_or(usize::MAX))
-                .cloned()
-                .map(|node| node_binding(variable, node));
-            emit_binding_iterator(bindings, memory.batch_rows.get(), emit)
+            stream_visited_node_batches(
+                variable,
+                memory.batch_rows.get(),
+                execution_limit,
+                emit,
+                |consumer| {
+                    store.visit_nodes_by_composite_property_owned(label_id, predicates, consumer)
+                },
+            )
         }
         PhysicalPlan::IndexNodeRangeSeek {
             variable,
@@ -1569,13 +1720,21 @@ fn execute_binding_batches_inner(
             let Some(label_id) = catalog.label_id(label) else {
                 return Ok(BatchControl::Continue);
             };
-            let bindings = store
-                .seek_nodes_by_property_range(label_id, property, lower.as_ref(), upper.as_ref())
-                .into_iter()
-                .take(execution_limit.output_rows.unwrap_or(usize::MAX))
-                .cloned()
-                .map(|node| node_binding(variable, node));
-            emit_binding_iterator(bindings, memory.batch_rows.get(), emit)
+            stream_visited_node_batches(
+                variable,
+                memory.batch_rows.get(),
+                execution_limit,
+                emit,
+                |consumer| {
+                    store.visit_nodes_by_property_range_owned(
+                        label_id,
+                        property,
+                        lower.as_ref(),
+                        upper.as_ref(),
+                        consumer,
+                    )
+                },
+            )
         }
         PhysicalPlan::IndexNodeTextSeek {
             variable,
@@ -1586,13 +1745,17 @@ fn execute_binding_batches_inner(
             let Some(label_id) = catalog.label_id(label) else {
                 return Ok(BatchControl::Continue);
             };
-            let bindings = store
-                .seek_nodes_by_full_text_property(label_id, property, query)
-                .into_iter()
-                .take(execution_limit.output_rows.unwrap_or(usize::MAX))
-                .cloned()
-                .map(|node| node_binding(variable, node));
-            emit_binding_iterator(bindings, memory.batch_rows.get(), emit)
+            stream_visited_node_batches(
+                variable,
+                memory.batch_rows.get(),
+                execution_limit,
+                emit,
+                |consumer| {
+                    store.visit_nodes_by_full_text_property_owned(
+                        label_id, property, query, consumer,
+                    )
+                },
+            )
         }
         PhysicalPlan::AdjacencyExpandExec { input, .. } => stream_adjacency_expand_batches(
             plan,
@@ -1659,16 +1822,22 @@ fn execute_binding_batches_inner(
             }
             let mut emitted = 0usize;
             execute_binding_batches(input, context, ExecutionLimit::unlimited(), &mut |batch| {
-                let filtered = batch
-                    .into_iter()
-                    .filter(|binding| evaluate_predicate(predicate, catalog, store, binding))
-                    .take(
-                        execution_limit
-                            .output_rows
-                            .unwrap_or(usize::MAX)
-                            .saturating_sub(emitted),
-                    )
-                    .collect::<Vec<_>>();
+                let remaining = execution_limit
+                    .output_rows
+                    .unwrap_or(usize::MAX)
+                    .saturating_sub(emitted);
+                if remaining == 0 {
+                    return Ok(BatchControl::Stop);
+                }
+                let mut filtered = Vec::with_capacity(batch.len().min(remaining));
+                for binding in batch {
+                    if evaluate_predicate(predicate, catalog, store, &binding)? {
+                        filtered.push(binding);
+                        if filtered.len() == remaining {
+                            break;
+                        }
+                    }
+                }
                 emitted = emitted.saturating_add(filtered.len());
                 if !filtered.is_empty() && emit(filtered)? == BatchControl::Stop {
                     return Ok(BatchControl::Stop);
@@ -2626,34 +2795,124 @@ fn stream_node_scan_batches(
         ..
     } = context;
     let batch_rows = memory.batch_rows.get();
-    if let Some(label_id) = exact_scan_label_id(catalog, label) {
+    let exact_label = exact_scan_label_id(catalog, label);
+    let exact_label_id = exact_label.flatten();
+    if !store.is_out_of_core()
+        && let Some(label_id) = exact_label
+    {
         let scan = store.scan_nodes_with_filter_pruning(label_id, filter.map(|(_, filter)| filter));
         record_scan_pruning_report(scan.report.clone());
-        let bindings = scan
-            .nodes
-            .into_iter()
-            .map(|node| node_binding(variable, node.clone()))
-            .filter(|binding| {
-                filter
-                    .map(|(predicate, _)| evaluate_predicate(predicate, catalog, store, binding))
-                    .unwrap_or(true)
-            })
-            .take(execution_limit.output_rows.unwrap_or(usize::MAX));
-        return emit_binding_iterator(bindings, batch_rows, emit);
+        let mut batch = Vec::with_capacity(batch_rows);
+        let mut emitted = 0usize;
+        for node in scan.nodes {
+            runtime_checkpoint(context.task_context)?;
+            let binding = node_binding(variable, node.clone());
+            if let Some((predicate, _)) = filter
+                && !evaluate_predicate(predicate, catalog, store, &binding)?
+            {
+                continue;
+            }
+            batch.push(binding);
+            emitted = emitted.saturating_add(1);
+            if batch.len() == batch_rows
+                && emit(std::mem::replace(
+                    &mut batch,
+                    Vec::with_capacity(batch_rows),
+                ))? == BatchControl::Stop
+            {
+                return Ok(BatchControl::Stop);
+            }
+            if execution_limit.is_reached(emitted) {
+                break;
+            }
+        }
+        if !batch.is_empty() && emit(batch)? == BatchControl::Stop {
+            return Ok(BatchControl::Stop);
+        }
+        return Ok(if execution_limit.is_reached(emitted) {
+            BatchControl::Stop
+        } else {
+            BatchControl::Continue
+        });
     }
-
     let label_ids = label_ids_for_pattern(catalog, label);
-    let bindings = store
-        .scan_nodes(None)
-        .filter(|node| node_matches_label_pattern(node, label_ids.as_deref()))
-        .map(|node| node_binding(variable, node.clone()))
-        .filter(|binding| {
-            filter
-                .map(|(predicate, _)| evaluate_predicate(predicate, catalog, store, binding))
-                .unwrap_or(true)
-        })
-        .take(execution_limit.output_rows.unwrap_or(usize::MAX));
-    emit_binding_iterator(bindings, batch_rows, emit)
+    let mut batch = Vec::with_capacity(batch_rows);
+    let mut emitted = 0usize;
+    let mut callback_error = None;
+    let control = store.visit_nodes_owned(exact_label_id, |node| {
+        if callback_error.is_some() {
+            return GraphScanControl::Stop;
+        }
+        if let Err(error) = runtime_checkpoint(context.task_context) {
+            callback_error = Some(error);
+            return GraphScanControl::Stop;
+        }
+        if exact_label.is_none() && !node_matches_label_pattern(&node, label_ids.as_deref()) {
+            return GraphScanControl::Continue;
+        }
+        if filter
+            .map(|(_, property_filter)| node_matches_property_filter(&node, property_filter))
+            .is_some_and(|matches| !matches)
+        {
+            return GraphScanControl::Continue;
+        }
+        let binding = node_binding(variable, node);
+        if let Some((predicate, _)) = filter {
+            match evaluate_predicate(predicate, catalog, store, &binding) {
+                Ok(true) => {}
+                Ok(false) => return GraphScanControl::Continue,
+                Err(error) => {
+                    callback_error = Some(error);
+                    return GraphScanControl::Stop;
+                }
+            }
+        }
+        batch.push(binding);
+        emitted = emitted.saturating_add(1);
+        if batch.len() == batch_rows {
+            match emit(std::mem::replace(
+                &mut batch,
+                Vec::with_capacity(batch_rows),
+            )) {
+                Ok(BatchControl::Continue) => {}
+                Ok(BatchControl::Stop) => return GraphScanControl::Stop,
+                Err(error) => {
+                    callback_error = Some(error);
+                    return GraphScanControl::Stop;
+                }
+            }
+        }
+        if execution_limit.is_reached(emitted) {
+            GraphScanControl::Stop
+        } else {
+            GraphScanControl::Continue
+        }
+    })?;
+    if let Some(error) = callback_error {
+        return Err(error);
+    }
+    let candidate_count = store.node_count_for_label(exact_label_id);
+    record_scan_pruning_report(ScanPruningReport {
+        target_kind: crate::store::ScanPruningTargetKind::Node,
+        label_id: exact_label_id,
+        rel_type_id: None,
+        strategy: ScanPruningStrategy::FullLabelScan,
+        pruned: false,
+        exact_empty: candidate_count == 0,
+        candidate_count_before_pruning: candidate_count,
+        pruned_candidate_count: 0,
+        candidate_count_before_filter: candidate_count,
+        output_count: emitted,
+        filtered_out_count: candidate_count.saturating_sub(emitted),
+    });
+    if !batch.is_empty() && emit(batch)? == BatchControl::Stop {
+        return Ok(BatchControl::Stop);
+    }
+    Ok(if control == GraphScanControl::Stop {
+        BatchControl::Stop
+    } else {
+        BatchControl::Continue
+    })
 }
 
 fn stream_index_node_seek_batches(
@@ -2675,15 +2934,15 @@ fn stream_index_node_seek_batches(
     let Some(label_id) = catalog.label_id(label) else {
         return Ok(BatchControl::Continue);
     };
-    let mut seen = BTreeSet::new();
-    let mut nodes = Vec::new();
-    for value in values {
-        for node in store.seek_nodes_by_property(label_id, property, value) {
-            if seen.insert(node.id) {
-                nodes.push(node);
-            }
-        }
-    }
+    let matched = std::cell::Cell::new(0usize);
+    let control =
+        stream_visited_node_batches(variable, batch_rows, execution_limit, emit, |consumer| {
+            store.visit_nodes_by_property_owned(label_id, property, values, |node| {
+                matched.set(matched.get().saturating_add(1));
+                consumer(node)
+            })
+        })?;
+    let matched = matched.get();
     let candidate_count_before_pruning = store.node_count_for_label(Some(label_id));
     record_scan_pruning_report(ScanPruningReport {
         target_kind: crate::store::ScanPruningTargetKind::Node,
@@ -2699,20 +2958,60 @@ fn stream_index_node_seek_batches(
             }
         },
         pruned: true,
-        exact_empty: nodes.is_empty(),
+        exact_empty: matched == 0,
         candidate_count_before_pruning,
-        pruned_candidate_count: candidate_count_before_pruning.saturating_sub(nodes.len()),
-        candidate_count_before_filter: nodes.len(),
-        output_count: nodes
-            .len()
-            .min(execution_limit.output_rows.unwrap_or(usize::MAX)),
+        pruned_candidate_count: candidate_count_before_pruning.saturating_sub(matched),
+        candidate_count_before_filter: matched,
+        output_count: matched.min(execution_limit.output_rows.unwrap_or(usize::MAX)),
         filtered_out_count: 0,
     });
-    let bindings = nodes
-        .into_iter()
-        .take(execution_limit.output_rows.unwrap_or(usize::MAX))
-        .map(|node| node_binding(variable, node.clone()));
-    emit_binding_iterator(bindings, batch_rows, emit)
+    Ok(control)
+}
+
+fn stream_visited_node_batches(
+    variable: &str,
+    batch_rows: usize,
+    execution_limit: ExecutionLimit,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+    visit: impl FnOnce(&mut dyn FnMut(NodeRecord) -> GraphScanControl) -> Result<GraphScanControl>,
+) -> Result<BatchControl> {
+    let mut batch = Vec::with_capacity(batch_rows);
+    let mut emitted = 0usize;
+    let mut callback_error = None;
+    let mut consumer = |node| {
+        batch.push(node_binding(variable, node));
+        emitted = emitted.saturating_add(1);
+        if batch.len() == batch_rows {
+            match emit(std::mem::replace(
+                &mut batch,
+                Vec::with_capacity(batch_rows),
+            )) {
+                Ok(BatchControl::Continue) => {}
+                Ok(BatchControl::Stop) => return GraphScanControl::Stop,
+                Err(error) => {
+                    callback_error = Some(error);
+                    return GraphScanControl::Stop;
+                }
+            }
+        }
+        if execution_limit.is_reached(emitted) {
+            GraphScanControl::Stop
+        } else {
+            GraphScanControl::Continue
+        }
+    };
+    let control = visit(&mut consumer)?;
+    if let Some(error) = callback_error {
+        return Err(error);
+    }
+    if !batch.is_empty() && emit(batch)? == BatchControl::Stop {
+        return Ok(BatchControl::Stop);
+    }
+    Ok(if control == GraphScanControl::Stop {
+        BatchControl::Stop
+    } else {
+        BatchControl::Continue
+    })
 }
 
 fn node_binding(variable: &str, node: NodeRecord) -> Binding {
@@ -3113,17 +3412,6 @@ fn execute_bindings_with_limit(
                             .unwrap_or_else(|| PageRankOptions::default().damping),
                     })
                     .into_iter()
-                    .filter(|score| {
-                        node_visibility_filter
-                            .as_ref()
-                            .map(|filter| {
-                                store
-                                    .node(score.node)
-                                    .map(|node| node_matches_property_filter(node, filter))
-                                    .unwrap_or(false)
-                            })
-                            .unwrap_or(true)
-                    })
                     .map(|score| Binding {
                         values: BTreeMap::from([
                             ("node".to_string(), Value::Int(score.node.0 as i64)),
@@ -3143,17 +3431,6 @@ fn execute_bindings_with_limit(
                             .unwrap_or_else(|| LouvainOptions::default().max_levels),
                     })
                     .into_iter()
-                    .filter(|assignment| {
-                        node_visibility_filter
-                            .as_ref()
-                            .map(|filter| {
-                                store
-                                    .node(assignment.node)
-                                    .map(|node| node_matches_property_filter(node, filter))
-                                    .unwrap_or(false)
-                            })
-                            .unwrap_or(true)
-                    })
                     .map(|assignment| Binding {
                         values: BTreeMap::from([
                             ("node".to_string(), Value::Int(assignment.node.0 as i64)),
@@ -3548,28 +3825,43 @@ fn execute_bindings_with_limit(
                 .map(node_set_assignment)
                 .collect::<Vec<_>>();
             let label_ids = label_ids_for_pattern(catalog, label);
-            let ids = store
-                .scan_nodes(None)
-                .filter(|node| node_matches_label_pattern(node, label_ids.as_deref()))
-                .filter(|node| {
-                    let binding = Binding {
-                        values: BTreeMap::new(),
-                        nodes: BTreeMap::from([(variable.clone(), (*node).clone())]),
-                        relationships: BTreeMap::new(),
-                    };
-                    predicate
-                        .as_ref()
-                        .map(|predicate| evaluate_predicate(predicate, catalog, store, &binding))
-                        .unwrap_or(true)
-                })
-                .map(|node| node.id)
-                .collect::<Vec<_>>();
+            let mut ids = Vec::new();
+            let mut callback_error = None;
+            store.visit_nodes_owned(None, |node| {
+                if callback_error.is_some() {
+                    return GraphScanControl::Stop;
+                }
+                if !node_matches_label_pattern(&node, label_ids.as_deref()) {
+                    return GraphScanControl::Continue;
+                }
+                let id = node.id;
+                let binding = Binding {
+                    values: BTreeMap::new(),
+                    nodes: BTreeMap::from([(variable.clone(), node)]),
+                    relationships: BTreeMap::new(),
+                };
+                if let Some(predicate) = predicate {
+                    match evaluate_predicate(predicate, catalog, store, &binding) {
+                        Ok(true) => {}
+                        Ok(false) => return GraphScanControl::Continue,
+                        Err(error) => {
+                            callback_error = Some(error);
+                            return GraphScanControl::Stop;
+                        }
+                    }
+                }
+                ids.push(id);
+                GraphScanControl::Continue
+            })?;
+            if let Some(error) = callback_error {
+                return Err(error);
+            }
             let ids = store.set_node_properties_by_ids(catalog, &ids, &assignments)?;
             match returns {
                 SetNodePropertiesReturnMode::Project(returns) => ids
                     .into_iter()
                     .map(|id| {
-                        let node = store.node(id).cloned().ok_or_else(|| {
+                        let node = store.node_owned(id)?.ok_or_else(|| {
                             SkeinError::Execution(format!(
                                 "updated node {} is missing during SET RETURN projection",
                                 id.0
@@ -3705,25 +3997,40 @@ fn execute_bindings_with_limit(
             let candidate_filter = predicate
                 .as_ref()
                 .and_then(|predicate| node_scan_filter_from_predicate(predicate, variable));
-            let ids = store
-                .scan_nodes_with_filter_pruning(label_id, candidate_filter.as_ref())
-                .nodes
-                .into_iter()
-                .filter(|node| {
-                    predicate
-                        .as_ref()
-                        .map(|predicate| {
-                            let binding = Binding {
-                                values: BTreeMap::new(),
-                                nodes: BTreeMap::from([(variable.clone(), (*node).clone())]),
-                                relationships: BTreeMap::new(),
-                            };
-                            evaluate_predicate(predicate, catalog, store, &binding)
-                        })
-                        .unwrap_or(true)
-                })
-                .map(|node| node.id)
-                .collect::<Vec<_>>();
+            let mut ids = Vec::new();
+            let mut callback_error = None;
+            store.visit_nodes_owned(label_id, |node| {
+                if callback_error.is_some() {
+                    return GraphScanControl::Stop;
+                }
+                if candidate_filter
+                    .as_ref()
+                    .is_some_and(|filter| !node_matches_property_filter(&node, filter))
+                {
+                    return GraphScanControl::Continue;
+                }
+                let id = node.id;
+                let binding = Binding {
+                    values: BTreeMap::new(),
+                    nodes: BTreeMap::from([(variable.clone(), node)]),
+                    relationships: BTreeMap::new(),
+                };
+                if let Some(predicate) = predicate {
+                    match evaluate_predicate(predicate, catalog, store, &binding) {
+                        Ok(true) => {}
+                        Ok(false) => return GraphScanControl::Continue,
+                        Err(error) => {
+                            callback_error = Some(error);
+                            return GraphScanControl::Stop;
+                        }
+                    }
+                }
+                ids.push(id);
+                GraphScanControl::Continue
+            })?;
+            if let Some(error) = callback_error {
+                return Err(error);
+            }
             let ids = store.delete_node_ids(catalog, &ids, *detach)?;
             Ok(ids
                 .into_iter()
@@ -3943,9 +4250,20 @@ fn execute_bindings_with_limit(
             let Some(label_id) = catalog.label_id(label) else {
                 return Ok(Vec::new());
             };
-            let nodes = store
-                .seek_nodes_by_property(label_id, property, value)
-                .collect::<Vec<_>>();
+            let mut output = Vec::new();
+            store.visit_nodes_by_property_owned(
+                label_id,
+                property,
+                std::slice::from_ref(value),
+                |node| {
+                    output.push(single_node_binding(variable, node));
+                    if execution_limit.is_reached(output.len()) {
+                        GraphScanControl::Stop
+                    } else {
+                        GraphScanControl::Continue
+                    }
+                },
+            )?;
             let candidate_count_before_pruning = store.node_count_for_label(Some(label_id));
             record_scan_pruning_report(ScanPruningReport {
                 target_kind: crate::store::ScanPruningTargetKind::Node,
@@ -3955,25 +4273,14 @@ fn execute_bindings_with_limit(
                     property: property.clone(),
                 },
                 pruned: true,
-                exact_empty: nodes.is_empty(),
+                exact_empty: output.is_empty(),
                 candidate_count_before_pruning,
-                pruned_candidate_count: candidate_count_before_pruning.saturating_sub(nodes.len()),
-                candidate_count_before_filter: nodes.len(),
-                output_count: nodes
-                    .len()
-                    .min(execution_limit.output_rows.unwrap_or(usize::MAX)),
+                pruned_candidate_count: candidate_count_before_pruning.saturating_sub(output.len()),
+                candidate_count_before_filter: output.len(),
+                output_count: output.len(),
                 filtered_out_count: 0,
             });
-            Ok(nodes
-                .into_iter()
-                .take(execution_limit.output_rows.unwrap_or(usize::MAX))
-                .cloned()
-                .map(|node| Binding {
-                    values: BTreeMap::new(),
-                    nodes: BTreeMap::from([(variable.clone(), node)]),
-                    relationships: BTreeMap::new(),
-                })
-                .collect())
+            Ok(output)
         }
         PhysicalPlan::IndexNodeMultiSeek {
             variable,
@@ -3985,14 +4292,17 @@ fn execute_bindings_with_limit(
                 return Ok(Vec::new());
             };
             let mut seen = std::collections::BTreeSet::new();
-            let mut nodes = Vec::new();
-            for value in values {
-                for node in store.seek_nodes_by_property(label_id, property, value) {
-                    if seen.insert(node.id) {
-                        nodes.push(node);
-                    }
+            let mut output = Vec::new();
+            store.visit_nodes_by_property_owned(label_id, property, values, |node| {
+                if seen.insert(node.id) {
+                    output.push(single_node_binding(variable, node));
                 }
-            }
+                if execution_limit.is_reached(output.len()) {
+                    GraphScanControl::Stop
+                } else {
+                    GraphScanControl::Continue
+                }
+            })?;
             let candidate_count_before_pruning = store.node_count_for_label(Some(label_id));
             record_scan_pruning_report(ScanPruningReport {
                 target_kind: crate::store::ScanPruningTargetKind::Node,
@@ -4002,25 +4312,14 @@ fn execute_bindings_with_limit(
                     property: property.clone(),
                 },
                 pruned: true,
-                exact_empty: nodes.is_empty(),
+                exact_empty: output.is_empty(),
                 candidate_count_before_pruning,
-                pruned_candidate_count: candidate_count_before_pruning.saturating_sub(nodes.len()),
-                candidate_count_before_filter: nodes.len(),
-                output_count: nodes
-                    .len()
-                    .min(execution_limit.output_rows.unwrap_or(usize::MAX)),
+                pruned_candidate_count: candidate_count_before_pruning.saturating_sub(output.len()),
+                candidate_count_before_filter: output.len(),
+                output_count: output.len(),
                 filtered_out_count: 0,
             });
-            Ok(nodes
-                .into_iter()
-                .take(execution_limit.output_rows.unwrap_or(usize::MAX))
-                .cloned()
-                .map(|node| Binding {
-                    values: BTreeMap::new(),
-                    nodes: BTreeMap::from([(variable.clone(), node)]),
-                    relationships: BTreeMap::new(),
-                })
-                .collect())
+            Ok(output)
         }
         PhysicalPlan::IndexNodeCompositeSeek {
             variable,
@@ -4030,17 +4329,16 @@ fn execute_bindings_with_limit(
             let Some(label_id) = catalog.label_id(label) else {
                 return Ok(Vec::new());
             };
-            Ok(store
-                .seek_nodes_by_composite_property(label_id, predicates)
-                .into_iter()
-                .take(execution_limit.output_rows.unwrap_or(usize::MAX))
-                .cloned()
-                .map(|node| Binding {
-                    values: BTreeMap::new(),
-                    nodes: BTreeMap::from([(variable.clone(), node)]),
-                    relationships: BTreeMap::new(),
-                })
-                .collect())
+            let mut output = Vec::new();
+            store.visit_nodes_by_composite_property_owned(label_id, predicates, |node| {
+                output.push(single_node_binding(variable, node));
+                if execution_limit.is_reached(output.len()) {
+                    GraphScanControl::Stop
+                } else {
+                    GraphScanControl::Continue
+                }
+            })?;
+            Ok(output)
         }
         PhysicalPlan::IndexNodeRangeSeek {
             variable,
@@ -4052,10 +4350,21 @@ fn execute_bindings_with_limit(
             let Some(label_id) = catalog.label_id(label) else {
                 return Ok(Vec::new());
             };
-            let nodes = store
-                .seek_nodes_by_property_range(label_id, property, lower.as_ref(), upper.as_ref())
-                .into_iter()
-                .collect::<Vec<_>>();
+            let mut output = Vec::new();
+            store.visit_nodes_by_property_range_owned(
+                label_id,
+                property,
+                lower.as_ref(),
+                upper.as_ref(),
+                |node| {
+                    output.push(single_node_binding(variable, node));
+                    if execution_limit.is_reached(output.len()) {
+                        GraphScanControl::Stop
+                    } else {
+                        GraphScanControl::Continue
+                    }
+                },
+            )?;
             let candidate_count_before_pruning = store.node_count_for_label(Some(label_id));
             record_scan_pruning_report(ScanPruningReport {
                 target_kind: crate::store::ScanPruningTargetKind::Node,
@@ -4065,25 +4374,14 @@ fn execute_bindings_with_limit(
                     property: property.clone(),
                 },
                 pruned: true,
-                exact_empty: nodes.is_empty(),
+                exact_empty: output.is_empty(),
                 candidate_count_before_pruning,
-                pruned_candidate_count: candidate_count_before_pruning.saturating_sub(nodes.len()),
-                candidate_count_before_filter: nodes.len(),
-                output_count: nodes
-                    .len()
-                    .min(execution_limit.output_rows.unwrap_or(usize::MAX)),
+                pruned_candidate_count: candidate_count_before_pruning.saturating_sub(output.len()),
+                candidate_count_before_filter: output.len(),
+                output_count: output.len(),
                 filtered_out_count: 0,
             });
-            Ok(nodes
-                .into_iter()
-                .take(execution_limit.output_rows.unwrap_or(usize::MAX))
-                .cloned()
-                .map(|node| Binding {
-                    values: BTreeMap::new(),
-                    nodes: BTreeMap::from([(variable.clone(), node)]),
-                    relationships: BTreeMap::new(),
-                })
-                .collect())
+            Ok(output)
         }
         PhysicalPlan::IndexNodeTextSeek {
             variable,
@@ -4094,17 +4392,16 @@ fn execute_bindings_with_limit(
             let Some(label_id) = catalog.label_id(label) else {
                 return Ok(Vec::new());
             };
-            Ok(store
-                .seek_nodes_by_full_text_property(label_id, property, query)
-                .into_iter()
-                .take(execution_limit.output_rows.unwrap_or(usize::MAX))
-                .cloned()
-                .map(|node| Binding {
-                    values: BTreeMap::new(),
-                    nodes: BTreeMap::from([(variable.clone(), node)]),
-                    relationships: BTreeMap::new(),
-                })
-                .collect())
+            let mut output = Vec::new();
+            store.visit_nodes_by_full_text_property_owned(label_id, property, query, |node| {
+                output.push(single_node_binding(variable, node));
+                if execution_limit.is_reached(output.len()) {
+                    GraphScanControl::Stop
+                } else {
+                    GraphScanControl::Continue
+                }
+            })?;
+            Ok(output)
         }
         PhysicalPlan::AdjacencyExpandExec { input, .. } => execute_adjacency_expand(
             plan,
@@ -4157,7 +4454,7 @@ fn execute_bindings_with_limit(
                         rel_properties,
                         None,
                         *direction,
-                    )
+                    )?
                     .into_iter()
                     .filter(|(_, target)| node_properties_match(target, target_properties))
                     .count();
@@ -4176,16 +4473,28 @@ fn execute_bindings_with_limit(
             ..
         } => {
             let label_ids = label_ids_for_pattern(catalog, label);
-            let total = store
-                .scan_nodes(None)
-                .filter(|node| node_matches_label_pattern(node, label_ids.as_deref()))
-                .filter(|node| node_properties_match(node, properties))
-                .map(|node| {
-                    legs.iter()
-                        .map(|leg| relationship_count_sum_leg(catalog, store, node.id, leg))
-                        .sum::<usize>()
-                })
-                .sum::<usize>();
+            let mut total = 0usize;
+            let mut callback_error = None;
+            store.visit_nodes_owned(None, |node| {
+                if !node_matches_label_pattern(&node, label_ids.as_deref())
+                    || !node_properties_match(&node, properties)
+                {
+                    return GraphScanControl::Continue;
+                }
+                for leg in legs {
+                    match relationship_count_sum_leg(catalog, store, node.id, leg) {
+                        Ok(count) => total = total.saturating_add(count),
+                        Err(error) => {
+                            callback_error = Some(error);
+                            return GraphScanControl::Stop;
+                        }
+                    }
+                }
+                GraphScanControl::Continue
+            })?;
+            if let Some(error) = callback_error {
+                return Err(error);
+            }
             Ok(vec![Binding {
                 values: BTreeMap::from([(output.clone(), Value::Int(total as i64))]),
                 nodes: BTreeMap::new(),
@@ -4201,7 +4510,7 @@ fn execute_bindings_with_limit(
             message_label,
             memory_rel_type,
             memory_label,
-        } => Ok(thread_repair_stats_rows(
+        } => thread_repair_stats_rows(
             catalog,
             store,
             label,
@@ -4212,7 +4521,7 @@ fn execute_bindings_with_limit(
             message_label,
             memory_rel_type,
             memory_label,
-        )),
+        ),
         PhysicalPlan::ShortestPathExec {
             source_label,
             source_id,
@@ -4289,7 +4598,7 @@ fn execute_bindings_with_limit(
                 )?;
                 let mut output = Vec::new();
                 for binding in input {
-                    if evaluate_predicate(predicate, catalog, store, &binding) {
+                    if evaluate_predicate(predicate, catalog, store, &binding)? {
                         output.push(binding);
                         if execution_limit.is_reached(output.len()) {
                             return Ok(output);
@@ -4320,7 +4629,7 @@ fn execute_bindings_with_limit(
                 )?;
                 let mut output = Vec::new();
                 for binding in input {
-                    if evaluate_predicate(predicate, catalog, store, &binding) {
+                    if evaluate_predicate(predicate, catalog, store, &binding)? {
                         output.push(binding);
                         if execution_limit.is_reached(output.len()) {
                             return Ok(output);
@@ -4332,7 +4641,7 @@ fn execute_bindings_with_limit(
             let input = execute_child_bindings(input, catalog, store, context)?;
             let mut output = Vec::new();
             for binding in input {
-                if evaluate_predicate(predicate, catalog, store, &binding) {
+                if evaluate_predicate(predicate, catalog, store, &binding)? {
                     output.push(binding);
                     if execution_limit.is_reached(output.len()) {
                         return Ok(output);
@@ -4461,41 +4770,84 @@ fn execute_node_scan_with_optional_filter(
     store: &GraphStore,
     execution_limit: ExecutionLimit,
 ) -> Result<Vec<Binding>> {
-    if let Some(label_id) = exact_scan_label_id(catalog, label) {
+    let exact_label = exact_scan_label_id(catalog, label);
+    let exact_label_id = exact_label.flatten();
+    if !store.is_out_of_core()
+        && let Some(label_id) = exact_label
+    {
         let scan = store.scan_nodes_with_filter_pruning(label_id, filter.map(|(_, filter)| filter));
         record_scan_pruning_report(scan.report.clone());
         let mut output = Vec::new();
         for node in scan.nodes {
-            let binding = Binding {
-                values: BTreeMap::new(),
-                nodes: BTreeMap::from([(variable.to_string(), node.clone())]),
-                relationships: BTreeMap::new(),
-            };
-            if filter
-                .map(|(predicate, _)| evaluate_predicate(predicate, catalog, store, &binding))
-                .unwrap_or(true)
+            let binding = node_binding(variable, node.clone());
+            if let Some((predicate, _)) = filter
+                && !evaluate_predicate(predicate, catalog, store, &binding)?
             {
-                output.push(binding);
-                if execution_limit.is_reached(output.len()) {
-                    return Ok(output);
-                }
+                continue;
+            }
+            output.push(binding);
+            if execution_limit.is_reached(output.len()) {
+                break;
             }
         }
         return Ok(output);
     }
-
     let label_ids = label_ids_for_pattern(catalog, label);
-    Ok(store
-        .scan_nodes(None)
-        .filter(|node| node_matches_label_pattern(node, label_ids.as_deref()))
-        .take(execution_limit.output_rows.unwrap_or(usize::MAX))
-        .cloned()
-        .map(|node| Binding {
+    let mut output = Vec::new();
+    let mut callback_error = None;
+    store.visit_nodes_owned(exact_label_id, |node| {
+        if callback_error.is_some() {
+            return GraphScanControl::Stop;
+        }
+        if exact_label.is_none() && !node_matches_label_pattern(&node, label_ids.as_deref()) {
+            return GraphScanControl::Continue;
+        }
+        if filter
+            .map(|(_, property_filter)| node_matches_property_filter(&node, property_filter))
+            .is_some_and(|matches| !matches)
+        {
+            return GraphScanControl::Continue;
+        }
+        let binding = Binding {
             values: BTreeMap::new(),
             nodes: BTreeMap::from([(variable.to_string(), node)]),
             relationships: BTreeMap::new(),
-        })
-        .collect())
+        };
+        if let Some((predicate, _)) = filter {
+            match evaluate_predicate(predicate, catalog, store, &binding) {
+                Ok(true) => {}
+                Ok(false) => return GraphScanControl::Continue,
+                Err(error) => {
+                    callback_error = Some(error);
+                    return GraphScanControl::Stop;
+                }
+            }
+        }
+        output.push(binding);
+        if execution_limit.is_reached(output.len()) {
+            GraphScanControl::Stop
+        } else {
+            GraphScanControl::Continue
+        }
+    })?;
+    if let Some(error) = callback_error {
+        return Err(error);
+    }
+    let candidate_count = store.node_count_for_label(exact_label_id);
+    record_scan_pruning_report(ScanPruningReport {
+        target_kind: crate::store::ScanPruningTargetKind::Node,
+        label_id: exact_label_id,
+        rel_type_id: None,
+        strategy: ScanPruningStrategy::FullLabelScan,
+        pruned: false,
+        exact_empty: candidate_count == 0,
+        candidate_count_before_pruning: candidate_count,
+        pruned_candidate_count: 0,
+        candidate_count_before_filter: candidate_count,
+        output_count: output.len(),
+        filtered_out_count: candidate_count.saturating_sub(output.len()),
+    });
+    Ok(output)
 }
 
 fn execute_source_segment_scan(
@@ -4580,7 +4932,7 @@ fn execute_source_segment_scan(
     let source_label_id = catalog.label_id("Source");
     let mut bindings = Vec::new();
     for row in rows {
-        let Some(node) = store.node(NodeId(row.node_id)) else {
+        let Some(node) = store.node_owned(NodeId(row.node_id))? else {
             return execute_node_scan_with_optional_filter(
                 variable,
                 "Source",
@@ -4604,7 +4956,7 @@ fn execute_source_segment_scan(
         }
         bindings.push(Binding {
             values: BTreeMap::new(),
-            nodes: BTreeMap::from([(variable.to_string(), node.clone())]),
+            nodes: BTreeMap::from([(variable.to_string(), node)]),
             relationships: BTreeMap::new(),
         });
         if execution_limit.is_reached(bindings.len()) {
@@ -4725,6 +5077,14 @@ fn exact_scan_label_id(catalog: &Catalog, label: &str) -> Option<Option<crate::s
     catalog.label_id(label).map(Some)
 }
 
+fn single_node_binding(variable: &str, node: NodeRecord) -> Binding {
+    Binding {
+        values: BTreeMap::new(),
+        nodes: BTreeMap::from([(variable.to_string(), node)]),
+        relationships: BTreeMap::new(),
+    }
+}
+
 fn execute_node_column_lookup(
     spec: NodeColumnLookupSpec<'_>,
     input: Vec<Binding>,
@@ -4737,11 +5097,6 @@ fn execute_node_column_lookup(
     }
 
     let label_ids = label_ids_for_pattern(catalog, spec.label);
-    let candidates = store
-        .scan_nodes(None)
-        .filter(|node| node_matches_label_pattern(node, label_ids.as_deref()))
-        .cloned()
-        .collect::<Vec<_>>();
     let mut output = Vec::new();
     for binding in input {
         let expected = binding.values.get(spec.column).ok_or_else(|| {
@@ -4751,16 +5106,22 @@ fn execute_node_column_lookup(
             ))
         })?;
         let mut matched = false;
-        for node in &candidates {
-            if node.properties.get(spec.property) == Some(expected) {
+        store.visit_nodes_owned(None, |node| {
+            if node_matches_label_pattern(&node, label_ids.as_deref())
+                && node.properties.get(spec.property) == Some(expected)
+            {
                 let mut next = binding.clone();
-                next.nodes.insert(spec.variable.to_string(), node.clone());
+                next.nodes.insert(spec.variable.to_string(), node);
                 output.push(next);
                 matched = true;
                 if execution_limit.is_reached(output.len()) {
-                    return Ok(output);
+                    return GraphScanControl::Stop;
                 }
             }
+            GraphScanControl::Continue
+        })?;
+        if execution_limit.is_reached(output.len()) {
+            return Ok(output);
         }
         if spec.optional && !matched {
             let mut next = binding;
@@ -4793,44 +5154,42 @@ fn execute_indexed_node_column_lookup(
         lookup_values.insert(expected.clone());
     }
 
-    let mut nodes_by_value = BTreeMap::<Value, Vec<NodeRecord>>::new();
     let mut unique_candidate_ids = BTreeSet::new();
-    for value in &lookup_values {
-        let nodes = store
-            .seek_nodes_by_property(label_id, spec.property, value)
-            .cloned()
-            .collect::<Vec<_>>();
-        for node in &nodes {
-            unique_candidate_ids.insert(node.id);
-        }
-        nodes_by_value.insert(value.clone(), nodes);
-    }
-
     let mut output = Vec::new();
     for binding in input {
         let expected = binding
             .values
             .get(spec.column)
-            .expect("lookup column was validated before index lookup");
+            .expect("lookup column was validated before index lookup")
+            .clone();
         let mut matched = false;
-        if let Some(nodes) = nodes_by_value.get(expected) {
-            for node in nodes {
+        store.visit_nodes_by_property_owned(
+            label_id,
+            spec.property,
+            std::slice::from_ref(&expected),
+            |node| {
+                unique_candidate_ids.insert(node.id);
                 let mut next = binding.clone();
-                next.nodes.insert(spec.variable.to_string(), node.clone());
+                next.nodes.insert(spec.variable.to_string(), node);
                 output.push(next);
                 matched = true;
                 if execution_limit.is_reached(output.len()) {
-                    record_node_column_lookup_scan_pruning_report(
-                        label_id,
-                        spec.property,
-                        lookup_values.len(),
-                        unique_candidate_ids.len(),
-                        output.len(),
-                        store,
-                    );
-                    return Ok(output);
+                    GraphScanControl::Stop
+                } else {
+                    GraphScanControl::Continue
                 }
-            }
+            },
+        )?;
+        if execution_limit.is_reached(output.len()) {
+            record_node_column_lookup_scan_pruning_report(
+                label_id,
+                spec.property,
+                lookup_values.len(),
+                unique_candidate_ids.len(),
+                output.len(),
+                store,
+            );
+            return Ok(output);
         }
         if spec.optional && !matched {
             let mut next = binding;
@@ -4951,12 +5310,12 @@ fn expand_binding(
             spec.rel_properties,
             filters.relationship_scan_filter,
             spec.direction,
-        ) {
+        )? {
             runtime_checkpoint(task_context)?;
             if bound_target_id.is_some_and(|node_id| node_id != target.id)
                 || filters
                     .target_scan_filter
-                    .is_some_and(|filter| !node_matches_property_filter(target, filter))
+                    .is_some_and(|filter| !node_matches_property_filter(&target, filter))
             {
                 continue;
             }
@@ -4984,12 +5343,12 @@ fn expand_binding(
             target_label_ids,
             spec.min_hops,
             spec.max_hops,
-        ) {
+        )? {
             runtime_checkpoint(task_context)?;
             if bound_target_id.is_some_and(|node_id| node_id != target.id)
                 || filters
                     .target_scan_filter
-                    .is_some_and(|filter| !node_matches_property_filter(target, filter))
+                    .is_some_and(|filter| !node_matches_property_filter(&target, filter))
             {
                 continue;
             }
@@ -5040,16 +5399,22 @@ fn stream_filtered_adjacency_expand_batches(
         execution_limit,
         filters,
         &mut |batch| {
-            let filtered = batch
-                .into_iter()
-                .filter(|binding| evaluate_predicate(predicate, catalog, store, binding))
-                .take(
-                    execution_limit
-                        .output_rows
-                        .unwrap_or(usize::MAX)
-                        .saturating_sub(emitted),
-                )
-                .collect::<Vec<_>>();
+            let remaining = execution_limit
+                .output_rows
+                .unwrap_or(usize::MAX)
+                .saturating_sub(emitted);
+            if remaining == 0 {
+                return Ok(BatchControl::Stop);
+            }
+            let mut filtered = Vec::with_capacity(batch.len().min(remaining));
+            for binding in batch {
+                if evaluate_predicate(predicate, catalog, store, &binding)? {
+                    filtered.push(binding);
+                    if filtered.len() == remaining {
+                        break;
+                    }
+                }
+            }
             emitted = emitted.saturating_add(filtered.len());
             if !filtered.is_empty() && emit(filtered)? == BatchControl::Stop {
                 return Ok(BatchControl::Stop);
@@ -5378,7 +5743,7 @@ fn binding_payload_bytes(binding: &Binding) -> usize {
         )
 }
 
-fn map_payload_bytes(values: &BTreeMap<String, Value>) -> usize {
+pub(crate) fn map_payload_bytes(values: &BTreeMap<String, Value>) -> usize {
     values.iter().fold(0usize, |total, (name, value)| {
         total
             .saturating_add(name.len())
@@ -6031,22 +6396,22 @@ fn execute_shortest_path(
     input: ShortestPathExecInput<'_>,
 ) -> Result<Vec<Binding>> {
     let Some(source) =
-        find_node_by_id_property(catalog, store, input.source_label, input.source_id)
+        find_node_by_id_property(catalog, store, input.source_label, input.source_id)?
     else {
         return Ok(Vec::new());
     };
     let Some(target) =
-        find_node_by_id_property(catalog, store, input.target_label, input.target_id)
+        find_node_by_id_property(catalog, store, input.target_label, input.target_id)?
     else {
         return Ok(Vec::new());
     };
     if input
         .source_visibility_filter
-        .map(|filter| !node_matches_property_filter(source, filter))
+        .map(|filter| !node_matches_property_filter(&source, filter))
         .unwrap_or(false)
         || input
             .target_visibility_filter
-            .map(|filter| !node_matches_property_filter(target, filter))
+            .map(|filter| !node_matches_property_filter(&target, filter))
             .unwrap_or(false)
     {
         return Ok(Vec::new());
@@ -6070,26 +6435,37 @@ fn execute_shortest_path(
             max_hops: input.max_hops,
             path_node_visibility_filter: input.path_node_visibility_filter,
         },
-    );
+    )?;
     paths
         .iter()
         .map(|path| shortest_path_binding(store, path, input.returns))
         .collect()
 }
 
-fn find_node_by_id_property<'a>(
+fn find_node_by_id_property(
     catalog: &Catalog,
-    store: &'a GraphStore,
+    store: &GraphStore,
     label: &str,
     id: &Value,
-) -> Option<&'a NodeRecord> {
-    if label.is_empty() {
-        return store
-            .scan_nodes(None)
-            .find(|node| node.properties.get("id") == Some(id));
-    }
-    let label_id = catalog.label_id(label)?;
-    store.seek_nodes_by_property(label_id, "id", id).next()
+) -> Result<Option<NodeRecord>> {
+    let label_id = if label.is_empty() {
+        None
+    } else {
+        let Some(label_id) = catalog.label_id(label) else {
+            return Ok(None);
+        };
+        Some(label_id)
+    };
+    let mut matched = None;
+    store.visit_nodes_owned(label_id, |node| {
+        if node.properties.get("id") == Some(id) {
+            matched = Some(node);
+            GraphScanControl::Stop
+        } else {
+            GraphScanControl::Continue
+        }
+    })?;
+    Ok(matched)
 }
 
 struct ShortestPathSearch<'a> {
@@ -6102,7 +6478,10 @@ struct ShortestPathSearch<'a> {
     path_node_visibility_filter: Option<&'a PropertyFilter>,
 }
 
-fn all_shortest_paths(store: &GraphStore, search: ShortestPathSearch<'_>) -> Vec<Vec<NodeId>> {
+fn all_shortest_paths(
+    store: &GraphStore,
+    search: ShortestPathSearch<'_>,
+) -> Result<Vec<Vec<NodeId>>> {
     let mut queue = VecDeque::from([vec![search.source]]);
     let mut results = Vec::new();
     let mut found_depth = None;
@@ -6120,10 +6499,10 @@ fn all_shortest_paths(store: &GraphStore, search: ShortestPathSearch<'_>) -> Vec
             &BTreeMap::new(),
             None,
             search.direction,
-        ) {
+        )? {
             if search
                 .path_node_visibility_filter
-                .map(|filter| !node_matches_property_filter(next, filter))
+                .map(|filter| !node_matches_property_filter(&next, filter))
                 .unwrap_or(false)
             {
                 continue;
@@ -6142,7 +6521,7 @@ fn all_shortest_paths(store: &GraphStore, search: ShortestPathSearch<'_>) -> Vec
             }
         }
     }
-    results
+    Ok(results)
 }
 
 fn shortest_path_binding(
@@ -6156,13 +6535,12 @@ fn shortest_path_binding(
             ShortestPathProjectionExpression::NodePropertyList { property } => Value::List(
                 path.iter()
                     .map(|node_id| {
-                        store
-                            .node(*node_id)
-                            .and_then(|node| node.properties.get(property))
-                            .cloned()
-                            .unwrap_or(Value::Null)
+                        Ok(store
+                            .node_owned(*node_id)?
+                            .and_then(|node| node.properties.get(property).cloned())
+                            .unwrap_or(Value::Null))
                     })
-                    .collect(),
+                    .collect::<Result<Vec<_>>>()?,
             ),
             ShortestPathProjectionExpression::Length => Value::Int(path.len() as i64 - 1),
         };
@@ -6175,107 +6553,78 @@ fn shortest_path_binding(
     })
 }
 
-fn one_hop_relationships<'a>(
-    store: &'a GraphStore,
+fn one_hop_relationships(
+    store: &GraphStore,
     source: NodeId,
     rel_type_id: Option<crate::schema::RelTypeId>,
     target_label_ids: Option<&[crate::schema::LabelId]>,
     rel_properties: &BTreeMap<String, Value>,
     relationship_scan_filter: Option<&PropertyFilter>,
     direction: RelationshipDirection,
-) -> Vec<(&'a RelRecord, &'a NodeRecord)> {
+) -> Result<Vec<(RelRecord, NodeRecord)>> {
     let mut matches = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     let relationship_filter = combine_property_filters(
         property_filter_from_properties(rel_properties),
         relationship_scan_filter.cloned(),
     );
-    if let Some(filter) = relationship_filter.as_ref() {
+    if !store.is_out_of_core()
+        && let Some(filter) = relationship_filter.as_ref()
+    {
         let scan = store.scan_relationships_with_filter_pruning(rel_type_id, Some(filter));
         record_scan_pruning_report(scan.report.clone());
-        collect_one_hop_relationships(
-            scan.relationships.into_iter().filter(|relationship| {
-                relationship_target_for_source_direction(relationship, source, direction).is_some()
-            }),
-            store,
-            target_label_ids,
-            rel_properties,
-            |relationship| {
+        for relationship in scan.relationships {
+            let Some(target_id) =
                 relationship_target_for_source_direction(relationship, source, direction)
-                    .expect("relationship direction was checked before target lookup")
-            },
-            &mut seen,
-            &mut matches,
-        );
-        matches.sort_by_key(|(relationship, target)| (target.id, relationship.id));
-        return matches;
-    }
-
-    if let Some(rel_type_id) = rel_type_id {
-        if matches!(
-            direction,
-            RelationshipDirection::Outgoing | RelationshipDirection::Undirected
-        ) {
-            collect_ordered_one_hop_relationships(
-                store.ordered_adjacency_entries(source, rel_type_id, AdjacencyDirection::Outgoing),
-                store,
-                target_label_ids,
-                rel_properties,
-                &mut seen,
-                &mut matches,
-            );
-        }
-        if matches!(
-            direction,
-            RelationshipDirection::Incoming | RelationshipDirection::Undirected
-        ) {
-            collect_ordered_one_hop_relationships(
-                store.ordered_adjacency_entries(source, rel_type_id, AdjacencyDirection::Incoming),
-                store,
-                target_label_ids,
-                rel_properties,
-                &mut seen,
-                &mut matches,
-            );
+            else {
+                continue;
+            };
+            if !seen.insert(relationship.id)
+                || !relationship_properties_match(relationship, rel_properties)
+            {
+                continue;
+            }
+            if let Some(target) = store.node_owned(target_id)?
+                && node_matches_label_pattern(&target, target_label_ids)
+            {
+                matches.push((relationship.clone(), target));
+            }
         }
         matches.sort_by_key(|(relationship, target)| (target.id, relationship.id));
-        return matches;
+        return Ok(matches);
     }
-
-    if matches!(
-        direction,
-        RelationshipDirection::Outgoing | RelationshipDirection::Undirected
-    ) {
-        collect_one_hop_relationships(
-            store
-                .scan_relationships(None)
-                .filter(move |relationship| relationship.source == source),
-            store,
-            target_label_ids,
-            rel_properties,
-            |relationship| relationship.target,
-            &mut seen,
-            &mut matches,
-        );
-    }
-    if matches!(
-        direction,
-        RelationshipDirection::Incoming | RelationshipDirection::Undirected
-    ) {
-        collect_one_hop_relationships(
-            store
-                .scan_relationships(None)
-                .filter(move |relationship| relationship.target == source),
-            store,
-            target_label_ids,
-            rel_properties,
-            |relationship| relationship.source,
-            &mut seen,
-            &mut matches,
-        );
+    let mut callback_error = None;
+    store.visit_relationships_owned(rel_type_id, |relationship| {
+        let Some(target_id) =
+            relationship_target_for_source_direction(&relationship, source, direction)
+        else {
+            return GraphScanControl::Continue;
+        };
+        if !seen.insert(relationship.id)
+            || !relationship_properties_match(&relationship, rel_properties)
+            || relationship_filter.as_ref().is_some_and(|filter| {
+                !property_filter_matches_values(filter, relationship.id.0, &relationship.properties)
+            })
+        {
+            return GraphScanControl::Continue;
+        }
+        match store.node_owned(target_id) {
+            Ok(Some(target)) if node_matches_label_pattern(&target, target_label_ids) => {
+                matches.push((relationship, target));
+            }
+            Ok(_) => {}
+            Err(error) => {
+                callback_error = Some(error);
+                return GraphScanControl::Stop;
+            }
+        }
+        GraphScanControl::Continue
+    })?;
+    if let Some(error) = callback_error {
+        return Err(error);
     }
     matches.sort_by_key(|(relationship, target)| (target.id, relationship.id));
-    matches
+    Ok(matches)
 }
 
 fn relationship_target_for_source_direction(
@@ -6307,16 +6656,16 @@ fn relationship_count_sum_leg(
     store: &GraphStore,
     source: NodeId,
     leg: &RelationshipCountLeg,
-) -> usize {
+) -> Result<usize> {
     let rel_type_id = if leg.rel_type.is_empty() {
         None
     } else {
         catalog.rel_type_id(&leg.rel_type)
     };
     if !leg.rel_type.is_empty() && rel_type_id.is_none() {
-        return 0;
+        return Ok(0);
     }
-    one_hop_relationships(
+    Ok(one_hop_relationships(
         store,
         source,
         rel_type_id,
@@ -6324,12 +6673,12 @@ fn relationship_count_sum_leg(
         &BTreeMap::new(),
         None,
         leg.direction,
-    )
+    )?
     .into_iter()
     .filter(|(relationship, _)| {
         relationship_count_filter_matches(relationship, leg.filter.as_ref())
     })
-    .count()
+    .count())
 }
 
 fn relationship_count_filter_matches(
@@ -6360,76 +6709,76 @@ fn thread_repair_stats_rows(
     message_label: &str,
     memory_rel_type: &str,
     memory_label: &str,
-) -> Vec<Binding> {
+) -> Result<Vec<Binding>> {
     let thread_label_ids = label_ids_for_pattern(catalog, label);
     let identity_label_ids = label_ids_for_pattern(catalog, identity_label);
     let message_label_ids = label_ids_for_pattern(catalog, message_label);
     let memory_label_ids = label_ids_for_pattern(catalog, memory_label);
     let message_rel_type_id = catalog.rel_type_id(message_rel_type);
     let memory_rel_type_id = catalog.rel_type_id(memory_rel_type);
-    let identities = store
-        .scan_nodes(None)
-        .filter(|node| node_matches_label_pattern(node, identity_label_ids.as_deref()))
-        .collect::<Vec<_>>();
-    let mut threads = store
-        .scan_nodes(None)
-        .filter(|node| node_matches_label_pattern(node, thread_label_ids.as_deref()))
-        .collect::<Vec<_>>();
+    let mut identities = Vec::new();
+    let mut threads = Vec::new();
+    store.visit_nodes_owned(None, |node| {
+        if node_matches_label_pattern(&node, identity_label_ids.as_deref()) {
+            identities.push(node.clone());
+        }
+        if node_matches_label_pattern(&node, thread_label_ids.as_deref()) {
+            threads.push(node);
+        }
+        GraphScanControl::Continue
+    })?;
     threads.sort_by(|left, right| {
         left.properties
             .get("id")
             .unwrap_or(&Value::Null)
             .cmp(right.properties.get("id").unwrap_or(&Value::Null))
     });
-    threads
-        .into_iter()
-        .map(|thread| {
-            let thread_id = thread
-                .properties
-                .get(thread_id_property)
-                .cloned()
-                .unwrap_or(Value::Null);
-            let identity_refs = identities
-                .iter()
-                .filter(|identity| identity.properties.get(identity_ref_property) == Some(&thread_id))
-                .count();
-            let legacy_messages = message_rel_type_id
-                .map(|rel_type_id| {
-                    one_hop_relationships(
-                        store,
-                        thread.id,
-                        Some(rel_type_id),
-                        message_label_ids.as_deref(),
-                        &BTreeMap::new(),
-                        None,
-                        RelationshipDirection::Outgoing,
-                    )
-                    .len()
-                })
-                .unwrap_or(0);
-            let compacted_memories = memory_rel_type_id
-                .map(|rel_type_id| {
-                    one_hop_relationships(
-                        store,
-                        thread.id,
-                        Some(rel_type_id),
-                        memory_label_ids.as_deref(),
-                        &BTreeMap::new(),
-                        None,
-                        RelationshipDirection::Outgoing,
-                    )
-                    .len()
-                })
-                .unwrap_or(0);
-            let space_id = match thread.properties.get("space_id") {
-                Some(Value::String(value)) if !value.is_empty() => Value::String(value.clone()),
-                _ => Value::String("default".to_string()),
-            };
-            let message_count = match thread.properties.get("message_count") {
-                Some(Value::Null) | None => Value::Int(0),
-                Some(value) => value.clone(),
-            };
-            Binding {
+    let mut rows = Vec::with_capacity(threads.len());
+    for thread in threads {
+        let thread_id = thread
+            .properties
+            .get(thread_id_property)
+            .cloned()
+            .unwrap_or(Value::Null);
+        let identity_refs = identities
+            .iter()
+            .filter(|identity| identity.properties.get(identity_ref_property) == Some(&thread_id))
+            .count();
+        let legacy_messages = match message_rel_type_id {
+            Some(rel_type_id) => one_hop_relationships(
+                store,
+                thread.id,
+                Some(rel_type_id),
+                message_label_ids.as_deref(),
+                &BTreeMap::new(),
+                None,
+                RelationshipDirection::Outgoing,
+            )?
+            .len(),
+            None => 0,
+        };
+        let compacted_memories = match memory_rel_type_id {
+            Some(rel_type_id) => one_hop_relationships(
+                store,
+                thread.id,
+                Some(rel_type_id),
+                memory_label_ids.as_deref(),
+                &BTreeMap::new(),
+                None,
+                RelationshipDirection::Outgoing,
+            )?
+            .len(),
+            None => 0,
+        };
+        let space_id = match thread.properties.get("space_id") {
+            Some(Value::String(value)) if !value.is_empty() => Value::String(value.clone()),
+            _ => Value::String("default".to_string()),
+        };
+        let message_count = match thread.properties.get("message_count") {
+            Some(Value::Null) | None => Value::Int(0),
+            Some(value) => value.clone(),
+        };
+        rows.push(Binding {
                 values: BTreeMap::from([
                     (
                         "t.id".to_string(),
@@ -6458,61 +6807,9 @@ fn thread_repair_stats_rows(
                 ]),
                 nodes: BTreeMap::new(),
                 relationships: BTreeMap::new(),
-            }
-        })
-        .collect()
-}
-
-fn collect_ordered_one_hop_relationships<'a>(
-    entries: Vec<OrderedAdjacencyEntry>,
-    store: &'a GraphStore,
-    target_label_ids: Option<&[crate::schema::LabelId]>,
-    rel_properties: &BTreeMap<String, Value>,
-    seen: &mut std::collections::BTreeSet<crate::store::RelId>,
-    matches: &mut Vec<(&'a RelRecord, &'a NodeRecord)>,
-) {
-    for entry in entries {
-        if !seen.insert(entry.relationship_id) {
-            continue;
-        }
-        let Some(relationship) = store.relationship(entry.relationship_id) else {
-            continue;
-        };
-        if !relationship_properties_match(relationship, rel_properties) {
-            continue;
-        }
-        let Some(target) = store.node(entry.neighbor_id) else {
-            continue;
-        };
-        if node_matches_label_pattern(target, target_label_ids) {
-            matches.push((relationship, target));
-        }
+            });
     }
-}
-
-fn collect_one_hop_relationships<'a>(
-    relationships: impl Iterator<Item = &'a RelRecord>,
-    store: &'a GraphStore,
-    target_label_ids: Option<&[crate::schema::LabelId]>,
-    rel_properties: &BTreeMap<String, Value>,
-    target_id: impl Fn(&RelRecord) -> NodeId,
-    seen: &mut std::collections::BTreeSet<crate::store::RelId>,
-    matches: &mut Vec<(&'a RelRecord, &'a NodeRecord)>,
-) {
-    for relationship in relationships {
-        if !seen.insert(relationship.id) {
-            continue;
-        }
-        if !relationship_properties_match(relationship, rel_properties) {
-            continue;
-        }
-        let Some(target) = store.node(target_id(relationship)) else {
-            continue;
-        };
-        if node_matches_label_pattern(target, target_label_ids) {
-            matches.push((relationship, target));
-        }
-    }
+    Ok(rows)
 }
 
 fn node_matches_property_filter(node: &NodeRecord, filter: &PropertyFilter) -> bool {
@@ -6671,14 +6968,14 @@ fn relationship_properties_match(
         .all(|(property, value)| relationship.properties.get(property) == Some(value))
 }
 
-fn bounded_expand_targets<'a>(
-    store: &'a GraphStore,
+fn bounded_expand_targets(
+    store: &GraphStore,
     source: NodeId,
     rel_type_id: crate::schema::RelTypeId,
     target_label_ids: Option<&[crate::schema::LabelId]>,
     min_hops: usize,
     max_hops: usize,
-) -> Vec<(&'a NodeRecord, usize)> {
+) -> Result<Vec<(NodeRecord, usize)>> {
     let mut targets = Vec::new();
     BoundedExpand {
         store,
@@ -6687,8 +6984,8 @@ fn bounded_expand_targets<'a>(
         min_hops,
         max_hops,
     }
-    .collect(source, 0, &mut targets);
-    targets
+    .collect(source, 0, &mut targets)?;
+    Ok(targets)
 }
 
 struct BoundedExpand<'a> {
@@ -6700,23 +6997,36 @@ struct BoundedExpand<'a> {
 }
 
 impl<'a> BoundedExpand<'a> {
-    fn collect(&self, current: NodeId, depth: usize, targets: &mut Vec<(&'a NodeRecord, usize)>) {
+    fn collect(
+        &self,
+        current: NodeId,
+        depth: usize,
+        targets: &mut Vec<(NodeRecord, usize)>,
+    ) -> Result<()> {
         if depth >= self.min_hops
-            && let Some(node) = self.store.node(current)
-            && node_matches_label_pattern(node, self.target_label_ids.as_deref())
+            && let Some(node) = self.store.node_owned(current)?
+            && node_matches_label_pattern(&node, self.target_label_ids.as_deref())
         {
             targets.push((node, depth));
         }
         if depth == self.max_hops {
-            return;
+            return Ok(());
         }
-        for entry in self.store.ordered_adjacency_entries(
+        let mut neighbors = Vec::new();
+        self.store.visit_adjacent_relationships_owned(
             current,
-            self.rel_type_id,
+            Some(self.rel_type_id),
             AdjacencyDirection::Outgoing,
-        ) {
-            self.collect(entry.neighbor_id, depth + 1, targets);
+            |relationship| {
+                neighbors.push((relationship.target, relationship.id));
+                GraphScanControl::Continue
+            },
+        )?;
+        neighbors.sort_unstable();
+        for (neighbor_id, _) in neighbors {
+            self.collect(neighbor_id, depth + 1, targets)?;
         }
+        Ok(())
     }
 }
 
@@ -6873,8 +7183,8 @@ fn evaluate_predicate(
     catalog: &Catalog,
     store: &GraphStore,
     binding: &Binding,
-) -> bool {
-    evaluate_predicate_truth(predicate, catalog, store, binding).is_true()
+) -> Result<bool> {
+    Ok(evaluate_predicate_truth(predicate, catalog, store, binding)?.is_true())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6956,24 +7266,34 @@ fn evaluate_predicate_truth(
     catalog: &Catalog,
     store: &GraphStore,
     binding: &Binding,
-) -> PredicateTruth {
-    match predicate {
+) -> Result<PredicateTruth> {
+    Ok(match predicate {
         Predicate::And(predicates) => {
-            predicates
-                .iter()
-                .fold(PredicateTruth::True, |truth, predicate| {
-                    truth.and(evaluate_predicate_truth(predicate, catalog, store, binding))
-                })
+            let mut truth = PredicateTruth::True;
+            for predicate in predicates {
+                truth = truth.and(evaluate_predicate_truth(
+                    predicate, catalog, store, binding,
+                )?);
+                if truth == PredicateTruth::False {
+                    break;
+                }
+            }
+            truth
         }
         Predicate::Or(predicates) => {
-            predicates
-                .iter()
-                .fold(PredicateTruth::False, |truth, predicate| {
-                    truth.or(evaluate_predicate_truth(predicate, catalog, store, binding))
-                })
+            let mut truth = PredicateTruth::False;
+            for predicate in predicates {
+                truth = truth.or(evaluate_predicate_truth(
+                    predicate, catalog, store, binding,
+                )?);
+                if truth == PredicateTruth::True {
+                    break;
+                }
+            }
+            truth
         }
         Predicate::Not(predicate) => {
-            evaluate_predicate_truth(predicate, catalog, store, binding).not()
+            evaluate_predicate_truth(predicate, catalog, store, binding)?.not()
         }
         Predicate::ConstantBool(value) => PredicateTruth::from_bool(*value),
         Predicate::RelationshipExists {
@@ -6989,7 +7309,7 @@ fn evaluate_predicate_truth(
             rel_type,
             *direction,
             target_label,
-        )),
+        )?),
         Predicate::BoundRelationshipExists {
             source_variable,
             rel_type,
@@ -7003,7 +7323,7 @@ fn evaluate_predicate_truth(
             rel_type,
             *direction,
             target_variable,
-        )),
+        )?),
         Predicate::IdEq { variable, value } => {
             let actual = binding_id(binding, variable);
             predicate_comparison_truth(actual.as_ref(), value, |actual, expected| {
@@ -7179,7 +7499,7 @@ fn evaluate_predicate_truth(
             property,
             values,
         } => predicate_in_truth(binding_property(binding, variable, property), values),
-    }
+    })
 }
 
 fn relationship_exists(
@@ -7190,20 +7510,20 @@ fn relationship_exists(
     rel_type: &str,
     direction: RelationshipDirection,
     target_label: &str,
-) -> bool {
+) -> Result<bool> {
     let Some(source) = binding.nodes.get(variable) else {
-        return false;
+        return Ok(false);
     };
     let rel_type_id = if rel_type.is_empty() {
         None
     } else {
         let Some(rel_type_id) = catalog.rel_type_id(rel_type) else {
-            return false;
+            return Ok(false);
         };
         Some(rel_type_id)
     };
     let target_label_ids = label_ids_for_pattern(catalog, target_label);
-    !one_hop_relationships(
+    one_hop_relationships(
         store,
         source.id,
         rel_type_id,
@@ -7212,7 +7532,7 @@ fn relationship_exists(
         None,
         direction,
     )
-    .is_empty()
+    .map(|relationships| !relationships.is_empty())
 }
 
 fn bound_relationship_exists(
@@ -7223,32 +7543,30 @@ fn bound_relationship_exists(
     rel_type: &str,
     direction: RelationshipDirection,
     target_variable: &str,
-) -> bool {
+) -> Result<bool> {
     let (Some(source), Some(target)) = (
         binding.nodes.get(source_variable),
         binding.nodes.get(target_variable),
     ) else {
-        return false;
+        return Ok(false);
     };
     let Some(rel_type_id) = catalog.rel_type_id(rel_type) else {
-        return false;
+        return Ok(false);
     };
-    match direction {
-        RelationshipDirection::Outgoing => store
-            .outgoing_relationships(source.id, rel_type_id)
-            .any(|relationship| relationship.target == target.id),
-        RelationshipDirection::Incoming => store
-            .incoming_relationships(source.id, rel_type_id)
-            .any(|relationship| relationship.source == target.id),
-        RelationshipDirection::Undirected => {
-            store
-                .outgoing_relationships(source.id, rel_type_id)
-                .any(|relationship| relationship.target == target.id)
-                || store
-                    .incoming_relationships(source.id, rel_type_id)
-                    .any(|relationship| relationship.source == target.id)
-        }
-    }
+    one_hop_relationships(
+        store,
+        source.id,
+        Some(rel_type_id),
+        None,
+        &BTreeMap::new(),
+        None,
+        direction,
+    )
+    .map(|relationships| {
+        relationships
+            .iter()
+            .any(|(_, candidate)| candidate.id == target.id)
+    })
 }
 
 fn predicate_expression_value(
@@ -7668,6 +7986,7 @@ mod tests {
             .as_nanos();
         ExecutionMemoryConfig {
             batch_rows: NonZeroUsize::new(2).unwrap(),
+            batch_payload_bytes: NonZeroUsize::new(1024 * 1024).unwrap(),
             blocking_operator_bytes: NonZeroUsize::new(128).unwrap(),
             spill_directory: std::env::temp_dir().join(format!("skein-{name}-{nonce}")),
         }

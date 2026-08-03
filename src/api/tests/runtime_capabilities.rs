@@ -213,6 +213,103 @@ fn cypher_access_control_policy_epoch_isolates_plan_cache_entries() {
 
 #[cfg(feature = "acl")]
 #[test]
+fn cypher_access_control_rebinds_scope_values_on_plan_cache_hit() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        runtime_capabilities: RuntimeCapabilities::default()
+            .with(RuntimeCapability::AccessControl, true),
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 'team-a', space_id: 'team-a'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'team-b', space_id: 'team-b'})")
+        .unwrap();
+    let query = "MATCH (m:Memory) WHERE m.id = $id RETURN m.id AS id";
+    let team_a_parameters =
+        BTreeMap::from([("id".to_string(), Value::String("team-a".to_string()))]);
+    let team_b_parameters =
+        BTreeMap::from([("id".to_string(), Value::String("team-b".to_string()))]);
+
+    let team_a = db
+        .explain_analyze_query_with_params_access_control(
+            query,
+            &team_a_parameters,
+            QueryAccessControlContext::visibility_scope(7, "space_id", "team-a"),
+        )
+        .unwrap();
+    let team_b = db
+        .explain_analyze_query_with_params_access_control(
+            query,
+            &team_b_parameters,
+            QueryAccessControlContext::visibility_scope(7, "space_id", "team-b"),
+        )
+        .unwrap();
+
+    assert_eq!(team_a.plan_cache_lookup, PlanCacheLookup::Miss);
+    assert_eq!(team_b.plan_cache_lookup, PlanCacheLookup::Hit);
+    assert!(team_b
+        .trace
+        .decisions
+        .iter()
+        .any(|decision| { decision == "access control scope values bound for this execution" }));
+    assert_eq!(team_a.output.rows.len(), 1);
+    assert_eq!(
+        team_a.output.rows[0].get("id"),
+        Some(&Value::String("team-a".to_string()))
+    );
+    assert_eq!(team_b.output.rows.len(), 1);
+    assert_eq!(
+        team_b.output.rows[0].get("id"),
+        Some(&Value::String("team-b".to_string()))
+    );
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 1);
+    assert_eq!(stats.misses, 1);
+    assert_eq!(stats.hits, 1);
+}
+
+#[cfg(feature = "acl")]
+#[test]
+fn cypher_access_control_visibility_shape_isolates_plan_cache_entries() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        runtime_capabilities: RuntimeCapabilities::default()
+            .with(RuntimeCapability::AccessControl, true),
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 'team-a', space_id: 'team-a', visibility_class: 'public'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'team-b', space_id: 'team-b', visibility_class: 'private'})")
+        .unwrap();
+    let query = "MATCH (m:Memory) RETURN m.id AS id ORDER BY id";
+
+    let by_space = db
+        .explain_analyze_query_with_params_access_control(
+            query,
+            &BTreeMap::new(),
+            QueryAccessControlContext::visibility_scope(7, "space_id", "team-a"),
+        )
+        .unwrap();
+    let by_class = db
+        .explain_analyze_query_with_params_access_control(
+            query,
+            &BTreeMap::new(),
+            QueryAccessControlContext::visibility_scope(7, "visibility_class", "private"),
+        )
+        .unwrap();
+
+    assert_eq!(by_space.plan_cache_lookup, PlanCacheLookup::Miss);
+    assert_eq!(by_class.plan_cache_lookup, PlanCacheLookup::Miss);
+    assert_eq!(by_class.output.rows.len(), 1);
+    assert_eq!(
+        by_class.output.rows[0].get("id"),
+        Some(&Value::String("team-b".to_string()))
+    );
+    assert_eq!(db.plan_cache_stats().entries, 2);
+}
+
+#[cfg(feature = "acl")]
+#[test]
 fn cypher_access_control_readiness_fails_closed_for_missing_and_stale_policy() {
     let db = Database::new_with_config(DatabaseConfig {
         runtime_capabilities: RuntimeCapabilities::default()

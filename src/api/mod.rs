@@ -27,13 +27,15 @@ use crate::search::{
     SearchTruncationReasonCode,
 };
 use crate::store::{
-    AdjacencyConsistencyReport, AdjacencyConsolidationPlan, AdjacencyConsolidationReport,
-    AdjacencyDirection, AdjacencyLayout, BasicStatisticsConsistencyReport,
-    DegreeStatisticsConsistencyReport, DistinctValueStatisticsConsistencyReport, DurabilityPolicy,
-    GraphMutation, GraphSnapshotNodeImport, GraphSnapshotRelationshipImport, GraphStore, NodeId,
-    NodeRecord, ProjectedGraphStatus, PropertyIndexConsistencyReport,
-    PropertyIndexProjectionRebuildAction, RecoveryMode, RelId, RelRecord, SchemaMaintenanceAction,
-    StorageReclamationWatermark, StorageRecoveryReport, StoreStableIdMapping, WalReplayConfig,
+    restore_storage_backup, AdjacencyConsistencyReport, AdjacencyConsolidationPlan,
+    AdjacencyConsolidationReport, AdjacencyDirection, AdjacencyLayout,
+    BasicStatisticsConsistencyReport, DegreeStatisticsConsistencyReport,
+    DistinctValueStatisticsConsistencyReport, DurabilityPolicy, GraphMutation,
+    GraphSnapshotNodeImport, GraphSnapshotRelationshipImport, GraphStore, NodeId, NodeRecord,
+    ProjectedGraphStatus, PropertyIndexConsistencyReport, PropertyIndexProjectionRebuildAction,
+    RecoveryMode, RelId, RelRecord, SchemaMaintenanceAction, SegmentCacheSnapshot,
+    StorageBackupReport, StorageReclamationWatermark, StorageRecoveryReport, StorageRestoreReport,
+    StoreStableIdMapping, WalReplayConfig,
 };
 use crate::telemetry::{
     operations_telemetry_readiness, qos_telemetry_sink, KernelTelemetry, KernelTelemetryOperation,
@@ -88,6 +90,7 @@ mod observability;
 mod plan_cache;
 mod query_domains;
 mod query_runtime;
+mod resource_profile;
 mod schema_guidance;
 mod search_projection_catch_up;
 mod source_candidates;
@@ -150,6 +153,9 @@ pub use canonical_snapshot::{
     GRAPH_LIGHTNING_INITIAL_IMPORT_DURABLE_STATE_PROTOCOL,
 };
 pub use plan_cache::{PlanCacheBypassReason, PlanCacheLookup, PlanCacheStats};
+pub use resource_profile::{
+    StorageResourceProfileLimits, StorageResourceProfileReport, STORAGE_RESOURCE_PROFILE_PROTOCOL,
+};
 pub use search_projection_catch_up::{
     ScheduledSearchProjectionCatchUpReport, SearchProjectionCatchUpReport,
     SearchProjectionCatchUpStopReason,
@@ -217,9 +223,19 @@ impl<T> SharedState<T> {
 pub struct DatabaseConfig {
     pub read_only: bool,
     pub max_read_result_rows: Option<usize>,
+    pub max_read_result_payload_bytes: Option<usize>,
     pub max_optimizer_groups: Option<usize>,
     pub recovery_mode: RecoveryMode,
     pub max_wal_replay_entries: Option<usize>,
+    pub max_wal_replay_bytes: Option<u64>,
+    pub max_wal_record_bytes: Option<usize>,
+    pub max_wal_batch_operations: Option<usize>,
+    pub max_checkpoint_encoded_bytes: Option<u64>,
+    pub max_checkpoint_decoded_bytes: Option<u64>,
+    pub segment_cache_capacity_bytes: u64,
+    pub storage_residency_mode: skein_storage::StorageResidencyMode,
+    pub auto_materialize_checkpoint_bytes: u64,
+    pub max_out_of_core_delta_bytes: Option<u64>,
     pub max_search_projection_change_log_entries: Option<usize>,
     pub max_plan_cache_entries: Option<usize>,
     pub slow_query_log_capacity: usize,
@@ -230,14 +246,37 @@ pub struct DatabaseConfig {
     pub adaptive_vector_backend_policy: skein_optimizer::AdaptiveVectorBackendPolicy,
 }
 
+pub const DEFAULT_MAX_READ_RESULT_ROWS: usize = 100_000;
+pub const DEFAULT_MAX_READ_RESULT_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
+
+fn restrictive_query_limit(configured: Option<usize>, requested: Option<usize>) -> Option<usize> {
+    match (configured, requested) {
+        (Some(configured), Some(requested)) => Some(configured.min(requested)),
+        (Some(configured), None) => Some(configured),
+        (None, Some(requested)) => Some(requested),
+        (None, None) => None,
+    }
+}
+
 impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
             read_only: false,
-            max_read_result_rows: None,
+            max_read_result_rows: Some(DEFAULT_MAX_READ_RESULT_ROWS),
+            max_read_result_payload_bytes: Some(DEFAULT_MAX_READ_RESULT_PAYLOAD_BYTES),
             max_optimizer_groups: None,
             recovery_mode: RecoveryMode::default(),
-            max_wal_replay_entries: None,
+            max_wal_replay_entries: Some(skein_storage::DEFAULT_MAX_WAL_REPLAY_ENTRIES),
+            max_wal_replay_bytes: Some(skein_storage::DEFAULT_MAX_WAL_REPLAY_BYTES),
+            max_wal_record_bytes: Some(skein_storage::DEFAULT_MAX_WAL_RECORD_BYTES),
+            max_wal_batch_operations: Some(skein_storage::DEFAULT_MAX_WAL_BATCH_OPERATIONS),
+            max_checkpoint_encoded_bytes: Some(skein_storage::DEFAULT_MAX_CHECKPOINT_ENCODED_BYTES),
+            max_checkpoint_decoded_bytes: Some(skein_storage::DEFAULT_MAX_CHECKPOINT_DECODED_BYTES),
+            segment_cache_capacity_bytes: skein_storage::DEFAULT_SEGMENT_CACHE_CAPACITY_BYTES,
+            storage_residency_mode: skein_storage::StorageResidencyMode::Auto,
+            auto_materialize_checkpoint_bytes:
+                skein_storage::DEFAULT_AUTO_MATERIALIZE_CHECKPOINT_BYTES,
+            max_out_of_core_delta_bytes: Some(skein_storage::DEFAULT_MAX_OUT_OF_CORE_DELTA_BYTES),
             max_search_projection_change_log_entries: Some(
                 DEFAULT_SEARCH_PROJECTION_CHANGE_LOG_MAX_ENTRIES,
             ),
@@ -5628,6 +5667,15 @@ impl Database {
         let replay_config = WalReplayConfig {
             recovery_mode: config.recovery_mode,
             max_entries: config.max_wal_replay_entries,
+            max_bytes: config.max_wal_replay_bytes,
+            max_record_bytes: config.max_wal_record_bytes,
+            max_batch_operations: config.max_wal_batch_operations,
+            max_checkpoint_encoded_bytes: config.max_checkpoint_encoded_bytes,
+            max_checkpoint_decoded_bytes: config.max_checkpoint_decoded_bytes,
+            segment_cache_capacity_bytes: config.segment_cache_capacity_bytes,
+            residency_mode: config.storage_residency_mode,
+            auto_materialize_checkpoint_bytes: config.auto_materialize_checkpoint_bytes,
+            max_out_of_core_delta_bytes: config.max_out_of_core_delta_bytes,
         };
         let mut store = if config.read_only {
             GraphStore::open_read_only_with_durability_and_replay_config(
@@ -5692,6 +5740,9 @@ impl Database {
                     success: true,
                     elapsed_micros: 0,
                     item_count: recovery.replayed_wal_entries,
+                    byte_count: recovery.replayed_wal_bytes,
+                    fsync_micros: 0,
+                    generation: recovery.wal_generation,
                 });
             }
         }
@@ -5915,11 +5966,15 @@ impl Database {
                 "EXPLAIN ANALYZE only supports read queries".to_string(),
             ));
         }
-        let profiled = executor::execute_with_row_limit_profile(
+        let mut external = executor::NoExternalReadOperator;
+        let profiled = executor::execute_with_output_limits_profile_and_external(
             &optimized.physical_plan,
             &mut self.catalog,
             &mut self.store,
+            parameters,
+            &mut external,
             self.config.max_read_result_rows,
+            self.config.max_read_result_payload_bytes,
         )?;
         Ok(ExplainAnalyzeOutput {
             output: QueryOutput {
@@ -6000,9 +6055,27 @@ impl Database {
                 success: result.is_ok(),
                 elapsed_micros: elapsed_micros(started),
                 item_count: 1,
+                byte_count: 0,
+                fsync_micros: 0,
+                generation: self
+                    .store
+                    .storage_reclamation_watermark(oldest_reader_epoch)
+                    .checkpoint_epoch,
             });
         }
         result
+    }
+
+    pub fn backup_to(&mut self, destination: impl AsRef<Path>) -> Result<StorageBackupReport> {
+        self.ensure_writable()?;
+        self.store.backup_to(&self.catalog, destination)
+    }
+
+    pub fn restore_backup(
+        backup: impl AsRef<Path>,
+        destination: impl AsRef<Path>,
+    ) -> Result<StorageRestoreReport> {
+        restore_storage_backup(backup, destination)
     }
 
     pub fn storage_reclamation_watermark(&self) -> StorageReclamationWatermark {
@@ -6019,8 +6092,20 @@ impl Database {
         self.store.storage_recovery_report()
     }
 
+    pub fn storage_residency_report(&self) -> crate::store::StorageResidencyReport {
+        self.store.storage_residency_report()
+    }
+
+    pub fn segment_cache_snapshot(&self) -> Option<SegmentCacheSnapshot> {
+        self.store.segment_cache_snapshot()
+    }
+
     pub fn export_canonical_graph_snapshot(&self) -> CanonicalGraphSnapshotExport {
         export_canonical_graph_snapshot_for(&self.catalog, &self.store)
+    }
+
+    pub fn try_export_canonical_graph_snapshot(&self) -> Result<CanonicalGraphSnapshotExport> {
+        canonical_snapshot::try_export_canonical_graph_snapshot_for(&self.catalog, &self.store)
     }
 
     pub fn export_canonical_graph_snapshot_with_persisted_stable_ids(
@@ -6029,7 +6114,7 @@ impl Database {
         self.ensure_writable()?;
         let mapping = CanonicalStableIdMapping::from(self.store.ensure_stable_id_mapping()?);
         Ok(self
-            .export_canonical_graph_snapshot()
+            .try_export_canonical_graph_snapshot()?
             .with_stable_id_mapping(&mapping))
     }
 
@@ -6222,8 +6307,8 @@ impl Database {
                     applied: false,
                     ready_for_cutover: plan.ready_for_cutover,
                     graph_commit_epoch: self.store.commit_epoch(),
-                    node_count: self.store.scan_nodes(None).count(),
-                    relationship_count: self.store.scan_relationships(None).count(),
+                    node_count: self.store.basic_statistics().node_count as usize,
+                    relationship_count: self.store.basic_statistics().relationship_count as usize,
                     plan,
                     blocker_codes: Vec::new(),
                 });
@@ -6231,8 +6316,8 @@ impl Database {
             blocker_codes
                 .insert("graph_lightning_initial_import_source_fingerprint_mismatch".to_string());
         }
-        let target_empty = self.store.scan_nodes(None).next().is_none()
-            && self.store.scan_relationships(None).next().is_none();
+        let statistics = self.store.basic_statistics();
+        let target_empty = statistics.node_count == 0 && statistics.relationship_count == 0;
         if !target_empty {
             blocker_codes.insert("graph_lightning_initial_import_target_not_empty".to_string());
         }
@@ -6259,8 +6344,8 @@ impl Database {
                 applied: false,
                 ready_for_cutover: false,
                 graph_commit_epoch: self.store.commit_epoch(),
-                node_count: self.store.scan_nodes(None).count(),
-                relationship_count: self.store.scan_relationships(None).count(),
+                node_count: self.store.basic_statistics().node_count as usize,
+                relationship_count: self.store.basic_statistics().relationship_count as usize,
                 plan,
                 blocker_codes: blocker_codes.into_iter().collect(),
             });
@@ -6331,8 +6416,8 @@ impl Database {
             applied: true,
             ready_for_cutover: updated_plan.ready_for_cutover,
             graph_commit_epoch: self.store.commit_epoch(),
-            node_count: self.store.scan_nodes(None).count(),
-            relationship_count: self.store.scan_relationships(None).count(),
+            node_count: self.store.basic_statistics().node_count as usize,
+            relationship_count: self.store.basic_statistics().relationship_count as usize,
             plan: updated_plan,
             blocker_codes: Vec::new(),
         })
@@ -6422,6 +6507,24 @@ impl Database {
 
     pub fn statistics(&self) -> GraphStatistics {
         self.store.statistics()
+    }
+
+    pub fn refresh_optimizer_statistics_external(
+        &mut self,
+        options: &crate::store::OptimizerStatisticsRefreshOptions,
+    ) -> Result<crate::store::OptimizerStatisticsRefreshReport> {
+        self.ensure_writable()?;
+        let previous_statistics = self.store.checkpoint_statistics_snapshot();
+        let mut report = self.store.refresh_optimizer_statistics_external(options)?;
+        if let Err(error) = self.checkpoint() {
+            self.store
+                .replace_checkpoint_statistics(previous_statistics);
+            return Err(error);
+        }
+        report.checkpoint_persisted = true;
+        *self.plan_cache.borrow_mut() = PlanCache::new(self.config.max_plan_cache_entries);
+        self.optimizer_planning_cache.borrow_mut().invalidate();
+        Ok(report)
     }
 
     pub fn basic_statistics(&self) -> BasicGraphStatistics {
@@ -8037,7 +8140,7 @@ impl Database {
     pub fn knowledge_thread_sources(
         &self,
         request: &KnowledgeThreadSourceListRequest,
-    ) -> KnowledgeThreadSourceListOutput {
+    ) -> Result<KnowledgeThreadSourceListOutput> {
         knowledge_thread_sources_via_query_runtime(self, request)
     }
 
@@ -8359,7 +8462,7 @@ impl Database {
     pub fn knowledge_schema_migrations(
         &self,
         request: &KnowledgeSchemaMigrationListRequest,
-    ) -> KnowledgeSchemaMigrationListOutput {
+    ) -> Result<KnowledgeSchemaMigrationListOutput> {
         knowledge_schema_migrations_for(&self.catalog, &self.store, request)
     }
 
@@ -8541,14 +8644,14 @@ impl Database {
     pub fn knowledge_neighbors(
         &self,
         request: &KnowledgeNeighborsRequest,
-    ) -> KnowledgeNeighborsOutput {
+    ) -> Result<KnowledgeNeighborsOutput> {
         knowledge_neighbors_via_query_runtime(self, request)
     }
 
     pub fn knowledge_scoped_neighbors(
         &self,
         request: &KnowledgeScopedNeighborsRequest,
-    ) -> KnowledgeNeighborsOutput {
+    ) -> Result<KnowledgeNeighborsOutput> {
         knowledge_scoped_neighbors_via_query_runtime(self, request)
     }
 
@@ -8573,28 +8676,28 @@ impl Database {
         knowledge_induced_edges_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_paths(&self, request: &KnowledgePathRequest) -> KnowledgePathOutput {
+    pub fn knowledge_paths(&self, request: &KnowledgePathRequest) -> Result<KnowledgePathOutput> {
         knowledge_paths_via_query_runtime(self, request)
     }
 
     pub fn knowledge_scoped_paths(
         &self,
         request: &KnowledgeScopedPathRequest,
-    ) -> KnowledgePathOutput {
+    ) -> Result<KnowledgePathOutput> {
         knowledge_scoped_paths_via_query_runtime(self, request)
     }
 
     pub fn knowledge_subgraph(
         &self,
         request: &KnowledgeSubgraphRequest,
-    ) -> KnowledgeSubgraphOutput {
+    ) -> Result<KnowledgeSubgraphOutput> {
         knowledge_subgraph_via_query_runtime(self, request)
     }
 
     pub fn knowledge_scoped_subgraph(
         &self,
         request: &KnowledgeScopedSubgraphRequest,
-    ) -> KnowledgeSubgraphOutput {
+    ) -> Result<KnowledgeSubgraphOutput> {
         knowledge_scoped_subgraph_via_query_runtime(self, request)
     }
 
@@ -8687,14 +8790,14 @@ impl KnowledgeRetrievalGraphContext<'_> {
             &request.query_text,
             request.graph_seed_limit,
             &request.metadata_filters,
-        );
+        )?;
         let graph_context_search = self.expand_knowledge_context(
             &search,
             &graph_seed_search.seeds,
             request.graph_context_limit,
             request.graph_context_max_hops,
-        );
-        let evidence = self.knowledge_evidence_for_search(&search, &graph_context_search.paths);
+        )?;
+        let evidence = self.knowledge_evidence_for_search(&search, &graph_context_search.paths)?;
         let projection_freshness = search_index.projection_freshness();
         let graph_commit_epoch = self.store.commit_epoch();
         let retrievers = knowledge_retriever_reports(
@@ -8720,7 +8823,7 @@ impl KnowledgeRetrievalGraphContext<'_> {
                 &graph_context_search.paths,
                 request.candidate_limit,
                 request.candidate_scoring,
-            );
+            )?;
         let mut fanout_reason_details = graph_context_search.fanout_reason_details.clone();
         fanout_reason_details.extend(graph_seed_search.fanout_reason_details.clone());
         fanout_reason_details.extend(candidate_fanout_details);
@@ -8786,7 +8889,7 @@ impl KnowledgeRetrievalGraphContext<'_> {
         graph_seeds: &[KnowledgeGraphSeed],
         graph_context_limit: usize,
         graph_context_max_hops: usize,
-    ) -> KnowledgeGraphContextSearchOutput {
+    ) -> Result<KnowledgeGraphContextSearchOutput> {
         let mut paths = Vec::new();
         let mut fanout_reasons = Vec::new();
         let mut truncation_reasons = Vec::new();
@@ -8797,7 +8900,7 @@ impl KnowledgeRetrievalGraphContext<'_> {
 
         for hit in &search.hits {
             let Some(seed) =
-                self.seed_node_for_hit(hit.kind.as_deref(), hit.external_id.as_deref())
+                self.seed_node_for_hit(hit.kind.as_deref(), hit.external_id.as_deref())?
             else {
                 continue;
             };
@@ -8835,7 +8938,7 @@ impl KnowledgeRetrievalGraphContext<'_> {
                 current_node,
                 None,
                 KnowledgeNeighborDirection::Both,
-            ) {
+            )? {
                 if !seen_relationships.insert((seed_hit_id.clone(), edge.relationship.id.0)) {
                     continue;
                 }
@@ -8847,20 +8950,21 @@ impl KnowledgeRetrievalGraphContext<'_> {
                     truncation_reasons.push(detail.message.clone());
                     fanout_reasons.push(detail);
                     let expanded_relationship_count = paths.len();
-                    return KnowledgeGraphContextSearchOutput {
+                    return Ok(KnowledgeGraphContextSearchOutput {
                         paths,
                         input_seed_count,
                         expanded_relationship_count,
                         fanout_reason_details: fanout_reasons,
                         truncation_reasons,
-                    };
+                    });
                 }
                 let Some(path) = self.context_path_for_relationship(
                     &seed_hit_id,
                     depth + 1,
                     edge.direction,
-                    edge.relationship,
-                ) else {
+                    &edge.relationship,
+                )?
+                else {
                     continue;
                 };
                 paths.push(path);
@@ -8871,26 +8975,27 @@ impl KnowledgeRetrievalGraphContext<'_> {
         }
 
         let expanded_relationship_count = paths.len();
-        KnowledgeGraphContextSearchOutput {
+        Ok(KnowledgeGraphContextSearchOutput {
             paths,
             input_seed_count,
             expanded_relationship_count,
             fanout_reason_details: fanout_reasons,
             truncation_reasons,
-        }
+        })
     }
 
     fn seed_node_for_hit(
         &self,
         kind: Option<&str>,
         external_id: Option<&str>,
-    ) -> Option<&NodeRecord> {
-        let external_id = external_id?;
-        let label = kind.and_then(search_kind_to_label)?;
-        let label_id = self.catalog.label_id(label)?;
-        self.store
-            .scan_nodes(Some(label_id))
-            .find(|node| projected_node_external_id(node) == external_id)
+    ) -> Result<Option<NodeRecord>> {
+        let Some(external_id) = external_id else {
+            return Ok(None);
+        };
+        let Some(label) = kind.and_then(search_kind_to_label) else {
+            return Ok(None);
+        };
+        try_seed_node_by_label_and_external_id(self.catalog, self.store, label, external_id)
     }
 
     fn context_path_for_relationship(
@@ -8899,7 +9004,7 @@ impl KnowledgeRetrievalGraphContext<'_> {
         hop: usize,
         direction: KnowledgeGraphPathDirection,
         relationship: &RelRecord,
-    ) -> Option<KnowledgeGraphContextPath> {
+    ) -> Result<Option<KnowledgeGraphContextPath>> {
         context_path_for_relationship(
             self.catalog,
             self.store,
@@ -8918,38 +9023,36 @@ impl KnowledgeRetrievalGraphContext<'_> {
         &self,
         search: &SearchResultSet,
         graph_context_paths: &[KnowledgeGraphContextPath],
-    ) -> Vec<KnowledgeEvidence> {
-        search
-            .hits
-            .iter()
-            .map(|hit| {
-                let canonical_node_id = self
-                    .seed_node_for_hit(hit.kind.as_deref(), hit.external_id.as_deref())
-                    .map(|node| node.id.0);
-                let graph_context_path_count = graph_context_paths
-                    .iter()
-                    .filter(|path| path.seed_hit_id == hit.id)
-                    .count();
-                KnowledgeEvidence {
-                    hit_id: hit.id.clone(),
-                    kind: hit.kind.clone(),
-                    external_id: hit.external_id.clone(),
-                    source_id: hit.source_id.clone(),
-                    canonical_node_id,
-                    graph_context_path_count,
-                    matched_terms: hit.matched_terms.clone(),
-                    matched_spans: hit.matched_spans.clone(),
-                    score: hit.score,
-                    rrf_score: hit.rrf_score,
-                    vector_rrf_score: hit.vector_rrf_score,
-                    text_rrf_score: hit.text_rrf_score,
-                    vector_score: hit.vector_score,
-                    text_score: hit.text_score,
-                    vector_rank: hit.vector_rank,
-                    text_rank: hit.text_rank,
-                }
-            })
-            .collect()
+    ) -> Result<Vec<KnowledgeEvidence>> {
+        let mut evidence = Vec::with_capacity(search.hits.len());
+        for hit in &search.hits {
+            let canonical_node_id = self
+                .seed_node_for_hit(hit.kind.as_deref(), hit.external_id.as_deref())?
+                .map(|node| node.id.0);
+            let graph_context_path_count = graph_context_paths
+                .iter()
+                .filter(|path| path.seed_hit_id == hit.id)
+                .count();
+            evidence.push(KnowledgeEvidence {
+                hit_id: hit.id.clone(),
+                kind: hit.kind.clone(),
+                external_id: hit.external_id.clone(),
+                source_id: hit.source_id.clone(),
+                canonical_node_id,
+                graph_context_path_count,
+                matched_terms: hit.matched_terms.clone(),
+                matched_spans: hit.matched_spans.clone(),
+                score: hit.score,
+                rrf_score: hit.rrf_score,
+                vector_rrf_score: hit.vector_rrf_score,
+                text_rrf_score: hit.text_rrf_score,
+                vector_score: hit.vector_score,
+                text_score: hit.text_score,
+                vector_rank: hit.vector_rank,
+                text_rank: hit.text_rank,
+            });
+        }
+        Ok(evidence)
     }
 
     fn knowledge_candidates(
@@ -8960,36 +9063,32 @@ impl KnowledgeRetrievalGraphContext<'_> {
         graph_context_paths: &[KnowledgeGraphContextPath],
         candidate_limit: Option<usize>,
         scoring: KnowledgeCandidateScoringPolicy,
-    ) -> (
+    ) -> Result<(
         Vec<KnowledgeCandidate>,
         usize,
         Vec<KnowledgeFanoutReasonDetail>,
-    ) {
-        let mut candidates = search
-            .hits
-            .iter()
-            .zip(evidence.iter())
-            .enumerate()
-            .map(|(index, (hit, evidence))| {
-                let score_breakdown =
-                    knowledge_candidate_score_breakdown(Some(hit.score), None, scoring);
-                KnowledgeCandidate {
-                    id: hit.id.clone(),
-                    canonical_node_id: evidence.canonical_node_id,
-                    source: KnowledgeCandidateSource::SearchHit,
-                    source_rank: index + 1,
-                    merged_sources: vec![KnowledgeCandidateSource::SearchHit],
-                    score: score_breakdown.combined_score,
-                    score_breakdown,
-                    entity: self
-                        .seed_node_for_hit(hit.kind.as_deref(), hit.external_id.as_deref())
-                        .map(|node| self.knowledge_entity_from_node(node)),
-                    evidence: Some(evidence.clone()),
-                    matched_properties: Vec::new(),
-                    graph_context_path_count: evidence.graph_context_path_count,
-                }
-            })
-            .collect::<Vec<_>>();
+    )> {
+        let mut candidates = Vec::with_capacity(search.hits.len());
+        for (index, (hit, evidence)) in search.hits.iter().zip(evidence.iter()).enumerate() {
+            let score_breakdown =
+                knowledge_candidate_score_breakdown(Some(hit.score), None, scoring);
+            candidates.push(KnowledgeCandidate {
+                id: hit.id.clone(),
+                canonical_node_id: evidence.canonical_node_id,
+                source: KnowledgeCandidateSource::SearchHit,
+                source_rank: index + 1,
+                merged_sources: vec![KnowledgeCandidateSource::SearchHit],
+                score: score_breakdown.combined_score,
+                score_breakdown,
+                entity: self
+                    .seed_node_for_hit(hit.kind.as_deref(), hit.external_id.as_deref())?
+                    .as_ref()
+                    .map(|node| self.knowledge_entity_from_node(node)),
+                evidence: Some(evidence.clone()),
+                matched_properties: Vec::new(),
+                graph_context_path_count: evidence.graph_context_path_count,
+            });
+        }
 
         for (index, seed) in graph_seeds.iter().enumerate() {
             let seed_candidate_id = graph_seed_candidate_id(seed);
@@ -9058,7 +9157,7 @@ impl KnowledgeRetrievalGraphContext<'_> {
                 fanout_reasons.push(KnowledgeFanoutReasonDetail::candidate_limit(limit, total));
             }
         }
-        (candidates, total, fanout_reasons)
+        Ok((candidates, total, fanout_reasons))
     }
 
     fn search_knowledge_graph_seeds(
@@ -9066,40 +9165,52 @@ impl KnowledgeRetrievalGraphContext<'_> {
         query_text: &str,
         limit: usize,
         metadata_filters: &BTreeMap<String, String>,
-    ) -> KnowledgeGraphSeedSearchOutput {
+    ) -> Result<KnowledgeGraphSeedSearchOutput> {
         if limit == 0 {
-            return KnowledgeGraphSeedSearchOutput::default();
+            return Ok(KnowledgeGraphSeedSearchOutput::default());
         }
         let query_terms = knowledge_query_terms(query_text);
         if query_terms.is_empty() {
-            return KnowledgeGraphSeedSearchOutput::default();
+            return Ok(KnowledgeGraphSeedSearchOutput::default());
         }
         let normalized_query = query_text.trim().to_ascii_lowercase();
         let mut input_candidate_count = 0usize;
         let mut input_filtered_out_count = 0usize;
         let mut scored = Vec::new();
-        for node in self.store.scan_nodes(None) {
-            if !knowledge_graph_seed_matches_filters(
+        let mut scan_error = None;
+        self.store.visit_nodes_owned(None, |node| {
+            let matches = match try_knowledge_graph_seed_matches_filters(
                 self.catalog,
                 self.store,
-                node,
+                &node,
                 metadata_filters,
             ) {
+                Ok(matches) => matches,
+                Err(error) => {
+                    scan_error = Some(error);
+                    return crate::store::GraphScanControl::Stop;
+                }
+            };
+            if !matches {
                 input_filtered_out_count += 1;
-                continue;
+                return crate::store::GraphScanControl::Continue;
             }
             input_candidate_count += 1;
             if let Some(seed) = {
                 let (score, matched_properties) =
-                    graph_seed_score(node, &query_terms, &normalized_query);
+                    graph_seed_score(&node, &query_terms, &normalized_query);
                 (score > 0.0).then(|| KnowledgeGraphSeed {
-                    entity: self.knowledge_entity_from_node(node),
+                    entity: self.knowledge_entity_from_node(&node),
                     score,
                     matched_properties,
                 })
             } {
                 scored.push(seed);
             }
+            crate::store::GraphScanControl::Continue
+        })?;
+        if let Some(error) = scan_error {
+            return Err(error);
         }
 
         scored.sort_by(|left, right| {
@@ -9116,13 +9227,13 @@ impl KnowledgeRetrievalGraphContext<'_> {
         } else {
             Vec::new()
         };
-        KnowledgeGraphSeedSearchOutput {
+        Ok(KnowledgeGraphSeedSearchOutput {
             seeds: scored,
             input_candidate_count,
             input_filtered_out_count,
             candidate_count: total,
             fanout_reason_details: fanout_reasons,
-        }
+        })
     }
 }
 
@@ -9809,6 +9920,16 @@ fn knowledge_graph_seed_matches_filters(
     node: &NodeRecord,
     metadata_filters: &BTreeMap<String, String>,
 ) -> bool {
+    try_knowledge_graph_seed_matches_filters(catalog, store, node, metadata_filters)
+        .unwrap_or(false)
+}
+
+fn try_knowledge_graph_seed_matches_filters(
+    catalog: &Catalog,
+    store: &GraphStore,
+    node: &NodeRecord,
+    metadata_filters: &BTreeMap<String, String>,
+) -> Result<bool> {
     let pushdown = search_metadata_predicate_pushdown(metadata_filters);
     knowledge_graph_seed_matches_predicates(catalog, store, node, &pushdown.predicates)
 }
@@ -9818,14 +9939,16 @@ fn knowledge_graph_seed_matches_predicates(
     store: &GraphStore,
     node: &NodeRecord,
     predicates: &SearchPredicateSet,
-) -> bool {
+) -> Result<bool> {
     if predicates.is_unsatisfiable() {
-        return false;
+        return Ok(false);
     }
-    predicates
-        .predicates()
-        .iter()
-        .all(|predicate| knowledge_graph_seed_matches_predicate(catalog, store, node, predicate))
+    for predicate in predicates.predicates() {
+        if !knowledge_graph_seed_matches_predicate(catalog, store, node, predicate)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn knowledge_graph_seed_matches_predicate(
@@ -9833,10 +9956,10 @@ fn knowledge_graph_seed_matches_predicate(
     store: &GraphStore,
     node: &NodeRecord,
     predicate: &SearchPredicate,
-) -> bool {
-    match predicate.op() {
+) -> Result<bool> {
+    Ok(match predicate.op() {
         SearchPredicateOp::Eq(expected) => {
-            knowledge_graph_seed_filter_values(catalog, store, node, predicate.field().name())
+            knowledge_graph_seed_filter_values(catalog, store, node, predicate.field().name())?
                 .iter()
                 .any(|actual| {
                     knowledge_graph_seed_filter_value_matches(
@@ -9848,7 +9971,7 @@ fn knowledge_graph_seed_matches_predicate(
         }
         SearchPredicateOp::In(expected_values) => {
             let actual_values =
-                knowledge_graph_seed_filter_values(catalog, store, node, predicate.field().name());
+                knowledge_graph_seed_filter_values(catalog, store, node, predicate.field().name())?;
             actual_values.iter().any(|actual| {
                 expected_values.iter().any(|expected| {
                     knowledge_graph_seed_filter_value_matches(
@@ -9861,7 +9984,7 @@ fn knowledge_graph_seed_matches_predicate(
         }
         SearchPredicateOp::NotIn(excluded_values) => {
             let actual_values =
-                knowledge_graph_seed_filter_values(catalog, store, node, predicate.field().name());
+                knowledge_graph_seed_filter_values(catalog, store, node, predicate.field().name())?;
             actual_values.iter().all(|actual| {
                 excluded_values.iter().all(|excluded| {
                     !knowledge_graph_seed_filter_value_matches(
@@ -9897,14 +10020,14 @@ fn knowledge_graph_seed_matches_predicate(
             |actual, expected| actual <= expected,
         ),
         SearchPredicateOp::Exists => {
-            !knowledge_graph_seed_filter_values(catalog, store, node, predicate.field().name())
+            !knowledge_graph_seed_filter_values(catalog, store, node, predicate.field().name())?
                 .is_empty()
         }
         SearchPredicateOp::IsMissing => {
-            knowledge_graph_seed_filter_values(catalog, store, node, predicate.field().name())
+            knowledge_graph_seed_filter_values(catalog, store, node, predicate.field().name())?
                 .is_empty()
         }
-    }
+    })
 }
 
 fn knowledge_graph_seed_matches_numeric_filter(
@@ -9949,8 +10072,8 @@ fn knowledge_graph_seed_filter_values(
     store: &GraphStore,
     node: &NodeRecord,
     key: &str,
-) -> Vec<String> {
-    match key {
+) -> Result<Vec<String>> {
+    Ok(match key {
         "kind" => {
             let label = node
                 .labels
@@ -9961,46 +10084,64 @@ fn knowledge_graph_seed_filter_values(
         "external_id" => vec![projected_node_external_id(node)],
         "source_id" => node_projection_source_id(node).into_iter().collect(),
         "space_id" => vec![normalized_node_space_id(node)],
-        "labels" => knowledge_graph_seed_business_labels(catalog, store, node),
+        "labels" => knowledge_graph_seed_business_labels(catalog, store, node)?,
         _ => node
             .properties
             .get(key)
             .map(value_to_external_id)
             .into_iter()
             .collect(),
-    }
+    })
 }
 
 fn knowledge_graph_seed_business_labels(
     catalog: &Catalog,
     store: &GraphStore,
     node: &NodeRecord,
-) -> Vec<String> {
+) -> Result<Vec<String>> {
     let Some(has_label_type_id) = catalog.rel_type_id("HAS_LABEL") else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Some(label_label_id) = catalog.label_id("Label") else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    store
-        .scan_relationships(Some(has_label_type_id))
-        .filter_map(|relationship| {
-            let label_node_id = if relationship.source == node.id {
-                relationship.target
-            } else if relationship.target == node.id {
-                relationship.source
-            } else {
-                return None;
-            };
-            let label = store.node(label_node_id)?;
-            label
-                .labels
-                .contains(&label_label_id)
-                .then(|| first_non_empty_node_value(label, &["canonical_name", "name", "id"]))?
-        })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
+    let mut labels = BTreeSet::new();
+    let mut scan_error = None;
+    for direction in [AdjacencyDirection::Outgoing, AdjacencyDirection::Incoming] {
+        store.visit_adjacent_relationships_owned(
+            node.id,
+            Some(has_label_type_id),
+            direction,
+            |relationship| {
+                let label_node_id = match direction {
+                    AdjacencyDirection::Outgoing => relationship.target,
+                    AdjacencyDirection::Incoming => relationship.source,
+                };
+                let label = match store.node_owned(label_node_id) {
+                    Ok(Some(label)) => label,
+                    Ok(None) => return crate::store::GraphScanControl::Continue,
+                    Err(error) => {
+                        scan_error = Some(error);
+                        return crate::store::GraphScanControl::Stop;
+                    }
+                };
+                if label.labels.contains(&label_label_id)
+                    && let Some(value) =
+                        first_non_empty_node_value(&label, &["canonical_name", "name", "id"])
+                {
+                    labels.insert(value);
+                }
+                crate::store::GraphScanControl::Continue
+            },
+        )?;
+        if scan_error.is_some() {
+            break;
+        }
+    }
+    if let Some(error) = scan_error {
+        return Err(error);
+    }
+    Ok(labels.into_iter().collect())
 }
 
 fn first_non_empty_node_value(node: &NodeRecord, keys: &[&str]) -> Option<String> {
@@ -10059,42 +10200,42 @@ fn knowledge_entity_for(
     catalog: &Catalog,
     store: &GraphStore,
     request: &KnowledgeEntityRequest,
-) -> KnowledgeEntityOutput {
-    let entity = match knowledge_scoped_entity_match(catalog, store, request, &BTreeMap::new()) {
+) -> Result<KnowledgeEntityOutput> {
+    let entity = match knowledge_scoped_entity_match(catalog, store, request, &BTreeMap::new())? {
         KnowledgeScopedEntityMatch::Found(entity) => Some(entity),
         KnowledgeScopedEntityMatch::Missing | KnowledgeScopedEntityMatch::FilteredOut => None,
     };
-    KnowledgeEntityOutput {
+    Ok(KnowledgeEntityOutput {
         graph_commit_epoch: store.commit_epoch(),
         entity,
-    }
+    })
 }
 
 fn knowledge_scoped_entity_for(
     catalog: &Catalog,
     store: &GraphStore,
     request: &KnowledgeScopedEntityRequest,
-) -> KnowledgeEntityOutput {
+) -> Result<KnowledgeEntityOutput> {
     let entity = match knowledge_scoped_entity_match(
         catalog,
         store,
         &request.entity,
         &request.metadata_filters,
-    ) {
+    )? {
         KnowledgeScopedEntityMatch::Found(entity) => Some(entity),
         KnowledgeScopedEntityMatch::Missing | KnowledgeScopedEntityMatch::FilteredOut => None,
     };
-    KnowledgeEntityOutput {
+    Ok(KnowledgeEntityOutput {
         graph_commit_epoch: store.commit_epoch(),
         entity,
-    }
+    })
 }
 
 fn knowledge_entity_batch_for(
     catalog: &Catalog,
     store: &GraphStore,
     request: &KnowledgeEntityBatchRequest,
-) -> KnowledgeEntityBatchOutput {
+) -> Result<KnowledgeEntityBatchOutput> {
     knowledge_scoped_entity_batch_for(
         catalog,
         store,
@@ -10109,7 +10250,7 @@ fn knowledge_scoped_entity_batch_for(
     catalog: &Catalog,
     store: &GraphStore,
     request: &KnowledgeScopedEntityBatchRequest,
-) -> KnowledgeEntityBatchOutput {
+) -> Result<KnowledgeEntityBatchOutput> {
     let mut entities = Vec::with_capacity(request.entities.len());
     let mut found_count = 0;
     let mut missing_count = 0;
@@ -10120,7 +10261,7 @@ fn knowledge_scoped_entity_batch_for(
             store,
             entity_request,
             &request.metadata_filters,
-        ) {
+        )? {
             KnowledgeScopedEntityMatch::Found(entity) => {
                 found_count += 1;
                 entities.push(Some(entity));
@@ -10135,13 +10276,13 @@ fn knowledge_scoped_entity_batch_for(
             }
         }
     }
-    KnowledgeEntityBatchOutput {
+    Ok(KnowledgeEntityBatchOutput {
         graph_commit_epoch: store.commit_epoch(),
         entities,
         found_count,
         missing_count,
         filtered_out_count,
-    }
+    })
 }
 
 fn knowledge_memory_entities_for(
@@ -10158,7 +10299,8 @@ fn knowledge_memory_entities_for(
     let mut entity_count = 0;
 
     for memory_id in &request.memory_ids {
-        let Some(memory) = seed_node_by_label_and_external_id(catalog, store, "Memory", memory_id)
+        let Some(memory) =
+            try_seed_node_by_label_and_external_id(catalog, store, "Memory", memory_id)?
         else {
             missing_memory_count += 1;
             groups.push(KnowledgeMemoryEntityGroup {
@@ -10173,7 +10315,7 @@ fn knowledge_memory_entities_for(
         };
 
         found_memory_count += 1;
-        let mut rows = memory_entity_rows(catalog, store, memory.id);
+        let mut rows = memory_entity_rows(catalog, store, memory.id)?;
         let matched_count = rows.len();
         for name in rows
             .iter()
@@ -10332,24 +10474,30 @@ fn memory_entity_rows(
     catalog: &Catalog,
     store: &GraphStore,
     memory_node_id: NodeId,
-) -> Vec<KnowledgeMemoryEntityRow> {
+) -> Result<Vec<KnowledgeMemoryEntityRow>> {
     let Some(rel_type_id) = catalog.rel_type_id("MENTIONS") else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Some(entity_label_id) = catalog.label_id("Entity") else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    let mut rows = store
-        .outgoing_relationships(memory_node_id, rel_type_id)
-        .filter_map(|relationship| {
-            store
-                .node(relationship.target)
+    let mut rows = Vec::new();
+    store.try_visit_adjacent_relationships_owned(
+        memory_node_id,
+        Some(rel_type_id),
+        AdjacencyDirection::Outgoing,
+        |relationship| {
+            if let Some(entity) = store
+                .node_owned(relationship.target)?
                 .filter(|entity| entity.labels.contains(&entity_label_id))
-                .map(|entity| memory_entity_row(entity, relationship))
-        })
-        .collect::<Vec<_>>();
+            {
+                rows.push(memory_entity_row(&entity, &relationship));
+            }
+            Ok(crate::store::GraphScanControl::Continue)
+        },
+    )?;
     sort_memory_entity_rows(&mut rows);
-    rows
+    Ok(rows)
 }
 
 fn sort_memory_entity_rows(rows: &mut [KnowledgeMemoryEntityRow]) {
@@ -10433,10 +10581,13 @@ fn knowledge_entity_mention_counts_for(
         });
     };
 
-    let mut rows = store
-        .scan_nodes(Some(entity_label_id))
-        .filter_map(|entity| entity_mention_count_row(catalog, store, entity))
-        .collect::<Vec<_>>();
+    let mut rows = Vec::new();
+    store.try_visit_nodes_owned(Some(entity_label_id), |entity| {
+        if let Some(row) = entity_mention_count_row(catalog, store, &entity)? {
+            rows.push(row);
+        }
+        Ok(crate::store::GraphScanControl::Continue)
+    })?;
     rows.sort_by(compare_entity_mention_count_rows);
     if let Some(cursor) = &request.cursor {
         rows.retain(|row| {
@@ -10532,7 +10683,7 @@ fn knowledge_entity_delete_guard_for(
     }
     let graph_commit_epoch = store.commit_epoch();
     let Some(entity) =
-        seed_node_by_label_and_external_id(catalog, store, "Entity", &request.entity_id)
+        try_seed_node_by_label_and_external_id(catalog, store, "Entity", &request.entity_id)?
     else {
         return Ok(KnowledgeEntityDeleteGuardOutput {
             graph_commit_epoch,
@@ -10555,13 +10706,13 @@ fn knowledge_entity_delete_guard_for(
             store,
             entity.id,
             &request.excluded_memory_id,
-        ),
+        )?,
         label_relationship_count: entity_delete_guard_label_relationship_count(
             catalog, store, entity.id,
-        ),
+        )?,
         distinct_relationship_count: entity_delete_guard_distinct_relationship_count(
             store, entity.id,
-        ),
+        )?,
     })
 }
 
@@ -10690,74 +10841,103 @@ fn entity_delete_guard_other_memory_mentions(
     store: &GraphStore,
     entity_node_id: NodeId,
     excluded_memory_id: &str,
-) -> usize {
+) -> Result<usize> {
     let Some(mentions_type_id) = catalog.rel_type_id("MENTIONS") else {
-        return 0;
+        return Ok(0);
     };
     let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return 0;
+        return Ok(0);
     };
-    store
-        .incoming_relationships(entity_node_id, mentions_type_id)
-        .filter(|relationship| {
-            store
-                .node(relationship.source)
+    let mut count = 0usize;
+    store.try_visit_adjacent_relationships_owned(
+        entity_node_id,
+        Some(mentions_type_id),
+        AdjacencyDirection::Incoming,
+        |relationship| {
+            if store
+                .node_owned(relationship.source)?
                 .filter(|memory| memory.labels.contains(&memory_label_id))
+                .as_ref()
                 .and_then(node_external_id)
                 .is_some_and(|memory_id| memory_id != excluded_memory_id)
-        })
-        .count()
+            {
+                count = count.saturating_add(1);
+            }
+            Ok(crate::store::GraphScanControl::Continue)
+        },
+    )?;
+    Ok(count)
 }
 
 fn entity_delete_guard_label_relationship_count(
     catalog: &Catalog,
     store: &GraphStore,
     entity_node_id: NodeId,
-) -> usize {
+) -> Result<usize> {
     let Some(has_label_type_id) = catalog.rel_type_id("HAS_LABEL") else {
-        return 0;
+        return Ok(0);
     };
-    store
-        .scan_relationships(Some(has_label_type_id))
-        .filter(|relationship| {
-            relationship.source == entity_node_id || relationship.target == entity_node_id
-        })
-        .count()
+    let mut relationship_ids = BTreeSet::new();
+    for direction in [AdjacencyDirection::Outgoing, AdjacencyDirection::Incoming] {
+        store.visit_adjacent_relationships_owned(
+            entity_node_id,
+            Some(has_label_type_id),
+            direction,
+            |relationship| {
+                relationship_ids.insert(relationship.id);
+                crate::store::GraphScanControl::Continue
+            },
+        )?;
+    }
+    Ok(relationship_ids.len())
 }
 
 fn entity_delete_guard_distinct_relationship_count(
     store: &GraphStore,
     entity_node_id: NodeId,
-) -> usize {
-    let incident_relationships = store
-        .scan_relationships(None)
-        .filter(|relationship| {
-            relationship.source == entity_node_id || relationship.target == entity_node_id
-        })
-        .map(|relationship| relationship.id)
-        .collect::<BTreeSet<_>>();
-    let incoming_relationships = store
-        .scan_relationships(None)
-        .filter(|relationship| relationship.target == entity_node_id)
-        .map(|relationship| relationship.id)
-        .collect::<BTreeSet<_>>();
-    incident_relationships.len() + incoming_relationships.len()
+) -> Result<usize> {
+    let mut incident_relationships = BTreeSet::new();
+    let mut incoming_relationships = BTreeSet::new();
+    store.visit_adjacent_relationships_owned(
+        entity_node_id,
+        None,
+        AdjacencyDirection::Outgoing,
+        |relationship| {
+            incident_relationships.insert(relationship.id);
+            crate::store::GraphScanControl::Continue
+        },
+    )?;
+    store.visit_adjacent_relationships_owned(
+        entity_node_id,
+        None,
+        AdjacencyDirection::Incoming,
+        |relationship| {
+            incident_relationships.insert(relationship.id);
+            incoming_relationships.insert(relationship.id);
+            crate::store::GraphScanControl::Continue
+        },
+    )?;
+    Ok(incident_relationships.len() + incoming_relationships.len())
 }
 
 fn entity_mention_count_row(
     catalog: &Catalog,
     store: &GraphStore,
     entity: &NodeRecord,
-) -> Option<KnowledgeEntityMentionCountRow> {
-    let entity_id = node_external_id(entity)?;
-    let name = string_property(entity, "name")?;
-    Some(KnowledgeEntityMentionCountRow {
+) -> Result<Option<KnowledgeEntityMentionCountRow>> {
+    let Some(entity_id) = node_external_id(entity) else {
+        return Ok(None);
+    };
+    let Some(name) = string_property(entity, "name") else {
+        return Ok(None);
+    };
+    Ok(Some(KnowledgeEntityMentionCountRow {
         entity_id,
         node_id: entity.id.0,
         name,
         updated_at: entity.properties.get("updated_at").cloned(),
-        mention_count: memory_mention_count_for_entity(catalog, store, entity.id),
-    })
+        mention_count: memory_mention_count_for_entity(catalog, store, entity.id)?,
+    }))
 }
 
 fn knowledge_entity_mention_count_row_from_query(
@@ -10798,21 +10978,29 @@ fn memory_mention_count_for_entity(
     catalog: &Catalog,
     store: &GraphStore,
     entity_node_id: NodeId,
-) -> usize {
+) -> Result<usize> {
     let Some(rel_type_id) = catalog.rel_type_id("MENTIONS") else {
-        return 0;
+        return Ok(0);
     };
     let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return 0;
+        return Ok(0);
     };
-    store
-        .incoming_relationships(entity_node_id, rel_type_id)
-        .filter(|relationship| {
-            store
-                .node(relationship.source)
+    let mut count = 0usize;
+    store.try_visit_adjacent_relationships_owned(
+        entity_node_id,
+        Some(rel_type_id),
+        AdjacencyDirection::Incoming,
+        |relationship| {
+            if store
+                .node_owned(relationship.source)?
                 .is_some_and(|memory| memory.labels.contains(&memory_label_id))
-        })
-        .count()
+            {
+                count = count.saturating_add(1);
+            }
+            Ok(crate::store::GraphScanControl::Continue)
+        },
+    )?;
+    Ok(count)
 }
 
 fn compare_entity_mention_count_rows(
@@ -10849,35 +11037,37 @@ fn knowledge_community_entity_visibility_for(
     let mut matched_entity_count = 0;
     let mut rows = Vec::new();
 
-    for entity in store.scan_nodes(Some(entity_label_id)).filter(|entity| {
-        entity
+    store.try_visit_nodes_owned(Some(entity_label_id), |entity| {
+        if !entity
             .properties
             .get("community_id")
             .is_some_and(|community_id| community_ids.contains(community_id))
-    }) {
+        {
+            return Ok(crate::store::GraphScanControl::Continue);
+        }
         matched_entity_count += 1;
         let community_id = entity
             .properties
             .get("community_id")
             .cloned()
             .unwrap_or(Value::Null);
-        let memory_rows = mentions_type_id
-            .map(|rel_type_id| {
-                community_entity_visibility_memory_rows(
-                    store,
-                    memory_label_id,
-                    entity,
-                    rel_type_id,
-                    &community_id,
-                )
-            })
-            .unwrap_or_default();
+        let memory_rows = match mentions_type_id {
+            Some(rel_type_id) => community_entity_visibility_memory_rows(
+                store,
+                memory_label_id,
+                &entity,
+                rel_type_id,
+                &community_id,
+            )?,
+            None => Vec::new(),
+        };
         if memory_rows.is_empty() {
-            rows.push(community_entity_visibility_row(entity, None, community_id));
+            rows.push(community_entity_visibility_row(&entity, None, community_id));
         } else {
             rows.extend(memory_rows);
         }
-    }
+        Ok(crate::store::GraphScanControl::Continue)
+    })?;
 
     sort_community_entity_visibility_rows(&mut rows);
     let matched_row_count = rows.len();
@@ -11143,18 +11333,27 @@ fn community_entity_visibility_memory_rows(
     entity: &NodeRecord,
     rel_type_id: RelTypeId,
     community_id: &Value,
-) -> Vec<KnowledgeCommunityEntityVisibilityRow> {
-    store
-        .incoming_relationships(entity.id, rel_type_id)
-        .filter_map(|relationship| {
-            store
-                .node(relationship.source)
+) -> Result<Vec<KnowledgeCommunityEntityVisibilityRow>> {
+    let mut rows = Vec::new();
+    store.try_visit_adjacent_relationships_owned(
+        entity.id,
+        Some(rel_type_id),
+        AdjacencyDirection::Incoming,
+        |relationship| {
+            if let Some(memory) = store
+                .node_owned(relationship.source)?
                 .filter(|memory| memory.labels.contains(&memory_label_id))
-                .map(|memory| {
-                    community_entity_visibility_row(entity, Some(memory), community_id.clone())
-                })
-        })
-        .collect()
+            {
+                rows.push(community_entity_visibility_row(
+                    entity,
+                    Some(&memory),
+                    community_id.clone(),
+                ));
+            }
+            Ok(crate::store::GraphScanControl::Continue)
+        },
+    )?;
+    Ok(rows)
 }
 
 fn community_entity_visibility_row(
@@ -11227,7 +11426,7 @@ fn knowledge_community_memories_for(
             &community_ids,
             request.crystal_filter,
             &unit_types,
-        ));
+        )?);
     }
     if matches!(
         request.source,
@@ -11241,7 +11440,7 @@ fn knowledge_community_memories_for(
             &community_ids,
             request.crystal_filter,
             &unit_types,
-        ));
+        )?);
     }
 
     sort_community_memory_rows(&mut rows, request.order);
@@ -11452,52 +11651,63 @@ fn mentioned_community_memory_rows(
     community_ids: &BTreeSet<Value>,
     crystal_filter: KnowledgeCommunityMemoryCrystalFilter,
     unit_types: &Option<BTreeSet<String>>,
-) -> Vec<KnowledgeCommunityMemoryRow> {
+) -> Result<Vec<KnowledgeCommunityMemoryRow>> {
     let Some(entity_label_id) = catalog.label_id("Entity") else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Some(mentions_type_id) = catalog.rel_type_id("MENTIONS") else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let mut groups: BTreeMap<(Value, NodeId), KnowledgeCommunityMemoryAccumulator> =
         BTreeMap::new();
-    for entity in store.scan_nodes(Some(entity_label_id)).filter(|entity| {
-        entity
+    store.try_visit_nodes_owned(Some(entity_label_id), |entity| {
+        if !entity
             .properties
             .get("community_id")
             .is_some_and(|community_id| community_ids.contains(community_id))
-    }) {
+        {
+            return Ok(crate::store::GraphScanControl::Continue);
+        }
         let community_id = entity
             .properties
             .get("community_id")
             .cloned()
             .unwrap_or(Value::Null);
-        for relationship in store.incoming_relationships(entity.id, mentions_type_id) {
-            let Some(memory) = store
-                .node(relationship.source)
-                .filter(|memory| memory.labels.contains(&memory_label_id))
-                .filter(|memory| {
-                    memory_matches_community_memory_crystal_filter(memory, crystal_filter)
-                })
-                .filter(|memory| memory_matches_community_memory_unit_types(memory, unit_types))
-            else {
-                continue;
-            };
-            let accumulator = groups
-                .entry((community_id.clone(), memory.id))
-                .or_insert_with(|| KnowledgeCommunityMemoryAccumulator {
-                    community_id: community_id.clone(),
-                    memory: memory.clone(),
-                    entity_ids: BTreeSet::new(),
-                    mention_count: 0,
-                });
-            accumulator.mention_count += 1;
-            if let Some(entity_id) = node_external_id(entity) {
-                accumulator.entity_ids.insert(entity_id);
-            }
-        }
-    }
-    groups
+        store.try_visit_adjacent_relationships_owned(
+            entity.id,
+            Some(mentions_type_id),
+            AdjacencyDirection::Incoming,
+            |relationship| {
+                let Some(memory) = store
+                    .node_owned(relationship.source)?
+                    .filter(|memory| memory.labels.contains(&memory_label_id))
+                    .filter(|memory| {
+                        memory_matches_community_memory_crystal_filter(memory, crystal_filter)
+                    })
+                    .filter(|memory| {
+                        memory_matches_community_memory_unit_types(memory, unit_types)
+                    })
+                else {
+                    return Ok(crate::store::GraphScanControl::Continue);
+                };
+                let accumulator = groups
+                    .entry((community_id.clone(), memory.id))
+                    .or_insert_with(|| KnowledgeCommunityMemoryAccumulator {
+                        community_id: community_id.clone(),
+                        memory,
+                        entity_ids: BTreeSet::new(),
+                        mention_count: 0,
+                    });
+                accumulator.mention_count += 1;
+                if let Some(entity_id) = node_external_id(&entity) {
+                    accumulator.entity_ids.insert(entity_id);
+                }
+                Ok(crate::store::GraphScanControl::Continue)
+            },
+        )?;
+        Ok(crate::store::GraphScanControl::Continue)
+    })?;
+    Ok(groups
         .into_values()
         .map(|accumulator| {
             let entity_ids = accumulator.entity_ids.into_iter().collect::<Vec<_>>();
@@ -11514,7 +11724,7 @@ fn mentioned_community_memory_rows(
                 entity_ids,
             )
         })
-        .collect()
+        .collect())
 }
 
 fn direct_community_memory_rows(
@@ -11524,33 +11734,28 @@ fn direct_community_memory_rows(
     community_ids: &BTreeSet<Value>,
     crystal_filter: KnowledgeCommunityMemoryCrystalFilter,
     unit_types: &Option<BTreeSet<String>>,
-) -> Vec<KnowledgeCommunityMemoryRow> {
-    store
-        .scan_nodes(Some(memory_label_id))
-        .filter(|memory| {
-            memory
-                .properties
-                .get("community_id")
-                .is_some_and(|community_id| community_ids.contains(community_id))
-                && memory_matches_community_memory_crystal_filter(memory, crystal_filter)
-                && memory_matches_community_memory_unit_types(memory, unit_types)
-        })
-        .filter_map(|memory| {
-            memory
-                .properties
-                .get("community_id")
-                .cloned()
-                .map(|community_id| {
-                    knowledge_community_memory_row(
-                        memory,
-                        community_id,
-                        KnowledgeCommunityMemoryRowSource::DirectMemoryCommunity,
-                        0,
-                        Vec::new(),
-                    )
-                })
-        })
-        .collect()
+) -> Result<Vec<KnowledgeCommunityMemoryRow>> {
+    let mut rows = Vec::new();
+    store.visit_nodes_owned(Some(memory_label_id), |memory| {
+        if memory
+            .properties
+            .get("community_id")
+            .is_some_and(|community_id| community_ids.contains(community_id))
+            && memory_matches_community_memory_crystal_filter(&memory, crystal_filter)
+            && memory_matches_community_memory_unit_types(&memory, unit_types)
+            && let Some(community_id) = memory.properties.get("community_id").cloned()
+        {
+            rows.push(knowledge_community_memory_row(
+                &memory,
+                community_id,
+                KnowledgeCommunityMemoryRowSource::DirectMemoryCommunity,
+                0,
+                Vec::new(),
+            ));
+        }
+        crate::store::GraphScanControl::Continue
+    })?;
+    Ok(rows)
 }
 
 fn memory_matches_community_memory_crystal_filter(
@@ -11745,13 +11950,13 @@ fn knowledge_related_entity_names_for(
         KnowledgeRelatedEntityNameScope::MemoryIds(memory_ids) => {
             for memory_id in memory_ids {
                 let Some(memory) =
-                    seed_node_by_label_and_external_id(catalog, store, "Memory", memory_id)
+                    try_seed_node_by_label_and_external_id(catalog, store, "Memory", memory_id)?
                 else {
                     missing_memory_ids.push(memory_id.clone());
                     continue;
                 };
                 matched_memory_count += 1;
-                collect_entity_names_for_memory(catalog, store, memory.id, &mut entity_names);
+                collect_entity_names_for_memory(catalog, store, memory.id, &mut entity_names)?;
             }
         }
         KnowledgeRelatedEntityNameScope::Thread {
@@ -11759,14 +11964,14 @@ fn knowledge_related_entity_names_for(
             identity_property,
         } => {
             if let Some(thread) =
-                thread_node_by_identity(catalog, store, identity_property, thread_id)
+                thread_node_by_identity(catalog, store, identity_property, thread_id)?
             {
                 thread_node_id = Some(thread.id.0);
                 found_thread = Some(true);
-                let memory_ids = compacted_memory_node_ids_for_thread(catalog, store, thread.id);
+                let memory_ids = compacted_memory_node_ids_for_thread(catalog, store, thread.id)?;
                 matched_memory_count = memory_ids.len();
                 for memory_id in memory_ids {
-                    collect_entity_names_for_memory(catalog, store, memory_id, &mut entity_names);
+                    collect_entity_names_for_memory(catalog, store, memory_id, &mut entity_names)?;
                 }
             } else {
                 found_thread = Some(false);
@@ -11984,22 +12189,29 @@ fn compacted_memory_node_ids_for_thread(
     catalog: &Catalog,
     store: &GraphStore,
     thread_node_id: NodeId,
-) -> Vec<NodeId> {
+) -> Result<Vec<NodeId>> {
     let Some(rel_type_id) = catalog.rel_type_id("COMPACTS_TO") else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    store
-        .outgoing_relationships(thread_node_id, rel_type_id)
-        .filter_map(|relationship| {
-            store
-                .node(relationship.target)
+    let mut memory_ids = Vec::new();
+    store.try_visit_adjacent_relationships_owned(
+        thread_node_id,
+        Some(rel_type_id),
+        AdjacencyDirection::Outgoing,
+        |relationship| {
+            if let Some(memory) = store
+                .node_owned(relationship.target)?
                 .filter(|memory| memory.labels.contains(&memory_label_id))
-                .map(|memory| memory.id)
-        })
-        .collect()
+            {
+                memory_ids.push(memory.id);
+            }
+            Ok(crate::store::GraphScanControl::Continue)
+        },
+    )?;
+    Ok(memory_ids)
 }
 
 fn collect_entity_names_for_memory(
@@ -12007,23 +12219,31 @@ fn collect_entity_names_for_memory(
     store: &GraphStore,
     memory_node_id: NodeId,
     entity_names: &mut BTreeSet<String>,
-) {
+) -> Result<()> {
     let Some(rel_type_id) = catalog.rel_type_id("MENTIONS") else {
-        return;
+        return Ok(());
     };
     let Some(entity_label_id) = catalog.label_id("Entity") else {
-        return;
+        return Ok(());
     };
-    for relationship in store.outgoing_relationships(memory_node_id, rel_type_id) {
-        if let Some(name) = store
-            .node(relationship.target)
-            .filter(|entity| entity.labels.contains(&entity_label_id))
-            .and_then(|entity| string_property(entity, "name"))
-            .filter(|name| !name.is_empty())
-        {
-            entity_names.insert(name);
-        }
-    }
+    store.try_visit_adjacent_relationships_owned(
+        memory_node_id,
+        Some(rel_type_id),
+        AdjacencyDirection::Outgoing,
+        |relationship| {
+            if let Some(name) = store
+                .node_owned(relationship.target)?
+                .filter(|entity| entity.labels.contains(&entity_label_id))
+                .as_ref()
+                .and_then(|entity| string_property(entity, "name"))
+                .filter(|name| !name.is_empty())
+            {
+                entity_names.insert(name);
+            }
+            Ok(crate::store::GraphScanControl::Continue)
+        },
+    )?;
+    Ok(())
 }
 
 fn knowledge_context_memory_preview_via_query_runtime(
@@ -12486,11 +12706,15 @@ fn knowledge_memory_cleanup_fingerprints_for(
         });
     };
     let requested_ids = ordered_memory_ids.iter().cloned().collect::<BTreeSet<_>>();
-    let matched_memories = store
-        .scan_nodes(Some(memory_label_id))
-        .filter_map(|memory| node_external_id(memory).map(|memory_id| (memory_id, memory)))
-        .filter(|(memory_id, _memory)| requested_ids.contains(memory_id))
-        .collect::<BTreeMap<_, _>>();
+    let mut matched_memories = BTreeMap::new();
+    store.visit_nodes_owned(Some(memory_label_id), |memory| {
+        if let Some(memory_id) = node_external_id(&memory)
+            && requested_ids.contains(&memory_id)
+        {
+            matched_memories.insert(memory_id, memory);
+        }
+        crate::store::GraphScanControl::Continue
+    })?;
     let mut rows = Vec::with_capacity(matched_memories.len());
     let mut missing_memory_ids = Vec::new();
     for memory_id in ordered_memory_ids {
@@ -12655,17 +12879,18 @@ fn knowledge_memory_metadata_related_projected_list_for(
     };
 
     let markers = metadata_related_memory_markers(&request.source_id);
-    let mut rows = store
-        .scan_nodes(Some(memory_label_id))
-        .filter(|memory| normalized_node_space_id(memory) == request.normalized_space_id)
-        .filter(|memory| memory_metadata_contains_any(memory, &markers))
-        .map(|memory| {
-            (
-                knowledge_memory_projected_row(memory, &request.property_names),
+    let mut rows = Vec::new();
+    store.visit_nodes_owned(Some(memory_label_id), |memory| {
+        if normalized_node_space_id(&memory) == request.normalized_space_id
+            && memory_metadata_contains_any(&memory, &markers)
+        {
+            rows.push((
+                knowledge_memory_projected_row(&memory, &request.property_names),
                 memory.properties.get("created_at").cloned(),
-            )
-        })
-        .collect::<Vec<_>>();
+            ));
+        }
+        crate::store::GraphScanControl::Continue
+    })?;
     rows.sort_by(|left, right| {
         compare_skill_memory_created_at(
             &left.1,
@@ -12933,20 +13158,20 @@ fn knowledge_memory_prefix_ownership_for(
         });
     };
 
-    let mut rows = store
-        .scan_nodes(Some(memory_label_id))
-        .filter_map(|memory| {
-            let memory_id = node_external_id(memory)?;
-            memory_id
-                .starts_with(&request.prefix)
-                .then(|| KnowledgeMemoryPrefixOwnershipRow {
-                    memory_id,
-                    memory_node_id: memory.id.0,
-                    raw_space_id: memory.properties.get("space_id").map(value_to_external_id),
-                    normalized_space_id: normalized_node_space_id(memory),
-                })
-        })
-        .collect::<Vec<_>>();
+    let mut rows = Vec::new();
+    store.visit_nodes_owned(Some(memory_label_id), |memory| {
+        if let Some(memory_id) = node_external_id(&memory)
+            && memory_id.starts_with(&request.prefix)
+        {
+            rows.push(KnowledgeMemoryPrefixOwnershipRow {
+                memory_id,
+                memory_node_id: memory.id.0,
+                raw_space_id: memory.properties.get("space_id").map(value_to_external_id),
+                normalized_space_id: normalized_node_space_id(&memory),
+            });
+        }
+        crate::store::GraphScanControl::Continue
+    })?;
     rows.sort_by(|left, right| {
         left.memory_id
             .cmp(&right.memory_id)
@@ -13057,19 +13282,19 @@ fn knowledge_memory_title_contents_for(
 
     let requested_ids = request.memory_ids.iter().cloned().collect::<BTreeSet<_>>();
     let mut matched_ids = BTreeSet::new();
-    let mut rows = store
-        .scan_nodes(Some(memory_label_id))
-        .filter(|memory| {
-            node_external_id(memory).is_some_and(|memory_id| {
-                let matched = requested_ids.contains(&memory_id);
-                if matched {
-                    matched_ids.insert(memory_id);
-                }
-                matched
-            })
-        })
-        .map(knowledge_memory_title_content_row)
-        .collect::<Vec<_>>();
+    let mut rows = Vec::new();
+    store.visit_nodes_owned(Some(memory_label_id), |memory| {
+        if node_external_id(&memory).is_some_and(|memory_id| {
+            let matched = requested_ids.contains(&memory_id);
+            if matched {
+                matched_ids.insert(memory_id);
+            }
+            matched
+        }) {
+            rows.push(knowledge_memory_title_content_row(&memory));
+        }
+        crate::store::GraphScanControl::Continue
+    })?;
     rows.sort_by(|left, right| {
         compare_skill_memory_created_at(
             &left.created_at,
@@ -13235,18 +13460,19 @@ fn knowledge_memory_evolves_latest_for(
         .cloned()
         .collect::<BTreeSet<_>>();
     let mut matched_old_ids = BTreeSet::new();
-    let old_memories = store
-        .scan_nodes(Some(memory_label_id))
-        .filter(|memory| {
-            node_external_id(memory).is_some_and(|memory_id| {
-                let matched = requested_ids.contains(&memory_id);
-                if matched {
-                    matched_old_ids.insert(memory_id);
-                }
-                matched
-            })
-        })
-        .collect::<Vec<_>>();
+    let mut old_memories = Vec::new();
+    store.visit_nodes_owned(Some(memory_label_id), |memory| {
+        if node_external_id(&memory).is_some_and(|memory_id| {
+            let matched = requested_ids.contains(&memory_id);
+            if matched {
+                matched_old_ids.insert(memory_id);
+            }
+            matched
+        }) {
+            old_memories.push(memory);
+        }
+        crate::store::GraphScanControl::Continue
+    })?;
 
     let mut seen_missing = BTreeSet::new();
     let missing_old_memory_ids = request
@@ -13271,24 +13497,30 @@ fn knowledge_memory_evolves_latest_for(
     let mut distinct_rows = BTreeMap::new();
     let mut matched_relationship_count = 0;
     for old_memory in old_memories {
-        for relationship in store.outgoing_relationships(old_memory.id, evolves_type_id) {
-            let Some(new_memory) = store.node(relationship.target) else {
-                continue;
-            };
-            if !new_memory.labels.contains(&memory_label_id) {
-                continue;
-            }
-            matched_relationship_count += 1;
-            let new_memory_id = node_external_id(new_memory);
-            let new_is_latest = boolean_property(new_memory, "is_latest");
-            distinct_rows
-                .entry((new_memory_id.clone(), new_is_latest))
-                .or_insert_with(|| KnowledgeMemoryEvolvesLatestRow {
-                    new_memory_id,
-                    new_node_id: new_memory.id.0,
-                    new_is_latest,
-                });
-        }
+        store.try_visit_adjacent_relationships_owned(
+            old_memory.id,
+            Some(evolves_type_id),
+            AdjacencyDirection::Outgoing,
+            |relationship| {
+                let Some(new_memory) = store
+                    .node_owned(relationship.target)?
+                    .filter(|memory| memory.labels.contains(&memory_label_id))
+                else {
+                    return Ok(crate::store::GraphScanControl::Continue);
+                };
+                matched_relationship_count += 1;
+                let new_memory_id = node_external_id(&new_memory);
+                let new_is_latest = boolean_property(&new_memory, "is_latest");
+                distinct_rows
+                    .entry((new_memory_id.clone(), new_is_latest))
+                    .or_insert_with(|| KnowledgeMemoryEvolvesLatestRow {
+                        new_memory_id,
+                        new_node_id: new_memory.id.0,
+                        new_is_latest,
+                    });
+                Ok(crate::store::GraphScanControl::Continue)
+            },
+        )?;
     }
 
     let mut rows = distinct_rows.into_values().collect::<Vec<_>>();
@@ -13457,18 +13689,19 @@ fn knowledge_memory_evolves_relation_counts_for(
         .cloned()
         .collect::<BTreeSet<_>>();
     let mut matched_ids = BTreeSet::new();
-    let memories = store
-        .scan_nodes(Some(memory_label_id))
-        .filter(|memory| {
-            node_external_id(memory).is_some_and(|memory_id| {
-                let matched = requested_ids.contains(&memory_id);
-                if matched {
-                    matched_ids.insert(memory_id);
-                }
-                matched
-            })
-        })
-        .collect::<Vec<_>>();
+    let mut memories = Vec::new();
+    store.visit_nodes_owned(Some(memory_label_id), |memory| {
+        if node_external_id(&memory).is_some_and(|memory_id| {
+            let matched = requested_ids.contains(&memory_id);
+            if matched {
+                matched_ids.insert(memory_id);
+            }
+            matched
+        }) {
+            memories.push(memory);
+        }
+        crate::store::GraphScanControl::Continue
+    })?;
 
     let mut seen_missing = BTreeSet::new();
     let missing_memory_ids = request
@@ -13493,27 +13726,32 @@ fn knowledge_memory_evolves_relation_counts_for(
     let mut matched_relationship_count = 0;
     let mut rows = Vec::new();
     for memory in memories {
-        let count = store
-            .outgoing_relationships(memory.id, evolves_type_id)
-            .filter(|relationship| {
-                store
-                    .node(relationship.target)
-                    .is_some_and(|target| target.labels.contains(&memory_label_id))
-            })
-            .filter(|relationship| {
-                relationship
+        let mut count = 0usize;
+        store.try_visit_adjacent_relationships_owned(
+            memory.id,
+            Some(evolves_type_id),
+            AdjacencyDirection::Outgoing,
+            |relationship| {
+                let target_is_memory = store
+                    .node_owned(relationship.target)?
+                    .is_some_and(|target| target.labels.contains(&memory_label_id));
+                let relation_matches = relationship
                     .properties
                     .get("content_relation")
                     .and_then(|value| match value {
                         Value::String(relation) => Some(relation),
                         _ => None,
                     })
-                    .is_some_and(|relation| relation_filter.contains(relation))
-            })
-            .count();
+                    .is_some_and(|relation| relation_filter.contains(relation));
+                if target_is_memory && relation_matches {
+                    count = count.saturating_add(1);
+                }
+                Ok(crate::store::GraphScanControl::Continue)
+            },
+        )?;
         matched_relationship_count += count;
         if count > 0
-            && let Some(memory_id) = node_external_id(memory)
+            && let Some(memory_id) = node_external_id(&memory)
         {
             rows.push(KnowledgeMemoryEvolvesRelationCountRow {
                 memory_id,
@@ -13717,18 +13955,19 @@ fn knowledge_memory_crystal_synthesis_counts_for(
 
     let requested_ids = request.memory_ids.iter().cloned().collect::<BTreeSet<_>>();
     let mut matched_ids = BTreeSet::new();
-    let memories = store
-        .scan_nodes(Some(memory_label_id))
-        .filter(|memory| {
-            node_external_id(memory).is_some_and(|memory_id| {
-                let matched = requested_ids.contains(&memory_id);
-                if matched {
-                    matched_ids.insert(memory_id);
-                }
-                matched
-            })
-        })
-        .collect::<Vec<_>>();
+    let mut memories = Vec::new();
+    store.visit_nodes_owned(Some(memory_label_id), |memory| {
+        if node_external_id(&memory).is_some_and(|memory_id| {
+            let matched = requested_ids.contains(&memory_id);
+            if matched {
+                matched_ids.insert(memory_id);
+            }
+            matched
+        }) {
+            memories.push(memory);
+        }
+        crate::store::GraphScanControl::Continue
+    })?;
 
     let mut seen_missing = BTreeSet::new();
     let missing_memory_ids = request
@@ -13753,18 +13992,25 @@ fn knowledge_memory_crystal_synthesis_counts_for(
     let mut matched_relationship_count = 0;
     let mut rows = Vec::new();
     for memory in memories {
-        let count = store
-            .incoming_relationships(memory.id, synthesized_from_type_id)
-            .filter(|relationship| {
-                store
-                    .node(relationship.source)
+        let mut count = 0usize;
+        store.try_visit_adjacent_relationships_owned(
+            memory.id,
+            Some(synthesized_from_type_id),
+            AdjacencyDirection::Incoming,
+            |relationship| {
+                if store
+                    .node_owned(relationship.source)?
                     .filter(|crystal| crystal.labels.contains(&memory_label_id))
-                    .is_some_and(|crystal| boolean_property(crystal, "is_crystal") == Some(true))
-            })
-            .count();
+                    .is_some_and(|crystal| boolean_property(&crystal, "is_crystal") == Some(true))
+                {
+                    count = count.saturating_add(1);
+                }
+                Ok(crate::store::GraphScanControl::Continue)
+            },
+        )?;
         matched_relationship_count += count;
         if count > 0
-            && let Some(memory_id) = node_external_id(memory)
+            && let Some(memory_id) = node_external_id(&memory)
         {
             rows.push(KnowledgeMemoryCrystalSynthesisCountRow {
                 memory_id,
@@ -13922,10 +14168,16 @@ fn knowledge_memory_evolves_neighbors_for(
             returned_count: 0,
         });
     };
-    let Some(anchor) = store
-        .scan_nodes(Some(memory_label_id))
-        .find(|memory| node_external_id(memory).as_deref() == Some(request.memory_id.as_str()))
-    else {
+    let mut anchor = None;
+    store.visit_nodes_owned(Some(memory_label_id), |memory| {
+        if node_external_id(&memory).as_deref() == Some(request.memory_id.as_str()) {
+            anchor = Some(memory);
+            crate::store::GraphScanControl::Stop
+        } else {
+            crate::store::GraphScanControl::Continue
+        }
+    })?;
+    let Some(anchor) = anchor else {
         return Ok(KnowledgeMemoryEvolvesNeighborOutput {
             graph_commit_epoch,
             anchor_found: false,
@@ -13951,39 +14203,55 @@ fn knowledge_memory_evolves_neighbors_for(
         request.direction,
         KnowledgeNeighborDirection::Outgoing | KnowledgeNeighborDirection::Both
     ) {
-        rows.extend(
-            store
-                .outgoing_relationships(anchor.id, evolves_type_id)
-                .filter_map(|relationship| {
-                    knowledge_memory_evolves_neighbor_row(
-                        anchor,
-                        relationship,
+        rows.extend({
+            let mut outgoing_rows = Vec::new();
+            store.try_visit_adjacent_relationships_owned(
+                anchor.id,
+                Some(evolves_type_id),
+                AdjacencyDirection::Outgoing,
+                |relationship| {
+                    if let Some(row) = knowledge_memory_evolves_neighbor_row(
+                        &anchor,
+                        &relationship,
                         relationship.target,
                         memory_label_id,
                         store,
                         request,
-                    )
-                }),
-        );
+                    )? {
+                        outgoing_rows.push(row);
+                    }
+                    Ok(crate::store::GraphScanControl::Continue)
+                },
+            )?;
+            outgoing_rows
+        });
     }
     if matches!(
         request.direction,
         KnowledgeNeighborDirection::Incoming | KnowledgeNeighborDirection::Both
     ) {
-        rows.extend(
-            store
-                .incoming_relationships(anchor.id, evolves_type_id)
-                .filter_map(|relationship| {
-                    knowledge_memory_evolves_neighbor_row(
-                        anchor,
-                        relationship,
+        rows.extend({
+            let mut incoming_rows = Vec::new();
+            store.try_visit_adjacent_relationships_owned(
+                anchor.id,
+                Some(evolves_type_id),
+                AdjacencyDirection::Incoming,
+                |relationship| {
+                    if let Some(row) = knowledge_memory_evolves_neighbor_row(
+                        &anchor,
+                        &relationship,
                         relationship.source,
                         memory_label_id,
                         store,
                         request,
-                    )
-                }),
-        );
+                    )? {
+                        incoming_rows.push(row);
+                    }
+                    Ok(crate::store::GraphScanControl::Continue)
+                },
+            )?;
+            incoming_rows
+        });
     }
     rows.sort_by(|left, right| {
         left.neighbor_memory_id
@@ -14151,7 +14419,7 @@ fn knowledge_memory_evolves_projected_successors_for(
 
     for old_memory_id in &request.old_memory_ids {
         let Some(old_memory) =
-            seed_node_by_label_and_external_id(catalog, store, "Memory", old_memory_id)
+            try_seed_node_by_label_and_external_id(catalog, store, "Memory", old_memory_id)?
         else {
             missing_old_memory_count += 1;
             groups.push(KnowledgeMemoryEvolvesProjectedSuccessorGroup {
@@ -14166,22 +14434,21 @@ fn knowledge_memory_evolves_projected_successors_for(
         };
 
         found_old_memory_count += 1;
-        let (group_matched_relationship_count, mut rows) = evolves_type_id
-            .map(|rel_type_id| {
-                memory_evolves_projected_successor_rows(
-                    store,
-                    old_memory,
-                    memory_label_id,
-                    rel_type_id,
-                    MemoryEvolvesProjectedSuccessorReadSpec {
-                        order: request.order,
-                        page_cursor: page_cursors.get(old_memory_id).copied(),
-                        new_memory_property_names: &request.new_memory_property_names,
-                        relationship_property_names: &request.relationship_property_names,
-                    },
-                )
-            })
-            .unwrap_or_default();
+        let (group_matched_relationship_count, mut rows) = match evolves_type_id {
+            Some(rel_type_id) => memory_evolves_projected_successor_rows(
+                store,
+                &old_memory,
+                memory_label_id,
+                rel_type_id,
+                MemoryEvolvesProjectedSuccessorReadSpec {
+                    order: request.order,
+                    page_cursor: page_cursors.get(old_memory_id).copied(),
+                    new_memory_property_names: &request.new_memory_property_names,
+                    relationship_property_names: &request.relationship_property_names,
+                },
+            )?,
+            None => (0, Vec::new()),
+        };
         if request.limit_per_old_memory > 0 {
             rows.truncate(request.limit_per_old_memory);
         }
@@ -14418,14 +14685,20 @@ fn knowledge_memory_evolves_neighbor_row(
     memory_label_id: LabelId,
     store: &GraphStore,
     request: &KnowledgeMemoryEvolvesNeighborRequest,
-) -> Option<KnowledgeMemoryEvolvesNeighborRow> {
-    let neighbor = store
-        .node(neighbor_id)
-        .filter(|node| node.labels.contains(&memory_label_id))?;
-    Some(KnowledgeMemoryEvolvesNeighborRow {
-        anchor_memory_id: node_external_id(anchor)?,
+) -> Result<Option<KnowledgeMemoryEvolvesNeighborRow>> {
+    let Some(neighbor) = store
+        .node_owned(neighbor_id)?
+        .filter(|node| node.labels.contains(&memory_label_id))
+    else {
+        return Ok(None);
+    };
+    let Some(anchor_memory_id) = node_external_id(anchor) else {
+        return Ok(None);
+    };
+    Ok(Some(KnowledgeMemoryEvolvesNeighborRow {
+        anchor_memory_id,
         anchor_node_id: anchor.id.0,
-        neighbor_memory_id: node_external_id(neighbor),
+        neighbor_memory_id: node_external_id(&neighbor),
         neighbor_node_id: neighbor.id.0,
         neighbor_properties: projected_properties(
             &neighbor.properties,
@@ -14436,7 +14709,7 @@ fn knowledge_memory_evolves_neighbor_row(
             &relationship.properties,
             &request.relationship_property_names,
         ),
-    })
+    }))
 }
 
 fn knowledge_memory_evolves_neighbor_row_from_query(
@@ -14591,26 +14864,30 @@ fn memory_evolves_projected_successor_rows(
     memory_label_id: LabelId,
     evolves_type_id: RelTypeId,
     spec: MemoryEvolvesProjectedSuccessorReadSpec<'_>,
-) -> (usize, Vec<KnowledgeMemoryEvolvesProjectedSuccessorRow>) {
-    let mut rows = store
-        .outgoing_relationships(old_memory.id, evolves_type_id)
-        .filter_map(|relationship| {
-            store
-                .node(relationship.target)
+) -> Result<(usize, Vec<KnowledgeMemoryEvolvesProjectedSuccessorRow>)> {
+    let mut rows = Vec::new();
+    store.try_visit_adjacent_relationships_owned(
+        old_memory.id,
+        Some(evolves_type_id),
+        AdjacencyDirection::Outgoing,
+        |relationship| {
+            if let Some(new_memory) = store
+                .node_owned(relationship.target)?
                 .filter(|new_memory| new_memory.labels.contains(&memory_label_id))
-                .map(|new_memory| {
-                    (
-                        memory_evolves_projected_successor_row(
-                            new_memory,
-                            relationship,
-                            spec.new_memory_property_names,
-                            spec.relationship_property_names,
-                        ),
-                        new_memory.properties.get("updated_at").cloned(),
-                    )
-                })
-        })
-        .collect::<Vec<_>>();
+            {
+                rows.push((
+                    memory_evolves_projected_successor_row(
+                        &new_memory,
+                        &relationship,
+                        spec.new_memory_property_names,
+                        spec.relationship_property_names,
+                    ),
+                    new_memory.properties.get("updated_at").cloned(),
+                ));
+            }
+            Ok(crate::store::GraphScanControl::Continue)
+        },
+    )?;
     rows.sort_by(|left, right| {
         compare_memory_evolves_projected_successor_rows(left, right, spec.order)
     });
@@ -14620,10 +14897,10 @@ fn memory_evolves_projected_successor_rows(
             memory_evolves_projected_successor_is_after_cursor(row, page_cursor, spec.order)
         });
     }
-    (
+    Ok((
         matched_relationship_count,
         rows.into_iter().map(|(row, _)| row).collect(),
-    )
+    ))
 }
 
 fn compare_memory_evolves_projected_successor_rows(
@@ -14856,12 +15133,15 @@ fn knowledge_crystals_for(
         });
     };
 
-    let mut rows = store
-        .scan_nodes(Some(memory_label_id))
-        .filter(|memory| boolean_property(memory, "is_crystal") == Some(true))
-        .filter(|memory| memory_matches_crystal_list(memory, request))
-        .map(knowledge_crystal_row)
-        .collect::<Vec<_>>();
+    let mut rows = Vec::new();
+    store.visit_nodes_owned(Some(memory_label_id), |memory| {
+        if boolean_property(&memory, "is_crystal") == Some(true)
+            && memory_matches_crystal_list(&memory, request)
+        {
+            rows.push(knowledge_crystal_row(&memory));
+        }
+        crate::store::GraphScanControl::Continue
+    })?;
     sort_crystal_rows(&mut rows, request);
     let matched_count = rows.len();
     if request.limit > 0 {
@@ -15159,45 +15439,59 @@ fn knowledge_crystal_communities_for(
     let mut groups: BTreeMap<(NodeId, Value), KnowledgeCrystalCommunityAccumulator> =
         BTreeMap::new();
 
-    for crystal in store
-        .scan_nodes(Some(memory_label_id))
-        .filter(|memory| boolean_property(memory, "is_crystal") == Some(true))
-    {
-        for source_rel in store.outgoing_relationships(crystal.id, synthesized_from_type_id) {
-            let Some(source_memory) = store
-                .node(source_rel.target)
-                .filter(|node| node.labels.contains(&memory_label_id))
-            else {
-                continue;
-            };
-            for mention_rel in store.outgoing_relationships(source_memory.id, mentions_type_id) {
-                let Some(entity) = store
-                    .node(mention_rel.target)
-                    .filter(|node| node.labels.contains(&entity_label_id))
-                else {
-                    continue;
-                };
-                let Some(community_id) = entity.properties.get("community_id").cloned() else {
-                    continue;
-                };
-                if community_id == Value::Null
-                    || !crystal_community_scope_matches(&community_id, &community_filter)
-                {
-                    continue;
-                }
-                matched_path_count += 1;
-                let accumulator = groups
-                    .entry((crystal.id, community_id.clone()))
-                    .or_insert_with(|| KnowledgeCrystalCommunityAccumulator {
-                        row: knowledge_crystal_community_row(crystal, community_id),
-                        source_memory_ids: BTreeSet::new(),
-                    });
-                accumulator.row.hit_count += 1;
-                accumulator.source_memory_ids.insert(source_memory.id.0);
-                accumulator.row.source_memory_count = accumulator.source_memory_ids.len();
-            }
+    store.try_visit_nodes_owned(Some(memory_label_id), |crystal| {
+        if boolean_property(&crystal, "is_crystal") != Some(true) {
+            return Ok(crate::store::GraphScanControl::Continue);
         }
-    }
+        store.try_visit_adjacent_relationships_owned(
+            crystal.id,
+            Some(synthesized_from_type_id),
+            AdjacencyDirection::Outgoing,
+            |source_rel| {
+                let Some(source_memory) = store
+                    .node_owned(source_rel.target)?
+                    .filter(|node| node.labels.contains(&memory_label_id))
+                else {
+                    return Ok(crate::store::GraphScanControl::Continue);
+                };
+                store.try_visit_adjacent_relationships_owned(
+                    source_memory.id,
+                    Some(mentions_type_id),
+                    AdjacencyDirection::Outgoing,
+                    |mention_rel| {
+                        let Some(entity) = store
+                            .node_owned(mention_rel.target)?
+                            .filter(|node| node.labels.contains(&entity_label_id))
+                        else {
+                            return Ok(crate::store::GraphScanControl::Continue);
+                        };
+                        let Some(community_id) = entity.properties.get("community_id").cloned()
+                        else {
+                            return Ok(crate::store::GraphScanControl::Continue);
+                        };
+                        if community_id == Value::Null
+                            || !crystal_community_scope_matches(&community_id, &community_filter)
+                        {
+                            return Ok(crate::store::GraphScanControl::Continue);
+                        }
+                        matched_path_count += 1;
+                        let accumulator = groups
+                            .entry((crystal.id, community_id.clone()))
+                            .or_insert_with(|| KnowledgeCrystalCommunityAccumulator {
+                                row: knowledge_crystal_community_row(&crystal, community_id),
+                                source_memory_ids: BTreeSet::new(),
+                            });
+                        accumulator.row.hit_count += 1;
+                        accumulator.source_memory_ids.insert(source_memory.id.0);
+                        accumulator.row.source_memory_count = accumulator.source_memory_ids.len();
+                        Ok(crate::store::GraphScanControl::Continue)
+                    },
+                )?;
+                Ok(crate::store::GraphScanControl::Continue)
+            },
+        )?;
+        Ok(crate::store::GraphScanControl::Continue)
+    })?;
 
     let mut rows = groups
         .into_values()
@@ -15473,39 +15767,52 @@ fn knowledge_crystal_source_visibility_for(
         .cloned()
         .collect::<BTreeSet<_>>();
     let mut rows = Vec::new();
-    for crystal in store
-        .scan_nodes(Some(memory_label_id))
-        .filter(|memory| boolean_property(memory, "is_crystal") == Some(true))
-    {
-        for source_rel in store.outgoing_relationships(crystal.id, synthesized_from_type_id) {
-            let Some(source_memory) = store
-                .node(source_rel.target)
-                .filter(|node| node.labels.contains(&memory_label_id))
-            else {
-                continue;
-            };
-            for mention_rel in store.outgoing_relationships(source_memory.id, mentions_type_id) {
-                let Some(entity) = store
-                    .node(mention_rel.target)
-                    .filter(|node| node.labels.contains(&entity_label_id))
-                else {
-                    continue;
-                };
-                let Some(community_id) = entity.properties.get("community_id").cloned() else {
-                    continue;
-                };
-                if !community_ids.contains(&community_id) {
-                    continue;
-                }
-                rows.push(knowledge_crystal_source_visibility_row(
-                    crystal,
-                    source_memory,
-                    entity,
-                    community_id,
-                ));
-            }
+    store.try_visit_nodes_owned(Some(memory_label_id), |crystal| {
+        if boolean_property(&crystal, "is_crystal") != Some(true) {
+            return Ok(crate::store::GraphScanControl::Continue);
         }
-    }
+        store.try_visit_adjacent_relationships_owned(
+            crystal.id,
+            Some(synthesized_from_type_id),
+            AdjacencyDirection::Outgoing,
+            |source_rel| {
+                let Some(source_memory) = store
+                    .node_owned(source_rel.target)?
+                    .filter(|node| node.labels.contains(&memory_label_id))
+                else {
+                    return Ok(crate::store::GraphScanControl::Continue);
+                };
+                store.try_visit_adjacent_relationships_owned(
+                    source_memory.id,
+                    Some(mentions_type_id),
+                    AdjacencyDirection::Outgoing,
+                    |mention_rel| {
+                        let Some(entity) = store
+                            .node_owned(mention_rel.target)?
+                            .filter(|node| node.labels.contains(&entity_label_id))
+                        else {
+                            return Ok(crate::store::GraphScanControl::Continue);
+                        };
+                        let Some(community_id) = entity.properties.get("community_id").cloned()
+                        else {
+                            return Ok(crate::store::GraphScanControl::Continue);
+                        };
+                        if community_ids.contains(&community_id) {
+                            rows.push(knowledge_crystal_source_visibility_row(
+                                &crystal,
+                                &source_memory,
+                                &entity,
+                                community_id,
+                            ));
+                        }
+                        Ok(crate::store::GraphScanControl::Continue)
+                    },
+                )?;
+                Ok(crate::store::GraphScanControl::Continue)
+            },
+        )?;
+        Ok(crate::store::GraphScanControl::Continue)
+    })?;
 
     sort_crystal_source_visibility_rows(&mut rows);
     let matched_path_count = rows.len();
@@ -15724,30 +16031,36 @@ fn knowledge_synthesized_source_coverage_for(
         .collect::<BTreeSet<_>>();
     let mut rows = Vec::new();
 
-    for crystal in store
-        .scan_nodes(Some(memory_label_id))
-        .filter(|memory| boolean_property(memory, "is_crystal") == Some(true))
-    {
-        let mut matched_source_memory_ids = BTreeSet::new();
-        for source_rel in store.outgoing_relationships(crystal.id, synthesized_from_type_id) {
-            let Some(source_memory_id) = store
-                .node(source_rel.target)
-                .filter(|node| node.labels.contains(&memory_label_id))
-                .and_then(node_external_id)
-            else {
-                continue;
-            };
-            if source_memory_ids.contains(&source_memory_id) {
-                matched_source_memory_ids.insert(source_memory_id);
-            }
+    store.try_visit_nodes_owned(Some(memory_label_id), |crystal| {
+        if boolean_property(&crystal, "is_crystal") != Some(true) {
+            return Ok(crate::store::GraphScanControl::Continue);
         }
+        let mut matched_source_memory_ids = BTreeSet::new();
+        store.try_visit_adjacent_relationships_owned(
+            crystal.id,
+            Some(synthesized_from_type_id),
+            AdjacencyDirection::Outgoing,
+            |source_rel| {
+                if let Some(source_memory_id) = store
+                    .node_owned(source_rel.target)?
+                    .filter(|node| node.labels.contains(&memory_label_id))
+                    .as_ref()
+                    .and_then(node_external_id)
+                    .filter(|source_memory_id| source_memory_ids.contains(source_memory_id))
+                {
+                    matched_source_memory_ids.insert(source_memory_id);
+                }
+                Ok(crate::store::GraphScanControl::Continue)
+            },
+        )?;
         if matched_source_memory_ids.len() == request.required_covered_count {
             rows.push(knowledge_synthesized_source_coverage_row(
-                crystal,
+                &crystal,
                 matched_source_memory_ids.into_iter().collect(),
             ));
         }
-    }
+        Ok(crate::store::GraphScanControl::Continue)
+    })?;
 
     sort_synthesized_source_coverage_rows(&mut rows);
     let matched_candidate_count = rows.len();
@@ -15947,7 +16260,7 @@ fn knowledge_synthesized_source_ids_for(
 
     for crystal_memory_id in &request.crystal_memory_ids {
         let Some(crystal) =
-            seed_node_by_label_and_external_id(catalog, store, "Memory", crystal_memory_id)
+            try_seed_node_by_label_and_external_id(catalog, store, "Memory", crystal_memory_id)?
         else {
             missing_crystal_count += 1;
             rows.push(KnowledgeSynthesizedSourceIdsRow {
@@ -15964,7 +16277,7 @@ fn knowledge_synthesized_source_ids_for(
             crystal_memory_id: crystal_memory_id.clone(),
             crystal_node_id: Some(crystal.id.0),
             found_crystal: true,
-            source_memory_ids: synthesized_source_ids_for_crystal(catalog, store, crystal),
+            source_memory_ids: synthesized_source_ids_for_crystal(catalog, store, &crystal)?,
         });
     }
 
@@ -16089,25 +16402,32 @@ fn synthesized_source_ids_for_crystal(
     catalog: &Catalog,
     store: &GraphStore,
     crystal: &NodeRecord,
-) -> Vec<String> {
+) -> Result<Vec<String>> {
     let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Some(synthesized_from_type_id) = catalog.rel_type_id("SYNTHESIZED_FROM") else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
 
-    store
-        .outgoing_relationships(crystal.id, synthesized_from_type_id)
-        .filter_map(|relationship| {
-            store
-                .node(relationship.target)
+    let mut source_ids = BTreeSet::new();
+    store.try_visit_adjacent_relationships_owned(
+        crystal.id,
+        Some(synthesized_from_type_id),
+        AdjacencyDirection::Outgoing,
+        |relationship| {
+            if let Some(source_id) = store
+                .node_owned(relationship.target)?
                 .filter(|node| node.labels.contains(&memory_label_id))
+                .as_ref()
                 .and_then(node_external_id)
-        })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
+            {
+                source_ids.insert(source_id);
+            }
+            Ok(crate::store::GraphScanControl::Continue)
+        },
+    )?;
+    Ok(source_ids.into_iter().collect())
 }
 
 enum KnowledgeScopedEntityMatch {
@@ -16121,21 +16441,24 @@ fn knowledge_scoped_entity_match(
     store: &GraphStore,
     request: &KnowledgeEntityRequest,
     metadata_filters: &BTreeMap<String, String>,
-) -> KnowledgeScopedEntityMatch {
-    let Some(node) = seed_node_by_label_and_external_id(
+) -> Result<KnowledgeScopedEntityMatch> {
+    let Some(node) = try_seed_node_by_label_and_external_id(
         catalog,
         store,
         request.label.as_str(),
         request.external_id.as_str(),
-    ) else {
-        return KnowledgeScopedEntityMatch::Missing;
+    )?
+    else {
+        return Ok(KnowledgeScopedEntityMatch::Missing);
     };
     if !metadata_filters.is_empty()
-        && !knowledge_graph_seed_matches_filters(catalog, store, node, metadata_filters)
+        && !knowledge_graph_seed_matches_filters(catalog, store, &node, metadata_filters)
     {
-        return KnowledgeScopedEntityMatch::FilteredOut;
+        return Ok(KnowledgeScopedEntityMatch::FilteredOut);
     }
-    KnowledgeScopedEntityMatch::Found(knowledge_entity_from_node(catalog, node))
+    Ok(KnowledgeScopedEntityMatch::Found(
+        knowledge_entity_from_node(catalog, &node),
+    ))
 }
 
 fn create_knowledge_entity_for(
@@ -16146,12 +16469,12 @@ fn create_knowledge_entity_for(
     validate_knowledge_entity_create(request)?;
 
     let graph_commit_epoch_before = db.store.commit_epoch();
-    if let Some(existing) = seed_node_by_label_and_external_id(
+    if let Some(existing) = try_seed_node_by_label_and_external_id(
         &db.catalog,
         &db.store,
         request.label.as_str(),
         request.external_id.as_str(),
-    ) {
+    )? {
         return Ok(KnowledgeEntityCreateOutput {
             graph_commit_epoch_before,
             graph_commit_epoch_after: graph_commit_epoch_before,
@@ -16166,12 +16489,12 @@ fn create_knowledge_entity_for(
     let output = db.query_with_params(cypher.as_str(), &parameters)?;
     let created_node_count = output.rows.len();
     let created = created_node_count > 0;
-    let node_id = seed_node_by_label_and_external_id(
+    let node_id = try_seed_node_by_label_and_external_id(
         &db.catalog,
         &db.store,
         request.label.as_str(),
         request.external_id.as_str(),
-    )
+    )?
     .map(|node| node.id.0);
     Ok(KnowledgeEntityCreateOutput {
         graph_commit_epoch_before,
@@ -16200,12 +16523,12 @@ fn create_knowledge_entity_batch_for(
     let mut pending_identities = BTreeSet::new();
 
     for create in &request.creates {
-        if let Some(existing) = seed_node_by_label_and_external_id(
+        if let Some(existing) = try_seed_node_by_label_and_external_id(
             &db.catalog,
             &db.store,
             create.label.as_str(),
             create.external_id.as_str(),
-        ) {
+        )? {
             already_exists_count += 1;
             rows.push(KnowledgeEntityCreateBatchRow {
                 label: create.label.clone(),
@@ -16259,12 +16582,12 @@ fn create_knowledge_entity_batch_for(
     let output = tx.commit()?;
     for row in &mut rows {
         if row.created {
-            row.node_id = seed_node_by_label_and_external_id(
+            row.node_id = try_seed_node_by_label_and_external_id(
                 &db.catalog,
                 &db.store,
                 row.label.as_str(),
                 row.external_id.as_str(),
-            )
+            )?
             .map(|node| node.id.0);
         }
     }
@@ -16331,14 +16654,14 @@ fn upsert_knowledge_entity_for(
 
     let graph_commit_epoch_before = db.store.commit_epoch();
     let update_properties = knowledge_entity_upsert_update_properties(request);
-    if let Some(existing) = seed_node_by_label_and_external_id(
+    if let Some(existing) = try_seed_node_by_label_and_external_id(
         &db.catalog,
         &db.store,
         request.label.as_str(),
         request.external_id.as_str(),
-    ) {
+    )? {
         let node_id = existing.id.0;
-        if !node_has_external_id_property(existing, request.external_id.as_str()) {
+        if !node_has_external_id_property(&existing, request.external_id.as_str()) {
             return Ok(KnowledgeEntityUpsertOutput {
                 graph_commit_epoch_before,
                 graph_commit_epoch_after: graph_commit_epoch_before,
@@ -16386,12 +16709,12 @@ fn upsert_knowledge_entity_for(
     let create = knowledge_entity_upsert_create_request(request);
     let (cypher, parameters) = knowledge_entity_create_statement(&create);
     let output = db.query_with_params(cypher.as_str(), &parameters)?;
-    let node_id = seed_node_by_label_and_external_id(
+    let node_id = try_seed_node_by_label_and_external_id(
         &db.catalog,
         &db.store,
         request.label.as_str(),
         request.external_id.as_str(),
-    )
+    )?
     .map(|node| node.id.0);
     Ok(KnowledgeEntityUpsertOutput {
         graph_commit_epoch_before,
@@ -16427,15 +16750,15 @@ fn upsert_knowledge_entity_batch_for(
     let mut pending_identities = BTreeSet::new();
 
     for upsert in &request.upserts {
-        if let Some(existing) = seed_node_by_label_and_external_id(
+        if let Some(existing) = try_seed_node_by_label_and_external_id(
             &db.catalog,
             &db.store,
             upsert.label.as_str(),
             upsert.external_id.as_str(),
-        ) {
+        )? {
             let node_id = existing.id.0;
             already_exists_count += 1;
-            if !node_has_external_id_property(existing, upsert.external_id.as_str()) {
+            if !node_has_external_id_property(&existing, upsert.external_id.as_str()) {
                 non_writable_count += 1;
                 rows.push(KnowledgeEntityUpsertBatchRow {
                     label: upsert.label.clone(),
@@ -16537,12 +16860,12 @@ fn upsert_knowledge_entity_batch_for(
     tx.commit()?;
     for row in &mut rows {
         if row.created {
-            row.node_id = seed_node_by_label_and_external_id(
+            row.node_id = try_seed_node_by_label_and_external_id(
                 &db.catalog,
                 &db.store,
                 row.label.as_str(),
                 row.external_id.as_str(),
-            )
+            )?
             .map(|node| node.id.0);
         }
     }
@@ -16622,7 +16945,7 @@ fn knowledge_property_batch_for(
     catalog: &Catalog,
     store: &GraphStore,
     request: &KnowledgePropertyBatchRequest,
-) -> KnowledgePropertyBatchOutput {
+) -> Result<KnowledgePropertyBatchOutput> {
     knowledge_scoped_property_batch_for(
         catalog,
         store,
@@ -16637,19 +16960,19 @@ fn knowledge_scoped_property_batch_for(
     catalog: &Catalog,
     store: &GraphStore,
     request: &KnowledgeScopedPropertyBatchRequest,
-) -> KnowledgePropertyBatchOutput {
+) -> Result<KnowledgePropertyBatchOutput> {
     let property_names = dedup_property_names(&request.projection.property_names);
     let mut rows = Vec::with_capacity(request.projection.entities.len());
     let mut found_count = 0;
     let mut missing_count = 0;
     let mut filtered_out_count = 0;
     for entity_request in &request.projection.entities {
-        let node = seed_node_by_label_and_external_id(
+        let node = try_seed_node_by_label_and_external_id(
             catalog,
             store,
             entity_request.label.as_str(),
             entity_request.external_id.as_str(),
-        );
+        )?;
         let Some(node) = node else {
             missing_count += 1;
             rows.push(KnowledgePropertyRow {
@@ -16664,7 +16987,7 @@ fn knowledge_scoped_property_batch_for(
             && !knowledge_graph_seed_matches_filters(
                 catalog,
                 store,
-                node,
+                &node,
                 &request.metadata_filters,
             )
         {
@@ -16682,17 +17005,17 @@ fn knowledge_scoped_property_batch_for(
             entity: entity_request.clone(),
             node_id: Some(node.id.0),
             filtered_out: false,
-            properties: project_node_properties(node, &property_names),
+            properties: project_node_properties(&node, &property_names),
         });
     }
-    KnowledgePropertyBatchOutput {
+    Ok(KnowledgePropertyBatchOutput {
         graph_commit_epoch: store.commit_epoch(),
         rows,
         found_count,
         missing_count,
         filtered_out_count,
         property_names,
-    }
+    })
 }
 
 fn dedup_property_names(property_names: &[String]) -> Vec<String> {
@@ -16769,12 +17092,13 @@ fn update_scoped_knowledge_properties_for(
     }
 
     let graph_commit_epoch_before = db.store.commit_epoch();
-    let Some(seed) = seed_node_by_label_and_external_id(
+    let Some(seed) = try_seed_node_by_label_and_external_id(
         &db.catalog,
         &db.store,
         request.update.entity.label.as_str(),
         request.update.entity.external_id.as_str(),
-    ) else {
+    )?
+    else {
         return Ok(KnowledgePropertyUpdateOutput {
             graph_commit_epoch_before,
             graph_commit_epoch_after: graph_commit_epoch_before,
@@ -16788,7 +17112,7 @@ fn update_scoped_knowledge_properties_for(
         && !knowledge_graph_seed_matches_filters(
             &db.catalog,
             &db.store,
-            seed,
+            &seed,
             &request.metadata_filters,
         )
     {
@@ -16879,12 +17203,13 @@ fn update_scoped_knowledge_properties_batch_for(
     let mut eligible_updates = Vec::new();
 
     for update in &request.updates {
-        let Some(seed) = seed_node_by_label_and_external_id(
+        let Some(seed) = try_seed_node_by_label_and_external_id(
             &db.catalog,
             &db.store,
             update.entity.label.as_str(),
             update.entity.external_id.as_str(),
-        ) else {
+        )?
+        else {
             missing_count += 1;
             rows.push(KnowledgePropertyUpdateBatchRow {
                 entity: update.entity.clone(),
@@ -16897,7 +17222,7 @@ fn update_scoped_knowledge_properties_batch_for(
             continue;
         };
         let node_id = seed.id.0;
-        if !node_has_external_id_property(seed, update.entity.external_id.as_str()) {
+        if !node_has_external_id_property(&seed, update.entity.external_id.as_str()) {
             non_writable_count += 1;
             rows.push(KnowledgePropertyUpdateBatchRow {
                 entity: update.entity.clone(),
@@ -16913,7 +17238,7 @@ fn update_scoped_knowledge_properties_batch_for(
             && !knowledge_graph_seed_matches_filters(
                 &db.catalog,
                 &db.store,
-                seed,
+                &seed,
                 &request.metadata_filters,
             )
         {
@@ -17003,13 +17328,14 @@ fn move_knowledge_normalized_space_batch_for(
     let mut pending_node_ids = BTreeSet::new();
 
     for external_id in &request.external_ids {
-        let Some(node) = node_by_label_property_external_id(
+        let Some(node) = try_node_by_label_property_external_id(
             &db.catalog,
             &db.store,
             request.label.as_str(),
             request.identity_property.as_str(),
             external_id.as_str(),
-        ) else {
+        )?
+        else {
             missing_count += 1;
             rows.push(KnowledgeNormalizedSpaceMoveBatchRow {
                 external_id: external_id.clone(),
@@ -17024,7 +17350,7 @@ fn move_knowledge_normalized_space_batch_for(
         };
         matched_count += 1;
         let node_id = node.id.0;
-        let normalized_space_id = normalized_node_space_id(node);
+        let normalized_space_id = normalized_node_space_id(&node);
         if request
             .source_space_id
             .as_deref()
@@ -17156,8 +17482,12 @@ fn touch_knowledge_memory_access_batch_for(
     let mut eligible_touches = BTreeMap::new();
 
     for touch in &request.touches {
-        let Some(seed) =
-            seed_node_by_label_and_external_id(&db.catalog, &db.store, "Memory", &touch.memory_id)
+        let Some(seed) = try_seed_node_by_label_and_external_id(
+            &db.catalog,
+            &db.store,
+            "Memory",
+            &touch.memory_id,
+        )?
         else {
             missing_count += 1;
             rows.push(KnowledgeMemoryAccessBatchRow {
@@ -17171,7 +17501,7 @@ fn touch_knowledge_memory_access_batch_for(
             continue;
         };
         let node_id = seed.id.0;
-        if !node_has_external_id_property(seed, touch.memory_id.as_str()) {
+        if !node_has_external_id_property(&seed, touch.memory_id.as_str()) {
             non_writable_count += 1;
             rows.push(KnowledgeMemoryAccessBatchRow {
                 memory_id: touch.memory_id.clone(),
@@ -17317,8 +17647,12 @@ fn update_knowledge_memory_content_batch_for(
     let mut eligible_updates = Vec::new();
 
     for update in &request.updates {
-        let Some(seed) =
-            seed_node_by_label_and_external_id(&db.catalog, &db.store, "Memory", &update.memory_id)
+        let Some(seed) = try_seed_node_by_label_and_external_id(
+            &db.catalog,
+            &db.store,
+            "Memory",
+            &update.memory_id,
+        )?
         else {
             missing_count += 1;
             rows.push(KnowledgeMemoryContentBatchRow {
@@ -17333,7 +17667,7 @@ fn update_knowledge_memory_content_batch_for(
             continue;
         };
         let node_id = seed.id;
-        if !node_has_external_id_property(seed, update.memory_id.as_str()) {
+        if !node_has_external_id_property(&seed, update.memory_id.as_str()) {
             non_writable_count += 1;
             rows.push(KnowledgeMemoryContentBatchRow {
                 memory_id: update.memory_id.clone(),
@@ -17513,8 +17847,12 @@ fn update_knowledge_memory_metadata_batch_for(
     let mut eligible_updates = Vec::new();
 
     for update in &request.updates {
-        let Some(seed) =
-            seed_node_by_label_and_external_id(&db.catalog, &db.store, "Memory", &update.memory_id)
+        let Some(seed) = try_seed_node_by_label_and_external_id(
+            &db.catalog,
+            &db.store,
+            "Memory",
+            &update.memory_id,
+        )?
         else {
             missing_count += 1;
             rows.push(KnowledgeMemoryMetadataBatchRow {
@@ -17529,7 +17867,7 @@ fn update_knowledge_memory_metadata_batch_for(
             continue;
         };
         let node_id = seed.id;
-        if !node_has_external_id_property(seed, update.memory_id.as_str()) {
+        if !node_has_external_id_property(&seed, update.memory_id.as_str()) {
             non_writable_count += 1;
             rows.push(KnowledgeMemoryMetadataBatchRow {
                 memory_id: update.memory_id.clone(),
@@ -17633,7 +17971,7 @@ fn update_knowledge_memory_dedup_reviewed_batch_for(
 
     for memory_id in &request.memory_ids {
         let Some(seed) =
-            seed_node_by_label_and_external_id(&db.catalog, &db.store, "Memory", memory_id)
+            try_seed_node_by_label_and_external_id(&db.catalog, &db.store, "Memory", memory_id)?
         else {
             missing_count += 1;
             rows.push(KnowledgeMemoryDedupReviewedBatchRow {
@@ -17647,7 +17985,7 @@ fn update_knowledge_memory_dedup_reviewed_batch_for(
             continue;
         };
         let node_id = seed.id;
-        if !node_has_external_id_property(seed, memory_id.as_str()) {
+        if !node_has_external_id_property(&seed, memory_id.as_str()) {
             non_writable_count += 1;
             rows.push(KnowledgeMemoryDedupReviewedBatchRow {
                 memory_id: memory_id.clone(),
@@ -17741,8 +18079,12 @@ fn update_knowledge_memory_decay_refresh_batch_for(
     let mut eligible_updates = Vec::new();
 
     for update in &request.updates {
-        let Some(seed) =
-            seed_node_by_label_and_external_id(&db.catalog, &db.store, "Memory", &update.memory_id)
+        let Some(seed) = try_seed_node_by_label_and_external_id(
+            &db.catalog,
+            &db.store,
+            "Memory",
+            &update.memory_id,
+        )?
         else {
             missing_count += 1;
             rows.push(KnowledgeMemoryDecayRefreshBatchRow {
@@ -17757,7 +18099,7 @@ fn update_knowledge_memory_decay_refresh_batch_for(
             continue;
         };
         let node_id = seed.id;
-        if !node_has_external_id_property(seed, update.memory_id.as_str()) {
+        if !node_has_external_id_property(&seed, update.memory_id.as_str()) {
             non_writable_count += 1;
             rows.push(KnowledgeMemoryDecayRefreshBatchRow {
                 memory_id: update.memory_id.clone(),
@@ -17899,12 +18241,13 @@ fn adjust_knowledge_source_memory_count_batch_for(
     let mut aggregates: BTreeMap<NodeId, AggregatedSourceMemoryCountAdjustment> = BTreeMap::new();
 
     for adjustment in &request.adjustments {
-        let Some(seed) = seed_node_by_label_and_external_id(
+        let Some(seed) = try_seed_node_by_label_and_external_id(
             &db.catalog,
             &db.store,
             "Source",
             &adjustment.source_id,
-        ) else {
+        )?
+        else {
             missing_count += 1;
             rows.push(KnowledgeSourceMemoryCountBatchRow {
                 source_id: adjustment.source_id.clone(),
@@ -17919,7 +18262,7 @@ fn adjust_knowledge_source_memory_count_batch_for(
             continue;
         };
         let node_id = seed.id;
-        if !node_has_external_id_property(seed, adjustment.source_id.as_str()) {
+        if !node_has_external_id_property(&seed, adjustment.source_id.as_str()) {
             non_writable_count += 1;
             rows.push(KnowledgeSourceMemoryCountBatchRow {
                 source_id: adjustment.source_id.clone(),
@@ -17933,7 +18276,7 @@ fn adjust_knowledge_source_memory_count_batch_for(
             });
             continue;
         }
-        let Some(current_count) = source_memory_count(seed) else {
+        let Some(current_count) = source_memory_count(&seed) else {
             invalid_current_count_count += 1;
             rows.push(KnowledgeSourceMemoryCountBatchRow {
                 source_id: adjustment.source_id.clone(),
@@ -18085,8 +18428,12 @@ fn update_knowledge_source_lifecycle_batch_for(
     let mut eligible_updates = Vec::new();
 
     for update in &request.updates {
-        let Some(seed) =
-            seed_node_by_label_and_external_id(&db.catalog, &db.store, "Source", &update.source_id)
+        let Some(seed) = try_seed_node_by_label_and_external_id(
+            &db.catalog,
+            &db.store,
+            "Source",
+            &update.source_id,
+        )?
         else {
             missing_count += 1;
             rows.push(KnowledgeSourceLifecycleBatchRow {
@@ -18102,7 +18449,7 @@ fn update_knowledge_source_lifecycle_batch_for(
             continue;
         };
         let node_id = seed.id;
-        if !node_has_external_id_property(seed, update.source_id.as_str()) {
+        if !node_has_external_id_property(&seed, update.source_id.as_str()) {
             non_writable_count += 1;
             rows.push(KnowledgeSourceLifecycleBatchRow {
                 source_id: update.source_id.clone(),
@@ -18244,8 +18591,12 @@ fn update_knowledge_source_metadata_batch_for(
     let mut eligible_updates = Vec::new();
 
     for update in &request.updates {
-        let Some(seed) =
-            seed_node_by_label_and_external_id(&db.catalog, &db.store, "Source", &update.source_id)
+        let Some(seed) = try_seed_node_by_label_and_external_id(
+            &db.catalog,
+            &db.store,
+            "Source",
+            &update.source_id,
+        )?
         else {
             missing_count += 1;
             rows.push(KnowledgeSourceMetadataBatchRow {
@@ -18260,7 +18611,7 @@ fn update_knowledge_source_metadata_batch_for(
             continue;
         };
         let node_id = seed.id;
-        if !node_has_external_id_property(seed, update.source_id.as_str()) {
+        if !node_has_external_id_property(&seed, update.source_id.as_str()) {
             non_writable_count += 1;
             rows.push(KnowledgeSourceMetadataBatchRow {
                 source_id: update.source_id.clone(),
@@ -18379,8 +18730,12 @@ fn update_knowledge_source_parsed_metadata_batch_for(
     let mut eligible_updates = Vec::new();
 
     for update in &request.updates {
-        let Some(seed) =
-            seed_node_by_label_and_external_id(&db.catalog, &db.store, "Source", &update.source_id)
+        let Some(seed) = try_seed_node_by_label_and_external_id(
+            &db.catalog,
+            &db.store,
+            "Source",
+            &update.source_id,
+        )?
         else {
             missing_count += 1;
             rows.push(KnowledgeSourceParsedMetadataBatchRow {
@@ -18395,7 +18750,7 @@ fn update_knowledge_source_parsed_metadata_batch_for(
             continue;
         };
         let node_id = seed.id;
-        if !node_has_external_id_property(seed, update.source_id.as_str()) {
+        if !node_has_external_id_property(&seed, update.source_id.as_str()) {
             non_writable_count += 1;
             rows.push(KnowledgeSourceParsedMetadataBatchRow {
                 source_id: update.source_id.clone(),
@@ -19920,20 +20275,20 @@ fn knowledge_source_projected_list_direct(
         .cloned()
         .collect::<BTreeSet<_>>();
     let mut matched_source_ids = BTreeSet::new();
-    let mut rows = store
-        .scan_nodes(Some(label_id))
-        .filter(|node| source_matches_list_request_direct(node, &request.list, &requested_ids))
-        .map(|node| {
-            if let Some(source_id) = node_external_id(node) {
+    let mut rows = Vec::new();
+    store.visit_nodes_owned(Some(label_id), |node| {
+        if source_matches_list_request_direct(&node, &request.list, &requested_ids) {
+            if let Some(source_id) = node_external_id(&node) {
                 matched_source_ids.insert(source_id);
             }
-            (
-                knowledge_source_projected_row_direct(node, &request.property_names),
-                integer_property(node, "memory_count").unwrap_or(0),
+            rows.push((
+                knowledge_source_projected_row_direct(&node, &request.property_names),
+                integer_property(&node, "memory_count").unwrap_or(0),
                 node.properties.get("created_at").cloned(),
-            )
-        })
-        .collect::<Vec<_>>();
+            ));
+        }
+        crate::store::GraphScanControl::Continue
+    })?;
 
     sort_source_projected_rows_direct(&mut rows, request.list.order);
     let matched_count = rows.len();
@@ -20210,7 +20565,7 @@ fn knowledge_source_memory_projected_list_direct(
     validate_knowledge_source_memory_projected_list_request(request)?;
     let graph_commit_epoch = store.commit_epoch();
     let Some(source) =
-        seed_node_by_label_and_external_id(catalog, store, "Source", &request.list.source_id)
+        try_seed_node_by_label_and_external_id(catalog, store, "Source", &request.list.source_id)?
     else {
         return Ok(KnowledgeSourceMemoryProjectedListOutput {
             graph_commit_epoch,
@@ -20229,7 +20584,7 @@ fn knowledge_source_memory_projected_list_direct(
         source.id,
         &request.memory_property_names,
         &request.relationship_property_names,
-    );
+    )?;
     let matched_count = rows.len();
     if request.list.limit > 0 {
         rows.truncate(request.list.limit);
@@ -20252,39 +20607,43 @@ fn source_memory_projected_rows_direct(
     source_node_id: NodeId,
     memory_property_names: &[String],
     relationship_property_names: &[String],
-) -> Vec<KnowledgeSourceMemoryProjectedRow> {
+) -> Result<Vec<KnowledgeSourceMemoryProjectedRow>> {
     let Some(rel_type_id) = catalog.rel_type_id("SOURCED_FROM") else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    let mut rows = store
-        .incoming_relationships(source_node_id, rel_type_id)
-        .filter_map(|relationship| {
-            store
-                .node(relationship.source)
+    let mut rows = Vec::new();
+    store.try_visit_adjacent_relationships_owned(
+        source_node_id,
+        Some(rel_type_id),
+        AdjacencyDirection::Incoming,
+        |relationship| {
+            if let Some(memory) = store
+                .node_owned(relationship.source)?
                 .filter(|memory| memory.labels.contains(&memory_label_id))
-                .map(|memory| {
-                    (
-                        source_memory_projected_row_direct(
-                            memory,
-                            relationship,
-                            memory_property_names,
-                            relationship_property_names,
-                        ),
-                        relationship_integer_property(relationship, "chunk_index"),
-                    )
-                })
-        })
-        .collect::<Vec<_>>();
+            {
+                rows.push((
+                    source_memory_projected_row_direct(
+                        &memory,
+                        &relationship,
+                        memory_property_names,
+                        relationship_property_names,
+                    ),
+                    relationship_integer_property(&relationship, "chunk_index"),
+                ));
+            }
+            Ok(crate::store::GraphScanControl::Continue)
+        },
+    )?;
     rows.sort_by(|left, right| {
         left.1
             .cmp(&right.1)
             .then_with(|| left.0.memory_id.cmp(&right.0.memory_id))
             .then_with(|| left.0.relationship_id.cmp(&right.0.relationship_id))
     });
-    rows.into_iter().map(|(row, _chunk_index)| row).collect()
+    Ok(rows.into_iter().map(|(row, _chunk_index)| row).collect())
 }
 
 fn source_memory_projected_row_direct(
@@ -20318,7 +20677,7 @@ fn knowledge_source_sourced_memory_count_for(
     }
     let graph_commit_epoch = store.commit_epoch();
     let Some(source) =
-        seed_node_by_label_and_external_id(catalog, store, "Source", &request.source_id)
+        try_seed_node_by_label_and_external_id(catalog, store, "Source", &request.source_id)?
     else {
         return Ok(KnowledgeSourceSourcedMemoryCountOutput {
             graph_commit_epoch,
@@ -20334,7 +20693,7 @@ fn knowledge_source_sourced_memory_count_for(
         source_id: request.source_id.clone(),
         source_node_id: Some(source.id.0),
         found: true,
-        sourced_memory_count: source_sourced_memory_count(catalog, store, source.id),
+        sourced_memory_count: source_sourced_memory_count(catalog, store, source.id)?,
     })
 }
 
@@ -20627,22 +20986,29 @@ fn source_sourced_memory_count(
     catalog: &Catalog,
     store: &GraphStore,
     source_node_id: NodeId,
-) -> usize {
+) -> Result<usize> {
     let Some(rel_type_id) = catalog.rel_type_id("SOURCED_FROM") else {
-        return 0;
+        return Ok(0);
     };
     let memory_label_id = catalog.label_id("Memory");
-    store
-        .scan_relationships(Some(rel_type_id))
-        .filter(|relationship| {
-            relationship.target == source_node_id
-                && memory_label_id.is_none_or(|label_id| {
-                    store
-                        .node(relationship.source)
-                        .is_some_and(|node| node.labels.contains(&label_id))
-                })
-        })
-        .count()
+    let mut count = 0usize;
+    store.try_visit_adjacent_relationships_owned(
+        source_node_id,
+        Some(rel_type_id),
+        AdjacencyDirection::Incoming,
+        |relationship| {
+            if match memory_label_id {
+                Some(label_id) => store
+                    .node_owned(relationship.source)?
+                    .is_some_and(|node| node.labels.contains(&label_id)),
+                None => true,
+            } {
+                count = count.saturating_add(1);
+            }
+            Ok(crate::store::GraphScanControl::Continue)
+        },
+    )?;
+    Ok(count)
 }
 
 fn string_property(node: &NodeRecord, property: &str) -> Option<String> {
@@ -20712,8 +21078,12 @@ fn update_knowledge_memory_lifecycle_batch_for(
     let mut eligible_updates = Vec::new();
 
     for update in &request.updates {
-        let Some(seed) =
-            seed_node_by_label_and_external_id(&db.catalog, &db.store, "Memory", &update.memory_id)
+        let Some(seed) = try_seed_node_by_label_and_external_id(
+            &db.catalog,
+            &db.store,
+            "Memory",
+            &update.memory_id,
+        )?
         else {
             missing_count += 1;
             rows.push(KnowledgeMemoryLifecycleBatchRow {
@@ -20728,7 +21098,7 @@ fn update_knowledge_memory_lifecycle_batch_for(
             continue;
         };
         let node_id = seed.id;
-        if !node_has_external_id_property(seed, update.memory_id.as_str()) {
+        if !node_has_external_id_property(&seed, update.memory_id.as_str()) {
             non_writable_count += 1;
             rows.push(KnowledgeMemoryLifecycleBatchRow {
                 memory_id: update.memory_id.clone(),
@@ -20840,8 +21210,12 @@ fn update_knowledge_memory_latest_batch_for(
     let mut eligible_updates = Vec::new();
 
     for update in &request.updates {
-        let Some(seed) =
-            seed_node_by_label_and_external_id(&db.catalog, &db.store, "Memory", &update.memory_id)
+        let Some(seed) = try_seed_node_by_label_and_external_id(
+            &db.catalog,
+            &db.store,
+            "Memory",
+            &update.memory_id,
+        )?
         else {
             missing_count += 1;
             rows.push(KnowledgeMemoryLatestBatchRow {
@@ -20856,7 +21230,7 @@ fn update_knowledge_memory_latest_batch_for(
             continue;
         };
         let node_id = seed.id;
-        if !node_has_external_id_property(seed, update.memory_id.as_str()) {
+        if !node_has_external_id_property(&seed, update.memory_id.as_str()) {
             non_writable_count += 1;
             rows.push(KnowledgeMemoryLatestBatchRow {
                 memory_id: update.memory_id.clone(),
@@ -20869,7 +21243,7 @@ fn update_knowledge_memory_latest_batch_for(
             });
             continue;
         }
-        if !memory_latest_update_matches_space(seed, update) {
+        if !memory_latest_update_matches_space(&seed, update) {
             filtered_out_count += 1;
             rows.push(KnowledgeMemoryLatestBatchRow {
                 memory_id: update.memory_id.clone(),
@@ -21104,8 +21478,12 @@ fn update_knowledge_skill_usage_stats_batch_for(
     let mut eligible_updates = Vec::new();
 
     for update in &request.updates {
-        let Some(seed) =
-            seed_node_by_label_and_external_id(&db.catalog, &db.store, "Skill", &update.skill_id)
+        let Some(seed) = try_seed_node_by_label_and_external_id(
+            &db.catalog,
+            &db.store,
+            "Skill",
+            &update.skill_id,
+        )?
         else {
             missing_count += 1;
             rows.push(KnowledgeSkillUsageStatsBatchRow {
@@ -21120,7 +21498,7 @@ fn update_knowledge_skill_usage_stats_batch_for(
             continue;
         };
         let node_id = seed.id;
-        if !node_has_external_id_property(seed, update.skill_id.as_str()) {
+        if !node_has_external_id_property(&seed, update.skill_id.as_str()) {
             non_writable_count += 1;
             rows.push(KnowledgeSkillUsageStatsBatchRow {
                 skill_id: update.skill_id.clone(),
@@ -21235,8 +21613,12 @@ fn update_knowledge_skill_metadata_batch_for(
     let mut eligible_updates = Vec::new();
 
     for update in &request.updates {
-        let Some(seed) =
-            seed_node_by_label_and_external_id(&db.catalog, &db.store, "Skill", &update.skill_id)
+        let Some(seed) = try_seed_node_by_label_and_external_id(
+            &db.catalog,
+            &db.store,
+            "Skill",
+            &update.skill_id,
+        )?
         else {
             missing_count += 1;
             rows.push(KnowledgeSkillMetadataBatchRow {
@@ -21251,7 +21633,7 @@ fn update_knowledge_skill_metadata_batch_for(
             continue;
         };
         let node_id = seed.id;
-        if !node_has_external_id_property(seed, update.skill_id.as_str()) {
+        if !node_has_external_id_property(&seed, update.skill_id.as_str()) {
             non_writable_count += 1;
             rows.push(KnowledgeSkillMetadataBatchRow {
                 skill_id: update.skill_id.clone(),
@@ -21446,8 +21828,12 @@ fn update_knowledge_skill_lifecycle_batch_for(
     let mut eligible_updates = Vec::new();
 
     for update in &request.updates {
-        let Some(seed) =
-            seed_node_by_label_and_external_id(&db.catalog, &db.store, "Skill", &update.skill_id)
+        let Some(seed) = try_seed_node_by_label_and_external_id(
+            &db.catalog,
+            &db.store,
+            "Skill",
+            &update.skill_id,
+        )?
         else {
             missing_count += 1;
             rows.push(KnowledgeSkillLifecycleBatchRow {
@@ -21462,7 +21848,7 @@ fn update_knowledge_skill_lifecycle_batch_for(
             continue;
         };
         let node_id = seed.id;
-        if !node_has_external_id_property(seed, update.skill_id.as_str()) {
+        if !node_has_external_id_property(&seed, update.skill_id.as_str()) {
             non_writable_count += 1;
             rows.push(KnowledgeSkillLifecycleBatchRow {
                 skill_id: update.skill_id.clone(),
@@ -21618,8 +22004,12 @@ fn update_knowledge_thread_metadata_batch_for(
     let mut eligible_updates = Vec::new();
 
     for update in &request.updates {
-        let Some(seed) =
-            seed_node_by_label_and_external_id(&db.catalog, &db.store, "Thread", &update.thread_id)
+        let Some(seed) = try_seed_node_by_label_and_external_id(
+            &db.catalog,
+            &db.store,
+            "Thread",
+            &update.thread_id,
+        )?
         else {
             missing_count += 1;
             rows.push(KnowledgeThreadMetadataBatchRow {
@@ -21634,7 +22024,7 @@ fn update_knowledge_thread_metadata_batch_for(
             continue;
         };
         let node_id = seed.id;
-        if !node_has_external_id_property(seed, update.thread_id.as_str()) {
+        if !node_has_external_id_property(&seed, update.thread_id.as_str()) {
             non_writable_count += 1;
             rows.push(KnowledgeThreadMetadataBatchRow {
                 thread_id: update.thread_id.clone(),
@@ -21788,8 +22178,12 @@ fn update_knowledge_thread_message_count_batch_for(
     let mut eligible_updates = Vec::new();
 
     for update in &request.updates {
-        let Some(seed) =
-            seed_node_by_label_and_external_id(&db.catalog, &db.store, "Thread", &update.thread_id)
+        let Some(seed) = try_seed_node_by_label_and_external_id(
+            &db.catalog,
+            &db.store,
+            "Thread",
+            &update.thread_id,
+        )?
         else {
             missing_count += 1;
             rows.push(KnowledgeThreadMessageCountBatchRow {
@@ -21805,7 +22199,7 @@ fn update_knowledge_thread_message_count_batch_for(
             continue;
         };
         let node_id = seed.id;
-        if !node_has_external_id_property(seed, update.thread_id.as_str()) {
+        if !node_has_external_id_property(&seed, update.thread_id.as_str()) {
             non_writable_count += 1;
             rows.push(KnowledgeThreadMessageCountBatchRow {
                 thread_id: update.thread_id.clone(),
@@ -21838,7 +22232,7 @@ fn update_knowledge_thread_message_count_batch_for(
             "message_count".to_string(),
             Value::Int(update.message_count),
         )]);
-        let updated_at_changed = should_update_thread_updated_at(seed, update);
+        let updated_at_changed = should_update_thread_updated_at(&seed, update);
         if updated_at_changed && let Some(updated_at) = &update.updated_at {
             assignments.insert("updated_at".to_string(), updated_at.clone());
         }
@@ -21945,16 +22339,16 @@ fn knowledge_skills_for(
 
     let requested_ids = request.ids.iter().cloned().collect::<BTreeSet<_>>();
     let mut matched_ids = BTreeSet::new();
-    let mut rows = store
-        .scan_nodes(Some(label_id))
-        .filter(|node| skill_matches_list_request(node, request, &requested_ids))
-        .map(|node| {
-            if let Some(id) = node_external_id(node) {
+    let mut rows = Vec::new();
+    store.visit_nodes_owned(Some(label_id), |node| {
+        if skill_matches_list_request(&node, request, &requested_ids) {
+            if let Some(id) = node_external_id(&node) {
                 matched_ids.insert(id);
             }
-            knowledge_skill_row(node)
-        })
-        .collect::<Vec<_>>();
+            rows.push(knowledge_skill_row(&node));
+        }
+        crate::store::GraphScanControl::Continue
+    })?;
 
     sort_skill_rows(&mut rows, request.order);
     let matched_count = rows.len();
@@ -22047,19 +22441,19 @@ fn knowledge_skill_projected_list_for(
 
     let requested_ids = request.list.ids.iter().cloned().collect::<BTreeSet<_>>();
     let mut matched_ids = BTreeSet::new();
-    let mut rows = store
-        .scan_nodes(Some(label_id))
-        .filter(|node| skill_matches_list_request(node, &request.list, &requested_ids))
-        .map(|node| {
-            if let Some(id) = node_external_id(node) {
+    let mut rows = Vec::new();
+    store.visit_nodes_owned(Some(label_id), |node| {
+        if skill_matches_list_request(&node, &request.list, &requested_ids) {
+            if let Some(id) = node_external_id(&node) {
                 matched_ids.insert(id);
             }
-            (
-                knowledge_skill_projected_row(node, &request.property_names),
+            rows.push((
+                knowledge_skill_projected_row(&node, &request.property_names),
                 node.properties.get("updated_at").cloned(),
-            )
-        })
-        .collect::<Vec<_>>();
+            ));
+        }
+        crate::store::GraphScanControl::Continue
+    })?;
 
     sort_skill_projected_rows(&mut rows, request.list.order);
     let matched_count = rows.len();
@@ -22514,7 +22908,7 @@ fn knowledge_skill_thread_sources_for(
     validate_knowledge_skill_thread_source_request(request)?;
     let graph_commit_epoch = store.commit_epoch();
     let Some(skill) =
-        seed_node_by_label_and_external_id(catalog, store, "Skill", &request.skill_id)
+        try_seed_node_by_label_and_external_id(catalog, store, "Skill", &request.skill_id)?
     else {
         return Ok(KnowledgeSkillThreadSourceListOutput {
             graph_commit_epoch,
@@ -22527,7 +22921,7 @@ fn knowledge_skill_thread_sources_for(
         });
     };
 
-    let mut rows = skill_thread_source_rows(catalog, store, skill);
+    let mut rows = skill_thread_source_rows(catalog, store, &skill)?;
     sort_skill_thread_source_rows(&mut rows);
     let matched_count = rows.len();
     if request.limit > 0 {
@@ -22711,22 +23105,34 @@ fn knowledge_skill_detail_lookup_for(
         });
     };
 
-    let matched = skill_detail_lookup_candidates(store, label_id, &request.key);
+    let matched = skill_detail_lookup_candidates(store, label_id, &request.key)?;
     let matched_count = matched.len();
     let first = matched.into_iter().next();
 
     Ok(KnowledgeSkillDetailLookupOutput {
         graph_commit_epoch,
         key: request.key.clone(),
-        skill_node_id: first.map(|node| node.id.0),
+        skill_node_id: first.as_ref().map(|node| node.id.0),
         found_skill: first.is_some(),
-        id: first.and_then(node_external_id),
-        name: first.and_then(|node| string_property(node, "name")),
-        title: first.and_then(|node| string_property(node, "title")),
-        stage: first.and_then(|node| string_property(node, "stage")),
-        version: first.and_then(|node| node.properties.get("version").cloned()),
-        created_at: first.and_then(|node| node.properties.get("created_at").cloned()),
-        updated_at: first.and_then(|node| node.properties.get("updated_at").cloned()),
+        id: first.as_ref().and_then(node_external_id),
+        name: first
+            .as_ref()
+            .and_then(|node| string_property(node, "name")),
+        title: first
+            .as_ref()
+            .and_then(|node| string_property(node, "title")),
+        stage: first
+            .as_ref()
+            .and_then(|node| string_property(node, "stage")),
+        version: first
+            .as_ref()
+            .and_then(|node| node.properties.get("version").cloned()),
+        created_at: first
+            .as_ref()
+            .and_then(|node| node.properties.get("created_at").cloned()),
+        updated_at: first
+            .as_ref()
+            .and_then(|node| node.properties.get("updated_at").cloned()),
         matched_count,
     })
 }
@@ -22781,20 +23187,22 @@ fn validate_knowledge_skill_detail_lookup_request(
     Ok(())
 }
 
-fn skill_detail_lookup_candidates<'a>(
-    store: &'a GraphStore,
+fn skill_detail_lookup_candidates(
+    store: &GraphStore,
     label_id: LabelId,
     key: &str,
-) -> Vec<&'a NodeRecord> {
-    let mut nodes = store
-        .scan_nodes(Some(label_id))
-        .filter(|node| {
-            node_external_id(node)
-                .is_some_and(|id| id.as_str() == key || id.starts_with(key) || id.contains(key))
-        })
-        .collect::<Vec<_>>();
+) -> Result<Vec<NodeRecord>> {
+    let mut nodes = Vec::new();
+    store.visit_nodes_owned(Some(label_id), |node| {
+        if node_external_id(&node)
+            .is_some_and(|id| id.as_str() == key || id.starts_with(key) || id.contains(key))
+        {
+            nodes.push(node);
+        }
+        crate::store::GraphScanControl::Continue
+    })?;
     nodes.sort_by_key(|node| node.id.0);
-    nodes
+    Ok(nodes)
 }
 
 fn knowledge_skill_state_for(
@@ -22804,23 +23212,41 @@ fn knowledge_skill_state_for(
 ) -> Result<KnowledgeSkillStateOutput> {
     validate_knowledge_skill_state_request(request)?;
     let graph_commit_epoch = store.commit_epoch();
-    let skill = seed_node_by_label_and_external_id(catalog, store, "Skill", &request.skill_id);
+    let skill = try_seed_node_by_label_and_external_id(catalog, store, "Skill", &request.skill_id)?;
 
     Ok(KnowledgeSkillStateOutput {
         graph_commit_epoch,
         skill_id: request.skill_id.clone(),
-        skill_node_id: skill.map(|node| node.id.0),
+        skill_node_id: skill.as_ref().map(|node| node.id.0),
         found_skill: skill.is_some(),
-        id: skill.and_then(node_external_id),
-        stage: skill.and_then(|node| string_property(node, "stage")),
-        metadata: skill.and_then(|node| node.properties.get("metadata").cloned()),
-        version: skill.and_then(|node| node.properties.get("version").cloned()),
-        use_count: skill.and_then(|node| node.properties.get("use_count").cloned()),
-        bundle_path: skill.and_then(|node| string_property(node, "bundle_path")),
-        content_hash: skill.and_then(|node| string_property(node, "content_hash")),
-        name: skill.and_then(|node| string_property(node, "name")),
-        description: skill.and_then(|node| string_property(node, "description")),
-        title: skill.and_then(|node| string_property(node, "title")),
+        id: skill.as_ref().and_then(node_external_id),
+        stage: skill
+            .as_ref()
+            .and_then(|node| string_property(node, "stage")),
+        metadata: skill
+            .as_ref()
+            .and_then(|node| node.properties.get("metadata").cloned()),
+        version: skill
+            .as_ref()
+            .and_then(|node| node.properties.get("version").cloned()),
+        use_count: skill
+            .as_ref()
+            .and_then(|node| node.properties.get("use_count").cloned()),
+        bundle_path: skill
+            .as_ref()
+            .and_then(|node| string_property(node, "bundle_path")),
+        content_hash: skill
+            .as_ref()
+            .and_then(|node| string_property(node, "content_hash")),
+        name: skill
+            .as_ref()
+            .and_then(|node| string_property(node, "name")),
+        description: skill
+            .as_ref()
+            .and_then(|node| string_property(node, "description")),
+        title: skill
+            .as_ref()
+            .and_then(|node| string_property(node, "title")),
     })
 }
 
@@ -22896,49 +23322,60 @@ fn skill_thread_source_rows(
     catalog: &Catalog,
     store: &GraphStore,
     skill: &NodeRecord,
-) -> Vec<KnowledgeSkillThreadSourceRow> {
+) -> Result<Vec<KnowledgeSkillThreadSourceRow>> {
     let Some(synthesized_from_type_id) = catalog.rel_type_id("SYNTHESIZED_FROM") else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Some(compacts_to_type_id) = catalog.rel_type_id("COMPACTS_TO") else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Some(thread_label_id) = catalog.label_id("Thread") else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
 
     let mut seen = BTreeSet::new();
     let mut rows = Vec::new();
-    for skill_memory_rel in store.outgoing_relationships(skill.id, synthesized_from_type_id) {
-        let Some(memory) = store
-            .node(skill_memory_rel.target)
-            .filter(|memory| memory.labels.contains(&memory_label_id))
-        else {
-            continue;
-        };
-        for compact_rel in store.incoming_relationships(memory.id, compacts_to_type_id) {
-            let Some(thread) = store
-                .node(compact_rel.source)
-                .filter(|thread| thread.labels.contains(&thread_label_id))
+    store.try_visit_adjacent_relationships_owned(
+        skill.id,
+        Some(synthesized_from_type_id),
+        AdjacencyDirection::Outgoing,
+        |skill_memory_rel| {
+            let Some(memory) = store
+                .node_owned(skill_memory_rel.target)?
+                .filter(|memory| memory.labels.contains(&memory_label_id))
             else {
-                continue;
+                return Ok(crate::store::GraphScanControl::Continue);
             };
-            if !seen.insert((memory.id.0, thread.id.0)) {
-                continue;
-            }
-            rows.push(skill_thread_source_row(
-                skill,
-                memory,
-                skill_memory_rel,
-                thread,
-                compact_rel,
-            ));
-        }
-    }
-    rows
+            store.try_visit_adjacent_relationships_owned(
+                memory.id,
+                Some(compacts_to_type_id),
+                AdjacencyDirection::Incoming,
+                |compact_rel| {
+                    let Some(thread) = store
+                        .node_owned(compact_rel.source)?
+                        .filter(|thread| thread.labels.contains(&thread_label_id))
+                    else {
+                        return Ok(crate::store::GraphScanControl::Continue);
+                    };
+                    if seen.insert((memory.id.0, thread.id.0)) {
+                        rows.push(skill_thread_source_row(
+                            skill,
+                            &memory,
+                            &skill_memory_rel,
+                            &thread,
+                            &compact_rel,
+                        ));
+                    }
+                    Ok(crate::store::GraphScanControl::Continue)
+                },
+            )?;
+            Ok(crate::store::GraphScanControl::Continue)
+        },
+    )?;
+    Ok(rows)
 }
 
 fn skill_thread_source_row(
@@ -23312,57 +23749,52 @@ fn knowledge_thread_sources_for(
     catalog: &Catalog,
     store: &GraphStore,
     request: &KnowledgeThreadSourceListRequest,
-) -> KnowledgeThreadSourceListOutput {
+) -> Result<KnowledgeThreadSourceListOutput> {
     let graph_commit_epoch = store.commit_epoch();
     let Some(label_id) = catalog.label_id("Thread") else {
-        return KnowledgeThreadSourceListOutput {
+        return Ok(KnowledgeThreadSourceListOutput {
             graph_commit_epoch,
             sources: Vec::new(),
             matched_count: 0,
             returned_count: 0,
-        };
+        });
     };
 
-    let mut sources = store
-        .scan_nodes(Some(label_id))
-        .filter_map(|node| string_property(node, "source"))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
+    let mut source_set = BTreeSet::new();
+    store.visit_nodes_owned(Some(label_id), |node| {
+        if let Some(source) = string_property(&node, "source") {
+            source_set.insert(source);
+        }
+        crate::store::GraphScanControl::Continue
+    })?;
+    let mut sources = source_set.into_iter().collect::<Vec<_>>();
     let matched_count = sources.len();
     if request.limit > 0 {
         sources.truncate(request.limit);
     }
     let returned_count = sources.len();
 
-    KnowledgeThreadSourceListOutput {
+    Ok(KnowledgeThreadSourceListOutput {
         graph_commit_epoch,
         sources,
         matched_count,
         returned_count,
-    }
+    })
 }
 
 fn knowledge_thread_sources_via_query_runtime(
     db: &Database,
     request: &KnowledgeThreadSourceListRequest,
-) -> KnowledgeThreadSourceListOutput {
+) -> Result<KnowledgeThreadSourceListOutput> {
     let graph_commit_epoch = db.store.commit_epoch();
-    let Ok(output) = db.query_read_only_with_params_bounded(
+    let output = db.query_read_only_with_params_bounded(
         "MATCH (t:Thread) \
              WHERE t.source IS NOT NULL AND t.source <> '' \
              RETURN DISTINCT t.source AS source \
              ORDER BY source ASC",
         &BTreeMap::new(),
         None,
-    ) else {
-        return KnowledgeThreadSourceListOutput {
-            graph_commit_epoch,
-            sources: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-        };
-    };
+    )?;
     let matched_count = output.rows.len();
     let mut sources = output
         .rows
@@ -23373,12 +23805,12 @@ fn knowledge_thread_sources_via_query_runtime(
         sources.truncate(request.limit);
     }
     let returned_count = sources.len();
-    KnowledgeThreadSourceListOutput {
+    Ok(KnowledgeThreadSourceListOutput {
         graph_commit_epoch,
         sources,
         matched_count,
         returned_count,
-    }
+    })
 }
 
 fn knowledge_thread_title_for(
@@ -23399,16 +23831,18 @@ fn knowledge_thread_title_for(
         });
     };
 
-    let matched = exact_thread_id_or_logical_candidates(store, label_id, &request.id);
+    let matched = exact_thread_id_or_logical_candidates(store, label_id, &request.id)?;
     let matched_count = matched.len();
     let first = matched.into_iter().next();
 
     Ok(KnowledgeThreadTitleLookupOutput {
         graph_commit_epoch,
         id: request.id.clone(),
-        thread_node_id: first.map(|node| node.id.0),
+        thread_node_id: first.as_ref().map(|node| node.id.0),
         found_thread: first.is_some(),
-        title: first.and_then(|node| string_property(node, "title")),
+        title: first
+            .as_ref()
+            .and_then(|node| string_property(node, "title")),
         matched_count,
     })
 }
@@ -23473,19 +23907,27 @@ fn knowledge_thread_source_for(
         });
     };
 
-    let matched = exact_thread_id_or_logical_candidates(store, label_id, &request.sid);
+    let matched = exact_thread_id_or_logical_candidates(store, label_id, &request.sid)?;
     let matched_count = matched.len();
     let first = matched.into_iter().next();
 
     Ok(KnowledgeThreadSourceLookupOutput {
         graph_commit_epoch,
         sid: request.sid.clone(),
-        thread_node_id: first.map(|node| node.id.0),
+        thread_node_id: first.as_ref().map(|node| node.id.0),
         found_thread: first.is_some(),
-        thread_id: first.and_then(|node| string_property(node, "thread_id")),
-        title: first.and_then(|node| string_property(node, "title")),
-        source: first.and_then(|node| string_property(node, "source")),
-        created_at: first.and_then(|node| node.properties.get("created_at").cloned()),
+        thread_id: first
+            .as_ref()
+            .and_then(|node| string_property(node, "thread_id")),
+        title: first
+            .as_ref()
+            .and_then(|node| string_property(node, "title")),
+        source: first
+            .as_ref()
+            .and_then(|node| string_property(node, "source")),
+        created_at: first
+            .as_ref()
+            .and_then(|node| node.properties.get("created_at").cloned()),
         matched_count,
     })
 }
@@ -23557,7 +23999,7 @@ fn knowledge_thread_message_lookup_for(
     };
 
     let matched =
-        thread_id_lookup_key_and_source_candidates(store, label_id, &request.key, &request.source);
+        thread_id_lookup_key_and_source_candidates(store, label_id, &request.key, &request.source)?;
     let matched_count = matched.len();
     let first = matched.into_iter().next();
 
@@ -23565,11 +24007,15 @@ fn knowledge_thread_message_lookup_for(
         graph_commit_epoch,
         key: request.key.clone(),
         source_filter: request.source.clone(),
-        thread_node_id: first.map(|node| node.id.0),
+        thread_node_id: first.as_ref().map(|node| node.id.0),
         found_thread: first.is_some(),
-        id: first.and_then(node_external_id),
-        message_count: first.and_then(|node| node.properties.get("message_count").cloned()),
-        raw_space_id: first.and_then(|node| raw_string_property(node, "space_id")),
+        id: first.as_ref().and_then(node_external_id),
+        message_count: first
+            .as_ref()
+            .and_then(|node| node.properties.get("message_count").cloned()),
+        raw_space_id: first
+            .as_ref()
+            .and_then(|node| raw_string_property(node, "space_id")),
         matched_count,
     })
 }
@@ -23657,7 +24103,7 @@ fn knowledge_thread_meta_lookup_for(
     };
 
     let matched =
-        thread_id_lookup_key_and_source_candidates(store, label_id, &request.key, &request.source);
+        thread_id_lookup_key_and_source_candidates(store, label_id, &request.key, &request.source)?;
     let matched_count = matched.len();
     let first = matched.into_iter().next();
 
@@ -23665,19 +24111,39 @@ fn knowledge_thread_meta_lookup_for(
         graph_commit_epoch,
         key: request.key.clone(),
         source_filter: request.source.clone(),
-        thread_node_id: first.map(|node| node.id.0),
+        thread_node_id: first.as_ref().map(|node| node.id.0),
         found_thread: first.is_some(),
-        id: first.and_then(node_external_id),
-        thread_id: first.and_then(|node| string_property(node, "thread_id")),
-        title: first.and_then(|node| string_property(node, "title")),
-        summary: first.and_then(|node| string_property(node, "summary")),
-        message_count: first.and_then(|node| node.properties.get("message_count").cloned()),
-        source: first.and_then(|node| string_property(node, "source")),
-        created_at: first.and_then(|node| node.properties.get("created_at").cloned()),
-        updated_at: first.and_then(|node| node.properties.get("updated_at").cloned()),
-        raw_space_id: first.and_then(|node| raw_string_property(node, "space_id")),
-        project: first.and_then(|node| string_property(node, "project")),
-        workspace: first.and_then(|node| string_property(node, "workspace")),
+        id: first.as_ref().and_then(node_external_id),
+        thread_id: first
+            .as_ref()
+            .and_then(|node| string_property(node, "thread_id")),
+        title: first
+            .as_ref()
+            .and_then(|node| string_property(node, "title")),
+        summary: first
+            .as_ref()
+            .and_then(|node| string_property(node, "summary")),
+        message_count: first
+            .as_ref()
+            .and_then(|node| node.properties.get("message_count").cloned()),
+        source: first
+            .as_ref()
+            .and_then(|node| string_property(node, "source")),
+        created_at: first
+            .as_ref()
+            .and_then(|node| node.properties.get("created_at").cloned()),
+        updated_at: first
+            .as_ref()
+            .and_then(|node| node.properties.get("updated_at").cloned()),
+        raw_space_id: first
+            .as_ref()
+            .and_then(|node| raw_string_property(node, "space_id")),
+        project: first
+            .as_ref()
+            .and_then(|node| string_property(node, "project")),
+        workspace: first
+            .as_ref()
+            .and_then(|node| string_property(node, "workspace")),
         matched_count,
     })
 }
@@ -23756,39 +24222,42 @@ fn thread_lookup_key_source_parameters(key: &str, source: &str) -> BTreeMap<Stri
     ])
 }
 
-fn exact_thread_id_or_logical_candidates<'a>(
-    store: &'a GraphStore,
+fn exact_thread_id_or_logical_candidates(
+    store: &GraphStore,
     label_id: LabelId,
     id: &str,
-) -> Vec<&'a NodeRecord> {
-    let mut matched = store
-        .scan_nodes(Some(label_id))
-        .filter(|node| {
-            node_external_id(node).as_deref() == Some(id)
-                || string_property(node, "thread_id").as_deref() == Some(id)
-        })
-        .collect::<Vec<_>>();
+) -> Result<Vec<NodeRecord>> {
+    let mut matched = Vec::new();
+    store.visit_nodes_owned(Some(label_id), |node| {
+        if node_external_id(&node).as_deref() == Some(id)
+            || string_property(&node, "thread_id").as_deref() == Some(id)
+        {
+            matched.push(node);
+        }
+        crate::store::GraphScanControl::Continue
+    })?;
     matched.sort_by_key(|node| node.id.0);
-    matched
+    Ok(matched)
 }
 
-fn thread_id_lookup_key_and_source_candidates<'a>(
-    store: &'a GraphStore,
+fn thread_id_lookup_key_and_source_candidates(
+    store: &GraphStore,
     label_id: LabelId,
     key: &str,
     source: &str,
-) -> Vec<&'a NodeRecord> {
-    let mut matched = store
-        .scan_nodes(Some(label_id))
-        .filter(|node| {
-            node_external_id(node).is_some_and(|id| {
-                (id == key || id.starts_with(key) || id.contains(key))
-                    && string_property(node, "source").as_deref() == Some(source)
-            })
-        })
-        .collect::<Vec<_>>();
+) -> Result<Vec<NodeRecord>> {
+    let mut matched = Vec::new();
+    store.visit_nodes_owned(Some(label_id), |node| {
+        if node_external_id(&node).is_some_and(|id| {
+            (id == key || id.starts_with(key) || id.contains(key))
+                && string_property(&node, "source").as_deref() == Some(source)
+        }) {
+            matched.push(node);
+        }
+        crate::store::GraphScanControl::Continue
+    })?;
     matched.sort_by_key(|node| node.id.0);
-    matched
+    Ok(matched)
 }
 
 fn knowledge_thread_identity_for(
@@ -23798,8 +24267,12 @@ fn knowledge_thread_identity_for(
 ) -> Result<KnowledgeThreadIdentityOutput> {
     validate_knowledge_thread_identity_request(request)?;
     let graph_commit_epoch = store.commit_epoch();
-    let Some(identity) =
-        seed_node_by_label_and_external_id(catalog, store, "ThreadIdentity", &request.identity_key)
+    let Some(identity) = try_seed_node_by_label_and_external_id(
+        catalog,
+        store,
+        "ThreadIdentity",
+        &request.identity_key,
+    )?
     else {
         return Ok(KnowledgeThreadIdentityOutput {
             graph_commit_epoch,
@@ -23819,11 +24292,11 @@ fn knowledge_thread_identity_for(
         identity_key: request.identity_key.clone(),
         identity_node_id: Some(identity.id.0),
         found_identity: true,
-        thread_node_id: string_property(identity, "thread_node_id"),
-        thread_id: string_property(identity, "thread_id"),
-        raw_space_id: string_property(identity, "space_id"),
-        normalized_space_id: Some(normalized_node_space_id(identity)),
-        source: string_property(identity, "source"),
+        thread_node_id: string_property(&identity, "thread_node_id"),
+        thread_id: string_property(&identity, "thread_id"),
+        raw_space_id: string_property(&identity, "space_id"),
+        normalized_space_id: Some(normalized_node_space_id(&identity)),
+        source: string_property(&identity, "source"),
     })
 }
 
@@ -23881,7 +24354,7 @@ fn delete_knowledge_thread_identities_for(
     validate_knowledge_thread_identity_delete_request(request)?;
 
     let graph_commit_epoch_before = db.store.commit_epoch();
-    let deleted_node_ids = thread_identity_delete_candidates(&db.catalog, &db.store, request)
+    let deleted_node_ids = thread_identity_delete_candidates(&db.catalog, &db.store, request)?
         .into_iter()
         .map(|node| node.id.0)
         .collect::<Vec<_>>();
@@ -23962,36 +24435,41 @@ fn validate_knowledge_thread_identity_delete_request(
     }
 }
 
-fn thread_identity_delete_candidates<'a>(
-    catalog: &'a Catalog,
-    store: &'a GraphStore,
+fn thread_identity_delete_candidates(
+    catalog: &Catalog,
+    store: &GraphStore,
     request: &KnowledgeThreadIdentityDeleteRequest,
-) -> Vec<&'a NodeRecord> {
+) -> Result<Vec<NodeRecord>> {
     match (&request.identity_key, &request.cascade_keys) {
-        (Some(identity_key), None) => {
-            seed_node_by_label_and_external_id(catalog, store, "ThreadIdentity", identity_key)
-                .into_iter()
-                .collect()
-        }
+        (Some(identity_key), None) => Ok(try_seed_node_by_label_and_external_id(
+            catalog,
+            store,
+            "ThreadIdentity",
+            identity_key,
+        )?
+        .into_iter()
+        .collect()),
         (None, Some(keys)) => {
             let Some(label_id) = catalog.label_id("ThreadIdentity") else {
-                return Vec::new();
+                return Ok(Vec::new());
             };
             let mut seen = BTreeSet::new();
-            let mut matched = store
-                .scan_nodes(Some(label_id))
-                .filter(|node| {
-                    node_external_id(node).as_deref() == Some(keys.public_thread_id.as_str())
-                        || node_external_id(node).as_deref() == Some(keys.input_thread_id.as_str())
-                        || string_property(node, "thread_node_id").as_deref()
-                            == Some(keys.thread_uuid.as_str())
-                })
-                .filter(|node| seen.insert(node.id))
-                .collect::<Vec<_>>();
+            let mut matched = Vec::new();
+            store.visit_nodes_owned(Some(label_id), |node| {
+                let matches = node_external_id(&node).as_deref()
+                    == Some(keys.public_thread_id.as_str())
+                    || node_external_id(&node).as_deref() == Some(keys.input_thread_id.as_str())
+                    || string_property(&node, "thread_node_id").as_deref()
+                        == Some(keys.thread_uuid.as_str());
+                if matches && seen.insert(node.id) {
+                    matched.push(node);
+                }
+                crate::store::GraphScanControl::Continue
+            })?;
             matched.sort_by_key(|node| node.id.0);
-            matched
+            Ok(matched)
         }
-        _ => Vec::new(),
+        _ => Ok(Vec::new()),
     }
 }
 
@@ -24002,7 +24480,8 @@ fn knowledge_thread_sync_metadata_for(
 ) -> Result<KnowledgeThreadSyncMetadataOutput> {
     validate_knowledge_thread_sync_metadata_request(request)?;
     let graph_commit_epoch = store.commit_epoch();
-    let Some(thread) = seed_node_by_label_and_external_id(catalog, store, "Thread", &request.id)
+    let Some(thread) =
+        try_seed_node_by_label_and_external_id(catalog, store, "Thread", &request.id)?
     else {
         return Ok(KnowledgeThreadSyncMetadataOutput {
             graph_commit_epoch,
@@ -24022,11 +24501,11 @@ fn knowledge_thread_sync_metadata_for(
         id: request.id.clone(),
         thread_node_id: Some(thread.id.0),
         found_thread: true,
-        title: coalesced_string_property(thread, "title", ""),
-        source: coalesced_string_property(thread, "source", ""),
-        project: coalesced_string_property(thread, "project", ""),
-        workspace: coalesced_string_property(thread, "workspace", ""),
-        space_id: coalesced_string_property(thread, "space_id", "default"),
+        title: coalesced_string_property(&thread, "title", ""),
+        source: coalesced_string_property(&thread, "source", ""),
+        project: coalesced_string_property(&thread, "project", ""),
+        workspace: coalesced_string_property(&thread, "workspace", ""),
+        space_id: coalesced_string_property(&thread, "space_id", "default"),
     })
 }
 
@@ -24263,7 +24742,8 @@ fn knowledge_thread_compacted_memory_projected_list_for(
         store,
         &request.list.identity_property,
         &request.list.thread_id,
-    ) else {
+    )?
+    else {
         return Ok(KnowledgeThreadCompactedMemoryProjectedListOutput {
             graph_commit_epoch,
             thread_id: request.list.thread_id.clone(),
@@ -24281,7 +24761,7 @@ fn knowledge_thread_compacted_memory_projected_list_for(
         thread.id,
         &request.memory_property_names,
         &request.relationship_property_names,
-    );
+    )?;
     let matched_count = rows.len();
     if request.list.limit > 0 {
         rows.truncate(request.list.limit);
@@ -24353,20 +24833,20 @@ fn create_knowledge_thread_compaction_link_for(
     validate_knowledge_thread_compaction_link_request(request)?;
 
     let graph_commit_epoch_before = db.store.commit_epoch();
-    let thread = seed_node_by_label_and_external_id(
+    let thread = try_seed_node_by_label_and_external_id(
         &db.catalog,
         &db.store,
         "Thread",
         request.thread_id.as_str(),
-    );
-    let memory = seed_node_by_label_and_external_id(
+    )?;
+    let memory = try_seed_node_by_label_and_external_id(
         &db.catalog,
         &db.store,
         "Memory",
         request.memory_id.as_str(),
-    );
-    let thread_node_id = thread.map(|node| node.id.0);
-    let memory_node_id = memory.map(|node| node.id.0);
+    )?;
+    let thread_node_id = thread.as_ref().map(|node| node.id.0);
+    let memory_node_id = memory.as_ref().map(|node| node.id.0);
     let (Some(thread), Some(memory)) = (thread, memory) else {
         return Ok(KnowledgeThreadCompactionLinkOutput {
             graph_commit_epoch_before,
@@ -24381,8 +24861,8 @@ fn create_knowledge_thread_compaction_link_for(
             created_relationship_count: 0,
         });
     };
-    if !node_has_external_id_property(thread, request.thread_id.as_str())
-        || !node_has_external_id_property(memory, request.memory_id.as_str())
+    if !node_has_external_id_property(&thread, request.thread_id.as_str())
+        || !node_has_external_id_property(&memory, request.memory_id.as_str())
     {
         return Ok(KnowledgeThreadCompactionLinkOutput {
             graph_commit_epoch_before,
@@ -24488,20 +24968,31 @@ fn validate_thread_compacted_memory_projected_request(
     Ok(())
 }
 
-fn thread_node_by_identity<'a>(
+fn thread_node_by_identity(
     catalog: &Catalog,
-    store: &'a GraphStore,
+    store: &GraphStore,
     identity_property: &str,
     thread_id: &str,
-) -> Option<&'a NodeRecord> {
-    let label_id = catalog.label_id("Thread")?;
-    store.scan_nodes(Some(label_id)).find(|node| {
-        node.properties
+) -> Result<Option<NodeRecord>> {
+    let Some(label_id) = catalog.label_id("Thread") else {
+        return Ok(None);
+    };
+    let mut found = None;
+    store.visit_nodes_owned(Some(label_id), |node| {
+        if node
+            .properties
             .get(identity_property)
             .map(value_to_external_id)
             .as_deref()
             == Some(thread_id)
-    })
+        {
+            found = Some(node);
+            crate::store::GraphScanControl::Stop
+        } else {
+            crate::store::GraphScanControl::Continue
+        }
+    })?;
+    Ok(found)
 }
 
 fn thread_entity_by_identity_via_query_runtime(
@@ -24580,37 +25071,41 @@ fn thread_compacted_memory_projected_rows(
     thread_node_id: NodeId,
     memory_property_names: &[String],
     relationship_property_names: &[String],
-) -> Vec<KnowledgeThreadCompactedMemoryProjectedRow> {
+) -> Result<Vec<KnowledgeThreadCompactedMemoryProjectedRow>> {
     let Some(rel_type_id) = catalog.rel_type_id("COMPACTS_TO") else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    let Some(thread) = store.node(thread_node_id) else {
-        return Vec::new();
+    let Some(thread) = store.node_owned(thread_node_id)? else {
+        return Ok(Vec::new());
     };
-    let mut rows = store
-        .outgoing_relationships(thread_node_id, rel_type_id)
-        .filter_map(|relationship| {
-            store
-                .node(relationship.target)
+    let mut rows = Vec::new();
+    store.try_visit_adjacent_relationships_owned(
+        thread_node_id,
+        Some(rel_type_id),
+        AdjacencyDirection::Outgoing,
+        |relationship| {
+            if let Some(memory) = store
+                .node_owned(relationship.target)?
                 .filter(|memory| memory.labels.contains(&memory_label_id))
-                .map(|memory| {
-                    (
-                        thread_compacted_memory_projected_row(
-                            thread,
-                            memory,
-                            relationship,
-                            memory_property_names,
-                            relationship_property_names,
-                        ),
-                        memory.properties.get("importance").cloned(),
-                        memory.properties.get("created_at").cloned(),
-                    )
-                })
-        })
-        .collect::<Vec<_>>();
+            {
+                rows.push((
+                    thread_compacted_memory_projected_row(
+                        &thread,
+                        &memory,
+                        &relationship,
+                        memory_property_names,
+                        relationship_property_names,
+                    ),
+                    memory.properties.get("importance").cloned(),
+                    memory.properties.get("created_at").cloned(),
+                ));
+            }
+            Ok(crate::store::GraphScanControl::Continue)
+        },
+    )?;
     rows.sort_by(|left, right| {
         compare_optional_values_desc(left.1.as_ref(), right.1.as_ref())
             .then_with(|| {
@@ -24623,9 +25118,10 @@ fn thread_compacted_memory_projected_rows(
             .then_with(|| left.0.memory_id.cmp(&right.0.memory_id))
             .then_with(|| left.0.relationship_id.cmp(&right.0.relationship_id))
     });
-    rows.into_iter()
+    Ok(rows
+        .into_iter()
         .map(|(row, _importance, _created_at)| row)
-        .collect()
+        .collect())
 }
 
 fn thread_compacted_memory_projected_rows_via_query_runtime(
@@ -24898,8 +25394,9 @@ fn knowledge_memory_decay_detail_for(
 ) -> Result<KnowledgeMemoryDecayDetailOutput> {
     validate_knowledge_memory_decay_detail_request(request)?;
     let graph_commit_epoch = store.commit_epoch();
-    let memory = seed_node_by_label_and_external_id(catalog, store, "Memory", &request.memory_id)
-        .map(|memory| knowledge_memory_decay_detail_row(memory, request));
+    let memory =
+        try_seed_node_by_label_and_external_id(catalog, store, "Memory", &request.memory_id)?
+            .map(|memory| knowledge_memory_decay_detail_row(&memory, request));
     Ok(KnowledgeMemoryDecayDetailOutput {
         graph_commit_epoch,
         found: memory.is_some(),
@@ -25065,7 +25562,8 @@ fn knowledge_memory_compacting_thread_projected_list_for(
     let mut found_memory_count = 0;
     let mut missing_memory_count = 0;
     for memory_id in &request.list.memory_ids {
-        let Some(memory) = seed_node_by_label_and_external_id(catalog, store, "Memory", memory_id)
+        let Some(memory) =
+            try_seed_node_by_label_and_external_id(catalog, store, "Memory", memory_id)?
         else {
             missing_memory_count += 1;
             rows.push(missing_memory_compacting_thread_projected_row(memory_id));
@@ -25075,10 +25573,10 @@ fn knowledge_memory_compacting_thread_projected_list_for(
         let mut memory_rows = compacting_thread_projected_rows_for_memory(
             catalog,
             store,
-            memory,
+            &memory,
             &request.thread_property_names,
             &request.relationship_property_names,
-        );
+        )?;
         if request.list.limit_per_memory > 0 {
             memory_rows.truncate(request.list.limit_per_memory);
         }
@@ -25259,34 +25757,38 @@ fn compacting_thread_projected_rows_for_memory(
     memory: &NodeRecord,
     thread_property_names: &[String],
     relationship_property_names: &[String],
-) -> Vec<KnowledgeMemoryCompactingThreadProjectedRow> {
+) -> Result<Vec<KnowledgeMemoryCompactingThreadProjectedRow>> {
     let Some(rel_type_id) = catalog.rel_type_id("COMPACTS_TO") else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Some(thread_label_id) = catalog.label_id("Thread") else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let memory_id = node_external_id(memory).unwrap_or_else(|| memory.id.0.to_string());
-    let mut rows = store
-        .incoming_relationships(memory.id, rel_type_id)
-        .filter_map(|relationship| {
-            store
-                .node(relationship.source)
+    let mut rows = Vec::new();
+    store.try_visit_adjacent_relationships_owned(
+        memory.id,
+        Some(rel_type_id),
+        AdjacencyDirection::Incoming,
+        |relationship| {
+            if let Some(thread) = store
+                .node_owned(relationship.source)?
                 .filter(|thread| thread.labels.contains(&thread_label_id))
-                .map(|thread| {
-                    compacting_thread_projected_row(
-                        &memory_id,
-                        memory.id,
-                        thread,
-                        relationship,
-                        thread_property_names,
-                        relationship_property_names,
-                    )
-                })
-        })
-        .collect::<Vec<_>>();
+            {
+                rows.push(compacting_thread_projected_row(
+                    &memory_id,
+                    memory.id,
+                    &thread,
+                    &relationship,
+                    thread_property_names,
+                    relationship_property_names,
+                ));
+            }
+            Ok(crate::store::GraphScanControl::Continue)
+        },
+    )?;
     sort_memory_compacting_thread_projected_rows(&mut rows);
-    rows
+    Ok(rows)
 }
 
 fn compacting_thread_projected_rows_for_memory_via_query_runtime(
@@ -25592,8 +26094,12 @@ fn delete_knowledge_thread_messages_for(
     }
 
     let graph_commit_epoch_before = db.store.commit_epoch();
-    let Some(thread) =
-        seed_node_by_label_and_external_id(&db.catalog, &db.store, "Thread", &request.thread_id)
+    let Some(thread) = try_seed_node_by_label_and_external_id(
+        &db.catalog,
+        &db.store,
+        "Thread",
+        &request.thread_id,
+    )?
     else {
         return Ok(KnowledgeThreadMessageDeleteOutput {
             graph_commit_epoch_before,
@@ -25607,7 +26113,7 @@ fn delete_knowledge_thread_messages_for(
     };
 
     let thread_node_id = thread.id;
-    let message_rows = thread_message_rows(&db.catalog, &db.store, thread_node_id);
+    let message_rows = thread_message_rows(&db.catalog, &db.store, thread_node_id)?;
     let matched_relationship_count = message_rows.len();
     let deleted_message_count = message_rows
         .iter()
@@ -25650,29 +26156,35 @@ fn thread_message_rows(
     catalog: &Catalog,
     store: &GraphStore,
     thread_node_id: NodeId,
-) -> Vec<KnowledgeThreadMessageRow> {
+) -> Result<Vec<KnowledgeThreadMessageRow>> {
     let Some(rel_type_id) = catalog.rel_type_id("CONTAINS") else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Some(message_label_id) = catalog.label_id("Message") else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    let mut rows = store
-        .outgoing_relationships(thread_node_id, rel_type_id)
-        .filter_map(|relationship| {
-            store
-                .node(relationship.target)
+    let mut rows = Vec::new();
+    store.try_visit_adjacent_relationships_owned(
+        thread_node_id,
+        Some(rel_type_id),
+        AdjacencyDirection::Outgoing,
+        |relationship| {
+            if let Some(message) = store
+                .node_owned(relationship.target)?
                 .filter(|message| message.labels.contains(&message_label_id))
-                .map(|message| thread_message_row(message, relationship))
-        })
-        .collect::<Vec<_>>();
+            {
+                rows.push(thread_message_row(&message, &relationship));
+            }
+            Ok(crate::store::GraphScanControl::Continue)
+        },
+    )?;
     rows.sort_by(|left, right| {
         left.order_index
             .cmp(&right.order_index)
             .then_with(|| left.message_id.cmp(&right.message_id))
             .then_with(|| left.relationship_id.cmp(&right.relationship_id))
     });
-    rows
+    Ok(rows)
 }
 
 fn thread_message_rows_via_query_runtime(
@@ -25811,8 +26323,12 @@ fn update_knowledge_label_lifecycle_batch_for(
     let mut eligible_updates = Vec::new();
 
     for update in &request.updates {
-        let Some(seed) =
-            seed_node_by_label_and_external_id(&db.catalog, &db.store, "Label", &update.label_id)
+        let Some(seed) = try_seed_node_by_label_and_external_id(
+            &db.catalog,
+            &db.store,
+            "Label",
+            &update.label_id,
+        )?
         else {
             missing_count += 1;
             rows.push(KnowledgeLabelLifecycleBatchRow {
@@ -25827,7 +26343,7 @@ fn update_knowledge_label_lifecycle_batch_for(
             continue;
         };
         let node_id = seed.id;
-        if !node_has_external_id_property(seed, update.label_id.as_str()) {
+        if !node_has_external_id_property(&seed, update.label_id.as_str()) {
             non_writable_count += 1;
             rows.push(KnowledgeLabelLifecycleBatchRow {
                 label_id: update.label_id.clone(),
@@ -26217,36 +26733,45 @@ fn knowledge_label_regex_memory_connections_for(
 
     let property_names = deduplicated_strings_in_order(&request.memory_property_names);
     let mut counts = BTreeMap::<(NodeId, NodeId), usize>::new();
-    for memory in store.scan_nodes(Some(memory_label_id)) {
-        for relationship in store.outgoing_relationships(memory.id, has_label_type_id) {
-            let Some(label) = store
-                .node(relationship.target)
-                .filter(|node| node.labels.contains(&label_label_id))
-            else {
-                continue;
-            };
-            let Some(label_name) = node_string_property(label, "name") else {
-                continue;
-            };
-            if crate::regex_cache::regex_is_match(&request.label_name_pattern, &label_name) {
-                *counts.entry((memory.id, label.id)).or_default() += 1;
-            }
-        }
-    }
+    store.try_visit_nodes_owned(Some(memory_label_id), |memory| {
+        store.try_visit_adjacent_relationships_owned(
+            memory.id,
+            Some(has_label_type_id),
+            AdjacencyDirection::Outgoing,
+            |relationship| {
+                let Some(label) = store
+                    .node_owned(relationship.target)?
+                    .filter(|node| node.labels.contains(&label_label_id))
+                else {
+                    return Ok(crate::store::GraphScanControl::Continue);
+                };
+                let Some(label_name) = node_string_property(&label, "name") else {
+                    return Ok(crate::store::GraphScanControl::Continue);
+                };
+                if crate::regex_cache::regex_is_match(&request.label_name_pattern, &label_name) {
+                    *counts.entry((memory.id, label.id)).or_default() += 1;
+                }
+                Ok(crate::store::GraphScanControl::Continue)
+            },
+        )?;
+        Ok(crate::store::GraphScanControl::Continue)
+    })?;
 
-    let mut rows = counts
-        .into_iter()
-        .filter_map(|((memory_node_id, label_node_id), label_connections)| {
-            let memory = store.node(memory_node_id)?;
-            let label = store.node(label_node_id)?;
-            Some(knowledge_label_regex_memory_connection_row(
-                memory,
-                label,
-                label_connections,
-                &property_names,
-            ))
-        })
-        .collect::<Vec<_>>();
+    let mut rows = Vec::with_capacity(counts.len());
+    for ((memory_node_id, label_node_id), label_connections) in counts {
+        let Some(memory) = store.node_owned(memory_node_id)? else {
+            continue;
+        };
+        let Some(label) = store.node_owned(label_node_id)? else {
+            continue;
+        };
+        rows.push(knowledge_label_regex_memory_connection_row(
+            &memory,
+            &label,
+            label_connections,
+            &property_names,
+        ));
+    }
     sort_label_regex_memory_connection_rows(&mut rows);
     let matched_count = rows.len();
     let mut rows = rows.into_iter().skip(request.offset).collect::<Vec<_>>();
@@ -26336,13 +26861,13 @@ fn delete_knowledge_memory_labels_for(
     validate_knowledge_memory_label_delete_request(request)?;
 
     let graph_commit_epoch_before = db.store.commit_epoch();
-    let memory = seed_node_by_label_and_external_id(
+    let memory = try_seed_node_by_label_and_external_id(
         &db.catalog,
         &db.store,
         "Memory",
         request.memory_id.as_str(),
-    );
-    let memory_node_id = memory.map(|node| node.id.0);
+    )?;
+    let memory_node_id = memory.as_ref().map(|node| node.id.0);
     let Some(memory) = memory else {
         return Ok(knowledge_memory_label_delete_empty_output(
             request,
@@ -26354,7 +26879,7 @@ fn delete_knowledge_memory_labels_for(
             false,
         ));
     };
-    if !node_has_external_id_property(memory, request.memory_id.as_str()) {
+    if !node_has_external_id_property(&memory, request.memory_id.as_str()) {
         return Ok(knowledge_memory_label_delete_empty_output(
             request,
             graph_commit_epoch_before,
@@ -26369,8 +26894,8 @@ fn delete_knowledge_memory_labels_for(
     let (label_node_id, found_label, relationship_ids) = match request.label_id.as_ref() {
         Some(label_id) => {
             let label =
-                seed_node_by_label_and_external_id(&db.catalog, &db.store, "Label", label_id);
-            let label_node_id = label.map(|node| node.id.0);
+                try_seed_node_by_label_and_external_id(&db.catalog, &db.store, "Label", label_id)?;
+            let label_node_id = label.as_ref().map(|node| node.id.0);
             let Some(label) = label else {
                 return Ok(knowledge_memory_label_delete_empty_output(
                     request,
@@ -26382,7 +26907,7 @@ fn delete_knowledge_memory_labels_for(
                     false,
                 ));
             };
-            if !node_has_external_id_property(label, label_id.as_str()) {
+            if !node_has_external_id_property(&label, label_id.as_str()) {
                 return Ok(knowledge_memory_label_delete_empty_output(
                     request,
                     graph_commit_epoch_before,
@@ -26396,13 +26921,13 @@ fn delete_knowledge_memory_labels_for(
             (
                 label_node_id,
                 true,
-                memory_label_relationship_ids(&db.catalog, &db.store, memory.id, Some(label.id)),
+                memory_label_relationship_ids(&db.catalog, &db.store, memory.id, Some(label.id))?,
             )
         }
         None => (
             None,
             true,
-            memory_label_relationship_ids(&db.catalog, &db.store, memory.id, None),
+            memory_label_relationship_ids(&db.catalog, &db.store, memory.id, None)?,
         ),
     };
 
@@ -26492,27 +27017,31 @@ fn memory_label_relationship_ids(
     store: &GraphStore,
     memory_node_id: NodeId,
     label_node_id: Option<NodeId>,
-) -> Vec<u64> {
+) -> Result<Vec<u64>> {
     let Some(has_label_type_id) = catalog.rel_type_id("HAS_LABEL") else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Some(label_type_id) = catalog.label_id("Label") else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    let mut relationship_ids = store
-        .outgoing_relationships(memory_node_id, has_label_type_id)
-        .filter(|relationship| {
-            label_node_id.is_none_or(|label_node_id| relationship.target == label_node_id)
-        })
-        .filter(|relationship| {
-            store
-                .node(relationship.target)
-                .is_some_and(|node| node.labels.contains(&label_type_id))
-        })
-        .map(|relationship| relationship.id.0)
-        .collect::<Vec<_>>();
+    let mut relationship_ids = Vec::new();
+    store.try_visit_adjacent_relationships_owned(
+        memory_node_id,
+        Some(has_label_type_id),
+        AdjacencyDirection::Outgoing,
+        |relationship| {
+            if label_node_id.is_none_or(|label_node_id| relationship.target == label_node_id)
+                && store
+                    .node_owned(relationship.target)?
+                    .is_some_and(|node| node.labels.contains(&label_type_id))
+            {
+                relationship_ids.push(relationship.id.0);
+            }
+            Ok(crate::store::GraphScanControl::Continue)
+        },
+    )?;
     relationship_ids.sort_unstable();
-    relationship_ids
+    Ok(relationship_ids)
 }
 
 fn transfer_knowledge_label_memory_edges_for(
@@ -26523,32 +27052,34 @@ fn transfer_knowledge_label_memory_edges_for(
     validate_knowledge_label_memory_transfer_request(request)?;
 
     let graph_commit_epoch_before = db.store.commit_epoch();
-    let source_label = seed_node_by_label_and_external_id(
+    let source_label = try_seed_node_by_label_and_external_id(
         &db.catalog,
         &db.store,
         "Label",
         request.source_label_id.as_str(),
-    );
-    let target_label = seed_node_by_label_and_external_id(
+    )?;
+    let target_label = try_seed_node_by_label_and_external_id(
         &db.catalog,
         &db.store,
         "Label",
         request.target_label_id.as_str(),
-    );
-    let source_label_node_id = source_label.map(|node| node.id.0);
-    let target_label_node_id = target_label.map(|node| node.id.0);
+    )?;
+    let source_label_node_id = source_label.as_ref().map(|node| node.id.0);
+    let target_label_node_id = target_label.as_ref().map(|node| node.id.0);
+    let found_source_label = source_label.is_some();
+    let found_target_label = target_label.is_some();
     let (Some(source_label), Some(target_label)) = (source_label, target_label) else {
         return Ok(knowledge_label_memory_transfer_empty_output(
             request,
             graph_commit_epoch_before,
             source_label_node_id,
             target_label_node_id,
-            source_label.is_some(),
-            target_label.is_some(),
+            found_source_label,
+            found_target_label,
         ));
     };
-    if !node_has_external_id_property(source_label, request.source_label_id.as_str())
-        || !node_has_external_id_property(target_label, request.target_label_id.as_str())
+    if !node_has_external_id_property(&source_label, request.source_label_id.as_str())
+        || !node_has_external_id_property(&target_label, request.target_label_id.as_str())
     {
         return Ok(KnowledgeLabelMemoryTransferOutput {
             graph_commit_epoch_before,
@@ -26568,7 +27099,7 @@ fn transfer_knowledge_label_memory_edges_for(
     }
 
     let memory_candidates =
-        source_label_memory_transfer_candidates(&db.catalog, &db.store, source_label.id);
+        source_label_memory_transfer_candidates(&db.catalog, &db.store, source_label.id)?;
     if memory_candidates.is_empty() {
         return Ok(knowledge_label_memory_transfer_empty_output(
             request,
@@ -26585,10 +27116,10 @@ fn transfer_knowledge_label_memory_edges_for(
     let mut upsert_row_indexes = Vec::new();
     let mut non_writable_count = 0;
     for memory in memory_candidates {
-        let memory_id = node_external_id(memory);
+        let memory_id = node_external_id(&memory);
         if !memory_id
             .as_deref()
-            .is_some_and(|memory_id| node_has_external_id_property(memory, memory_id))
+            .is_some_and(|memory_id| node_has_external_id_property(&memory, memory_id))
         {
             non_writable_count += 1;
             rows.push(KnowledgeLabelMemoryTransferRow {
@@ -26716,29 +27247,41 @@ fn knowledge_label_memory_transfer_empty_output(
     }
 }
 
-fn source_label_memory_transfer_candidates<'a>(
+fn source_label_memory_transfer_candidates(
     catalog: &Catalog,
-    store: &'a GraphStore,
+    store: &GraphStore,
     source_label_node_id: NodeId,
-) -> Vec<&'a NodeRecord> {
+) -> Result<Vec<NodeRecord>> {
     let Some(has_label_type_id) = catalog.rel_type_id("HAS_LABEL") else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let mut seen_memory_ids = BTreeSet::new();
-    let mut memories = store
-        .scan_nodes(Some(memory_label_id))
-        .filter(|memory| {
-            store
-                .outgoing_relationships(memory.id, has_label_type_id)
-                .any(|relationship| relationship.target == source_label_node_id)
-        })
-        .filter(|memory| seen_memory_ids.insert(memory.id))
-        .collect::<Vec<_>>();
+    let mut memories = Vec::new();
+    store.try_visit_nodes_owned(Some(memory_label_id), |memory| {
+        let mut found = false;
+        store.visit_adjacent_relationships_owned(
+            memory.id,
+            Some(has_label_type_id),
+            AdjacencyDirection::Outgoing,
+            |relationship| {
+                if relationship.target == source_label_node_id {
+                    found = true;
+                    crate::store::GraphScanControl::Stop
+                } else {
+                    crate::store::GraphScanControl::Continue
+                }
+            },
+        )?;
+        if found && seen_memory_ids.insert(memory.id) {
+            memories.push(memory);
+        }
+        Ok(crate::store::GraphScanControl::Continue)
+    })?;
     memories.sort_by_key(|memory| memory.id.0);
-    memories
+    Ok(memories)
 }
 
 fn transfer_knowledge_memory_label_edges_for(
@@ -26749,20 +27292,22 @@ fn transfer_knowledge_memory_label_edges_for(
     validate_knowledge_memory_label_transfer_request(request)?;
 
     let graph_commit_epoch_before = db.store.commit_epoch();
-    let older_memory = seed_node_by_label_and_external_id(
+    let older_memory = try_seed_node_by_label_and_external_id(
         &db.catalog,
         &db.store,
         "Memory",
         request.older_memory_id.as_str(),
-    );
-    let newer_memory = seed_node_by_label_and_external_id(
+    )?;
+    let newer_memory = try_seed_node_by_label_and_external_id(
         &db.catalog,
         &db.store,
         "Memory",
         request.newer_memory_id.as_str(),
-    );
-    let older_memory_node_id = older_memory.map(|node| node.id.0);
-    let newer_memory_node_id = newer_memory.map(|node| node.id.0);
+    )?;
+    let older_memory_node_id = older_memory.as_ref().map(|node| node.id.0);
+    let newer_memory_node_id = newer_memory.as_ref().map(|node| node.id.0);
+    let found_older_memory = older_memory.is_some();
+    let found_newer_memory = newer_memory.is_some();
     let (Some(older_memory), Some(newer_memory)) = (older_memory, newer_memory) else {
         return Ok(knowledge_memory_label_transfer_empty_output(
             request,
@@ -26770,8 +27315,8 @@ fn transfer_knowledge_memory_label_edges_for(
                 graph_commit_epoch: graph_commit_epoch_before,
                 older_memory_node_id,
                 newer_memory_node_id,
-                found_older_memory: older_memory.is_some(),
-                found_newer_memory: newer_memory.is_some(),
+                found_older_memory,
+                found_newer_memory,
                 older_space_matches: false,
                 newer_space_matches: false,
                 duplicate_source_edge_count: 0,
@@ -26780,11 +27325,11 @@ fn transfer_knowledge_memory_label_edges_for(
     };
 
     let older_space_matches =
-        node_property_equals_external_id(older_memory, "space_id", request.space_id.as_str());
+        node_property_equals_external_id(&older_memory, "space_id", request.space_id.as_str());
     let newer_space_matches =
-        node_property_equals_external_id(newer_memory, "space_id", request.space_id.as_str());
-    if !node_has_external_id_property(older_memory, request.older_memory_id.as_str())
-        || !node_has_external_id_property(newer_memory, request.newer_memory_id.as_str())
+        node_property_equals_external_id(&newer_memory, "space_id", request.space_id.as_str());
+    if !node_has_external_id_property(&older_memory, request.older_memory_id.as_str())
+        || !node_has_external_id_property(&newer_memory, request.newer_memory_id.as_str())
     {
         return Ok(KnowledgeMemoryLabelTransferOutput {
             graph_commit_epoch_before,
@@ -26823,7 +27368,7 @@ fn transfer_knowledge_memory_label_edges_for(
     }
 
     let (label_candidates, duplicate_source_edge_count) =
-        memory_label_transfer_candidates(&db.catalog, &db.store, older_memory.id);
+        memory_label_transfer_candidates(&db.catalog, &db.store, older_memory.id)?;
     if label_candidates.is_empty() {
         return Ok(knowledge_memory_label_transfer_empty_output(
             request,
@@ -26845,10 +27390,10 @@ fn transfer_knowledge_memory_label_edges_for(
     let mut upsert_row_indexes = Vec::new();
     let mut non_writable_count = 0;
     for label in label_candidates {
-        let label_id = node_external_id(label);
+        let label_id = node_external_id(&label);
         if !label_id
             .as_deref()
-            .is_some_and(|label_id| node_has_external_id_property(label, label_id))
+            .is_some_and(|label_id| node_has_external_id_property(&label, label_id))
         {
             non_writable_count += 1;
             rows.push(KnowledgeMemoryLabelTransferRow {
@@ -26996,38 +27541,45 @@ fn knowledge_memory_label_transfer_empty_output(
     }
 }
 
-fn memory_label_transfer_candidates<'a>(
+fn memory_label_transfer_candidates(
     catalog: &Catalog,
-    store: &'a GraphStore,
+    store: &GraphStore,
     older_memory_node_id: NodeId,
-) -> (Vec<&'a NodeRecord>, usize) {
+) -> Result<(Vec<NodeRecord>, usize)> {
     let Some(has_label_type_id) = catalog.rel_type_id("HAS_LABEL") else {
-        return (Vec::new(), 0);
+        return Ok((Vec::new(), 0));
     };
     let Some(label_type_id) = catalog.label_id("Label") else {
-        return (Vec::new(), 0);
+        return Ok((Vec::new(), 0));
     };
     let mut seen_label_ids = BTreeSet::new();
     let mut duplicate_source_edge_count = 0;
-    let mut labels = store
-        .outgoing_relationships(older_memory_node_id, has_label_type_id)
-        .filter_map(|relationship| store.node(relationship.target))
-        .filter(|label| label.labels.contains(&label_type_id))
-        .filter(|label| {
+    let mut labels = Vec::new();
+    store.try_visit_adjacent_relationships_owned(
+        older_memory_node_id,
+        Some(has_label_type_id),
+        AdjacencyDirection::Outgoing,
+        |relationship| {
+            let Some(label) = store
+                .node_owned(relationship.target)?
+                .filter(|label| label.labels.contains(&label_type_id))
+            else {
+                return Ok(crate::store::GraphScanControl::Continue);
+            };
             if seen_label_ids.insert(label.id) {
-                true
+                labels.push(label);
             } else {
                 duplicate_source_edge_count += 1;
-                false
             }
-        })
-        .collect::<Vec<_>>();
+            Ok(crate::store::GraphScanControl::Continue)
+        },
+    )?;
     labels.sort_by(|left, right| {
         node_external_id(left)
             .cmp(&node_external_id(right))
             .then_with(|| left.id.0.cmp(&right.id.0))
     });
-    (labels, duplicate_source_edge_count)
+    Ok((labels, duplicate_source_edge_count))
 }
 
 fn node_property_equals_external_id(node: &NodeRecord, key: &str, expected: &str) -> bool {
@@ -27210,12 +27762,13 @@ fn knowledge_entity_label_projected_list_for(
     let mut label_count = 0;
 
     for external_id in &request.list.external_ids {
-        let Some(entity) = seed_node_by_label_and_external_id(
+        let Some(entity) = try_seed_node_by_label_and_external_id(
             catalog,
             store,
             &request.list.entity_label,
             external_id,
-        ) else {
+        )?
+        else {
             missing_entity_count += 1;
             groups.push(KnowledgeEntityLabelProjectedGroup {
                 external_id: external_id.clone(),
@@ -27230,11 +27783,11 @@ fn knowledge_entity_label_projected_list_for(
         let labels = entity_label_projected_rows(
             catalog,
             store,
-            entity,
+            &entity,
             request.list.limit_per_entity,
             &request.label_property_names,
             &request.relationship_property_names,
-        );
+        )?;
         label_count += labels.len();
         groups.push(KnowledgeEntityLabelProjectedGroup {
             external_id: external_id.clone(),
@@ -27419,32 +27972,36 @@ fn entity_label_projected_rows(
     limit: usize,
     label_property_names: &[String],
     relationship_property_names: &[String],
-) -> Vec<KnowledgeEntityLabelProjectedRow> {
+) -> Result<Vec<KnowledgeEntityLabelProjectedRow>> {
     let Some(rel_type_id) = catalog.rel_type_id("HAS_LABEL") else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Some(label_label_id) = catalog.label_id("Label") else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    let mut rows = store
-        .outgoing_relationships(entity.id, rel_type_id)
-        .filter_map(|relationship| {
-            store
-                .node(relationship.target)
+    let mut rows = Vec::new();
+    store.try_visit_adjacent_relationships_owned(
+        entity.id,
+        Some(rel_type_id),
+        AdjacencyDirection::Outgoing,
+        |relationship| {
+            if let Some(label) = store
+                .node_owned(relationship.target)?
                 .filter(|node| node.labels.contains(&label_label_id))
-                .map(|label| {
-                    (
-                        entity_label_projected_row(
-                            label,
-                            relationship,
-                            label_property_names,
-                            relationship_property_names,
-                        ),
-                        node_string_property(label, "name"),
-                    )
-                })
-        })
-        .collect::<Vec<_>>();
+            {
+                rows.push((
+                    entity_label_projected_row(
+                        &label,
+                        &relationship,
+                        label_property_names,
+                        relationship_property_names,
+                    ),
+                    node_string_property(&label, "name"),
+                ));
+            }
+            Ok(crate::store::GraphScanControl::Continue)
+        },
+    )?;
     rows.sort_by(|left, right| {
         left.1
             .cmp(&right.1)
@@ -27455,7 +28012,7 @@ fn entity_label_projected_rows(
     if limit > 0 {
         rows.truncate(limit);
     }
-    rows.into_iter().map(|(row, _name)| row).collect()
+    Ok(rows.into_iter().map(|(row, _name)| row).collect())
 }
 
 fn entity_label_projected_rows_via_query_runtime(
@@ -27607,12 +28164,13 @@ fn update_knowledge_pagerank_scores_batch_for(
 
     for update in &request.updates {
         let label = pagerank_label(update.label.as_str());
-        let Some(seed) = seed_node_by_label_and_external_id(
+        let Some(seed) = try_seed_node_by_label_and_external_id(
             &db.catalog,
             &db.store,
             label,
             update.external_id.as_str(),
-        ) else {
+        )?
+        else {
             missing_count += 1;
             rows.push(KnowledgePageRankScoreBatchRow {
                 label: label.to_string(),
@@ -27626,7 +28184,7 @@ fn update_knowledge_pagerank_scores_batch_for(
             continue;
         };
         let node_id = seed.id;
-        if !node_has_external_id_property(seed, update.external_id.as_str()) {
+        if !node_has_external_id_property(&seed, update.external_id.as_str()) {
             non_writable_count += 1;
             rows.push(KnowledgePageRankScoreBatchRow {
                 label: label.to_string(),
@@ -27729,19 +28287,19 @@ fn clear_knowledge_pagerank_scores_for(
         let Some(label_id) = db.catalog.label_id(label) else {
             continue;
         };
-        for node in db.store.scan_nodes(Some(label_id)) {
+        db.store.visit_nodes_owned(Some(label_id), |node| {
             if !seen_node_ids.insert(node.id) {
-                continue;
+                return crate::store::GraphScanControl::Continue;
             }
             if node
                 .properties
                 .get("pagerank_score")
                 .is_none_or(|value| value == &Value::Null)
             {
-                continue;
+                return crate::store::GraphScanControl::Continue;
             }
             candidate_count += 1;
-            let external_id = node_external_id(node);
+            let external_id = node_external_id(&node);
             if external_id.is_none() {
                 non_writable_count += 1;
                 rows.push(KnowledgePageRankClearRow {
@@ -27751,7 +28309,7 @@ fn clear_knowledge_pagerank_scores_for(
                     cleared: false,
                     non_writable: true,
                 });
-                continue;
+                return crate::store::GraphScanControl::Continue;
             }
             let assignments = BTreeMap::from([("pagerank_score".to_string(), Value::Null)]);
             eligible_updates.push((label.to_string(), node.id, assignments));
@@ -27763,7 +28321,8 @@ fn clear_knowledge_pagerank_scores_for(
                 cleared: true,
                 non_writable: false,
             });
-        }
+            crate::store::GraphScanControl::Continue
+        })?;
     }
 
     if eligible_updates.is_empty() {
@@ -28071,7 +28630,7 @@ fn clear_knowledge_community_assignments_for(
             &mut eligible_updates,
             &mut candidate_count,
             &mut cleared_count,
-        );
+        )?;
     } else {
         for label in &request.labels {
             let Some(label_id) = db.catalog.label_id(label.as_str()) else {
@@ -28085,7 +28644,7 @@ fn clear_knowledge_community_assignments_for(
                 &mut eligible_updates,
                 &mut candidate_count,
                 &mut cleared_count,
-            );
+            )?;
         }
     }
 
@@ -28123,28 +28682,30 @@ fn collect_knowledge_community_assignment_clears(
     eligible_updates: &mut Vec<NodeId>,
     candidate_count: &mut usize,
     cleared_count: &mut usize,
-) {
-    for node in db.store.scan_nodes(label_id) {
+) -> Result<()> {
+    db.store.visit_nodes_owned(label_id, |node| {
         if !seen_node_ids.insert(node.id) {
-            continue;
+            return crate::store::GraphScanControl::Continue;
         }
         if node
             .properties
             .get("community_id")
             .is_none_or(|value| value == &Value::Null)
         {
-            continue;
+            return crate::store::GraphScanControl::Continue;
         }
         *candidate_count += 1;
         *cleared_count += 1;
         eligible_updates.push(node.id);
         rows.push(KnowledgeCommunityAssignmentClearRow {
-            labels: node_label_names(&db.catalog, node),
-            external_id: node_external_id(node),
+            labels: node_label_names(&db.catalog, &node),
+            external_id: node_external_id(&node),
             node_id: node.id.0,
             cleared: true,
         });
-    }
+        crate::store::GraphScanControl::Continue
+    })?;
+    Ok(())
 }
 
 fn community_assignment_clear_statement(node_id: NodeId) -> (String, BTreeMap<String, Value>) {
@@ -28257,17 +28818,19 @@ fn knowledge_communities_for(
         });
     };
 
-    let mut rows = store
-        .scan_nodes(Some(label_id))
-        .map(knowledge_community_row)
-        .filter(|row| !request.require_summary || row.has_summary)
-        .filter(|row| {
-            !request.require_non_negative_community_id
+    let mut rows = Vec::new();
+    store.visit_nodes_owned(Some(label_id), |node| {
+        let row = knowledge_community_row(&node);
+        if (!request.require_summary || row.has_summary)
+            && (!request.require_non_negative_community_id
                 || row
                     .community_id
-                    .is_some_and(|community_id| community_id >= 0)
-        })
-        .collect::<Vec<_>>();
+                    .is_some_and(|community_id| community_id >= 0))
+        {
+            rows.push(row);
+        }
+        crate::store::GraphScanControl::Continue
+    })?;
     let matched_count = rows.len();
     rows.sort_by(|left, right| compare_knowledge_community_rows(left, right, request.order));
     if request.limit > 0 {
@@ -28335,11 +28898,18 @@ fn knowledge_community_for(
         });
     };
 
-    let row = store
-        .scan_nodes(Some(label_id))
-        .filter(|node| community_matches_lookup_key(node, &request.key))
-        .min_by_key(|node| node.id.0)
-        .map(knowledge_community_row);
+    let mut matched = None;
+    store.visit_nodes_owned(Some(label_id), |node| {
+        if community_matches_lookup_key(&node, &request.key)
+            && matched
+                .as_ref()
+                .is_none_or(|current: &NodeRecord| node.id < current.id)
+        {
+            matched = Some(node);
+        }
+        crate::store::GraphScanControl::Continue
+    })?;
+    let row = matched.as_ref().map(knowledge_community_row);
     let found = row.is_some();
     Ok(KnowledgeCommunityOutput {
         graph_commit_epoch,
@@ -28497,7 +29067,7 @@ fn update_knowledge_communities_batch_for(
 
     for create in &request.creates {
         if let Some(existing) =
-            seed_node_by_label_and_external_id(&db.catalog, &db.store, "Community", &create.id)
+            try_seed_node_by_label_and_external_id(&db.catalog, &db.store, "Community", &create.id)?
         {
             already_exists_count += 1;
             create_rows.push(KnowledgeCommunityCreateBatchRow {
@@ -28533,8 +29103,12 @@ fn update_knowledge_communities_batch_for(
     }
 
     for update in &request.summary_updates {
-        let Some(seed) =
-            seed_node_by_label_and_external_id(&db.catalog, &db.store, "Community", &update.id)
+        let Some(seed) = try_seed_node_by_label_and_external_id(
+            &db.catalog,
+            &db.store,
+            "Community",
+            &update.id,
+        )?
         else {
             missing_count += 1;
             summary_update_rows.push(KnowledgeCommunitySummaryUpdateBatchRow {
@@ -28549,7 +29123,7 @@ fn update_knowledge_communities_batch_for(
             });
             continue;
         };
-        if !node_has_external_id_property(seed, update.id.as_str()) {
+        if !node_has_external_id_property(&seed, update.id.as_str()) {
             non_writable_count += 1;
             summary_update_rows.push(KnowledgeCommunitySummaryUpdateBatchRow {
                 id: update.id.clone(),
@@ -28625,9 +29199,13 @@ fn update_knowledge_communities_batch_for(
     let output = tx.commit()?;
     for row in &mut create_rows {
         if row.created {
-            row.node_id =
-                seed_node_by_label_and_external_id(&db.catalog, &db.store, "Community", &row.id)
-                    .map(|node| node.id.0);
+            row.node_id = try_seed_node_by_label_and_external_id(
+                &db.catalog,
+                &db.store,
+                "Community",
+                &row.id,
+            )?
+            .map(|node| node.id.0);
         }
     }
 
@@ -28759,15 +29337,15 @@ fn delete_knowledge_communities_for(
         });
     };
 
-    let mut rows = db
-        .store
-        .scan_nodes(Some(label_id))
-        .map(|node| KnowledgeCommunityCleanupRow {
-            id: node_external_id(node),
+    let mut rows = Vec::new();
+    db.store.visit_nodes_owned(Some(label_id), |node| {
+        rows.push(KnowledgeCommunityCleanupRow {
+            id: node_external_id(&node),
             node_id: node.id.0,
             deleted: true,
-        })
-        .collect::<Vec<_>>();
+        });
+        crate::store::GraphScanControl::Continue
+    })?;
     rows.sort_by_key(|row| row.node_id);
 
     if rows.is_empty() {
@@ -28833,14 +29411,14 @@ fn knowledge_graph_meta_projected_for(
 ) -> Result<KnowledgeGraphMetaProjectedOutput> {
     validate_graph_meta_projected_request(request)?;
     let graph_commit_epoch = store.commit_epoch();
-    let meta = node_by_label_property_external_id(
+    let meta = try_node_by_label_property_external_id(
         catalog,
         store,
         "GraphMeta",
         "meta_id",
         &request.meta.meta_id,
-    )
-    .map(|node| knowledge_graph_meta_projected_from_node(node, &request.property_names));
+    )?
+    .map(|node| knowledge_graph_meta_projected_from_node(&node, &request.property_names));
     Ok(KnowledgeGraphMetaProjectedOutput {
         graph_commit_epoch,
         found: meta.is_some(),
@@ -28886,13 +29464,13 @@ fn delete_knowledge_graph_meta_for(
     db.ensure_writable()?;
     validate_graph_meta_request(request)?;
     let graph_commit_epoch_before = db.store.commit_epoch();
-    let Some(node_id) = node_by_label_property_external_id(
+    let Some(node_id) = try_node_by_label_property_external_id(
         &db.catalog,
         &db.store,
         "GraphMeta",
         "meta_id",
         &request.meta_id,
-    )
+    )?
     .map(|node| node.id) else {
         return Ok(KnowledgeGraphMetaDeleteOutput {
             graph_commit_epoch_before,
@@ -29040,13 +29618,13 @@ fn stamp_knowledge_graph_meta_batch_for(
             continue;
         }
 
-        let existing = node_by_label_property_external_id(
+        let existing = try_node_by_label_property_external_id(
             &db.catalog,
             &db.store,
             "GraphMeta",
             "meta_id",
             stamp.meta_id.as_str(),
-        );
+        )?;
         let updated_properties = stamp.assignments.len();
         updated_property_count += updated_properties;
         match existing {
@@ -29104,13 +29682,13 @@ fn stamp_knowledge_graph_meta_batch_for(
 
     for row in &mut rows {
         if row.created {
-            row.node_id = node_by_label_property_external_id(
+            row.node_id = try_node_by_label_property_external_id(
                 &db.catalog,
                 &db.store,
                 "GraphMeta",
                 "meta_id",
                 row.meta_id.as_str(),
-            )
+            )?
             .map(|node| node.id.0);
         }
     }
@@ -29190,12 +29768,12 @@ fn apply_knowledge_schema_migrations_batch_for(
     let mut eligible_creates = Vec::new();
 
     for migration in &request.migrations {
-        let existing = seed_node_by_label_and_external_id(
+        let existing = try_seed_node_by_label_and_external_id(
             &db.catalog,
             &db.store,
             "SchemaMigrationLog",
             migration.migration_id.as_str(),
-        );
+        )?;
         if let Some(node) = existing {
             already_applied_count += 1;
             rows.push(KnowledgeSchemaMigrationApplyBatchRow {
@@ -29255,12 +29833,12 @@ fn apply_knowledge_schema_migrations_batch_for(
 
     for row in &mut rows {
         if row.created {
-            row.node_id = seed_node_by_label_and_external_id(
+            row.node_id = try_seed_node_by_label_and_external_id(
                 &db.catalog,
                 &db.store,
                 "SchemaMigrationLog",
                 row.migration_id.as_str(),
-            )
+            )?
             .map(|node| node.id.0);
         }
     }
@@ -29279,38 +29857,38 @@ fn knowledge_schema_migrations_for(
     catalog: &Catalog,
     store: &GraphStore,
     request: &KnowledgeSchemaMigrationListRequest,
-) -> KnowledgeSchemaMigrationListOutput {
+) -> Result<KnowledgeSchemaMigrationListOutput> {
     let Some(label_id) = catalog.label_id("SchemaMigrationLog") else {
-        return KnowledgeSchemaMigrationListOutput {
+        return Ok(KnowledgeSchemaMigrationListOutput {
             graph_commit_epoch: store.commit_epoch(),
             rows: Vec::new(),
             matched_count: 0,
             returned_count: 0,
-        };
+        });
     };
-    let mut rows = store
-        .scan_nodes(Some(label_id))
-        .filter_map(|node| {
-            let migration_id = node_external_id(node)?;
-            Some(KnowledgeSchemaMigrationRow {
+    let mut rows = Vec::new();
+    store.visit_nodes_owned(Some(label_id), |node| {
+        if let Some(migration_id) = node_external_id(&node) {
+            rows.push(KnowledgeSchemaMigrationRow {
                 migration_id,
                 node_id: node.id.0,
                 applied_at: node.properties.get("applied_at").cloned(),
-            })
-        })
-        .collect::<Vec<_>>();
+            });
+        }
+        crate::store::GraphScanControl::Continue
+    })?;
     rows.sort_by(|left, right| left.migration_id.cmp(&right.migration_id));
     let matched_count = rows.len();
     if request.limit > 0 {
         rows.truncate(request.limit);
     }
     let returned_count = rows.len();
-    KnowledgeSchemaMigrationListOutput {
+    Ok(KnowledgeSchemaMigrationListOutput {
         graph_commit_epoch: store.commit_epoch(),
         rows,
         matched_count,
         returned_count,
-    }
+    })
 }
 
 fn update_knowledge_augmentation_jobs_batch_for(
@@ -29353,13 +29931,13 @@ fn update_knowledge_augmentation_jobs_batch_for(
 
         match &update.transition {
             KnowledgeAugmentationJobLifecycleTransition::Create { .. } => {
-                if let Some(existing) = node_by_label_property_external_id(
+                if let Some(existing) = try_node_by_label_property_external_id(
                     &db.catalog,
                     &db.store,
                     "AugmentationJob",
                     "job_id",
                     update.job_id.as_str(),
-                ) {
+                )? {
                     already_exists_count += 1;
                     rows.push(KnowledgeAugmentationJobLifecycleBatchRow {
                         job_id: update.job_id.clone(),
@@ -29395,13 +29973,14 @@ fn update_knowledge_augmentation_jobs_batch_for(
                 });
             }
             _ => {
-                let Some(existing) = node_by_label_property_external_id(
+                let Some(existing) = try_node_by_label_property_external_id(
                     &db.catalog,
                     &db.store,
                     "AugmentationJob",
                     "job_id",
                     update.job_id.as_str(),
-                ) else {
+                )?
+                else {
                     missing_count += 1;
                     rows.push(KnowledgeAugmentationJobLifecycleBatchRow {
                         job_id: update.job_id.clone(),
@@ -29418,7 +29997,7 @@ fn update_knowledge_augmentation_jobs_batch_for(
                 };
                 if !augmentation_job_transition_allows_status(
                     &update.transition,
-                    augmentation_job_status(existing).as_deref(),
+                    augmentation_job_status(&existing).as_deref(),
                 ) {
                     status_mismatch_count += 1;
                     rows.push(KnowledgeAugmentationJobLifecycleBatchRow {
@@ -29481,13 +30060,13 @@ fn update_knowledge_augmentation_jobs_batch_for(
 
     for row in &mut rows {
         if row.created {
-            row.node_id = node_by_label_property_external_id(
+            row.node_id = try_node_by_label_property_external_id(
                 &db.catalog,
                 &db.store,
                 "AugmentationJob",
                 "job_id",
                 row.job_id.as_str(),
-            )
+            )?
             .map(|node| node.id.0);
         }
     }
@@ -29896,26 +30475,25 @@ fn interrupt_knowledge_augmentation_jobs_for(
         });
     };
 
-    let mut rows = db
-        .store
-        .scan_nodes(Some(label_id))
-        .filter_map(|node| {
-            let previous_status = augmentation_job_status(node)?;
-            matches!(previous_status.as_str(), "pending" | "running").then(|| {
-                KnowledgeAugmentationJobInterruptRow {
-                    job_id: node
-                        .properties
-                        .get("job_id")
-                        .map(value_to_external_id)
-                        .filter(|job_id| !job_id.is_empty()),
-                    node_id: node.id.0,
-                    previous_status,
-                    interrupted: true,
-                    updated_property_count: 4,
-                }
-            })
-        })
-        .collect::<Vec<_>>();
+    let mut rows = Vec::new();
+    db.store.visit_nodes_owned(Some(label_id), |node| {
+        if let Some(previous_status) = augmentation_job_status(&node)
+            && matches!(previous_status.as_str(), "pending" | "running")
+        {
+            rows.push(KnowledgeAugmentationJobInterruptRow {
+                job_id: node
+                    .properties
+                    .get("job_id")
+                    .map(value_to_external_id)
+                    .filter(|job_id| !job_id.is_empty()),
+                node_id: node.id.0,
+                previous_status,
+                interrupted: true,
+                updated_property_count: 4,
+            });
+        }
+        crate::store::GraphScanControl::Continue
+    })?;
     rows.sort_by_key(|row| row.node_id);
 
     if rows.is_empty() {
@@ -29985,12 +30563,13 @@ fn delete_scoped_knowledge_entity_for(
     validate_cypher_identifier(&request.delete.entity.label, "label")?;
 
     let graph_commit_epoch_before = db.store.commit_epoch();
-    let Some(seed) = seed_node_by_label_and_external_id(
+    let Some(seed) = try_seed_node_by_label_and_external_id(
         &db.catalog,
         &db.store,
         request.delete.entity.label.as_str(),
         request.delete.entity.external_id.as_str(),
-    ) else {
+    )?
+    else {
         return Ok(KnowledgeEntityDeleteOutput {
             graph_commit_epoch_before,
             graph_commit_epoch_after: graph_commit_epoch_before,
@@ -30001,7 +30580,7 @@ fn delete_scoped_knowledge_entity_for(
         });
     };
     let node_id = seed.id.0;
-    if !node_has_external_id_property(seed, request.delete.entity.external_id.as_str()) {
+    if !node_has_external_id_property(&seed, request.delete.entity.external_id.as_str()) {
         return Ok(KnowledgeEntityDeleteOutput {
             graph_commit_epoch_before,
             graph_commit_epoch_after: graph_commit_epoch_before,
@@ -30015,7 +30594,7 @@ fn delete_scoped_knowledge_entity_for(
         && !knowledge_graph_seed_matches_filters(
             &db.catalog,
             &db.store,
-            seed,
+            &seed,
             &request.metadata_filters,
         )
     {
@@ -30079,12 +30658,13 @@ fn delete_scoped_knowledge_entity_batch_for(
     let mut seen_eligible_external_ids = BTreeSet::new();
 
     for external_id in &request.delete.external_ids {
-        let Some(seed) = seed_node_by_label_and_external_id(
+        let Some(seed) = try_seed_node_by_label_and_external_id(
             &db.catalog,
             &db.store,
             request.delete.label.as_str(),
             external_id.as_str(),
-        ) else {
+        )?
+        else {
             missing_count += 1;
             rows.push(KnowledgeEntityDeleteBatchRow {
                 external_id: external_id.clone(),
@@ -30096,7 +30676,7 @@ fn delete_scoped_knowledge_entity_batch_for(
             continue;
         };
         let node_id = seed.id.0;
-        if !node_has_external_id_property(seed, external_id.as_str()) {
+        if !node_has_external_id_property(&seed, external_id.as_str()) {
             non_writable_count += 1;
             rows.push(KnowledgeEntityDeleteBatchRow {
                 external_id: external_id.clone(),
@@ -30111,7 +30691,7 @@ fn delete_scoped_knowledge_entity_batch_for(
             && !knowledge_graph_seed_matches_filters(
                 &db.catalog,
                 &db.store,
-                seed,
+                &seed,
                 &request.metadata_filters,
             )
         {
@@ -30206,20 +30786,20 @@ fn create_scoped_knowledge_relationship_for(
     }
 
     let graph_commit_epoch_before = db.store.commit_epoch();
-    let source = seed_node_by_label_and_external_id(
+    let source = try_seed_node_by_label_and_external_id(
         &db.catalog,
         &db.store,
         request.create.source.label.as_str(),
         request.create.source.external_id.as_str(),
-    );
-    let target = seed_node_by_label_and_external_id(
+    )?;
+    let target = try_seed_node_by_label_and_external_id(
         &db.catalog,
         &db.store,
         request.create.target.label.as_str(),
         request.create.target.external_id.as_str(),
-    );
-    let source_node_id = source.map(|node| node.id.0);
-    let target_node_id = target.map(|node| node.id.0);
+    )?;
+    let source_node_id = source.as_ref().map(|node| node.id.0);
+    let target_node_id = target.as_ref().map(|node| node.id.0);
     let (Some(source), Some(target)) = (source, target) else {
         return Ok(KnowledgeRelationshipCreateOutput {
             graph_commit_epoch_before,
@@ -30232,8 +30812,8 @@ fn create_scoped_knowledge_relationship_for(
             created_relationship_count: 0,
         });
     };
-    if !node_has_external_id_property(source, request.create.source.external_id.as_str())
-        || !node_has_external_id_property(target, request.create.target.external_id.as_str())
+    if !node_has_external_id_property(&source, request.create.source.external_id.as_str())
+        || !node_has_external_id_property(&target, request.create.target.external_id.as_str())
     {
         return Ok(KnowledgeRelationshipCreateOutput {
             graph_commit_epoch_before,
@@ -30251,14 +30831,14 @@ fn create_scoped_knowledge_relationship_for(
         && !knowledge_graph_seed_matches_filters(
             &db.catalog,
             &db.store,
-            source,
+            &source,
             &request.source_metadata_filters,
         );
     let target_filtered_out = !request.target_metadata_filters.is_empty()
         && !knowledge_graph_seed_matches_filters(
             &db.catalog,
             &db.store,
-            target,
+            &target,
             &request.target_metadata_filters,
         );
     if source_filtered_out || target_filtered_out {
@@ -30359,20 +30939,20 @@ fn create_scoped_knowledge_relationship_batch_for(
     let mut eligible_creates = Vec::new();
 
     for create in &request.creates {
-        let source = seed_node_by_label_and_external_id(
+        let source = try_seed_node_by_label_and_external_id(
             &db.catalog,
             &db.store,
             create.source.label.as_str(),
             create.source.external_id.as_str(),
-        );
-        let target = seed_node_by_label_and_external_id(
+        )?;
+        let target = try_seed_node_by_label_and_external_id(
             &db.catalog,
             &db.store,
             create.target.label.as_str(),
             create.target.external_id.as_str(),
-        );
-        let source_node_id = source.map(|node| node.id.0);
-        let target_node_id = target.map(|node| node.id.0);
+        )?;
+        let source_node_id = source.as_ref().map(|node| node.id.0);
+        let target_node_id = target.as_ref().map(|node| node.id.0);
         let (Some(source), Some(target)) = (source, target) else {
             missing_endpoint_count += 1;
             rows.push(KnowledgeRelationshipCreateBatchRow {
@@ -30388,8 +30968,8 @@ fn create_scoped_knowledge_relationship_batch_for(
             });
             continue;
         };
-        if !node_has_external_id_property(source, create.source.external_id.as_str())
-            || !node_has_external_id_property(target, create.target.external_id.as_str())
+        if !node_has_external_id_property(&source, create.source.external_id.as_str())
+            || !node_has_external_id_property(&target, create.target.external_id.as_str())
         {
             non_writable_count += 1;
             rows.push(KnowledgeRelationshipCreateBatchRow {
@@ -30410,14 +30990,14 @@ fn create_scoped_knowledge_relationship_batch_for(
             && !knowledge_graph_seed_matches_filters(
                 &db.catalog,
                 &db.store,
-                source,
+                &source,
                 &request.source_metadata_filters,
             );
         let target_filtered_out = !request.target_metadata_filters.is_empty()
             && !knowledge_graph_seed_matches_filters(
                 &db.catalog,
                 &db.store,
-                target,
+                &target,
                 &request.target_metadata_filters,
             );
         if source_filtered_out || target_filtered_out {
@@ -30512,20 +31092,20 @@ fn upsert_scoped_knowledge_relationship_for(
     validate_knowledge_relationship_upsert(&request.upsert)?;
 
     let graph_commit_epoch_before = db.store.commit_epoch();
-    let source = seed_node_by_label_and_external_id(
+    let source = try_seed_node_by_label_and_external_id(
         &db.catalog,
         &db.store,
         request.upsert.source.label.as_str(),
         request.upsert.source.external_id.as_str(),
-    );
-    let target = seed_node_by_label_and_external_id(
+    )?;
+    let target = try_seed_node_by_label_and_external_id(
         &db.catalog,
         &db.store,
         request.upsert.target.label.as_str(),
         request.upsert.target.external_id.as_str(),
-    );
-    let source_node_id = source.map(|node| node.id.0);
-    let target_node_id = target.map(|node| node.id.0);
+    )?;
+    let source_node_id = source.as_ref().map(|node| node.id.0);
+    let target_node_id = target.as_ref().map(|node| node.id.0);
     let (Some(source), Some(target)) = (source, target) else {
         return Ok(KnowledgeRelationshipUpsertOutput {
             graph_commit_epoch_before,
@@ -30542,8 +31122,8 @@ fn upsert_scoped_knowledge_relationship_for(
             created_relationship_count: 0,
         });
     };
-    if !node_has_external_id_property(source, request.upsert.source.external_id.as_str())
-        || !node_has_external_id_property(target, request.upsert.target.external_id.as_str())
+    if !node_has_external_id_property(&source, request.upsert.source.external_id.as_str())
+        || !node_has_external_id_property(&target, request.upsert.target.external_id.as_str())
     {
         return Ok(KnowledgeRelationshipUpsertOutput {
             graph_commit_epoch_before,
@@ -30565,14 +31145,14 @@ fn upsert_scoped_knowledge_relationship_for(
         && !knowledge_graph_seed_matches_filters(
             &db.catalog,
             &db.store,
-            source,
+            &source,
             &request.source_metadata_filters,
         );
     let target_filtered_out = !request.target_metadata_filters.is_empty()
         && !knowledge_graph_seed_matches_filters(
             &db.catalog,
             &db.store,
-            target,
+            &target,
             &request.target_metadata_filters,
         );
     if source_filtered_out || target_filtered_out {
@@ -30600,7 +31180,7 @@ fn upsert_scoped_knowledge_relationship_for(
         source_id,
         target_id,
         request.upsert.relationship_type.as_str(),
-    ) {
+    )? {
         return Ok(KnowledgeRelationshipUpsertOutput {
             graph_commit_epoch_before,
             graph_commit_epoch_after: graph_commit_epoch_before,
@@ -30626,7 +31206,7 @@ fn upsert_scoped_knowledge_relationship_for(
         source_id,
         target_id,
         request.upsert.relationship_type.as_str(),
-    );
+    )?;
     Ok(KnowledgeRelationshipUpsertOutput {
         graph_commit_epoch_before,
         graph_commit_epoch_after: db.store.commit_epoch(),
@@ -30679,20 +31259,20 @@ fn upsert_scoped_knowledge_relationship_batch_for(
     let mut pending_relationships = BTreeSet::new();
 
     for upsert in &request.upserts {
-        let source = seed_node_by_label_and_external_id(
+        let source = try_seed_node_by_label_and_external_id(
             &db.catalog,
             &db.store,
             upsert.source.label.as_str(),
             upsert.source.external_id.as_str(),
-        );
-        let target = seed_node_by_label_and_external_id(
+        )?;
+        let target = try_seed_node_by_label_and_external_id(
             &db.catalog,
             &db.store,
             upsert.target.label.as_str(),
             upsert.target.external_id.as_str(),
-        );
-        let source_node_id = source.map(|node| node.id.0);
-        let target_node_id = target.map(|node| node.id.0);
+        )?;
+        let source_node_id = source.as_ref().map(|node| node.id.0);
+        let target_node_id = target.as_ref().map(|node| node.id.0);
         let (Some(source), Some(target)) = (source, target) else {
             missing_endpoint_count += 1;
             rows.push(KnowledgeRelationshipUpsertBatchRow {
@@ -30711,8 +31291,8 @@ fn upsert_scoped_knowledge_relationship_batch_for(
             });
             continue;
         };
-        if !node_has_external_id_property(source, upsert.source.external_id.as_str())
-            || !node_has_external_id_property(target, upsert.target.external_id.as_str())
+        if !node_has_external_id_property(&source, upsert.source.external_id.as_str())
+            || !node_has_external_id_property(&target, upsert.target.external_id.as_str())
         {
             non_writable_count += 1;
             rows.push(KnowledgeRelationshipUpsertBatchRow {
@@ -30736,14 +31316,14 @@ fn upsert_scoped_knowledge_relationship_batch_for(
             && !knowledge_graph_seed_matches_filters(
                 &db.catalog,
                 &db.store,
-                source,
+                &source,
                 &request.source_metadata_filters,
             );
         let target_filtered_out = !request.target_metadata_filters.is_empty()
             && !knowledge_graph_seed_matches_filters(
                 &db.catalog,
                 &db.store,
-                target,
+                &target,
                 &request.target_metadata_filters,
             );
         if source_filtered_out || target_filtered_out {
@@ -30777,7 +31357,7 @@ fn upsert_scoped_knowledge_relationship_batch_for(
             source.id,
             target.id,
             upsert.relationship_type.as_str(),
-        ) {
+        )? {
             already_exists_count += 1;
             rows.push(KnowledgeRelationshipUpsertBatchRow {
                 source: upsert.source.clone(),
@@ -30867,7 +31447,7 @@ fn upsert_scoped_knowledge_relationship_batch_for(
                 NodeId(source_node_id),
                 NodeId(target_node_id),
                 row.relationship_type.as_str(),
-            );
+            )?;
         }
     }
     Ok(KnowledgeRelationshipUpsertBatchOutput {
@@ -30914,12 +31494,25 @@ fn existing_knowledge_relationship_id(
     source: NodeId,
     target: NodeId,
     relationship_type: &str,
-) -> Option<u64> {
-    let rel_type_id = catalog.rel_type_id(relationship_type)?;
-    store
-        .outgoing_relationships(source, rel_type_id)
-        .find(|relationship| relationship.target == target)
-        .map(|relationship| relationship.id.0)
+) -> Result<Option<u64>> {
+    let Some(rel_type_id) = catalog.rel_type_id(relationship_type) else {
+        return Ok(None);
+    };
+    let mut relationship_id = None;
+    store.visit_adjacent_relationships_owned(
+        source,
+        Some(rel_type_id),
+        AdjacencyDirection::Outgoing,
+        |relationship| {
+            if relationship.target == target {
+                relationship_id = Some(relationship.id.0);
+                crate::store::GraphScanControl::Stop
+            } else {
+                crate::store::GraphScanControl::Continue
+            }
+        },
+    )?;
+    Ok(relationship_id)
 }
 
 fn delete_knowledge_relationship_for(
@@ -30949,20 +31542,20 @@ fn delete_scoped_knowledge_relationship_for(
     }
 
     let graph_commit_epoch_before = db.store.commit_epoch();
-    let source = seed_node_by_label_and_external_id(
+    let source = try_seed_node_by_label_and_external_id(
         &db.catalog,
         &db.store,
         request.delete.source.label.as_str(),
         request.delete.source.external_id.as_str(),
-    );
-    let target = seed_node_by_label_and_external_id(
+    )?;
+    let target = try_seed_node_by_label_and_external_id(
         &db.catalog,
         &db.store,
         request.delete.target.label.as_str(),
         request.delete.target.external_id.as_str(),
-    );
-    let source_node_id = source.map(|node| node.id.0);
-    let target_node_id = target.map(|node| node.id.0);
+    )?;
+    let source_node_id = source.as_ref().map(|node| node.id.0);
+    let target_node_id = target.as_ref().map(|node| node.id.0);
     let (Some(source), Some(target)) = (source, target) else {
         return Ok(KnowledgeRelationshipDeleteOutput {
             graph_commit_epoch_before,
@@ -30975,8 +31568,8 @@ fn delete_scoped_knowledge_relationship_for(
             deleted_relationship_count: 0,
         });
     };
-    if !node_has_external_id_property(source, request.delete.source.external_id.as_str())
-        || !node_has_external_id_property(target, request.delete.target.external_id.as_str())
+    if !node_has_external_id_property(&source, request.delete.source.external_id.as_str())
+        || !node_has_external_id_property(&target, request.delete.target.external_id.as_str())
     {
         return Ok(KnowledgeRelationshipDeleteOutput {
             graph_commit_epoch_before,
@@ -30994,14 +31587,14 @@ fn delete_scoped_knowledge_relationship_for(
         && !knowledge_graph_seed_matches_filters(
             &db.catalog,
             &db.store,
-            source,
+            &source,
             &request.source_metadata_filters,
         );
     let target_filtered_out = !request.target_metadata_filters.is_empty()
         && !knowledge_graph_seed_matches_filters(
             &db.catalog,
             &db.store,
-            target,
+            &target,
             &request.target_metadata_filters,
         );
     if source_filtered_out || target_filtered_out {
@@ -31090,20 +31683,20 @@ fn update_scoped_knowledge_relationship_for(
     validate_knowledge_relationship_update(&request.update)?;
 
     let graph_commit_epoch_before = db.store.commit_epoch();
-    let source = seed_node_by_label_and_external_id(
+    let source = try_seed_node_by_label_and_external_id(
         &db.catalog,
         &db.store,
         request.update.source.label.as_str(),
         request.update.source.external_id.as_str(),
-    );
-    let target = seed_node_by_label_and_external_id(
+    )?;
+    let target = try_seed_node_by_label_and_external_id(
         &db.catalog,
         &db.store,
         request.update.target.label.as_str(),
         request.update.target.external_id.as_str(),
-    );
-    let source_node_id = source.map(|node| node.id.0);
-    let target_node_id = target.map(|node| node.id.0);
+    )?;
+    let source_node_id = source.as_ref().map(|node| node.id.0);
+    let target_node_id = target.as_ref().map(|node| node.id.0);
     let (Some(source), Some(target)) = (source, target) else {
         return Ok(KnowledgeRelationshipUpdateOutput {
             graph_commit_epoch_before,
@@ -31117,8 +31710,8 @@ fn update_scoped_knowledge_relationship_for(
             updated_property_count: 0,
         });
     };
-    if !node_has_external_id_property(source, request.update.source.external_id.as_str())
-        || !node_has_external_id_property(target, request.update.target.external_id.as_str())
+    if !node_has_external_id_property(&source, request.update.source.external_id.as_str())
+        || !node_has_external_id_property(&target, request.update.target.external_id.as_str())
     {
         return Ok(KnowledgeRelationshipUpdateOutput {
             graph_commit_epoch_before,
@@ -31137,14 +31730,14 @@ fn update_scoped_knowledge_relationship_for(
         && !knowledge_graph_seed_matches_filters(
             &db.catalog,
             &db.store,
-            source,
+            &source,
             &request.source_metadata_filters,
         );
     let target_filtered_out = !request.target_metadata_filters.is_empty()
         && !knowledge_graph_seed_matches_filters(
             &db.catalog,
             &db.store,
-            target,
+            &target,
             &request.target_metadata_filters,
         );
     if source_filtered_out || target_filtered_out {
@@ -31211,20 +31804,20 @@ fn update_scoped_knowledge_relationship_batch_for(
     let mut updated_property_count = 0;
 
     for update in &request.updates {
-        let source = seed_node_by_label_and_external_id(
+        let source = try_seed_node_by_label_and_external_id(
             &db.catalog,
             &db.store,
             update.source.label.as_str(),
             update.source.external_id.as_str(),
-        );
-        let target = seed_node_by_label_and_external_id(
+        )?;
+        let target = try_seed_node_by_label_and_external_id(
             &db.catalog,
             &db.store,
             update.target.label.as_str(),
             update.target.external_id.as_str(),
-        );
-        let source_node_id = source.map(|node| node.id.0);
-        let target_node_id = target.map(|node| node.id.0);
+        )?;
+        let source_node_id = source.as_ref().map(|node| node.id.0);
+        let target_node_id = target.as_ref().map(|node| node.id.0);
         let (Some(source), Some(target)) = (source, target) else {
             missing_endpoint_count += 1;
             rows.push(KnowledgeRelationshipUpdateBatchRow {
@@ -31241,8 +31834,8 @@ fn update_scoped_knowledge_relationship_batch_for(
             });
             continue;
         };
-        if !node_has_external_id_property(source, update.source.external_id.as_str())
-            || !node_has_external_id_property(target, update.target.external_id.as_str())
+        if !node_has_external_id_property(&source, update.source.external_id.as_str())
+            || !node_has_external_id_property(&target, update.target.external_id.as_str())
         {
             non_writable_count += 1;
             rows.push(KnowledgeRelationshipUpdateBatchRow {
@@ -31264,14 +31857,14 @@ fn update_scoped_knowledge_relationship_batch_for(
             && !knowledge_graph_seed_matches_filters(
                 &db.catalog,
                 &db.store,
-                source,
+                &source,
                 &request.source_metadata_filters,
             );
         let target_filtered_out = !request.target_metadata_filters.is_empty()
             && !knowledge_graph_seed_matches_filters(
                 &db.catalog,
                 &db.store,
-                target,
+                &target,
                 &request.target_metadata_filters,
             );
         if source_filtered_out || target_filtered_out {
@@ -31452,20 +32045,20 @@ fn delete_scoped_knowledge_relationship_batch_for(
     let mut eligible_deletes = Vec::new();
 
     for delete in &request.deletes {
-        let source = seed_node_by_label_and_external_id(
+        let source = try_seed_node_by_label_and_external_id(
             &db.catalog,
             &db.store,
             delete.source.label.as_str(),
             delete.source.external_id.as_str(),
-        );
-        let target = seed_node_by_label_and_external_id(
+        )?;
+        let target = try_seed_node_by_label_and_external_id(
             &db.catalog,
             &db.store,
             delete.target.label.as_str(),
             delete.target.external_id.as_str(),
-        );
-        let source_node_id = source.map(|node| node.id.0);
-        let target_node_id = target.map(|node| node.id.0);
+        )?;
+        let source_node_id = source.as_ref().map(|node| node.id.0);
+        let target_node_id = target.as_ref().map(|node| node.id.0);
         let (Some(source), Some(target)) = (source, target) else {
             missing_endpoint_count += 1;
             rows.push(KnowledgeRelationshipDeleteBatchRow {
@@ -31481,8 +32074,8 @@ fn delete_scoped_knowledge_relationship_batch_for(
             });
             continue;
         };
-        if !node_has_external_id_property(source, delete.source.external_id.as_str())
-            || !node_has_external_id_property(target, delete.target.external_id.as_str())
+        if !node_has_external_id_property(&source, delete.source.external_id.as_str())
+            || !node_has_external_id_property(&target, delete.target.external_id.as_str())
         {
             non_writable_count += 1;
             rows.push(KnowledgeRelationshipDeleteBatchRow {
@@ -31503,14 +32096,14 @@ fn delete_scoped_knowledge_relationship_batch_for(
             && !knowledge_graph_seed_matches_filters(
                 &db.catalog,
                 &db.store,
-                source,
+                &source,
                 &request.source_metadata_filters,
             );
         let target_filtered_out = !request.target_metadata_filters.is_empty()
             && !knowledge_graph_seed_matches_filters(
                 &db.catalog,
                 &db.store,
-                target,
+                &target,
                 &request.target_metadata_filters,
             );
         if source_filtered_out || target_filtered_out {
@@ -31619,32 +32212,31 @@ fn knowledge_source_reference_entities_for(
 
     let mut matched_relationship_count = 0;
     let mut entity_node_ids = BTreeSet::new();
-    for relationship in store.scan_relationships(Some(rel_type_id)) {
-        if !relationship_source_reference_equals(relationship, &request.source_reference) {
-            continue;
+    store.try_visit_relationships_owned(Some(rel_type_id), |relationship| {
+        if !relationship_source_reference_equals(&relationship, &request.source_reference) {
+            return Ok(crate::store::GraphScanControl::Continue);
         }
         matched_relationship_count += 1;
         for node_id in [relationship.source, relationship.target] {
             if store
-                .node(node_id)
+                .node_owned(node_id)?
                 .is_some_and(|node| node.labels.contains(&entity_label_id))
             {
                 entity_node_ids.insert(node_id);
             }
         }
-    }
+        Ok(crate::store::GraphScanControl::Continue)
+    })?;
 
-    let mut rows = entity_node_ids
-        .into_iter()
-        .filter_map(|node_id| {
-            store
-                .node(node_id)
-                .map(|node| KnowledgeSourceReferenceEntityRow {
-                    entity_id: node_external_id(node),
-                    node_id: node.id.0,
-                })
-        })
-        .collect::<Vec<_>>();
+    let mut rows = Vec::with_capacity(entity_node_ids.len());
+    for node_id in entity_node_ids {
+        if let Some(node) = store.node_owned(node_id)? {
+            rows.push(KnowledgeSourceReferenceEntityRow {
+                entity_id: node_external_id(&node),
+                node_id: node.id.0,
+            });
+        }
+    }
     sort_source_reference_entity_rows(&mut rows);
     let returned_count = rows.len();
 
@@ -31748,7 +32340,7 @@ fn knowledge_source_reference_relationship_count_for(
     )?;
     let graph_commit_epoch = store.commit_epoch();
     let Some(entity) =
-        seed_node_by_label_and_external_id(catalog, store, "Entity", &request.entity_id)
+        try_seed_node_by_label_and_external_id(catalog, store, "Entity", &request.entity_id)?
     else {
         return Ok(KnowledgeSourceReferenceRelationshipCountOutput {
             graph_commit_epoch,
@@ -31768,25 +32360,33 @@ fn knowledge_source_reference_relationship_count_for(
         });
     };
 
-    let incident_count = store
-        .scan_relationships(Some(rel_type_id))
-        .filter(|relationship| {
-            (relationship.source == entity.id || relationship.target == entity.id)
-                && relationship_source_reference_is_counted(
-                    relationship,
-                    &request.excluded_source_reference,
-                )
-        })
-        .count();
-    let incoming_count = store
-        .incoming_relationships(entity.id, rel_type_id)
-        .filter(|relationship| {
-            relationship_source_reference_is_counted(
-                relationship,
+    let mut incident_count = 0usize;
+    store.visit_relationships_owned(Some(rel_type_id), |relationship| {
+        if (relationship.source == entity.id || relationship.target == entity.id)
+            && relationship_source_reference_is_counted(
+                &relationship,
                 &request.excluded_source_reference,
             )
-        })
-        .count();
+        {
+            incident_count += 1;
+        }
+        crate::store::GraphScanControl::Continue
+    })?;
+    let mut incoming_count = 0usize;
+    store.visit_adjacent_relationships_owned(
+        entity.id,
+        Some(rel_type_id),
+        AdjacencyDirection::Incoming,
+        |relationship| {
+            if relationship_source_reference_is_counted(
+                &relationship,
+                &request.excluded_source_reference,
+            ) {
+                incoming_count += 1;
+            }
+            crate::store::GraphScanControl::Continue
+        },
+    )?;
 
     Ok(KnowledgeSourceReferenceRelationshipCountOutput {
         graph_commit_epoch,
@@ -31941,31 +32541,32 @@ fn delete_knowledge_source_reference_relationships_for(
         });
     };
 
-    let mut candidates = db
-        .store
-        .scan_relationships(Some(rel_type_id))
-        .filter(|relationship| {
-            relationship
+    let mut candidates = Vec::new();
+    db.store
+        .try_visit_relationships_owned(Some(rel_type_id), |relationship| {
+            if relationship
                 .properties
                 .get("source_reference")
                 .is_some_and(|value| value_to_external_id(value) == request.source_reference)
-        })
-        .map(
-            |relationship| KnowledgeSourceReferenceRelationshipDeleteCandidate {
-                relationship_id: relationship.id.0,
-                source_node_id: relationship.source.0,
-                target_node_id: relationship.target.0,
-                source_external_id: db
-                    .store
-                    .node(relationship.source)
-                    .and_then(node_external_id),
-                target_external_id: db
-                    .store
-                    .node(relationship.target)
-                    .and_then(node_external_id),
-            },
-        )
-        .collect::<Vec<_>>();
+            {
+                candidates.push(KnowledgeSourceReferenceRelationshipDeleteCandidate {
+                    relationship_id: relationship.id.0,
+                    source_node_id: relationship.source.0,
+                    target_node_id: relationship.target.0,
+                    source_external_id: db
+                        .store
+                        .node_owned(relationship.source)?
+                        .as_ref()
+                        .and_then(node_external_id),
+                    target_external_id: db
+                        .store
+                        .node_owned(relationship.target)?
+                        .as_ref()
+                        .and_then(node_external_id),
+                });
+            }
+            Ok(crate::store::GraphScanControl::Continue)
+        })?;
     candidates.sort_by_key(|candidate| candidate.relationship_id);
 
     if candidates.is_empty() {
@@ -32048,7 +32649,7 @@ fn knowledge_neighbors_for(
     catalog: &Catalog,
     store: &GraphStore,
     request: &KnowledgeNeighborsRequest,
-) -> KnowledgeNeighborsOutput {
+) -> Result<KnowledgeNeighborsOutput> {
     knowledge_scoped_neighbors_for(
         catalog,
         store,
@@ -32062,7 +32663,7 @@ fn knowledge_neighbors_for(
 fn knowledge_neighbors_via_query_runtime(
     db: &Database,
     request: &KnowledgeNeighborsRequest,
-) -> KnowledgeNeighborsOutput {
+) -> Result<KnowledgeNeighborsOutput> {
     knowledge_scoped_neighbors_via_query_runtime(
         db,
         &KnowledgeScopedNeighborsRequest {
@@ -32072,79 +32673,17 @@ fn knowledge_neighbors_via_query_runtime(
     )
 }
 
-fn knowledge_query_runtime_failed_traversal_diagnostics(
-    graph_commit_epoch: u64,
-    max_hops: usize,
-    path_limit: Option<usize>,
-    node_limit: Option<usize>,
-    relationship_limit: Option<usize>,
-    target_found: Option<bool>,
-) -> KnowledgeTraversalDiagnostics {
-    let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
-        graph_commit_epoch,
-        seed_found: true,
-        target_found,
-        path_count: 0,
-        node_count: 0,
-        relationship_count: 0,
-        fanout_reason_details: Vec::new(),
-        missing_seed_identity: None,
-        missing_target_identity: None,
-        missing_relationship_type: None,
-        max_hops,
-        path_limit,
-        node_limit,
-        relationship_limit,
-    });
-    diagnostics
-        .fallback_reason_codes
-        .push(KnowledgeTraversalFallbackReasonCode::QueryRuntimeFailed);
-    diagnostics
-        .fallback_reasons
-        .push("query runtime failed".to_string());
-    diagnostics
-}
-
-fn knowledge_query_runtime_failed_neighbors_output(
-    graph_commit_epoch: u64,
-    request: &KnowledgeScopedNeighborsRequest,
-) -> KnowledgeNeighborsOutput {
-    let mut diagnostics = knowledge_query_runtime_failed_traversal_diagnostics(
-        graph_commit_epoch,
-        request.navigation.max_hops,
-        Some(request.navigation.limit),
-        None,
-        None,
-        None,
-    );
-    attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 0);
-    KnowledgeNeighborsOutput {
-        graph_commit_epoch,
-        seed_node_id: None,
-        paths: Vec::new(),
-        fanout_reason_codes: Vec::new(),
-        fanout_reason_details: Vec::new(),
-        fanout_reasons: Vec::new(),
-        diagnostics,
-    }
-}
-
 fn knowledge_scoped_neighbors_via_query_runtime(
     db: &Database,
     request: &KnowledgeScopedNeighborsRequest,
-) -> KnowledgeNeighborsOutput {
+) -> Result<KnowledgeNeighborsOutput> {
     let navigation = &request.navigation;
     let graph_commit_epoch = db.store.commit_epoch();
     let seed_request = KnowledgeEntityRequest {
         label: navigation.label.clone(),
         external_id: navigation.external_id.clone(),
     };
-    let seed = match knowledge_relationship_seed_via_query_runtime(db, &seed_request) {
-        Ok(seed) => seed,
-        Err(_) => {
-            return knowledge_query_runtime_failed_neighbors_output(graph_commit_epoch, request);
-        }
-    };
+    let seed = knowledge_relationship_seed_via_query_runtime(db, &seed_request)?;
     let Some(seed) = seed else {
         let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
             graph_commit_epoch,
@@ -32166,7 +32705,7 @@ fn knowledge_scoped_neighbors_via_query_runtime(
             relationship_limit: None,
         });
         attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 0);
-        return KnowledgeNeighborsOutput {
+        return Ok(KnowledgeNeighborsOutput {
             graph_commit_epoch,
             seed_node_id: None,
             paths: Vec::new(),
@@ -32174,7 +32713,7 @@ fn knowledge_scoped_neighbors_via_query_runtime(
             fanout_reason_details: Vec::new(),
             fanout_reasons: Vec::new(),
             diagnostics,
-        };
+        });
     };
     if !request.metadata_filters.is_empty()
         && !knowledge_entity_matches_filters(&seed, &request.metadata_filters)
@@ -32196,7 +32735,7 @@ fn knowledge_scoped_neighbors_via_query_runtime(
             relationship_limit: None,
         });
         attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 1);
-        return KnowledgeNeighborsOutput {
+        return Ok(KnowledgeNeighborsOutput {
             graph_commit_epoch,
             seed_node_id: Some(seed.node_id),
             paths: Vec::new(),
@@ -32204,18 +32743,13 @@ fn knowledge_scoped_neighbors_via_query_runtime(
             fanout_reason_details: Vec::new(),
             fanout_reasons: Vec::new(),
             diagnostics,
-        };
+        });
     }
 
     let relationship_type_name = match navigation.relationship_type.as_deref() {
         Some(name) => match db.catalog.rel_type_id(name) {
             Some(_) => {
-                if validate_cypher_identifier(name, "relationship type").is_err() {
-                    return knowledge_query_runtime_failed_neighbors_output(
-                        graph_commit_epoch,
-                        request,
-                    );
-                }
+                validate_cypher_identifier(name, "relationship type")?;
                 Some(name.to_string())
             }
             None => {
@@ -32237,7 +32771,7 @@ fn knowledge_scoped_neighbors_via_query_runtime(
                         relationship_limit: None,
                     });
                 attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 0);
-                return KnowledgeNeighborsOutput {
+                return Ok(KnowledgeNeighborsOutput {
                     graph_commit_epoch,
                     seed_node_id: Some(seed.node_id),
                     paths: Vec::new(),
@@ -32245,13 +32779,13 @@ fn knowledge_scoped_neighbors_via_query_runtime(
                     fanout_reason_details: Vec::new(),
                     fanout_reasons: Vec::new(),
                     diagnostics,
-                };
+                });
             }
         },
         None => None,
     };
 
-    let (paths, fanout_reason_details) = match expand_knowledge_neighbors_via_query_runtime(
+    let (paths, fanout_reason_details) = expand_knowledge_neighbors_via_query_runtime(
         db,
         "seed",
         NodeId(seed.node_id),
@@ -32259,12 +32793,7 @@ fn knowledge_scoped_neighbors_via_query_runtime(
         navigation.direction,
         navigation.limit,
         navigation.max_hops,
-    ) {
-        Ok(rows) => rows,
-        Err(_) => {
-            return knowledge_query_runtime_failed_neighbors_output(graph_commit_epoch, request);
-        }
-    };
+    )?;
     let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
         graph_commit_epoch,
         seed_found: true,
@@ -32282,7 +32811,7 @@ fn knowledge_scoped_neighbors_via_query_runtime(
         relationship_limit: None,
     });
     attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 0);
-    KnowledgeNeighborsOutput {
+    Ok(KnowledgeNeighborsOutput {
         graph_commit_epoch,
         seed_node_id: Some(seed.node_id),
         paths,
@@ -32290,7 +32819,7 @@ fn knowledge_scoped_neighbors_via_query_runtime(
         fanout_reasons: knowledge_fanout_reason_messages(&fanout_reason_details),
         fanout_reason_details,
         diagnostics,
-    }
+    })
 }
 
 fn expand_knowledge_neighbors_via_query_runtime(
@@ -32366,14 +32895,15 @@ fn knowledge_scoped_neighbors_for(
     catalog: &Catalog,
     store: &GraphStore,
     request: &KnowledgeScopedNeighborsRequest,
-) -> KnowledgeNeighborsOutput {
+) -> Result<KnowledgeNeighborsOutput> {
     let navigation = &request.navigation;
-    let Some(seed) = seed_node_by_label_and_external_id(
+    let Some(seed) = try_seed_node_by_label_and_external_id(
         catalog,
         store,
         navigation.label.as_str(),
         navigation.external_id.as_str(),
-    ) else {
+    )?
+    else {
         let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
             graph_commit_epoch: store.commit_epoch(),
             seed_found: false,
@@ -32394,7 +32924,7 @@ fn knowledge_scoped_neighbors_for(
             relationship_limit: None,
         });
         attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 0);
-        return KnowledgeNeighborsOutput {
+        return Ok(KnowledgeNeighborsOutput {
             graph_commit_epoch: store.commit_epoch(),
             seed_node_id: None,
             paths: Vec::new(),
@@ -32402,10 +32932,10 @@ fn knowledge_scoped_neighbors_for(
             fanout_reason_details: Vec::new(),
             fanout_reasons: Vec::new(),
             diagnostics,
-        };
+        });
     };
     if !request.metadata_filters.is_empty()
-        && !knowledge_graph_seed_matches_filters(catalog, store, seed, &request.metadata_filters)
+        && !knowledge_graph_seed_matches_filters(catalog, store, &seed, &request.metadata_filters)
     {
         let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
             graph_commit_epoch: store.commit_epoch(),
@@ -32424,7 +32954,7 @@ fn knowledge_scoped_neighbors_for(
             relationship_limit: None,
         });
         attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 1);
-        return KnowledgeNeighborsOutput {
+        return Ok(KnowledgeNeighborsOutput {
             graph_commit_epoch: store.commit_epoch(),
             seed_node_id: Some(seed.id.0),
             paths: Vec::new(),
@@ -32432,7 +32962,7 @@ fn knowledge_scoped_neighbors_for(
             fanout_reason_details: Vec::new(),
             fanout_reasons: Vec::new(),
             diagnostics,
-        };
+        });
     }
 
     let relationship_type = match navigation.relationship_type.as_deref() {
@@ -32457,7 +32987,7 @@ fn knowledge_scoped_neighbors_for(
                         relationship_limit: None,
                     });
                 attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 0);
-                return KnowledgeNeighborsOutput {
+                return Ok(KnowledgeNeighborsOutput {
                     graph_commit_epoch: store.commit_epoch(),
                     seed_node_id: Some(seed.id.0),
                     paths: Vec::new(),
@@ -32465,7 +32995,7 @@ fn knowledge_scoped_neighbors_for(
                     fanout_reason_details: Vec::new(),
                     fanout_reasons: Vec::new(),
                     diagnostics,
-                };
+                });
             }
         },
         None => None,
@@ -32481,7 +33011,7 @@ fn knowledge_scoped_neighbors_for(
             limit: navigation.limit,
             max_hops: navigation.max_hops,
         },
-    );
+    )?;
     let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
         graph_commit_epoch: store.commit_epoch(),
         seed_found: true,
@@ -32499,7 +33029,7 @@ fn knowledge_scoped_neighbors_for(
         relationship_limit: None,
     });
     attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 0);
-    KnowledgeNeighborsOutput {
+    Ok(KnowledgeNeighborsOutput {
         graph_commit_epoch: store.commit_epoch(),
         seed_node_id: Some(seed.id.0),
         diagnostics,
@@ -32507,14 +33037,14 @@ fn knowledge_scoped_neighbors_for(
         fanout_reason_codes: knowledge_fanout_reason_codes(&fanout_reason_details),
         fanout_reasons: knowledge_fanout_reason_messages(&fanout_reason_details),
         fanout_reason_details,
-    }
+    })
 }
 
 fn knowledge_relationships_for(
     catalog: &Catalog,
     store: &GraphStore,
     request: &KnowledgeRelationshipsRequest,
-) -> KnowledgeRelationshipsOutput {
+) -> Result<KnowledgeRelationshipsOutput> {
     knowledge_scoped_relationships_for(
         catalog,
         store,
@@ -32850,12 +33380,14 @@ fn knowledge_scoped_relationships_for(
     catalog: &Catalog,
     store: &GraphStore,
     request: &KnowledgeScopedRelationshipsRequest,
-) -> KnowledgeRelationshipsOutput {
+) -> Result<KnowledgeRelationshipsOutput> {
     let relationship_type = match request.relationships.relationship_type.as_deref() {
         Some(name) => match catalog.rel_type_id(name) {
             Some(rel_type_id) => Some(rel_type_id),
             None => {
-                return knowledge_empty_relationship_groups_for_missing_type(store, request);
+                return Ok(knowledge_empty_relationship_groups_for_missing_type(
+                    store, request,
+                ));
             }
         },
         None => None,
@@ -32866,12 +33398,12 @@ fn knowledge_scoped_relationships_for(
     let mut filtered_out_seed_count = 0;
     let mut relationship_count = 0;
     for (index, seed_request) in request.relationships.seeds.iter().enumerate() {
-        let seed = seed_node_by_label_and_external_id(
+        let seed = try_seed_node_by_label_and_external_id(
             catalog,
             store,
             seed_request.label.as_str(),
             seed_request.external_id.as_str(),
-        );
+        )?;
         let Some(seed) = seed else {
             missing_seed_count += 1;
             groups.push(KnowledgeRelationshipGroup {
@@ -32889,7 +33421,7 @@ fn knowledge_scoped_relationships_for(
             && !knowledge_graph_seed_matches_filters(
                 catalog,
                 store,
-                seed,
+                &seed,
                 &request.metadata_filters,
             )
         {
@@ -32917,7 +33449,7 @@ fn knowledge_scoped_relationships_for(
                 limit: request.relationships.limit_per_seed,
                 max_hops: 1,
             },
-        );
+        )?;
         relationship_count += relationships.len();
         groups.push(KnowledgeRelationshipGroup {
             seed: seed_request.clone(),
@@ -32929,7 +33461,7 @@ fn knowledge_scoped_relationships_for(
             fanout_reason_details,
         });
     }
-    KnowledgeRelationshipsOutput {
+    Ok(KnowledgeRelationshipsOutput {
         graph_commit_epoch: store.commit_epoch(),
         groups,
         relationship_type_found: true,
@@ -32937,7 +33469,7 @@ fn knowledge_scoped_relationships_for(
         missing_seed_count,
         filtered_out_seed_count,
         relationship_count,
-    }
+    })
 }
 
 fn knowledge_empty_relationship_groups_for_missing_type(
@@ -32973,7 +33505,7 @@ fn knowledge_paths_for(
     catalog: &Catalog,
     store: &GraphStore,
     request: &KnowledgePathRequest,
-) -> KnowledgePathOutput {
+) -> Result<KnowledgePathOutput> {
     knowledge_scoped_paths_for(
         catalog,
         store,
@@ -32988,7 +33520,7 @@ fn knowledge_paths_for(
 fn knowledge_paths_via_query_runtime(
     db: &Database,
     request: &KnowledgePathRequest,
-) -> KnowledgePathOutput {
+) -> Result<KnowledgePathOutput> {
     knowledge_scoped_paths_via_query_runtime(
         db,
         &KnowledgeScopedPathRequest {
@@ -32999,40 +33531,10 @@ fn knowledge_paths_via_query_runtime(
     )
 }
 
-fn knowledge_query_runtime_failed_path_output(
-    graph_commit_epoch: u64,
-    request: &KnowledgeScopedPathRequest,
-) -> KnowledgePathOutput {
-    let mut diagnostics = knowledge_query_runtime_failed_traversal_diagnostics(
-        graph_commit_epoch,
-        request.navigation.max_hops,
-        Some(request.navigation.limit),
-        None,
-        None,
-        Some(true),
-    );
-    attach_path_endpoint_metadata_filters(
-        &mut diagnostics,
-        &request.source_metadata_filters,
-        &request.target_metadata_filters,
-        0,
-    );
-    KnowledgePathOutput {
-        graph_commit_epoch,
-        source_node_id: None,
-        target_node_id: None,
-        paths: Vec::new(),
-        fanout_reason_codes: Vec::new(),
-        fanout_reason_details: Vec::new(),
-        fanout_reasons: Vec::new(),
-        diagnostics,
-    }
-}
-
 fn knowledge_scoped_paths_via_query_runtime(
     db: &Database,
     request: &KnowledgeScopedPathRequest,
-) -> KnowledgePathOutput {
+) -> Result<KnowledgePathOutput> {
     let navigation = &request.navigation;
 
     let graph_commit_epoch = db.store.commit_epoch();
@@ -33044,18 +33546,8 @@ fn knowledge_scoped_paths_via_query_runtime(
         label: navigation.target_label.clone(),
         external_id: navigation.target_external_id.clone(),
     };
-    let source = match knowledge_relationship_seed_via_query_runtime(db, &source_request) {
-        Ok(source) => source,
-        Err(_) => {
-            return knowledge_query_runtime_failed_path_output(graph_commit_epoch, request);
-        }
-    };
-    let target = match knowledge_relationship_seed_via_query_runtime(db, &target_request) {
-        Ok(target) => target,
-        Err(_) => {
-            return knowledge_query_runtime_failed_path_output(graph_commit_epoch, request);
-        }
-    };
+    let source = knowledge_relationship_seed_via_query_runtime(db, &source_request)?;
+    let target = knowledge_relationship_seed_via_query_runtime(db, &target_request)?;
     let source_node_id = source.as_ref().map(|entity| entity.node_id);
     let target_node_id = target.as_ref().map(|entity| entity.node_id);
 
@@ -33090,7 +33582,7 @@ fn knowledge_scoped_paths_via_query_runtime(
             &request.target_metadata_filters,
             0,
         );
-        return KnowledgePathOutput {
+        return Ok(KnowledgePathOutput {
             graph_commit_epoch,
             source_node_id,
             target_node_id,
@@ -33099,7 +33591,7 @@ fn knowledge_scoped_paths_via_query_runtime(
             fanout_reason_details: Vec::new(),
             fanout_reasons: Vec::new(),
             diagnostics,
-        };
+        });
     };
     let Some(target) = target else {
         let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
@@ -33127,7 +33619,7 @@ fn knowledge_scoped_paths_via_query_runtime(
             &request.target_metadata_filters,
             0,
         );
-        return KnowledgePathOutput {
+        return Ok(KnowledgePathOutput {
             graph_commit_epoch,
             source_node_id: Some(source.node_id),
             target_node_id,
@@ -33136,7 +33628,7 @@ fn knowledge_scoped_paths_via_query_runtime(
             fanout_reason_details: Vec::new(),
             fanout_reasons: Vec::new(),
             diagnostics,
-        };
+        });
     };
 
     let source_filtered = !request.source_metadata_filters.is_empty()
@@ -33166,7 +33658,7 @@ fn knowledge_scoped_paths_via_query_runtime(
             &request.target_metadata_filters,
             usize::from(source_filtered) + usize::from(target_filtered),
         );
-        return KnowledgePathOutput {
+        return Ok(KnowledgePathOutput {
             graph_commit_epoch,
             source_node_id: Some(source.node_id),
             target_node_id: Some(target.node_id),
@@ -33175,15 +33667,13 @@ fn knowledge_scoped_paths_via_query_runtime(
             fanout_reason_details: Vec::new(),
             fanout_reasons: Vec::new(),
             diagnostics,
-        };
+        });
     }
 
     let relationship_type_name = match navigation.relationship_type.as_deref() {
         Some(name) => match db.catalog.rel_type_id(name) {
             Some(_) => {
-                if validate_cypher_identifier(name, "relationship type").is_err() {
-                    return knowledge_query_runtime_failed_path_output(graph_commit_epoch, request);
-                }
+                validate_cypher_identifier(name, "relationship type")?;
                 Some(name.to_string())
             }
             None => {
@@ -33210,7 +33700,7 @@ fn knowledge_scoped_paths_via_query_runtime(
                     &request.target_metadata_filters,
                     0,
                 );
-                return KnowledgePathOutput {
+                return Ok(KnowledgePathOutput {
                     graph_commit_epoch,
                     source_node_id: Some(source.node_id),
                     target_node_id: Some(target.node_id),
@@ -33219,12 +33709,12 @@ fn knowledge_scoped_paths_via_query_runtime(
                     fanout_reason_details: Vec::new(),
                     fanout_reasons: Vec::new(),
                     diagnostics,
-                };
+                });
             }
         },
         None => None,
     };
-    let (paths, fanout_reason_details) = match expand_knowledge_paths_via_query_runtime(
+    let (paths, fanout_reason_details) = expand_knowledge_paths_via_query_runtime(
         db,
         source.node_id,
         target.node_id,
@@ -33232,12 +33722,7 @@ fn knowledge_scoped_paths_via_query_runtime(
         navigation.direction,
         navigation.max_hops,
         navigation.limit,
-    ) {
-        Ok(paths) => paths,
-        Err(_) => {
-            return knowledge_query_runtime_failed_path_output(graph_commit_epoch, request);
-        }
-    };
+    )?;
     let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
         graph_commit_epoch,
         seed_found: true,
@@ -33260,7 +33745,7 @@ fn knowledge_scoped_paths_via_query_runtime(
         &request.target_metadata_filters,
         0,
     );
-    KnowledgePathOutput {
+    Ok(KnowledgePathOutput {
         graph_commit_epoch,
         source_node_id: Some(source.node_id),
         target_node_id: Some(target.node_id),
@@ -33269,7 +33754,7 @@ fn knowledge_scoped_paths_via_query_runtime(
         fanout_reason_codes: knowledge_fanout_reason_codes(&fanout_reason_details),
         fanout_reasons: knowledge_fanout_reason_messages(&fanout_reason_details),
         fanout_reason_details,
-    }
+    })
 }
 
 fn expand_knowledge_paths_via_query_runtime(
@@ -33439,22 +33924,22 @@ fn knowledge_scoped_paths_for(
     catalog: &Catalog,
     store: &GraphStore,
     request: &KnowledgeScopedPathRequest,
-) -> KnowledgePathOutput {
+) -> Result<KnowledgePathOutput> {
     let navigation = &request.navigation;
-    let source = seed_node_by_label_and_external_id(
+    let source = try_seed_node_by_label_and_external_id(
         catalog,
         store,
         navigation.source_label.as_str(),
         navigation.source_external_id.as_str(),
-    );
-    let target = seed_node_by_label_and_external_id(
+    )?;
+    let target = try_seed_node_by_label_and_external_id(
         catalog,
         store,
         navigation.target_label.as_str(),
         navigation.target_external_id.as_str(),
-    );
-    let source_node_id = source.map(|node| node.id.0);
-    let target_node_id = target.map(|node| node.id.0);
+    )?;
+    let source_node_id = source.as_ref().map(|node| node.id.0);
+    let target_node_id = target.as_ref().map(|node| node.id.0);
 
     let Some(source) = source else {
         let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
@@ -33487,7 +33972,7 @@ fn knowledge_scoped_paths_for(
             &request.target_metadata_filters,
             0,
         );
-        return KnowledgePathOutput {
+        return Ok(KnowledgePathOutput {
             graph_commit_epoch: store.commit_epoch(),
             source_node_id,
             target_node_id,
@@ -33496,7 +33981,7 @@ fn knowledge_scoped_paths_for(
             fanout_reason_details: Vec::new(),
             fanout_reasons: Vec::new(),
             diagnostics,
-        };
+        });
     };
     let Some(target) = target else {
         let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
@@ -33524,7 +34009,7 @@ fn knowledge_scoped_paths_for(
             &request.target_metadata_filters,
             0,
         );
-        return KnowledgePathOutput {
+        return Ok(KnowledgePathOutput {
             graph_commit_epoch: store.commit_epoch(),
             source_node_id,
             target_node_id,
@@ -33533,20 +34018,20 @@ fn knowledge_scoped_paths_for(
             fanout_reason_details: Vec::new(),
             fanout_reasons: Vec::new(),
             diagnostics,
-        };
+        });
     };
     let source_filtered = !request.source_metadata_filters.is_empty()
         && !knowledge_graph_seed_matches_filters(
             catalog,
             store,
-            source,
+            &source,
             &request.source_metadata_filters,
         );
     let target_filtered = !request.target_metadata_filters.is_empty()
         && !knowledge_graph_seed_matches_filters(
             catalog,
             store,
-            target,
+            &target,
             &request.target_metadata_filters,
         );
     if source_filtered || target_filtered {
@@ -33572,7 +34057,7 @@ fn knowledge_scoped_paths_for(
             &request.target_metadata_filters,
             usize::from(source_filtered) + usize::from(target_filtered),
         );
-        return KnowledgePathOutput {
+        return Ok(KnowledgePathOutput {
             graph_commit_epoch: store.commit_epoch(),
             source_node_id,
             target_node_id,
@@ -33581,7 +34066,7 @@ fn knowledge_scoped_paths_for(
             fanout_reason_details: Vec::new(),
             fanout_reasons: Vec::new(),
             diagnostics,
-        };
+        });
     }
     let relationship_type = match navigation.relationship_type.as_deref() {
         Some(name) => match catalog.rel_type_id(name) {
@@ -33610,7 +34095,7 @@ fn knowledge_scoped_paths_for(
                     &request.target_metadata_filters,
                     0,
                 );
-                return KnowledgePathOutput {
+                return Ok(KnowledgePathOutput {
                     graph_commit_epoch: store.commit_epoch(),
                     source_node_id,
                     target_node_id,
@@ -33619,7 +34104,7 @@ fn knowledge_scoped_paths_for(
                     fanout_reason_details: Vec::new(),
                     fanout_reasons: Vec::new(),
                     diagnostics,
-                };
+                });
             }
         },
         None => None,
@@ -33636,7 +34121,7 @@ fn knowledge_scoped_paths_for(
             max_hops: navigation.max_hops,
             limit: navigation.limit,
         },
-    );
+    )?;
     let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
         graph_commit_epoch: store.commit_epoch(),
         seed_found: true,
@@ -33659,7 +34144,7 @@ fn knowledge_scoped_paths_for(
         &request.target_metadata_filters,
         0,
     );
-    KnowledgePathOutput {
+    Ok(KnowledgePathOutput {
         graph_commit_epoch: store.commit_epoch(),
         source_node_id,
         target_node_id,
@@ -33668,14 +34153,14 @@ fn knowledge_scoped_paths_for(
         fanout_reason_codes: knowledge_fanout_reason_codes(&fanout_reason_details),
         fanout_reasons: knowledge_fanout_reason_messages(&fanout_reason_details),
         fanout_reason_details,
-    }
+    })
 }
 
 fn knowledge_subgraph_for(
     catalog: &Catalog,
     store: &GraphStore,
     request: &KnowledgeSubgraphRequest,
-) -> KnowledgeSubgraphOutput {
+) -> Result<KnowledgeSubgraphOutput> {
     knowledge_scoped_subgraph_for(
         catalog,
         store,
@@ -33689,7 +34174,7 @@ fn knowledge_subgraph_for(
 fn knowledge_subgraph_via_query_runtime(
     db: &Database,
     request: &KnowledgeSubgraphRequest,
-) -> KnowledgeSubgraphOutput {
+) -> Result<KnowledgeSubgraphOutput> {
     knowledge_scoped_subgraph_via_query_runtime(
         db,
         &KnowledgeScopedSubgraphRequest {
@@ -33699,35 +34184,10 @@ fn knowledge_subgraph_via_query_runtime(
     )
 }
 
-fn knowledge_query_runtime_failed_subgraph_output(
-    graph_commit_epoch: u64,
-    request: &KnowledgeScopedSubgraphRequest,
-) -> KnowledgeSubgraphOutput {
-    let mut diagnostics = knowledge_query_runtime_failed_traversal_diagnostics(
-        graph_commit_epoch,
-        request.navigation.max_hops,
-        None,
-        Some(request.navigation.node_limit),
-        Some(request.navigation.relationship_limit),
-        None,
-    );
-    attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 0);
-    KnowledgeSubgraphOutput {
-        graph_commit_epoch,
-        seed_node_id: None,
-        nodes: Vec::new(),
-        relationships: Vec::new(),
-        fanout_reason_codes: Vec::new(),
-        fanout_reason_details: Vec::new(),
-        fanout_reasons: Vec::new(),
-        diagnostics,
-    }
-}
-
 fn knowledge_scoped_subgraph_via_query_runtime(
     db: &Database,
     request: &KnowledgeScopedSubgraphRequest,
-) -> KnowledgeSubgraphOutput {
+) -> Result<KnowledgeSubgraphOutput> {
     let navigation = &request.navigation;
 
     let graph_commit_epoch = db.store.commit_epoch();
@@ -33735,12 +34195,7 @@ fn knowledge_scoped_subgraph_via_query_runtime(
         label: navigation.label.clone(),
         external_id: navigation.external_id.clone(),
     };
-    let seed = match knowledge_relationship_seed_via_query_runtime(db, &seed_request) {
-        Ok(seed) => seed,
-        Err(_) => {
-            return knowledge_query_runtime_failed_subgraph_output(graph_commit_epoch, request);
-        }
-    };
+    let seed = knowledge_relationship_seed_via_query_runtime(db, &seed_request)?;
     let Some(seed) = seed else {
         let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
             graph_commit_epoch,
@@ -33762,7 +34217,7 @@ fn knowledge_scoped_subgraph_via_query_runtime(
             relationship_limit: Some(navigation.relationship_limit),
         });
         attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 0);
-        return KnowledgeSubgraphOutput {
+        return Ok(KnowledgeSubgraphOutput {
             graph_commit_epoch,
             seed_node_id: None,
             nodes: Vec::new(),
@@ -33771,7 +34226,7 @@ fn knowledge_scoped_subgraph_via_query_runtime(
             fanout_reason_details: Vec::new(),
             fanout_reasons: Vec::new(),
             diagnostics,
-        };
+        });
     };
     if !request.metadata_filters.is_empty()
         && !knowledge_entity_matches_filters(&seed, &request.metadata_filters)
@@ -33793,7 +34248,7 @@ fn knowledge_scoped_subgraph_via_query_runtime(
             relationship_limit: Some(navigation.relationship_limit),
         });
         attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 1);
-        return KnowledgeSubgraphOutput {
+        return Ok(KnowledgeSubgraphOutput {
             graph_commit_epoch,
             seed_node_id: Some(seed.node_id),
             nodes: Vec::new(),
@@ -33802,18 +34257,13 @@ fn knowledge_scoped_subgraph_via_query_runtime(
             fanout_reason_details: Vec::new(),
             fanout_reasons: Vec::new(),
             diagnostics,
-        };
+        });
     }
 
     let relationship_type_name = match navigation.relationship_type.as_deref() {
         Some(name) => match db.catalog.rel_type_id(name) {
             Some(_) => {
-                if validate_cypher_identifier(name, "relationship type").is_err() {
-                    return knowledge_query_runtime_failed_subgraph_output(
-                        graph_commit_epoch,
-                        request,
-                    );
-                }
+                validate_cypher_identifier(name, "relationship type")?;
                 Some(name.to_string())
             }
             None => {
@@ -33835,7 +34285,7 @@ fn knowledge_scoped_subgraph_via_query_runtime(
                         relationship_limit: Some(navigation.relationship_limit),
                     });
                 attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 0);
-                return KnowledgeSubgraphOutput {
+                return Ok(KnowledgeSubgraphOutput {
                     graph_commit_epoch,
                     seed_node_id: Some(seed.node_id),
                     nodes: Vec::new(),
@@ -33844,14 +34294,14 @@ fn knowledge_scoped_subgraph_via_query_runtime(
                     fanout_reason_details: Vec::new(),
                     fanout_reasons: Vec::new(),
                     diagnostics,
-                };
+                });
             }
         },
         None => None,
     };
 
     let (nodes, relationships, fanout_reason_details) =
-        match expand_knowledge_subgraph_via_query_runtime(
+        expand_knowledge_subgraph_via_query_runtime(
             db,
             &seed,
             relationship_type_name.as_deref(),
@@ -33859,12 +34309,7 @@ fn knowledge_scoped_subgraph_via_query_runtime(
             navigation.max_hops,
             navigation.node_limit,
             navigation.relationship_limit,
-        ) {
-            Ok(output) => output,
-            Err(_) => {
-                return knowledge_query_runtime_failed_subgraph_output(graph_commit_epoch, request);
-            }
-        };
+        )?;
     let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
         graph_commit_epoch,
         seed_found: true,
@@ -33882,7 +34327,7 @@ fn knowledge_scoped_subgraph_via_query_runtime(
         relationship_limit: Some(navigation.relationship_limit),
     });
     attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 0);
-    KnowledgeSubgraphOutput {
+    Ok(KnowledgeSubgraphOutput {
         graph_commit_epoch,
         seed_node_id: Some(seed.node_id),
         diagnostics,
@@ -33891,7 +34336,7 @@ fn knowledge_scoped_subgraph_via_query_runtime(
         fanout_reason_codes: knowledge_fanout_reason_codes(&fanout_reason_details),
         fanout_reasons: knowledge_fanout_reason_messages(&fanout_reason_details),
         fanout_reason_details,
-    }
+    })
 }
 
 fn expand_knowledge_subgraph_via_query_runtime(
@@ -34152,14 +34597,15 @@ fn knowledge_scoped_subgraph_for(
     catalog: &Catalog,
     store: &GraphStore,
     request: &KnowledgeScopedSubgraphRequest,
-) -> KnowledgeSubgraphOutput {
+) -> Result<KnowledgeSubgraphOutput> {
     let navigation = &request.navigation;
-    let Some(seed) = seed_node_by_label_and_external_id(
+    let Some(seed) = try_seed_node_by_label_and_external_id(
         catalog,
         store,
         navigation.label.as_str(),
         navigation.external_id.as_str(),
-    ) else {
+    )?
+    else {
         let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
             graph_commit_epoch: store.commit_epoch(),
             seed_found: false,
@@ -34180,7 +34626,7 @@ fn knowledge_scoped_subgraph_for(
             relationship_limit: Some(navigation.relationship_limit),
         });
         attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 0);
-        return KnowledgeSubgraphOutput {
+        return Ok(KnowledgeSubgraphOutput {
             graph_commit_epoch: store.commit_epoch(),
             seed_node_id: None,
             nodes: Vec::new(),
@@ -34189,10 +34635,10 @@ fn knowledge_scoped_subgraph_for(
             fanout_reason_details: Vec::new(),
             fanout_reasons: Vec::new(),
             diagnostics,
-        };
+        });
     };
     if !request.metadata_filters.is_empty()
-        && !knowledge_graph_seed_matches_filters(catalog, store, seed, &request.metadata_filters)
+        && !knowledge_graph_seed_matches_filters(catalog, store, &seed, &request.metadata_filters)
     {
         let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
             graph_commit_epoch: store.commit_epoch(),
@@ -34211,7 +34657,7 @@ fn knowledge_scoped_subgraph_for(
             relationship_limit: Some(navigation.relationship_limit),
         });
         attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 1);
-        return KnowledgeSubgraphOutput {
+        return Ok(KnowledgeSubgraphOutput {
             graph_commit_epoch: store.commit_epoch(),
             seed_node_id: Some(seed.id.0),
             nodes: Vec::new(),
@@ -34220,7 +34666,7 @@ fn knowledge_scoped_subgraph_for(
             fanout_reason_details: Vec::new(),
             fanout_reasons: Vec::new(),
             diagnostics,
-        };
+        });
     }
     let relationship_type = match navigation.relationship_type.as_deref() {
         Some(name) => match catalog.rel_type_id(name) {
@@ -34244,7 +34690,7 @@ fn knowledge_scoped_subgraph_for(
                         relationship_limit: Some(navigation.relationship_limit),
                     });
                 attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 0);
-                return KnowledgeSubgraphOutput {
+                return Ok(KnowledgeSubgraphOutput {
                     graph_commit_epoch: store.commit_epoch(),
                     seed_node_id: Some(seed.id.0),
                     nodes: Vec::new(),
@@ -34253,7 +34699,7 @@ fn knowledge_scoped_subgraph_for(
                     fanout_reason_details: Vec::new(),
                     fanout_reasons: Vec::new(),
                     diagnostics,
-                };
+                });
             }
         },
         None => None,
@@ -34269,7 +34715,7 @@ fn knowledge_scoped_subgraph_for(
             node_limit: navigation.node_limit,
             relationship_limit: navigation.relationship_limit,
         },
-    );
+    )?;
     let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
         graph_commit_epoch: store.commit_epoch(),
         seed_found: true,
@@ -34287,7 +34733,7 @@ fn knowledge_scoped_subgraph_for(
         relationship_limit: Some(navigation.relationship_limit),
     });
     attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 0);
-    KnowledgeSubgraphOutput {
+    Ok(KnowledgeSubgraphOutput {
         graph_commit_epoch: store.commit_epoch(),
         seed_node_id: Some(seed.id.0),
         diagnostics,
@@ -34296,7 +34742,7 @@ fn knowledge_scoped_subgraph_for(
         fanout_reason_codes: knowledge_fanout_reason_codes(&fanout_reason_details),
         fanout_reasons: knowledge_fanout_reason_messages(&fanout_reason_details),
         fanout_reason_details,
-    }
+    })
 }
 
 struct KnowledgeTraversalDiagnosticInput {
@@ -34539,10 +34985,10 @@ struct KnowledgeSubgraphExpansion {
     relationship_limit: usize,
 }
 
-struct KnowledgeExpansionEdge<'a> {
+struct KnowledgeExpansionEdge {
     direction: KnowledgeGraphPathDirection,
     next_node: NodeId,
-    relationship: &'a RelRecord,
+    relationship: RelRecord,
 }
 
 struct DenseAdjacencyDiagnosticContext<'a> {
@@ -34557,10 +35003,10 @@ fn expand_knowledge_neighbors_for(
     catalog: &Catalog,
     store: &GraphStore,
     expansion: KnowledgeNeighborExpansion<'_>,
-) -> (
+) -> Result<(
     Vec<KnowledgeGraphContextPath>,
     Vec<KnowledgeFanoutReasonDetail>,
-) {
+)> {
     let mut paths = Vec::new();
     let mut fanout_reasons = Vec::new();
     let mut seen_relationships = BTreeSet::new();
@@ -34590,7 +35036,7 @@ fn expand_knowledge_neighbors_for(
             current_node,
             expansion.relationship_type,
             expansion.requested_direction,
-        ) {
+        )? {
             let relationship = edge.relationship;
             if !seen_relationships.insert(relationship.id.0) {
                 continue;
@@ -34601,7 +35047,7 @@ fn expand_knowledge_neighbors_for(
                     expansion.limit,
                     expansion.seed_hit_id,
                 ));
-                return (paths, fanout_reasons);
+                return Ok((paths, fanout_reasons));
             }
             let Some(path) = context_path_for_relationship(
                 catalog,
@@ -34609,8 +35055,9 @@ fn expand_knowledge_neighbors_for(
                 expansion.seed_hit_id,
                 depth + 1,
                 edge.direction,
-                relationship,
-            ) else {
+                &relationship,
+            )?
+            else {
                 continue;
             };
             paths.push(path);
@@ -34620,14 +35067,14 @@ fn expand_knowledge_neighbors_for(
         }
     }
 
-    (paths, fanout_reasons)
+    Ok((paths, fanout_reasons))
 }
 
 fn expand_knowledge_paths_for(
     catalog: &Catalog,
     store: &GraphStore,
     expansion: KnowledgePathExpansion,
-) -> (Vec<KnowledgeGraphPath>, Vec<KnowledgeFanoutReasonDetail>) {
+) -> Result<(Vec<KnowledgeGraphPath>, Vec<KnowledgeFanoutReasonDetail>)> {
     let mut paths = Vec::new();
     let mut fanout_reasons = Vec::new();
     let mut reported_dense_groups = BTreeSet::new();
@@ -34658,7 +35105,7 @@ fn expand_knowledge_paths_for(
             current_node,
             expansion.relationship_type,
             expansion.requested_direction,
-        ) {
+        )? {
             if visited_nodes.contains(&edge.next_node.0)
                 && edge.next_node != expansion.target_node_id
             {
@@ -34670,8 +35117,9 @@ fn expand_knowledge_paths_for(
                 "path",
                 current_path.len() + 1,
                 edge.direction,
-                edge.relationship,
-            ) else {
+                &edge.relationship,
+            )?
+            else {
                 continue;
             };
             let mut next_path = current_path.clone();
@@ -34683,7 +35131,7 @@ fn expand_knowledge_paths_for(
                         expansion.limit,
                         "path",
                     ));
-                    return (paths, fanout_reasons);
+                    return Ok((paths, fanout_reasons));
                 }
                 paths.push(KnowledgeGraphPath {
                     segments: next_path,
@@ -34696,18 +35144,18 @@ fn expand_knowledge_paths_for(
         }
     }
 
-    (paths, fanout_reasons)
+    Ok((paths, fanout_reasons))
 }
 
 fn expand_knowledge_subgraph_for(
     catalog: &Catalog,
     store: &GraphStore,
     expansion: KnowledgeSubgraphExpansion,
-) -> (
+) -> Result<(
     Vec<KnowledgeEntity>,
     Vec<KnowledgeGraphContextPath>,
     Vec<KnowledgeFanoutReasonDetail>,
-) {
+)> {
     let mut nodes = Vec::new();
     let mut relationships = Vec::new();
     let mut fanout_reasons = Vec::new();
@@ -34718,10 +35166,10 @@ fn expand_knowledge_subgraph_for(
 
     if expansion.node_limit == 0 {
         fanout_reasons.push(KnowledgeFanoutReasonDetail::node_limit(0));
-        return (nodes, relationships, fanout_reasons);
+        return Ok((nodes, relationships, fanout_reasons));
     }
-    if let Some(seed) = store.node(expansion.seed_node_id) {
-        nodes.push(knowledge_entity_from_node(catalog, seed));
+    if let Some(seed) = store.node_owned(expansion.seed_node_id)? {
+        nodes.push(knowledge_entity_from_node(catalog, &seed));
         seen_nodes.insert(expansion.seed_node_id.0);
     }
 
@@ -34746,7 +35194,7 @@ fn expand_knowledge_subgraph_for(
             current_node,
             expansion.relationship_type,
             expansion.requested_direction,
-        ) {
+        )? {
             let relationship = edge.relationship;
             if !seen_relationships.insert(relationship.id.0) {
                 continue;
@@ -34756,13 +35204,13 @@ fn expand_knowledge_subgraph_for(
                 fanout_reasons.push(KnowledgeFanoutReasonDetail::node_limit(
                     expansion.node_limit,
                 ));
-                return (nodes, relationships, fanout_reasons);
+                return Ok((nodes, relationships, fanout_reasons));
             }
             if relationships.len() >= expansion.relationship_limit {
                 fanout_reasons.push(KnowledgeFanoutReasonDetail::relationship_limit(
                     expansion.relationship_limit,
                 ));
-                return (nodes, relationships, fanout_reasons);
+                return Ok((nodes, relationships, fanout_reasons));
             }
             let Some(path) = context_path_for_relationship(
                 catalog,
@@ -34770,68 +35218,59 @@ fn expand_knowledge_subgraph_for(
                 "subgraph",
                 depth + 1,
                 edge.direction,
-                relationship,
-            ) else {
+                &relationship,
+            )?
+            else {
                 continue;
             };
             relationships.push(path);
             if new_node && seen_nodes.insert(edge.next_node.0) {
-                if let Some(node) = store.node(edge.next_node) {
-                    nodes.push(knowledge_entity_from_node(catalog, node));
+                if let Some(node) = store.node_owned(edge.next_node)? {
+                    nodes.push(knowledge_entity_from_node(catalog, &node));
                 }
                 frontier.push_back((edge.next_node, depth + 1));
             }
         }
     }
 
-    (nodes, relationships, fanout_reasons)
+    Ok((nodes, relationships, fanout_reasons))
 }
 
-fn knowledge_expansion_edges_for_node<'a>(
-    store: &'a GraphStore,
+fn knowledge_expansion_edges_for_node(
+    store: &GraphStore,
     node_id: NodeId,
     relationship_type: Option<crate::schema::RelTypeId>,
     requested_direction: KnowledgeNeighborDirection,
-) -> Vec<KnowledgeExpansionEdge<'a>> {
-    let Some(rel_type) = relationship_type else {
-        let mut edges = Vec::new();
-        let mut seen_relationships = BTreeSet::new();
-        for adjacency_direction in adjacency_directions_for_request(requested_direction) {
-            for entry in store.ordered_adjacency_entries_for_node(node_id, adjacency_direction) {
-                let Some(relationship) = store.relationship(entry.relationship_id) else {
-                    continue;
-                };
-                if !seen_relationships.insert(entry.relationship_id.0) {
-                    continue;
-                }
-                edges.push(KnowledgeExpansionEdge {
-                    direction: knowledge_path_direction_for_adjacency(adjacency_direction),
-                    next_node: entry.neighbor_id,
-                    relationship,
-                });
-            }
-        }
-        return edges;
-    };
-
+) -> Result<Vec<KnowledgeExpansionEdge>> {
     let mut edges = Vec::new();
     let mut seen_relationships = BTreeSet::new();
     for adjacency_direction in adjacency_directions_for_request(requested_direction) {
-        for entry in store.ordered_adjacency_entries(node_id, rel_type, adjacency_direction) {
-            let Some(relationship) = store.relationship(entry.relationship_id) else {
-                continue;
-            };
-            if !seen_relationships.insert(entry.relationship_id.0) {
-                continue;
-            }
-            edges.push(KnowledgeExpansionEdge {
-                direction: knowledge_path_direction_for_adjacency(adjacency_direction),
-                next_node: entry.neighbor_id,
-                relationship,
-            });
-        }
+        let mut direction_edges = Vec::new();
+        store.visit_adjacent_relationships_owned(
+            node_id,
+            relationship_type,
+            adjacency_direction,
+            |relationship| {
+                let next_node = match adjacency_direction {
+                    AdjacencyDirection::Outgoing => relationship.target,
+                    AdjacencyDirection::Incoming => relationship.source,
+                };
+                direction_edges.push(KnowledgeExpansionEdge {
+                    direction: knowledge_path_direction_for_adjacency(adjacency_direction),
+                    next_node,
+                    relationship,
+                });
+                crate::store::GraphScanControl::Continue
+            },
+        )?;
+        direction_edges.sort_by_key(|edge| (edge.next_node, edge.relationship.id));
+        edges.extend(
+            direction_edges
+                .into_iter()
+                .filter(|edge| seen_relationships.insert(edge.relationship.id.0)),
+        );
     }
-    edges
+    Ok(edges)
 }
 
 fn record_dense_adjacency_diagnostics(
@@ -34913,31 +35352,51 @@ fn qos_admission_name(admission: &QosAdmission) -> &'static str {
     }
 }
 
-fn seed_node_by_label_and_external_id<'a>(
+fn try_seed_node_by_label_and_external_id(
     catalog: &Catalog,
-    store: &'a GraphStore,
+    store: &GraphStore,
     label: &str,
     external_id: &str,
-) -> Option<&'a NodeRecord> {
-    let label_id = catalog.label_id(label)?;
-    store
-        .scan_nodes(Some(label_id))
-        .find(|node| projected_node_external_id(node) == external_id)
+) -> Result<Option<NodeRecord>> {
+    let Some(label_id) = catalog.label_id(label) else {
+        return Ok(None);
+    };
+    let mut found = None;
+    store.visit_nodes_owned(Some(label_id), |node| {
+        if projected_node_external_id(&node) == external_id {
+            found = Some(node);
+            crate::store::GraphScanControl::Stop
+        } else {
+            crate::store::GraphScanControl::Continue
+        }
+    })?;
+    Ok(found)
 }
 
-fn node_by_label_property_external_id<'a>(
+fn try_node_by_label_property_external_id(
     catalog: &Catalog,
-    store: &'a GraphStore,
+    store: &GraphStore,
     label: &str,
     property: &str,
     external_id: &str,
-) -> Option<&'a NodeRecord> {
-    let label_id = catalog.label_id(label)?;
-    store.scan_nodes(Some(label_id)).find(|node| {
-        node.properties
+) -> Result<Option<NodeRecord>> {
+    let Some(label_id) = catalog.label_id(label) else {
+        return Ok(None);
+    };
+    let mut found = None;
+    store.visit_nodes_owned(Some(label_id), |node| {
+        if node
+            .properties
             .get(property)
             .is_some_and(|value| value_to_external_id(value) == external_id)
-    })
+        {
+            found = Some(node);
+            crate::store::GraphScanControl::Stop
+        } else {
+            crate::store::GraphScanControl::Continue
+        }
+    })?;
+    Ok(found)
 }
 
 fn knowledge_induced_edges_via_query_runtime(
@@ -35123,10 +35582,14 @@ fn context_path_for_relationship(
     hop: usize,
     direction: KnowledgeGraphPathDirection,
     relationship: &RelRecord,
-) -> Option<KnowledgeGraphContextPath> {
-    let source = store.node(relationship.source)?;
-    let target = store.node(relationship.target)?;
-    Some(KnowledgeGraphContextPath {
+) -> Result<Option<KnowledgeGraphContextPath>> {
+    let Some(source) = store.node_owned(relationship.source)? else {
+        return Ok(None);
+    };
+    let Some(target) = store.node_owned(relationship.target)? else {
+        return Ok(None);
+    };
+    Ok(Some(KnowledgeGraphContextPath {
         seed_hit_id: seed_hit_id.to_string(),
         hop,
         direction,
@@ -35137,12 +35600,12 @@ fn context_path_for_relationship(
             .to_string(),
         relationship_properties: relationship.properties.clone(),
         source_node_id: relationship.source.0,
-        source_labels: node_label_names(catalog, source),
-        source_external_id: Some(projected_node_external_id(source)),
+        source_labels: node_label_names(catalog, &source),
+        source_external_id: Some(projected_node_external_id(&source)),
         target_node_id: relationship.target.0,
-        target_labels: node_label_names(catalog, target),
-        target_external_id: Some(projected_node_external_id(target)),
-    })
+        target_labels: node_label_names(catalog, &target),
+        target_external_id: Some(projected_node_external_id(&target)),
+    }))
 }
 
 fn search_projection_graph_delta_for(
@@ -35169,10 +35632,10 @@ fn search_projection_graph_delta_for(
 
     let mut upserts = Vec::new();
     for node_id in &request.upsert_node_ids {
-        let Some(node) = store.node(NodeId(*node_id)) else {
+        let Some(node) = store.node_owned(NodeId(*node_id))? else {
             continue;
         };
-        if let Some(row) = projection_row_from_node_with_graph_metadata(catalog, store, node) {
+        if let Some(row) = projection_row_from_node_with_graph_metadata(catalog, store, &node)? {
             upserts.push(row);
         }
     }
@@ -35976,11 +36439,15 @@ impl DatabaseSession<'_> {
                     "EXPLAIN ANALYZE only supports read queries".to_string(),
                 ));
             }
-            let profiled = executor::execute_with_row_limit_profile(
+            let mut external = executor::NoExternalReadOperator;
+            let profiled = executor::execute_with_output_limits_profile_and_external(
                 &optimized.physical_plan,
                 &mut self.db.catalog,
                 &mut self.db.store,
+                parameters,
+                &mut external,
                 self.db.config.max_read_result_rows,
+                self.db.config.max_read_result_payload_bytes,
             )?;
             return Ok(QueryOutput {
                 rows: vec![explain_analyze_output_row(
@@ -36135,6 +36602,11 @@ impl DatabaseReadTransaction {
         options: QueryStreamOptions,
         mut consumer: impl FnMut(Row) -> Result<()>,
     ) -> Result<QueryStreamReport> {
+        let max_rows = restrictive_query_limit(self.config.max_read_result_rows, options.max_rows);
+        let max_payload_bytes = restrictive_query_limit(
+            self.config.max_read_result_payload_bytes,
+            options.max_payload_bytes,
+        );
         let statement = cypher::parse(cypher_text)?;
         let body = statement_body(&statement);
         if matches!(statement, cypher::Statement::Explain(_)) {
@@ -36169,9 +36641,72 @@ impl DatabaseReadTransaction {
             &mut self.catalog,
             &mut self.store,
             parameters,
-            options.max_rows,
-            options.max_payload_bytes,
+            max_rows,
+            max_payload_bytes,
             &mut consumer,
+        )?;
+        let pipeline = &streamed.profile.pipeline_memory_report;
+        Ok(QueryStreamReport {
+            fully_streamed: streamed.fully_streamed,
+            output_rows: pipeline.output_rows,
+            output_payload_bytes: pipeline.output_payload_bytes,
+            execution_profile: streamed.profile,
+        })
+    }
+
+    pub fn query_with_params_streaming_context(
+        &mut self,
+        cypher_text: &str,
+        parameters: &BTreeMap<String, Value>,
+        options: QueryStreamOptions,
+        task_context: &skein_core::RuntimeTaskContext,
+        mut consumer: impl FnMut(Row) -> Result<()>,
+    ) -> Result<QueryStreamReport> {
+        let max_rows = restrictive_query_limit(self.config.max_read_result_rows, options.max_rows);
+        let max_payload_bytes = restrictive_query_limit(
+            self.config.max_read_result_payload_bytes,
+            options.max_payload_bytes,
+        );
+        let statement = cypher::parse(cypher_text)?;
+        let body = statement_body(&statement);
+        if matches!(statement, cypher::Statement::Explain(_)) {
+            return Err(SkeinError::Execution(
+                "streaming query does not support EXPLAIN".to_string(),
+            ));
+        }
+        if matches!(body, cypher::Statement::Checkpoint) {
+            return Err(SkeinError::Execution(
+                "CHECKPOINT is not allowed inside a read transaction".to_string(),
+            ));
+        }
+        if matches!(body, cypher::Statement::SetSystemVariable(_)) {
+            return Err(SkeinError::Execution(
+                "SET system variable is not allowed inside a read transaction".to_string(),
+            ));
+        }
+        query_work_request_for_statement(&QuerySystemVariables::default(), &statement)?;
+        let optimized = self.optimized_query_plan_with_access_control(
+            cypher_text,
+            &statement,
+            parameters,
+            None,
+        )?;
+        if executor::is_mutation_plan(&optimized.physical_plan)? {
+            return Err(SkeinError::Execution(
+                "read transaction query must not be a mutation".to_string(),
+            ));
+        }
+        let mut external = executor::NoExternalReadOperator;
+        let streamed = executor::execute_with_row_consumer_profile_and_external_and_context(
+            &optimized.physical_plan,
+            &mut self.catalog,
+            &mut self.store,
+            parameters,
+            &mut external,
+            max_rows,
+            max_payload_bytes,
+            &mut consumer,
+            task_context,
         )?;
         let pipeline = &streamed.profile.pipeline_memory_report;
         Ok(QueryStreamReport {
@@ -36207,6 +36742,8 @@ impl DatabaseReadTransaction {
         task_context: Option<&skein_core::RuntimeTaskContext>,
     ) -> Result<BoundedReadQueryOutput> {
         query_runtime::query_runtime_checkpoint(task_context)?;
+        let max_rows = restrictive_query_limit(self.config.max_read_result_rows, max_rows);
+        let max_payload_bytes = self.config.max_read_result_payload_bytes;
         let statement = cypher::parse(cypher_text)?;
         let body = statement_body(&statement);
         if let cypher::Statement::Explain(explain) = &statement {
@@ -36246,22 +36783,29 @@ impl DatabaseReadTransaction {
         let profiled = match task_context {
             Some(task_context) => {
                 let mut external = executor::NoExternalReadOperator;
-                executor::execute_with_row_limit_profile_and_external_and_context(
+                executor::execute_with_output_limits_profile_and_external_and_context(
                     &optimized.physical_plan,
                     &mut self.catalog,
                     &mut self.store,
                     parameters,
                     &mut external,
                     max_rows,
+                    max_payload_bytes,
                     task_context,
                 )
             }
-            None => executor::execute_with_row_limit_profile(
-                &optimized.physical_plan,
-                &mut self.catalog,
-                &mut self.store,
-                max_rows,
-            ),
+            None => {
+                let mut external = executor::NoExternalReadOperator;
+                executor::execute_with_output_limits_profile_and_external(
+                    &optimized.physical_plan,
+                    &mut self.catalog,
+                    &mut self.store,
+                    parameters,
+                    &mut external,
+                    max_rows,
+                    max_payload_bytes,
+                )
+            }
         }?;
         query_runtime::query_runtime_checkpoint(task_context)?;
         Ok(BoundedReadQueryOutput {
@@ -36305,22 +36849,29 @@ impl DatabaseReadTransaction {
             let profiled = match task_context {
                 Some(task_context) => {
                     let mut external = executor::NoExternalReadOperator;
-                    executor::execute_with_row_limit_profile_and_external_and_context(
+                    executor::execute_with_output_limits_profile_and_external_and_context(
                         &optimized.physical_plan,
                         &mut self.catalog,
                         &mut self.store,
                         parameters,
                         &mut external,
                         max_rows,
+                        self.config.max_read_result_payload_bytes,
                         task_context,
                     )
                 }
-                None => executor::execute_with_row_limit_profile(
-                    &optimized.physical_plan,
-                    &mut self.catalog,
-                    &mut self.store,
-                    max_rows,
-                ),
+                None => {
+                    let mut external = executor::NoExternalReadOperator;
+                    executor::execute_with_output_limits_profile_and_external(
+                        &optimized.physical_plan,
+                        &mut self.catalog,
+                        &mut self.store,
+                        parameters,
+                        &mut external,
+                        max_rows,
+                        self.config.max_read_result_payload_bytes,
+                    )
+                }
             }?;
             query_runtime::query_runtime_checkpoint(task_context)?;
             let row_count = profiled.rows.len();
@@ -36358,9 +36909,11 @@ impl DatabaseReadTransaction {
         sql_text: &str,
         max_rows: Option<usize>,
     ) -> Result<QueryOutput> {
+        let max_rows = restrictive_query_limit(self.config.max_read_result_rows, max_rows);
         system_sql::query_sql(
             sql_text,
             max_rows,
+            self.config.max_read_result_payload_bytes,
             &self.plan_cache.borrow().stats(),
             &self.slow_query_snapshot,
             &self.statement_summary_snapshot,
@@ -36464,6 +37017,10 @@ impl DatabaseReadTransaction {
         export_canonical_graph_snapshot_for(&self.catalog, &self.store)
     }
 
+    pub fn try_export_canonical_graph_snapshot(&self) -> Result<CanonicalGraphSnapshotExport> {
+        canonical_snapshot::try_export_canonical_graph_snapshot_for(&self.catalog, &self.store)
+    }
+
     pub fn rebuild_search_projection(
         &self,
         search_index: &mut SearchIndex,
@@ -36508,14 +37065,17 @@ impl DatabaseReadTransaction {
         .try_retrieve_knowledge(search_index, request)
     }
 
-    pub fn knowledge_entity(&self, request: &KnowledgeEntityRequest) -> KnowledgeEntityOutput {
+    pub fn knowledge_entity(
+        &self,
+        request: &KnowledgeEntityRequest,
+    ) -> Result<KnowledgeEntityOutput> {
         knowledge_entity_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_entity_batch(
         &self,
         request: &KnowledgeEntityBatchRequest,
-    ) -> KnowledgeEntityBatchOutput {
+    ) -> Result<KnowledgeEntityBatchOutput> {
         knowledge_entity_batch_for(&self.catalog, &self.store, request)
     }
 
@@ -36767,7 +37327,7 @@ impl DatabaseReadTransaction {
     pub fn knowledge_thread_sources(
         &self,
         request: &KnowledgeThreadSourceListRequest,
-    ) -> KnowledgeThreadSourceListOutput {
+    ) -> Result<KnowledgeThreadSourceListOutput> {
         knowledge_thread_sources_for(&self.catalog, &self.store, request)
     }
 
@@ -36830,81 +37390,81 @@ impl DatabaseReadTransaction {
     pub fn knowledge_scoped_entity(
         &self,
         request: &KnowledgeScopedEntityRequest,
-    ) -> KnowledgeEntityOutput {
+    ) -> Result<KnowledgeEntityOutput> {
         knowledge_scoped_entity_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_scoped_entity_batch(
         &self,
         request: &KnowledgeScopedEntityBatchRequest,
-    ) -> KnowledgeEntityBatchOutput {
+    ) -> Result<KnowledgeEntityBatchOutput> {
         knowledge_scoped_entity_batch_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_property_batch(
         &self,
         request: &KnowledgePropertyBatchRequest,
-    ) -> KnowledgePropertyBatchOutput {
+    ) -> Result<KnowledgePropertyBatchOutput> {
         knowledge_property_batch_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_scoped_property_batch(
         &self,
         request: &KnowledgeScopedPropertyBatchRequest,
-    ) -> KnowledgePropertyBatchOutput {
+    ) -> Result<KnowledgePropertyBatchOutput> {
         knowledge_scoped_property_batch_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_neighbors(
         &self,
         request: &KnowledgeNeighborsRequest,
-    ) -> KnowledgeNeighborsOutput {
+    ) -> Result<KnowledgeNeighborsOutput> {
         knowledge_neighbors_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_scoped_neighbors(
         &self,
         request: &KnowledgeScopedNeighborsRequest,
-    ) -> KnowledgeNeighborsOutput {
+    ) -> Result<KnowledgeNeighborsOutput> {
         knowledge_scoped_neighbors_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_relationships(
         &self,
         request: &KnowledgeRelationshipsRequest,
-    ) -> KnowledgeRelationshipsOutput {
+    ) -> Result<KnowledgeRelationshipsOutput> {
         knowledge_relationships_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_scoped_relationships(
         &self,
         request: &KnowledgeScopedRelationshipsRequest,
-    ) -> KnowledgeRelationshipsOutput {
+    ) -> Result<KnowledgeRelationshipsOutput> {
         knowledge_scoped_relationships_for(&self.catalog, &self.store, request)
     }
 
-    pub fn knowledge_paths(&self, request: &KnowledgePathRequest) -> KnowledgePathOutput {
+    pub fn knowledge_paths(&self, request: &KnowledgePathRequest) -> Result<KnowledgePathOutput> {
         knowledge_paths_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_scoped_paths(
         &self,
         request: &KnowledgeScopedPathRequest,
-    ) -> KnowledgePathOutput {
+    ) -> Result<KnowledgePathOutput> {
         knowledge_scoped_paths_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_subgraph(
         &self,
         request: &KnowledgeSubgraphRequest,
-    ) -> KnowledgeSubgraphOutput {
+    ) -> Result<KnowledgeSubgraphOutput> {
         knowledge_subgraph_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_scoped_subgraph(
         &self,
         request: &KnowledgeScopedSubgraphRequest,
-    ) -> KnowledgeSubgraphOutput {
+    ) -> Result<KnowledgeSubgraphOutput> {
         knowledge_scoped_subgraph_for(&self.catalog, &self.store, request)
     }
 

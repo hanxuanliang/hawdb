@@ -219,7 +219,7 @@ fn typed_knowledge_property_batch_update_persists_as_one_wal_batch_and_replays()
         })
         .unwrap();
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("set_node_property"));
     assert_eq!(wal.matches("\tbatch\t").count(), 1);
     {

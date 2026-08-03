@@ -131,6 +131,7 @@ pub struct BasicGraphStatistics {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct GraphStatistics {
     pub computed_at_commit_epoch: u64,
+    pub advanced_statistics_complete: bool,
     pub histogram_sample_limit: usize,
     pub node_count: u64,
     pub relationship_count: u64,

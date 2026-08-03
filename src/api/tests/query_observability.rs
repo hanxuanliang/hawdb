@@ -794,7 +794,7 @@ fn cypher_explain_analyze_returns_execution_profile_row() {
     );
     assert_eq!(
         row.get("operator_row_cap_enabled"),
-        Some(&Value::Bool(false))
+        Some(&Value::Bool(true))
     );
 }
 

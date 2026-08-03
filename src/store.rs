@@ -12,42 +12,72 @@ use crate::value::Value;
 use skein_core::RuntimeTaskContext;
 #[path = "store/source_scan.rs"]
 mod source_scan;
-use skein_storage::AdjacencyPostingList;
+#[path = "store/statistics_refresh.rs"]
+mod statistics_refresh;
 pub use skein_storage::{
     AdjacencyDirection, AdjacencyGroupConsistencyMismatch, AdjacencyGroupKey, AdjacencyGroupStats,
-    AdjacencyLayout, ConnectedNodesCreate, DurabilityPolicy, DurableCompression,
-    FileSegmentRangeReader, GraphMutation, MatchedRelationshipCopyMerge, MatchedRelationshipCreate,
-    MatchedRelationshipMerge, MatchedRelationshipRetargetMerge,
+    AdjacencyLayout, CanonicalAdjacencyBuildReport, CanonicalAdjacencyConfig,
+    CanonicalAdjacencyEntry, CanonicalAdjacencyManifest, CanonicalAdjacencyReadReport,
+    CanonicalAdjacencyReader, CanonicalAdjacencyWriter, CanonicalScanControl,
+    CanonicalSegmentConfig, CanonicalSegmentManifest, CanonicalSegmentReader,
+    CanonicalSegmentWriter, ConnectedNodesCreate, DurabilityPolicy, DurableCompression,
+    FileSegmentRangeReader, GraphMutation, ManifestGeneration, MatchedRelationshipCopyMerge,
+    MatchedRelationshipCreate, MatchedRelationshipMerge, MatchedRelationshipRetargetMerge,
     MatchedRelationshipSourceRetargetMerge, NodeId, NodeRecord, NodeSetAssignment, NodeSetValue,
-    OrderedAdjacencyEntry, ProjectedGraphDefinition, ProjectedGraphStatus, PropertyFilter,
-    PropertyIndexProjectionRebuildAction, RecoveryMode, RelId, RelRecord,
-    RelationshipDeleteRequest, RelationshipOnCreatePropertyValue, RelationshipPropertiesUpdate,
-    RelationshipPropertyUpdate, RelationshipSetAssignment, RelationshipTargetNodeDelete,
-    ScanPredicate, ScanPruningReport, ScanPruningStrategy, ScanPruningTargetKind,
-    ScanSegmentAccessPlan, ScanSegmentFallback, ScanSegmentManifest, SchemaMaintenanceAction,
-    SchemaMaintenancePlanItem, SearchProjectionChangefeedReadiness,
-    SearchProjectionChangefeedStatus, SearchProjectionGraphChange, SearchProjectionMutationId,
+    OrderedAdjacencyEntry, PersistentPropertyProjectionConfig,
+    PersistentPropertyProjectionDefinition, PersistentPropertyProjectionError,
+    PersistentPropertyProjectionKind, PersistentPropertyProjectionManifest,
+    PersistentPropertyProjectionReader, PersistentPropertyProjectionWriter,
+    ProjectedGraphDefinition, ProjectedGraphStatus, PropertyFilter,
+    PropertyIndexProjectionRebuildAction, PropertySpillConfig, PropertySpillManifest,
+    PropertySpillReader, RecoveryMode, RelId, RelRecord, RelationshipDeleteRequest,
+    RelationshipOnCreatePropertyValue, RelationshipPropertiesUpdate, RelationshipPropertyUpdate,
+    RelationshipSetAssignment, RelationshipTargetNodeDelete, ScanPredicate, ScanPruningReport,
+    ScanPruningStrategy, ScanPruningTargetKind, ScanSegmentAccessPlan, ScanSegmentFallback,
+    ScanSegmentManifest, SchemaMaintenanceAction, SchemaMaintenancePlanItem,
+    SearchProjectionChangefeedReadiness, SearchProjectionChangefeedStatus,
+    SearchProjectionGraphChange, SearchProjectionMutationId, SegmentCache, SegmentCacheSnapshot,
     SegmentRangeReader, SegmentReadError, SegmentReadExecutionError, SegmentReadExecutionReport,
     SegmentReadExecutor, SegmentReadPayload, SegmentReadRange, SegmentReadSchedule,
-    SegmentReadScheduler, SegmentReadWave, StorageReclamationWatermark, StorageRecoveryReport,
+    SegmentReadScheduler, SegmentReadWave, StorageBackupReport, StorageReclamationWatermark,
+    StorageRecoveryReport, StorageResidencyMode, StorageRestoreReport, StoreId,
     StoreStableIdMapping, WalReplayConfig,
 };
+use skein_storage::{
+    AdjacencyPostingList, CanonicalEndpointDirection, CanonicalNodeIterator,
+    CanonicalRelationshipIterator, CanonicalSegmentError, DatabaseDirectoryLease,
+};
 pub use source_scan::SourceScanRow;
+pub use statistics_refresh::{OptimizerStatisticsRefreshOptions, OptimizerStatisticsRefreshReport};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Cursor, Write};
+use std::io::{BufRead, BufReader, Cursor, Read, Write};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::ops::{Deref, DerefMut};
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-const STORAGE_VERSION: &str = "skein-storage-v1";
-const CHECKPOINT_FILE: &str = "checkpoint.skein";
+const LEGACY_STORAGE_VERSION: &str = "skein-storage-v1";
+const STORAGE_VERSION: &str = "skein-storage-v2";
+const LEGACY_CHECKPOINT_FILE: &str = "checkpoint.skein";
 const MANIFEST_FILE: &str = "manifest.skein";
 const PROJECTED_GRAPHS_FILE: &str = "projected_graphs.skein";
 const STABLE_ID_MAPPING_FILE: &str = "stable_ids.skein";
 const PROJECTED_GRAPH_ARTIFACT_VERSION: u64 = 1;
-const WAL_FILE: &str = "wal.skein";
+const LEGACY_WAL_FILE: &str = "wal.skein";
+const CHECKPOINT_HEADER_V1: &str = "SKEIN_CHECKPOINT_V1";
+const CHECKPOINT_HEADER_V2: &str = "SKEIN_CHECKPOINT_V2";
+const MANIFEST_HEADER_V1: &str = "SKEIN_MANIFEST_V1";
+const MANIFEST_HEADER_V2: &str = "SKEIN_MANIFEST_V2";
+const WAL_HEADER_V2: &str = "SKEIN_WAL_V2";
+const BACKUP_MANIFEST_FILE: &str = "backup.skein";
+const BACKUP_HEADER_V1: &str = "SKEIN_BACKUP_V1";
+const CANONICAL_MANIFEST_MAX_BYTES: u64 = 256 * 1024 * 1024;
+const CANONICAL_ADJACENCY_MANIFEST_MAX_BYTES: u64 = 1024 * 1024 * 1024;
+const PROPERTY_SPILL_MANIFEST_MAX_BYTES: u64 = 256 * 1024 * 1024;
+const PROPERTY_PROJECTION_MANIFEST_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 const MIN_PROPERTY_HISTOGRAM_VALUES: usize = 128;
 const MID_PROPERTY_HISTOGRAM_VALUES: usize = 256;
 const MAX_PROPERTY_HISTOGRAM_VALUES: usize = 512;
@@ -58,6 +88,151 @@ const DURABLE_COMPRESSION_HEADER: &str = "SKEIN_COMPRESSED_V1";
 const DEFAULT_COMPRESSION_LEVEL: i32 = 3;
 pub const DENSE_ADJACENCY_DEGREE_THRESHOLD: usize = 64;
 const MAX_ADJACENCY_CONSISTENCY_SAMPLES: usize = 32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckpointPublishStage {
+    CheckpointPersisted,
+    WalPrepared,
+    ManifestPublished,
+}
+
+#[cfg(test)]
+thread_local! {
+    static CHECKPOINT_FAILPOINT: std::cell::Cell<Option<CheckpointPublishStage>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+fn checkpoint_publish_failpoint(stage: CheckpointPublishStage) -> Result<()> {
+    #[cfg(test)]
+    if CHECKPOINT_FAILPOINT.with(|failpoint| failpoint.get()) == Some(stage) {
+        return Err(SkeinError::Storage(format!(
+            "injected checkpoint failure at {stage:?}"
+        )));
+    }
+    let _ = stage;
+    Ok(())
+}
+
+#[cfg(test)]
+fn set_checkpoint_failpoint(stage: Option<CheckpointPublishStage>) {
+    CHECKPOINT_FAILPOINT.with(|failpoint| failpoint.set(stage));
+}
+
+fn checkpoint_generation_file(generation: u64) -> String {
+    format!("checkpoint.{generation}.skein")
+}
+
+fn wal_generation_file(generation: u64) -> String {
+    format!("wal.{generation}.skein")
+}
+
+fn canonical_artifact_generation_file(generation: u64) -> String {
+    format!("canonical.{generation}.skein")
+}
+
+fn canonical_manifest_generation_file(generation: u64) -> String {
+    format!("canonical.{generation}.manifest.skein")
+}
+
+fn canonical_adjacency_artifact_generation_file(generation: u64) -> String {
+    format!("adjacency.{generation}.skein")
+}
+
+fn canonical_adjacency_manifest_generation_file(generation: u64) -> String {
+    format!("adjacency.{generation}.manifest.skein")
+}
+
+fn property_spill_artifact_generation_file(generation: u64) -> String {
+    format!("properties.{generation}.skein")
+}
+
+fn property_spill_manifest_generation_file(generation: u64) -> String {
+    format!("properties.{generation}.manifest.skein")
+}
+
+fn property_projection_artifact_generation_file(generation: u64) -> String {
+    format!("property-index.{generation}.skein")
+}
+
+fn property_projection_manifest_generation_file(generation: u64) -> String {
+    format!("property-index.{generation}.manifest.skein")
+}
+
+fn parse_generation_file(name: &str, prefix: &str) -> Option<u64> {
+    name.strip_prefix(prefix)?
+        .strip_suffix(".skein")?
+        .parse()
+        .ok()
+}
+
+fn parse_canonical_manifest_generation_file(name: &str) -> Option<u64> {
+    name.strip_prefix("canonical.")?
+        .strip_suffix(".manifest.skein")?
+        .parse()
+        .ok()
+}
+
+fn parse_canonical_adjacency_manifest_generation_file(name: &str) -> Option<u64> {
+    name.strip_prefix("adjacency.")?
+        .strip_suffix(".manifest.skein")?
+        .parse()
+        .ok()
+}
+
+fn parse_property_spill_manifest_generation_file(name: &str) -> Option<u64> {
+    name.strip_prefix("properties.")?
+        .strip_suffix(".manifest.skein")?
+        .parse()
+        .ok()
+}
+
+fn parse_property_projection_manifest_generation_file(name: &str) -> Option<u64> {
+    name.strip_prefix("property-index.")?
+        .strip_suffix(".manifest.skein")?
+        .parse()
+        .ok()
+}
+
+fn has_generational_artifacts(root: &Path) -> Result<bool> {
+    for entry in fs::read_dir(root)? {
+        let name = entry?.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if parse_generation_file(name, "checkpoint.").is_some()
+            || parse_generation_file(name, "wal.").is_some()
+            || parse_generation_file(name, "canonical.").is_some()
+            || parse_canonical_manifest_generation_file(name).is_some()
+            || parse_generation_file(name, "adjacency.").is_some()
+            || parse_canonical_adjacency_manifest_generation_file(name).is_some()
+            || parse_generation_file(name, "properties.").is_some()
+            || parse_property_spill_manifest_generation_file(name).is_some()
+            || parse_generation_file(name, "property-index.").is_some()
+            || parse_property_projection_manifest_generation_file(name).is_some()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn store_id_for_path(root: &Path) -> Result<StoreId> {
+    let canonical = fs::canonicalize(root)?;
+    let path = canonical.to_string_lossy();
+    let lower = checksum_bytes(path.as_bytes());
+    let mut salted = Vec::with_capacity(path.len().saturating_add(16));
+    salted.extend_from_slice(b"skein-store-id\0");
+    salted.extend_from_slice(path.as_bytes());
+    let upper = checksum_bytes(&salted);
+    Ok(StoreId((u128::from(upper) << 64) | u128::from(lower)))
+}
+
+fn encode_wal_header(generation: u64, start_lsn: u64) -> String {
+    let body = format!("{WAL_HEADER_V2}\t{generation}\t{start_lsn}");
+    let checksum = checksum_bytes(body.as_bytes());
+    format!("{body}\t{checksum}")
+}
 
 type PendingNode = (NodeId, LabelId, BTreeMap<String, Value>);
 type PendingRelationship = (RelId, NodeId, NodeId, RelTypeId, BTreeMap<String, Value>);
@@ -216,6 +391,122 @@ impl<T> CowSegment<T> {
 }
 
 const COW_MAP_MAX_SEGMENT_ENTRIES: usize = 512;
+const COW_MAP_TARGET_SEGMENT_BYTES: usize = 128 * 1024;
+
+trait CowPageWeight {
+    fn cow_page_bytes(&self) -> usize;
+}
+
+impl CowPageWeight for NodeId {
+    fn cow_page_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+    }
+}
+
+impl CowPageWeight for RelId {
+    fn cow_page_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+    }
+}
+
+impl CowPageWeight for LabelId {
+    fn cow_page_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+    }
+}
+
+impl CowPageWeight for RelTypeId {
+    fn cow_page_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+    }
+}
+
+impl CowPageWeight for String {
+    fn cow_page_bytes(&self) -> usize {
+        std::mem::size_of::<Self>().saturating_add(self.len())
+    }
+}
+
+impl CowPageWeight for Value {
+    fn cow_page_bytes(&self) -> usize {
+        usize::try_from(estimated_value_bytes(self)).unwrap_or(usize::MAX)
+    }
+}
+
+impl<T: CowPageWeight> CowPageWeight for Vec<T> {
+    fn cow_page_bytes(&self) -> usize {
+        std::mem::size_of::<Self>().saturating_add(
+            self.iter()
+                .map(CowPageWeight::cow_page_bytes)
+                .fold(0usize, usize::saturating_add),
+        )
+    }
+}
+
+impl<T: CowPageWeight + Ord> CowPageWeight for BTreeSet<T> {
+    fn cow_page_bytes(&self) -> usize {
+        std::mem::size_of::<Self>().saturating_add(
+            self.iter()
+                .map(CowPageWeight::cow_page_bytes)
+                .fold(0usize, usize::saturating_add),
+        )
+    }
+}
+
+impl<A: CowPageWeight, B: CowPageWeight> CowPageWeight for (A, B) {
+    fn cow_page_bytes(&self) -> usize {
+        self.0
+            .cow_page_bytes()
+            .saturating_add(self.1.cow_page_bytes())
+    }
+}
+
+impl<A: CowPageWeight, B: CowPageWeight, C: CowPageWeight> CowPageWeight for (A, B, C) {
+    fn cow_page_bytes(&self) -> usize {
+        self.0
+            .cow_page_bytes()
+            .saturating_add(self.1.cow_page_bytes())
+            .saturating_add(self.2.cow_page_bytes())
+    }
+}
+
+impl CowPageWeight for NodeRecord {
+    fn cow_page_bytes(&self) -> usize {
+        usize::try_from(estimated_node_record_bytes(self)).unwrap_or(usize::MAX)
+    }
+}
+
+impl CowPageWeight for RelRecord {
+    fn cow_page_bytes(&self) -> usize {
+        usize::try_from(estimated_relationship_record_bytes(self)).unwrap_or(usize::MAX)
+    }
+}
+
+impl CowPageWeight for AdjacencyPostingList {
+    fn cow_page_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+    }
+}
+
+impl<T> CowPageWeight for CowSegment<T> {
+    fn cow_page_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+    }
+}
+
+fn cow_map_entry_bytes<K: CowPageWeight, V: CowPageWeight>(key: &K, value: &V) -> usize {
+    std::mem::size_of::<usize>()
+        .saturating_mul(4)
+        .saturating_add(key.cow_page_bytes())
+        .saturating_add(value.cow_page_bytes())
+}
+
+fn cow_map_segment_bytes<K: CowPageWeight, V: CowPageWeight>(segment: &BTreeMap<K, V>) -> usize {
+    segment
+        .iter()
+        .map(|(key, value)| cow_map_entry_bytes(key, value))
+        .fold(0usize, usize::saturating_add)
+}
 
 /// An ordered map backed by immutable COW pages.
 ///
@@ -246,15 +537,26 @@ impl<K, V> Default for CowSegmentedMap<K, V> {
     }
 }
 
-impl<K: Ord, V> From<BTreeMap<K, V>> for CowSegmentedMap<K, V> {
+impl<K: Ord + CowPageWeight, V: CowPageWeight> From<BTreeMap<K, V>> for CowSegmentedMap<K, V> {
     fn from(values: BTreeMap<K, V>) -> Self {
         let len = values.len();
-        let mut entries = values.into_iter().peekable();
         let mut segments = Vec::new();
-        while entries.peek().is_some() {
-            segments.push(Arc::new(
-                entries.by_ref().take(COW_MAP_MAX_SEGMENT_ENTRIES).collect(),
-            ));
+        let mut segment = BTreeMap::new();
+        let mut segment_bytes = 0usize;
+        for (key, value) in values {
+            let entry_bytes = cow_map_entry_bytes(&key, &value);
+            if !segment.is_empty()
+                && (segment.len() >= COW_MAP_MAX_SEGMENT_ENTRIES
+                    || segment_bytes.saturating_add(entry_bytes) > COW_MAP_TARGET_SEGMENT_BYTES)
+            {
+                segments.push(Arc::new(std::mem::take(&mut segment)));
+                segment_bytes = 0;
+            }
+            segment_bytes = segment_bytes.saturating_add(entry_bytes);
+            segment.insert(key, value);
+        }
+        if !segment.is_empty() {
+            segments.push(Arc::new(segment));
         }
         Self {
             segments: Arc::new(segments),
@@ -308,7 +610,7 @@ impl<K: Ord, V> CowSegmentedMap<K, V> {
     }
 }
 
-impl<K: Ord + Clone, V: Clone> CowSegmentedMap<K, V> {
+impl<K: Ord + Clone + CowPageWeight, V: Clone + CowPageWeight> CowSegmentedMap<K, V> {
     fn insert(&mut self, key: K, value: V) -> Option<V> {
         if self.segments.is_empty() {
             self.segments = Arc::new(vec![Arc::new(BTreeMap::from([(key, value)]))]);
@@ -324,16 +626,51 @@ impl<K: Ord + Clone, V: Clone> CowSegmentedMap<K, V> {
         if previous.is_none() {
             self.len = self.len.saturating_add(1);
         }
-        if segment.len() > COW_MAP_MAX_SEGMENT_ENTRIES {
-            let split_key = segment
-                .keys()
-                .nth(segment.len() / 2)
-                .cloned()
-                .expect("oversized segmented map page is non-empty");
-            let right = segment.split_off(&split_key);
-            segments.insert(index + 1, Arc::new(right));
-        }
+        Self::split_oversized_segment(segments, index);
         previous
+    }
+
+    fn split_oversized_segment(segments: &mut Vec<Arc<BTreeMap<K, V>>>, index: usize) {
+        let segment = Arc::make_mut(&mut segments[index]);
+        let segment_bytes = cow_map_segment_bytes(segment);
+        if segment.len() <= 1
+            || (segment.len() <= COW_MAP_MAX_SEGMENT_ENTRIES
+                && segment_bytes <= COW_MAP_TARGET_SEGMENT_BYTES)
+        {
+            return;
+        }
+        let split_after_bytes = segment_bytes / 2;
+        let mut bytes = 0usize;
+        let split_key = segment
+            .iter()
+            .enumerate()
+            .find_map(|(entry_index, (key, value))| {
+                if entry_index > 0
+                    && (bytes >= split_after_bytes
+                        || entry_index >= COW_MAP_MAX_SEGMENT_ENTRIES / 2)
+                {
+                    return Some(key.clone());
+                }
+                bytes = bytes.saturating_add(cow_map_entry_bytes(key, value));
+                None
+            })
+            .unwrap_or_else(|| {
+                segment
+                    .keys()
+                    .nth(segment.len() / 2)
+                    .cloned()
+                    .expect("oversized segmented map page is non-empty")
+            });
+        let right = segment.split_off(&split_key);
+        segments.insert(index + 1, Arc::new(right));
+    }
+
+    fn rebalance_key(&mut self, key: &K) {
+        let Some(index) = self.segment_index(key) else {
+            return;
+        };
+        let segments = Arc::make_mut(&mut self.segments);
+        Self::split_oversized_segment(segments, index);
     }
 
     fn get_mut(&mut self, key: &K) -> Option<&mut V> {
@@ -707,6 +1044,7 @@ pub struct GraphStore {
     nodes: CowSegmentedMap<NodeId, NodeRecord>,
     relationships: CowSegmentedMap<RelId, RelRecord>,
     basic_statistics: BasicGraphStatistics,
+    checkpoint_statistics: GraphStatistics,
     outgoing: CowSegmentedMap<(NodeId, RelTypeId), AdjacencyPostingList>,
     incoming: CowSegmentedMap<(NodeId, RelTypeId), AdjacencyPostingList>,
     property_index: NodePropertyIndex,
@@ -722,7 +1060,224 @@ pub struct GraphStore {
     max_search_projection_change_log_entries: Option<usize>,
     source_scan_manifest: CowSegment<Option<ScanSegmentManifest>>,
     storage_recovery_report: StorageRecoveryReport,
+    canonical_base: Option<CanonicalSegmentReader>,
+    canonical_adjacency: Option<CanonicalAdjacencyReader>,
+    persistent_property_projection: Option<PersistentPropertyProjectionReader>,
+    canonical_base_out_of_core: bool,
+    node_tombstones: CowSegment<BTreeSet<NodeId>>,
+    relationship_tombstones: CowSegment<BTreeSet<RelId>>,
+    residency_mode: StorageResidencyMode,
+    auto_materialize_checkpoint_bytes: u64,
+    max_out_of_core_delta_bytes: Option<u64>,
     durable: Option<DurableStore>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphScanControl {
+    Continue,
+    Stop,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageResidencyReport {
+    pub out_of_core: bool,
+    pub canonical_generation: Option<u64>,
+    pub canonical_artifact_bytes: u64,
+    pub canonical_node_count: u64,
+    pub canonical_relationship_count: u64,
+    pub delta_node_count: usize,
+    pub delta_relationship_count: usize,
+    pub node_tombstone_count: usize,
+    pub relationship_tombstone_count: usize,
+    pub estimated_delta_resident_bytes: u64,
+    pub max_out_of_core_delta_bytes: Option<u64>,
+    pub delta_within_budget: bool,
+    pub checkpoint_statistics_commit_epoch: u64,
+    pub checkpoint_statistics_complete: bool,
+    pub checkpoint_statistics_stale: bool,
+    pub segment_cache_capacity_bytes: u64,
+    pub segment_cache_resident_bytes: u64,
+    pub segment_cache_pinned_bytes: u64,
+    pub segment_cache_hit_count: u64,
+    pub segment_cache_miss_count: u64,
+    pub segment_cache_eviction_count: u64,
+    pub segment_cache_admission_rejection_count: u64,
+    pub segment_cache_digest_mismatch_count: u64,
+}
+
+pub struct GraphNodeIterator {
+    base: Option<std::iter::Peekable<CanonicalNodeIterator>>,
+    delta: std::iter::Peekable<std::vec::IntoIter<NodeRecord>>,
+    tombstones: CowSegment<BTreeSet<NodeId>>,
+}
+
+impl Iterator for GraphNodeIterator {
+    type Item = Result<NodeRecord>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let base_id = match self.base.as_mut().and_then(|base| base.peek()) {
+                Some(Ok(node)) => Some(node.id),
+                Some(Err(_)) => {
+                    return self
+                        .base
+                        .as_mut()
+                        .and_then(Iterator::next)
+                        .map(|record| record.map_err(canonical_segment_error));
+                }
+                None => None,
+            };
+            let delta_id = self.delta.peek().map(|node| node.id);
+            match (base_id, delta_id) {
+                (None, None) => return None,
+                (Some(_), None) => {
+                    let record = self
+                        .base
+                        .as_mut()
+                        .and_then(Iterator::next)
+                        .expect("peeked base node exists")
+                        .map_err(canonical_segment_error);
+                    match record {
+                        Ok(node) if self.tombstones.contains(&node.id) => continue,
+                        other => return Some(other),
+                    }
+                }
+                (None, Some(_)) => {
+                    let node = self.delta.next().expect("peeked delta node exists");
+                    if self.tombstones.contains(&node.id) {
+                        continue;
+                    }
+                    return Some(Ok(node));
+                }
+                (Some(base_id), Some(delta_id)) if base_id < delta_id => {
+                    let record = self
+                        .base
+                        .as_mut()
+                        .and_then(Iterator::next)
+                        .expect("peeked base node exists")
+                        .map_err(canonical_segment_error);
+                    match record {
+                        Ok(node) if self.tombstones.contains(&node.id) => continue,
+                        other => return Some(other),
+                    }
+                }
+                (Some(base_id), Some(delta_id)) if base_id == delta_id => {
+                    if let Err(error) = self
+                        .base
+                        .as_mut()
+                        .and_then(Iterator::next)
+                        .expect("peeked base node exists")
+                        .map_err(canonical_segment_error)
+                    {
+                        return Some(Err(error));
+                    }
+                    let node = self.delta.next().expect("matching delta node exists");
+                    if self.tombstones.contains(&node.id) {
+                        continue;
+                    }
+                    return Some(Ok(node));
+                }
+                (Some(_), Some(_)) => {
+                    let node = self.delta.next().expect("peeked delta node exists");
+                    if self.tombstones.contains(&node.id) {
+                        continue;
+                    }
+                    return Some(Ok(node));
+                }
+            }
+        }
+    }
+}
+
+pub struct GraphRelationshipIterator {
+    base: Option<std::iter::Peekable<CanonicalRelationshipIterator>>,
+    delta: std::iter::Peekable<std::vec::IntoIter<RelRecord>>,
+    tombstones: CowSegment<BTreeSet<RelId>>,
+}
+
+impl Iterator for GraphRelationshipIterator {
+    type Item = Result<RelRecord>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let base_id = match self.base.as_mut().and_then(|base| base.peek()) {
+                Some(Ok(relationship)) => Some(relationship.id),
+                Some(Err(_)) => {
+                    return self
+                        .base
+                        .as_mut()
+                        .and_then(Iterator::next)
+                        .map(|record| record.map_err(canonical_segment_error));
+                }
+                None => None,
+            };
+            let delta_id = self.delta.peek().map(|relationship| relationship.id);
+            match (base_id, delta_id) {
+                (None, None) => return None,
+                (Some(_), None) => {
+                    let record = self
+                        .base
+                        .as_mut()
+                        .and_then(Iterator::next)
+                        .expect("peeked base relationship exists")
+                        .map_err(canonical_segment_error);
+                    match record {
+                        Ok(relationship) if self.tombstones.contains(&relationship.id) => continue,
+                        other => return Some(other),
+                    }
+                }
+                (None, Some(_)) => {
+                    let relationship = self.delta.next().expect("peeked delta relationship exists");
+                    if self.tombstones.contains(&relationship.id) {
+                        continue;
+                    }
+                    return Some(Ok(relationship));
+                }
+                (Some(base_id), Some(delta_id)) if base_id < delta_id => {
+                    let record = self
+                        .base
+                        .as_mut()
+                        .and_then(Iterator::next)
+                        .expect("peeked base relationship exists")
+                        .map_err(canonical_segment_error);
+                    match record {
+                        Ok(relationship) if self.tombstones.contains(&relationship.id) => continue,
+                        other => return Some(other),
+                    }
+                }
+                (Some(base_id), Some(delta_id)) if base_id == delta_id => {
+                    if let Err(error) = self
+                        .base
+                        .as_mut()
+                        .and_then(Iterator::next)
+                        .expect("peeked base relationship exists")
+                        .map_err(canonical_segment_error)
+                    {
+                        return Some(Err(error));
+                    }
+                    let relationship = self
+                        .delta
+                        .next()
+                        .expect("matching delta relationship exists");
+                    if self.tombstones.contains(&relationship.id) {
+                        continue;
+                    }
+                    return Some(Ok(relationship));
+                }
+                (Some(_), Some(_)) => {
+                    let relationship = self.delta.next().expect("peeked delta relationship exists");
+                    if self.tombstones.contains(&relationship.id) {
+                        continue;
+                    }
+                    return Some(Ok(relationship));
+                }
+            }
+        }
+    }
+}
+
+fn canonical_segment_error(error: CanonicalSegmentError) -> SkeinError {
+    SkeinError::Storage(error.to_string())
 }
 
 /// Result of reading Source scan sidecar candidates. The rows have passed
@@ -809,7 +1364,7 @@ impl GraphStore {
             DurableOpenMode::CreateIfMissing,
             WalReplayConfig {
                 recovery_mode,
-                max_entries: None,
+                ..WalReplayConfig::default()
             },
         )
     }
@@ -842,7 +1397,7 @@ impl GraphStore {
             DurableOpenMode::ExistingOnly,
             WalReplayConfig {
                 recovery_mode,
-                max_entries: None,
+                ..WalReplayConfig::default()
             },
         )
     }
@@ -870,10 +1425,16 @@ impl GraphStore {
         replay_config: WalReplayConfig,
     ) -> Result<Self> {
         let durable = match mode {
-            DurableOpenMode::CreateIfMissing => DurableStore::open(path.as_ref(), durability)?,
-            DurableOpenMode::ExistingOnly => {
-                DurableStore::open_existing_only(path.as_ref(), durability)?
-            }
+            DurableOpenMode::CreateIfMissing => DurableStore::open(
+                path.as_ref(),
+                durability,
+                replay_config.segment_cache_capacity_bytes,
+            )?,
+            DurableOpenMode::ExistingOnly => DurableStore::open_existing_only(
+                path.as_ref(),
+                durability,
+                replay_config.segment_cache_capacity_bytes,
+            )?,
         };
         let mut store = Self {
             next_node_id: 0,
@@ -882,6 +1443,7 @@ impl GraphStore {
             nodes: CowSegmentedMap::default(),
             relationships: CowSegmentedMap::default(),
             basic_statistics: BasicGraphStatistics::default(),
+            checkpoint_statistics: GraphStatistics::default(),
             outgoing: CowSegmentedMap::default(),
             incoming: CowSegmentedMap::default(),
             property_index: CowSegmentedMap::default(),
@@ -897,9 +1459,18 @@ impl GraphStore {
             max_search_projection_change_log_entries: None,
             source_scan_manifest: CowSegment::default(),
             storage_recovery_report: StorageRecoveryReport::default(),
+            canonical_base: None,
+            canonical_adjacency: None,
+            persistent_property_projection: None,
+            canonical_base_out_of_core: false,
+            node_tombstones: CowSegment::default(),
+            relationship_tombstones: CowSegment::default(),
+            residency_mode: replay_config.residency_mode,
+            auto_materialize_checkpoint_bytes: replay_config.auto_materialize_checkpoint_bytes,
+            max_out_of_core_delta_bytes: replay_config.max_out_of_core_delta_bytes,
             durable: Some(durable),
         };
-        store.load_checkpoint(catalog)?;
+        store.load_checkpoint(catalog, replay_config)?;
         store.storage_recovery_report = store.replay_wal(catalog, replay_config)?;
         store.validate_relationship_endpoints()?;
         store.refresh_basic_statistics_epoch();
@@ -1802,7 +2373,7 @@ impl GraphStore {
         post_merge_assignments: &[NodeSetAssignment],
     ) -> Result<(NodeId, bool)> {
         let label_id = catalog.get_or_create_label(label);
-        if let Some(id) = self.find_node_by_label_and_properties(label_id, &match_properties) {
+        if let Some(id) = self.find_node_by_label_and_properties(label_id, &match_properties)? {
             if !on_match_assignments.is_empty() || !post_merge_assignments.is_empty() {
                 let mut assignments =
                     Vec::with_capacity(on_match_assignments.len() + post_merge_assignments.len());
@@ -1819,7 +2390,7 @@ impl GraphStore {
                     &ops,
                 );
                 for op in ops {
-                    self.apply_wal_op(catalog, op);
+                    self.apply_wal_op(catalog, op)?;
                 }
                 self.commit_epoch += 1;
             }
@@ -1855,13 +2426,13 @@ impl GraphStore {
         rel_type: &str,
         properties: BTreeMap<String, Value>,
     ) -> Result<RelId> {
-        if !self.nodes.contains_key(&source) {
+        if self.node_owned(source)?.is_none() {
             return Err(SkeinError::Storage(format!(
                 "source node {} does not exist",
                 source.0
             )));
         }
-        if !self.nodes.contains_key(&target) {
+        if self.node_owned(target)?.is_none() {
             return Err(SkeinError::Storage(format!(
                 "target node {} does not exist",
                 target.0
@@ -1869,6 +2440,14 @@ impl GraphStore {
         }
         let rel_type_id = catalog.get_or_create_rel_type(rel_type);
         let id = RelId(self.next_rel_id);
+        let ops = [WalOp::CreateRelationship {
+            id,
+            source,
+            target,
+            rel_type: rel_type.to_string(),
+            properties: properties.clone(),
+        }];
+        self.validate_constraints_for_ops(catalog, &ops)?;
         if let Some(durable) = &mut self.durable {
             durable.append_create_relationship(id, source, target, rel_type, &properties)?;
         }
@@ -1883,7 +2462,7 @@ impl GraphStore {
         nodes: Vec<GraphSnapshotNodeImport>,
         relationships: Vec<GraphSnapshotRelationshipImport>,
     ) -> Result<()> {
-        if !self.nodes.is_empty() || !self.relationships.is_empty() {
+        if self.basic_statistics.node_count != 0 || self.basic_statistics.relationship_count != 0 {
             return Err(SkeinError::Storage(
                 "graph lightning initial import requires an empty target graph".to_string(),
             ));
@@ -1972,7 +2551,7 @@ impl GraphStore {
             &ops,
         );
         for op in ops {
-            self.apply_wal_op(catalog, op);
+            self.apply_wal_op(catalog, op)?;
         }
         self.commit_epoch += 1;
         Ok(())
@@ -2075,7 +2654,7 @@ impl GraphStore {
             &ops,
         );
         for op in ops {
-            self.apply_wal_op(catalog, op);
+            self.apply_wal_op(catalog, op)?;
         }
         self.commit_epoch += 1;
         Ok(())
@@ -2102,12 +2681,8 @@ impl GraphStore {
             };
             Some(label_id)
         };
-        let sources = self
-            .matching_node_ids(source_label_id, request.source_filter.as_ref())
-            .collect::<Vec<_>>();
-        let targets = self
-            .matching_node_ids(target_label_id, request.target_filter.as_ref())
-            .collect::<Vec<_>>();
+        let sources = self.matching_node_ids(source_label_id, request.source_filter.as_ref())?;
+        let targets = self.matching_node_ids(target_label_id, request.target_filter.as_ref())?;
         if sources.is_empty() || targets.is_empty() {
             return Ok(Vec::new());
         }
@@ -2136,7 +2711,7 @@ impl GraphStore {
         }
         self.record_search_projection_graph_changes_for_ops(catalog, self.commit_epoch + 1, &ops);
         for op in ops {
-            self.apply_wal_op(catalog, op);
+            self.apply_wal_op(catalog, op)?;
         }
         self.commit_epoch += 1;
         Ok(rows)
@@ -2163,12 +2738,8 @@ impl GraphStore {
             };
             Some(label_id)
         };
-        let sources = self
-            .matching_node_ids(source_label_id, request.source_filter.as_ref())
-            .collect::<Vec<_>>();
-        let targets = self
-            .matching_node_ids(target_label_id, request.target_filter.as_ref())
-            .collect::<Vec<_>>();
+        let sources = self.matching_node_ids(source_label_id, request.source_filter.as_ref())?;
+        let targets = self.matching_node_ids(target_label_id, request.target_filter.as_ref())?;
         if sources.is_empty() || targets.is_empty() {
             return Ok(Vec::new());
         }
@@ -2184,7 +2755,7 @@ impl GraphStore {
                     *target,
                     rel_type_id,
                     &request.rel_match_properties,
-                ) {
+                )? {
                     rows.push((source, rel, *target, false));
                     continue;
                 }
@@ -2215,7 +2786,7 @@ impl GraphStore {
                 &ops,
             );
             for op in ops {
-                self.apply_wal_op(catalog, op);
+                self.apply_wal_op(catalog, op)?;
             }
             self.commit_epoch += 1;
         }
@@ -2296,7 +2867,7 @@ impl GraphStore {
                 old_relationship.target,
                 new_rel_type_id,
                 &request.new_rel_match_properties,
-            ) {
+            )? {
                 rows.push((old_relationship.source, rel, old_relationship.target, false));
                 continue;
             }
@@ -2336,7 +2907,7 @@ impl GraphStore {
                 &ops,
             );
             for op in ops {
-                self.apply_wal_op(catalog, op);
+                self.apply_wal_op(catalog, op)?;
             }
             self.commit_epoch += 1;
         }
@@ -2402,12 +2973,10 @@ impl GraphStore {
         if source_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let target_ids = self
-            .matching_node_ids(
-                Some(new_target_label_id),
-                request.new_target_filter.as_ref(),
-            )
-            .collect::<Vec<_>>();
+        let target_ids = self.matching_node_ids(
+            Some(new_target_label_id),
+            request.new_target_filter.as_ref(),
+        )?;
         let mut next_rel_id = self.next_rel_id;
         let mut rows = Vec::new();
         let mut ops = Vec::new();
@@ -2418,7 +2987,7 @@ impl GraphStore {
                     *target,
                     new_rel_type_id,
                     &request.new_rel_match_properties,
-                ) {
+                )? {
                     rows.push((source, rel, *target, false));
                     continue;
                 }
@@ -2447,7 +3016,7 @@ impl GraphStore {
                 &ops,
             );
             for op in ops {
-                self.apply_wal_op(catalog, op);
+                self.apply_wal_op(catalog, op)?;
             }
             self.commit_epoch += 1;
         }
@@ -2514,9 +3083,8 @@ impl GraphStore {
         if target_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let source_ids = self
-            .matching_node_ids(new_source_label_id, request.new_source_filter.as_ref())
-            .collect::<Vec<_>>();
+        let source_ids =
+            self.matching_node_ids(new_source_label_id, request.new_source_filter.as_ref())?;
         let mut next_rel_id = self.next_rel_id;
         let mut rows = Vec::new();
         let mut ops = Vec::new();
@@ -2527,7 +3095,7 @@ impl GraphStore {
                     *target,
                     new_rel_type_id,
                     &request.new_rel_match_properties,
-                ) {
+                )? {
                     rows.push((source, rel, *target, false));
                     continue;
                 }
@@ -2556,7 +3124,7 @@ impl GraphStore {
                 &ops,
             );
             for op in ops {
-                self.apply_wal_op(catalog, op);
+                self.apply_wal_op(catalog, op)?;
             }
             self.commit_epoch += 1;
         }
@@ -2579,7 +3147,7 @@ impl GraphStore {
             };
             Some(label_id)
         };
-        let ids = self.matching_node_ids(label_id, filter).collect::<Vec<_>>();
+        let ids = self.matching_node_ids(label_id, filter)?;
         if ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -2597,7 +3165,7 @@ impl GraphStore {
         }
         self.record_search_projection_graph_changes_for_ops(catalog, self.commit_epoch + 1, &ops);
         for op in ops {
-            self.apply_wal_op(catalog, op);
+            self.apply_wal_op(catalog, op)?;
         }
         self.commit_epoch += 1;
         Ok(ids)
@@ -2619,14 +3187,14 @@ impl GraphStore {
             };
             Some(label_id)
         };
-        let ids = self.matching_node_ids(label_id, filter).collect::<Vec<_>>();
+        let ids = self.matching_node_ids(label_id, filter)?;
         if ids.is_empty() {
             return Ok(Vec::new());
         }
         let ops = ids
             .iter()
             .map(|id| {
-                let node = self.nodes.get(id).ok_or_else(|| {
+                let node = self.node_owned(*id)?.ok_or_else(|| {
                     SkeinError::Storage(format!("node {} disappeared during property update", id.0))
                 })?;
                 let current = match node.properties.get(property) {
@@ -2682,7 +3250,7 @@ impl GraphStore {
             };
             Some(label_id)
         };
-        let ids = self.matching_node_ids(label_id, filter).collect::<Vec<_>>();
+        let ids = self.matching_node_ids(label_id, filter)?;
         if ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -2693,7 +3261,7 @@ impl GraphStore {
         }
         self.record_search_projection_graph_changes_for_ops(catalog, self.commit_epoch + 1, &ops);
         for op in ops {
-            self.apply_wal_op(catalog, op);
+            self.apply_wal_op(catalog, op)?;
         }
         self.commit_epoch += 1;
         Ok(ids)
@@ -2715,7 +3283,7 @@ impl GraphStore {
         }
         self.record_search_projection_graph_changes_for_ops(catalog, self.commit_epoch + 1, &ops);
         for op in ops {
-            self.apply_wal_op(catalog, op);
+            self.apply_wal_op(catalog, op)?;
         }
         self.commit_epoch += 1;
         Ok(ids.to_vec())
@@ -2728,7 +3296,7 @@ impl GraphStore {
     ) -> Result<Vec<WalOp>> {
         let mut ops = Vec::with_capacity(ids.len().saturating_mul(assignments.len()));
         for id in ids {
-            let node = self.nodes.get(id).ok_or_else(|| {
+            let node = self.node_owned(*id)?.ok_or_else(|| {
                 SkeinError::Storage(format!("node {} disappeared during property update", id.0))
             })?;
             for assignment in assignments {
@@ -2758,17 +3326,18 @@ impl GraphStore {
             };
             Some(label_id)
         };
-        let ids = self.matching_node_ids(label_id, filter).collect::<Vec<_>>();
+        let ids = self.matching_node_ids(label_id, filter)?;
         if ids.is_empty() {
             return Ok(Vec::new());
         }
         let ops = self.delete_node_ops(&ids, detach)?;
+        self.ensure_out_of_core_delta_admission(&ops)?;
         if let Some(durable) = &mut self.durable {
             durable.append_batch(ops.clone())?;
         }
         self.record_search_projection_graph_changes_for_ops(catalog, self.commit_epoch + 1, &ops);
         for op in ops {
-            self.apply_wal_op(catalog, op);
+            self.apply_wal_op(catalog, op)?;
         }
         self.commit_epoch += 1;
         Ok(ids)
@@ -2784,12 +3353,13 @@ impl GraphStore {
             return Ok(Vec::new());
         }
         let ops = self.delete_node_ops(ids, detach)?;
+        self.ensure_out_of_core_delta_admission(&ops)?;
         if let Some(durable) = &mut self.durable {
             durable.append_batch(ops.clone())?;
         }
         self.record_search_projection_graph_changes_for_ops(catalog, self.commit_epoch + 1, &ops);
         for op in ops {
-            self.apply_wal_op(catalog, op);
+            self.apply_wal_op(catalog, op)?;
         }
         self.commit_epoch += 1;
         Ok(ids.to_vec())
@@ -2810,47 +3380,44 @@ impl GraphStore {
             return Ok(Vec::new());
         };
         let source_ids = self
-            .matching_node_ids(Some(source_label_id), request.filter.as_ref())
+            .matching_node_ids(Some(source_label_id), request.filter.as_ref())?
+            .into_iter()
             .collect::<BTreeSet<_>>();
         if source_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let target_ids = request.target_filter.as_ref().map(|filter| {
-            self.matching_node_ids(Some(target_label_id), Some(filter))
-                .collect::<BTreeSet<_>>()
-        });
+        let target_ids = request
+            .target_filter
+            .as_ref()
+            .map(|filter| {
+                self.matching_node_ids(Some(target_label_id), Some(filter))
+                    .map(|ids| ids.into_iter().collect::<BTreeSet<_>>())
+            })
+            .transpose()?;
         if target_ids.as_ref().is_some_and(BTreeSet::is_empty) {
             return Ok(Vec::new());
         }
-        let ids = self
-            .relationships
-            .values()
-            .filter(|relationship| {
-                relationship.rel_type == rel_type_id && source_ids.contains(&relationship.source)
-            })
-            .filter(|relationship| {
-                request
-                    .rel_filter
-                    .as_ref()
-                    .map(|filter| {
-                        property_filter_matches(filter, relationship.id.0, &relationship.properties)
-                    })
-                    .unwrap_or(true)
-            })
-            .filter(|relationship| {
-                self.nodes
-                    .get(&relationship.target)
-                    .map(|target| {
-                        target.labels.contains(&target_label_id)
-                            && target_ids
-                                .as_ref()
-                                .map(|ids| ids.contains(&relationship.target))
-                                .unwrap_or(true)
-                    })
-                    .unwrap_or(false)
-            })
-            .map(|relationship| relationship.id)
-            .collect::<Vec<_>>();
+        let mut ids = Vec::new();
+        for relationship in self.relationship_records_owned() {
+            let relationship = relationship?;
+            if relationship.rel_type != rel_type_id
+                || !source_ids.contains(&relationship.source)
+                || request.rel_filter.as_ref().is_some_and(|filter| {
+                    !property_filter_matches(filter, relationship.id.0, &relationship.properties)
+                })
+            {
+                continue;
+            }
+            let target_matches = self.node_owned(relationship.target)?.is_some_and(|target| {
+                target.labels.contains(&target_label_id)
+                    && target_ids
+                        .as_ref()
+                        .is_none_or(|ids| ids.contains(&relationship.target))
+            });
+            if target_matches {
+                ids.push(relationship.id);
+            }
+        }
         if ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -2859,12 +3426,13 @@ impl GraphStore {
             .copied()
             .map(|id| WalOp::DeleteRelationship { id })
             .collect::<Vec<_>>();
+        self.ensure_out_of_core_delta_admission(&ops)?;
         if let Some(durable) = &mut self.durable {
             durable.append_batch(ops.clone())?;
         }
         self.record_search_projection_graph_changes_for_ops(catalog, self.commit_epoch + 1, &ops);
         for op in ops {
-            self.apply_wal_op(catalog, op);
+            self.apply_wal_op(catalog, op)?;
         }
         self.commit_epoch += 1;
         Ok(ids)
@@ -2875,17 +3443,18 @@ impl GraphStore {
         catalog: &mut Catalog,
         request: RelationshipTargetNodeDelete,
     ) -> Result<Vec<NodeId>> {
-        let ids = self.relationship_target_node_ids(catalog, &request);
+        let ids = self.relationship_target_node_ids(catalog, &request)?;
         if ids.is_empty() {
             return Ok(Vec::new());
         }
         let ops = self.delete_node_ops(&ids, request.detach)?;
+        self.ensure_out_of_core_delta_admission(&ops)?;
         if let Some(durable) = &mut self.durable {
             durable.append_batch(ops.clone())?;
         }
         self.record_search_projection_graph_changes_for_ops(catalog, self.commit_epoch + 1, &ops);
         for op in ops {
-            self.apply_wal_op(catalog, op);
+            self.apply_wal_op(catalog, op)?;
         }
         self.commit_epoch += 1;
         Ok(ids)
@@ -2895,59 +3464,63 @@ impl GraphStore {
         &self,
         catalog: &Catalog,
         request: &RelationshipTargetNodeDelete,
-    ) -> Vec<NodeId> {
+    ) -> Result<Vec<NodeId>> {
         let Some(source_label_id) = optional_label_id(catalog, &request.source_label) else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         let Some(target_label_id) = optional_label_id(catalog, &request.target_label) else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         let Some(rel_type_id) = catalog.rel_type_id(&request.rel_type) else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         let source_ids = self
-            .matching_node_ids(Some(source_label_id), request.source_filter.as_ref())
+            .matching_node_ids(Some(source_label_id), request.source_filter.as_ref())?
+            .into_iter()
             .collect::<BTreeSet<_>>();
         if source_ids.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        let target_ids = request.target_filter.as_ref().map(|filter| {
-            self.matching_node_ids(Some(target_label_id), Some(filter))
-                .collect::<BTreeSet<_>>()
-        });
+        let target_ids = request
+            .target_filter
+            .as_ref()
+            .map(|filter| {
+                self.matching_node_ids(Some(target_label_id), Some(filter))
+                    .map(|ids| ids.into_iter().collect::<BTreeSet<_>>())
+            })
+            .transpose()?;
         if target_ids.as_ref().is_some_and(BTreeSet::is_empty) {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        self.relationships
-            .values()
-            .filter(|relationship| {
-                relationship.rel_type == rel_type_id && source_ids.contains(&relationship.source)
-            })
-            .filter(|relationship| {
-                request
-                    .rel_filter
+        let mut ids = BTreeSet::new();
+        let mut callback_error = None;
+        self.visit_relationships_owned(Some(rel_type_id), |relationship| {
+            if !source_ids.contains(&relationship.source)
+                || request.rel_filter.as_ref().is_some_and(|filter| {
+                    !property_filter_matches(filter, relationship.id.0, &relationship.properties)
+                })
+                || target_ids
                     .as_ref()
-                    .map(|filter| {
-                        property_filter_matches(filter, relationship.id.0, &relationship.properties)
-                    })
-                    .unwrap_or(true)
-            })
-            .filter(|relationship| {
-                self.nodes
-                    .get(&relationship.target)
-                    .map(|target| {
-                        target.labels.contains(&target_label_id)
-                            && target_ids
-                                .as_ref()
-                                .map(|ids| ids.contains(&relationship.target))
-                                .unwrap_or(true)
-                    })
-                    .unwrap_or(false)
-            })
-            .map(|relationship| relationship.target)
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect()
+                    .is_some_and(|ids| !ids.contains(&relationship.target))
+            {
+                return GraphScanControl::Continue;
+            }
+            match self.node_owned(relationship.target) {
+                Ok(Some(target)) if target.labels.contains(&target_label_id) => {
+                    ids.insert(relationship.target);
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    callback_error = Some(error);
+                    return GraphScanControl::Stop;
+                }
+            }
+            GraphScanControl::Continue
+        })?;
+        if let Some(error) = callback_error {
+            return Err(error);
+        }
+        Ok(ids.into_iter().collect())
     }
 
     fn relationship_target_node_ids_with_pending(
@@ -2956,72 +3529,69 @@ impl GraphStore {
         request: &RelationshipTargetNodeDelete,
         pending_nodes: &[PendingNode],
         pending_relationships: &[PendingRelationship],
-    ) -> Vec<NodeId> {
+    ) -> Result<Vec<NodeId>> {
         let Some(source_label_id) = optional_label_id(catalog, &request.source_label) else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         let Some(target_label_id) = optional_label_id(catalog, &request.target_label) else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         let Some(rel_type_id) = catalog.rel_type_id(&request.rel_type) else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         let source_ids = self
             .matching_node_ids_with_pending(
                 Some(source_label_id),
                 request.source_filter.as_ref(),
                 pending_nodes,
-            )
+            )?
             .into_iter()
             .collect::<BTreeSet<_>>();
         if source_ids.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        let target_ids = request.target_filter.as_ref().map(|filter| {
-            self.matching_node_ids_with_pending(Some(target_label_id), Some(filter), pending_nodes)
-                .into_iter()
-                .collect::<BTreeSet<_>>()
-        });
+        let target_ids = request
+            .target_filter
+            .as_ref()
+            .map(|filter| {
+                self.matching_node_ids_with_pending(
+                    Some(target_label_id),
+                    Some(filter),
+                    pending_nodes,
+                )
+                .map(|ids| ids.into_iter().collect::<BTreeSet<_>>())
+            })
+            .transpose()?;
         if target_ids.as_ref().is_some_and(BTreeSet::is_empty) {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        let mut ids = self.relationship_target_node_ids(catalog, request);
-        ids.extend(pending_relationships.iter().filter_map(
-            |(relationship_id, source, target, pending_rel_type_id, properties)| {
-                if *pending_rel_type_id != rel_type_id || !source_ids.contains(source) {
-                    return None;
-                }
-                if request
-                    .rel_filter
-                    .as_ref()
-                    .map(|filter| !property_filter_matches(filter, relationship_id.0, properties))
-                    .unwrap_or(false)
-                {
-                    return None;
-                }
-                if !node_matches_label_and_filter(
+        let mut ids = self.relationship_target_node_ids(catalog, request)?;
+        for (relationship_id, source, target, pending_rel_type_id, properties) in
+            pending_relationships
+        {
+            if *pending_rel_type_id != rel_type_id
+                || !source_ids.contains(source)
+                || request.rel_filter.as_ref().is_some_and(|filter| {
+                    !property_filter_matches(filter, relationship_id.0, properties)
+                })
+                || !node_matches_label_and_filter(
                     self,
                     pending_nodes,
                     *target,
                     target_label_id,
                     request.target_filter.as_ref(),
-                ) {
-                    return None;
-                }
-                if target_ids
-                    .as_ref()
-                    .map(|ids| !ids.contains(target))
-                    .unwrap_or(false)
-                {
-                    return None;
-                }
-                Some(*target)
-            },
-        ));
-        ids.into_iter()
+                )?
+                || target_ids.as_ref().is_some_and(|ids| !ids.contains(target))
+            {
+                continue;
+            }
+            ids.push(*target);
+        }
+        Ok(ids
+            .into_iter()
             .collect::<BTreeSet<_>>()
             .into_iter()
-            .collect()
+            .collect())
     }
 
     pub fn set_relationship_property(
@@ -3061,34 +3631,30 @@ impl GraphStore {
             return Ok(Vec::new());
         };
         let source_ids = self
-            .matching_node_ids(Some(source_label_id), update.filter.as_ref())
+            .matching_node_ids(Some(source_label_id), update.filter.as_ref())?
+            .into_iter()
             .collect::<BTreeSet<_>>();
         if source_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let ids = self
-            .relationships
-            .values()
-            .filter(|relationship| {
-                relationship.rel_type == rel_type_id && source_ids.contains(&relationship.source)
-            })
-            .filter(|relationship| {
-                update
-                    .rel_filter
-                    .as_ref()
-                    .map(|filter| {
-                        property_filter_matches(filter, relationship.id.0, &relationship.properties)
-                    })
-                    .unwrap_or(true)
-            })
-            .filter(|relationship| {
-                self.nodes
-                    .get(&relationship.target)
-                    .map(|target| target.labels.contains(&target_label_id))
-                    .unwrap_or(false)
-            })
-            .map(|relationship| relationship.id)
-            .collect::<Vec<_>>();
+        let mut ids = Vec::new();
+        for relationship in self.relationship_records_owned() {
+            let relationship = relationship?;
+            if relationship.rel_type != rel_type_id
+                || !source_ids.contains(&relationship.source)
+                || update.rel_filter.as_ref().is_some_and(|filter| {
+                    !property_filter_matches(filter, relationship.id.0, &relationship.properties)
+                })
+            {
+                continue;
+            }
+            if self
+                .node_owned(relationship.target)?
+                .is_some_and(|target| target.labels.contains(&target_label_id))
+            {
+                ids.push(relationship.id);
+            }
+        }
         if ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -3110,7 +3676,7 @@ impl GraphStore {
         }
         self.record_search_projection_graph_changes_for_ops(catalog, self.commit_epoch + 1, &ops);
         for op in ops {
-            self.apply_wal_op(catalog, op);
+            self.apply_wal_op(catalog, op)?;
         }
         self.commit_epoch += 1;
         Ok(ids)
@@ -3174,16 +3740,16 @@ impl GraphStore {
         let target_label_id = catalog.get_or_create_label(&request.target_label);
         let rel_type_id = catalog.get_or_create_rel_type(&request.rel_type);
         let source =
-            self.find_node_by_label_and_properties(source_label_id, &request.source_properties);
+            self.find_node_by_label_and_properties(source_label_id, &request.source_properties)?;
         let target =
-            self.find_node_by_label_and_properties(target_label_id, &request.target_properties);
+            self.find_node_by_label_and_properties(target_label_id, &request.target_properties)?;
         if let (Some(source), Some(target)) = (source, target)
             && let Some(relationship) = self.find_relationship_by_properties(
                 source,
                 target,
                 rel_type_id,
                 &request.rel_properties,
-            )
+            )?
         {
             return Ok((source, relationship, target, false));
         }
@@ -3197,14 +3763,14 @@ impl GraphStore {
             }
         });
         let relationship = RelId(self.next_rel_id);
-        let ops = self.merge_connected_node_ops(&request, source, target, relationship);
+        let ops = self.merge_connected_node_ops(&request, source, target, relationship)?;
         self.validate_constraints_for_ops(catalog, &ops)?;
         if let Some(durable) = &mut self.durable {
             durable.append_batch(ops.clone())?;
         }
         self.record_search_projection_graph_changes_for_ops(catalog, self.commit_epoch + 1, &ops);
         for op in ops {
-            self.apply_wal_op(catalog, op);
+            self.apply_wal_op(catalog, op)?;
         }
         self.commit_epoch += 1;
         Ok((source, relationship, target, true))
@@ -3633,7 +4199,7 @@ impl GraphStore {
                 } => {
                     let label_id = working_catalog.get_or_create_label(&label);
                     let current =
-                        self.find_node_by_label_and_properties(label_id, &match_properties);
+                        self.find_node_by_label_and_properties(label_id, &match_properties)?;
                     let pending = pending_nodes
                         .iter()
                         .find(|(_, pending_label, pending_properties)| {
@@ -3705,11 +4271,11 @@ impl GraphStore {
                     let current_source = self.find_node_by_label_and_properties(
                         source_label_id,
                         &request.source_properties,
-                    );
+                    )?;
                     let current_target = self.find_node_by_label_and_properties(
                         target_label_id,
                         &request.target_properties,
-                    );
+                    )?;
                     let pending_source = pending_nodes
                         .iter()
                         .find(|(_, pending_label, pending_properties)| {
@@ -3732,7 +4298,7 @@ impl GraphStore {
                             target,
                             rel_type_id,
                             &request.rel_properties,
-                        );
+                        )?;
                         let pending_relationship = pending_relationships
                             .iter()
                             .find(
@@ -3890,7 +4456,7 @@ impl GraphStore {
                             rel_filter,
                             assignments,
                         },
-                    );
+                    )?;
                 }
                 GraphMutation::SetRelationshipProperties {
                     source_label,
@@ -3917,7 +4483,7 @@ impl GraphStore {
                             rel_filter,
                             assignments,
                         },
-                    );
+                    )?;
                 }
                 GraphMutation::DeleteNode {
                     label,
@@ -3926,9 +4492,7 @@ impl GraphStore {
                 } => {
                     let label_id = optional_label_id(&working_catalog, &label);
                     if label.is_empty() || label_id.is_some() {
-                        let committed_ids = self
-                            .matching_node_ids(label_id, filter.as_ref())
-                            .collect::<Vec<_>>();
+                        let committed_ids = self.matching_node_ids(label_id, filter.as_ref())?;
                         let pending_ids = Self::pending_node_ids_matching(
                             label_id,
                             filter.as_ref(),
@@ -3985,22 +4549,25 @@ impl GraphStore {
                                 Some(source_label_id),
                                 filter.as_ref(),
                                 &pending_nodes,
-                            )
+                            )?
                             .into_iter()
                             .collect::<BTreeSet<_>>();
-                        let target_ids = target_filter.as_ref().map(|filter| {
-                            self.matching_node_ids_with_pending(
-                                Some(target_label_id),
-                                Some(filter),
-                                &pending_nodes,
-                            )
-                            .into_iter()
-                            .collect::<BTreeSet<_>>()
-                        });
+                        let target_ids = target_filter
+                            .as_ref()
+                            .map(|filter| {
+                                self.matching_node_ids_with_pending(
+                                    Some(target_label_id),
+                                    Some(filter),
+                                    &pending_nodes,
+                                )
+                                .map(|ids| ids.into_iter().collect::<BTreeSet<_>>())
+                            })
+                            .transpose()?;
                         if target_ids.as_ref().is_some_and(BTreeSet::is_empty) {
                             continue;
                         }
-                        for relationship in self.relationships.values() {
+                        for relationship in self.relationship_records_owned() {
+                            let relationship = relationship?;
                             if relationship.rel_type != rel_type_id
                                 || !source_ids.contains(&relationship.source)
                             {
@@ -4020,8 +4587,7 @@ impl GraphStore {
                                 continue;
                             }
                             let target_matches = self
-                                .nodes
-                                .get(&relationship.target)
+                                .node_owned(relationship.target)?
                                 .map(|target| {
                                     target.labels.contains(&target_label_id)
                                         && target_ids
@@ -4040,47 +4606,27 @@ impl GraphStore {
                                 )]));
                             }
                         }
-                        let pending_delete_ids = pending_relationships
-                            .iter()
-                            .filter_map(
-                                |(
-                                    relationship_id,
-                                    source,
-                                    target,
-                                    pending_rel_type_id,
-                                    properties,
-                                )| {
-                                    if *pending_rel_type_id != rel_type_id
-                                        || !source_ids.contains(source)
-                                    {
-                                        return None;
-                                    }
-                                    if rel_filter
-                                        .as_ref()
-                                        .map(|filter| {
-                                            !property_filter_matches(
-                                                filter,
-                                                relationship_id.0,
-                                                properties,
-                                            )
-                                        })
-                                        .unwrap_or(false)
-                                    {
-                                        return None;
-                                    }
-                                    if !node_matches_label_and_filter(
-                                        self,
-                                        &pending_nodes,
-                                        *target,
-                                        target_label_id,
-                                        target_filter.as_ref(),
-                                    ) {
-                                        return None;
-                                    }
-                                    Some(*relationship_id)
-                                },
-                            )
-                            .collect::<Vec<_>>();
+                        let mut pending_delete_ids = Vec::new();
+                        for (relationship_id, source, target, pending_rel_type_id, properties) in
+                            &pending_relationships
+                        {
+                            if *pending_rel_type_id != rel_type_id
+                                || !source_ids.contains(source)
+                                || rel_filter.as_ref().is_some_and(|filter| {
+                                    !property_filter_matches(filter, relationship_id.0, properties)
+                                })
+                                || !node_matches_label_and_filter(
+                                    self,
+                                    &pending_nodes,
+                                    *target,
+                                    target_label_id,
+                                    target_filter.as_ref(),
+                                )?
+                            {
+                                continue;
+                            }
+                            pending_delete_ids.push(*relationship_id);
+                        }
                         for relationship_id in pending_delete_ids {
                             remove_pending_relationship(
                                 &mut ops,
@@ -4100,12 +4646,13 @@ impl GraphStore {
                         &request,
                         &pending_nodes,
                         &pending_relationships,
-                    );
-                    let committed_ids = ids
-                        .iter()
-                        .copied()
-                        .filter(|id| self.nodes.contains_key(id))
-                        .collect::<Vec<_>>();
+                    )?;
+                    let mut committed_ids = Vec::new();
+                    for id in &ids {
+                        if self.node_owned(*id)?.is_some() {
+                            committed_ids.push(*id);
+                        }
+                    }
                     let pending_ids = ids
                         .iter()
                         .copied()
@@ -4157,12 +4704,12 @@ impl GraphStore {
                         source_label_id,
                         request.source_filter.as_ref(),
                         &pending_nodes,
-                    );
+                    )?;
                     let targets = self.matching_node_ids_with_pending(
                         target_label_id,
                         request.target_filter.as_ref(),
                         &pending_nodes,
-                    );
+                    )?;
                     for source in sources {
                         for target in &targets {
                             let relationship = RelId(next_rel_id);
@@ -4204,12 +4751,12 @@ impl GraphStore {
                         source_label_id,
                         request.source_filter.as_ref(),
                         &pending_nodes,
-                    );
+                    )?;
                     let targets = self.matching_node_ids_with_pending(
                         target_label_id,
                         request.target_filter.as_ref(),
                         &pending_nodes,
-                    );
+                    )?;
                     for source in sources {
                         for target in &targets {
                             let current = self.find_relationship_by_property_subset(
@@ -4217,7 +4764,7 @@ impl GraphStore {
                                 *target,
                                 rel_type_id,
                                 &request.rel_match_properties,
-                            );
+                            )?;
                             let pending = pending_relationships
                                 .iter()
                                 .find(
@@ -4310,7 +4857,7 @@ impl GraphStore {
                             target_filter: request.old_target_filter.as_ref(),
                             rel_properties: &request.old_rel_filter,
                         },
-                    )
+                    )?
                     .into_iter()
                     .map(|relationship| relationship.source)
                     .collect::<BTreeSet<_>>();
@@ -4319,7 +4866,7 @@ impl GraphStore {
                             Some(new_target_label_id),
                             request.new_target_filter.as_ref(),
                             &pending_nodes,
-                        )
+                        )?
                         .into_iter()
                         .collect::<Vec<_>>();
                     for source in source_ids {
@@ -4329,7 +4876,7 @@ impl GraphStore {
                                 *target,
                                 new_rel_type_id,
                                 &request.new_rel_match_properties,
-                            );
+                            )?;
                             let pending = pending_relationships
                                 .iter()
                                 .find(
@@ -4420,7 +4967,7 @@ impl GraphStore {
                             target_filter: request.old_target_filter.as_ref(),
                             rel_properties: &request.old_rel_filter,
                         },
-                    )
+                    )?
                     .into_iter()
                     .map(|relationship| relationship.target)
                     .collect::<BTreeSet<_>>();
@@ -4429,7 +4976,7 @@ impl GraphStore {
                             new_source_label_id,
                             request.new_source_filter.as_ref(),
                             &pending_nodes,
-                        )
+                        )?
                         .into_iter()
                         .collect::<Vec<_>>();
                     for source in source_ids {
@@ -4439,7 +4986,7 @@ impl GraphStore {
                                 *target,
                                 new_rel_type_id,
                                 &request.new_rel_match_properties,
-                            );
+                            )?;
                             let pending = pending_relationships
                                 .iter()
                                 .find(
@@ -4524,14 +5071,14 @@ impl GraphStore {
                             target_filter: request.target_filter.as_ref(),
                             rel_properties: &request.old_rel_filter,
                         },
-                    );
+                    )?;
                     for old_relationship in old_relationships {
                         let current = self.find_relationship_by_property_subset(
                             old_relationship.source,
                             old_relationship.target,
                             new_rel_type_id,
                             &request.new_rel_match_properties,
-                        );
+                        )?;
                         let pending = pending_relationships
                             .iter()
                             .find(
@@ -4664,7 +5211,7 @@ impl GraphStore {
         *catalog = working_catalog;
         self.record_search_projection_graph_changes_for_ops(catalog, self.commit_epoch + 1, &ops);
         for op in ops {
-            self.apply_wal_op(catalog, op);
+            self.apply_wal_op(catalog, op)?;
         }
         self.commit_epoch += 1;
         Ok(MutationSummary { rows })
@@ -4710,7 +5257,7 @@ impl GraphStore {
         filter: Option<&PropertyFilter>,
         assignments: &[NodeSetAssignment],
     ) -> Result<()> {
-        let committed_ids = self.matching_node_ids(label_id, filter).collect::<Vec<_>>();
+        let committed_ids = self.matching_node_ids(label_id, filter)?;
         ops.extend(self.node_set_property_ops(&committed_ids, assignments)?);
         let pending_ids = Self::pending_node_ids_matching(label_id, filter, pending_nodes);
         for id in &pending_ids {
@@ -4729,6 +5276,23 @@ impl GraphStore {
         self.checkpoint_with_reader_epoch(catalog, None)
     }
 
+    pub fn backup_to(
+        &mut self,
+        catalog: &Catalog,
+        destination: impl AsRef<Path>,
+    ) -> Result<StorageBackupReport> {
+        if self.durable.is_none() {
+            return Err(SkeinError::Storage(
+                "an in-memory database cannot create a durable backup".to_string(),
+            ));
+        }
+        self.checkpoint(catalog)?;
+        self.durable
+            .as_ref()
+            .expect("durable store must exist after checkpoint")
+            .backup_to(destination.as_ref())
+    }
+
     pub fn checkpoint_with_reader_epoch(
         &mut self,
         catalog: &Catalog,
@@ -4737,44 +5301,199 @@ impl GraphStore {
         if self.durable.is_none() {
             return Ok(());
         }
-        let projection_epoch = self.next_projection_epoch();
-        let projected_graph_artifacts =
-            encode_projected_graph_artifacts(catalog, self, projection_epoch);
-        let (_, artifacts) = decode_projected_graph_artifacts(&projected_graph_artifacts)?;
-        let mut source_scan_projection = source_scan::build(
-            self.commit_epoch,
-            catalog.label_id("Source"),
-            self.nodes.values(),
-        );
-        let durable = self.durable.as_mut().expect("durable store must exist");
-        durable.write_projected_graph_artifacts(&projected_graph_artifacts)?;
-        let source_scan_publication =
-            source_scan::write(durable.root_path(), &mut source_scan_projection)?;
-        durable.write_checkpoint(CheckpointImage {
-            catalog,
-            commit_epoch: self.commit_epoch,
-            next_node_id: self.next_node_id,
-            next_rel_id: self.next_rel_id,
-            search_projection_change_log_start_epoch: self.search_projection_change_log_start_epoch,
-            search_projection_graph_changes: &self.search_projection_graph_changes,
-            nodes: &self.nodes,
-            relationships: &self.relationships,
-            projected_graphs: &self.projected_graphs,
-            initial_import_source_fingerprint: self.initial_import_source_fingerprint.as_deref(),
-        })?;
-        durable.truncate_wal()?;
-        durable.publish_checkpoint_manifest(
-            self.commit_epoch,
-            oldest_reader_commit_epoch,
-            Some(source_scan_publication),
-        )?;
+        let estimated_record_bytes = self.estimated_logical_record_bytes();
+        let checkpoint_out_of_core = match self.residency_mode {
+            StorageResidencyMode::Materialized => false,
+            StorageResidencyMode::OutOfCore => true,
+            StorageResidencyMode::Auto => {
+                self.canonical_base_out_of_core
+                    || estimated_record_bytes > self.auto_materialize_checkpoint_bytes
+            }
+        };
+        let (projected_graph_artifacts, artifacts) = if checkpoint_out_of_core {
+            (None, BTreeMap::new())
+        } else {
+            let encoded =
+                encode_projected_graph_artifacts(catalog, self, self.next_projection_epoch());
+            let (_, artifacts) = decode_projected_graph_artifacts(&encoded)?;
+            (Some(encoded), artifacts)
+        };
+        let mut source_scan_projection = (!checkpoint_out_of_core).then(|| {
+            source_scan::build(
+                self.commit_epoch,
+                catalog.label_id("Source"),
+                self.nodes.values(),
+            )
+        });
+        let merged_nodes = self.canonical_base.as_ref().map(|_| {
+            self.node_records_owned().map(|record| {
+                record.map_err(|error| CanonicalSegmentError::Source(error.to_string()))
+            })
+        });
+        let property_projection_nodes = self.canonical_base.as_ref().map(|_| {
+            self.node_records_owned().map(|record| {
+                record.map_err(|error| {
+                    skein_storage::PersistentPropertyProjectionError::Source(error.to_string())
+                })
+            })
+        });
+        let property_projection_definitions = catalog
+            .property_indexes()
+            .filter_map(|index| {
+                let kind = match index.kind {
+                    IndexKind::Range => PersistentPropertyProjectionKind::Range,
+                    IndexKind::FullText => PersistentPropertyProjectionKind::FullText,
+                    IndexKind::Equality => return None,
+                };
+                Some(PersistentPropertyProjectionDefinition {
+                    label_id: index.label_id,
+                    property: index.property.clone(),
+                    kind,
+                    complete: false,
+                })
+            })
+            .collect::<Vec<_>>();
+        let merged_relationships = self.canonical_base.as_ref().map(|_| {
+            self.relationship_records_owned().map(|record| {
+                record.map_err(|error| CanonicalSegmentError::Source(error.to_string()))
+            })
+        });
+        let adjacency_relationships = self.canonical_base.as_ref().map(|_| {
+            self.relationship_records_owned().map(|record| {
+                record.map_err(|error| {
+                    skein_storage::CanonicalAdjacencyError::Source(error.to_string())
+                })
+            })
+        });
+        let commit_epoch = self.commit_epoch;
+        let checkpoint_statistics = if checkpoint_out_of_core && !self.canonical_base_out_of_core {
+            graph_statistics_from_basic(self.basic_statistics(), false)
+        } else {
+            self.statistics()
+        };
+        let (
+            canonical_base,
+            canonical_adjacency,
+            persistent_property_projection,
+            source_scan_manifest,
+        ) = {
+            let durable = self.durable.as_mut().expect("durable store must exist");
+            match projected_graph_artifacts.as_deref() {
+                Some(encoded) => durable.write_projected_graph_artifacts(encoded)?,
+                None => durable.remove_projected_graph_artifacts()?,
+            }
+            let source_scan_publication = source_scan_projection
+                .as_mut()
+                .map(|projection| source_scan::write(durable.root_path(), projection))
+                .transpose()?;
+            if source_scan_publication.is_none() {
+                remove_source_scan_artifacts(durable.root_path())?;
+            }
+            let generation = durable.checkpoint_epoch.saturating_add(1);
+            let (canonical_manifest_artifact, property_spill_manifest_artifact) =
+                match (merged_nodes, merged_relationships) {
+                    (Some(nodes), Some(relationships)) => {
+                        durable.write_canonical_segments(nodes, relationships, generation)?
+                    }
+                    (None, None) => durable.write_canonical_segments(
+                        self.nodes.values().map(|node| Ok(node.clone())),
+                        self.relationships
+                            .values()
+                            .map(|relationship| Ok(relationship.clone())),
+                        generation,
+                    )?,
+                    _ => unreachable!("canonical base iterators are created together"),
+                };
+            let canonical_adjacency_manifest_artifact = match adjacency_relationships {
+                Some(relationships) => {
+                    durable.write_canonical_adjacency(relationships, generation)?
+                }
+                None => durable.write_canonical_adjacency(
+                    self.relationships.values().cloned().map(Ok),
+                    generation,
+                )?,
+            };
+            let property_projection_manifest_artifact = match property_projection_nodes {
+                Some(nodes) => durable.write_persistent_property_projection(
+                    property_projection_definitions,
+                    nodes,
+                    generation,
+                    commit_epoch,
+                )?,
+                None => durable.write_persistent_property_projection(
+                    property_projection_definitions,
+                    self.nodes.values().cloned().map(Ok),
+                    generation,
+                    commit_epoch,
+                )?,
+            };
+            let checkpoint_artifact = durable.write_checkpoint(
+                CheckpointImage {
+                    catalog,
+                    commit_epoch,
+                    next_node_id: self.next_node_id,
+                    next_rel_id: self.next_rel_id,
+                    search_projection_change_log_start_epoch: self
+                        .search_projection_change_log_start_epoch,
+                    search_projection_graph_changes: &self.search_projection_graph_changes,
+                    statistics: &checkpoint_statistics,
+                    projected_graphs: &self.projected_graphs,
+                    initial_import_source_fingerprint: self
+                        .initial_import_source_fingerprint
+                        .as_deref(),
+                },
+                generation,
+            )?;
+            checkpoint_publish_failpoint(CheckpointPublishStage::CheckpointPersisted)?;
+            durable.prepare_wal_generation(generation)?;
+            checkpoint_publish_failpoint(CheckpointPublishStage::WalPrepared)?;
+            durable.publish_checkpoint_manifest(
+                generation,
+                checkpoint_artifact,
+                canonical_manifest_artifact,
+                canonical_adjacency_manifest_artifact,
+                property_spill_manifest_artifact,
+                property_projection_manifest_artifact,
+                commit_epoch,
+                oldest_reader_commit_epoch,
+                source_scan_publication,
+            )?;
+            let source_scan_manifest = source_scan_publication
+                .map(|publication| {
+                    source_scan::load(
+                        durable.root_path(),
+                        commit_epoch,
+                        publication.descriptor_checksum(),
+                    )
+                })
+                .transpose()?
+                .flatten();
+            (
+                durable.canonical_segments.clone(),
+                durable.canonical_adjacency.clone(),
+                durable.persistent_property_projection.clone(),
+                source_scan_manifest,
+            )
+        };
         self.projected_graph_artifacts = artifacts.into();
-        self.source_scan_manifest = source_scan::load(
-            durable.root_path(),
-            self.commit_epoch,
-            source_scan_publication.descriptor_checksum(),
-        )?
-        .into();
+        self.source_scan_manifest = source_scan_manifest.into();
+        self.checkpoint_statistics = checkpoint_statistics;
+        if checkpoint_out_of_core {
+            self.canonical_base = canonical_base;
+            self.canonical_adjacency = canonical_adjacency;
+            self.persistent_property_projection = persistent_property_projection;
+            self.canonical_base_out_of_core = true;
+            self.nodes = CowSegmentedMap::default();
+            self.relationships = CowSegmentedMap::default();
+            self.node_tombstones = CowSegment::default();
+            self.relationship_tombstones = CowSegment::default();
+            self.outgoing = CowSegmentedMap::default();
+            self.incoming = CowSegmentedMap::default();
+            self.property_index = CowSegmentedMap::default();
+            self.composite_property_index = CowSegmentedMap::default();
+            self.full_text_property_index = CowSegmentedMap::default();
+            self.relationship_property_index = CowSegmentedMap::default();
+        }
         Ok(())
     }
 
@@ -4792,6 +5511,10 @@ impl GraphStore {
 
     pub fn storage_version(&self) -> &'static str {
         STORAGE_VERSION
+    }
+
+    pub fn is_out_of_core(&self) -> bool {
+        self.canonical_base_out_of_core
     }
 
     pub fn commit_epoch(&self) -> u64 {
@@ -4951,8 +5674,438 @@ impl GraphStore {
         self.storage_recovery_report.clone()
     }
 
+    pub fn segment_cache_snapshot(&self) -> Option<SegmentCacheSnapshot> {
+        self.durable
+            .as_ref()
+            .map(|durable| durable.segment_cache.snapshot())
+    }
+
+    pub fn canonical_segment_manifest(&self) -> Option<&CanonicalSegmentManifest> {
+        self.durable
+            .as_ref()?
+            .canonical_segments
+            .as_ref()
+            .map(CanonicalSegmentReader::manifest)
+    }
+
+    pub fn canonical_adjacency_manifest(&self) -> Option<&CanonicalAdjacencyManifest> {
+        self.durable
+            .as_ref()?
+            .canonical_adjacency
+            .as_ref()
+            .map(CanonicalAdjacencyReader::manifest)
+    }
+
+    pub fn property_spill_manifest(&self) -> Option<&PropertySpillManifest> {
+        self.durable
+            .as_ref()?
+            .canonical_segments
+            .as_ref()?
+            .property_spill_manifest()
+    }
+
+    pub fn persistent_property_projection_manifest(
+        &self,
+    ) -> Option<&PersistentPropertyProjectionManifest> {
+        self.durable
+            .as_ref()?
+            .persistent_property_projection
+            .as_ref()
+            .map(PersistentPropertyProjectionReader::manifest)
+    }
+
+    pub fn canonical_node_from_segments(&self, id: NodeId) -> Result<Option<NodeRecord>> {
+        self.durable
+            .as_ref()
+            .and_then(|durable| durable.canonical_segments.as_ref())
+            .map(|reader| {
+                reader
+                    .get_node(id)
+                    .map_err(|error| SkeinError::Storage(error.to_string()))
+            })
+            .transpose()
+            .map(Option::flatten)
+    }
+
+    pub fn canonical_relationship_from_segments(&self, id: RelId) -> Result<Option<RelRecord>> {
+        self.durable
+            .as_ref()
+            .and_then(|durable| durable.canonical_segments.as_ref())
+            .map(|reader| {
+                reader
+                    .get_relationship(id)
+                    .map_err(|error| SkeinError::Storage(error.to_string()))
+            })
+            .transpose()
+            .map(Option::flatten)
+    }
+
+    pub fn storage_residency_report(&self) -> StorageResidencyReport {
+        let manifest = self
+            .canonical_base
+            .as_ref()
+            .map(CanonicalSegmentReader::manifest);
+        let estimated_delta_resident_bytes = self.estimated_delta_resident_bytes();
+        let cache = self.segment_cache_snapshot().unwrap_or_default();
+        StorageResidencyReport {
+            out_of_core: self.canonical_base_out_of_core,
+            canonical_generation: manifest.map(|manifest| manifest.generation.0),
+            canonical_artifact_bytes: manifest.map_or(0, |manifest| manifest.artifact_len),
+            canonical_node_count: manifest.map_or(0, |manifest| manifest.node_count),
+            canonical_relationship_count: manifest
+                .map_or(0, |manifest| manifest.relationship_count),
+            delta_node_count: self.nodes.len(),
+            delta_relationship_count: self.relationships.len(),
+            node_tombstone_count: self.node_tombstones.len(),
+            relationship_tombstone_count: self.relationship_tombstones.len(),
+            estimated_delta_resident_bytes,
+            max_out_of_core_delta_bytes: self.max_out_of_core_delta_bytes,
+            delta_within_budget: self
+                .max_out_of_core_delta_bytes
+                .is_none_or(|limit| estimated_delta_resident_bytes <= limit),
+            checkpoint_statistics_commit_epoch: self.checkpoint_statistics.computed_at_commit_epoch,
+            checkpoint_statistics_complete: self.checkpoint_statistics.advanced_statistics_complete,
+            checkpoint_statistics_stale: !self.checkpoint_statistics.advanced_statistics_complete
+                || self.checkpoint_statistics.computed_at_commit_epoch < self.commit_epoch,
+            segment_cache_capacity_bytes: cache.capacity_bytes,
+            segment_cache_resident_bytes: cache.resident_bytes,
+            segment_cache_pinned_bytes: cache.pinned_bytes,
+            segment_cache_hit_count: cache.hit_count,
+            segment_cache_miss_count: cache.miss_count,
+            segment_cache_eviction_count: cache.eviction_count,
+            segment_cache_admission_rejection_count: cache.admission_rejection_count,
+            segment_cache_digest_mismatch_count: cache.digest_mismatch_count,
+        }
+    }
+
+    fn estimated_delta_resident_bytes(&self) -> u64 {
+        let record_bytes = self
+            .nodes
+            .values()
+            .fold(0u64, |bytes, node| {
+                bytes.saturating_add(estimated_node_record_bytes(node))
+            })
+            .saturating_add(
+                self.relationships
+                    .values()
+                    .fold(0u64, |bytes, relationship| {
+                        bytes.saturating_add(estimated_relationship_record_bytes(relationship))
+                    }),
+            );
+        let tombstone_bytes = (self
+            .node_tombstones
+            .len()
+            .saturating_add(self.relationship_tombstones.len())
+            as u64)
+            .saturating_mul(32);
+        let adjacency_bytes =
+            self.outgoing
+                .values()
+                .chain(self.incoming.values())
+                .fold(0u64, |bytes, posting| {
+                    bytes
+                        .saturating_add(48)
+                        .saturating_add((posting.len() as u64).saturating_mul(24))
+                });
+        let node_index_bytes = self
+            .property_index
+            .values()
+            .chain(self.composite_property_index.values())
+            .chain(self.full_text_property_index.values())
+            .fold(0u64, |bytes, posting| {
+                bytes
+                    .saturating_add(64)
+                    .saturating_add((posting.len() as u64).saturating_mul(24))
+            });
+        let relationship_index_bytes =
+            self.relationship_property_index
+                .values()
+                .fold(0u64, |bytes, posting| {
+                    bytes
+                        .saturating_add(64)
+                        .saturating_add((posting.len() as u64).saturating_mul(24))
+                });
+        record_bytes
+            .saturating_add(tombstone_bytes)
+            .saturating_add(adjacency_bytes)
+            .saturating_add(node_index_bytes)
+            .saturating_add(relationship_index_bytes)
+    }
+
+    fn estimated_logical_record_bytes(&self) -> u64 {
+        let base_bytes = self
+            .canonical_base
+            .as_ref()
+            .map_or(0, |reader| reader.manifest().artifact_len);
+        self.nodes
+            .values()
+            .fold(base_bytes, |bytes, node| {
+                bytes.saturating_add(estimated_node_record_bytes(node))
+            })
+            .saturating_add(self.relationships.values().fold(0, |bytes, relationship| {
+                bytes.saturating_add(estimated_relationship_record_bytes(relationship))
+            }))
+    }
+
+    pub fn node_records_owned(&self) -> GraphNodeIterator {
+        GraphNodeIterator {
+            base: self
+                .canonical_base
+                .as_ref()
+                .map(CanonicalSegmentReader::node_records)
+                .map(Iterator::peekable),
+            delta: self
+                .nodes
+                .values()
+                .cloned()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .peekable(),
+            tombstones: self.node_tombstones.clone(),
+        }
+    }
+
+    pub fn relationship_records_owned(&self) -> GraphRelationshipIterator {
+        GraphRelationshipIterator {
+            base: self
+                .canonical_base
+                .as_ref()
+                .map(CanonicalSegmentReader::relationship_records)
+                .map(Iterator::peekable),
+            delta: self
+                .relationships
+                .values()
+                .cloned()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .peekable(),
+            tombstones: self.relationship_tombstones.clone(),
+        }
+    }
+
+    pub fn node_owned(&self, id: NodeId) -> Result<Option<NodeRecord>> {
+        if self.node_tombstones.contains(&id) {
+            return Ok(None);
+        }
+        if let Some(node) = self.nodes.get(&id) {
+            return Ok(Some(node.clone()));
+        }
+        self.canonical_base
+            .as_ref()
+            .map(|reader| {
+                reader
+                    .get_node(id)
+                    .map_err(|error| SkeinError::Storage(error.to_string()))
+            })
+            .transpose()
+            .map(Option::flatten)
+    }
+
+    pub fn relationship_owned(&self, id: RelId) -> Result<Option<RelRecord>> {
+        if self.relationship_tombstones.contains(&id) {
+            return Ok(None);
+        }
+        if let Some(relationship) = self.relationships.get(&id) {
+            return Ok(Some(relationship.clone()));
+        }
+        self.canonical_base
+            .as_ref()
+            .map(|reader| {
+                reader
+                    .get_relationship(id)
+                    .map_err(|error| SkeinError::Storage(error.to_string()))
+            })
+            .transpose()
+            .map(Option::flatten)
+    }
+
+    pub fn visit_nodes_owned(
+        &self,
+        label_id: Option<LabelId>,
+        mut consumer: impl FnMut(NodeRecord) -> GraphScanControl,
+    ) -> Result<GraphScanControl> {
+        let Some(reader) = &self.canonical_base else {
+            for node in self.nodes.values() {
+                if self.node_matches_label(node, label_id)
+                    && consumer(node.clone()) == GraphScanControl::Stop
+                {
+                    return Ok(GraphScanControl::Stop);
+                }
+            }
+            return Ok(GraphScanControl::Continue);
+        };
+
+        let mut delta = self.nodes.iter().peekable();
+        let mut graph_control = GraphScanControl::Continue;
+        let (_, canonical_control) = reader
+            .scan_nodes_control(|base| {
+                while delta.peek().is_some_and(|(id, _)| **id < base.id) {
+                    let (id, node) = delta.next().expect("peeked delta node exists");
+                    if !self.node_tombstones.contains(id)
+                        && self.node_matches_label(node, label_id)
+                        && consumer(node.clone()) == GraphScanControl::Stop
+                    {
+                        graph_control = GraphScanControl::Stop;
+                        return Ok(CanonicalScanControl::Stop);
+                    }
+                }
+                if delta.peek().is_some_and(|(id, _)| **id == base.id) {
+                    let (id, node) = delta.next().expect("matching delta node exists");
+                    if !self.node_tombstones.contains(id)
+                        && self.node_matches_label(node, label_id)
+                        && consumer(node.clone()) == GraphScanControl::Stop
+                    {
+                        graph_control = GraphScanControl::Stop;
+                        return Ok(CanonicalScanControl::Stop);
+                    }
+                    return Ok(CanonicalScanControl::Continue);
+                }
+                if !self.node_tombstones.contains(&base.id)
+                    && self.node_matches_label(&base, label_id)
+                    && consumer(base) == GraphScanControl::Stop
+                {
+                    graph_control = GraphScanControl::Stop;
+                    return Ok(CanonicalScanControl::Stop);
+                }
+                Ok(CanonicalScanControl::Continue)
+            })
+            .map_err(|error| SkeinError::Storage(error.to_string()))?;
+        if canonical_control == CanonicalScanControl::Stop {
+            return Ok(graph_control);
+        }
+        for (id, node) in delta {
+            if !self.node_tombstones.contains(id)
+                && self.node_matches_label(node, label_id)
+                && consumer(node.clone()) == GraphScanControl::Stop
+            {
+                return Ok(GraphScanControl::Stop);
+            }
+        }
+        Ok(GraphScanControl::Continue)
+    }
+
+    pub fn try_visit_nodes_owned(
+        &self,
+        label_id: Option<LabelId>,
+        mut consumer: impl FnMut(NodeRecord) -> Result<GraphScanControl>,
+    ) -> Result<GraphScanControl> {
+        let mut consumer_error = None;
+        let control = self.visit_nodes_owned(label_id, |node| match consumer(node) {
+            Ok(control) => control,
+            Err(error) => {
+                consumer_error = Some(error);
+                GraphScanControl::Stop
+            }
+        })?;
+        match consumer_error {
+            Some(error) => Err(error),
+            None => Ok(control),
+        }
+    }
+
+    pub fn visit_relationships_owned(
+        &self,
+        rel_type: Option<RelTypeId>,
+        mut consumer: impl FnMut(RelRecord) -> GraphScanControl,
+    ) -> Result<GraphScanControl> {
+        let Some(reader) = &self.canonical_base else {
+            for relationship in self.relationships.values() {
+                if self.relationship_matches_type(relationship, rel_type)
+                    && consumer(relationship.clone()) == GraphScanControl::Stop
+                {
+                    return Ok(GraphScanControl::Stop);
+                }
+            }
+            return Ok(GraphScanControl::Continue);
+        };
+
+        let mut delta = self.relationships.iter().peekable();
+        let mut graph_control = GraphScanControl::Continue;
+        let (_, canonical_control) = reader
+            .scan_relationships_control(|base| {
+                while delta.peek().is_some_and(|(id, _)| **id < base.id) {
+                    let (id, relationship) =
+                        delta.next().expect("peeked delta relationship exists");
+                    if !self.relationship_tombstones.contains(id)
+                        && self.relationship_matches_type(relationship, rel_type)
+                        && consumer(relationship.clone()) == GraphScanControl::Stop
+                    {
+                        graph_control = GraphScanControl::Stop;
+                        return Ok(CanonicalScanControl::Stop);
+                    }
+                }
+                if delta.peek().is_some_and(|(id, _)| **id == base.id) {
+                    let (id, relationship) =
+                        delta.next().expect("matching delta relationship exists");
+                    if !self.relationship_tombstones.contains(id)
+                        && self.relationship_matches_type(relationship, rel_type)
+                        && consumer(relationship.clone()) == GraphScanControl::Stop
+                    {
+                        graph_control = GraphScanControl::Stop;
+                        return Ok(CanonicalScanControl::Stop);
+                    }
+                    return Ok(CanonicalScanControl::Continue);
+                }
+                if !self.relationship_tombstones.contains(&base.id)
+                    && self.relationship_matches_type(&base, rel_type)
+                    && consumer(base) == GraphScanControl::Stop
+                {
+                    graph_control = GraphScanControl::Stop;
+                    return Ok(CanonicalScanControl::Stop);
+                }
+                Ok(CanonicalScanControl::Continue)
+            })
+            .map_err(|error| SkeinError::Storage(error.to_string()))?;
+        if canonical_control == CanonicalScanControl::Stop {
+            return Ok(graph_control);
+        }
+        for (id, relationship) in delta {
+            if !self.relationship_tombstones.contains(id)
+                && self.relationship_matches_type(relationship, rel_type)
+                && consumer(relationship.clone()) == GraphScanControl::Stop
+            {
+                return Ok(GraphScanControl::Stop);
+            }
+        }
+        Ok(GraphScanControl::Continue)
+    }
+
+    pub fn try_visit_relationships_owned(
+        &self,
+        rel_type: Option<RelTypeId>,
+        mut consumer: impl FnMut(RelRecord) -> Result<GraphScanControl>,
+    ) -> Result<GraphScanControl> {
+        let mut consumer_error = None;
+        let control = self.visit_relationships_owned(rel_type, |relationship| {
+            match consumer(relationship) {
+                Ok(control) => control,
+                Err(error) => {
+                    consumer_error = Some(error);
+                    GraphScanControl::Stop
+                }
+            }
+        })?;
+        match consumer_error {
+            Some(error) => Err(error),
+            None => Ok(control),
+        }
+    }
+
     pub fn statistics(&self) -> GraphStatistics {
-        compute_statistics_with_basic(&self.nodes, &self.relationships, self.basic_statistics())
+        if !self.canonical_base_out_of_core {
+            return compute_statistics_with_basic(
+                &self.nodes,
+                &self.relationships,
+                self.basic_statistics(),
+            );
+        }
+        let mut statistics = self.checkpoint_statistics.clone();
+        let basic = self.basic_statistics();
+        statistics.node_count = basic.node_count;
+        statistics.relationship_count = basic.relationship_count;
+        statistics.label_counts = basic.label_counts;
+        statistics.rel_type_counts = basic.rel_type_counts;
+        statistics
     }
 
     pub fn basic_statistics(&self) -> BasicGraphStatistics {
@@ -5022,6 +6175,7 @@ impl GraphStore {
             nodes: self.nodes.clone(),
             relationships: self.relationships.clone(),
             basic_statistics: self.basic_statistics.clone(),
+            checkpoint_statistics: self.checkpoint_statistics.clone(),
             outgoing: self.outgoing.clone(),
             incoming: self.incoming.clone(),
             property_index: self.property_index.clone(),
@@ -5037,6 +6191,15 @@ impl GraphStore {
             max_search_projection_change_log_entries: self.max_search_projection_change_log_entries,
             source_scan_manifest: self.source_scan_manifest.clone(),
             storage_recovery_report: self.storage_recovery_report.clone(),
+            canonical_base: self.canonical_base.clone(),
+            canonical_adjacency: self.canonical_adjacency.clone(),
+            persistent_property_projection: self.persistent_property_projection.clone(),
+            canonical_base_out_of_core: self.canonical_base_out_of_core,
+            node_tombstones: self.node_tombstones.clone(),
+            relationship_tombstones: self.relationship_tombstones.clone(),
+            residency_mode: self.residency_mode,
+            auto_materialize_checkpoint_bytes: self.auto_materialize_checkpoint_bytes,
+            max_out_of_core_delta_bytes: self.max_out_of_core_delta_bytes,
             durable: None,
         }
     }
@@ -5332,6 +6495,7 @@ impl GraphStore {
         properties: BTreeMap<String, Value>,
     ) {
         self.next_node_id = self.next_node_id.max(id.0 + 1);
+        self.node_tombstones.remove(&id);
         if let Some(old_node) = self.nodes.remove(&id) {
             self.remove_node_from_basic_statistics(&old_node);
         }
@@ -5559,6 +6723,7 @@ impl GraphStore {
         properties: BTreeMap<String, Value>,
     ) {
         self.next_rel_id = self.next_rel_id.max(id.0 + 1);
+        self.relationship_tombstones.remove(&id);
         if let Some(old_relationship) = self.relationships.remove(&id) {
             self.remove_relationship_from_basic_statistics(&old_relationship);
             self.remove_relationship_from_property_index(&old_relationship);
@@ -5664,10 +6829,14 @@ impl GraphStore {
     }
 
     pub fn node_count_for_label(&self, label_id: Option<LabelId>) -> usize {
-        self.nodes
-            .values()
-            .filter(|node| self.node_matches_label(node, label_id))
-            .count()
+        let count = label_id.map_or(self.basic_statistics.node_count, |label_id| {
+            self.basic_statistics
+                .label_counts
+                .get(&label_id)
+                .copied()
+                .unwrap_or_default()
+        });
+        usize::try_from(count).unwrap_or(usize::MAX)
     }
 
     fn node_matches_label(&self, node: &NodeRecord, label_id: Option<LabelId>) -> bool {
@@ -6042,6 +7211,62 @@ impl GraphStore {
             .filter_map(|node_id| self.nodes.get(node_id))
     }
 
+    pub fn visit_nodes_by_property_owned(
+        &self,
+        label_id: LabelId,
+        property: &str,
+        values: &[Value],
+        mut consumer: impl FnMut(NodeRecord) -> GraphScanControl,
+    ) -> Result<GraphScanControl> {
+        let Some(reader) = &self.canonical_base else {
+            return self.visit_nodes_owned(Some(label_id), |node| {
+                if node
+                    .properties
+                    .get(property)
+                    .is_some_and(|candidate| values.iter().any(|value| candidate == value))
+                {
+                    consumer(node)
+                } else {
+                    GraphScanControl::Continue
+                }
+            });
+        };
+        let mut seen = BTreeSet::new();
+        for value in values {
+            let mut graph_control = GraphScanControl::Continue;
+            let (_, canonical_control) = reader
+                .scan_nodes_by_property_control(label_id, property, value, |node| {
+                    if self.node_tombstones.contains(&node.id)
+                        || self.nodes.contains_key(&node.id)
+                        || !seen.insert(node.id)
+                    {
+                        return Ok(CanonicalScanControl::Continue);
+                    }
+                    if consumer(node) == GraphScanControl::Stop {
+                        graph_control = GraphScanControl::Stop;
+                        return Ok(CanonicalScanControl::Stop);
+                    }
+                    Ok(CanonicalScanControl::Continue)
+                })
+                .map_err(canonical_segment_error)?;
+            if canonical_control == CanonicalScanControl::Stop {
+                return Ok(graph_control);
+            }
+        }
+        for node in self.nodes.values() {
+            if node.labels.contains(&label_id)
+                && node
+                    .properties
+                    .get(property)
+                    .is_some_and(|candidate| values.iter().any(|value| candidate == value))
+                && consumer(node.clone()) == GraphScanControl::Stop
+            {
+                return Ok(GraphScanControl::Stop);
+            }
+        }
+        Ok(GraphScanControl::Continue)
+    }
+
     pub fn seek_nodes_by_composite_property<'a>(
         &'a self,
         label_id: LabelId,
@@ -6053,6 +7278,32 @@ impl GraphStore {
             .flat_map(|node_ids| node_ids.iter())
             .filter_map(|node_id| self.nodes.get(node_id))
             .collect()
+    }
+
+    pub fn visit_nodes_by_composite_property_owned(
+        &self,
+        label_id: LabelId,
+        predicates: &[(String, Value)],
+        mut consumer: impl FnMut(NodeRecord) -> GraphScanControl,
+    ) -> Result<GraphScanControl> {
+        let Some((first_property, first_value)) = predicates.first() else {
+            return self.visit_nodes_owned(Some(label_id), consumer);
+        };
+        self.visit_nodes_by_property_owned(
+            label_id,
+            first_property,
+            std::slice::from_ref(first_value),
+            |node| {
+                if predicates
+                    .iter()
+                    .all(|(property, value)| node.properties.get(property) == Some(value))
+                {
+                    consumer(node)
+                } else {
+                    GraphScanControl::Continue
+                }
+            },
+        )
     }
 
     pub fn seek_nodes_by_property_range<'a>(
@@ -6079,6 +7330,101 @@ impl GraphStore {
             .flat_map(|node_ids| node_ids.iter())
             .filter_map(|node_id| self.nodes.get(node_id))
             .collect()
+    }
+
+    pub fn visit_nodes_by_property_range_owned(
+        &self,
+        label_id: LabelId,
+        property: &str,
+        lower: Option<&(Value, bool)>,
+        upper: Option<&(Value, bool)>,
+        mut consumer: impl FnMut(NodeRecord) -> GraphScanControl,
+    ) -> Result<GraphScanControl> {
+        let Some(reader) = &self.canonical_base else {
+            return self.visit_nodes_owned(Some(label_id), |node| {
+                if node
+                    .properties
+                    .get(property)
+                    .is_some_and(|value| range_bounds_match(value, lower, upper))
+                {
+                    consumer(node)
+                } else {
+                    GraphScanControl::Continue
+                }
+            });
+        };
+        let Some(projection) = self
+            .persistent_property_projection
+            .as_ref()
+            .filter(|projection| {
+                projection.manifest().supports(
+                    label_id,
+                    property,
+                    PersistentPropertyProjectionKind::Range,
+                )
+            })
+        else {
+            return self.visit_nodes_owned(Some(label_id), |node| {
+                if node
+                    .properties
+                    .get(property)
+                    .is_some_and(|value| range_bounds_match(value, lower, upper))
+                {
+                    consumer(node)
+                } else {
+                    GraphScanControl::Continue
+                }
+            });
+        };
+
+        let mut graph_control = GraphScanControl::Continue;
+        let (_, projection_control) = projection
+            .scan_range_candidates(label_id, property, lower, upper, |node_id| {
+                if self.node_tombstones.contains(&node_id) || self.nodes.contains_key(&node_id) {
+                    return Ok(CanonicalScanControl::Continue);
+                }
+                let node = reader.get_node(node_id)?.ok_or_else(|| {
+                    PersistentPropertyProjectionError::Corrupt(format!(
+                        "property projection references missing canonical node {}",
+                        node_id.0
+                    ))
+                })?;
+                if !node.labels.contains(&label_id)
+                    || !node
+                        .properties
+                        .get(property)
+                        .is_some_and(|value| range_bounds_match(value, lower, upper))
+                {
+                    return Err(PersistentPropertyProjectionError::Corrupt(format!(
+                        "property projection candidate {} fails its canonical range predicate",
+                        node_id.0
+                    )));
+                }
+                if consumer(node) == GraphScanControl::Stop {
+                    graph_control = GraphScanControl::Stop;
+                    return Ok(CanonicalScanControl::Stop);
+                }
+                Ok(CanonicalScanControl::Continue)
+            })
+            .map_err(|error| SkeinError::Storage(error.to_string()))?;
+        if projection_control == CanonicalScanControl::Stop {
+            return Ok(graph_control);
+        }
+        for node in self.nodes.values() {
+            if self.node_tombstones.contains(&node.id) {
+                continue;
+            }
+            if node.labels.contains(&label_id)
+                && node
+                    .properties
+                    .get(property)
+                    .is_some_and(|value| range_bounds_match(value, lower, upper))
+                && consumer(node.clone()) == GraphScanControl::Stop
+            {
+                return Ok(GraphScanControl::Stop);
+            }
+        }
+        Ok(GraphScanControl::Continue)
     }
 
     pub fn seek_nodes_by_full_text_property<'a>(
@@ -6114,6 +7460,97 @@ impl GraphStore {
             .collect()
     }
 
+    pub fn visit_nodes_by_full_text_property_owned(
+        &self,
+        label_id: LabelId,
+        property: &str,
+        query: &str,
+        mut consumer: impl FnMut(NodeRecord) -> GraphScanControl,
+    ) -> Result<GraphScanControl> {
+        let query_tokens = full_text_query_tokens(query);
+        if query_tokens.is_empty() {
+            return Ok(GraphScanControl::Continue);
+        }
+        let matches_query = |node: &NodeRecord| match node.properties.get(property) {
+            Some(Value::String(value)) => {
+                let tokens = full_text_index_tokens(value);
+                query_tokens.iter().all(|token| tokens.contains(token))
+            }
+            _ => false,
+        };
+        let Some(reader) = &self.canonical_base else {
+            return self.visit_nodes_owned(Some(label_id), |node| {
+                if matches_query(&node) {
+                    consumer(node)
+                } else {
+                    GraphScanControl::Continue
+                }
+            });
+        };
+        let Some(projection) = self
+            .persistent_property_projection
+            .as_ref()
+            .filter(|projection| {
+                projection.manifest().supports(
+                    label_id,
+                    property,
+                    PersistentPropertyProjectionKind::FullText,
+                )
+            })
+        else {
+            return self.visit_nodes_owned(Some(label_id), |node| {
+                if matches_query(&node) {
+                    consumer(node)
+                } else {
+                    GraphScanControl::Continue
+                }
+            });
+        };
+        let seed_token = query_tokens
+            .iter()
+            .min_by_key(|token| {
+                projection.estimate_full_text_token_entries(label_id, property, token)
+            })
+            .expect("non-empty full-text query has a seed token");
+        let mut graph_control = GraphScanControl::Continue;
+        let (_, projection_control) = projection
+            .scan_full_text_token_candidates(label_id, property, seed_token, |node_id| {
+                if self.node_tombstones.contains(&node_id) || self.nodes.contains_key(&node_id) {
+                    return Ok(CanonicalScanControl::Continue);
+                }
+                let node = reader.get_node(node_id)?.ok_or_else(|| {
+                    PersistentPropertyProjectionError::Corrupt(format!(
+                        "property projection references missing canonical node {}",
+                        node_id.0
+                    ))
+                })?;
+                if !node.labels.contains(&label_id) || !matches_query(&node) {
+                    return Ok(CanonicalScanControl::Continue);
+                }
+                if consumer(node) == GraphScanControl::Stop {
+                    graph_control = GraphScanControl::Stop;
+                    return Ok(CanonicalScanControl::Stop);
+                }
+                Ok(CanonicalScanControl::Continue)
+            })
+            .map_err(|error| SkeinError::Storage(error.to_string()))?;
+        if projection_control == CanonicalScanControl::Stop {
+            return Ok(graph_control);
+        }
+        for node in self.nodes.values() {
+            if self.node_tombstones.contains(&node.id) {
+                continue;
+            }
+            if node.labels.contains(&label_id)
+                && matches_query(node)
+                && consumer(node.clone()) == GraphScanControl::Stop
+            {
+                return Ok(GraphScanControl::Stop);
+            }
+        }
+        Ok(GraphScanControl::Continue)
+    }
+
     #[inline]
     pub fn outgoing_relationships<'a>(
         &'a self,
@@ -6138,6 +7575,121 @@ impl GraphStore {
             .into_iter()
             .flat_map(AdjacencyPostingList::iter_copied)
             .filter_map(|rel_id| self.relationships.get(&rel_id))
+    }
+
+    pub fn visit_adjacent_relationships_owned(
+        &self,
+        node_id: NodeId,
+        rel_type: Option<RelTypeId>,
+        direction: AdjacencyDirection,
+        mut consumer: impl FnMut(RelRecord) -> GraphScanControl,
+    ) -> Result<GraphScanControl> {
+        let Some(reader) = &self.canonical_base else {
+            return self.visit_relationships_owned(rel_type, |relationship| {
+                let adjacent = match direction {
+                    AdjacencyDirection::Outgoing => relationship.source == node_id,
+                    AdjacencyDirection::Incoming => relationship.target == node_id,
+                };
+                if adjacent {
+                    consumer(relationship)
+                } else {
+                    GraphScanControl::Continue
+                }
+            });
+        };
+        let mut graph_control = GraphScanControl::Continue;
+        let mut consume_canonical = |relationship: RelRecord| {
+            if self.relationship_tombstones.contains(&relationship.id)
+                || self.relationships.contains_key(&relationship.id)
+            {
+                return CanonicalScanControl::Continue;
+            }
+            if consumer(relationship) == GraphScanControl::Stop {
+                graph_control = GraphScanControl::Stop;
+                CanonicalScanControl::Stop
+            } else {
+                CanonicalScanControl::Continue
+            }
+        };
+        let canonical_control = if let Some(adjacency) = &self.canonical_adjacency {
+            adjacency
+                .scan_endpoint_entries_control(node_id, direction, rel_type, |entry| {
+                    let relationship = match entry {
+                        CanonicalAdjacencyEntry::Inline(relationship) => relationship,
+                        CanonicalAdjacencyEntry::CanonicalReference { relationship_id } => reader
+                            .get_relationship(relationship_id)
+                            .map_err(|error| {
+                                skein_storage::CanonicalAdjacencyError::Source(error.to_string())
+                            })?
+                            .ok_or_else(|| {
+                                skein_storage::CanonicalAdjacencyError::Corrupt(format!(
+                                    "canonical adjacency references missing relationship {}",
+                                    relationship_id.0
+                                ))
+                            })?,
+                    };
+                    Ok(consume_canonical(relationship))
+                })
+                .map_err(|error| SkeinError::Storage(error.to_string()))?
+                .1
+        } else {
+            let endpoint_direction = match direction {
+                AdjacencyDirection::Outgoing => CanonicalEndpointDirection::Source,
+                AdjacencyDirection::Incoming => CanonicalEndpointDirection::Target,
+            };
+            reader
+                .scan_relationships_for_endpoint_control(
+                    node_id,
+                    endpoint_direction,
+                    rel_type,
+                    |relationship| Ok(consume_canonical(relationship)),
+                )
+                .map_err(canonical_segment_error)?
+                .1
+        };
+        drop(consume_canonical);
+        if canonical_control == CanonicalScanControl::Stop {
+            return Ok(graph_control);
+        }
+        for relationship in self.relationships.values() {
+            if rel_type.is_some_and(|rel_type| relationship.rel_type != rel_type) {
+                continue;
+            }
+            let adjacent = match direction {
+                AdjacencyDirection::Outgoing => relationship.source == node_id,
+                AdjacencyDirection::Incoming => relationship.target == node_id,
+            };
+            if adjacent && consumer(relationship.clone()) == GraphScanControl::Stop {
+                return Ok(GraphScanControl::Stop);
+            }
+        }
+        Ok(GraphScanControl::Continue)
+    }
+
+    pub fn try_visit_adjacent_relationships_owned(
+        &self,
+        node_id: NodeId,
+        rel_type: Option<RelTypeId>,
+        direction: AdjacencyDirection,
+        mut consumer: impl FnMut(RelRecord) -> Result<GraphScanControl>,
+    ) -> Result<GraphScanControl> {
+        let mut consumer_error = None;
+        let control = self.visit_adjacent_relationships_owned(
+            node_id,
+            rel_type,
+            direction,
+            |relationship| match consumer(relationship) {
+                Ok(control) => control,
+                Err(error) => {
+                    consumer_error = Some(error);
+                    GraphScanControl::Stop
+                }
+            },
+        )?;
+        match consumer_error {
+            Some(error) => Err(error),
+            None => Ok(control),
+        }
     }
 
     pub fn adjacency_group_stats(
@@ -6397,10 +7949,14 @@ impl GraphStore {
     }
 
     pub fn relationship_count_for_type(&self, rel_type: Option<RelTypeId>) -> usize {
-        self.relationships
-            .values()
-            .filter(|relationship| self.relationship_matches_type(relationship, rel_type))
-            .count()
+        let count = rel_type.map_or(self.basic_statistics.relationship_count, |rel_type| {
+            self.basic_statistics
+                .rel_type_counts
+                .get(&rel_type)
+                .copied()
+                .unwrap_or_default()
+        });
+        usize::try_from(count).unwrap_or(usize::MAX)
     }
 
     fn relationship_matches_type(
@@ -6866,13 +8422,7 @@ impl GraphStore {
             ));
         };
 
-        let mut reader = FileSegmentRangeReader::new();
-        reader.register(
-            source_scan::SOURCE_SCAN_ARTIFACT_ID,
-            durable
-                .root_path()
-                .join(source_scan::SOURCE_SCAN_PAYLOAD_FILE),
-        );
+        let reader = &durable.source_scan_reader;
         let ranges = plan
             .segments
             .iter()
@@ -6948,9 +8498,9 @@ impl GraphStore {
         let executor = SegmentReadExecutor::new(max_wave_bytes);
         let report = match task_context {
             Some(task_context) => {
-                executor.execute_with_context(&reader, &schedule, task_context, &mut consume)
+                executor.execute_with_context(reader, &schedule, task_context, &mut consume)
             }
-            None => executor.execute(&reader, &schedule, &mut consume),
+            None => executor.execute(reader, &schedule, &mut consume),
         }
         .map_err(|error| match error {
             SegmentReadExecutionError::Stopped(reason) => {
@@ -7120,16 +8670,20 @@ impl GraphStore {
         &self,
         label_id: LabelId,
         properties: &BTreeMap<String, Value>,
-    ) -> Option<NodeId> {
-        self.nodes
-            .values()
-            .find(|node| {
-                node.labels.contains(&label_id)
-                    && properties
-                        .iter()
-                        .all(|(key, value)| node.properties.get(key) == Some(value))
-            })
-            .map(|node| node.id)
+    ) -> Result<Option<NodeId>> {
+        let mut found = None;
+        self.visit_nodes_owned(Some(label_id), |node| {
+            if properties
+                .iter()
+                .all(|(key, value)| node.properties.get(key) == Some(value))
+            {
+                found = Some(node.id);
+                GraphScanControl::Stop
+            } else {
+                GraphScanControl::Continue
+            }
+        })?;
+        Ok(found)
     }
 
     fn find_relationship_by_properties(
@@ -7138,12 +8692,22 @@ impl GraphStore {
         target: NodeId,
         rel_type_id: RelTypeId,
         properties: &BTreeMap<String, Value>,
-    ) -> Option<RelId> {
-        self.outgoing_relationships(source, rel_type_id)
-            .find(|relationship| {
-                relationship.target == target && &relationship.properties == properties
-            })
-            .map(|relationship| relationship.id)
+    ) -> Result<Option<RelId>> {
+        let mut found = None;
+        self.visit_adjacent_relationships_owned(
+            source,
+            Some(rel_type_id),
+            AdjacencyDirection::Outgoing,
+            |relationship| {
+                if relationship.target == target && &relationship.properties == properties {
+                    found = Some(relationship.id);
+                    GraphScanControl::Stop
+                } else {
+                    GraphScanControl::Continue
+                }
+            },
+        )?;
+        Ok(found)
     }
 
     fn find_relationship_by_property_subset(
@@ -7152,13 +8716,24 @@ impl GraphStore {
         target: NodeId,
         rel_type_id: RelTypeId,
         properties: &BTreeMap<String, Value>,
-    ) -> Option<RelId> {
-        self.outgoing_relationships(source, rel_type_id)
-            .find(|relationship| {
-                relationship.target == target
+    ) -> Result<Option<RelId>> {
+        let mut found = None;
+        self.visit_adjacent_relationships_owned(
+            source,
+            Some(rel_type_id),
+            AdjacencyDirection::Outgoing,
+            |relationship| {
+                if relationship.target == target
                     && properties_contain_all(&relationship.properties, properties)
-            })
-            .map(|relationship| relationship.id)
+                {
+                    found = Some(relationship.id);
+                    GraphScanControl::Stop
+                } else {
+                    GraphScanControl::Continue
+                }
+            },
+        )?;
+        Ok(found)
     }
 
     fn merge_connected_node_ops(
@@ -7167,16 +8742,16 @@ impl GraphStore {
         source: NodeId,
         target: NodeId,
         relationship: RelId,
-    ) -> Vec<WalOp> {
+    ) -> Result<Vec<WalOp>> {
         let mut ops = Vec::new();
-        if !self.nodes.contains_key(&source) {
+        if self.node_owned(source)?.is_none() {
             ops.push(WalOp::CreateNode {
                 id: source,
                 label: request.source_label.clone(),
                 properties: request.source_properties.clone(),
             });
         }
-        if !self.nodes.contains_key(&target) {
+        if self.node_owned(target)?.is_none() {
             ops.push(WalOp::CreateNode {
                 id: target,
                 label: request.target_label.clone(),
@@ -7190,18 +8765,32 @@ impl GraphStore {
             rel_type: request.rel_type.clone(),
             properties: request.rel_properties.clone(),
         });
-        ops
+        Ok(ops)
     }
 
-    fn matching_node_ids<'a>(
-        &'a self,
+    fn matching_node_ids(
+        &self,
         label_id: Option<LabelId>,
-        filter: Option<&'a PropertyFilter>,
-    ) -> impl Iterator<Item = NodeId> + 'a {
-        self.scan_nodes_with_filter_pruning(label_id, filter)
-            .nodes
-            .into_iter()
-            .map(|node| node.id)
+        filter: Option<&PropertyFilter>,
+    ) -> Result<Vec<NodeId>> {
+        if !self.canonical_base_out_of_core {
+            return Ok(self
+                .scan_nodes_with_filter_pruning(label_id, filter)
+                .nodes
+                .into_iter()
+                .map(|node| node.id)
+                .collect());
+        }
+        let mut ids = Vec::new();
+        self.visit_nodes_owned(label_id, |node| {
+            if filter
+                .is_none_or(|filter| property_filter_matches(filter, node.id.0, &node.properties))
+            {
+                ids.push(node.id);
+            }
+            GraphScanControl::Continue
+        })?;
+        Ok(ids)
     }
 
     fn matching_node_ids_with_pending(
@@ -7209,14 +8798,14 @@ impl GraphStore {
         label_id: Option<LabelId>,
         filter: Option<&PropertyFilter>,
         pending_nodes: &[PendingNode],
-    ) -> Vec<NodeId> {
-        let mut ids = self.matching_node_ids(label_id, filter).collect::<Vec<_>>();
+    ) -> Result<Vec<NodeId>> {
+        let mut ids = self.matching_node_ids(label_id, filter)?;
         ids.extend(Self::pending_node_ids_matching(
             label_id,
             filter,
             pending_nodes,
         ));
-        ids
+        Ok(ids)
     }
 
     fn pending_node_ids_matching(
@@ -7250,6 +8839,7 @@ impl GraphStore {
         };
         let old_value = node.properties.insert(property.clone(), value.clone());
         let labels = node.labels.clone();
+        self.nodes.rebalance_key(&id);
         for label_id in labels {
             if let Some(old_value) = &old_value {
                 let key = (label_id, property.clone(), old_value.clone());
@@ -7278,6 +8868,7 @@ impl GraphStore {
         let old_value = relationship
             .properties
             .insert(property.clone(), value.clone());
+        self.relationships.rebalance_key(&id);
         if let Some(old_value) = old_value {
             let key = (rel_type, property.clone(), old_value);
             if let Some(ids) = self.relationship_property_index.get_mut(&key) {
@@ -7293,6 +8884,10 @@ impl GraphStore {
     }
 
     fn validate_constraints_for_ops(&self, catalog: &Catalog, ops: &[WalOp]) -> Result<()> {
+        self.ensure_out_of_core_delta_admission(ops)?;
+        if self.canonical_base_out_of_core {
+            return self.validate_out_of_core_record_changes(catalog, ops);
+        }
         let mut nodes = self.nodes.clone();
         let mut relationships = self.relationships.clone();
         for op in ops {
@@ -7305,12 +8900,259 @@ impl GraphStore {
         validate_property_schemas(catalog, &nodes, &relationships)
     }
 
+    fn ensure_out_of_core_delta_admission(&self, ops: &[WalOp]) -> Result<()> {
+        if !self.canonical_base_out_of_core {
+            return Ok(());
+        }
+        let Some(limit) = self.max_out_of_core_delta_bytes else {
+            return Ok(());
+        };
+        let current = self.estimated_delta_resident_bytes();
+        let mut touched_nodes = BTreeSet::new();
+        let mut touched_relationships = BTreeSet::new();
+        let additional = self.estimated_mutation_delta_bytes(
+            ops,
+            &mut touched_nodes,
+            &mut touched_relationships,
+        )?;
+        let projected = current.saturating_add(additional);
+        if projected > limit {
+            return Err(SkeinError::Storage(format!(
+                "out-of-core mutation delta admission rejected {projected} estimated bytes under the {limit} byte limit; checkpoint the database or raise max_out_of_core_delta_bytes"
+            )));
+        }
+        Ok(())
+    }
+
+    fn estimated_mutation_delta_bytes(
+        &self,
+        ops: &[WalOp],
+        touched_nodes: &mut BTreeSet<NodeId>,
+        touched_relationships: &mut BTreeSet<RelId>,
+    ) -> Result<u64> {
+        let mut bytes = 0u64;
+        for op in ops {
+            match op {
+                WalOp::CreateNode { id, properties, .. } => {
+                    if touched_nodes.insert(*id) && !self.nodes.contains_key(id) {
+                        bytes = bytes.saturating_add(64).saturating_add(
+                            estimated_properties_bytes(properties).saturating_mul(2),
+                        );
+                    }
+                }
+                WalOp::SetNodeProperty {
+                    id,
+                    property,
+                    value,
+                } => {
+                    if touched_nodes.insert(*id)
+                        && !self.nodes.contains_key(id)
+                        && let Some(node) = self.node_owned(*id)?
+                    {
+                        bytes = bytes.saturating_add(estimated_node_record_bytes(&node));
+                    }
+                    bytes = bytes
+                        .saturating_add(64)
+                        .saturating_add(property.len() as u64)
+                        .saturating_add(estimated_value_bytes(value).saturating_mul(2));
+                }
+                WalOp::DeleteNode { id } => {
+                    if touched_nodes.insert(*id)
+                        && !self.nodes.contains_key(id)
+                        && let Some(node) = self.node_owned(*id)?
+                    {
+                        bytes = bytes
+                            .saturating_add(estimated_node_record_bytes(&node))
+                            .saturating_add(32);
+                    }
+                }
+                WalOp::CreateRelationship { id, properties, .. } => {
+                    if touched_relationships.insert(*id) && !self.relationships.contains_key(id) {
+                        bytes = bytes.saturating_add(160).saturating_add(
+                            estimated_properties_bytes(properties).saturating_mul(2),
+                        );
+                    }
+                }
+                WalOp::SetRelationshipProperty {
+                    id,
+                    property,
+                    value,
+                } => {
+                    if touched_relationships.insert(*id)
+                        && !self.relationships.contains_key(id)
+                        && let Some(relationship) = self.relationship_owned(*id)?
+                    {
+                        bytes = bytes
+                            .saturating_add(estimated_relationship_record_bytes(&relationship))
+                            .saturating_add(96);
+                    }
+                    bytes = bytes
+                        .saturating_add(64)
+                        .saturating_add(property.len() as u64)
+                        .saturating_add(estimated_value_bytes(value).saturating_mul(2));
+                }
+                WalOp::DeleteRelationship { id } => {
+                    if touched_relationships.insert(*id)
+                        && !self.relationships.contains_key(id)
+                        && let Some(relationship) = self.relationship_owned(*id)?
+                    {
+                        bytes = bytes
+                            .saturating_add(estimated_relationship_record_bytes(&relationship))
+                            .saturating_add(128);
+                    }
+                }
+                WalOp::Batch(batch) => {
+                    bytes = bytes.saturating_add(self.estimated_mutation_delta_bytes(
+                        batch,
+                        touched_nodes,
+                        touched_relationships,
+                    )?);
+                }
+                WalOp::CreateNodeLabel { .. }
+                | WalOp::CreateRelationshipType { .. }
+                | WalOp::CreateNodeTable { .. }
+                | WalOp::CreateRelationshipTable { .. }
+                | WalOp::CreateProperty { .. }
+                | WalOp::AlterTableState { .. }
+                | WalOp::AlterPropertyState { .. }
+                | WalOp::GcTableDescriptor { .. }
+                | WalOp::GcPropertyDescriptor { .. }
+                | WalOp::CreateIndex { .. }
+                | WalOp::CreateCompositeIndex { .. }
+                | WalOp::CreateRangeIndex { .. }
+                | WalOp::CreateFullTextIndex { .. }
+                | WalOp::CreateUniqueConstraint { .. }
+                | WalOp::CreateNodePropertyExistsConstraint { .. }
+                | WalOp::CreateRelationshipUniqueConstraint { .. }
+                | WalOp::CreateRelationshipPropertyExistsConstraint { .. }
+                | WalOp::ProjectGraph { .. }
+                | WalOp::MarkInitialImportSource { .. } => {}
+            }
+        }
+        Ok(bytes)
+    }
+
+    fn validate_out_of_core_record_changes(&self, catalog: &Catalog, ops: &[WalOp]) -> Result<()> {
+        let mut node_changes = BTreeMap::<NodeId, Option<NodeRecord>>::new();
+        let mut relationship_changes = BTreeMap::<RelId, Option<RelRecord>>::new();
+        self.collect_out_of_core_record_changes(
+            catalog,
+            ops,
+            &mut node_changes,
+            &mut relationship_changes,
+        )?;
+
+        for node in node_changes.values().flatten() {
+            validate_node_record_constraints(catalog, node)?;
+        }
+        for relationship in relationship_changes.values().flatten() {
+            validate_relationship_record_constraints(catalog, relationship)?;
+        }
+        validate_changed_node_uniqueness(self, catalog, &node_changes)?;
+        validate_changed_relationship_uniqueness(self, catalog, &relationship_changes)
+    }
+
+    fn collect_out_of_core_record_changes(
+        &self,
+        catalog: &Catalog,
+        ops: &[WalOp],
+        nodes: &mut BTreeMap<NodeId, Option<NodeRecord>>,
+        relationships: &mut BTreeMap<RelId, Option<RelRecord>>,
+    ) -> Result<()> {
+        for op in ops {
+            match op {
+                WalOp::CreateNode {
+                    id,
+                    label,
+                    properties,
+                } => {
+                    let label_id = catalog.label_id(label).ok_or_else(|| {
+                        SkeinError::Storage(format!(
+                            "node label '{label}' is missing during out-of-core validation"
+                        ))
+                    })?;
+                    nodes.insert(
+                        *id,
+                        Some(NodeRecord {
+                            id: *id,
+                            labels: BTreeSet::from([label_id]),
+                            properties: properties.clone(),
+                        }),
+                    );
+                }
+                WalOp::SetNodeProperty {
+                    id,
+                    property,
+                    value,
+                } => {
+                    if !nodes.contains_key(id) {
+                        nodes.insert(*id, self.node_owned(*id)?);
+                    }
+                    if let Some(node) = nodes.get_mut(id).and_then(Option::as_mut) {
+                        node.properties.insert(property.clone(), value.clone());
+                    }
+                }
+                WalOp::DeleteNode { id } => {
+                    nodes.insert(*id, None);
+                }
+                WalOp::CreateRelationship {
+                    id,
+                    source,
+                    target,
+                    rel_type,
+                    properties,
+                } => {
+                    let rel_type = catalog.rel_type_id(rel_type).ok_or_else(|| {
+                        SkeinError::Storage(format!(
+                            "relationship type '{rel_type}' is missing during out-of-core validation"
+                        ))
+                    })?;
+                    relationships.insert(
+                        *id,
+                        Some(RelRecord {
+                            id: *id,
+                            source: *source,
+                            target: *target,
+                            rel_type,
+                            properties: properties.clone(),
+                        }),
+                    );
+                }
+                WalOp::SetRelationshipProperty {
+                    id,
+                    property,
+                    value,
+                } => {
+                    if !relationships.contains_key(id) {
+                        relationships.insert(*id, self.relationship_owned(*id)?);
+                    }
+                    if let Some(relationship) = relationships.get_mut(id).and_then(Option::as_mut) {
+                        relationship
+                            .properties
+                            .insert(property.clone(), value.clone());
+                    }
+                }
+                WalOp::DeleteRelationship { id } => {
+                    relationships.insert(*id, None);
+                }
+                WalOp::Batch(ops) => {
+                    self.collect_out_of_core_record_changes(catalog, ops, nodes, relationships)?
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     fn validate_unique_constraint(
         &self,
         catalog: &Catalog,
         label_id: LabelId,
         property: &str,
     ) -> Result<()> {
+        if self.canonical_base_out_of_core {
+            return validate_unique_property_streaming(self, catalog, label_id, property);
+        }
         validate_unique_property(catalog, &self.nodes, label_id, property)
     }
 
@@ -7320,6 +9162,29 @@ impl GraphStore {
         label_id: LabelId,
         property: &str,
     ) -> Result<()> {
+        if self.canonical_base_out_of_core {
+            let mut violation = None;
+            self.visit_nodes_owned(Some(label_id), |node| {
+                if !node
+                    .properties
+                    .get(property)
+                    .is_some_and(|value| value != &Value::Null)
+                {
+                    violation = Some(node.id);
+                    GraphScanControl::Stop
+                } else {
+                    GraphScanControl::Continue
+                }
+            })?;
+            if let Some(id) = violation {
+                let label = catalog.label_name(label_id).unwrap_or("<unknown>");
+                return Err(SkeinError::Storage(format!(
+                    "node property exists constraint violation on :{label}({property}) for node {}",
+                    id.0
+                )));
+            }
+            return Ok(());
+        }
         validate_node_property_exists(catalog, &self.nodes, label_id, property)
     }
 
@@ -7329,6 +9194,14 @@ impl GraphStore {
         rel_type_id: RelTypeId,
         property: &str,
     ) -> Result<()> {
+        if self.canonical_base_out_of_core {
+            return validate_unique_relationship_property_streaming(
+                self,
+                catalog,
+                rel_type_id,
+                property,
+            );
+        }
         validate_unique_relationship_property(catalog, &self.relationships, rel_type_id, property)
     }
 
@@ -7338,10 +9211,59 @@ impl GraphStore {
         rel_type_id: RelTypeId,
         property: &str,
     ) -> Result<()> {
+        if self.canonical_base_out_of_core {
+            let mut violation = None;
+            self.visit_relationships_owned(Some(rel_type_id), |relationship| {
+                if !relationship
+                    .properties
+                    .get(property)
+                    .is_some_and(|value| value != &Value::Null)
+                {
+                    violation = Some(relationship.id);
+                    GraphScanControl::Stop
+                } else {
+                    GraphScanControl::Continue
+                }
+            })?;
+            if let Some(id) = violation {
+                let rel_type = catalog.rel_type_name(rel_type_id).unwrap_or("<unknown>");
+                return Err(SkeinError::Storage(format!(
+                    "relationship property exists constraint violation on :{rel_type}({property}) for relationship {}",
+                    id.0
+                )));
+            }
+            return Ok(());
+        }
         validate_relationship_property_exists(catalog, &self.relationships, rel_type_id, property)
     }
 
     fn validate_relationship_endpoints(&self) -> Result<()> {
+        if self.canonical_base_out_of_core {
+            let mut validation_error = None;
+            self.visit_relationships_owned(None, |relationship| {
+                for (kind, node_id) in [
+                    ("source", relationship.source),
+                    ("target", relationship.target),
+                ] {
+                    match self.node_owned(node_id) {
+                        Ok(Some(_)) => {}
+                        Ok(None) => {
+                            validation_error = Some(SkeinError::Storage(format!(
+                                "relationship {} references missing {kind} node {}",
+                                relationship.id.0, node_id.0
+                            )));
+                            return GraphScanControl::Stop;
+                        }
+                        Err(error) => {
+                            validation_error = Some(error);
+                            return GraphScanControl::Stop;
+                        }
+                    }
+                }
+                GraphScanControl::Continue
+            })?;
+            return validation_error.map_or(Ok(()), Err);
+        }
         for relationship in self.relationships.values() {
             if !self.nodes.contains_key(&relationship.source) {
                 return Err(SkeinError::Storage(format!(
@@ -7362,7 +9284,8 @@ impl GraphStore {
     fn delete_node_ops(&self, ids: &[NodeId], detach: bool) -> Result<Vec<WalOp>> {
         let mut relationship_ids = BTreeSet::new();
         for id in ids {
-            for relationship in self.relationships.values() {
+            for relationship in self.relationship_records_owned() {
+                let relationship = relationship?;
                 if relationship.source == *id || relationship.target == *id {
                     if !detach {
                         return Err(SkeinError::Storage(format!(
@@ -7448,14 +9371,23 @@ impl GraphStore {
         }
     }
 
-    fn load_checkpoint(&mut self, catalog: &mut Catalog) -> Result<()> {
+    fn load_checkpoint(&mut self, catalog: &mut Catalog, config: WalReplayConfig) -> Result<()> {
         let Some(durable) = &self.durable else {
             return Ok(());
         };
         if !durable.checkpoint_path.exists() {
+            if durable.checkpoint_commit_epoch != 0 {
+                return Err(SkeinError::Storage(format!(
+                    "manifest checkpoint generation {} is missing",
+                    durable.checkpoint_epoch
+                )));
+            }
             return Ok(());
         }
-        let text = read_durable_text(&durable.checkpoint_path, "checkpoint")?;
+        let expected_format = durable.format;
+        let expected_generation = durable.checkpoint_epoch;
+        let expected_commit_epoch = durable.checkpoint_commit_epoch;
+        let text = durable.read_checkpoint_text(config)?;
         let (body, checksum) = split_checkpoint_checksum(&text)?;
         let actual = checksum_bytes(body.as_bytes());
         if checksum != actual {
@@ -7464,21 +9396,49 @@ impl GraphStore {
             )));
         }
         let mut loaded_search_projection_change_log_start_epoch = None;
+        let mut loaded_generation = None;
+        let mut loaded_commit_epoch = None;
+        let mut loaded_statistics_complete = None;
+        let mut saw_checkpoint_statistics = false;
+        let mut canonical_records = false;
+        let mut saw_format_header = false;
         for line in body.lines() {
-            if line == "SKEIN_CHECKPOINT_V1" {
+            if line == CHECKPOINT_HEADER_V1 {
+                if expected_format != DurableFormat::LegacyV1 {
+                    return Err(SkeinError::Storage(
+                        "generational manifest references a legacy checkpoint".to_string(),
+                    ));
+                }
+                saw_format_header = true;
+                continue;
+            }
+            if line == CHECKPOINT_HEADER_V2 {
+                if expected_format != DurableFormat::GenerationalV2 {
+                    return Err(SkeinError::Storage(
+                        "legacy manifest references a generational checkpoint".to_string(),
+                    ));
+                }
+                saw_format_header = true;
                 continue;
             }
             let fields = line.split('\t').collect::<Vec<_>>();
             match fields.as_slice() {
                 ["version", version] => validate_storage_version(version)?,
+                ["generation", raw] => {
+                    loaded_generation = Some(parse_u64(raw, "checkpoint generation")?);
+                }
                 ["next_node_id", raw] => {
                     self.next_node_id = parse_u64(raw, "next_node_id")?;
                 }
                 ["next_rel_id", raw] => {
                     self.next_rel_id = parse_u64(raw, "next_rel_id")?;
                 }
+                ["canonical_records", "true"] => {
+                    canonical_records = true;
+                }
                 ["commit_epoch", raw] => {
                     self.commit_epoch = parse_u64(raw, "commit_epoch")?;
+                    loaded_commit_epoch = Some(self.commit_epoch);
                 }
                 ["search_projection_change_log_start_epoch", raw] => {
                     if loaded_search_projection_change_log_start_epoch.is_some() {
@@ -7617,26 +9577,212 @@ impl GraphStore {
                         decode_string(raw_property)?,
                     );
                 }
-                ["stat_commit_epoch", _]
-                | ["stat_histogram_sample_limit", _]
-                | ["stat_node_count", _]
-                | ["stat_relationship_count", _]
-                | ["stat_label_count", _, _]
-                | ["stat_rel_type_count", _, _]
-                | ["stat_rel_type_source_count", _, _]
-                | ["stat_rel_type_target_count", _, _]
-                | ["stat_path_count", _, _, _, _]
-                | ["stat_path_source_distinct_count", _, _, _, _]
-                | ["stat_path_target_distinct_count", _, _, _, _]
-                | ["stat_bounded_path_count", _, _, _, _, _]
-                | ["stat_bounded_path_source_distinct_count", _, _, _, _, _]
-                | ["stat_bounded_path_target_distinct_count", _, _, _, _, _]
-                | ["stat_property_distinct_count", _, _, _]
-                | ["stat_rel_property_distinct_count", _, _, _]
-                | ["stat_rel_property_histogram", _, _, _]
-                | ["stat_property_histogram", _, _, _]
-                | ["stat_rel_property_histogram_sampled", _, _, _]
-                | ["stat_property_histogram_sampled", _, _, _] => {}
+                ["stat_commit_epoch", raw] => {
+                    saw_checkpoint_statistics = true;
+                    let epoch = parse_u64(raw, "statistics commit epoch")?;
+                    self.basic_statistics.computed_at_commit_epoch = epoch;
+                    self.checkpoint_statistics.computed_at_commit_epoch = epoch;
+                }
+                ["stat_advanced_complete", raw] => {
+                    if loaded_statistics_complete.is_some() {
+                        return Err(SkeinError::Storage(
+                            "checkpoint contains duplicate statistics completeness flag"
+                                .to_string(),
+                        ));
+                    }
+                    loaded_statistics_complete =
+                        Some(decode_bool(raw, "statistics advanced completeness flag")?);
+                }
+                ["stat_histogram_sample_limit", raw] => {
+                    self.checkpoint_statistics.histogram_sample_limit =
+                        parse_usize(raw, "statistics histogram sample limit")?;
+                }
+                ["stat_node_count", raw] => {
+                    let count = parse_u64(raw, "statistics node count")?;
+                    self.basic_statistics.node_count = count;
+                    self.checkpoint_statistics.node_count = count;
+                }
+                ["stat_relationship_count", raw] => {
+                    let count = parse_u64(raw, "statistics relationship count")?;
+                    self.basic_statistics.relationship_count = count;
+                    self.checkpoint_statistics.relationship_count = count;
+                }
+                ["stat_label_count", raw_label_id, raw_count] => {
+                    let label_id = LabelId(parse_u32(raw_label_id, "statistics label id")?);
+                    let count = parse_u64(raw_count, "statistics label count")?;
+                    self.basic_statistics.label_counts.insert(label_id, count);
+                    self.checkpoint_statistics
+                        .label_counts
+                        .insert(label_id, count);
+                }
+                ["stat_rel_type_count", raw_rel_type_id, raw_count] => {
+                    let rel_type_id = RelTypeId(parse_u32(
+                        raw_rel_type_id,
+                        "statistics relationship type id",
+                    )?);
+                    let count = parse_u64(raw_count, "statistics relationship type count")?;
+                    self.basic_statistics
+                        .rel_type_counts
+                        .insert(rel_type_id, count);
+                    self.checkpoint_statistics
+                        .rel_type_counts
+                        .insert(rel_type_id, count);
+                }
+                ["stat_rel_type_source_count", raw_rel_type_id, raw_count] => {
+                    self.checkpoint_statistics.rel_type_source_counts.insert(
+                        RelTypeId(parse_u32(
+                            raw_rel_type_id,
+                            "statistics relationship type id",
+                        )?),
+                        parse_u64(raw_count, "statistics relationship source count")?,
+                    );
+                }
+                ["stat_rel_type_target_count", raw_rel_type_id, raw_count] => {
+                    self.checkpoint_statistics.rel_type_target_counts.insert(
+                        RelTypeId(parse_u32(
+                            raw_rel_type_id,
+                            "statistics relationship type id",
+                        )?),
+                        parse_u64(raw_count, "statistics relationship target count")?,
+                    );
+                }
+                ["stat_path_count", raw_source, raw_rel_type, raw_target, raw_count] => {
+                    self.checkpoint_statistics.path_counts.insert(
+                        parse_statistics_path_key(raw_source, raw_rel_type, raw_target)?,
+                        parse_u64(raw_count, "statistics path count")?,
+                    );
+                }
+                ["stat_path_source_distinct_count", raw_source, raw_rel_type, raw_target, raw_count] =>
+                {
+                    self.checkpoint_statistics
+                        .path_source_distinct_counts
+                        .insert(
+                            parse_statistics_path_key(raw_source, raw_rel_type, raw_target)?,
+                            parse_u64(raw_count, "statistics path source distinct count")?,
+                        );
+                }
+                ["stat_path_target_distinct_count", raw_source, raw_rel_type, raw_target, raw_count] =>
+                {
+                    self.checkpoint_statistics
+                        .path_target_distinct_counts
+                        .insert(
+                            parse_statistics_path_key(raw_source, raw_rel_type, raw_target)?,
+                            parse_u64(raw_count, "statistics path target distinct count")?,
+                        );
+                }
+                ["stat_bounded_path_count", raw_source, raw_rel_type, raw_target, raw_hops, raw_count] =>
+                {
+                    self.checkpoint_statistics.bounded_path_counts.insert(
+                        parse_statistics_bounded_path_key(
+                            raw_source,
+                            raw_rel_type,
+                            raw_target,
+                            raw_hops,
+                        )?,
+                        parse_u64(raw_count, "statistics bounded path count")?,
+                    );
+                }
+                ["stat_bounded_path_source_distinct_count", raw_source, raw_rel_type, raw_target, raw_hops, raw_count] =>
+                {
+                    self.checkpoint_statistics
+                        .bounded_path_source_distinct_counts
+                        .insert(
+                            parse_statistics_bounded_path_key(
+                                raw_source,
+                                raw_rel_type,
+                                raw_target,
+                                raw_hops,
+                            )?,
+                            parse_u64(raw_count, "statistics bounded path source distinct count")?,
+                        );
+                }
+                ["stat_bounded_path_target_distinct_count", raw_source, raw_rel_type, raw_target, raw_hops, raw_count] =>
+                {
+                    self.checkpoint_statistics
+                        .bounded_path_target_distinct_counts
+                        .insert(
+                            parse_statistics_bounded_path_key(
+                                raw_source,
+                                raw_rel_type,
+                                raw_target,
+                                raw_hops,
+                            )?,
+                            parse_u64(raw_count, "statistics bounded path target distinct count")?,
+                        );
+                }
+                ["stat_property_distinct_count", raw_label_id, raw_property, raw_count] => {
+                    self.checkpoint_statistics.property_distinct_counts.insert(
+                        (
+                            LabelId(parse_u32(raw_label_id, "statistics label id")?),
+                            decode_string(raw_property)?,
+                        ),
+                        parse_u64(raw_count, "statistics property distinct count")?,
+                    );
+                }
+                ["stat_rel_property_distinct_count", raw_rel_type_id, raw_property, raw_count] => {
+                    self.checkpoint_statistics
+                        .rel_property_distinct_counts
+                        .insert(
+                            (
+                                RelTypeId(parse_u32(
+                                    raw_rel_type_id,
+                                    "statistics relationship type id",
+                                )?),
+                                decode_string(raw_property)?,
+                            ),
+                            parse_u64(
+                                raw_count,
+                                "statistics relationship property distinct count",
+                            )?,
+                        );
+                }
+                ["stat_rel_property_histogram", raw_rel_type_id, raw_property, raw_values] => {
+                    self.checkpoint_statistics.rel_property_histograms.insert(
+                        (
+                            RelTypeId(parse_u32(
+                                raw_rel_type_id,
+                                "statistics relationship type id",
+                            )?),
+                            decode_string(raw_property)?,
+                        ),
+                        decode_value_vec(raw_values)?,
+                    );
+                }
+                ["stat_property_histogram", raw_label_id, raw_property, raw_values] => {
+                    self.checkpoint_statistics.property_histograms.insert(
+                        (
+                            LabelId(parse_u32(raw_label_id, "statistics label id")?),
+                            decode_string(raw_property)?,
+                        ),
+                        decode_value_vec(raw_values)?,
+                    );
+                }
+                ["stat_rel_property_histogram_sampled", raw_rel_type_id, raw_property, raw_sampled] =>
+                {
+                    self.checkpoint_statistics
+                        .sampled_rel_property_histograms
+                        .insert(
+                            (
+                                RelTypeId(parse_u32(
+                                    raw_rel_type_id,
+                                    "statistics relationship type id",
+                                )?),
+                                decode_string(raw_property)?,
+                            ),
+                            decode_bool(raw_sampled, "statistics sampled flag")?,
+                        );
+                }
+                ["stat_property_histogram_sampled", raw_label_id, raw_property, raw_sampled] => {
+                    self.checkpoint_statistics
+                        .sampled_property_histograms
+                        .insert(
+                            (
+                                LabelId(parse_u32(raw_label_id, "statistics label id")?),
+                                decode_string(raw_property)?,
+                            ),
+                            decode_bool(raw_sampled, "statistics sampled flag")?,
+                        );
+                }
                 ["project_graph", raw_name, raw_node_labels, raw_rel_types] => {
                     self.apply_project_graph_definition(
                         decode_string(raw_name)?,
@@ -7674,6 +9820,29 @@ impl GraphStore {
                 }
             }
         }
+        if !saw_format_header {
+            return Err(SkeinError::Storage(
+                "checkpoint is missing a supported format header".to_string(),
+            ));
+        }
+        if saw_checkpoint_statistics {
+            self.checkpoint_statistics.advanced_statistics_complete =
+                loaded_statistics_complete.unwrap_or(true);
+        }
+        if expected_format == DurableFormat::GenerationalV2 {
+            if loaded_generation != Some(expected_generation) {
+                return Err(SkeinError::Storage(format!(
+                    "checkpoint generation {:?} does not match manifest generation {expected_generation}",
+                    loaded_generation
+                )));
+            }
+            if loaded_commit_epoch != Some(expected_commit_epoch) {
+                return Err(SkeinError::Storage(format!(
+                    "checkpoint commit epoch {:?} does not match manifest commit epoch {expected_commit_epoch}",
+                    loaded_commit_epoch
+                )));
+            }
+        }
         match loaded_search_projection_change_log_start_epoch {
             Some(start_epoch) => {
                 validate_search_projection_checkpoint_changes(
@@ -7694,6 +9863,68 @@ impl GraphStore {
                 ));
             }
         }
+        if canonical_records {
+            let reader = self
+                .durable
+                .as_ref()
+                .and_then(|durable| durable.canonical_segments.clone())
+                .ok_or_else(|| {
+                    SkeinError::Storage(
+                        "checkpoint delegates records to missing canonical segments".to_string(),
+                    )
+                })?;
+            let materialize = match config.residency_mode {
+                StorageResidencyMode::Materialized => true,
+                StorageResidencyMode::OutOfCore => false,
+                StorageResidencyMode::Auto => {
+                    reader.manifest().artifact_len <= config.auto_materialize_checkpoint_bytes
+                }
+            };
+            if materialize {
+                self.basic_statistics = BasicGraphStatistics::default();
+                reader
+                    .scan_nodes(|node| {
+                        register_property_index_descriptors(
+                            catalog,
+                            node.labels.iter().copied(),
+                            &node.properties,
+                        );
+                        self.apply_create_node_with_labels(
+                            catalog,
+                            node.id,
+                            node.labels,
+                            node.properties,
+                        );
+                        Ok(())
+                    })
+                    .map_err(|error| SkeinError::Storage(error.to_string()))?;
+                reader
+                    .scan_relationships(|relationship| {
+                        self.apply_create_relationship(
+                            relationship.id,
+                            relationship.source,
+                            relationship.target,
+                            relationship.rel_type,
+                            relationship.properties,
+                        );
+                        Ok(())
+                    })
+                    .map_err(|error| SkeinError::Storage(error.to_string()))?;
+            } else {
+                self.basic_statistics.node_count = reader.manifest().node_count;
+                self.basic_statistics.relationship_count = reader.manifest().relationship_count;
+                self.canonical_base = Some(reader);
+                self.canonical_adjacency = self
+                    .durable
+                    .as_ref()
+                    .and_then(|durable| durable.canonical_adjacency.clone());
+                self.persistent_property_projection = self
+                    .durable
+                    .as_ref()
+                    .and_then(|durable| durable.persistent_property_projection.clone());
+                self.canonical_base_out_of_core = true;
+            }
+        }
         Ok(())
     }
 
@@ -7709,37 +9940,96 @@ impl GraphStore {
         let checkpoint_epoch = durable.checkpoint_epoch;
         let checkpoint_commit_epoch = durable.checkpoint_commit_epoch;
         let wal_replay_start_lsn = durable.wal_replay_start_lsn;
-        let mut next_lsn = durable.next_lsn;
+        let wal_generation = durable.wal_generation;
+        let durable_format = durable.format;
+        let read_only = durable.read_only;
+        let checkpoint_present = durable.checkpoint_path.exists();
         let mut replayed_entries = 0_usize;
+        let mut replayed_bytes = 0u64;
         let mut torn_tail_reason = None;
+        let mut torn_tail_repaired = false;
+        let mut discarded_wal_tail_bytes = 0u64;
         let wal_present = wal_path.exists();
         if !wal_path.exists() {
+            if durable_format == DurableFormat::GenerationalV2 && checkpoint_epoch > 0 {
+                return Err(SkeinError::Storage(format!(
+                    "manifest WAL generation {wal_generation} is missing"
+                )));
+            }
             return Ok(StorageRecoveryReport {
                 durable: true,
                 recovery_mode: config.recovery_mode,
                 max_wal_replay_entries: config.max_entries,
-                checkpoint_epoch: Some(checkpoint_epoch),
-                checkpoint_commit_epoch: Some(checkpoint_commit_epoch),
+                max_wal_replay_bytes: config.max_bytes,
+                max_wal_record_bytes: config.max_record_bytes,
+                checkpoint_epoch: checkpoint_present.then_some(checkpoint_epoch),
+                checkpoint_commit_epoch: checkpoint_present.then_some(checkpoint_commit_epoch),
                 wal_present,
+                wal_generation: Some(wal_generation),
                 wal_replay_start_lsn: Some(wal_replay_start_lsn),
-                next_lsn_after_replay: Some(next_lsn),
+                next_lsn_after_replay: Some(wal_replay_start_lsn),
                 replayed_wal_entries: replayed_entries,
+                replayed_wal_bytes: replayed_bytes,
                 torn_tail_ignored: false,
+                torn_tail_repaired: false,
+                discarded_wal_tail_bytes: 0,
                 torn_tail_reason,
                 recovered_commit_epoch: self.commit_epoch,
             });
         }
+        let wal_len = fs::metadata(&wal_path)?.len();
+        if config.max_bytes.is_some_and(|limit| wal_len > limit) {
+            return Err(SkeinError::Storage(format!(
+                "WAL replay byte limit exceeded: max_wal_replay_bytes={}",
+                config.max_bytes.unwrap_or_default()
+            )));
+        }
         let file = File::open(&wal_path)?;
-        for line in BufReader::new(file).lines() {
-            let line = line?;
-            if line.is_empty() {
+        let mut reader = BufReader::new(file);
+        let mut expected_lsn = wal_replay_start_lsn;
+        let mut byte_offset = 0u64;
+        let mut last_valid_offset = 0u64;
+        let mut saw_wal_header = durable_format == DurableFormat::LegacyV1;
+        while let Some(record) = read_bounded_wal_record(&mut reader, config.max_record_bytes)? {
+            let record_start = byte_offset;
+            byte_offset = byte_offset.saturating_add(record.encoded_len);
+            let line = std::str::from_utf8(&record.bytes).map_err(|error| {
+                SkeinError::Storage(format!("WAL record is not valid UTF-8: {error}"))
+            })?;
+            if !saw_wal_header {
+                let (generation, start_lsn) = decode_wal_header(line)?;
+                if generation != wal_generation || start_lsn != wal_replay_start_lsn {
+                    return Err(SkeinError::Storage(format!(
+                        "WAL header generation/start ({generation}, {start_lsn}) does not match manifest ({wal_generation}, {wal_replay_start_lsn})"
+                    )));
+                }
+                saw_wal_header = true;
+                last_valid_offset = byte_offset;
                 continue;
             }
-            let entry = match WalEntry::decode(&line)? {
+            if line.is_empty() {
+                return Err(SkeinError::Storage(format!(
+                    "WAL contains an empty record at byte offset {record_start}"
+                )));
+            }
+            let entry = match WalEntry::decode(line)? {
                 WalDecodeResult::Entry(entry) => entry,
                 WalDecodeResult::TornTail(reason) => match config.recovery_mode {
                     RecoveryMode::TolerateTornTail => {
+                        if !reader.fill_buf()?.is_empty() {
+                            quarantine_corrupt_wal(&wal_path, wal_generation, read_only)?;
+                            return Err(SkeinError::Storage(format!(
+                                "WAL corruption at byte offset {record_start} is not a torn tail: {reason}"
+                            )));
+                        }
                         torn_tail_reason = Some(reason);
+                        discarded_wal_tail_bytes = wal_len.saturating_sub(last_valid_offset);
+                        if !read_only {
+                            let file = OpenOptions::new().write(true).open(&wal_path)?;
+                            file.set_len(last_valid_offset)?;
+                            file.sync_all()?;
+                            torn_tail_repaired = true;
+                        }
                         break;
                     }
                     RecoveryMode::Strict => {
@@ -7749,6 +10039,13 @@ impl GraphStore {
                     }
                 },
             };
+            if entry.lsn != expected_lsn {
+                quarantine_corrupt_wal(&wal_path, wal_generation, read_only)?;
+                return Err(SkeinError::Storage(format!(
+                    "WAL LSN sequence mismatch at byte offset {record_start}: expected {expected_lsn}, got {}",
+                    entry.lsn
+                )));
+            }
             if let Some(max_entries) = config.max_entries
                 && replayed_entries >= max_entries
             {
@@ -7756,10 +10053,24 @@ impl GraphStore {
                     "WAL replay entry limit exceeded: max_wal_replay_entries={max_entries}"
                 )));
             }
+            if let WalOp::Batch(ops) = &entry.op
+                && config
+                    .max_batch_operations
+                    .is_some_and(|limit| ops.len() > limit)
+            {
+                return Err(SkeinError::Storage(format!(
+                    "WAL batch operation limit exceeded: max_wal_batch_operations={}",
+                    config.max_batch_operations.unwrap_or_default()
+                )));
+            }
             replayed_entries += 1;
-            next_lsn = next_lsn.max(entry.lsn + 1);
+            replayed_bytes = replayed_bytes.saturating_add(record.encoded_len);
+            expected_lsn = expected_lsn
+                .checked_add(1)
+                .ok_or_else(|| SkeinError::Storage("WAL LSN overflow during replay".to_string()))?;
             match entry.op {
                 WalOp::Batch(ops) => {
+                    self.ensure_out_of_core_delta_admission(&ops)?;
                     let commit_epoch = self.commit_epoch + 1;
                     self.record_search_projection_graph_changes_for_ops(
                         catalog,
@@ -7767,42 +10078,95 @@ impl GraphStore {
                         &ops,
                     );
                     for op in ops {
-                        self.apply_wal_op(catalog, op);
+                        self.apply_wal_op(catalog, op)?;
                     }
                     self.commit_epoch += 1;
                 }
                 op => {
+                    self.ensure_out_of_core_delta_admission(std::slice::from_ref(&op))?;
                     let commit_epoch = self.commit_epoch + 1;
                     self.record_search_projection_graph_changes_for_ops(
                         catalog,
                         commit_epoch,
                         std::slice::from_ref(&op),
                     );
-                    self.apply_wal_op(catalog, op);
+                    self.apply_wal_op(catalog, op)?;
                     self.commit_epoch += 1;
                 }
             }
+            last_valid_offset = byte_offset;
+        }
+        if durable_format == DurableFormat::GenerationalV2 && !saw_wal_header {
+            return Err(SkeinError::Storage(format!(
+                "WAL generation {wal_generation} is missing its header"
+            )));
         }
         if let Some(durable) = &mut self.durable {
-            durable.next_lsn = next_lsn;
+            durable.next_lsn = expected_lsn;
         }
         Ok(StorageRecoveryReport {
             durable: true,
             recovery_mode: config.recovery_mode,
             max_wal_replay_entries: config.max_entries,
-            checkpoint_epoch: Some(checkpoint_epoch),
-            checkpoint_commit_epoch: Some(checkpoint_commit_epoch),
+            max_wal_replay_bytes: config.max_bytes,
+            max_wal_record_bytes: config.max_record_bytes,
+            checkpoint_epoch: checkpoint_present.then_some(checkpoint_epoch),
+            checkpoint_commit_epoch: checkpoint_present.then_some(checkpoint_commit_epoch),
             wal_present,
+            wal_generation: Some(wal_generation),
             wal_replay_start_lsn: Some(wal_replay_start_lsn),
-            next_lsn_after_replay: Some(next_lsn),
+            next_lsn_after_replay: Some(expected_lsn),
             replayed_wal_entries: replayed_entries,
+            replayed_wal_bytes: replayed_bytes,
             torn_tail_ignored: torn_tail_reason.is_some(),
+            torn_tail_repaired,
+            discarded_wal_tail_bytes,
             torn_tail_reason,
             recovered_commit_epoch: self.commit_epoch,
         })
     }
 
-    fn apply_wal_op(&mut self, catalog: &mut Catalog, op: WalOp) {
+    fn materialize_node_for_write(&mut self, id: NodeId) -> Result<bool> {
+        if self.node_tombstones.contains(&id) {
+            return Ok(false);
+        }
+        if self.nodes.contains_key(&id) {
+            return Ok(true);
+        }
+        let Some(node) = self
+            .canonical_base
+            .as_ref()
+            .map(|reader| reader.get_node(id).map_err(canonical_segment_error))
+            .transpose()?
+            .flatten()
+        else {
+            return Ok(false);
+        };
+        self.nodes.insert(id, node);
+        Ok(true)
+    }
+
+    fn materialize_relationship_for_write(&mut self, id: RelId) -> Result<bool> {
+        if self.relationship_tombstones.contains(&id) {
+            return Ok(false);
+        }
+        if self.relationships.contains_key(&id) {
+            return Ok(true);
+        }
+        let Some(relationship) = self
+            .canonical_base
+            .as_ref()
+            .map(|reader| reader.get_relationship(id).map_err(canonical_segment_error))
+            .transpose()?
+            .flatten()
+        else {
+            return Ok(false);
+        };
+        self.relationships.insert(id, relationship);
+        Ok(true)
+    }
+
+    fn apply_wal_op(&mut self, catalog: &mut Catalog, op: WalOp) -> Result<()> {
         match op {
             WalOp::CreateNodeLabel { label } => {
                 catalog.get_or_create_label(&label);
@@ -7932,6 +10296,7 @@ impl GraphStore {
                 property,
                 value,
             } => {
+                self.materialize_node_for_write(id)?;
                 if let Some(node) = self.nodes.get(&id) {
                     let properties = BTreeMap::from([(property.clone(), value.clone())]);
                     register_property_index_descriptors(
@@ -7947,13 +10312,36 @@ impl GraphStore {
                 property,
                 value,
             } => {
+                self.materialize_relationship_for_write(id)?;
                 self.apply_set_relationship_property(id, property, value);
             }
             WalOp::DeleteNode { id } => {
+                let base_exists = self
+                    .canonical_base
+                    .as_ref()
+                    .map(|reader| reader.get_node(id).map_err(canonical_segment_error))
+                    .transpose()?
+                    .flatten()
+                    .is_some();
+                self.materialize_node_for_write(id)?;
                 self.apply_delete_node(catalog, id);
+                if base_exists {
+                    self.node_tombstones.insert(id);
+                }
             }
             WalOp::DeleteRelationship { id } => {
+                let base_exists = self
+                    .canonical_base
+                    .as_ref()
+                    .map(|reader| reader.get_relationship(id).map_err(canonical_segment_error))
+                    .transpose()?
+                    .flatten()
+                    .is_some();
+                self.materialize_relationship_for_write(id)?;
                 self.apply_delete_relationship(id);
+                if base_exists {
+                    self.relationship_tombstones.insert(id);
+                }
             }
             WalOp::ProjectGraph {
                 name,
@@ -7973,21 +10361,35 @@ impl GraphStore {
             }
             WalOp::Batch(ops) => {
                 for op in ops {
-                    self.apply_wal_op(catalog, op);
+                    self.apply_wal_op(catalog, op)?;
                 }
             }
         }
+        Ok(())
     }
 }
 
 #[derive(Debug)]
 struct DurableStore {
+    _directory_lease: DatabaseDirectoryLease,
     root_path: PathBuf,
     checkpoint_path: PathBuf,
     manifest_path: PathBuf,
     projected_graphs_path: PathBuf,
     stable_id_mapping_path: PathBuf,
     wal_path: PathBuf,
+    format: DurableFormat,
+    checkpoint_encoded_len: Option<u64>,
+    checkpoint_encoded_checksum: Option<u64>,
+    canonical_manifest_encoded_len: Option<u64>,
+    canonical_manifest_encoded_checksum: Option<u64>,
+    canonical_adjacency_manifest_encoded_len: Option<u64>,
+    canonical_adjacency_manifest_encoded_checksum: Option<u64>,
+    property_spill_manifest_encoded_len: Option<u64>,
+    property_spill_manifest_encoded_checksum: Option<u64>,
+    property_projection_manifest_encoded_len: Option<u64>,
+    property_projection_manifest_encoded_checksum: Option<u64>,
+    wal_generation: u64,
     checkpoint_epoch: u64,
     checkpoint_commit_epoch: u64,
     oldest_reader_commit_epoch: Option<u64>,
@@ -7996,6 +10398,12 @@ struct DurableStore {
     next_lsn: u64,
     source_scan_commit_epoch: Option<u64>,
     source_scan_descriptor_checksum: Option<u64>,
+    store_id: StoreId,
+    segment_cache: Arc<SegmentCache>,
+    canonical_segments: Option<CanonicalSegmentReader>,
+    canonical_adjacency: Option<CanonicalAdjacencyReader>,
+    persistent_property_projection: Option<PersistentPropertyProjectionReader>,
+    source_scan_reader: FileSegmentRangeReader,
     durability: DurabilityPolicy,
     read_only: bool,
     telemetry: Option<Arc<dyn TelemetrySink>>,
@@ -8008,10 +10416,30 @@ struct CheckpointImage<'a> {
     next_rel_id: u64,
     search_projection_change_log_start_epoch: u64,
     search_projection_graph_changes: &'a [SearchProjectionGraphChange],
-    nodes: &'a CowSegmentedMap<NodeId, NodeRecord>,
-    relationships: &'a CowSegmentedMap<RelId, RelRecord>,
+    statistics: &'a GraphStatistics,
     projected_graphs: &'a BTreeMap<String, ProjectedGraphDefinition>,
     initial_import_source_fingerprint: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DurableArtifactMetadata {
+    encoded_len: u64,
+    encoded_checksum: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BackupFileEntry {
+    name: String,
+    encoded_len: u64,
+    encoded_checksum: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BackupManifest {
+    generation: u64,
+    checkpoint_commit_epoch: u64,
+    files: Vec<BackupFileEntry>,
+    checksum: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8020,13 +10448,36 @@ enum DurableOpenMode {
     ExistingOnly,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DurableFormat {
+    LegacyV1,
+    GenerationalV2,
+}
+
+impl DurableFormat {
+    const fn storage_version(self) -> &'static str {
+        match self {
+            Self::LegacyV1 => LEGACY_STORAGE_VERSION,
+            Self::GenerationalV2 => STORAGE_VERSION,
+        }
+    }
+}
+
 impl DurableStore {
-    fn open(path: &Path, durability: DurabilityPolicy) -> Result<Self> {
+    fn open(
+        path: &Path,
+        durability: DurabilityPolicy,
+        segment_cache_capacity_bytes: u64,
+    ) -> Result<Self> {
         fs::create_dir_all(path)?;
-        Self::open_existing(path, durability, false)
+        Self::open_existing(path, durability, false, true, segment_cache_capacity_bytes)
     }
 
-    fn open_existing_only(path: &Path, durability: DurabilityPolicy) -> Result<Self> {
+    fn open_existing_only(
+        path: &Path,
+        durability: DurabilityPolicy,
+        segment_cache_capacity_bytes: u64,
+    ) -> Result<Self> {
         if !path.exists() {
             return Err(SkeinError::Storage(format!(
                 "read-only database path does not exist: {}",
@@ -8039,19 +10490,102 @@ impl DurableStore {
                 path.display()
             )));
         }
-        Self::open_existing(path, durability, true)
+        Self::open_existing(path, durability, true, false, segment_cache_capacity_bytes)
     }
 
-    fn open_existing(path: &Path, durability: DurabilityPolicy, read_only: bool) -> Result<Self> {
+    fn open_existing(
+        path: &Path,
+        durability: DurabilityPolicy,
+        read_only: bool,
+        initialize_if_empty: bool,
+        segment_cache_capacity_bytes: u64,
+    ) -> Result<Self> {
+        let directory_lease = DatabaseDirectoryLease::acquire(path)
+            .map_err(|error| SkeinError::Storage(error.to_string()))?;
         let manifest_path = path.join(MANIFEST_FILE);
-        let manifest = DurableManifest::load(&manifest_path)?;
+        let manifest = if manifest_path.exists() {
+            DurableManifest::load(&manifest_path)?
+        } else if path.join(LEGACY_CHECKPOINT_FILE).exists() || path.join(LEGACY_WAL_FILE).exists()
+        {
+            DurableManifest::legacy_default()
+        } else if has_generational_artifacts(path)? {
+            return Err(SkeinError::Storage(
+                "database has generational artifacts but no durable manifest".to_string(),
+            ));
+        } else if initialize_if_empty {
+            let manifest = DurableManifest::initial_generation();
+            manifest.write(&manifest_path)?;
+            manifest
+        } else {
+            return Err(SkeinError::Storage(
+                "read-only database directory has no durable manifest".to_string(),
+            ));
+        };
+        manifest.validate()?;
+        let checkpoint_path = manifest.checkpoint_path(path);
+        let wal_path = manifest.wal_path(path);
+        let segment_cache = Arc::new(SegmentCache::new(segment_cache_capacity_bytes));
+        let store_id = store_id_for_path(path)?;
+        let canonical_segments = load_published_canonical_segments(
+            path,
+            manifest,
+            Arc::clone(&segment_cache),
+            store_id,
+        )?;
+        let canonical_adjacency = load_published_canonical_adjacency(
+            path,
+            manifest,
+            Arc::clone(&segment_cache),
+            store_id,
+        )?;
+        let persistent_property_projection = load_published_property_projection(
+            path,
+            manifest,
+            Arc::clone(&segment_cache),
+            store_id,
+        )?;
+        if let (Some(canonical), Some(adjacency)) = (&canonical_segments, &canonical_adjacency)
+            && canonical.manifest().relationship_count != adjacency.manifest().relationship_count
+        {
+            return Err(SkeinError::Storage(
+                "canonical adjacency relationship count does not match canonical segments"
+                    .to_string(),
+            ));
+        }
+        let mut source_scan_reader = FileSegmentRangeReader::new().with_cache(
+            Arc::clone(&segment_cache),
+            store_id,
+            ManifestGeneration(manifest.checkpoint_epoch),
+        );
+        source_scan_reader.register(
+            source_scan::SOURCE_SCAN_ARTIFACT_ID,
+            path.join(source_scan::SOURCE_SCAN_PAYLOAD_FILE),
+        );
         Ok(Self {
+            _directory_lease: directory_lease,
             root_path: path.to_path_buf(),
-            checkpoint_path: path.join(CHECKPOINT_FILE),
+            checkpoint_path,
             manifest_path,
             projected_graphs_path: path.join(PROJECTED_GRAPHS_FILE),
             stable_id_mapping_path: path.join(STABLE_ID_MAPPING_FILE),
-            wal_path: path.join(WAL_FILE),
+            wal_path,
+            format: manifest.format,
+            checkpoint_encoded_len: manifest.checkpoint_encoded_len,
+            checkpoint_encoded_checksum: manifest.checkpoint_encoded_checksum,
+            canonical_manifest_encoded_len: manifest.canonical_manifest_encoded_len,
+            canonical_manifest_encoded_checksum: manifest.canonical_manifest_encoded_checksum,
+            canonical_adjacency_manifest_encoded_len: manifest
+                .canonical_adjacency_manifest_encoded_len,
+            canonical_adjacency_manifest_encoded_checksum: manifest
+                .canonical_adjacency_manifest_encoded_checksum,
+            property_spill_manifest_encoded_len: manifest.property_spill_manifest_encoded_len,
+            property_spill_manifest_encoded_checksum: manifest
+                .property_spill_manifest_encoded_checksum,
+            property_projection_manifest_encoded_len: manifest
+                .property_projection_manifest_encoded_len,
+            property_projection_manifest_encoded_checksum: manifest
+                .property_projection_manifest_encoded_checksum,
+            wal_generation: manifest.wal_generation,
             checkpoint_epoch: manifest.checkpoint_epoch,
             checkpoint_commit_epoch: manifest.checkpoint_commit_epoch,
             oldest_reader_commit_epoch: manifest.oldest_reader_commit_epoch,
@@ -8060,6 +10594,12 @@ impl DurableStore {
             next_lsn: manifest.next_lsn,
             source_scan_commit_epoch: manifest.source_scan_commit_epoch,
             source_scan_descriptor_checksum: manifest.source_scan_descriptor_checksum,
+            store_id,
+            segment_cache,
+            canonical_segments,
+            canonical_adjacency,
+            persistent_property_projection,
+            source_scan_reader,
             durability,
             read_only,
             telemetry: None,
@@ -8068,6 +10608,163 @@ impl DurableStore {
 
     fn root_path(&self) -> &Path {
         &self.root_path
+    }
+
+    fn backup_to(&self, destination: &Path) -> Result<StorageBackupReport> {
+        if self.format != DurableFormat::GenerationalV2 {
+            return Err(SkeinError::Storage(
+                "legacy storage must be checkpointed before backup".to_string(),
+            ));
+        }
+        let generation = self.checkpoint_epoch;
+        if self.checkpoint_encoded_len.is_none() {
+            return Err(SkeinError::Storage(
+                "storage must have a published checkpoint before backup".to_string(),
+            ));
+        }
+        validate_new_backup_destination(&self.root_path, destination)?;
+        fs::create_dir(destination)?;
+
+        let result = (|| {
+            let mut sources = vec![
+                (MANIFEST_FILE.to_string(), self.manifest_path.clone()),
+                (
+                    checkpoint_generation_file(generation),
+                    self.checkpoint_path.clone(),
+                ),
+                (wal_generation_file(generation), self.wal_path.clone()),
+            ];
+            if self.canonical_manifest_encoded_len.is_some() {
+                sources.push((
+                    canonical_artifact_generation_file(generation),
+                    self.root_path
+                        .join(canonical_artifact_generation_file(generation)),
+                ));
+                sources.push((
+                    canonical_manifest_generation_file(generation),
+                    self.root_path
+                        .join(canonical_manifest_generation_file(generation)),
+                ));
+            }
+            if self.canonical_adjacency_manifest_encoded_len.is_some() {
+                sources.push((
+                    canonical_adjacency_artifact_generation_file(generation),
+                    self.root_path
+                        .join(canonical_adjacency_artifact_generation_file(generation)),
+                ));
+                sources.push((
+                    canonical_adjacency_manifest_generation_file(generation),
+                    self.root_path
+                        .join(canonical_adjacency_manifest_generation_file(generation)),
+                ));
+            }
+            if self.property_spill_manifest_encoded_len.is_some() {
+                sources.push((
+                    property_spill_artifact_generation_file(generation),
+                    self.root_path
+                        .join(property_spill_artifact_generation_file(generation)),
+                ));
+                sources.push((
+                    property_spill_manifest_generation_file(generation),
+                    self.root_path
+                        .join(property_spill_manifest_generation_file(generation)),
+                ));
+            }
+            if self.property_projection_manifest_encoded_len.is_some() {
+                sources.push((
+                    property_projection_artifact_generation_file(generation),
+                    self.root_path
+                        .join(property_projection_artifact_generation_file(generation)),
+                ));
+                sources.push((
+                    property_projection_manifest_generation_file(generation),
+                    self.root_path
+                        .join(property_projection_manifest_generation_file(generation)),
+                ));
+            }
+            let mut files = Vec::with_capacity(sources.len().saturating_add(1));
+            for (name, source) in sources {
+                files.push(copy_backup_file(&source, &destination.join(&name), &name)?);
+            }
+            if self.stable_id_mapping_path.exists() {
+                files.push(copy_backup_file(
+                    &self.stable_id_mapping_path,
+                    &destination.join(STABLE_ID_MAPPING_FILE),
+                    STABLE_ID_MAPPING_FILE,
+                )?);
+            }
+            files.sort_by(|left, right| left.name.cmp(&right.name));
+            validate_backup_files(destination, &files, generation)?;
+            let backup_manifest = BackupManifest::write(
+                &destination.join(BACKUP_MANIFEST_FILE),
+                generation,
+                self.checkpoint_commit_epoch,
+                files,
+            )?;
+            sync_parent_dir(&destination.join(BACKUP_MANIFEST_FILE))?;
+            let total_bytes = backup_manifest
+                .files
+                .iter()
+                .try_fold(0u64, |total, file| total.checked_add(file.encoded_len))
+                .ok_or_else(|| SkeinError::Storage("backup byte count overflow".to_string()))?;
+            Ok(StorageBackupReport {
+                generation,
+                checkpoint_commit_epoch: self.checkpoint_commit_epoch,
+                file_count: backup_manifest.files.len(),
+                total_bytes,
+                manifest_checksum: backup_manifest.checksum,
+            })
+        })();
+
+        if result.is_err() {
+            let _ = fs::remove_dir_all(destination);
+        }
+        result
+    }
+
+    fn read_checkpoint_text(&self, config: WalReplayConfig) -> Result<String> {
+        let metadata = fs::metadata(&self.checkpoint_path)?;
+        if config
+            .max_checkpoint_encoded_bytes
+            .is_some_and(|limit| metadata.len() > limit)
+        {
+            return Err(SkeinError::Storage(format!(
+                "checkpoint encoded byte limit exceeded: max_checkpoint_encoded_bytes={}",
+                config.max_checkpoint_encoded_bytes.unwrap_or_default()
+            )));
+        }
+        let bytes = fs::read(&self.checkpoint_path)?;
+        if self.format == DurableFormat::GenerationalV2 {
+            let expected_len = self.checkpoint_encoded_len.ok_or_else(|| {
+                SkeinError::Storage(
+                    "generational checkpoint is missing its encoded length".to_string(),
+                )
+            })?;
+            let actual_len = u64::try_from(bytes.len()).map_err(|_| {
+                SkeinError::Storage("checkpoint encoded length exceeds u64".to_string())
+            })?;
+            if actual_len != expected_len {
+                return Err(SkeinError::Storage(format!(
+                    "checkpoint encoded length mismatch: expected {expected_len}, got {actual_len}"
+                )));
+            }
+            let expected_checksum = self.checkpoint_encoded_checksum.ok_or_else(|| {
+                SkeinError::Storage(
+                    "generational checkpoint is missing its encoded checksum".to_string(),
+                )
+            })?;
+            let actual_checksum = checksum_bytes(&bytes);
+            if actual_checksum != expected_checksum {
+                return Err(SkeinError::Storage(format!(
+                    "checkpoint encoded checksum mismatch: expected {expected_checksum}, got {actual_checksum}"
+                )));
+            }
+        }
+        read_durable_text_bytes_with_limit(
+            &bytes,
+            "checkpoint",
+            config.max_checkpoint_decoded_bytes,
+        )
     }
 
     fn load_source_scan_manifest(&self, _graph_epoch: u64) -> Result<Option<ScanSegmentManifest>> {
@@ -8152,10 +10849,17 @@ impl DurableStore {
             lsn: self.next_lsn,
             op,
         };
+        let encoded_entry = entry.encode();
         let started = std::time::Instant::now();
+        let mut byte_count = encoded_entry.len().saturating_add(1) as u64;
         let result = (|| {
             let (mut file, created) = self.open_wal_append()?;
-            writeln!(file, "{}", entry.encode())?;
+            if created && self.format == DurableFormat::GenerationalV2 {
+                let header = encode_wal_header(self.wal_generation, self.wal_replay_start_lsn);
+                byte_count = byte_count.saturating_add(header.len().saturating_add(1) as u64);
+                writeln!(file, "{header}")?;
+            }
+            writeln!(file, "{encoded_entry}")?;
             self.finish_wal_append(&mut file, created)
         })();
         if let Some(telemetry) = &self.telemetry {
@@ -8164,12 +10868,15 @@ impl DurableStore {
                 success: result.is_ok(),
                 elapsed_micros: elapsed_micros(started),
                 item_count: operation_count,
+                byte_count,
+                fsync_micros: result.as_ref().copied().unwrap_or_default(),
+                generation: Some(self.wal_generation),
             });
         }
         if result.is_ok() {
             self.next_lsn += 1;
         }
-        result
+        result.map(|_| ())
     }
 
     fn open_wal_append(&self) -> Result<(File, bool)> {
@@ -8181,29 +10888,201 @@ impl DurableStore {
         Ok((file, created))
     }
 
-    fn finish_wal_append(&self, file: &mut File, created: bool) -> Result<()> {
+    fn finish_wal_append(&self, file: &mut File, created: bool) -> Result<u64> {
         file.flush()?;
+        let mut fsync_micros = 0;
         if self.durability == DurabilityPolicy::SyncOnEveryWrite {
+            let started = std::time::Instant::now();
             file.sync_data()?;
             if created {
                 sync_parent_dir(&self.wal_path)?;
             }
+            fsync_micros = elapsed_micros(started);
         }
-        Ok(())
+        Ok(fsync_micros)
     }
 
-    fn write_checkpoint(&self, image: CheckpointImage<'_>) -> Result<()> {
+    fn write_canonical_segments<N, R>(
+        &self,
+        nodes: N,
+        relationships: R,
+        generation: u64,
+    ) -> Result<(DurableArtifactMetadata, DurableArtifactMetadata)>
+    where
+        N: IntoIterator<Item = std::result::Result<NodeRecord, CanonicalSegmentError>>,
+        R: IntoIterator<Item = std::result::Result<RelRecord, CanonicalSegmentError>>,
+    {
+        let artifact_path = self
+            .root_path
+            .join(canonical_artifact_generation_file(generation));
+        let property_artifact_path = self
+            .root_path
+            .join(property_spill_artifact_generation_file(generation));
+        let (canonical_manifest, property_spill_manifest) =
+            CanonicalSegmentWriter::new(CanonicalSegmentConfig::default())
+                .write_fallible_with_property_spills(
+                    &artifact_path,
+                    &property_artifact_path,
+                    ManifestGeneration(generation),
+                    nodes,
+                    relationships,
+                    PropertySpillConfig::default(),
+                )
+                .map_err(|error| SkeinError::Storage(error.to_string()))?;
+        let encoded = canonical_manifest
+            .encode()
+            .map_err(|error| SkeinError::Storage(error.to_string()))?;
+        let encoded_len = encoded.len() as u64;
+        let encoded_checksum = checksum_bytes(encoded.as_bytes());
+        let manifest_path = self
+            .root_path
+            .join(canonical_manifest_generation_file(generation));
+        let tmp_path = manifest_path.with_extension("skein.tmp");
+        {
+            let mut file = File::create(&tmp_path)?;
+            file.write_all(encoded.as_bytes())?;
+            file.sync_all()?;
+        }
+        fs::rename(&tmp_path, &manifest_path)?;
+        sync_parent_dir(&manifest_path)?;
+        let property_encoded = property_spill_manifest
+            .encode()
+            .map_err(|error| SkeinError::Storage(error.to_string()))?;
+        let property_manifest_path = self
+            .root_path
+            .join(property_spill_manifest_generation_file(generation));
+        let property_tmp_path = property_manifest_path.with_extension("skein.tmp");
+        {
+            let mut file = File::create(&property_tmp_path)?;
+            file.write_all(property_encoded.as_bytes())?;
+            file.sync_all()?;
+        }
+        fs::rename(&property_tmp_path, &property_manifest_path)?;
+        sync_parent_dir(&property_manifest_path)?;
+        Ok((
+            DurableArtifactMetadata {
+                encoded_len,
+                encoded_checksum,
+            },
+            DurableArtifactMetadata {
+                encoded_len: property_encoded.len() as u64,
+                encoded_checksum: checksum_bytes(property_encoded.as_bytes()),
+            },
+        ))
+    }
+
+    fn write_canonical_adjacency<R>(
+        &self,
+        relationships: R,
+        generation: u64,
+    ) -> Result<DurableArtifactMetadata>
+    where
+        R: IntoIterator<
+            Item = std::result::Result<RelRecord, skein_storage::CanonicalAdjacencyError>,
+        >,
+    {
+        let artifact_path = self
+            .root_path
+            .join(canonical_adjacency_artifact_generation_file(generation));
+        let output = CanonicalAdjacencyWriter::new(CanonicalAdjacencyConfig::default())
+            .write_fallible(
+                &artifact_path,
+                ManifestGeneration(generation),
+                relationships,
+            )
+            .map_err(|error| SkeinError::Storage(error.to_string()))?;
+        let encoded = output
+            .manifest
+            .encode()
+            .map_err(|error| SkeinError::Storage(error.to_string()))?;
+        let encoded_len = encoded.len() as u64;
+        let encoded_checksum = checksum_bytes(encoded.as_bytes());
+        let manifest_path = self
+            .root_path
+            .join(canonical_adjacency_manifest_generation_file(generation));
+        let tmp_path = manifest_path.with_extension("skein.tmp");
+        {
+            let mut file = File::create(&tmp_path)?;
+            file.write_all(encoded.as_bytes())?;
+            file.sync_all()?;
+        }
+        fs::rename(&tmp_path, &manifest_path)?;
+        sync_parent_dir(&manifest_path)?;
+        Ok(DurableArtifactMetadata {
+            encoded_len,
+            encoded_checksum,
+        })
+    }
+
+    fn write_persistent_property_projection<N>(
+        &self,
+        definitions: Vec<PersistentPropertyProjectionDefinition>,
+        nodes: N,
+        generation: u64,
+        source_commit_epoch: u64,
+    ) -> Result<DurableArtifactMetadata>
+    where
+        N: IntoIterator<
+            Item = std::result::Result<
+                NodeRecord,
+                skein_storage::PersistentPropertyProjectionError,
+            >,
+        >,
+    {
+        let artifact_path = self
+            .root_path
+            .join(property_projection_artifact_generation_file(generation));
+        let output =
+            PersistentPropertyProjectionWriter::new(PersistentPropertyProjectionConfig::default())
+                .write_fallible(
+                    &artifact_path,
+                    ManifestGeneration(generation),
+                    source_commit_epoch,
+                    definitions,
+                    nodes,
+                )
+                .map_err(|error| SkeinError::Storage(error.to_string()))?;
+        let encoded = output
+            .manifest
+            .encode()
+            .map_err(|error| SkeinError::Storage(error.to_string()))?;
+        let encoded_len = encoded.len() as u64;
+        let encoded_checksum = checksum_bytes(encoded.as_bytes());
+        let manifest_path = self
+            .root_path
+            .join(property_projection_manifest_generation_file(generation));
+        let tmp_path = manifest_path.with_extension("skein.tmp");
+        {
+            let mut file = File::create(&tmp_path)?;
+            file.write_all(encoded.as_bytes())?;
+            file.sync_all()?;
+        }
+        fs::rename(&tmp_path, &manifest_path)?;
+        sync_parent_dir(&manifest_path)?;
+        Ok(DurableArtifactMetadata {
+            encoded_len,
+            encoded_checksum,
+        })
+    }
+
+    fn write_checkpoint(
+        &self,
+        image: CheckpointImage<'_>,
+        generation: u64,
+    ) -> Result<DurableArtifactMetadata> {
         validate_search_projection_checkpoint_changes(
             image.search_projection_change_log_start_epoch,
             image.commit_epoch,
             image.search_projection_graph_changes,
         )?;
         let mut body = String::new();
-        body.push_str("SKEIN_CHECKPOINT_V1\n");
+        body.push_str(&format!("{CHECKPOINT_HEADER_V2}\n"));
         body.push_str(&format!("version\t{STORAGE_VERSION}\n"));
+        body.push_str(&format!("generation\t{generation}\n"));
         body.push_str(&format!("commit_epoch\t{}\n", image.commit_epoch));
         body.push_str(&format!("next_node_id\t{}\n", image.next_node_id));
         body.push_str(&format!("next_rel_id\t{}\n", image.next_rel_id));
+        body.push_str("canonical_records\ttrue\n");
         body.push_str(&format!(
             "search_projection_change_log_start_epoch\t{}\n",
             image.search_projection_change_log_start_epoch
@@ -8323,10 +11202,14 @@ impl DurableStore {
                 encode_string(&constraint.property)
             ));
         }
-        let statistics = compute_statistics(image.nodes, image.relationships, image.commit_epoch);
+        let statistics = image.statistics;
         body.push_str(&format!(
             "stat_commit_epoch\t{}\n",
             statistics.computed_at_commit_epoch
+        ));
+        body.push_str(&format!(
+            "stat_advanced_complete\t{}\n",
+            statistics.advanced_statistics_complete
         ));
         body.push_str(&format!(
             "stat_histogram_sample_limit\t{}\n",
@@ -8460,36 +11343,26 @@ impl DurableStore {
                 encode_string_vec(&definition.rel_types)
             ));
         }
-        for node in image.nodes.values() {
-            body.push_str(&format!(
-                "node\t{}\t{}\t{}\n",
-                node.id.0,
-                encode_label_set(&node.labels),
-                encode_properties(&node.properties)
-            ));
-        }
-        for relationship in image.relationships.values() {
-            body.push_str(&format!(
-                "rel\t{}\t{}\t{}\t{}\t{}\n",
-                relationship.id.0,
-                relationship.source.0,
-                relationship.target.0,
-                relationship.rel_type.0,
-                encode_properties(&relationship.properties)
-            ));
-        }
         let checksum = checksum_bytes(body.as_bytes());
         let data = format!("{body}checksum\t{checksum}\n");
-        let tmp_path = self.checkpoint_path.with_extension("skein.tmp");
+        let checkpoint_path = self.root_path.join(checkpoint_generation_file(generation));
+        let tmp_path = checkpoint_path.with_extension("skein.tmp");
+        let encoded = encode_durable_text(&data, DurableCompression::default())?;
+        let encoded_len = u64::try_from(encoded.len()).map_err(|_| {
+            SkeinError::Storage("checkpoint encoded length exceeds u64".to_string())
+        })?;
+        let encoded_checksum = checksum_bytes(&encoded);
         {
             let mut file = File::create(&tmp_path)?;
-            let encoded = encode_durable_text(&data, DurableCompression::default())?;
             file.write_all(&encoded)?;
             file.sync_all()?;
         }
-        fs::rename(tmp_path, &self.checkpoint_path)?;
-        sync_parent_dir(&self.checkpoint_path)?;
-        Ok(())
+        fs::rename(tmp_path, &checkpoint_path)?;
+        sync_parent_dir(&checkpoint_path)?;
+        Ok(DurableArtifactMetadata {
+            encoded_len,
+            encoded_checksum,
+        })
     }
 
     fn write_projected_graph_artifacts(&self, body: &str) -> Result<()> {
@@ -8505,6 +11378,14 @@ impl DurableStore {
         fs::rename(tmp_path, &self.projected_graphs_path)?;
         sync_parent_dir(&self.projected_graphs_path)?;
         Ok(())
+    }
+
+    fn remove_projected_graph_artifacts(&self) -> Result<()> {
+        match fs::remove_file(&self.projected_graphs_path) {
+            Ok(()) => sync_parent_dir(&self.projected_graphs_path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn load_projected_graph_artifacts(&self) -> Result<BTreeMap<String, ProjectedGraphArtifact>> {
@@ -8565,43 +11446,182 @@ impl DurableStore {
         decode_stable_id_mapping(body)
     }
 
-    fn truncate_wal(&mut self) -> Result<()> {
-        File::create(&self.wal_path)?.sync_all()?;
-        self.next_lsn = 1;
-        Ok(())
+    fn prepare_wal_generation(&self, generation: u64) -> Result<()> {
+        let wal_path = self.root_path.join(wal_generation_file(generation));
+        let tmp_path = wal_path.with_extension("skein.tmp");
+        let header = encode_wal_header(generation, self.next_lsn);
+        {
+            let mut file = File::create(&tmp_path)?;
+            writeln!(file, "{header}")?;
+            file.sync_all()?;
+        }
+        fs::rename(tmp_path, &wal_path)?;
+        sync_parent_dir(&wal_path)
     }
 
     fn publish_checkpoint_manifest(
         &mut self,
+        generation: u64,
+        checkpoint_artifact: DurableArtifactMetadata,
+        canonical_manifest_artifact: DurableArtifactMetadata,
+        canonical_adjacency_manifest_artifact: DurableArtifactMetadata,
+        property_spill_manifest_artifact: DurableArtifactMetadata,
+        property_projection_manifest_artifact: DurableArtifactMetadata,
         checkpoint_commit_epoch: u64,
         oldest_reader_commit_epoch: Option<u64>,
         source_scan_publication: Option<source_scan::SourceScanPublication>,
     ) -> Result<()> {
-        self.checkpoint_epoch += 1;
-        self.checkpoint_commit_epoch = checkpoint_commit_epoch;
-        self.oldest_reader_commit_epoch = oldest_reader_commit_epoch;
-        self.safe_reclaim_commit_epoch =
-            safe_reclaim_commit_epoch(self.checkpoint_commit_epoch, oldest_reader_commit_epoch);
-        self.wal_replay_start_lsn = self.next_lsn;
-        self.source_scan_commit_epoch = source_scan_publication.map(|value| value.graph_epoch());
-        self.source_scan_descriptor_checksum =
+        let safe_reclaim_commit_epoch =
+            safe_reclaim_commit_epoch(checkpoint_commit_epoch, oldest_reader_commit_epoch);
+        let source_scan_commit_epoch = source_scan_publication.map(|value| value.graph_epoch());
+        let source_scan_descriptor_checksum =
             source_scan_publication.map(|value| value.descriptor_checksum());
-        DurableManifest {
-            checkpoint_epoch: self.checkpoint_epoch,
-            checkpoint_commit_epoch: self.checkpoint_commit_epoch,
+        let manifest = DurableManifest {
+            format: DurableFormat::GenerationalV2,
+            checkpoint_generation: Some(generation),
+            checkpoint_encoded_len: Some(checkpoint_artifact.encoded_len),
+            checkpoint_encoded_checksum: Some(checkpoint_artifact.encoded_checksum),
+            canonical_manifest_encoded_len: Some(canonical_manifest_artifact.encoded_len),
+            canonical_manifest_encoded_checksum: Some(canonical_manifest_artifact.encoded_checksum),
+            canonical_adjacency_manifest_encoded_len: Some(
+                canonical_adjacency_manifest_artifact.encoded_len,
+            ),
+            canonical_adjacency_manifest_encoded_checksum: Some(
+                canonical_adjacency_manifest_artifact.encoded_checksum,
+            ),
+            property_spill_manifest_encoded_len: Some(property_spill_manifest_artifact.encoded_len),
+            property_spill_manifest_encoded_checksum: Some(
+                property_spill_manifest_artifact.encoded_checksum,
+            ),
+            property_projection_manifest_encoded_len: Some(
+                property_projection_manifest_artifact.encoded_len,
+            ),
+            property_projection_manifest_encoded_checksum: Some(
+                property_projection_manifest_artifact.encoded_checksum,
+            ),
+            wal_generation: generation,
+            checkpoint_epoch: generation,
+            checkpoint_commit_epoch,
             oldest_reader_commit_epoch,
-            safe_reclaim_commit_epoch: self.safe_reclaim_commit_epoch,
+            safe_reclaim_commit_epoch,
             wal_replay_start_lsn: self.next_lsn,
             next_lsn: self.next_lsn,
-            source_scan_commit_epoch: self.source_scan_commit_epoch,
-            source_scan_descriptor_checksum: self.source_scan_descriptor_checksum,
+            source_scan_commit_epoch,
+            source_scan_descriptor_checksum,
+        };
+        manifest.validate()?;
+        manifest.write(&self.manifest_path)?;
+        checkpoint_publish_failpoint(CheckpointPublishStage::ManifestPublished)?;
+
+        self.format = manifest.format;
+        self.checkpoint_path = manifest.checkpoint_path(&self.root_path);
+        self.wal_path = manifest.wal_path(&self.root_path);
+        self.checkpoint_encoded_len = manifest.checkpoint_encoded_len;
+        self.checkpoint_encoded_checksum = manifest.checkpoint_encoded_checksum;
+        self.canonical_manifest_encoded_len = manifest.canonical_manifest_encoded_len;
+        self.canonical_manifest_encoded_checksum = manifest.canonical_manifest_encoded_checksum;
+        self.canonical_adjacency_manifest_encoded_len =
+            manifest.canonical_adjacency_manifest_encoded_len;
+        self.canonical_adjacency_manifest_encoded_checksum =
+            manifest.canonical_adjacency_manifest_encoded_checksum;
+        self.property_spill_manifest_encoded_len = manifest.property_spill_manifest_encoded_len;
+        self.property_spill_manifest_encoded_checksum =
+            manifest.property_spill_manifest_encoded_checksum;
+        self.property_projection_manifest_encoded_len =
+            manifest.property_projection_manifest_encoded_len;
+        self.property_projection_manifest_encoded_checksum =
+            manifest.property_projection_manifest_encoded_checksum;
+        self.wal_generation = manifest.wal_generation;
+        self.checkpoint_epoch = manifest.checkpoint_epoch;
+        self.checkpoint_commit_epoch = manifest.checkpoint_commit_epoch;
+        self.oldest_reader_commit_epoch = manifest.oldest_reader_commit_epoch;
+        self.safe_reclaim_commit_epoch = manifest.safe_reclaim_commit_epoch;
+        self.wal_replay_start_lsn = manifest.wal_replay_start_lsn;
+        self.source_scan_commit_epoch = manifest.source_scan_commit_epoch;
+        self.source_scan_descriptor_checksum = manifest.source_scan_descriptor_checksum;
+        self.canonical_segments = load_published_canonical_segments(
+            &self.root_path,
+            manifest,
+            Arc::clone(&self.segment_cache),
+            self.store_id,
+        )?;
+        self.canonical_adjacency = load_published_canonical_adjacency(
+            &self.root_path,
+            manifest,
+            Arc::clone(&self.segment_cache),
+            self.store_id,
+        )?;
+        self.persistent_property_projection = load_published_property_projection(
+            &self.root_path,
+            manifest,
+            Arc::clone(&self.segment_cache),
+            self.store_id,
+        )?;
+        if let (Some(canonical), Some(adjacency)) =
+            (&self.canonical_segments, &self.canonical_adjacency)
+            && canonical.manifest().relationship_count != adjacency.manifest().relationship_count
+        {
+            return Err(SkeinError::Storage(
+                "canonical adjacency relationship count does not match canonical segments"
+                    .to_string(),
+            ));
         }
-        .write(&self.manifest_path)
+        self.source_scan_reader = FileSegmentRangeReader::new().with_cache(
+            Arc::clone(&self.segment_cache),
+            self.store_id,
+            ManifestGeneration(generation),
+        );
+        self.source_scan_reader.register(
+            source_scan::SOURCE_SCAN_ARTIFACT_ID,
+            self.root_path.join(source_scan::SOURCE_SCAN_PAYLOAD_FILE),
+        );
+        self.reclaim_old_generations(generation)
+    }
+
+    fn reclaim_old_generations(&self, current_generation: u64) -> Result<()> {
+        if self.oldest_reader_commit_epoch.is_some() {
+            return Ok(());
+        }
+        let retain_from = current_generation.saturating_sub(1);
+        for entry in fs::read_dir(&self.root_path)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let generation = parse_generation_file(name, "checkpoint.")
+                .or_else(|| parse_generation_file(name, "wal."))
+                .or_else(|| parse_generation_file(name, "canonical."))
+                .or_else(|| parse_canonical_manifest_generation_file(name))
+                .or_else(|| parse_generation_file(name, "adjacency."))
+                .or_else(|| parse_canonical_adjacency_manifest_generation_file(name))
+                .or_else(|| parse_generation_file(name, "properties."))
+                .or_else(|| parse_property_spill_manifest_generation_file(name))
+                .or_else(|| parse_generation_file(name, "property-index."))
+                .or_else(|| parse_property_projection_manifest_generation_file(name));
+            if generation.is_some_and(|generation| generation < retain_from) {
+                fs::remove_file(entry.path())?;
+            }
+        }
+        sync_parent_dir(&self.manifest_path)
     }
 }
 
 #[derive(Debug, Clone, Copy)]
 struct DurableManifest {
+    format: DurableFormat,
+    checkpoint_generation: Option<u64>,
+    checkpoint_encoded_len: Option<u64>,
+    checkpoint_encoded_checksum: Option<u64>,
+    canonical_manifest_encoded_len: Option<u64>,
+    canonical_manifest_encoded_checksum: Option<u64>,
+    canonical_adjacency_manifest_encoded_len: Option<u64>,
+    canonical_adjacency_manifest_encoded_checksum: Option<u64>,
+    property_spill_manifest_encoded_len: Option<u64>,
+    property_spill_manifest_encoded_checksum: Option<u64>,
+    property_projection_manifest_encoded_len: Option<u64>,
+    property_projection_manifest_encoded_checksum: Option<u64>,
+    wal_generation: u64,
     checkpoint_epoch: u64,
     checkpoint_commit_epoch: u64,
     oldest_reader_commit_epoch: Option<u64>,
@@ -8614,7 +11634,26 @@ struct DurableManifest {
 
 impl Default for DurableManifest {
     fn default() -> Self {
+        Self::initial_generation()
+    }
+}
+
+impl DurableManifest {
+    const fn initial_generation() -> Self {
         Self {
+            format: DurableFormat::GenerationalV2,
+            checkpoint_generation: None,
+            checkpoint_encoded_len: None,
+            checkpoint_encoded_checksum: None,
+            canonical_manifest_encoded_len: None,
+            canonical_manifest_encoded_checksum: None,
+            canonical_adjacency_manifest_encoded_len: None,
+            canonical_adjacency_manifest_encoded_checksum: None,
+            property_spill_manifest_encoded_len: None,
+            property_spill_manifest_encoded_checksum: None,
+            property_projection_manifest_encoded_len: None,
+            property_projection_manifest_encoded_checksum: None,
+            wal_generation: 0,
             checkpoint_epoch: 0,
             checkpoint_commit_epoch: 0,
             oldest_reader_commit_epoch: None,
@@ -8625,13 +11664,159 @@ impl Default for DurableManifest {
             source_scan_descriptor_checksum: None,
         }
     }
-}
 
-impl DurableManifest {
-    fn load(path: &Path) -> Result<Self> {
-        if !path.exists() {
-            return Ok(Self::default());
+    const fn legacy_default() -> Self {
+        Self {
+            format: DurableFormat::LegacyV1,
+            checkpoint_generation: None,
+            checkpoint_encoded_len: None,
+            checkpoint_encoded_checksum: None,
+            canonical_manifest_encoded_len: None,
+            canonical_manifest_encoded_checksum: None,
+            canonical_adjacency_manifest_encoded_len: None,
+            canonical_adjacency_manifest_encoded_checksum: None,
+            property_spill_manifest_encoded_len: None,
+            property_spill_manifest_encoded_checksum: None,
+            property_projection_manifest_encoded_len: None,
+            property_projection_manifest_encoded_checksum: None,
+            wal_generation: 0,
+            checkpoint_epoch: 0,
+            checkpoint_commit_epoch: 0,
+            oldest_reader_commit_epoch: None,
+            safe_reclaim_commit_epoch: 0,
+            wal_replay_start_lsn: 1,
+            next_lsn: 1,
+            source_scan_commit_epoch: None,
+            source_scan_descriptor_checksum: None,
         }
+    }
+
+    fn checkpoint_path(self, root: &Path) -> PathBuf {
+        match self.format {
+            DurableFormat::LegacyV1 => root.join(LEGACY_CHECKPOINT_FILE),
+            DurableFormat::GenerationalV2 => root.join(checkpoint_generation_file(
+                self.checkpoint_generation.unwrap_or(self.checkpoint_epoch),
+            )),
+        }
+    }
+
+    fn wal_path(self, root: &Path) -> PathBuf {
+        match self.format {
+            DurableFormat::LegacyV1 => root.join(LEGACY_WAL_FILE),
+            DurableFormat::GenerationalV2 => root.join(wal_generation_file(self.wal_generation)),
+        }
+    }
+
+    fn validate(self) -> Result<()> {
+        if self.wal_replay_start_lsn == 0 || self.next_lsn == 0 {
+            return Err(SkeinError::Storage(
+                "manifest WAL LSN values must be non-zero".to_string(),
+            ));
+        }
+        if self.next_lsn < self.wal_replay_start_lsn {
+            return Err(SkeinError::Storage(format!(
+                "manifest next LSN {} precedes replay start LSN {}",
+                self.next_lsn, self.wal_replay_start_lsn
+            )));
+        }
+        if self.format == DurableFormat::GenerationalV2 {
+            if self.canonical_manifest_encoded_len.is_some()
+                != self.canonical_manifest_encoded_checksum.is_some()
+            {
+                return Err(SkeinError::Storage(
+                    "manifest canonical segment metadata is incomplete".to_string(),
+                ));
+            }
+            if self.canonical_adjacency_manifest_encoded_len.is_some()
+                != self.canonical_adjacency_manifest_encoded_checksum.is_some()
+            {
+                return Err(SkeinError::Storage(
+                    "manifest canonical adjacency metadata is incomplete".to_string(),
+                ));
+            }
+            if self.canonical_adjacency_manifest_encoded_len.is_some()
+                && self.canonical_manifest_encoded_len.is_none()
+            {
+                return Err(SkeinError::Storage(
+                    "manifest canonical adjacency requires canonical segments".to_string(),
+                ));
+            }
+            if self.property_spill_manifest_encoded_len.is_some()
+                != self.property_spill_manifest_encoded_checksum.is_some()
+            {
+                return Err(SkeinError::Storage(
+                    "manifest property spill metadata is incomplete".to_string(),
+                ));
+            }
+            if self.property_spill_manifest_encoded_len.is_some()
+                && self.canonical_manifest_encoded_len.is_none()
+            {
+                return Err(SkeinError::Storage(
+                    "manifest property spills require canonical segments".to_string(),
+                ));
+            }
+            if self.property_projection_manifest_encoded_len.is_some()
+                != self.property_projection_manifest_encoded_checksum.is_some()
+            {
+                return Err(SkeinError::Storage(
+                    "manifest property projection metadata is incomplete".to_string(),
+                ));
+            }
+            if self.property_projection_manifest_encoded_len.is_some()
+                && self.canonical_manifest_encoded_len.is_none()
+            {
+                return Err(SkeinError::Storage(
+                    "manifest property projections require canonical segments".to_string(),
+                ));
+            }
+            if self.wal_generation != self.checkpoint_epoch {
+                return Err(SkeinError::Storage(format!(
+                    "manifest WAL generation {} does not match checkpoint epoch {}",
+                    self.wal_generation, self.checkpoint_epoch
+                )));
+            }
+            match self.checkpoint_generation {
+                Some(generation) => {
+                    if generation != self.checkpoint_epoch {
+                        return Err(SkeinError::Storage(format!(
+                            "manifest checkpoint generation {generation} does not match checkpoint epoch {}",
+                            self.checkpoint_epoch
+                        )));
+                    }
+                    if self.checkpoint_encoded_len.is_none()
+                        || self.checkpoint_encoded_checksum.is_none()
+                    {
+                        return Err(SkeinError::Storage(
+                            "manifest checkpoint artifact metadata is incomplete".to_string(),
+                        ));
+                    }
+                }
+                None => {
+                    if self.checkpoint_epoch != 0
+                        || self.checkpoint_commit_epoch != 0
+                        || self.checkpoint_encoded_len.is_some()
+                        || self.checkpoint_encoded_checksum.is_some()
+                        || self.canonical_manifest_encoded_len.is_some()
+                        || self.canonical_manifest_encoded_checksum.is_some()
+                        || self.canonical_adjacency_manifest_encoded_len.is_some()
+                        || self.canonical_adjacency_manifest_encoded_checksum.is_some()
+                        || self.property_spill_manifest_encoded_len.is_some()
+                        || self.property_spill_manifest_encoded_checksum.is_some()
+                        || self.property_projection_manifest_encoded_len.is_some()
+                        || self.property_projection_manifest_encoded_checksum.is_some()
+                    {
+                        return Err(SkeinError::Storage(
+                            "manifest without a checkpoint must describe generation zero"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn load(path: &Path) -> Result<Self> {
         let text = fs::read_to_string(path)?;
         let (body, checksum) = split_manifest_checksum(&text)?;
         let actual = checksum_bytes(body.as_bytes());
@@ -8640,15 +11825,73 @@ impl DurableManifest {
                 "manifest checksum mismatch: expected {checksum}, got {actual}"
             )));
         }
-
-        let mut manifest = Self::default();
+        let format = if body.lines().any(|line| line == MANIFEST_HEADER_V2) {
+            DurableFormat::GenerationalV2
+        } else if body.lines().any(|line| line == MANIFEST_HEADER_V1) {
+            DurableFormat::LegacyV1
+        } else {
+            return Err(SkeinError::Storage(
+                "manifest is missing a supported format header".to_string(),
+            ));
+        };
+        let mut manifest = match format {
+            DurableFormat::LegacyV1 => Self::legacy_default(),
+            DurableFormat::GenerationalV2 => Self::initial_generation(),
+        };
         for line in body.lines() {
-            if line == "SKEIN_MANIFEST_V1" {
+            if line == MANIFEST_HEADER_V1 || line == MANIFEST_HEADER_V2 {
                 continue;
             }
             let fields = line.split('\t').collect::<Vec<_>>();
             match fields.as_slice() {
-                ["version", version] => validate_storage_version(version)?,
+                ["version", version] => validate_storage_version_for_format(version, format)?,
+                ["checkpoint_generation", raw] => {
+                    manifest.checkpoint_generation =
+                        parse_optional_u64(raw, "checkpoint generation")?;
+                }
+                ["checkpoint_encoded_len", raw] => {
+                    manifest.checkpoint_encoded_len =
+                        parse_optional_u64(raw, "checkpoint encoded length")?;
+                }
+                ["checkpoint_encoded_checksum", raw] => {
+                    manifest.checkpoint_encoded_checksum =
+                        parse_optional_u64(raw, "checkpoint encoded checksum")?;
+                }
+                ["canonical_manifest_encoded_len", raw] => {
+                    manifest.canonical_manifest_encoded_len =
+                        parse_optional_u64(raw, "canonical manifest encoded length")?;
+                }
+                ["canonical_manifest_encoded_checksum", raw] => {
+                    manifest.canonical_manifest_encoded_checksum =
+                        parse_optional_u64(raw, "canonical manifest encoded checksum")?;
+                }
+                ["canonical_adjacency_manifest_encoded_len", raw] => {
+                    manifest.canonical_adjacency_manifest_encoded_len =
+                        parse_optional_u64(raw, "canonical adjacency manifest encoded length")?;
+                }
+                ["canonical_adjacency_manifest_encoded_checksum", raw] => {
+                    manifest.canonical_adjacency_manifest_encoded_checksum =
+                        parse_optional_u64(raw, "canonical adjacency manifest encoded checksum")?;
+                }
+                ["property_spill_manifest_encoded_len", raw] => {
+                    manifest.property_spill_manifest_encoded_len =
+                        parse_optional_u64(raw, "property spill manifest encoded length")?;
+                }
+                ["property_spill_manifest_encoded_checksum", raw] => {
+                    manifest.property_spill_manifest_encoded_checksum =
+                        parse_optional_u64(raw, "property spill manifest encoded checksum")?;
+                }
+                ["property_projection_manifest_encoded_len", raw] => {
+                    manifest.property_projection_manifest_encoded_len =
+                        parse_optional_u64(raw, "property projection manifest encoded length")?;
+                }
+                ["property_projection_manifest_encoded_checksum", raw] => {
+                    manifest.property_projection_manifest_encoded_checksum =
+                        parse_optional_u64(raw, "property projection manifest encoded checksum")?;
+                }
+                ["wal_generation", raw] => {
+                    manifest.wal_generation = parse_u64(raw, "WAL generation")?;
+                }
                 ["checkpoint_epoch", raw] => {
                     manifest.checkpoint_epoch = parse_u64(raw, "checkpoint epoch")?;
                 }
@@ -8691,13 +11934,64 @@ impl DurableManifest {
                 manifest.oldest_reader_commit_epoch,
             );
         }
+        manifest.validate()?;
         Ok(manifest)
     }
 
     fn write(&self, path: &Path) -> Result<()> {
         let mut body = String::new();
-        body.push_str("SKEIN_MANIFEST_V1\n");
-        body.push_str(&format!("version\t{STORAGE_VERSION}\n"));
+        match self.format {
+            DurableFormat::LegacyV1 => body.push_str(&format!("{MANIFEST_HEADER_V1}\n")),
+            DurableFormat::GenerationalV2 => body.push_str(&format!("{MANIFEST_HEADER_V2}\n")),
+        }
+        body.push_str(&format!("version\t{}\n", self.format.storage_version()));
+        if self.format == DurableFormat::GenerationalV2 {
+            body.push_str(&format!(
+                "checkpoint_generation\t{}\n",
+                encode_optional_u64(self.checkpoint_generation)
+            ));
+            body.push_str(&format!(
+                "checkpoint_encoded_len\t{}\n",
+                encode_optional_u64(self.checkpoint_encoded_len)
+            ));
+            body.push_str(&format!(
+                "checkpoint_encoded_checksum\t{}\n",
+                encode_optional_u64(self.checkpoint_encoded_checksum)
+            ));
+            body.push_str(&format!(
+                "canonical_manifest_encoded_len\t{}\n",
+                encode_optional_u64(self.canonical_manifest_encoded_len)
+            ));
+            body.push_str(&format!(
+                "canonical_manifest_encoded_checksum\t{}\n",
+                encode_optional_u64(self.canonical_manifest_encoded_checksum)
+            ));
+            body.push_str(&format!(
+                "canonical_adjacency_manifest_encoded_len\t{}\n",
+                encode_optional_u64(self.canonical_adjacency_manifest_encoded_len)
+            ));
+            body.push_str(&format!(
+                "canonical_adjacency_manifest_encoded_checksum\t{}\n",
+                encode_optional_u64(self.canonical_adjacency_manifest_encoded_checksum)
+            ));
+            body.push_str(&format!(
+                "property_spill_manifest_encoded_len\t{}\n",
+                encode_optional_u64(self.property_spill_manifest_encoded_len)
+            ));
+            body.push_str(&format!(
+                "property_spill_manifest_encoded_checksum\t{}\n",
+                encode_optional_u64(self.property_spill_manifest_encoded_checksum)
+            ));
+            body.push_str(&format!(
+                "property_projection_manifest_encoded_len\t{}\n",
+                encode_optional_u64(self.property_projection_manifest_encoded_len)
+            ));
+            body.push_str(&format!(
+                "property_projection_manifest_encoded_checksum\t{}\n",
+                encode_optional_u64(self.property_projection_manifest_encoded_checksum)
+            ));
+            body.push_str(&format!("wal_generation\t{}\n", self.wal_generation));
+        }
         body.push_str(&format!("checkpoint_epoch\t{}\n", self.checkpoint_epoch));
         body.push_str(&format!(
             "checkpoint_commit_epoch\t{}\n",
@@ -8738,6 +12032,800 @@ impl DurableManifest {
     }
 }
 
+fn load_published_canonical_segments(
+    root: &Path,
+    durable_manifest: DurableManifest,
+    cache: Arc<SegmentCache>,
+    store_id: StoreId,
+) -> Result<Option<CanonicalSegmentReader>> {
+    let (Some(expected_len), Some(expected_checksum)) = (
+        durable_manifest.canonical_manifest_encoded_len,
+        durable_manifest.canonical_manifest_encoded_checksum,
+    ) else {
+        return Ok(None);
+    };
+    if expected_len > CANONICAL_MANIFEST_MAX_BYTES {
+        return Err(SkeinError::Storage(format!(
+            "canonical manifest exceeds {CANONICAL_MANIFEST_MAX_BYTES} bytes"
+        )));
+    }
+    let generation = durable_manifest.checkpoint_generation.ok_or_else(|| {
+        SkeinError::Storage(
+            "canonical manifest metadata requires a checkpoint generation".to_string(),
+        )
+    })?;
+    let manifest_path = root.join(canonical_manifest_generation_file(generation));
+    let encoded = fs::read(&manifest_path)?;
+    if encoded.len() as u64 != expected_len || checksum_bytes(&encoded) != expected_checksum {
+        return Err(SkeinError::Storage(
+            "canonical manifest artifact does not match the durable manifest".to_string(),
+        ));
+    }
+    let text = std::str::from_utf8(&encoded).map_err(|error| {
+        SkeinError::Storage(format!("canonical manifest is not UTF-8: {error}"))
+    })?;
+    let canonical_manifest = CanonicalSegmentManifest::decode(text)
+        .map_err(|error| SkeinError::Storage(error.to_string()))?;
+    if canonical_manifest.generation != ManifestGeneration(generation) {
+        return Err(SkeinError::Storage(format!(
+            "canonical manifest generation {} does not match durable generation {generation}",
+            canonical_manifest.generation.0
+        )));
+    }
+    let config = CanonicalSegmentConfig::default();
+    let max_segment_bytes = NonZeroU64::new(
+        config
+            .target_segment_bytes
+            .get()
+            .max(config.max_record_bytes.get().saturating_add(64)),
+    )
+    .expect("canonical segment maximum is non-zero");
+    let property_spills =
+        load_published_property_spills(root, durable_manifest, Arc::clone(&cache), store_id)?;
+    match property_spills {
+        Some(property_spills) => CanonicalSegmentReader::open_with_property_spills(
+            root.join(canonical_artifact_generation_file(generation)),
+            canonical_manifest,
+            cache,
+            store_id,
+            max_segment_bytes,
+            property_spills,
+        ),
+        None => CanonicalSegmentReader::open(
+            root.join(canonical_artifact_generation_file(generation)),
+            canonical_manifest,
+            cache,
+            store_id,
+            max_segment_bytes,
+        ),
+    }
+    .map(Some)
+    .map_err(|error| SkeinError::Storage(error.to_string()))
+}
+
+fn load_published_property_spills(
+    root: &Path,
+    durable_manifest: DurableManifest,
+    cache: Arc<SegmentCache>,
+    store_id: StoreId,
+) -> Result<Option<PropertySpillReader>> {
+    let (Some(expected_len), Some(expected_checksum)) = (
+        durable_manifest.property_spill_manifest_encoded_len,
+        durable_manifest.property_spill_manifest_encoded_checksum,
+    ) else {
+        return Ok(None);
+    };
+    if expected_len > PROPERTY_SPILL_MANIFEST_MAX_BYTES {
+        return Err(SkeinError::Storage(format!(
+            "property spill manifest exceeds {PROPERTY_SPILL_MANIFEST_MAX_BYTES} bytes"
+        )));
+    }
+    let generation = durable_manifest.checkpoint_generation.ok_or_else(|| {
+        SkeinError::Storage("property spill metadata requires a checkpoint generation".to_string())
+    })?;
+    let manifest_path = root.join(property_spill_manifest_generation_file(generation));
+    let encoded = fs::read(&manifest_path)?;
+    if encoded.len() as u64 != expected_len || checksum_bytes(&encoded) != expected_checksum {
+        return Err(SkeinError::Storage(
+            "property spill manifest artifact does not match the durable manifest".to_string(),
+        ));
+    }
+    let text = std::str::from_utf8(&encoded).map_err(|error| {
+        SkeinError::Storage(format!("property spill manifest is not UTF-8: {error}"))
+    })?;
+    let manifest = PropertySpillManifest::decode(text)
+        .map_err(|error| SkeinError::Storage(error.to_string()))?;
+    if manifest.generation != ManifestGeneration(generation) {
+        return Err(SkeinError::Storage(format!(
+            "property spill generation {} does not match durable generation {generation}",
+            manifest.generation.0
+        )));
+    }
+    let config = PropertySpillConfig::default();
+    let max_block_bytes = NonZeroU64::new(
+        config
+            .target_block_bytes
+            .get()
+            .max(config.max_value_bytes.get().saturating_add(1024)),
+    )
+    .expect("property spill maximum block size is non-zero");
+    PropertySpillReader::open(
+        root.join(property_spill_artifact_generation_file(generation)),
+        manifest,
+        cache,
+        store_id,
+        max_block_bytes,
+    )
+    .map(Some)
+    .map_err(|error| SkeinError::Storage(error.to_string()))
+}
+
+fn load_published_property_projection(
+    root: &Path,
+    durable_manifest: DurableManifest,
+    cache: Arc<SegmentCache>,
+    store_id: StoreId,
+) -> Result<Option<PersistentPropertyProjectionReader>> {
+    let (Some(expected_len), Some(expected_checksum)) = (
+        durable_manifest.property_projection_manifest_encoded_len,
+        durable_manifest.property_projection_manifest_encoded_checksum,
+    ) else {
+        return Ok(None);
+    };
+    if expected_len > PROPERTY_PROJECTION_MANIFEST_MAX_BYTES {
+        return Err(SkeinError::Storage(format!(
+            "property projection manifest exceeds {PROPERTY_PROJECTION_MANIFEST_MAX_BYTES} bytes"
+        )));
+    }
+    let generation = durable_manifest.checkpoint_generation.ok_or_else(|| {
+        SkeinError::Storage(
+            "property projection metadata requires a checkpoint generation".to_string(),
+        )
+    })?;
+    let manifest_path = root.join(property_projection_manifest_generation_file(generation));
+    let encoded = fs::read(&manifest_path)?;
+    if encoded.len() as u64 != expected_len || checksum_bytes(&encoded) != expected_checksum {
+        return Err(SkeinError::Storage(
+            "property projection manifest artifact does not match the durable manifest".to_string(),
+        ));
+    }
+    let text = std::str::from_utf8(&encoded).map_err(|error| {
+        SkeinError::Storage(format!(
+            "property projection manifest is not UTF-8: {error}"
+        ))
+    })?;
+    let manifest = PersistentPropertyProjectionManifest::decode(text)
+        .map_err(|error| SkeinError::Storage(error.to_string()))?;
+    if manifest.generation != ManifestGeneration(generation)
+        || manifest.source_commit_epoch != durable_manifest.checkpoint_commit_epoch
+    {
+        return Err(SkeinError::Storage(
+            "property projection generation or source epoch does not match the durable checkpoint"
+                .to_string(),
+        ));
+    }
+    let config = PersistentPropertyProjectionConfig::default();
+    let max_block_bytes = NonZeroU64::new(
+        config
+            .target_block_bytes
+            .get()
+            .max(config.max_index_key_bytes.get().saturating_add(1024)),
+    )
+    .expect("property projection maximum block size is non-zero");
+    PersistentPropertyProjectionReader::open(
+        root.join(property_projection_artifact_generation_file(generation)),
+        manifest,
+        cache,
+        store_id,
+        max_block_bytes,
+    )
+    .map(Some)
+    .map_err(|error| SkeinError::Storage(error.to_string()))
+}
+
+fn load_published_canonical_adjacency(
+    root: &Path,
+    durable_manifest: DurableManifest,
+    cache: Arc<SegmentCache>,
+    store_id: StoreId,
+) -> Result<Option<CanonicalAdjacencyReader>> {
+    let (Some(expected_len), Some(expected_checksum)) = (
+        durable_manifest.canonical_adjacency_manifest_encoded_len,
+        durable_manifest.canonical_adjacency_manifest_encoded_checksum,
+    ) else {
+        return Ok(None);
+    };
+    if expected_len > CANONICAL_ADJACENCY_MANIFEST_MAX_BYTES {
+        return Err(SkeinError::Storage(format!(
+            "canonical adjacency manifest exceeds {CANONICAL_ADJACENCY_MANIFEST_MAX_BYTES} bytes"
+        )));
+    }
+    let generation = durable_manifest.checkpoint_generation.ok_or_else(|| {
+        SkeinError::Storage(
+            "canonical adjacency metadata requires a checkpoint generation".to_string(),
+        )
+    })?;
+    let manifest_path = root.join(canonical_adjacency_manifest_generation_file(generation));
+    let encoded = fs::read(&manifest_path)?;
+    if encoded.len() as u64 != expected_len || checksum_bytes(&encoded) != expected_checksum {
+        return Err(SkeinError::Storage(
+            "canonical adjacency manifest artifact does not match the durable manifest".to_string(),
+        ));
+    }
+    let text = std::str::from_utf8(&encoded).map_err(|error| {
+        SkeinError::Storage(format!(
+            "canonical adjacency manifest is not UTF-8: {error}"
+        ))
+    })?;
+    let manifest = CanonicalAdjacencyManifest::decode(text)
+        .map_err(|error| SkeinError::Storage(error.to_string()))?;
+    if manifest.generation != ManifestGeneration(generation) {
+        return Err(SkeinError::Storage(format!(
+            "canonical adjacency generation {} does not match durable generation {generation}",
+            manifest.generation.0
+        )));
+    }
+    let config = CanonicalAdjacencyConfig::default();
+    let max_block_bytes = NonZeroU64::new(
+        config
+            .target_block_bytes
+            .get()
+            .max(config.max_record_bytes.get().saturating_add(1024)),
+    )
+    .expect("canonical adjacency maximum block size is non-zero");
+    CanonicalAdjacencyReader::open(
+        root.join(canonical_adjacency_artifact_generation_file(generation)),
+        manifest,
+        cache,
+        store_id,
+        max_block_bytes,
+    )
+    .map(Some)
+    .map_err(|error| SkeinError::Storage(error.to_string()))
+}
+
+impl BackupManifest {
+    fn load(path: &Path) -> Result<Self> {
+        const MAX_BACKUP_MANIFEST_BYTES: u64 = 64 * 1024;
+        let metadata = fs::metadata(path)?;
+        if metadata.len() > MAX_BACKUP_MANIFEST_BYTES {
+            return Err(SkeinError::Storage(format!(
+                "backup manifest exceeds {MAX_BACKUP_MANIFEST_BYTES} bytes"
+            )));
+        }
+        let text = fs::read_to_string(path)?;
+        let (body, checksum) = split_backup_manifest_checksum(&text)?;
+        let actual = checksum_bytes(body.as_bytes());
+        if checksum != actual {
+            return Err(SkeinError::Storage(format!(
+                "backup manifest checksum mismatch: expected {checksum}, got {actual}"
+            )));
+        }
+
+        let mut generation = None;
+        let mut checkpoint_commit_epoch = None;
+        let mut files = Vec::new();
+        let mut names = BTreeSet::new();
+        let mut saw_header = false;
+        for line in body.lines() {
+            if line == BACKUP_HEADER_V1 {
+                if saw_header {
+                    return Err(SkeinError::Storage(
+                        "backup manifest has duplicate headers".to_string(),
+                    ));
+                }
+                saw_header = true;
+                continue;
+            }
+            let fields = line.split('\t').collect::<Vec<_>>();
+            match fields.as_slice() {
+                ["version", "1"] => {}
+                ["generation", raw] => {
+                    if generation
+                        .replace(parse_u64(raw, "backup generation")?)
+                        .is_some()
+                    {
+                        return Err(SkeinError::Storage(
+                            "backup manifest has duplicate generation".to_string(),
+                        ));
+                    }
+                }
+                ["checkpoint_commit_epoch", raw] => {
+                    if checkpoint_commit_epoch
+                        .replace(parse_u64(raw, "backup checkpoint commit epoch")?)
+                        .is_some()
+                    {
+                        return Err(SkeinError::Storage(
+                            "backup manifest has duplicate checkpoint commit epoch".to_string(),
+                        ));
+                    }
+                }
+                ["file", encoded_name, encoded_len, encoded_checksum] => {
+                    let name = decode_string(encoded_name)?;
+                    validate_backup_file_name(&name)?;
+                    if !names.insert(name.clone()) {
+                        return Err(SkeinError::Storage(format!(
+                            "backup manifest has duplicate file: {name}"
+                        )));
+                    }
+                    files.push(BackupFileEntry {
+                        name,
+                        encoded_len: parse_u64(encoded_len, "backup file length")?,
+                        encoded_checksum: parse_u64(encoded_checksum, "backup file checksum")?,
+                    });
+                }
+                [""] => {}
+                _ => {
+                    return Err(SkeinError::Storage(format!(
+                        "invalid backup manifest line: {line}"
+                    )));
+                }
+            }
+        }
+        if !saw_header {
+            return Err(SkeinError::Storage(
+                "backup manifest is missing its format header".to_string(),
+            ));
+        }
+        let generation = generation.ok_or_else(|| {
+            SkeinError::Storage("backup manifest is missing generation".to_string())
+        })?;
+        let checkpoint_commit_epoch = checkpoint_commit_epoch.ok_or_else(|| {
+            SkeinError::Storage("backup manifest is missing checkpoint commit epoch".to_string())
+        })?;
+        Ok(Self {
+            generation,
+            checkpoint_commit_epoch,
+            files,
+            checksum,
+        })
+    }
+
+    fn write(
+        path: &Path,
+        generation: u64,
+        checkpoint_commit_epoch: u64,
+        files: Vec<BackupFileEntry>,
+    ) -> Result<Self> {
+        let mut body = format!(
+            "{BACKUP_HEADER_V1}\nversion\t1\ngeneration\t{generation}\ncheckpoint_commit_epoch\t{checkpoint_commit_epoch}\n"
+        );
+        for file in &files {
+            body.push_str(&format!(
+                "file\t{}\t{}\t{}\n",
+                encode_string(&file.name),
+                file.encoded_len,
+                file.encoded_checksum
+            ));
+        }
+        let checksum = checksum_bytes(body.as_bytes());
+        let tmp_path = path.with_extension("skein.tmp");
+        {
+            let mut file = File::create(&tmp_path)?;
+            file.write_all(format!("{body}checksum\t{checksum}\n").as_bytes())?;
+            file.sync_all()?;
+        }
+        fs::rename(&tmp_path, path)?;
+        sync_parent_dir(path)?;
+        Ok(Self {
+            generation,
+            checkpoint_commit_epoch,
+            files,
+            checksum,
+        })
+    }
+}
+
+fn split_backup_manifest_checksum(text: &str) -> Result<(&str, u64)> {
+    let marker = "checksum\t";
+    let checksum_offset = text
+        .rfind(marker)
+        .ok_or_else(|| SkeinError::Storage("backup manifest is missing checksum".to_string()))?;
+    let body = &text[..checksum_offset];
+    let checksum_line = text[checksum_offset..].trim_end();
+    if checksum_line.contains('\n') {
+        return Err(SkeinError::Storage(
+            "backup manifest has data after checksum".to_string(),
+        ));
+    }
+    let checksum = parse_u64(
+        checksum_line.strip_prefix(marker).unwrap_or_default(),
+        "backup manifest checksum",
+    )?;
+    Ok((body, checksum))
+}
+
+fn validate_backup_file_name(name: &str) -> Result<()> {
+    let allowed = name == MANIFEST_FILE
+        || name == STABLE_ID_MAPPING_FILE
+        || parse_generation_file(name, "checkpoint.").is_some()
+        || parse_generation_file(name, "wal.").is_some()
+        || parse_generation_file(name, "canonical.").is_some()
+        || parse_canonical_manifest_generation_file(name).is_some()
+        || parse_generation_file(name, "adjacency.").is_some()
+        || parse_canonical_adjacency_manifest_generation_file(name).is_some()
+        || parse_generation_file(name, "properties.").is_some()
+        || parse_property_spill_manifest_generation_file(name).is_some()
+        || parse_generation_file(name, "property-index.").is_some()
+        || parse_property_projection_manifest_generation_file(name).is_some();
+    if !allowed || Path::new(name).file_name().and_then(|value| value.to_str()) != Some(name) {
+        return Err(SkeinError::Storage(format!(
+            "backup contains unsupported file name: {name}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_new_backup_destination(root: &Path, destination: &Path) -> Result<()> {
+    if destination.exists() {
+        return Err(SkeinError::Storage(format!(
+            "backup destination already exists: {}",
+            destination.display()
+        )));
+    }
+    let file_name = destination.file_name().ok_or_else(|| {
+        SkeinError::Storage("backup destination must have a file name".to_string())
+    })?;
+    let parent = destination.parent().ok_or_else(|| {
+        SkeinError::Storage("backup destination must have a parent directory".to_string())
+    })?;
+    let canonical_parent = parent.canonicalize()?;
+    let destination = canonical_parent.join(file_name);
+    let canonical_root = root.canonicalize()?;
+    if destination.starts_with(&canonical_root) {
+        return Err(SkeinError::Storage(
+            "backup destination cannot be inside the database directory".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn copy_backup_file(source: &Path, destination: &Path, name: &str) -> Result<BackupFileEntry> {
+    let (encoded_len, encoded_checksum) = copy_file_with_checksum(source, destination)?;
+    Ok(BackupFileEntry {
+        name: name.to_string(),
+        encoded_len,
+        encoded_checksum,
+    })
+}
+
+fn copy_file_with_checksum(source: &Path, destination: &Path) -> Result<(u64, u64)> {
+    let mut source = File::open(source)?;
+    let mut destination = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)?;
+    let mut checksum = StreamingChecksum::new();
+    let mut total = 0u64;
+    let mut buffer = vec![0u8; 1024 * 1024];
+    loop {
+        let read = source.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        destination.write_all(&buffer[..read])?;
+        checksum.update(&buffer[..read]);
+        total = total
+            .checked_add(read as u64)
+            .ok_or_else(|| SkeinError::Storage("file byte count overflow".to_string()))?;
+    }
+    destination.sync_all()?;
+    Ok((total, checksum.finish()))
+}
+
+fn file_checksum(path: &Path) -> Result<(u64, u64)> {
+    let mut file = File::open(path)?;
+    let mut checksum = StreamingChecksum::new();
+    let mut total = 0u64;
+    let mut buffer = vec![0u8; 1024 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        checksum.update(&buffer[..read]);
+        total = total
+            .checked_add(read as u64)
+            .ok_or_else(|| SkeinError::Storage("file byte count overflow".to_string()))?;
+    }
+    Ok((total, checksum.finish()))
+}
+
+fn validate_backup_files(root: &Path, files: &[BackupFileEntry], generation: u64) -> Result<()> {
+    let names = files
+        .iter()
+        .map(|file| file.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let manifest_path = root.join(MANIFEST_FILE);
+    let manifest = DurableManifest::load(&manifest_path)?;
+    if manifest.format != DurableFormat::GenerationalV2
+        || manifest.checkpoint_generation != Some(generation)
+        || manifest.checkpoint_epoch != generation
+        || manifest.wal_generation != generation
+    {
+        return Err(SkeinError::Storage(
+            "backup files do not describe one published generation".to_string(),
+        ));
+    }
+    let checkpoint_name = checkpoint_generation_file(generation);
+    let wal_name = wal_generation_file(generation);
+    for required in [MANIFEST_FILE, checkpoint_name.as_str(), wal_name.as_str()] {
+        if !names.contains(required) {
+            return Err(SkeinError::Storage(format!(
+                "backup is missing required file: {required}"
+            )));
+        }
+    }
+    for file in files {
+        validate_backup_file_name(&file.name)?;
+        let (actual_len, actual_checksum) = file_checksum(&root.join(&file.name))?;
+        if actual_len != file.encoded_len || actual_checksum != file.encoded_checksum {
+            return Err(SkeinError::Storage(format!(
+                "backup file verification failed: {}",
+                file.name
+            )));
+        }
+    }
+    let checkpoint = files
+        .iter()
+        .find(|file| file.name == checkpoint_name)
+        .expect("required checkpoint must exist");
+    if manifest.checkpoint_encoded_len != Some(checkpoint.encoded_len)
+        || manifest.checkpoint_encoded_checksum != Some(checkpoint.encoded_checksum)
+    {
+        return Err(SkeinError::Storage(
+            "backup checkpoint metadata does not match the durable manifest".to_string(),
+        ));
+    }
+    if let (Some(expected_len), Some(expected_checksum)) = (
+        manifest.canonical_manifest_encoded_len,
+        manifest.canonical_manifest_encoded_checksum,
+    ) {
+        let canonical_manifest_name = canonical_manifest_generation_file(generation);
+        let canonical_artifact_name = canonical_artifact_generation_file(generation);
+        for required in [
+            canonical_manifest_name.as_str(),
+            canonical_artifact_name.as_str(),
+        ] {
+            if !names.contains(required) {
+                return Err(SkeinError::Storage(format!(
+                    "backup is missing required canonical file: {required}"
+                )));
+            }
+        }
+        let encoded_manifest = files
+            .iter()
+            .find(|file| file.name == canonical_manifest_name)
+            .expect("required canonical manifest must exist");
+        if encoded_manifest.encoded_len != expected_len
+            || encoded_manifest.encoded_checksum != expected_checksum
+        {
+            return Err(SkeinError::Storage(
+                "backup canonical manifest metadata does not match the durable manifest"
+                    .to_string(),
+            ));
+        }
+        let canonical_manifest_text = fs::read_to_string(root.join(&canonical_manifest_name))?;
+        let canonical_manifest = CanonicalSegmentManifest::decode(&canonical_manifest_text)
+            .map_err(|error| SkeinError::Storage(error.to_string()))?;
+        let canonical_artifact = files
+            .iter()
+            .find(|file| file.name == canonical_artifact_name)
+            .expect("required canonical artifact must exist");
+        if canonical_manifest.artifact_len != canonical_artifact.encoded_len
+            || canonical_manifest.artifact_digest.0 != canonical_artifact.encoded_checksum
+        {
+            return Err(SkeinError::Storage(
+                "backup canonical artifact metadata does not match its manifest".to_string(),
+            ));
+        }
+    }
+    if let (Some(expected_len), Some(expected_checksum)) = (
+        manifest.canonical_adjacency_manifest_encoded_len,
+        manifest.canonical_adjacency_manifest_encoded_checksum,
+    ) {
+        let adjacency_manifest_name = canonical_adjacency_manifest_generation_file(generation);
+        let adjacency_artifact_name = canonical_adjacency_artifact_generation_file(generation);
+        for required in [
+            adjacency_manifest_name.as_str(),
+            adjacency_artifact_name.as_str(),
+        ] {
+            if !names.contains(required) {
+                return Err(SkeinError::Storage(format!(
+                    "backup is missing required canonical adjacency file: {required}"
+                )));
+            }
+        }
+        let encoded_manifest = files
+            .iter()
+            .find(|file| file.name == adjacency_manifest_name)
+            .expect("required canonical adjacency manifest must exist");
+        if encoded_manifest.encoded_len != expected_len
+            || encoded_manifest.encoded_checksum != expected_checksum
+        {
+            return Err(SkeinError::Storage(
+                "backup canonical adjacency manifest metadata does not match the durable manifest"
+                    .to_string(),
+            ));
+        }
+        let adjacency_manifest_text = fs::read_to_string(root.join(&adjacency_manifest_name))?;
+        let adjacency_manifest = CanonicalAdjacencyManifest::decode(&adjacency_manifest_text)
+            .map_err(|error| SkeinError::Storage(error.to_string()))?;
+        let adjacency_artifact = files
+            .iter()
+            .find(|file| file.name == adjacency_artifact_name)
+            .expect("required canonical adjacency artifact must exist");
+        if adjacency_manifest.artifact_len != adjacency_artifact.encoded_len
+            || adjacency_manifest.artifact_digest.0 != adjacency_artifact.encoded_checksum
+        {
+            return Err(SkeinError::Storage(
+                "backup canonical adjacency artifact metadata does not match its manifest"
+                    .to_string(),
+            ));
+        }
+    }
+    if let (Some(expected_len), Some(expected_checksum)) = (
+        manifest.property_spill_manifest_encoded_len,
+        manifest.property_spill_manifest_encoded_checksum,
+    ) {
+        let property_manifest_name = property_spill_manifest_generation_file(generation);
+        let property_artifact_name = property_spill_artifact_generation_file(generation);
+        for required in [
+            property_manifest_name.as_str(),
+            property_artifact_name.as_str(),
+        ] {
+            if !names.contains(required) {
+                return Err(SkeinError::Storage(format!(
+                    "backup is missing required property spill file: {required}"
+                )));
+            }
+        }
+        let encoded_manifest = files
+            .iter()
+            .find(|file| file.name == property_manifest_name)
+            .expect("required property spill manifest must exist");
+        if encoded_manifest.encoded_len != expected_len
+            || encoded_manifest.encoded_checksum != expected_checksum
+        {
+            return Err(SkeinError::Storage(
+                "backup property spill manifest metadata does not match the durable manifest"
+                    .to_string(),
+            ));
+        }
+        let property_manifest_text = fs::read_to_string(root.join(&property_manifest_name))?;
+        let property_manifest = PropertySpillManifest::decode(&property_manifest_text)
+            .map_err(|error| SkeinError::Storage(error.to_string()))?;
+        let property_artifact = files
+            .iter()
+            .find(|file| file.name == property_artifact_name)
+            .expect("required property spill artifact must exist");
+        if property_manifest.artifact_len != property_artifact.encoded_len
+            || property_manifest.artifact_digest.0 != property_artifact.encoded_checksum
+        {
+            return Err(SkeinError::Storage(
+                "backup property spill artifact metadata does not match its manifest".to_string(),
+            ));
+        }
+    }
+    if let (Some(expected_len), Some(expected_checksum)) = (
+        manifest.property_projection_manifest_encoded_len,
+        manifest.property_projection_manifest_encoded_checksum,
+    ) {
+        let projection_manifest_name = property_projection_manifest_generation_file(generation);
+        let projection_artifact_name = property_projection_artifact_generation_file(generation);
+        for required in [
+            projection_manifest_name.as_str(),
+            projection_artifact_name.as_str(),
+        ] {
+            if !names.contains(required) {
+                return Err(SkeinError::Storage(format!(
+                    "backup is missing required property projection file: {required}"
+                )));
+            }
+        }
+        let encoded_manifest = files
+            .iter()
+            .find(|file| file.name == projection_manifest_name)
+            .expect("required property projection manifest must exist");
+        if encoded_manifest.encoded_len != expected_len
+            || encoded_manifest.encoded_checksum != expected_checksum
+        {
+            return Err(SkeinError::Storage(
+                "backup property projection manifest metadata does not match the durable manifest"
+                    .to_string(),
+            ));
+        }
+        let projection_manifest_text = fs::read_to_string(root.join(&projection_manifest_name))?;
+        let projection_manifest =
+            PersistentPropertyProjectionManifest::decode(&projection_manifest_text)
+                .map_err(|error| SkeinError::Storage(error.to_string()))?;
+        let projection_artifact = files
+            .iter()
+            .find(|file| file.name == projection_artifact_name)
+            .expect("required property projection artifact must exist");
+        if projection_manifest.generation != ManifestGeneration(generation)
+            || projection_manifest.source_commit_epoch != manifest.checkpoint_commit_epoch
+            || projection_manifest.artifact_len != projection_artifact.encoded_len
+            || projection_manifest.artifact_digest.0 != projection_artifact.encoded_checksum
+        {
+            return Err(SkeinError::Storage(
+                "backup property projection artifact metadata does not match its manifest"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub fn restore_storage_backup(
+    backup: impl AsRef<Path>,
+    destination: impl AsRef<Path>,
+) -> Result<StorageRestoreReport> {
+    let backup = backup.as_ref();
+    let destination = destination.as_ref();
+    let backup_manifest = BackupManifest::load(&backup.join(BACKUP_MANIFEST_FILE))?;
+    validate_backup_files(backup, &backup_manifest.files, backup_manifest.generation)?;
+    let durable_manifest = DurableManifest::load(&backup.join(MANIFEST_FILE))?;
+    if durable_manifest.checkpoint_commit_epoch != backup_manifest.checkpoint_commit_epoch {
+        return Err(SkeinError::Storage(
+            "backup checkpoint commit epoch does not match the durable manifest".to_string(),
+        ));
+    }
+    validate_new_backup_destination(backup, destination)?;
+    fs::create_dir(destination)?;
+
+    let result = (|| {
+        for entry in backup_manifest
+            .files
+            .iter()
+            .filter(|entry| entry.name != MANIFEST_FILE)
+        {
+            let (encoded_len, encoded_checksum) =
+                copy_file_with_checksum(&backup.join(&entry.name), &destination.join(&entry.name))?;
+            if encoded_len != entry.encoded_len || encoded_checksum != entry.encoded_checksum {
+                return Err(SkeinError::Storage(format!(
+                    "backup file changed while restoring: {}",
+                    entry.name
+                )));
+            }
+        }
+        sync_parent_dir(&destination.join(MANIFEST_FILE))?;
+        let manifest_entry = backup_manifest
+            .files
+            .iter()
+            .find(|entry| entry.name == MANIFEST_FILE)
+            .expect("validated backup must contain durable manifest");
+        let (encoded_len, encoded_checksum) = copy_file_with_checksum(
+            &backup.join(MANIFEST_FILE),
+            &destination.join(MANIFEST_FILE),
+        )?;
+        if encoded_len != manifest_entry.encoded_len
+            || encoded_checksum != manifest_entry.encoded_checksum
+        {
+            return Err(SkeinError::Storage(
+                "backup manifest file changed while restoring".to_string(),
+            ));
+        }
+        sync_parent_dir(&destination.join(MANIFEST_FILE))?;
+        let total_bytes = backup_manifest
+            .files
+            .iter()
+            .try_fold(0u64, |total, file| total.checked_add(file.encoded_len))
+            .ok_or_else(|| SkeinError::Storage("restore byte count overflow".to_string()))?;
+        Ok(StorageRestoreReport {
+            generation: backup_manifest.generation,
+            checkpoint_commit_epoch: backup_manifest.checkpoint_commit_epoch,
+            file_count: backup_manifest.files.len(),
+            total_bytes,
+            manifest_checksum: backup_manifest.checksum,
+        })
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(destination);
+    }
+    result
+}
+
 fn remove_source_scan_artifacts(path: &Path) -> Result<()> {
     for file in [
         source_scan::SOURCE_SCAN_DESCRIPTOR_FILE,
@@ -8757,7 +12845,14 @@ pub(crate) fn sync_parent_dir(path: &Path) -> Result<()> {
     let Some(parent) = path.parent() else {
         return Ok(());
     };
-    File::open(parent)?.sync_all()?;
+    #[cfg(not(windows))]
+    let directory = File::open(parent)?;
+    #[cfg(windows)]
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(0x0200_0000)
+        .open(parent)?;
+    directory.sync_all()?;
     Ok(())
 }
 
@@ -8768,6 +12863,104 @@ fn safe_reclaim_commit_epoch(
     oldest_reader_commit_epoch
         .map(|epoch| epoch.saturating_sub(1))
         .unwrap_or(checkpoint_commit_epoch)
+}
+
+struct BoundedWalRecord {
+    bytes: Vec<u8>,
+    encoded_len: u64,
+}
+
+fn read_bounded_wal_record<R: BufRead>(
+    reader: &mut R,
+    max_record_bytes: Option<usize>,
+) -> Result<Option<BoundedWalRecord>> {
+    let mut bytes = Vec::new();
+    let mut encoded_len = 0u64;
+    loop {
+        let (consumed, complete) = {
+            let available = reader.fill_buf()?;
+            if available.is_empty() {
+                if bytes.is_empty() {
+                    return Ok(None);
+                }
+                break;
+            }
+            let newline = available.iter().position(|byte| *byte == b'\n');
+            let consumed = newline.map_or(available.len(), |index| index + 1);
+            let next_len = bytes
+                .len()
+                .checked_add(consumed)
+                .ok_or_else(|| SkeinError::Storage("WAL record length overflow".to_string()))?;
+            if max_record_bytes.is_some_and(|limit| next_len > limit) {
+                return Err(SkeinError::Storage(format!(
+                    "WAL record byte limit exceeded: max_wal_record_bytes={}",
+                    max_record_bytes.unwrap_or_default()
+                )));
+            }
+            bytes.extend_from_slice(&available[..consumed]);
+            (consumed, newline.is_some())
+        };
+        reader.consume(consumed);
+        encoded_len = encoded_len.saturating_add(consumed as u64);
+        if complete {
+            break;
+        }
+    }
+    if bytes.last() == Some(&b'\n') {
+        bytes.pop();
+    }
+    if bytes.last() == Some(&b'\r') {
+        bytes.pop();
+    }
+    Ok(Some(BoundedWalRecord { bytes, encoded_len }))
+}
+
+fn decode_wal_header(line: &str) -> Result<(u64, u64)> {
+    let Some((body, raw_checksum)) = line.rsplit_once('\t') else {
+        return Err(SkeinError::Storage(
+            "WAL header is missing its checksum".to_string(),
+        ));
+    };
+    let expected = parse_u64(raw_checksum, "WAL header checksum")?;
+    let actual = checksum_bytes(body.as_bytes());
+    if expected != actual {
+        return Err(SkeinError::Storage(format!(
+            "WAL header checksum mismatch: expected {expected}, got {actual}"
+        )));
+    }
+    let fields = body.split('\t').collect::<Vec<_>>();
+    match fields.as_slice() {
+        [header, raw_generation, raw_start_lsn] if *header == WAL_HEADER_V2 => Ok((
+            parse_u64(raw_generation, "WAL generation")?,
+            parse_u64(raw_start_lsn, "WAL start LSN")?,
+        )),
+        _ => Err(SkeinError::Storage(
+            "WAL is missing a supported generation header".to_string(),
+        )),
+    }
+}
+
+fn quarantine_corrupt_wal(path: &Path, generation: u64, read_only: bool) -> Result<()> {
+    if read_only {
+        return Ok(());
+    }
+    let root = path
+        .parent()
+        .ok_or_else(|| SkeinError::Storage("WAL path has no database directory".to_string()))?;
+    let quarantine_dir = root.join("quarantine");
+    fs::create_dir_all(&quarantine_dir)?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let quarantine_path = quarantine_dir.join(format!(
+        "wal.{generation}.corrupt.{}.{}",
+        std::process::id(),
+        nonce
+    ));
+    fs::copy(path, &quarantine_path)?;
+    File::open(&quarantine_path)?.sync_all()?;
+    sync_parent_dir(&quarantine_path)
 }
 
 #[derive(Debug)]
@@ -10200,6 +14393,205 @@ fn validate_property_schemas(
     Ok(())
 }
 
+fn validate_node_record_constraints(catalog: &Catalog, node: &NodeRecord) -> Result<()> {
+    for property in catalog.property_descriptors() {
+        if property.state != SchemaObjectState::Public {
+            continue;
+        }
+        let Some(table) = catalog.table_descriptor(property.table_id) else {
+            continue;
+        };
+        if table.kind != TableKind::Node || table.state != SchemaObjectState::Public {
+            continue;
+        }
+        let Some(label_id) = catalog.label_id(&table.name) else {
+            continue;
+        };
+        if node.labels.contains(&label_id) {
+            validate_property_schema_value(
+                &table.name,
+                &property.name,
+                property.value_type,
+                property.nullable,
+                node.properties.get(&property.name),
+                &format!("node {}", node.id.0),
+            )?;
+        }
+    }
+    for constraint in catalog.node_property_exists_constraints() {
+        let crate::schema::ConstraintSubject::Node(label_id) = constraint.subject else {
+            continue;
+        };
+        if node.labels.contains(&label_id)
+            && !node
+                .properties
+                .get(&constraint.property)
+                .is_some_and(|value| value != &Value::Null)
+        {
+            let label = catalog.label_name(label_id).unwrap_or("<unknown>");
+            return Err(SkeinError::Storage(format!(
+                "node property exists constraint violation on :{label}({}) for node {}",
+                constraint.property, node.id.0
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_relationship_record_constraints(
+    catalog: &Catalog,
+    relationship: &RelRecord,
+) -> Result<()> {
+    for property in catalog.property_descriptors() {
+        if property.state != SchemaObjectState::Public {
+            continue;
+        }
+        let Some(table) = catalog.table_descriptor(property.table_id) else {
+            continue;
+        };
+        if table.kind != TableKind::Relationship || table.state != SchemaObjectState::Public {
+            continue;
+        }
+        let Some(rel_type_id) = catalog.rel_type_id(&table.name) else {
+            continue;
+        };
+        if relationship.rel_type == rel_type_id {
+            validate_property_schema_value(
+                &table.name,
+                &property.name,
+                property.value_type,
+                property.nullable,
+                relationship.properties.get(&property.name),
+                &format!("relationship {}", relationship.id.0),
+            )?;
+        }
+    }
+    for constraint in catalog.relationship_property_exists_constraints() {
+        let crate::schema::ConstraintSubject::Relationship(rel_type_id) = constraint.subject else {
+            continue;
+        };
+        if relationship.rel_type == rel_type_id
+            && !relationship
+                .properties
+                .get(&constraint.property)
+                .is_some_and(|value| value != &Value::Null)
+        {
+            let rel_type = catalog.rel_type_name(rel_type_id).unwrap_or("<unknown>");
+            return Err(SkeinError::Storage(format!(
+                "relationship property exists constraint violation on :{rel_type}({}) for relationship {}",
+                constraint.property, relationship.id.0
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_changed_node_uniqueness(
+    store: &GraphStore,
+    catalog: &Catalog,
+    changes: &BTreeMap<NodeId, Option<NodeRecord>>,
+) -> Result<()> {
+    for constraint in catalog.unique_constraints() {
+        let crate::schema::ConstraintSubject::Node(label_id) = constraint.subject else {
+            continue;
+        };
+        let mut changed_values = BTreeMap::<Value, NodeId>::new();
+        for node in changes.values().flatten() {
+            if !node.labels.contains(&label_id) {
+                continue;
+            }
+            let Some(value) = node.properties.get(&constraint.property) else {
+                continue;
+            };
+            if value == &Value::Null {
+                continue;
+            }
+            if let Some(previous) = changed_values.insert(value.clone(), node.id) {
+                let label = catalog.label_name(label_id).unwrap_or("<unknown>");
+                return Err(SkeinError::Storage(format!(
+                    "unique constraint violation on :{label}({}) for nodes {} and {}",
+                    constraint.property, previous.0, node.id.0
+                )));
+            }
+        }
+        for (value, changed_id) in changed_values {
+            let mut violation = None;
+            store.visit_nodes_owned(Some(label_id), |node| {
+                if changes.contains_key(&node.id) {
+                    return GraphScanControl::Continue;
+                }
+                if node.properties.get(&constraint.property) == Some(&value) {
+                    violation = Some(node.id);
+                    GraphScanControl::Stop
+                } else {
+                    GraphScanControl::Continue
+                }
+            })?;
+            if let Some(existing_id) = violation {
+                let label = catalog.label_name(label_id).unwrap_or("<unknown>");
+                return Err(SkeinError::Storage(format!(
+                    "unique constraint violation on :{label}({}) for nodes {} and {}",
+                    constraint.property, existing_id.0, changed_id.0
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_changed_relationship_uniqueness(
+    store: &GraphStore,
+    catalog: &Catalog,
+    changes: &BTreeMap<RelId, Option<RelRecord>>,
+) -> Result<()> {
+    for constraint in catalog.relationship_unique_constraints() {
+        let crate::schema::ConstraintSubject::Relationship(rel_type_id) = constraint.subject else {
+            continue;
+        };
+        let mut changed_values = BTreeMap::<Value, RelId>::new();
+        for relationship in changes.values().flatten() {
+            if relationship.rel_type != rel_type_id {
+                continue;
+            }
+            let Some(value) = relationship.properties.get(&constraint.property) else {
+                continue;
+            };
+            if value == &Value::Null {
+                continue;
+            }
+            if let Some(previous) = changed_values.insert(value.clone(), relationship.id) {
+                let rel_type = catalog.rel_type_name(rel_type_id).unwrap_or("<unknown>");
+                return Err(SkeinError::Storage(format!(
+                    "relationship unique constraint violation on :{rel_type}({}) for relationships {} and {}",
+                    constraint.property, previous.0, relationship.id.0
+                )));
+            }
+        }
+        for (value, changed_id) in changed_values {
+            let mut violation = None;
+            store.visit_relationships_owned(Some(rel_type_id), |relationship| {
+                if changes.contains_key(&relationship.id) {
+                    return GraphScanControl::Continue;
+                }
+                if relationship.properties.get(&constraint.property) == Some(&value) {
+                    violation = Some(relationship.id);
+                    GraphScanControl::Stop
+                } else {
+                    GraphScanControl::Continue
+                }
+            })?;
+            if let Some(existing_id) = violation {
+                let rel_type = catalog.rel_type_name(rel_type_id).unwrap_or("<unknown>");
+                return Err(SkeinError::Storage(format!(
+                    "relationship unique constraint violation on :{rel_type}({}) for relationships {} and {}",
+                    constraint.property, existing_id.0, changed_id.0
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_property_schema_value(
     table: &str,
     property: &str,
@@ -10395,6 +14787,49 @@ fn validate_unique_property(
     Ok(())
 }
 
+fn validate_unique_property_streaming(
+    store: &GraphStore,
+    catalog: &Catalog,
+    label_id: LabelId,
+    property: &str,
+) -> Result<()> {
+    let mut validation_error = None;
+    store.visit_nodes_owned(Some(label_id), |node| {
+        let Some(value) = node.properties.get(property).cloned() else {
+            return GraphScanControl::Continue;
+        };
+        if value == Value::Null {
+            return GraphScanControl::Continue;
+        }
+        let mut duplicate = None;
+        match store.visit_nodes_owned(Some(label_id), |candidate| {
+            if candidate.id > node.id && candidate.properties.get(property) == Some(&value) {
+                duplicate = Some(candidate.id);
+                GraphScanControl::Stop
+            } else {
+                GraphScanControl::Continue
+            }
+        }) {
+            Ok(_) => {}
+            Err(error) => {
+                validation_error = Some(error);
+                return GraphScanControl::Stop;
+            }
+        }
+        if let Some(duplicate) = duplicate {
+            let label = catalog.label_name(label_id).unwrap_or("<unknown>");
+            validation_error = Some(SkeinError::Storage(format!(
+                "unique constraint violation on :{label}({property}) for nodes {} and {}",
+                node.id.0, duplicate.0
+            )));
+            GraphScanControl::Stop
+        } else {
+            GraphScanControl::Continue
+        }
+    })?;
+    validation_error.map_or(Ok(()), Err)
+}
+
 fn validate_unique_relationship_property(
     catalog: &Catalog,
     relationships: &CowSegmentedMap<RelId, RelRecord>,
@@ -10423,6 +14858,51 @@ fn validate_unique_relationship_property(
     Ok(())
 }
 
+fn validate_unique_relationship_property_streaming(
+    store: &GraphStore,
+    catalog: &Catalog,
+    rel_type_id: RelTypeId,
+    property: &str,
+) -> Result<()> {
+    let mut validation_error = None;
+    store.visit_relationships_owned(Some(rel_type_id), |relationship| {
+        let Some(value) = relationship.properties.get(property).cloned() else {
+            return GraphScanControl::Continue;
+        };
+        if value == Value::Null {
+            return GraphScanControl::Continue;
+        }
+        let mut duplicate = None;
+        match store.visit_relationships_owned(Some(rel_type_id), |candidate| {
+            if candidate.id > relationship.id
+                && candidate.properties.get(property) == Some(&value)
+            {
+                duplicate = Some(candidate.id);
+                GraphScanControl::Stop
+            } else {
+                GraphScanControl::Continue
+            }
+        }) {
+            Ok(_) => {}
+            Err(error) => {
+                validation_error = Some(error);
+                return GraphScanControl::Stop;
+            }
+        }
+        if let Some(duplicate) = duplicate {
+            let rel_type = catalog.rel_type_name(rel_type_id).unwrap_or("<unknown>");
+            validation_error = Some(SkeinError::Storage(format!(
+                "relationship unique constraint violation on :{rel_type}({property}) for relationships {} and {}",
+                relationship.id.0, duplicate.0
+            )));
+            GraphScanControl::Stop
+        } else {
+            GraphScanControl::Continue
+        }
+    })?;
+    validation_error.map_or(Ok(()), Err)
+}
+
 fn compute_statistics(
     nodes: &CowSegmentedMap<NodeId, NodeRecord>,
     relationships: &CowSegmentedMap<RelId, RelRecord>,
@@ -10435,20 +14915,28 @@ fn compute_statistics(
     )
 }
 
-fn compute_statistics_with_basic(
-    nodes: &CowSegmentedMap<NodeId, NodeRecord>,
-    relationships: &CowSegmentedMap<RelId, RelRecord>,
+fn graph_statistics_from_basic(
     basic_statistics: BasicGraphStatistics,
+    advanced_statistics_complete: bool,
 ) -> GraphStatistics {
-    let mut statistics = GraphStatistics {
+    GraphStatistics {
         computed_at_commit_epoch: basic_statistics.computed_at_commit_epoch,
+        advanced_statistics_complete,
         histogram_sample_limit: MAX_PROPERTY_HISTOGRAM_VALUES,
         node_count: basic_statistics.node_count,
         relationship_count: basic_statistics.relationship_count,
         label_counts: basic_statistics.label_counts,
         rel_type_counts: basic_statistics.rel_type_counts,
         ..GraphStatistics::default()
-    };
+    }
+}
+
+fn compute_statistics_with_basic(
+    nodes: &CowSegmentedMap<NodeId, NodeRecord>,
+    relationships: &CowSegmentedMap<RelId, RelRecord>,
+    basic_statistics: BasicGraphStatistics,
+) -> GraphStatistics {
+    let mut statistics = graph_statistics_from_basic(basic_statistics, true);
     let mut property_values = BTreeMap::<(LabelId, String), BTreeSet<Value>>::new();
     let mut rel_property_values = BTreeMap::<(RelTypeId, String), BTreeSet<Value>>::new();
     let mut rel_type_sources = BTreeMap::<RelTypeId, BTreeSet<NodeId>>::new();
@@ -11272,23 +15760,24 @@ fn apply_set_relationship_properties_mutation(
     pending_nodes: &[PendingNode],
     pending_relationships: &mut [PendingRelationship],
     update: RelationshipPropertiesUpdate,
-) {
+) -> Result<()> {
     let (Some(source_label_id), Some(target_label_id), Some(rel_type_id)) = (
         catalog.label_id(&update.source_label),
         catalog.label_id(&update.target_label),
         catalog.rel_type_id(&update.rel_type),
     ) else {
-        return;
+        return Ok(());
     };
     let source_ids = store
         .matching_node_ids_with_pending(
             Some(source_label_id),
             update.filter.as_ref(),
             pending_nodes,
-        )
+        )?
         .into_iter()
         .collect::<BTreeSet<_>>();
-    for relationship in store.relationships.values() {
+    for relationship in store.relationship_records_owned() {
+        let relationship = relationship?;
         if relationship.rel_type != rel_type_id || !source_ids.contains(&relationship.source) {
             continue;
         }
@@ -11303,8 +15792,7 @@ fn apply_set_relationship_properties_mutation(
             continue;
         }
         let target_matches = store
-            .nodes
-            .get(&relationship.target)
+            .node_owned(relationship.target)?
             .map(|target| {
                 target.labels.contains(&target_label_id)
                     && update
@@ -11350,7 +15838,7 @@ fn apply_set_relationship_properties_mutation(
             *target,
             target_label_id,
             update.target_filter.as_ref(),
-        ) {
+        )? {
             continue;
         }
         for assignment in &update.assignments {
@@ -11367,6 +15855,7 @@ fn apply_set_relationship_properties_mutation(
             Value::Int(relationship_id.0 as i64),
         )]));
     }
+    Ok(())
 }
 
 fn node_matches_label_and_filter(
@@ -11375,14 +15864,14 @@ fn node_matches_label_and_filter(
     id: NodeId,
     label_id: LabelId,
     filter: Option<&PropertyFilter>,
-) -> bool {
-    if let Some(node) = store.nodes.get(&id) {
-        return node.labels.contains(&label_id)
+) -> Result<bool> {
+    if let Some(node) = store.node_owned(id)? {
+        return Ok(node.labels.contains(&label_id)
             && filter
                 .map(|filter| property_filter_matches(filter, id.0, &node.properties))
-                .unwrap_or(true);
+                .unwrap_or(true));
     }
-    pending_nodes
+    Ok(pending_nodes
         .iter()
         .find(|(pending_id, _, _)| *pending_id == id)
         .map(|(_, pending_label_id, properties)| {
@@ -11391,36 +15880,7 @@ fn node_matches_label_and_filter(
                     .map(|filter| property_filter_matches(filter, id.0, properties))
                     .unwrap_or(true)
         })
-        .unwrap_or(false)
-}
-
-fn node_matches_optional_label_and_filter(
-    store: &GraphStore,
-    pending_nodes: &[PendingNode],
-    id: NodeId,
-    label_id: Option<LabelId>,
-    filter: Option<&PropertyFilter>,
-) -> bool {
-    if let Some(node) = store.nodes.get(&id) {
-        return label_id
-            .map(|label_id| node.labels.contains(&label_id))
-            .unwrap_or(true)
-            && filter
-                .map(|filter| property_filter_matches(filter, id.0, &node.properties))
-                .unwrap_or(true);
-    }
-    pending_nodes
-        .iter()
-        .find(|(pending_id, _, _)| *pending_id == id)
-        .map(|(_, pending_label_id, properties)| {
-            label_id
-                .map(|label_id| *pending_label_id == label_id)
-                .unwrap_or(true)
-                && filter
-                    .map(|filter| property_filter_matches(filter, id.0, properties))
-                    .unwrap_or(true)
-        })
-        .unwrap_or(false)
+        .unwrap_or(false))
 }
 
 fn relationships_with_pending_matching(
@@ -11428,62 +15888,86 @@ fn relationships_with_pending_matching(
     pending_nodes: &[PendingNode],
     pending_relationships: &[PendingRelationship],
     request: RelationshipMatchRequest<'_>,
-) -> Vec<RelationshipCandidate> {
-    let mut relationships = store
-        .scan_relationships(Some(request.rel_type_id))
-        .filter(|relationship| {
-            properties_contain_all(&relationship.properties, request.rel_properties)
-                && node_matches_optional_label_and_filter(
-                    store,
-                    pending_nodes,
-                    relationship.source,
-                    request.source_label_id,
-                    request.source_filter,
-                )
-                && node_matches_optional_label_and_filter(
-                    store,
-                    pending_nodes,
-                    relationship.target,
-                    request.target_label_id,
-                    request.target_filter,
-                )
-        })
-        .map(|relationship| RelationshipCandidate {
+) -> Result<Vec<RelationshipCandidate>> {
+    let mut relationships = Vec::new();
+    for relationship in store.relationship_records_owned() {
+        let relationship = relationship?;
+        if relationship.rel_type != request.rel_type_id
+            || !properties_contain_all(&relationship.properties, request.rel_properties)
+            || !node_matches_optional_label_and_filter_checked(
+                store,
+                pending_nodes,
+                relationship.source,
+                request.source_label_id,
+                request.source_filter,
+            )?
+            || !node_matches_optional_label_and_filter_checked(
+                store,
+                pending_nodes,
+                relationship.target,
+                request.target_label_id,
+                request.target_filter,
+            )?
+        {
+            continue;
+        }
+        relationships.push(RelationshipCandidate {
             source: relationship.source,
             target: relationship.target,
             properties: relationship.properties.clone(),
-        })
-        .collect::<Vec<_>>();
+        });
+    }
 
-    relationships.extend(pending_relationships.iter().filter_map(
-        |(_, source, target, pending_rel_type_id, properties)| {
-            if *pending_rel_type_id != request.rel_type_id
-                || !properties_contain_all(properties, request.rel_properties)
-                || !node_matches_optional_label_and_filter(
-                    store,
-                    pending_nodes,
-                    *source,
-                    request.source_label_id,
-                    request.source_filter,
-                )
-                || !node_matches_optional_label_and_filter(
-                    store,
-                    pending_nodes,
-                    *target,
-                    request.target_label_id,
-                    request.target_filter,
-                )
-            {
-                return None;
-            }
-            Some(RelationshipCandidate {
-                source: *source,
-                target: *target,
-                properties: properties.clone(),
-            })
-        },
-    ));
-    relationships
+    for (_, source, target, pending_rel_type_id, properties) in pending_relationships {
+        if *pending_rel_type_id != request.rel_type_id
+            || !properties_contain_all(properties, request.rel_properties)
+            || !node_matches_optional_label_and_filter_checked(
+                store,
+                pending_nodes,
+                *source,
+                request.source_label_id,
+                request.source_filter,
+            )?
+            || !node_matches_optional_label_and_filter_checked(
+                store,
+                pending_nodes,
+                *target,
+                request.target_label_id,
+                request.target_filter,
+            )?
+        {
+            continue;
+        }
+        relationships.push(RelationshipCandidate {
+            source: *source,
+            target: *target,
+            properties: properties.clone(),
+        });
+    }
+    Ok(relationships)
+}
+
+fn node_matches_optional_label_and_filter_checked(
+    store: &GraphStore,
+    pending_nodes: &[PendingNode],
+    id: NodeId,
+    label_id: Option<LabelId>,
+    filter: Option<&PropertyFilter>,
+) -> Result<bool> {
+    if let Some(node) = store.node_owned(id)? {
+        return Ok(
+            label_id.is_none_or(|label_id| node.labels.contains(&label_id))
+                && filter
+                    .is_none_or(|filter| property_filter_matches(filter, id.0, &node.properties)),
+        );
+    }
+    Ok(pending_nodes
+        .iter()
+        .find(|(pending_id, _, _)| *pending_id == id)
+        .is_some_and(|(_, pending_label_id, properties)| {
+            label_id.is_none_or(|label_id| *pending_label_id == label_id)
+                && filter.is_none_or(|filter| property_filter_matches(filter, id.0, properties))
+        }))
 }
 
 fn apply_pending_relationship_property(ops: &mut [WalOp], id: RelId, property: &str, value: Value) {
@@ -11663,15 +16147,33 @@ fn read_durable_text(path: &Path, name: &str) -> Result<String> {
 }
 
 pub(crate) fn read_durable_text_bytes(bytes: &[u8], name: &str) -> Result<String> {
+    read_durable_text_bytes_with_limit(bytes, name, None)
+}
+
+fn read_durable_text_bytes_with_limit(
+    bytes: &[u8],
+    name: &str,
+    max_decoded_bytes: Option<u64>,
+) -> Result<String> {
     if bytes.starts_with(DURABLE_COMPRESSION_HEADER.as_bytes()) {
-        decode_compressed_durable_text(bytes, name)
+        decode_compressed_durable_text(bytes, name, max_decoded_bytes)
     } else {
+        if max_decoded_bytes.is_some_and(|limit| bytes.len() as u64 > limit) {
+            return Err(SkeinError::Storage(format!(
+                "{name} decoded byte limit exceeded: max_decoded_bytes={}",
+                max_decoded_bytes.unwrap_or_default()
+            )));
+        }
         String::from_utf8(bytes.to_vec())
             .map_err(|error| SkeinError::Storage(format!("{name} is not valid UTF-8: {error}")))
     }
 }
 
-fn decode_compressed_durable_text(bytes: &[u8], name: &str) -> Result<String> {
+fn decode_compressed_durable_text(
+    bytes: &[u8],
+    name: &str,
+    max_decoded_bytes: Option<u64>,
+) -> Result<String> {
     let Some(header_end) = bytes.windows(2).position(|window| window == b"\n\n") else {
         return Err(SkeinError::Storage(format!(
             "{name} compressed envelope missing header terminator"
@@ -11739,14 +16241,37 @@ fn decode_compressed_durable_text(bytes: &[u8], name: &str) -> Result<String> {
             "{name} compressed checksum mismatch: expected {expected_compressed_checksum}, got {actual_compressed_checksum}"
         )));
     }
-    let decoded = zstd::stream::decode_all(Cursor::new(payload)).map_err(|error| {
-        SkeinError::Storage(format!("{name} zstd decompression failed: {error}"))
-    })?;
     let expected_uncompressed_len = uncompressed_len.ok_or_else(|| {
         SkeinError::Storage(format!(
             "{name} compressed envelope missing uncompressed_len"
         ))
     })?;
+    if max_decoded_bytes.is_some_and(|limit| expected_uncompressed_len as u64 > limit) {
+        return Err(SkeinError::Storage(format!(
+            "{name} decoded byte limit exceeded: max_decoded_bytes={}",
+            max_decoded_bytes.unwrap_or_default()
+        )));
+    }
+    let decode_limit = max_decoded_bytes
+        .unwrap_or(expected_uncompressed_len as u64)
+        .min(usize::MAX as u64);
+    let mut decoder = zstd::stream::read::Decoder::new(Cursor::new(payload)).map_err(|error| {
+        SkeinError::Storage(format!("{name} zstd decompression failed: {error}"))
+    })?;
+    let initial_capacity = expected_uncompressed_len.min(8 * 1024 * 1024);
+    let mut decoded = Vec::with_capacity(initial_capacity);
+    decoder
+        .by_ref()
+        .take(decode_limit.saturating_add(1))
+        .read_to_end(&mut decoded)
+        .map_err(|error| {
+            SkeinError::Storage(format!("{name} zstd decompression failed: {error}"))
+        })?;
+    if decoded.len() as u64 > decode_limit {
+        return Err(SkeinError::Storage(format!(
+            "{name} decoded byte limit exceeded: max_decoded_bytes={decode_limit}"
+        )));
+    }
     if decoded.len() != expected_uncompressed_len {
         return Err(SkeinError::Storage(format!(
             "{name} uncompressed length mismatch: expected {expected_uncompressed_len}, got {}",
@@ -11769,14 +16294,6 @@ fn decode_compressed_durable_text(bytes: &[u8], name: &str) -> Result<String> {
             "{name} decompressed payload is not valid UTF-8: {error}"
         ))
     })
-}
-
-fn encode_label_set(labels: &BTreeSet<LabelId>) -> String {
-    labels
-        .iter()
-        .map(|label| label.0.to_string())
-        .collect::<Vec<_>>()
-        .join(",")
 }
 
 fn parse_label_set(input: &str) -> Result<BTreeSet<LabelId>> {
@@ -11855,6 +16372,16 @@ fn encode_value_vec(values: &[Value]) -> String {
         .map(|value| encode_string(&encode_value(value)))
         .collect::<Vec<_>>()
         .join(":")
+}
+
+fn decode_value_vec(input: &str) -> Result<Vec<Value>> {
+    if input.is_empty() {
+        return Ok(Vec::new());
+    }
+    input
+        .split(':')
+        .map(|value| decode_string(value).and_then(|value| decode_value(&value)))
+        .collect()
 }
 
 fn encode_u64_vec(values: impl IntoIterator<Item = u64>) -> String {
@@ -12129,6 +16656,14 @@ fn encode_bool(value: bool) -> &'static str {
     }
 }
 
+fn decode_bool(input: &str, name: &str) -> Result<bool> {
+    match input {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(SkeinError::Storage(format!("invalid {name}: {input}"))),
+    }
+}
+
 fn decode_nullable(input: &str) -> Result<bool> {
     match input {
         "nullable" => Ok(true),
@@ -12189,12 +16724,28 @@ pub(crate) fn decode_string(input: &str) -> Result<String> {
 }
 
 pub(crate) fn checksum_bytes(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf29ce484222325u64;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
+    let mut checksum = StreamingChecksum::new();
+    checksum.update(bytes);
+    checksum.finish()
+}
+
+struct StreamingChecksum(u64);
+
+impl StreamingChecksum {
+    const fn new() -> Self {
+        Self(0xcbf29ce484222325)
     }
-    hash
+
+    fn update(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 ^= u64::from(*byte);
+            self.0 = self.0.wrapping_mul(0x100000001b3);
+        }
+    }
+
+    const fn finish(self) -> u64 {
+        self.0
+    }
 }
 
 fn elapsed_micros(started: std::time::Instant) -> u64 {
@@ -12219,6 +16770,33 @@ fn parse_usize(input: &str, name: &str) -> Result<usize> {
         .map_err(|_| SkeinError::Storage(format!("invalid {name}: {input}")))
 }
 
+fn parse_statistics_path_key(
+    source: &str,
+    rel_type: &str,
+    target: &str,
+) -> Result<(LabelId, RelTypeId, LabelId)> {
+    Ok((
+        LabelId(parse_u32(source, "statistics source label id")?),
+        RelTypeId(parse_u32(rel_type, "statistics relationship type id")?),
+        LabelId(parse_u32(target, "statistics target label id")?),
+    ))
+}
+
+fn parse_statistics_bounded_path_key(
+    source: &str,
+    rel_type: &str,
+    target: &str,
+    hops: &str,
+) -> Result<(LabelId, RelTypeId, LabelId, usize)> {
+    let (source, rel_type, target) = parse_statistics_path_key(source, rel_type, target)?;
+    Ok((
+        source,
+        rel_type,
+        target,
+        parse_usize(hops, "statistics bounded path hop count")?,
+    ))
+}
+
 pub(crate) fn parse_i64(input: &str, name: &str) -> Result<i64> {
     input
         .parse()
@@ -12240,32 +16818,83 @@ fn parse_optional_u64(input: &str, name: &str) -> Result<Option<u64>> {
 }
 
 fn validate_storage_version(version: &str) -> Result<()> {
-    if version == STORAGE_VERSION {
+    if version == STORAGE_VERSION || version == LEGACY_STORAGE_VERSION {
         return Ok(());
     }
     Err(SkeinError::Storage(format!(
-        "unsupported storage version: {version}; expected {STORAGE_VERSION}"
+        "unsupported storage version: {version}; expected {STORAGE_VERSION} or {LEGACY_STORAGE_VERSION}"
     )))
+}
+
+fn validate_storage_version_for_format(version: &str, format: DurableFormat) -> Result<()> {
+    if version == format.storage_version() {
+        return Ok(());
+    }
+    if version != STORAGE_VERSION && version != LEGACY_STORAGE_VERSION {
+        return validate_storage_version(version);
+    }
+    Err(SkeinError::Storage(format!(
+        "storage version {version} does not match {} manifest",
+        format.storage_version()
+    )))
+}
+
+fn estimated_node_record_bytes(node: &NodeRecord) -> u64 {
+    32u64
+        .saturating_add((node.labels.len() as u64).saturating_mul(4))
+        .saturating_add(estimated_properties_bytes(&node.properties))
+}
+
+fn estimated_relationship_record_bytes(relationship: &RelRecord) -> u64 {
+    40u64.saturating_add(estimated_properties_bytes(&relationship.properties))
+}
+
+fn estimated_properties_bytes(properties: &BTreeMap<String, Value>) -> u64 {
+    properties.iter().fold(0u64, |bytes, (key, value)| {
+        bytes
+            .saturating_add(key.len() as u64)
+            .saturating_add(estimated_value_bytes(value))
+            .saturating_add(16)
+    })
+}
+
+fn estimated_value_bytes(value: &Value) -> u64 {
+    match value {
+        Value::Null => 1,
+        Value::Bool(_) => 1,
+        Value::Int(_) | Value::Float(_) => 8,
+        Value::String(value) => value.len() as u64,
+        Value::List(values) => values.iter().fold(16u64, |bytes, value| {
+            bytes.saturating_add(estimated_value_bytes(value))
+        }),
+        Value::Map(values) => estimated_properties_bytes(values),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        checksum_bytes, compute_statistics, encode_durable_text, read_durable_text, source_scan,
+        canonical_adjacency_artifact_generation_file, canonical_adjacency_manifest_generation_file,
+        checksum_bytes, compute_statistics, encode_durable_text,
+        property_projection_artifact_generation_file, property_spill_artifact_generation_file,
+        read_durable_text, restore_storage_backup, set_checkpoint_failpoint, source_scan,
         AdjacencyConsolidationPlan, AdjacencyDirection, AdjacencyGroupStats, AdjacencyLayout,
-        ConnectedNodesCreate, CowSegmentedMap, DegreeStatisticsEntry, DegreeStatisticsKey,
-        DurableCompression, GraphStore, NodeId, NodeRecord, NodeSetAssignment, NodeSetValue,
-        OrderedAdjacencyEntry, ProjectedGraphDefinition, PropertyFilter, RelId, RelRecord,
-        RelTypeId, RelationshipDeleteRequest, ScanPruningStrategy, ScanPruningTargetKind,
-        SearchProjectionGraphChange, SourceScanCandidateRead, DENSE_ADJACENCY_DEGREE_THRESHOLD,
-        DURABLE_COMPRESSION_HEADER,
+        CheckpointPublishStage, ConnectedNodesCreate, CowSegmentedMap, DegreeStatisticsEntry,
+        DegreeStatisticsKey, DurableCompression, GraphScanControl, GraphStore, NodeId, NodeRecord,
+        NodeSetAssignment, NodeSetValue, OrderedAdjacencyEntry, ProjectedGraphDefinition,
+        PropertyFilter, RelId, RelRecord, RelTypeId, RelationshipDeleteRequest,
+        ScanPruningStrategy, ScanPruningTargetKind, SearchProjectionGraphChange,
+        SourceScanCandidateRead, COW_MAP_TARGET_SEGMENT_BYTES, DENSE_ADJACENCY_DEGREE_THRESHOLD,
+        DURABLE_COMPRESSION_HEADER, MANIFEST_FILE,
     };
     use crate::schema::{Catalog, LabelId};
     use crate::value::Value;
     use skein_storage::{
-        ScanPredicate, ScanSegmentAccessPlan, ScanSegmentFallback, ScanSegmentManifest,
+        DurabilityPolicy, ScanPredicate, ScanSegmentAccessPlan, ScanSegmentFallback,
+        ScanSegmentManifest, StorageResidencyMode, WalReplayConfig,
     };
     use std::collections::{BTreeMap, BTreeSet};
+    use std::fs::{self, OpenOptions};
     use std::io::Write;
     use std::num::{NonZeroU64, NonZeroUsize};
 
@@ -12609,6 +17238,36 @@ mod tests {
     }
 
     #[test]
+    fn large_records_split_cow_pages_by_estimated_bytes() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        for id in 0..8 {
+            store
+                .create_node(&mut catalog, "Memory", properties([("id", Value::Int(id))]))
+                .unwrap();
+        }
+        let snapshot = store.snapshot();
+        assert_eq!(store.nodes.segment_count(), 1);
+
+        store.apply_set_node_property(
+            &catalog,
+            NodeId(0),
+            "body".to_string(),
+            Value::String("x".repeat(COW_MAP_TARGET_SEGMENT_BYTES * 2)),
+        );
+
+        assert_eq!(snapshot.nodes.segment_count(), 1);
+        assert!(store.nodes.segment_count() >= 2);
+        assert_eq!(store.nodes.shared_segment_count_with(&snapshot.nodes), 0);
+        assert!(!snapshot
+            .nodes
+            .get(&NodeId(0))
+            .unwrap()
+            .properties
+            .contains_key("body"));
+    }
+
+    #[test]
     fn replays_relationships_from_wal_and_rebuilds_adjacency() {
         let path = unique_test_dir("rel_wal");
         {
@@ -12642,6 +17301,113 @@ mod tests {
             assert_eq!(rels[0].properties.get("weight"), Some(&Value::Int(7)));
         }
         std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn backup_restore_publishes_one_verified_generation() {
+        let path = unique_test_dir("backup_source");
+        let backup = unique_test_dir("backup_image");
+        let restored = unique_test_dir("backup_restored");
+        let report = {
+            let mut catalog = Catalog::default();
+            let mut store = GraphStore::open(&path, &mut catalog).unwrap();
+            let source = store
+                .create_node(
+                    &mut catalog,
+                    "Memory",
+                    properties([("id", Value::String("memory-1".to_string()))]),
+                )
+                .unwrap();
+            let target = store
+                .create_node(
+                    &mut catalog,
+                    "Entity",
+                    properties([("id", Value::String("entity-1".to_string()))]),
+                )
+                .unwrap();
+            store
+                .create_relationship(
+                    &mut catalog,
+                    source,
+                    target,
+                    "MENTIONS",
+                    properties([("weight", Value::Int(7))]),
+                )
+                .unwrap();
+            store.backup_to(&catalog, &backup).unwrap()
+        };
+        assert!(report.generation > 0);
+        assert_eq!(report.file_count, 11);
+
+        let restore = restore_storage_backup(&backup, &restored).unwrap();
+        assert_eq!(restore.generation, report.generation);
+        assert_eq!(restore.manifest_checksum, report.manifest_checksum);
+        let mut catalog = Catalog::default();
+        let store = GraphStore::open(&restored, &mut catalog).unwrap();
+        assert_eq!(store.scan_nodes(None).count(), 2);
+        assert_eq!(store.scan_relationships(None).count(), 1);
+        assert_eq!(
+            store.relationship(RelId(0)).unwrap().properties["weight"],
+            Value::Int(7)
+        );
+
+        std::fs::remove_dir_all(path).unwrap();
+        std::fs::remove_dir_all(backup).unwrap();
+        drop(store);
+        std::fs::remove_dir_all(restored).unwrap();
+    }
+
+    #[test]
+    fn restore_rejects_corrupt_backup_before_destination_publication() {
+        let path = unique_test_dir("backup_corrupt_source");
+        let backup = unique_test_dir("backup_corrupt_image");
+        let restored = unique_test_dir("backup_corrupt_restored");
+        {
+            let mut catalog = Catalog::default();
+            let mut store = GraphStore::open(&path, &mut catalog).unwrap();
+            store
+                .create_node(
+                    &mut catalog,
+                    "Memory",
+                    properties([("id", Value::String("memory-1".to_string()))]),
+                )
+                .unwrap();
+            store.backup_to(&catalog, &backup).unwrap();
+        }
+        let checkpoint = active_checkpoint_path(&backup);
+        let mut bytes = std::fs::read(&checkpoint).unwrap();
+        bytes[0] ^= 0xff;
+        std::fs::write(checkpoint, bytes).unwrap();
+
+        let error = restore_storage_backup(&backup, &restored).unwrap_err();
+        assert!(error.to_string().contains("verification failed"));
+        assert!(!restored.exists());
+
+        std::fs::remove_dir_all(path).unwrap();
+        std::fs::remove_dir_all(backup).unwrap();
+    }
+
+    #[test]
+    fn backup_and_restore_never_replace_existing_destinations() {
+        let path = unique_test_dir("backup_existing_source");
+        let backup = unique_test_dir("backup_existing_image");
+        let restored = unique_test_dir("backup_existing_restored");
+        std::fs::create_dir_all(&backup).unwrap();
+        std::fs::create_dir_all(&restored).unwrap();
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::open(&path, &mut catalog).unwrap();
+        let backup_error = store.backup_to(&catalog, &backup).unwrap_err();
+        assert!(backup_error.to_string().contains("already exists"));
+
+        std::fs::remove_dir_all(&backup).unwrap();
+        store.backup_to(&catalog, &backup).unwrap();
+        let restore_error = restore_storage_backup(&backup, &restored).unwrap_err();
+        assert!(restore_error.to_string().contains("already exists"));
+
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+        std::fs::remove_dir_all(backup).unwrap();
+        std::fs::remove_dir_all(restored).unwrap();
     }
 
     #[test]
@@ -12743,6 +17509,599 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_publishes_digest_bound_canonical_segments() {
+        let path = unique_test_dir("canonical_segment_checkpoint");
+        {
+            let mut catalog = Catalog::default();
+            let mut store = GraphStore::open(&path, &mut catalog).unwrap();
+            let source = store
+                .create_node(
+                    &mut catalog,
+                    "Memory",
+                    properties([("id", Value::String("memory-1".to_string()))]),
+                )
+                .unwrap();
+            let target = store
+                .create_node(
+                    &mut catalog,
+                    "Entity",
+                    properties([("id", Value::String("entity-1".to_string()))]),
+                )
+                .unwrap();
+            store
+                .create_relationship(
+                    &mut catalog,
+                    source,
+                    target,
+                    "MENTIONS",
+                    properties([("weight", Value::Int(5))]),
+                )
+                .unwrap();
+            store.checkpoint(&catalog).unwrap();
+            let manifest = store.canonical_segment_manifest().unwrap();
+            assert_eq!(manifest.node_count, 2);
+            assert_eq!(manifest.relationship_count, 1);
+            assert_eq!(
+                store.canonical_node_from_segments(source).unwrap(),
+                store.node(source).cloned()
+            );
+            assert_eq!(
+                store
+                    .canonical_relationship_from_segments(RelId(0))
+                    .unwrap(),
+                store.relationship(RelId(0)).cloned()
+            );
+        }
+        {
+            let mut catalog = Catalog::default();
+            let store = GraphStore::open(&path, &mut catalog).unwrap();
+            assert_eq!(store.canonical_segment_manifest().unwrap().node_count, 2);
+            assert_eq!(
+                store.canonical_node_from_segments(NodeId(1)).unwrap(),
+                store.node(NodeId(1)).cloned()
+            );
+        }
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn out_of_core_checkpoint_uses_generation_bound_dense_adjacency_and_fails_closed() {
+        use std::io::{Seek, SeekFrom};
+
+        let path = unique_test_dir("canonical_adjacency_checkpoint");
+        let replay_config = WalReplayConfig {
+            residency_mode: StorageResidencyMode::OutOfCore,
+            ..WalReplayConfig::default()
+        };
+        let source;
+        let first_relationship;
+        let corrupt_offset;
+        {
+            let mut catalog = Catalog::default();
+            let mut store = GraphStore::open_with_durability_and_replay_config(
+                &path,
+                &mut catalog,
+                DurabilityPolicy::default(),
+                replay_config,
+            )
+            .unwrap();
+            source = store
+                .create_node(&mut catalog, "Memory", BTreeMap::new())
+                .unwrap();
+            first_relationship = RelId(0);
+            for index in 0..70 {
+                let target = store
+                    .create_node(
+                        &mut catalog,
+                        "Entity",
+                        properties([("ordinal", Value::Int(index))]),
+                    )
+                    .unwrap();
+                store
+                    .create_relationship(&mut catalog, source, target, "MENTIONS", BTreeMap::new())
+                    .unwrap();
+            }
+            store.checkpoint(&catalog).unwrap();
+            let manifest = store.canonical_adjacency_manifest().unwrap();
+            let mention_type = catalog.rel_type_id("MENTIONS").unwrap();
+            let outgoing = manifest
+                .blocks
+                .iter()
+                .filter(|block| {
+                    block.direction == AdjacencyDirection::Outgoing
+                        && block.endpoint == source
+                        && block.rel_type == mention_type
+                })
+                .collect::<Vec<_>>();
+            assert!(!outgoing.is_empty());
+            assert!(outgoing
+                .iter()
+                .all(|block| block.layout == AdjacencyLayout::Dense));
+            corrupt_offset = outgoing[0].offset + 48;
+
+            let mut relationship_ids = Vec::new();
+            store
+                .visit_adjacent_relationships_owned(
+                    source,
+                    Some(mention_type),
+                    AdjacencyDirection::Outgoing,
+                    |relationship| {
+                        relationship_ids.push(relationship.id);
+                        GraphScanControl::Continue
+                    },
+                )
+                .unwrap();
+            assert_eq!(relationship_ids.len(), 70);
+
+            let target = store
+                .create_node(&mut catalog, "Entity", BTreeMap::new())
+                .unwrap();
+            store
+                .create_relationship(&mut catalog, source, target, "MENTIONS", BTreeMap::new())
+                .unwrap();
+            relationship_ids.clear();
+            store
+                .visit_adjacent_relationships_owned(
+                    source,
+                    Some(mention_type),
+                    AdjacencyDirection::Outgoing,
+                    |relationship| {
+                        relationship_ids.push(relationship.id);
+                        GraphScanControl::Continue
+                    },
+                )
+                .unwrap();
+            assert_eq!(relationship_ids.len(), 71);
+            assert!(relationship_ids.contains(&first_relationship));
+        }
+        {
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path.join(canonical_adjacency_artifact_generation_file(1)))
+                .unwrap();
+            file.seek(SeekFrom::Start(corrupt_offset)).unwrap();
+            file.write_all(&[0xff]).unwrap();
+            file.sync_all().unwrap();
+        }
+        {
+            let mut catalog = Catalog::default();
+            let store = GraphStore::open_with_durability_and_replay_config(
+                &path,
+                &mut catalog,
+                DurabilityPolicy::default(),
+                replay_config,
+            )
+            .unwrap();
+            let mention_type = catalog.rel_type_id("MENTIONS").unwrap();
+            let error = store
+                .visit_adjacent_relationships_owned(
+                    source,
+                    Some(mention_type),
+                    AdjacencyDirection::Outgoing,
+                    |_| GraphScanControl::Continue,
+                )
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("content digest verification"),
+                "unexpected adjacency corruption error: {error}"
+            );
+        }
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn out_of_core_checkpoint_without_adjacency_metadata_uses_legacy_canonical_fallback() {
+        let path = unique_test_dir("canonical_adjacency_legacy_fallback");
+        let replay_config = WalReplayConfig {
+            residency_mode: StorageResidencyMode::OutOfCore,
+            ..WalReplayConfig::default()
+        };
+        let source;
+        {
+            let mut catalog = Catalog::default();
+            let mut store = GraphStore::open_with_durability_and_replay_config(
+                &path,
+                &mut catalog,
+                DurabilityPolicy::default(),
+                replay_config,
+            )
+            .unwrap();
+            source = store
+                .create_node(&mut catalog, "Memory", BTreeMap::new())
+                .unwrap();
+            let target = store
+                .create_node(&mut catalog, "Entity", BTreeMap::new())
+                .unwrap();
+            store
+                .create_relationship(&mut catalog, source, target, "MENTIONS", BTreeMap::new())
+                .unwrap();
+            store.checkpoint(&catalog).unwrap();
+        }
+
+        let manifest_path = path.join(MANIFEST_FILE);
+        let manifest = fs::read_to_string(&manifest_path).unwrap();
+        let mut body = manifest
+            .lines()
+            .filter(|line| {
+                !line.starts_with("canonical_adjacency_manifest_")
+                    && !line.starts_with("checksum\t")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        body.push('\n');
+        fs::write(
+            &manifest_path,
+            format!("{body}checksum\t{}\n", checksum_bytes(body.as_bytes())),
+        )
+        .unwrap();
+        fs::remove_file(path.join(canonical_adjacency_artifact_generation_file(1))).unwrap();
+        fs::remove_file(path.join(canonical_adjacency_manifest_generation_file(1))).unwrap();
+
+        let mut catalog = Catalog::default();
+        let store = GraphStore::open_with_durability_and_replay_config(
+            &path,
+            &mut catalog,
+            DurabilityPolicy::default(),
+            replay_config,
+        )
+        .unwrap();
+        assert!(store.canonical_adjacency_manifest().is_none());
+        let mention_type = catalog.rel_type_id("MENTIONS").unwrap();
+        let mut relationships = Vec::new();
+        store
+            .visit_adjacent_relationships_owned(
+                source,
+                Some(mention_type),
+                AdjacencyDirection::Outgoing,
+                |relationship| {
+                    relationships.push(relationship.id);
+                    GraphScanControl::Continue
+                },
+            )
+            .unwrap();
+        assert_eq!(relationships, vec![RelId(0)]);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn out_of_core_property_spills_round_trip_and_fail_closed() {
+        use std::io::{Seek, SeekFrom};
+
+        let path = unique_test_dir("property_spill_checkpoint");
+        let replay_config = WalReplayConfig {
+            residency_mode: StorageResidencyMode::OutOfCore,
+            ..WalReplayConfig::default()
+        };
+        let content = "property-spill-value-".repeat(8_192);
+        let node_id;
+        let corrupt_offset;
+        {
+            let mut catalog = Catalog::default();
+            let mut store = GraphStore::open_with_durability_and_replay_config(
+                &path,
+                &mut catalog,
+                DurabilityPolicy::default(),
+                replay_config,
+            )
+            .unwrap();
+            node_id = store
+                .create_node(
+                    &mut catalog,
+                    "Memory",
+                    properties([("content", Value::String(content.clone()))]),
+                )
+                .unwrap();
+            let target = store
+                .create_node(&mut catalog, "Entity", BTreeMap::new())
+                .unwrap();
+            store
+                .create_relationship(
+                    &mut catalog,
+                    node_id,
+                    target,
+                    "MENTIONS",
+                    properties([("context", Value::String(content.clone()))]),
+                )
+                .unwrap();
+            store.checkpoint(&catalog).unwrap();
+            let spill_manifest = store.property_spill_manifest().unwrap();
+            assert_eq!(spill_manifest.value_count, 2);
+            assert!(spill_manifest.value_bytes > 64 * 1024);
+            corrupt_offset = spill_manifest.blocks[0].offset + 40;
+            let canonical_manifest = store.canonical_segment_manifest().unwrap();
+            assert!(canonical_manifest
+                .node_segments()
+                .all(|segment| segment.length.get() < 16 * 1024));
+            assert_eq!(
+                store.node_owned(node_id).unwrap().unwrap().properties["content"],
+                Value::String(content.clone())
+            );
+            let mention_type = catalog.rel_type_id("MENTIONS").unwrap();
+            let mut contexts = Vec::new();
+            store
+                .visit_adjacent_relationships_owned(
+                    node_id,
+                    Some(mention_type),
+                    AdjacencyDirection::Outgoing,
+                    |relationship| {
+                        contexts.push(relationship.properties["context"].clone());
+                        GraphScanControl::Continue
+                    },
+                )
+                .unwrap();
+            assert_eq!(contexts, vec![Value::String(content.clone())]);
+        }
+        {
+            let mut catalog = Catalog::default();
+            let store = GraphStore::open_with_durability_and_replay_config(
+                &path,
+                &mut catalog,
+                DurabilityPolicy::default(),
+                replay_config,
+            )
+            .unwrap();
+            assert_eq!(
+                store.node_owned(node_id).unwrap().unwrap().properties["content"],
+                Value::String(content)
+            );
+        }
+        {
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path.join(property_spill_artifact_generation_file(1)))
+                .unwrap();
+            file.seek(SeekFrom::Start(corrupt_offset)).unwrap();
+            file.write_all(&[0xff]).unwrap();
+            file.sync_all().unwrap();
+        }
+        {
+            let mut catalog = Catalog::default();
+            let error = GraphStore::open_with_durability_and_replay_config(
+                &path,
+                &mut catalog,
+                DurabilityPolicy::default(),
+                replay_config,
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("content digest verification"),
+                "unexpected property spill corruption error: {error}"
+            );
+        }
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn out_of_core_property_projections_merge_wal_delta_and_fail_closed() {
+        use skein_storage::PersistentPropertyProjectionKind;
+        use std::io::{Seek, SeekFrom};
+
+        let path = unique_test_dir("property_projection_checkpoint");
+        let replay_config = WalReplayConfig {
+            residency_mode: StorageResidencyMode::OutOfCore,
+            ..WalReplayConfig::default()
+        };
+        let first_id;
+        let second_id;
+        let delta_id;
+        let corrupt_offset;
+        {
+            let mut catalog = Catalog::default();
+            let mut store = GraphStore::open_with_durability_and_replay_config(
+                &path,
+                &mut catalog,
+                DurabilityPolicy::default(),
+                replay_config,
+            )
+            .unwrap();
+            store
+                .create_range_property_index(&mut catalog, "Memory", "rank")
+                .unwrap();
+            store
+                .create_full_text_property_index(&mut catalog, "Memory", "content")
+                .unwrap();
+            first_id = store
+                .create_node(
+                    &mut catalog,
+                    "Memory",
+                    properties([
+                        ("rank", Value::Int(10)),
+                        ("content", Value::String("alpha beta".to_string())),
+                    ]),
+                )
+                .unwrap();
+            second_id = store
+                .create_node(
+                    &mut catalog,
+                    "Memory",
+                    properties([
+                        ("rank", Value::Int(20)),
+                        ("content", Value::String("beta gamma".to_string())),
+                    ]),
+                )
+                .unwrap();
+            store
+                .create_node(
+                    &mut catalog,
+                    "Memory",
+                    properties([
+                        ("rank", Value::Int(30)),
+                        ("content", Value::String("delta".to_string())),
+                    ]),
+                )
+                .unwrap();
+            store.checkpoint(&catalog).unwrap();
+
+            let label_id = catalog.label_id("Memory").unwrap();
+            let manifest = store.persistent_property_projection_manifest().unwrap();
+            assert!(manifest.supports(label_id, "rank", PersistentPropertyProjectionKind::Range));
+            assert!(manifest.supports(
+                label_id,
+                "content",
+                PersistentPropertyProjectionKind::FullText
+            ));
+            corrupt_offset = manifest
+                .blocks
+                .iter()
+                .find(|block| block.kind == PersistentPropertyProjectionKind::Range)
+                .map(|block| block.offset + block.length.get() - 1)
+                .unwrap();
+
+            let lower = (Value::Int(15), true);
+            let upper = (Value::Int(25), true);
+            let mut range_ids = Vec::new();
+            store
+                .visit_nodes_by_property_range_owned(
+                    label_id,
+                    "rank",
+                    Some(&lower),
+                    Some(&upper),
+                    |node| {
+                        range_ids.push(node.id);
+                        GraphScanControl::Continue
+                    },
+                )
+                .unwrap();
+            assert_eq!(range_ids, vec![second_id]);
+            let mut full_text_ids = Vec::new();
+            store
+                .visit_nodes_by_full_text_property_owned(label_id, "content", "beta", |node| {
+                    full_text_ids.push(node.id);
+                    GraphScanControl::Continue
+                })
+                .unwrap();
+            assert_eq!(full_text_ids, vec![first_id, second_id]);
+
+            let second_filter = PropertyFilter::IdEq {
+                value: Value::Int(second_id.0 as i64),
+            };
+            store
+                .set_node_property(
+                    &mut catalog,
+                    "Memory",
+                    Some(&second_filter),
+                    "rank",
+                    Value::Int(40),
+                )
+                .unwrap();
+            store
+                .set_node_property(
+                    &mut catalog,
+                    "Memory",
+                    Some(&second_filter),
+                    "content",
+                    Value::String("omega".to_string()),
+                )
+                .unwrap();
+            let first_filter = PropertyFilter::IdEq {
+                value: Value::Int(first_id.0 as i64),
+            };
+            store
+                .delete_nodes(&mut catalog, "Memory", Some(&first_filter), false)
+                .unwrap();
+            delta_id = store
+                .create_node(
+                    &mut catalog,
+                    "Memory",
+                    properties([
+                        ("rank", Value::Int(18)),
+                        ("content", Value::String("beta epsilon".to_string())),
+                    ]),
+                )
+                .unwrap();
+
+            range_ids.clear();
+            store
+                .visit_nodes_by_property_range_owned(
+                    label_id,
+                    "rank",
+                    Some(&lower),
+                    Some(&upper),
+                    |node| {
+                        range_ids.push(node.id);
+                        GraphScanControl::Continue
+                    },
+                )
+                .unwrap();
+            assert_eq!(range_ids, vec![delta_id]);
+            full_text_ids.clear();
+            store
+                .visit_nodes_by_full_text_property_owned(label_id, "content", "beta", |node| {
+                    full_text_ids.push(node.id);
+                    GraphScanControl::Continue
+                })
+                .unwrap();
+            assert_eq!(full_text_ids, vec![delta_id]);
+        }
+        {
+            let mut catalog = Catalog::default();
+            let store = GraphStore::open_with_durability_and_replay_config(
+                &path,
+                &mut catalog,
+                DurabilityPolicy::default(),
+                replay_config,
+            )
+            .unwrap();
+            let label_id = catalog.label_id("Memory").unwrap();
+            let lower = (Value::Int(15), true);
+            let upper = (Value::Int(25), true);
+            let mut range_ids = Vec::new();
+            store
+                .visit_nodes_by_property_range_owned(
+                    label_id,
+                    "rank",
+                    Some(&lower),
+                    Some(&upper),
+                    |node| {
+                        range_ids.push(node.id);
+                        GraphScanControl::Continue
+                    },
+                )
+                .unwrap();
+            assert_eq!(range_ids, vec![delta_id]);
+        }
+        {
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path.join(property_projection_artifact_generation_file(1)))
+                .unwrap();
+            file.seek(SeekFrom::Start(corrupt_offset)).unwrap();
+            file.write_all(&[0xff]).unwrap();
+            file.sync_all().unwrap();
+        }
+        {
+            let mut catalog = Catalog::default();
+            let store = GraphStore::open_with_durability_and_replay_config(
+                &path,
+                &mut catalog,
+                DurabilityPolicy::default(),
+                replay_config,
+            )
+            .unwrap();
+            let label_id = catalog.label_id("Memory").unwrap();
+            let lower = (Value::Int(0), true);
+            let upper = (Value::Int(50), true);
+            let error = store
+                .visit_nodes_by_property_range_owned(
+                    label_id,
+                    "rank",
+                    Some(&lower),
+                    Some(&upper),
+                    |_| GraphScanControl::Continue,
+                )
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("content digest verification"),
+                "unexpected property projection corruption error: {error}"
+            );
+        }
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
     fn corrupted_source_scan_artifact_never_blocks_canonical_graph_recovery() {
         let path = unique_test_dir("source_scan_corruption");
         {
@@ -12770,7 +18129,7 @@ mod tests {
     }
 
     #[test]
-    fn source_scan_reader_decodes_coalesced_segment_ranges() {
+    fn source_scan_reader_caches_independently_verified_segment_ranges() {
         let path = unique_test_dir("source_scan_coalesced_ranges");
         let mut catalog = Catalog::default();
         let mut store = GraphStore::open(&path, &mut catalog).unwrap();
@@ -12796,8 +18155,27 @@ mod tests {
             panic!("expected source scan payload read");
         };
         assert_eq!(rows.len(), 129);
-        assert_eq!(report.range_count, 1);
+        assert_eq!(report.range_count, 2);
         assert_eq!(report.wave_count, 1);
+        let first_cache = store.segment_cache_snapshot().unwrap();
+        assert_eq!(first_cache.entry_count, 2);
+        assert_eq!(first_cache.miss_count, 2);
+
+        let SourceScanCandidateRead::Rows { rows, .. } = store
+            .read_published_source_scan_candidates(
+                &ScanPredicate::True,
+                NonZeroUsize::new(2).unwrap(),
+                NonZeroU64::new(1024 * 1024).unwrap(),
+                NonZeroU64::new(1024 * 1024).unwrap(),
+            )
+            .unwrap()
+        else {
+            panic!("expected cached source scan payload read");
+        };
+        assert_eq!(rows.len(), 129);
+        let second_cache = store.segment_cache_snapshot().unwrap();
+        assert_eq!(second_cache.hit_count, 2);
+        assert_eq!(second_cache.resident_bytes, first_cache.resident_bytes);
         std::fs::remove_dir_all(path).unwrap();
     }
 
@@ -13149,7 +18527,7 @@ mod tests {
                 .unwrap();
             store.checkpoint(&catalog).unwrap();
         }
-        assert_eq!(std::fs::read_to_string(path.join("wal.skein")).unwrap(), "");
+        assert_eq!(read_test_wal(&path).unwrap(), "");
         {
             let mut catalog = Catalog::default();
             let store = GraphStore::open(&path, &mut catalog).unwrap();
@@ -13228,7 +18606,7 @@ mod tests {
                 .unwrap();
             store.checkpoint(&catalog).unwrap();
         }
-        let checkpoint_path = path.join("checkpoint.skein");
+        let checkpoint_path = active_checkpoint_path(&path);
         rewrite_checksummed_file(
             &checkpoint_path,
             "search_projection_change_log_start_epoch\t0\n",
@@ -13268,10 +18646,15 @@ mod tests {
             store.checkpoint(&catalog).unwrap();
         }
 
+        let properties_one = crate::store::encode_properties(&properties([("id", Value::Int(1))]));
+        let properties_two = crate::store::encode_properties(&properties([("id", Value::Int(2))]));
+        let corrupt_records = format!(
+            "node\t0\t0\t{properties_one}\nnode\t1\t0\t{properties_two}\nrel\t0\t0\t99\t0\t"
+        );
         rewrite_checksummed_file(
-            &path.join("checkpoint.skein"),
-            "rel\t0\t0\t1\t0\t",
-            "rel\t0\t0\t99\t0\t",
+            &active_checkpoint_path(&path),
+            "canonical_records\ttrue",
+            &corrupt_records,
             "checkpoint",
         );
 
@@ -13298,7 +18681,7 @@ mod tests {
             store.checkpoint(&catalog).unwrap();
         }
 
-        let checkpoint_bytes = std::fs::read(path.join("checkpoint.skein")).unwrap();
+        let checkpoint_bytes = std::fs::read(active_checkpoint_path(&path)).unwrap();
         assert!(checkpoint_bytes.starts_with(DURABLE_COMPRESSION_HEADER.as_bytes()));
         let header_end = checkpoint_bytes
             .windows(2)
@@ -13306,16 +18689,97 @@ mod tests {
             .unwrap();
         let header = std::str::from_utf8(&checkpoint_bytes[..header_end]).unwrap();
         assert!(header.contains("codec\tzstd\n"));
-        let checkpoint = read_durable_text(&path.join("checkpoint.skein"), "checkpoint").unwrap();
+        let checkpoint = read_durable_text(&active_checkpoint_path(&path), "checkpoint").unwrap();
         assert!(checkpoint.contains("commit_epoch\t2\n"));
         let manifest = std::fs::read_to_string(path.join("manifest.skein")).unwrap();
-        assert!(manifest.contains("SKEIN_MANIFEST_V1\n"));
+        assert!(manifest.contains("SKEIN_MANIFEST_V2\n"));
+        assert!(manifest.contains("checkpoint_generation\t1\n"));
+        assert!(manifest.contains("wal_generation\t1\n"));
         assert!(manifest.contains("checkpoint_epoch\t1\n"));
         assert!(manifest.contains("checkpoint_commit_epoch\t2\n"));
         assert!(manifest.contains("oldest_reader_commit_epoch\tnone\n"));
         assert!(manifest.contains("safe_reclaim_commit_epoch\t2\n"));
-        assert!(manifest.contains("wal_replay_start_lsn\t1\n"));
-        assert!(manifest.contains("next_lsn\t1\n"));
+        assert!(manifest.contains("wal_replay_start_lsn\t3\n"));
+        assert!(manifest.contains("next_lsn\t3\n"));
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn checkpoint_publish_failpoints_recover_one_complete_generation() {
+        for (stage, expected_checkpoint_epoch) in [
+            (CheckpointPublishStage::CheckpointPersisted, None),
+            (CheckpointPublishStage::WalPrepared, None),
+            (CheckpointPublishStage::ManifestPublished, Some(1)),
+        ] {
+            let path = unique_test_dir(&format!("checkpoint_failpoint_{stage:?}"));
+            {
+                let mut catalog = Catalog::default();
+                let mut store = GraphStore::open(&path, &mut catalog).unwrap();
+                store
+                    .create_node(&mut catalog, "Memory", properties([("id", Value::Int(1))]))
+                    .unwrap();
+                set_checkpoint_failpoint(Some(stage));
+                let error = store.checkpoint(&catalog).unwrap_err();
+                set_checkpoint_failpoint(None);
+                assert!(error.to_string().contains("injected checkpoint failure"));
+            }
+
+            let mut catalog = Catalog::default();
+            let store = GraphStore::open(&path, &mut catalog).unwrap();
+            assert_eq!(store.commit_epoch(), 1);
+            assert_eq!(
+                store.storage_recovery_report().checkpoint_epoch,
+                expected_checkpoint_epoch
+            );
+            let memory = catalog.label_id("Memory").unwrap();
+            assert_eq!(store.scan_nodes(Some(memory)).count(), 1);
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn checkpoint_retains_one_previous_generation_before_reclaim() {
+        let path = unique_test_dir("checkpoint_generation_reclaim");
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::open(&path, &mut catalog).unwrap();
+        for id in 1..=3 {
+            store
+                .create_node(&mut catalog, "Memory", properties([("id", Value::Int(id))]))
+                .unwrap();
+            store.checkpoint(&catalog).unwrap();
+        }
+
+        assert!(!path.join("checkpoint.1.skein").exists());
+        assert!(!path.join("wal.1.skein").exists());
+        assert!(!path.join("canonical.1.skein").exists());
+        assert!(!path.join("canonical.1.manifest.skein").exists());
+        assert!(!path.join("adjacency.1.skein").exists());
+        assert!(!path.join("adjacency.1.manifest.skein").exists());
+        assert!(!path.join("properties.1.skein").exists());
+        assert!(!path.join("properties.1.manifest.skein").exists());
+        assert!(!path.join("property-index.1.skein").exists());
+        assert!(!path.join("property-index.1.manifest.skein").exists());
+        assert!(path.join("checkpoint.2.skein").exists());
+        assert!(path.join("wal.2.skein").exists());
+        assert!(path.join("canonical.2.skein").exists());
+        assert!(path.join("canonical.2.manifest.skein").exists());
+        assert!(path.join("adjacency.2.skein").exists());
+        assert!(path.join("adjacency.2.manifest.skein").exists());
+        assert!(path.join("properties.2.skein").exists());
+        assert!(path.join("properties.2.manifest.skein").exists());
+        assert!(path.join("property-index.2.skein").exists());
+        assert!(path.join("property-index.2.manifest.skein").exists());
+        assert!(path.join("checkpoint.3.skein").exists());
+        assert!(path.join("wal.3.skein").exists());
+        assert!(path.join("canonical.3.skein").exists());
+        assert!(path.join("canonical.3.manifest.skein").exists());
+        assert!(path.join("adjacency.3.skein").exists());
+        assert!(path.join("adjacency.3.manifest.skein").exists());
+        assert!(path.join("properties.3.skein").exists());
+        assert!(path.join("properties.3.manifest.skein").exists());
+        assert!(path.join("property-index.3.skein").exists());
+        assert!(path.join("property-index.3.manifest.skein").exists());
+        drop(store);
         std::fs::remove_dir_all(path).unwrap();
     }
 
@@ -13338,8 +18802,8 @@ mod tests {
                 .unwrap();
         }
 
-        let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
-        assert!(wal.starts_with("1\tcreate_node\t"));
+        let wal = read_test_wal(&path).unwrap();
+        assert!(wal.starts_with("2\tcreate_node\t"));
         let mut catalog = Catalog::default();
         let store = GraphStore::open(&path, &mut catalog).unwrap();
         let label = catalog.label_id("Memory").unwrap();
@@ -13386,7 +18850,7 @@ mod tests {
         }
         rewrite_checksummed_file(
             &path.join("manifest.skein"),
-            "version\tskein-storage-v1\n",
+            "version\tskein-storage-v2\n",
             "version\tskein-storage-v0\n",
             "manifest",
         );
@@ -13410,10 +18874,9 @@ mod tests {
                 .unwrap();
             store.checkpoint(&catalog).unwrap();
         }
-        std::fs::remove_file(path.join("manifest.skein")).unwrap();
         rewrite_checksummed_file(
-            &path.join("checkpoint.skein"),
-            "version\tskein-storage-v1\n",
+            &active_checkpoint_path(&path),
+            "version\tskein-storage-v2\n",
             "version\tskein-storage-v0\n",
             "checkpoint",
         );
@@ -14329,7 +19792,7 @@ mod tests {
         }
         std::fs::OpenOptions::new()
             .append(true)
-            .open(path.join("wal.skein"))
+            .open(active_wal_path(&path))
             .unwrap()
             .write_all(b"torn-entry-without-checksum")
             .unwrap();
@@ -14362,7 +19825,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let wal_path = path.join("wal.skein");
+        let wal_path = active_wal_path(&path);
         let wal = std::fs::read_to_string(&wal_path).unwrap();
         let torn = wal.rsplit_once('\t').unwrap().0;
         std::fs::write(&wal_path, torn).unwrap();
@@ -14372,6 +19835,100 @@ mod tests {
         assert!(store.scan_nodes(None).next().is_none());
         assert!(catalog.rel_type_id("MENTIONS").is_none());
         std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn rejects_and_quarantines_checksum_corruption_before_valid_wal_suffix() {
+        let path = unique_test_dir("wal_middle_corruption");
+        {
+            let mut catalog = Catalog::default();
+            let mut store = GraphStore::open(&path, &mut catalog).unwrap();
+            store
+                .create_node(&mut catalog, "Memory", properties([("id", Value::Int(1))]))
+                .unwrap();
+            store
+                .create_node(&mut catalog, "Memory", properties([("id", Value::Int(2))]))
+                .unwrap();
+        }
+        let wal_path = active_wal_path(&path);
+        let wal = std::fs::read_to_string(&wal_path).unwrap();
+        let mut lines = wal.lines().map(str::to_string).collect::<Vec<_>>();
+        let first_record = lines[1].rsplit_once('\t').unwrap().0;
+        lines[1] = format!("{first_record}\t0");
+        std::fs::write(&wal_path, format!("{}\n", lines.join("\n"))).unwrap();
+
+        let mut catalog = Catalog::default();
+        let error = GraphStore::open(&path, &mut catalog).unwrap_err();
+        assert!(error.to_string().contains("is not a torn tail"));
+        assert_eq!(
+            std::fs::read_dir(path.join("quarantine")).unwrap().count(),
+            1
+        );
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn rejects_and_quarantines_non_contiguous_wal_lsn() {
+        let path = unique_test_dir("wal_lsn_gap");
+        {
+            let mut catalog = Catalog::default();
+            let mut store = GraphStore::open(&path, &mut catalog).unwrap();
+            store
+                .create_node(&mut catalog, "Memory", properties([("id", Value::Int(1))]))
+                .unwrap();
+            store
+                .create_node(&mut catalog, "Memory", properties([("id", Value::Int(2))]))
+                .unwrap();
+        }
+        let wal_path = active_wal_path(&path);
+        let wal = std::fs::read_to_string(&wal_path).unwrap();
+        let mut lines = wal.lines().map(str::to_string).collect::<Vec<_>>();
+        let (body, _) = lines[2].rsplit_once('\t').unwrap();
+        let (_, payload) = body.split_once('\t').unwrap();
+        let rewritten_body = format!("3\t{payload}");
+        lines[2] = format!(
+            "{rewritten_body}\t{}",
+            checksum_bytes(rewritten_body.as_bytes())
+        );
+        std::fs::write(&wal_path, format!("{}\n", lines.join("\n"))).unwrap();
+
+        let mut catalog = Catalog::default();
+        let error = GraphStore::open(&path, &mut catalog).unwrap_err();
+        assert!(error.to_string().contains("WAL LSN sequence mismatch"));
+        assert_eq!(
+            std::fs::read_dir(path.join("quarantine")).unwrap().count(),
+            1
+        );
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn generational_manifest_fails_closed_for_missing_canonical_artifacts() {
+        for missing in ["checkpoint", "wal", "manifest"] {
+            let path = unique_test_dir(&format!("missing_{missing}"));
+            {
+                let mut catalog = Catalog::default();
+                let mut store = GraphStore::open(&path, &mut catalog).unwrap();
+                store
+                    .create_node(&mut catalog, "Memory", properties([("id", Value::Int(1))]))
+                    .unwrap();
+                store.checkpoint(&catalog).unwrap();
+            }
+            match missing {
+                "checkpoint" => std::fs::remove_file(active_checkpoint_path(&path)).unwrap(),
+                "wal" => std::fs::remove_file(active_wal_path(&path)).unwrap(),
+                "manifest" => std::fs::remove_file(path.join("manifest.skein")).unwrap(),
+                _ => unreachable!(),
+            }
+
+            let mut catalog = Catalog::default();
+            let error = GraphStore::open(&path, &mut catalog).unwrap_err();
+            assert!(
+                error.to_string().contains("missing")
+                    || error.to_string().contains("no durable manifest")
+            );
+            std::fs::remove_dir_all(path).unwrap();
+        }
     }
 
     #[test]
@@ -14455,7 +20012,7 @@ mod tests {
                 .unwrap();
         }
 
-        let wal_path = path.join("wal.skein");
+        let wal_path = active_wal_path(&path);
         let wal = std::fs::read_to_string(&wal_path).unwrap();
         let torn = wal.rsplit_once('\t').unwrap().0;
         std::fs::write(&wal_path, torn).unwrap();
@@ -14465,8 +20022,8 @@ mod tests {
         let report = store.storage_recovery_report();
         assert!(report.durable);
         assert_eq!(report.checkpoint_commit_epoch, Some(1));
-        assert_eq!(report.wal_replay_start_lsn, Some(1));
-        assert_eq!(report.next_lsn_after_replay, Some(3));
+        assert_eq!(report.wal_replay_start_lsn, Some(2));
+        assert_eq!(report.next_lsn_after_replay, Some(4));
         assert_eq!(report.replayed_wal_entries, 2);
         assert!(report.torn_tail_ignored);
         assert!(report.torn_tail_reason.is_some());
@@ -15196,6 +20753,52 @@ mod tests {
         std::env::temp_dir().join(format!("skein_store_{name}_{nanos}"))
     }
 
+    fn active_wal_path(path: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+        active_generation_path(path.as_ref(), "wal_generation", "wal", "wal.skein")
+    }
+
+    fn active_checkpoint_path(path: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+        active_generation_path(
+            path.as_ref(),
+            "checkpoint_generation",
+            "checkpoint",
+            "checkpoint.skein",
+        )
+    }
+
+    fn read_test_wal(path: impl AsRef<std::path::Path>) -> std::io::Result<String> {
+        let wal = std::fs::read_to_string(active_wal_path(path))?;
+        if wal.starts_with("SKEIN_WAL_V2\t") {
+            Ok(wal
+                .split_once('\n')
+                .map_or_else(String::new, |(_, records)| records.to_string()))
+        } else {
+            Ok(wal)
+        }
+    }
+
+    fn active_generation_path(
+        root: &std::path::Path,
+        manifest_field: &str,
+        prefix: &str,
+        legacy_name: &str,
+    ) -> std::path::PathBuf {
+        let Ok(manifest) = std::fs::read_to_string(root.join("manifest.skein")) else {
+            return root.join(legacy_name);
+        };
+        if !manifest.contains("SKEIN_MANIFEST_V2\n") {
+            return root.join(legacy_name);
+        }
+        let generation = manifest.lines().find_map(|line| {
+            let (field, value) = line.split_once('\t')?;
+            (field == manifest_field && value != "none").then_some(value)
+        });
+        generation.map_or_else(
+            || root.join(legacy_name),
+            |generation| root.join(format!("{prefix}.{generation}.skein")),
+        )
+    }
+
     fn rewrite_checksummed_file(path: &std::path::Path, from: &str, to: &str, kind: &str) {
         let was_compressed = std::fs::read(path)
             .unwrap()
@@ -15214,10 +20817,46 @@ mod tests {
         } else {
             std::fs::write(path, rewritten.as_bytes()).unwrap();
         }
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("checkpoint."))
+        {
+            refresh_manifest_checkpoint_metadata(path);
+        }
         let rewritten = read_durable_text(path, kind).unwrap();
         assert!(
             rewritten.contains(to),
             "{kind} rewrite did not update storage version"
         );
+    }
+
+    fn refresh_manifest_checkpoint_metadata(checkpoint_path: &std::path::Path) {
+        let root = checkpoint_path.parent().unwrap();
+        let manifest_path = root.join("manifest.skein");
+        let manifest = std::fs::read_to_string(&manifest_path).unwrap();
+        let (body, _) = manifest.rsplit_once("checksum\t").unwrap();
+        let checkpoint = std::fs::read(checkpoint_path).unwrap();
+        let encoded_len = checkpoint.len() as u64;
+        let encoded_checksum = checksum_bytes(&checkpoint);
+        let mut rewritten_body = String::new();
+        for line in body.lines() {
+            if line.starts_with("checkpoint_encoded_len\t") {
+                rewritten_body.push_str(&format!("checkpoint_encoded_len\t{encoded_len}\n"));
+            } else if line.starts_with("checkpoint_encoded_checksum\t") {
+                rewritten_body.push_str(&format!(
+                    "checkpoint_encoded_checksum\t{encoded_checksum}\n"
+                ));
+            } else {
+                rewritten_body.push_str(line);
+                rewritten_body.push('\n');
+            }
+        }
+        let checksum = checksum_bytes(rewritten_body.as_bytes());
+        std::fs::write(
+            manifest_path,
+            format!("{rewritten_body}checksum\t{checksum}\n"),
+        )
+        .unwrap();
     }
 }

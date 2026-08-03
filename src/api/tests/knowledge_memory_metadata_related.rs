@@ -130,7 +130,7 @@ fn metadata_related_memory_projected_list_rejects_invalid_input_without_wal() {
     db.query("CREATE (:Memory {id: 'metadata_related_wal', metadata: '{\"source_id\":\"source\"}', space_id: 'default'})")
         .unwrap();
     let graph_commit_epoch = db.store.commit_epoch();
-    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_before = read_test_wal(&path).unwrap();
 
     for request in [
         KnowledgeMemoryMetadataRelatedProjectedListRequest {
@@ -163,8 +163,5 @@ fn metadata_related_memory_projected_list_rejects_invalid_input_without_wal() {
     }
 
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(
-        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
-        wal_before
-    );
+    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
 }

@@ -155,9 +155,10 @@ fn checkpoint_persists_index_descriptors_and_statistics() {
         db.checkpoint().unwrap();
     }
 
-    let checkpoint = read_test_durable_text(&path.join("checkpoint.skein")).unwrap();
+    let checkpoint = read_test_durable_text(&active_checkpoint_path(&path)).unwrap();
     assert!(checkpoint.contains("property_index"));
     assert!(checkpoint.contains("stat_commit_epoch\t2\n"));
+    assert!(checkpoint.contains("stat_advanced_complete\ttrue\n"));
     assert!(checkpoint.contains("stat_histogram_sample_limit\t512\n"));
     assert!(checkpoint.contains("stat_node_count\t3\n"));
     assert!(checkpoint.contains("stat_relationship_count\t1\n"));
@@ -181,6 +182,7 @@ fn checkpoint_persists_index_descriptors_and_statistics() {
             .iter()
             .any(|index| index.property == "kind"));
         assert_eq!(db.statistics().computed_at_commit_epoch, 2);
+        assert!(db.statistics().advanced_statistics_complete);
         assert_eq!(db.statistics().histogram_sample_limit, 512);
         assert_eq!(db.statistics().node_count, 3);
         assert_eq!(db.statistics().relationship_count, 1);

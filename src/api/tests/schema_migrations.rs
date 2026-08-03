@@ -62,7 +62,9 @@ fn applies_schema_migration_log_batch_idempotently() {
     assert_eq!(rows.rows[2].get("applied_at"), Some(&Value::Int(103)));
 
     let graph_commit_epoch = db.store.commit_epoch();
-    let applied = db.knowledge_schema_migrations(&KnowledgeSchemaMigrationListRequest { limit: 0 });
+    let applied = db
+        .knowledge_schema_migrations(&KnowledgeSchemaMigrationListRequest { limit: 0 })
+        .unwrap();
     assert_eq!(applied.graph_commit_epoch, graph_commit_epoch);
     assert_eq!(applied.matched_count, 3);
     assert_eq!(applied.returned_count, 3);
@@ -79,7 +81,9 @@ fn applies_schema_migration_log_batch_idempotently() {
     assert_eq!(applied.rows[2].applied_at, Some(Value::Int(103)));
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
 
-    let limited = db.knowledge_schema_migrations(&KnowledgeSchemaMigrationListRequest { limit: 2 });
+    let limited = db
+        .knowledge_schema_migrations(&KnowledgeSchemaMigrationListRequest { limit: 2 })
+        .unwrap();
     assert_eq!(limited.matched_count, 3);
     assert_eq!(limited.returned_count, 2);
     assert_eq!(
@@ -115,7 +119,7 @@ fn typed_schema_migration_apply_persists_as_one_wal_batch_and_replays() {
     let path = unique_test_dir("typed_schema_migration_apply_wal_replay");
     {
         let mut db = Database::open(&path).unwrap();
-        let batch_count_before_update = std::fs::read_to_string(path.join("wal.skein"))
+        let batch_count_before_update = read_test_wal(&path)
             .ok()
             .map_or(0, |wal| wal.matches("\tbatch\t").count());
         db.apply_knowledge_schema_migrations_batch(&KnowledgeSchemaMigrationApplyBatchRequest {
@@ -131,13 +135,10 @@ fn typed_schema_migration_apply_persists_as_one_wal_batch_and_replays() {
             ],
         })
         .unwrap();
-        let batch_count_after_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_update, batch_count_before_update + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("create_node"));
     {
         let mut db = Database::open(&path).unwrap();

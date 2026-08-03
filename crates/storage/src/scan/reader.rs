@@ -1,4 +1,8 @@
 use super::{SegmentReadRange, SegmentReadSchedule};
+use crate::{
+    content_digest, ManifestGeneration, RepresentationKind, SegmentCache, SegmentCacheError,
+    SegmentCacheKey, StoreId,
+};
 use skein_core::{RuntimeCancellationReason, RuntimeTaskContext};
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -7,6 +11,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::num::NonZeroU64;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug)]
 pub enum SegmentReadError {
@@ -21,6 +26,14 @@ pub enum SegmentReadError {
     RangeTooLarge {
         artifact_id: u64,
         length: u64,
+    },
+    DigestMismatch {
+        artifact_id: u64,
+        segment_id: u64,
+    },
+    Cache {
+        artifact_id: u64,
+        source: SegmentCacheError,
     },
     Io {
         artifact_id: u64,
@@ -54,6 +67,16 @@ impl Display for SegmentReadError {
                 formatter,
                 "segment artifact {artifact_id} range length {length} exceeds the platform address space"
             ),
+            Self::DigestMismatch {
+                artifact_id,
+                segment_id,
+            } => write!(
+                formatter,
+                "segment artifact {artifact_id} segment {segment_id} failed content digest verification"
+            ),
+            Self::Cache { artifact_id, .. } => {
+                write!(formatter, "segment artifact {artifact_id} cache operation failed")
+            }
             Self::Io {
                 artifact_id,
                 offset,
@@ -74,6 +97,7 @@ impl Error for SegmentReadError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Io { source, .. } => Some(source),
+            Self::Cache { source, .. } => Some(source),
             _ => None,
         }
     }
@@ -107,12 +131,21 @@ impl<E: Error + 'static> Error for SegmentReadExecutionError<E> {
 }
 
 pub trait SegmentRangeReader: Sync {
-    fn read_range(&self, range: &SegmentReadRange) -> Result<Vec<u8>, SegmentReadError>;
+    fn read_range(&self, range: &SegmentReadRange) -> Result<Arc<[u8]>, SegmentReadError>;
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct FileSegmentRangeReader {
-    artifacts: BTreeMap<u64, PathBuf>,
+    artifacts: BTreeMap<u64, Arc<RegisteredArtifact>>,
+    cache: Option<Arc<SegmentCache>>,
+    store_id: StoreId,
+    manifest_generation: ManifestGeneration,
+}
+
+#[derive(Debug)]
+struct RegisteredArtifact {
+    path: PathBuf,
+    file: Mutex<Option<File>>,
 }
 
 impl FileSegmentRangeReader {
@@ -120,30 +153,106 @@ impl FileSegmentRangeReader {
         Self::default()
     }
 
+    pub fn with_cache(
+        mut self,
+        cache: Arc<SegmentCache>,
+        store_id: StoreId,
+        manifest_generation: ManifestGeneration,
+    ) -> Self {
+        self.cache = Some(cache);
+        self.store_id = store_id;
+        self.manifest_generation = manifest_generation;
+        self
+    }
+
     pub fn register(&mut self, artifact_id: u64, path: impl Into<PathBuf>) -> Option<PathBuf> {
-        self.artifacts.insert(artifact_id, path.into())
+        self.artifacts
+            .insert(
+                artifact_id,
+                Arc::new(RegisteredArtifact {
+                    path: path.into(),
+                    file: Mutex::new(None),
+                }),
+            )
+            .map(|artifact| artifact.path.clone())
     }
 }
 
 impl SegmentRangeReader for FileSegmentRangeReader {
-    fn read_range(&self, range: &SegmentReadRange) -> Result<Vec<u8>, SegmentReadError> {
-        let path =
+    fn read_range(&self, range: &SegmentReadRange) -> Result<Arc<[u8]>, SegmentReadError> {
+        let artifact =
             self.artifacts
                 .get(&range.artifact_id)
                 .ok_or(SegmentReadError::ArtifactNotFound {
                     artifact_id: range.artifact_id,
                 })?;
+        let cache_key = range
+            .content_digest
+            .zip(
+                (range.segment_ids.len() == 1)
+                    .then(|| range.segment_ids.first().copied())
+                    .flatten(),
+            )
+            .map(|(content_digest, segment_id)| SegmentCacheKey {
+                store_id: self.store_id,
+                manifest_generation: self.manifest_generation,
+                segment_id,
+                content_digest,
+                representation: RepresentationKind::RawBytes,
+            });
+        if let (Some(cache), Some(key)) = (&self.cache, cache_key)
+            && let Some(lease) = cache.get(&key)
+        {
+            return Ok(lease.into_arc());
+        }
         let length =
             usize::try_from(range.length.get()).map_err(|_| SegmentReadError::RangeTooLarge {
                 artifact_id: range.artifact_id,
                 length: range.length.get(),
             })?;
-        let mut file = File::open(path).map_err(|source| range_io_error(range, source))?;
-        file.seek(SeekFrom::Start(range.offset))
-            .map_err(|source| range_io_error(range, source))?;
-        let mut payload = vec![0; length];
-        file.read_exact(&mut payload)
-            .map_err(|source| range_io_error(range, source))?;
+        let payload = {
+            let mut file = artifact
+                .file
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if file.is_none() {
+                *file = Some(
+                    File::open(&artifact.path).map_err(|source| range_io_error(range, source))?,
+                );
+            }
+            let file = file.as_mut().expect("registered artifact file is open");
+            file.seek(SeekFrom::Start(range.offset))
+                .map_err(|source| range_io_error(range, source))?;
+            let mut payload = vec![0; length];
+            file.read_exact(&mut payload)
+                .map_err(|source| range_io_error(range, source))?;
+            payload
+        };
+        let payload: Arc<[u8]> = payload.into();
+        if let Some(expected) = range.content_digest
+            && content_digest(&payload) != expected
+        {
+            if let Some(cache) = &self.cache {
+                cache.record_digest_mismatch();
+            }
+            return Err(SegmentReadError::DigestMismatch {
+                artifact_id: range.artifact_id,
+                segment_id: range.segment_ids.first().copied().unwrap_or_default(),
+            });
+        }
+        if let (Some(cache), Some(key)) = (&self.cache, cache_key) {
+            match cache.insert(key, Arc::clone(&payload)) {
+                Ok(lease) => return Ok(lease.into_arc()),
+                Err(SegmentCacheError::EntryTooLarge { .. })
+                | Err(SegmentCacheError::PinnedCapacity { .. }) => {}
+                Err(source) => {
+                    return Err(SegmentReadError::Cache {
+                        artifact_id: range.artifact_id,
+                        source,
+                    });
+                }
+            }
+        }
         Ok(payload)
     }
 }
@@ -151,7 +260,7 @@ impl SegmentRangeReader for FileSegmentRangeReader {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SegmentReadPayload {
     pub range: SegmentReadRange,
-    pub bytes: Vec<u8>,
+    pub bytes: Arc<[u8]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -321,7 +430,7 @@ mod tests {
 
         let report = SegmentReadExecutor::new(NonZeroU64::new(8).unwrap())
             .execute(&reader, &schedule, |payload| {
-                payloads.push(payload.bytes);
+                payloads.push(payload.bytes.to_vec());
                 Ok::<(), std::convert::Infallible>(())
             })
             .unwrap();
@@ -331,6 +440,61 @@ mod tests {
         assert_eq!(report.range_count, 2);
         assert_eq!(report.bytes_read, 8);
         assert_eq!(report.max_wave_bytes_read, 8);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn file_reader_reuses_digest_verified_cache_by_generation() {
+        let path = unique_test_file("cache_generation");
+        std::fs::write(&path, b"first").unwrap();
+        let cache = Arc::new(SegmentCache::new(64));
+        let mut reader = FileSegmentRangeReader::new().with_cache(
+            Arc::clone(&cache),
+            StoreId(9),
+            ManifestGeneration(1),
+        );
+        reader.register(7, &path);
+        let first_bytes = b"first";
+        let first_range = SegmentReadRange::new(7, 1, 0, NonZeroU64::new(5).unwrap())
+            .with_content_digest(content_digest(first_bytes));
+        assert_eq!(&*reader.read_range(&first_range).unwrap(), first_bytes);
+
+        std::fs::write(&path, b"later").unwrap();
+        assert_eq!(&*reader.read_range(&first_range).unwrap(), first_bytes);
+        let snapshot = cache.snapshot();
+        assert_eq!(snapshot.hit_count, 1);
+        assert_eq!(snapshot.resident_bytes, 5);
+
+        let mut next_reader = FileSegmentRangeReader::new().with_cache(
+            Arc::clone(&cache),
+            StoreId(9),
+            ManifestGeneration(2),
+        );
+        next_reader.register(7, &path);
+        let next_range = SegmentReadRange::new(7, 1, 0, NonZeroU64::new(5).unwrap())
+            .with_content_digest(content_digest(b"later"));
+        assert_eq!(&*next_reader.read_range(&next_range).unwrap(), b"later");
+        assert_eq!(cache.snapshot().entry_count, 2);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn file_reader_fails_closed_on_manifest_digest_mismatch() {
+        let path = unique_test_file("digest_mismatch");
+        std::fs::write(&path, b"actual").unwrap();
+        let cache = Arc::new(SegmentCache::new(64));
+        let mut reader = FileSegmentRangeReader::new().with_cache(
+            Arc::clone(&cache),
+            StoreId(9),
+            ManifestGeneration(1),
+        );
+        reader.register(7, &path);
+        let range = SegmentReadRange::new(7, 1, 0, NonZeroU64::new(6).unwrap())
+            .with_content_digest(content_digest(b"wanted"));
+
+        let error = reader.read_range(&range).unwrap_err();
+        assert!(matches!(error, SegmentReadError::DigestMismatch { .. }));
+        assert_eq!(cache.snapshot().digest_mismatch_count, 1);
         std::fs::remove_file(path).unwrap();
     }
 
@@ -381,7 +545,7 @@ mod tests {
 
         let report = SegmentReadExecutor::new(NonZeroU64::new(8).unwrap())
             .execute(&reader, &schedule, |payload| {
-                payloads.push(payload.bytes);
+                payloads.push(payload.bytes.to_vec());
                 Ok::<(), std::convert::Infallible>(())
             })
             .unwrap();

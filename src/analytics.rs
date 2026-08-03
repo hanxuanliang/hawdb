@@ -69,10 +69,17 @@ pub struct ProjectionMemoryEstimate {
 pub struct ProjectionMemoryAdmissionError {
     pub estimate: ProjectionMemoryEstimate,
     pub budget_bytes: usize,
+    pub storage_error: Option<String>,
 }
 
 impl Display for ProjectionMemoryAdmissionError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        if let Some(error) = &self.storage_error {
+            return write!(
+                formatter,
+                "analytics projection storage scan failed: {error}"
+            );
+        }
         write!(
             formatter,
             "analytics projection layout '{}' requires an estimated {} bytes for {} nodes and {} relationships, exceeding the {} byte budget",
@@ -86,6 +93,22 @@ impl Display for ProjectionMemoryAdmissionError {
 }
 
 impl std::error::Error for ProjectionMemoryAdmissionError {}
+
+impl ProjectionMemoryAdmissionError {
+    fn storage(error: impl Display) -> Self {
+        Self {
+            estimate: ProjectionMemoryEstimate {
+                layout: ProjectionLayout::Bidirectional,
+                node_count: 0,
+                relationship_count: 0,
+                projected_edge_count: 0,
+                estimated_bytes: 0,
+            },
+            budget_bytes: 0,
+            storage_error: Some(error.to_string()),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProjectedGraph {
@@ -229,11 +252,7 @@ impl ProjectedGraph {
         layout: ProjectionLayout,
         budget: ProjectionMemoryBudget,
     ) -> std::result::Result<Self, ProjectionMemoryAdmissionError> {
-        let nodes = store
-            .scan_nodes(None)
-            .filter(|node| include_node(node))
-            .map(|node| node.id)
-            .collect::<Vec<_>>();
+        let nodes = collect_projected_node_ids(store, layout, budget, include_node)?;
         Self::try_from_nodes_and_relationships(
             store,
             nodes,
@@ -281,14 +300,10 @@ impl ProjectedGraph {
         budget: ProjectionMemoryBudget,
     ) -> std::result::Result<Self, ProjectionMemoryAdmissionError> {
         let labels = labels.iter().copied().collect::<BTreeSet<_>>();
-        let nodes = store
-            .scan_nodes(None)
-            .filter(|node| {
-                (labels.is_empty() || node.labels.iter().any(|label| labels.contains(label)))
-                    && include_node(node)
-            })
-            .map(|node| node.id)
-            .collect::<Vec<_>>();
+        let nodes = collect_projected_node_ids(store, layout, budget, |node| {
+            (labels.is_empty() || node.labels.iter().any(|label| labels.contains(label)))
+                && include_node(node)
+        })?;
         let rel_types = rel_types.iter().copied().collect::<BTreeSet<_>>();
         Self::try_from_nodes_and_relationships(
             store,
@@ -322,11 +337,7 @@ impl ProjectedGraph {
         layout: ProjectionLayout,
         budget: ProjectionMemoryBudget,
     ) -> std::result::Result<Self, ProjectionMemoryAdmissionError> {
-        let nodes = store
-            .scan_nodes(None)
-            .filter(|node| include_node(node))
-            .map(|node| node.id)
-            .collect::<Vec<_>>();
+        let nodes = collect_projected_node_ids(store, layout, budget, include_node)?;
         Self::try_from_nodes_without_edges(nodes, layout, budget)
     }
 
@@ -360,13 +371,9 @@ impl ProjectedGraph {
         budget: ProjectionMemoryBudget,
     ) -> std::result::Result<Self, ProjectionMemoryAdmissionError> {
         let labels = labels.iter().copied().collect::<BTreeSet<_>>();
-        let nodes = store
-            .scan_nodes(None)
-            .filter(|node| {
-                node.labels.iter().any(|label| labels.contains(label)) && include_node(node)
-            })
-            .map(|node| node.id)
-            .collect::<Vec<_>>();
+        let nodes = collect_projected_node_ids(store, layout, budget, |node| {
+            node.labels.iter().any(|label| labels.contains(label)) && include_node(node)
+        })?;
         Self::try_from_nodes_without_edges(nodes, layout, budget)
     }
 
@@ -403,14 +410,16 @@ impl ProjectedGraph {
         layout: ProjectionLayout,
         budget: ProjectionMemoryBudget,
     ) -> std::result::Result<Self, ProjectionMemoryAdmissionError> {
-        let relationship_count = store
-            .scan_relationships(None)
-            .filter(|relationship| include_relationship(relationship))
-            .filter(|relationship| {
-                nodes.binary_search(&relationship.source).is_ok()
-                    && nodes.binary_search(&relationship.target).is_ok()
-            })
-            .count();
+        let mut relationship_count = 0usize;
+        for relationship in store.relationship_records_owned() {
+            let relationship = relationship.map_err(ProjectionMemoryAdmissionError::storage)?;
+            if include_relationship(&relationship)
+                && nodes.binary_search(&relationship.source).is_ok()
+                && nodes.binary_search(&relationship.target).is_ok()
+            {
+                relationship_count = relationship_count.saturating_add(1);
+            }
+        }
         let memory_estimate = projection_memory_estimate(layout, nodes.len(), relationship_count);
         admit_projection(memory_estimate, budget)?;
 
@@ -421,8 +430,9 @@ impl ProjectedGraph {
             .stores_incoming()
             .then(|| vec![Vec::new(); nodes.len()]);
 
-        for relationship in store.scan_relationships(None) {
-            if !include_relationship(relationship) {
+        for relationship in store.relationship_records_owned() {
+            let relationship = relationship.map_err(ProjectionMemoryAdmissionError::storage)?;
+            if !include_relationship(&relationship) {
                 continue;
             }
             let Ok(source) = nodes.binary_search(&relationship.source) else {
@@ -901,6 +911,34 @@ fn community_representative(community: usize, assignments: &[usize], nodes: &[No
         .unwrap_or(nodes[community])
 }
 
+fn collect_projected_node_ids(
+    store: &GraphStore,
+    layout: ProjectionLayout,
+    budget: ProjectionMemoryBudget,
+    include_node: impl Fn(&NodeRecord) -> bool,
+) -> std::result::Result<Vec<NodeId>, ProjectionMemoryAdmissionError> {
+    let mut nodes = Vec::new();
+    let mut admission_error = None;
+    store
+        .visit_nodes_owned(None, |node| {
+            if !include_node(&node) {
+                return crate::store::GraphScanControl::Continue;
+            }
+            let estimate = projection_memory_estimate(layout, nodes.len().saturating_add(1), 0);
+            if let Err(error) = admit_projection(estimate, budget) {
+                admission_error = Some(error);
+                return crate::store::GraphScanControl::Stop;
+            }
+            nodes.push(node.id);
+            crate::store::GraphScanControl::Continue
+        })
+        .map_err(ProjectionMemoryAdmissionError::storage)?;
+    if let Some(error) = admission_error {
+        return Err(error);
+    }
+    Ok(nodes)
+}
+
 fn projection_memory_estimate(
     layout: ProjectionLayout,
     node_count: usize,
@@ -955,6 +993,7 @@ fn admit_projection(
         return Err(ProjectionMemoryAdmissionError {
             estimate,
             budget_bytes,
+            storage_error: None,
         });
     }
     Ok(())
@@ -1011,7 +1050,8 @@ fn validate_indexes(
 #[cfg(test)]
 mod tests {
     use super::{
-        LouvainOptions, PageRankOptions, ProjectedGraph, ProjectionLayout, ProjectionMemoryBudget,
+        projection_memory_estimate, LouvainOptions, PageRankOptions, ProjectedGraph,
+        ProjectionLayout, ProjectionMemoryBudget,
     };
     use crate::schema::Catalog;
     use crate::store::{GraphStore, NodeId};
@@ -1095,15 +1135,46 @@ mod tests {
             catalog.rel_type_id("MENTIONS"),
             |_| true,
             ProjectionLayout::Outgoing,
-            ProjectionMemoryBudget::new(NonZeroUsize::new(1).unwrap()),
+            ProjectionMemoryBudget::new(
+                NonZeroUsize::new(
+                    projection_memory_estimate(ProjectionLayout::Outgoing, 2, 0).estimated_bytes,
+                )
+                .unwrap(),
+            ),
         )
         .unwrap_err();
 
-        assert_eq!(error.budget_bytes, 1);
         assert_eq!(error.estimate.layout, ProjectionLayout::Outgoing);
         assert_eq!(error.estimate.node_count, 2);
         assert_eq!(error.estimate.relationship_count, 1);
         assert!(error.estimate.estimated_bytes > error.budget_bytes);
+    }
+
+    #[test]
+    fn projection_memory_admission_stops_node_scan_at_the_budget_boundary() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        for id in 0..100 {
+            store
+                .create_node(&mut catalog, "Memory", properties(&[("id", id)]))
+                .unwrap();
+        }
+        let visited = std::cell::Cell::new(0usize);
+        let error = ProjectedGraph::try_from_store_with_node_filter_and_layout(
+            &store,
+            None,
+            |_| {
+                visited.set(visited.get().saturating_add(1));
+                true
+            },
+            ProjectionLayout::Outgoing,
+            ProjectionMemoryBudget::new(NonZeroUsize::new(1).unwrap()),
+        )
+        .unwrap_err();
+
+        assert_eq!(visited.get(), 1);
+        assert_eq!(error.estimate.node_count, 1);
+        assert_eq!(error.estimate.relationship_count, 0);
     }
 
     #[test]

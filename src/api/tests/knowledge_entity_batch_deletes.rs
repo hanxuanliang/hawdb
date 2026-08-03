@@ -220,7 +220,7 @@ fn typed_knowledge_entity_batch_delete_persists_and_replays_from_wal() {
         })
         .unwrap();
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("delete_node"));
     {
         let db = Database::open(&path).unwrap();

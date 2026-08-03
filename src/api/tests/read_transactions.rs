@@ -1,4 +1,5 @@
 use super::*;
+use crate::store::StorageResidencyMode;
 use crate::DatabaseReadTransaction;
 use std::sync::{Arc, Barrier};
 
@@ -55,55 +56,66 @@ fn read_transaction_keeps_typed_knowledge_snapshot() {
         .create_relationship(&mut db.catalog, NodeId(0), leaf, "LINKS", BTreeMap::new())
         .unwrap();
 
-    let entity = read_tx.knowledge_entity(&KnowledgeEntityRequest {
-        label: "Memory".to_string(),
-        external_id: "root".to_string(),
-    });
+    let entity = read_tx
+        .knowledge_entity(&KnowledgeEntityRequest {
+            label: "Memory".to_string(),
+            external_id: "root".to_string(),
+        })
+        .unwrap();
     assert_eq!(entity.graph_commit_epoch, 1);
     assert_eq!(
         entity.entity.as_ref().unwrap().properties.get("title"),
         Some(&Value::String("Before snapshot".to_string()))
     );
-    let scoped_entity = read_tx.knowledge_scoped_entity(&KnowledgeScopedEntityRequest {
-        entity: KnowledgeEntityRequest {
-            label: "Memory".to_string(),
-            external_id: "root".to_string(),
-        },
-        metadata_filters: BTreeMap::from([("title".to_string(), "Before snapshot".to_string())]),
-    });
-    assert_eq!(scoped_entity.graph_commit_epoch, 1);
-    assert!(scoped_entity.entity.is_some());
-    let entity_batch = read_tx.knowledge_entity_batch(&KnowledgeEntityBatchRequest {
-        entities: vec![
-            KnowledgeEntityRequest {
+    let scoped_entity = read_tx
+        .knowledge_scoped_entity(&KnowledgeScopedEntityRequest {
+            entity: KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "root".to_string(),
             },
-            KnowledgeEntityRequest {
-                label: "Entity".to_string(),
-                external_id: "leaf".to_string(),
-            },
-        ],
-    });
+            metadata_filters: BTreeMap::from([(
+                "title".to_string(),
+                "Before snapshot".to_string(),
+            )]),
+        })
+        .unwrap();
+    assert_eq!(scoped_entity.graph_commit_epoch, 1);
+    assert!(scoped_entity.entity.is_some());
+    let entity_batch = read_tx
+        .knowledge_entity_batch(&KnowledgeEntityBatchRequest {
+            entities: vec![
+                KnowledgeEntityRequest {
+                    label: "Memory".to_string(),
+                    external_id: "root".to_string(),
+                },
+                KnowledgeEntityRequest {
+                    label: "Entity".to_string(),
+                    external_id: "leaf".to_string(),
+                },
+            ],
+        })
+        .unwrap();
     assert_eq!(entity_batch.graph_commit_epoch, 1);
     assert_eq!(entity_batch.found_count, 1);
     assert_eq!(entity_batch.missing_count, 1);
     assert_eq!(entity_batch.filtered_out_count, 0);
     assert!(entity_batch.entities[0].is_some());
     assert!(entity_batch.entities[1].is_none());
-    let property_batch = read_tx.knowledge_property_batch(&KnowledgePropertyBatchRequest {
-        entities: vec![
-            KnowledgeEntityRequest {
-                label: "Memory".to_string(),
-                external_id: "root".to_string(),
-            },
-            KnowledgeEntityRequest {
-                label: "Entity".to_string(),
-                external_id: "leaf".to_string(),
-            },
-        ],
-        property_names: vec!["title".to_string(), "name".to_string()],
-    });
+    let property_batch = read_tx
+        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            entities: vec![
+                KnowledgeEntityRequest {
+                    label: "Memory".to_string(),
+                    external_id: "root".to_string(),
+                },
+                KnowledgeEntityRequest {
+                    label: "Entity".to_string(),
+                    external_id: "leaf".to_string(),
+                },
+            ],
+            property_names: vec!["title".to_string(), "name".to_string()],
+        })
+        .unwrap();
     assert_eq!(property_batch.graph_commit_epoch, 1);
     assert_eq!(property_batch.found_count, 1);
     assert_eq!(property_batch.missing_count, 1);
@@ -114,29 +126,33 @@ fn read_transaction_keeps_typed_knowledge_snapshot() {
     );
     assert_eq!(property_batch.rows[1].properties.get("name"), Some(&None));
 
-    let snapshot_neighbors = read_tx.knowledge_neighbors(&KnowledgeNeighborsRequest {
-        label: "Memory".to_string(),
-        external_id: "root".to_string(),
-        relationship_type: Some("LINKS".to_string()),
-        direction: KnowledgeNeighborDirection::Outgoing,
-        limit: 8,
-        max_hops: 1,
-    });
+    let snapshot_neighbors = read_tx
+        .knowledge_neighbors(&KnowledgeNeighborsRequest {
+            label: "Memory".to_string(),
+            external_id: "root".to_string(),
+            relationship_type: Some("LINKS".to_string()),
+            direction: KnowledgeNeighborDirection::Outgoing,
+            limit: 8,
+            max_hops: 1,
+        })
+        .unwrap();
     assert_eq!(snapshot_neighbors.graph_commit_epoch, 1);
     assert_eq!(snapshot_neighbors.paths.len(), 1);
     assert_eq!(
         snapshot_neighbors.paths[0].target_external_id.as_deref(),
         Some("mid")
     );
-    let snapshot_relationships = read_tx.knowledge_relationships(&KnowledgeRelationshipsRequest {
-        seeds: vec![KnowledgeEntityRequest {
-            label: "Memory".to_string(),
-            external_id: "root".to_string(),
-        }],
-        relationship_type: Some("LINKS".to_string()),
-        direction: KnowledgeNeighborDirection::Outgoing,
-        limit_per_seed: 8,
-    });
+    let snapshot_relationships = read_tx
+        .knowledge_relationships(&KnowledgeRelationshipsRequest {
+            seeds: vec![KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "root".to_string(),
+            }],
+            relationship_type: Some("LINKS".to_string()),
+            direction: KnowledgeNeighborDirection::Outgoing,
+            limit_per_seed: 8,
+        })
+        .unwrap();
     assert_eq!(snapshot_relationships.graph_commit_epoch, 1);
     assert_eq!(snapshot_relationships.relationship_count, 1);
     assert_eq!(
@@ -146,14 +162,16 @@ fn read_transaction_keeps_typed_knowledge_snapshot() {
         Some("mid")
     );
 
-    let latest_neighbors = db.knowledge_neighbors(&KnowledgeNeighborsRequest {
-        label: "Memory".to_string(),
-        external_id: "root".to_string(),
-        relationship_type: Some("LINKS".to_string()),
-        direction: KnowledgeNeighborDirection::Outgoing,
-        limit: 8,
-        max_hops: 1,
-    });
+    let latest_neighbors = db
+        .knowledge_neighbors(&KnowledgeNeighborsRequest {
+            label: "Memory".to_string(),
+            external_id: "root".to_string(),
+            relationship_type: Some("LINKS".to_string()),
+            direction: KnowledgeNeighborDirection::Outgoing,
+            limit: 8,
+            max_hops: 1,
+        })
+        .unwrap();
     assert_eq!(latest_neighbors.graph_commit_epoch, 3);
     assert_eq!(latest_neighbors.paths.len(), 2);
     assert!(latest_neighbors
@@ -161,27 +179,31 @@ fn read_transaction_keeps_typed_knowledge_snapshot() {
         .iter()
         .any(|path| path.target_external_id.as_deref() == Some("leaf")));
 
-    let snapshot_paths = read_tx.knowledge_paths(&KnowledgePathRequest {
-        source_label: "Memory".to_string(),
-        source_external_id: "root".to_string(),
-        target_label: "Entity".to_string(),
-        target_external_id: "leaf".to_string(),
-        relationship_type: Some("LINKS".to_string()),
-        direction: KnowledgeNeighborDirection::Outgoing,
-        max_hops: 1,
-        limit: 4,
-    });
+    let snapshot_paths = read_tx
+        .knowledge_paths(&KnowledgePathRequest {
+            source_label: "Memory".to_string(),
+            source_external_id: "root".to_string(),
+            target_label: "Entity".to_string(),
+            target_external_id: "leaf".to_string(),
+            relationship_type: Some("LINKS".to_string()),
+            direction: KnowledgeNeighborDirection::Outgoing,
+            max_hops: 1,
+            limit: 4,
+        })
+        .unwrap();
     assert!(snapshot_paths.paths.is_empty());
 
-    let snapshot_subgraph = read_tx.knowledge_subgraph(&KnowledgeSubgraphRequest {
-        label: "Memory".to_string(),
-        external_id: "root".to_string(),
-        relationship_type: Some("LINKS".to_string()),
-        direction: KnowledgeNeighborDirection::Outgoing,
-        max_hops: 1,
-        node_limit: 8,
-        relationship_limit: 8,
-    });
+    let snapshot_subgraph = read_tx
+        .knowledge_subgraph(&KnowledgeSubgraphRequest {
+            label: "Memory".to_string(),
+            external_id: "root".to_string(),
+            relationship_type: Some("LINKS".to_string()),
+            direction: KnowledgeNeighborDirection::Outgoing,
+            max_hops: 1,
+            node_limit: 8,
+            relationship_limit: 8,
+        })
+        .unwrap();
     assert_eq!(snapshot_subgraph.nodes.len(), 2);
     assert!(snapshot_subgraph
         .nodes
@@ -445,6 +467,43 @@ fn read_transaction_pins_checkpoint_manifest_until_drop() {
         assert_eq!(watermark.safe_reclaim_commit_epoch, 2);
         assert!(watermark.durable);
     }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn out_of_core_reader_pin_retains_its_canonical_generation_until_drop() {
+    let path = unique_test_dir("out_of_core_reader_generation_pin");
+    let config = DatabaseConfig {
+        storage_residency_mode: StorageResidencyMode::OutOfCore,
+        ..DatabaseConfig::default()
+    };
+    let mut db = Database::open_with_config(&path, config).unwrap();
+    db.query("CREATE (:Memory {id: 1, title: 'Pinned snapshot'})")
+        .unwrap();
+    db.checkpoint().unwrap();
+
+    let mut reader = db.begin_read_transaction();
+    db.query("CREATE (:Memory {id: 2, title: 'Second'})")
+        .unwrap();
+    db.checkpoint().unwrap();
+    db.query("CREATE (:Memory {id: 3, title: 'Third'})")
+        .unwrap();
+    db.checkpoint().unwrap();
+
+    assert!(path.join("canonical.1.skein").exists());
+    let pinned = reader
+        .query("MATCH (m:Memory) RETURN m.id AS id ORDER BY id")
+        .unwrap();
+    assert_eq!(pinned.rows.len(), 1);
+    assert_eq!(pinned.rows[0].get("id"), Some(&Value::Int(1)));
+
+    drop(reader);
+    db.checkpoint().unwrap();
+    assert!(!path.join("canonical.1.skein").exists());
+    assert!(!path.join("canonical.2.skein").exists());
+    assert!(path.join("canonical.3.skein").exists());
+    assert!(path.join("canonical.4.skein").exists());
+    drop(db);
     std::fs::remove_dir_all(path).unwrap();
 }
 

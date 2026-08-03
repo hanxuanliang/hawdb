@@ -1,4 +1,6 @@
-use crate::{QueryOutput, SkeinEmbedded, SkeinEmbeddedOpenOptions, SkeinError, Value};
+use crate::{
+    QueryOutput, QueryStreamOptions, SkeinEmbedded, SkeinEmbeddedOpenOptions, SkeinError, Value,
+};
 use skein_core::RuntimeTaskContext;
 use skein_qos::{
     RuntimeGovernorSnapshot, RuntimeWorkKind, RuntimeWorkPriority, RuntimeWorkRequest, WorkClass,
@@ -160,30 +162,41 @@ impl SkeinTokioEmbedded {
         task_context: RuntimeTaskContext,
     ) -> Result<QueryOutput, SkeinTokioEmbeddedError> {
         let cypher_text = cypher_text.into();
-        let (work_request, is_mutation) = self.with_embedded_mut(|embedded| {
+        let admission = self.with_embedded_mut(|embedded| {
             embedded
                 .database_mut()
-                .runtime_admission_for(&cypher_text, &parameters)
+                .runtime_admission_plan(&cypher_text, &parameters)
         })?;
         let result_budget_bytes = self.runtime_snapshot().limits.result_budget_bytes;
-        let priority = match work_request.priority {
+        let priority = match admission.work_request.priority {
             WorkPriority::Foreground => RuntimeWorkPriority::Foreground,
             WorkPriority::Background => RuntimeWorkPriority::Background,
         };
-        let request = if is_mutation {
-            RuntimeWorkRequest::mutation(priority, 0)
+        let request = if admission.is_mutation {
+            RuntimeWorkRequest::mutation(priority, admission.estimated_memory_bytes)
         } else {
-            let kind = match work_request.class {
+            let kind = match admission.work_request.class {
                 WorkClass::Query | WorkClass::Mutation | WorkClass::Analytics => {
                     RuntimeWorkKind::Query
                 }
                 WorkClass::Projection | WorkClass::Import => RuntimeWorkKind::Maintenance,
                 WorkClass::Shadow => RuntimeWorkKind::Control,
             };
-            RuntimeWorkRequest::query(priority, 0, result_budget_bytes).with_kind(kind)
+            RuntimeWorkRequest::query(
+                priority,
+                admission.estimated_memory_bytes,
+                result_budget_bytes,
+            )
+            .with_kind(kind)
         };
-        self.execute_query_with_request(cypher_text, parameters, request, task_context)
-            .await
+        self.execute_query_with_request(
+            cypher_text,
+            parameters,
+            request,
+            admission.streaming_eligible,
+            task_context,
+        )
+        .await
     }
 
     pub async fn query_with_request(
@@ -194,23 +207,36 @@ impl SkeinTokioEmbedded {
         task_context: RuntimeTaskContext,
     ) -> Result<QueryOutput, SkeinTokioEmbeddedError> {
         let cypher_text = cypher_text.into();
-        let is_mutation = self.with_embedded_mut(|embedded| {
+        let admission = self.with_embedded_mut(|embedded| {
             embedded
                 .database_mut()
-                .runtime_admission_for(&cypher_text, &parameters)
-                .map(|(_, is_mutation)| is_mutation)
+                .runtime_admission_plan(&cypher_text, &parameters)
         })?;
-        let request = if is_mutation {
+        let request = if admission.is_mutation {
             request
                 .with_kind(RuntimeWorkKind::Mutation)
+                .with_memory_bytes(request.memory_bytes.max(admission.estimated_memory_bytes))
                 .with_result_bytes(0)
         } else if request.kind == RuntimeWorkKind::Mutation {
-            request.with_kind(RuntimeWorkKind::Query)
-        } else {
             request
+                .with_kind(RuntimeWorkKind::Query)
+                .with_memory_bytes(request.memory_bytes.max(admission.estimated_memory_bytes))
+        } else {
+            request.with_memory_bytes(request.memory_bytes.max(admission.estimated_memory_bytes))
         };
-        self.execute_query_with_request(cypher_text, parameters, request, task_context)
-            .await
+        let request = if admission.is_mutation || request.result_bytes > 0 {
+            request
+        } else {
+            request.with_result_bytes(self.runtime_snapshot().limits.result_budget_bytes)
+        };
+        self.execute_query_with_request(
+            cypher_text,
+            parameters,
+            request,
+            admission.streaming_eligible,
+            task_context,
+        )
+        .await
     }
 
     async fn execute_query_with_request(
@@ -218,6 +244,7 @@ impl SkeinTokioEmbedded {
         cypher_text: String,
         parameters: BTreeMap<String, Value>,
         request: RuntimeWorkRequest,
+        streaming_eligible: bool,
         task_context: RuntimeTaskContext,
     ) -> Result<QueryOutput, SkeinTokioEmbeddedError> {
         let embedded = Arc::clone(&self.embedded);
@@ -231,15 +258,35 @@ impl SkeinTokioEmbedded {
                 .await
                 .map_err(SkeinTokioEmbeddedError::Task)
         } else {
+            let max_rows =
+                self.with_embedded(|embedded| embedded.database().config().max_read_result_rows);
+            let max_payload_bytes = usize::try_from(request.result_bytes).unwrap_or(usize::MAX);
             self.runtime
                 .execute_blocking(request, task_context, move |task_context| {
                     let mut read_transaction =
                         lock_embedded(&embedded).database().begin_read_transaction();
-                    read_transaction.query_with_params_context(
+                    if !streaming_eligible {
+                        return read_transaction.query_with_params_context(
+                            &cypher_text,
+                            &parameters,
+                            task_context,
+                        );
+                    }
+                    let mut rows = Vec::new();
+                    read_transaction.query_with_params_streaming_context(
                         &cypher_text,
                         &parameters,
+                        QueryStreamOptions {
+                            max_rows,
+                            max_payload_bytes: Some(max_payload_bytes),
+                        },
                         task_context,
-                    )
+                        |row| {
+                            rows.push(row);
+                            Ok(())
+                        },
+                    )?;
+                    Ok(QueryOutput { rows })
                 })
                 .await
                 .map_err(SkeinTokioEmbeddedError::Task)
@@ -336,18 +383,21 @@ mod tests {
     fn admission_uses_physical_mutation_semantics() {
         let path = unique_test_path("admission-semantics");
         let mut embedded = SkeinEmbedded::open(&path).unwrap();
-        let (create_work, create_is_mutation) = embedded
+        let create = embedded
             .database_mut()
-            .runtime_admission_for("CREATE (:Probe {value: 1})", &BTreeMap::new())
+            .runtime_admission_plan("CREATE (:Probe {value: 1})", &BTreeMap::new())
             .unwrap();
-        let (_, read_is_mutation) = embedded
+        let read = embedded
             .database_mut()
-            .runtime_admission_for("MATCH (p:Probe) RETURN p.value AS value", &BTreeMap::new())
+            .runtime_admission_plan("MATCH (p:Probe) RETURN p.value AS value", &BTreeMap::new())
             .unwrap();
 
-        assert_eq!(create_work.class, WorkClass::Query);
-        assert!(create_is_mutation);
-        assert!(!read_is_mutation);
+        assert_eq!(create.work_request.class, WorkClass::Query);
+        assert!(create.is_mutation);
+        assert!(!read.is_mutation);
+        assert!(create.estimated_memory_bytes > 0);
+        assert!(read.estimated_memory_bytes > 0);
+        assert!(read.streaming_eligible);
     }
 
     #[test]
@@ -413,6 +463,36 @@ mod tests {
                 event.kind == RuntimeTelemetryEventKind::Admitted
                     && event.work_kind == Some(RuntimeWorkKind::Mutation)
             }));
+    }
+
+    #[test]
+    fn default_query_enforces_the_governor_result_byte_budget() {
+        let path = unique_test_path("result-byte-budget");
+        let options = SkeinEmbeddedOpenOptions::new(&path).with_runtime_governor_config(
+            skein_qos::RuntimeGovernorConfig {
+                result_budget_bytes: 64,
+                ..skein_qos::RuntimeGovernorConfig::desktop_bound()
+            },
+        );
+        let embedded = SkeinTokioEmbedded::open_owned(options).unwrap();
+        embedded
+            .runtime()
+            .block_on(embedded.query(
+                format!("CREATE (:Probe {{value: '{}'}})", "x".repeat(256)),
+                RuntimeTaskContext::default(),
+            ))
+            .unwrap()
+            .unwrap();
+
+        let error = embedded
+            .runtime()
+            .block_on(embedded.query(
+                "MATCH (p:Probe) RETURN p.value AS value",
+                RuntimeTaskContext::default(),
+            ))
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("max_payload_bytes 64"));
     }
 
     fn tokio_runtime() -> skein_runtime_tokio::TokioRuntime {

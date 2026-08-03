@@ -388,10 +388,7 @@ fn typed_knowledge_relationship_batch_upsert_persists_as_one_wal_batch_and_repla
         db.query("CREATE (:Memory {id: 'memory_1'})").unwrap();
         db.query("CREATE (:Memory {id: 'memory_2'})").unwrap();
         db.query("CREATE (:Label {id: 'label_1'})").unwrap();
-        let batch_count_before_upsert = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_upsert = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.upsert_knowledge_relationship_batch(&KnowledgeRelationshipUpsertBatchRequest {
             upserts: vec![
                 KnowledgeRelationshipUpsertRequest {
@@ -427,13 +424,10 @@ fn typed_knowledge_relationship_batch_upsert_persists_as_one_wal_batch_and_repla
             ],
         })
         .unwrap();
-        let batch_count_after_upsert = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_upsert = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_upsert, batch_count_before_upsert + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("create_rel"));
     {
         let db = Database::open(&path).unwrap();
@@ -516,7 +510,7 @@ fn typed_knowledge_relationship_create_persists_and_replays_from_wal() {
         })
         .unwrap();
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("create_rel"));
     {
         let db = Database::open(&path).unwrap();

@@ -123,7 +123,7 @@ fn memory_evolves_relation_counts_rejects_empty_fields_without_wal() {
     let mut db = Database::open(&path).unwrap();
     db.query("CREATE (:Memory {id: 'decay-source'})").unwrap();
     let graph_commit_epoch = db.store.commit_epoch();
-    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_before = read_test_wal(&path).unwrap();
 
     let memory_id_error = db
         .knowledge_memory_evolves_relation_counts(&KnowledgeMemoryEvolvesRelationCountRequest {
@@ -143,9 +143,6 @@ fn memory_evolves_relation_counts_rejects_empty_fields_without_wal() {
         .to_string()
         .contains("non-empty content relations"));
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(
-        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
-        wal_before
-    );
+    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
     std::fs::remove_dir_all(path).unwrap();
 }

@@ -270,7 +270,7 @@ fn matched_relationship_create_uses_one_wal_batch() {
                 .unwrap();
     }
 
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert_eq!(wal.lines().count(), 3);
     assert_eq!(wal.matches("create_node").count(), 2);
     assert_eq!(wal.matches("create_rel").count(), 1);
@@ -299,7 +299,7 @@ fn merge_relationship_existing_pattern_does_not_write_wal() {
             .unwrap();
     }
 
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert_eq!(wal.lines().count(), 1);
     assert_eq!(wal.matches("create_node").count(), 2);
     assert_eq!(wal.matches("create_rel").count(), 1);

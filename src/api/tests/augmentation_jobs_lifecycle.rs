@@ -178,10 +178,7 @@ fn typed_augmentation_job_lifecycle_persists_as_one_wal_batch_and_replays() {
         let mut db = Database::open(&path).unwrap();
         db.query("CREATE (:AugmentationJob {job_id: 'running_job', status: 'running'})")
             .unwrap();
-        let batch_count_before_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.update_knowledge_augmentation_jobs_batch(
             &KnowledgeAugmentationJobLifecycleBatchRequest {
                 updates: vec![
@@ -204,13 +201,10 @@ fn typed_augmentation_job_lifecycle_persists_as_one_wal_batch_and_replays() {
             },
         )
         .unwrap();
-        let batch_count_after_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_update, batch_count_before_update + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("create_node"));
     assert!(wal.contains("set_node_property"));
     {

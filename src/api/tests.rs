@@ -444,7 +444,7 @@ fn memory_crystal_synthesis_counts_rejects_empty_ids_without_wal() {
     let mut db = Database::open(&path).unwrap();
     db.query("CREATE (:Memory {id: 'decay-base'})").unwrap();
     let graph_commit_epoch = db.store.commit_epoch();
-    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_before = read_test_wal(&path).unwrap();
 
     let error = db
         .knowledge_memory_crystal_synthesis_counts(&KnowledgeMemoryCrystalSynthesisCountRequest {
@@ -453,10 +453,7 @@ fn memory_crystal_synthesis_counts_rejects_empty_ids_without_wal() {
         .unwrap_err();
     assert!(error.to_string().contains("non-empty memory ids"));
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(
-        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
-        wal_before
-    );
+    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
     std::fs::remove_dir_all(path).unwrap();
 }
 
@@ -614,7 +611,7 @@ fn memory_evolves_neighbors_rejects_empty_projection_fields_without_wal() {
     db.query("CREATE (:Memory {id: 'mcp-evolves-source'})")
         .unwrap();
     let graph_commit_epoch = db.store.commit_epoch();
-    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_before = read_test_wal(&path).unwrap();
 
     let error = db
         .knowledge_memory_evolves_neighbors(&KnowledgeMemoryEvolvesNeighborRequest {
@@ -628,10 +625,7 @@ fn memory_evolves_neighbors_rejects_empty_projection_fields_without_wal() {
 
     assert!(error.to_string().contains("non-empty property names"));
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(
-        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
-        wal_before
-    );
+    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
 }
 
 #[test]
@@ -975,7 +969,7 @@ fn memory_evolves_projected_successors_rejects_empty_fields_without_wal() {
     db.query("CREATE (:Memory {id: 'evolves_old_wal'})")
         .unwrap();
     let graph_commit_epoch = db.store.commit_epoch();
-    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_before = read_test_wal(&path).unwrap();
 
     let memory_id_error = db
         .knowledge_memory_evolves_projected_successors(
@@ -1031,10 +1025,7 @@ fn memory_evolves_projected_successors_rejects_empty_fields_without_wal() {
         .to_string()
         .contains("non-empty cursor memory ids"));
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(
-        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
-        wal_before
-    );
+    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
 }
 
 #[test]
@@ -2437,7 +2428,7 @@ fn typed_knowledge_entity_batch_create_persists_as_one_wal_batch_and_replays() {
     let path = unique_test_dir("typed_knowledge_entity_batch_create_wal_replay");
     {
         let mut db = Database::open(&path).unwrap();
-        let batch_count_before_create = std::fs::read_to_string(path.join("wal.skein"))
+        let batch_count_before_create = read_test_wal(&path)
             .unwrap_or_default()
             .matches("\tbatch\t")
             .count();
@@ -2462,13 +2453,10 @@ fn typed_knowledge_entity_batch_create_persists_as_one_wal_batch_and_replays() {
             ],
         })
         .unwrap();
-        let batch_count_after_create = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_create = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_create, batch_count_before_create + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("create_node"));
     {
         let db = Database::open(&path).unwrap();
@@ -2736,10 +2724,7 @@ fn typed_knowledge_entity_batch_upsert_persists_as_one_wal_batch_and_replays() {
         let mut db = Database::open(&path).unwrap();
         db.query("CREATE (:Memory {id: 'existing', title: 'Old'})")
             .unwrap();
-        let batch_count_before_upsert = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_upsert = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.upsert_knowledge_entity_batch(&KnowledgeEntityUpsertBatchRequest {
             upserts: vec![
                 KnowledgeEntityUpsertRequest {
@@ -2763,13 +2748,10 @@ fn typed_knowledge_entity_batch_upsert_persists_as_one_wal_batch_and_replays() {
             ],
         })
         .unwrap();
-        let batch_count_after_upsert = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_upsert = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_upsert, batch_count_before_upsert + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("create_node"));
     assert!(wal.contains("set_node_property"));
     {
@@ -3172,7 +3154,7 @@ fn typed_knowledge_property_update_persists_and_replays_from_wal() {
         })
         .unwrap();
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("set_node_property"));
     {
         let db = Database::open(&path).unwrap();
@@ -3375,10 +3357,7 @@ fn typed_knowledge_normalized_space_move_persists_as_one_wal_batch_and_replays()
             .unwrap();
         db.query("CREATE (:Memory {id: 'memory_2', space_id: 'default'})")
             .unwrap();
-        let batch_count_before_move = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_move = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.move_knowledge_normalized_space_batch(&KnowledgeNormalizedSpaceMoveBatchRequest {
             label: "Memory".to_string(),
             identity_property: "id".to_string(),
@@ -3388,13 +3367,10 @@ fn typed_knowledge_normalized_space_move_persists_as_one_wal_batch_and_replays()
             updated_at: None,
         })
         .unwrap();
-        let batch_count_after_move = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_move = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_move, batch_count_before_move + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("set_node_property"));
     {
         let db = Database::open(&path).unwrap();
@@ -3556,10 +3532,7 @@ fn typed_knowledge_memory_access_batch_persists_as_one_wal_batch_and_replays() {
         db.query("CREATE (:Memory {id: 'memory_1'})").unwrap();
         db.query("CREATE (:Memory {id: 'memory_2', access_count: 4, clicks: 2, total_dwell_time_ms: 10})")
             .unwrap();
-        let batch_count_before_touch = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_touch = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.touch_knowledge_memory_access_batch(&KnowledgeMemoryAccessBatchRequest {
             touches: vec![
                 KnowledgeMemoryAccessTouch {
@@ -3575,13 +3548,10 @@ fn typed_knowledge_memory_access_batch_persists_as_one_wal_batch_and_replays() {
             ],
         })
         .unwrap();
-        let batch_count_after_touch = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_touch = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_touch, batch_count_before_touch + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("set_node_property"));
     {
         let db = Database::open(&path).unwrap();
@@ -3892,10 +3862,7 @@ fn typed_memory_metadata_update_persists_as_one_wal_batch_and_replays() {
             .unwrap();
         db.query("CREATE (:Memory {id: 'memory_2', metadata: '{}', updated_at: 2})")
             .unwrap();
-        let batch_count_before_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.update_knowledge_memory_metadata_batch(&KnowledgeMemoryMetadataBatchRequest {
             updates: vec![
                 KnowledgeMemoryMetadataUpdate {
@@ -3911,13 +3878,10 @@ fn typed_memory_metadata_update_persists_as_one_wal_batch_and_replays() {
             ],
         })
         .unwrap();
-        let batch_count_after_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_update, batch_count_before_update + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("set_node_property"));
     {
         let db = Database::open(&path).unwrap();
@@ -4000,10 +3964,7 @@ fn typed_memory_content_update_persists_as_one_wal_batch_and_replays() {
             .unwrap();
         db.query("CREATE (:Memory {id: 'memory_2', title: 'Old 2'})")
             .unwrap();
-        let batch_count_before_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.update_knowledge_memory_content_batch(&KnowledgeMemoryContentBatchRequest {
             updates: vec![
                 memory_content_update("memory_1", "Updated One"),
@@ -4011,13 +3972,10 @@ fn typed_memory_content_update_persists_as_one_wal_batch_and_replays() {
             ],
         })
         .unwrap();
-        let batch_count_after_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_update, batch_count_before_update + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("set_node_property"));
     {
         let db = Database::open(&path).unwrap();
@@ -4145,10 +4103,7 @@ fn typed_memory_dedup_reviewed_persists_as_one_wal_batch_and_replays() {
         let mut db = Database::open(&path).unwrap();
         db.query("CREATE (:Memory {id: 'memory_1'})").unwrap();
         db.query("CREATE (:Memory {id: 'memory_2'})").unwrap();
-        let batch_count_before_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.update_knowledge_memory_dedup_reviewed_batch(
             &KnowledgeMemoryDedupReviewedBatchRequest {
                 memory_ids: vec!["memory_1".to_string(), "memory_2".to_string()],
@@ -4156,13 +4111,10 @@ fn typed_memory_dedup_reviewed_persists_as_one_wal_batch_and_replays() {
             },
         )
         .unwrap();
-        let batch_count_after_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_update, batch_count_before_update + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("set_node_property"));
     {
         let db = Database::open(&path).unwrap();
@@ -4300,7 +4252,7 @@ fn memory_decay_refresh_rejects_invalid_rows_before_wal() {
     db.query("CREATE (:Memory {id: 'decay-refresh-memory-1', decay_score_cached: 1.0})")
         .unwrap();
     let graph_commit_epoch_before = db.store.commit_epoch();
-    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_before = read_test_wal(&path).unwrap();
 
     let empty_id = db
         .update_knowledge_memory_decay_refresh_batch(&KnowledgeMemoryDecayRefreshBatchRequest {
@@ -4340,10 +4292,7 @@ fn memory_decay_refresh_rejects_invalid_rows_before_wal() {
         .contains("numeric finite confidence"));
 
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
-    assert_eq!(
-        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
-        wal_before
-    );
+    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
     std::fs::remove_dir_all(path).unwrap();
 }
 
@@ -4356,10 +4305,7 @@ fn typed_memory_decay_refresh_persists_as_one_wal_batch_and_replays() {
             .unwrap();
         db.query("CREATE (:Memory {id: 'decay-refresh-memory-2', decay_score_cached: 1.0})")
             .unwrap();
-        let batch_count_before_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.update_knowledge_memory_decay_refresh_batch(&KnowledgeMemoryDecayRefreshBatchRequest {
             updates: vec![
                 KnowledgeMemoryDecayRefreshUpdate {
@@ -4375,13 +4321,10 @@ fn typed_memory_decay_refresh_persists_as_one_wal_batch_and_replays() {
             ],
         })
         .unwrap();
-        let batch_count_after_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_update, batch_count_before_update + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("set_node_property"));
     {
         let db = Database::open(&path).unwrap();
@@ -4535,10 +4478,7 @@ fn typed_source_memory_count_batch_persists_as_one_wal_batch_and_replays() {
             .unwrap();
         db.query("CREATE (:Source {id: 'source_2', memory_count: 2})")
             .unwrap();
-        let batch_count_before_adjust = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_adjust = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.adjust_knowledge_source_memory_count_batch(&KnowledgeSourceMemoryCountBatchRequest {
             adjustments: vec![
                 KnowledgeSourceMemoryCountAdjustment {
@@ -4552,13 +4492,10 @@ fn typed_source_memory_count_batch_persists_as_one_wal_batch_and_replays() {
             ],
         })
         .unwrap();
-        let batch_count_after_adjust = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_adjust = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_adjust, batch_count_before_adjust + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("set_node_property"));
     {
         let db = Database::open(&path).unwrap();
@@ -4740,10 +4677,7 @@ fn typed_source_lifecycle_batch_persists_as_one_wal_batch_and_replays() {
             .unwrap();
         db.query("CREATE (:Source {id: 'source_2', lifecycle_state: 'parsed', chunk_count: 0})")
             .unwrap();
-        let batch_count_before_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.update_knowledge_source_lifecycle_batch(&KnowledgeSourceLifecycleBatchRequest {
             updates: vec![
                 KnowledgeSourceLifecycleUpdate {
@@ -4763,13 +4697,10 @@ fn typed_source_lifecycle_batch_persists_as_one_wal_batch_and_replays() {
             ],
         })
         .unwrap();
-        let batch_count_after_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_update, batch_count_before_update + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("set_node_property"));
     {
         let db = Database::open(&path).unwrap();
@@ -4930,10 +4861,7 @@ fn typed_source_metadata_batch_persists_as_one_wal_batch_and_replays() {
             .unwrap();
         db.query("CREATE (:Source {id: 'source_2', metadata: '{}', updated_at: 1})")
             .unwrap();
-        let batch_count_before_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.update_knowledge_source_metadata_batch(&KnowledgeSourceMetadataBatchRequest {
             updates: vec![
                 KnowledgeSourceMetadataUpdate {
@@ -4949,13 +4877,10 @@ fn typed_source_metadata_batch_persists_as_one_wal_batch_and_replays() {
             ],
         })
         .unwrap();
-        let batch_count_after_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_update, batch_count_before_update + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("set_node_property"));
     {
         let db = Database::open(&path).unwrap();
@@ -5085,21 +5010,15 @@ fn typed_source_delete_persists_as_one_wal_batch_and_replays() {
         db.query("CREATE (:Memory {id: 'memory_1'})-[:SOURCED_FROM]->(:Source {id: 'source_1'})")
             .unwrap();
         db.query("CREATE (:Source {id: 'source_2'})").unwrap();
-        let batch_count_before_delete = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_delete = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.delete_knowledge_sources(&KnowledgeSourceDeleteBatchRequest {
             source_ids: vec!["source_1".to_string(), "source_2".to_string()],
         })
         .unwrap();
-        let batch_count_after_delete = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_delete = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_delete, batch_count_before_delete + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("delete_node"));
     {
         let db = Database::open(&path).unwrap();
@@ -5262,10 +5181,7 @@ fn typed_source_label_assignment_persists_as_one_wal_batch_and_replays() {
         db.query("CREATE (:Source {id: 'source_2'})").unwrap();
         db.query("CREATE (:Label {id: 'label_1'})").unwrap();
         db.query("CREATE (:Label {id: 'label_2'})").unwrap();
-        let batch_count_before_assign = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_assign = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.assign_knowledge_source_labels_batch(&KnowledgeSourceLabelAssignmentBatchRequest {
             assignments: vec![
                 KnowledgeSourceLabelAssignment {
@@ -5285,13 +5201,10 @@ fn typed_source_label_assignment_persists_as_one_wal_batch_and_replays() {
             ],
         })
         .unwrap();
-        let batch_count_after_assign = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_assign = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_assign, batch_count_before_assign + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("create_rel"));
     {
         let mut db = Database::open(&path).unwrap();
@@ -5422,10 +5335,7 @@ fn typed_source_label_delete_persists_as_one_wal_batch_and_replays() {
             .unwrap();
         db.query("MATCH (s:Source {id: 'source_2'}), (l:Label {id: 'label_2'}) CREATE (s)-[:HAS_LABEL]->(l)")
             .unwrap();
-        let batch_count_before_delete = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_delete = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.delete_knowledge_source_labels_batch(&KnowledgeSourceLabelDeleteBatchRequest {
             deletes: vec![
                 KnowledgeSourceLabelDelete {
@@ -5439,13 +5349,10 @@ fn typed_source_label_delete_persists_as_one_wal_batch_and_replays() {
             ],
         })
         .unwrap();
-        let batch_count_after_delete = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_delete = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_delete, batch_count_before_delete + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("delete_rel"));
     {
         let mut db = Database::open(&path).unwrap();
@@ -5669,10 +5576,7 @@ fn typed_source_parsed_metadata_batch_persists_as_one_wal_batch_and_replays() {
             .unwrap();
         db.query("CREATE (:Source {id: 'source_2', lifecycle_state: 'ingested'})")
             .unwrap();
-        let batch_count_before_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         let mut first = source_parsed_metadata_update("source_1", "First", "sha-first");
         first.parsed_path = Some("/tmp/first.parsed".to_string());
         let mut second = source_parsed_metadata_update("source_2", "Second", "sha-second");
@@ -5683,13 +5587,10 @@ fn typed_source_parsed_metadata_batch_persists_as_one_wal_batch_and_replays() {
             },
         )
         .unwrap();
-        let batch_count_after_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_update, batch_count_before_update + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("set_node_property"));
     {
         let db = Database::open(&path).unwrap();
@@ -5922,7 +5823,7 @@ fn typed_source_parsed_create_batch_persists_as_one_wal_batch_and_replays() {
     let path = unique_test_dir("typed_source_parsed_create_batch_wal_replay");
     {
         let mut db = Database::open(&path).unwrap();
-        let batch_count_before_create = std::fs::read_to_string(path.join("wal.skein"))
+        let batch_count_before_create = read_test_wal(&path)
             .unwrap_or_default()
             .matches("\tbatch\t")
             .count();
@@ -5933,13 +5834,10 @@ fn typed_source_parsed_create_batch_persists_as_one_wal_batch_and_replays() {
             ],
         })
         .unwrap();
-        let batch_count_after_create = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_create = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_create, batch_count_before_create + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("create_node"));
     {
         let db = Database::open(&path).unwrap();
@@ -6206,10 +6104,7 @@ fn typed_source_revision_batch_persists_as_one_wal_batch_and_replays() {
         db.query("CREATE (:Source {id: 'older-1'})").unwrap();
         db.query("CREATE (:Source {id: 'newer-2'})").unwrap();
         db.query("CREATE (:Source {id: 'older-2'})").unwrap();
-        let batch_count_before_create = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_create = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.create_knowledge_source_revision_batch(&KnowledgeSourceRevisionCreateBatchRequest {
             creates: vec![
                 KnowledgeSourceRevisionCreate {
@@ -6225,13 +6120,10 @@ fn typed_source_revision_batch_persists_as_one_wal_batch_and_replays() {
             ],
         })
         .unwrap();
-        let batch_count_after_create = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_create = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_create, batch_count_before_create + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("\tbatch\t"));
     {
         let mut db = Database::open(&path).unwrap();
@@ -6306,7 +6198,7 @@ fn source_sourced_memory_count_rejects_empty_source_id_without_wal() {
     let mut db = Database::open(&path).unwrap();
     db.query("CREATE (:Source {id: 'source_a'})").unwrap();
     let graph_commit_epoch_before = db.store.commit_epoch();
-    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_before = read_test_wal(&path).unwrap();
 
     let error = db
         .knowledge_source_sourced_memory_count(&KnowledgeSourceSourcedMemoryCountRequest {
@@ -6316,10 +6208,7 @@ fn source_sourced_memory_count_rejects_empty_source_id_without_wal() {
 
     assert!(error.to_string().contains("non-empty source id"));
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
-    assert_eq!(
-        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
-        wal_before
-    );
+    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
     std::fs::remove_dir_all(path).unwrap();
 }
 
@@ -6621,7 +6510,7 @@ fn source_memory_projected_read_rejects_empty_property_names_without_wal() {
     db.query("MATCH (m:Memory {id: 'projected_source_memory_wal'}), (s:Source {id: 'projected_source_wal'}) CREATE (m)-[:SOURCED_FROM]->(s)")
         .unwrap();
     let graph_commit_epoch = db.store.commit_epoch();
-    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_before = read_test_wal(&path).unwrap();
 
     let memory_property_error = db
         .knowledge_source_memory_projected_list(&KnowledgeSourceMemoryProjectedListRequest {
@@ -6651,10 +6540,7 @@ fn source_memory_projected_read_rejects_empty_property_names_without_wal() {
         .to_string()
         .contains("non-empty property names"));
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(
-        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
-        wal_before
-    );
+    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
 }
 
 #[test]
@@ -6916,7 +6802,7 @@ fn projected_source_list_rejects_empty_property_names_without_wal() {
     db.query("CREATE (:Source {id: 'source_a', lifecycle_state: 'indexed'})")
         .unwrap();
     let graph_commit_epoch = db.store.commit_epoch();
-    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_before = read_test_wal(&path).unwrap();
 
     let error = db
         .knowledge_source_projected_list(&KnowledgeSourceProjectedListRequest {
@@ -6931,10 +6817,7 @@ fn projected_source_list_rejects_empty_property_names_without_wal() {
 
     assert!(error.to_string().contains("non-empty property names"));
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(
-        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
-        wal_before
-    );
+    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
 }
 
 #[test]
@@ -7282,10 +7165,7 @@ fn typed_memory_lifecycle_batch_persists_as_one_wal_batch_and_replays() {
             .unwrap();
         db.query("CREATE (:Memory {id: 'memory_2', metadata: '{}', is_latest: true, lifecycle_state: 'active'})")
             .unwrap();
-        let batch_count_before_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.update_knowledge_memory_lifecycle_batch(&KnowledgeMemoryLifecycleBatchRequest {
             updates: vec![
                 KnowledgeMemoryLifecycleUpdate {
@@ -7305,13 +7185,10 @@ fn typed_memory_lifecycle_batch_persists_as_one_wal_batch_and_replays() {
             ],
         })
         .unwrap();
-        let batch_count_after_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_update, batch_count_before_update + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("set_node_property"));
     {
         let db = Database::open(&path).unwrap();
@@ -7451,7 +7328,7 @@ fn memory_latest_batch_rejects_empty_id_before_wal() {
     db.query("CREATE (:Memory {id: 'memory_1', is_latest: true})")
         .unwrap();
     let graph_commit_epoch_before = db.store.commit_epoch();
-    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_before = read_test_wal(&path).unwrap();
 
     let error = db
         .update_knowledge_memory_latest_batch(&KnowledgeMemoryLatestBatchRequest {
@@ -7465,10 +7342,7 @@ fn memory_latest_batch_rejects_empty_id_before_wal() {
 
     assert!(error.to_string().contains("non-empty memory id"));
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
-    assert_eq!(
-        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
-        wal_before
-    );
+    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
     std::fs::remove_dir_all(path).unwrap();
 }
 
@@ -7481,10 +7355,7 @@ fn typed_memory_latest_batch_persists_as_one_wal_batch_and_replays() {
             .unwrap();
         db.query("CREATE (:Memory {id: 'newer', is_latest: false, space_id: 'space_a'})")
             .unwrap();
-        let batch_count_before_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.update_knowledge_memory_latest_batch(&KnowledgeMemoryLatestBatchRequest {
             updates: vec![
                 KnowledgeMemoryLatestUpdate {
@@ -7500,13 +7371,10 @@ fn typed_memory_latest_batch_persists_as_one_wal_batch_and_replays() {
             ],
         })
         .unwrap();
-        let batch_count_after_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_update, batch_count_before_update + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("set_node_property"));
     {
         let db = Database::open(&path).unwrap();
@@ -7670,7 +7538,7 @@ fn memory_evolves_create_rejects_empty_fields_before_wal() {
     db.query("CREATE (:Memory {id: 'older'})").unwrap();
     db.query("CREATE (:Memory {id: 'newer'})").unwrap();
     let graph_commit_epoch_before = db.store.commit_epoch();
-    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_before = read_test_wal(&path).unwrap();
 
     let error = db
         .create_knowledge_memory_evolves_batch(&KnowledgeMemoryEvolvesCreateBatchRequest {
@@ -7690,10 +7558,7 @@ fn memory_evolves_create_rejects_empty_fields_before_wal() {
 
     assert!(error.to_string().contains("content relation"));
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
-    assert_eq!(
-        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
-        wal_before
-    );
+    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
     std::fs::remove_dir_all(path).unwrap();
 }
 
@@ -7704,7 +7569,7 @@ fn memory_evolves_create_rejects_non_numeric_confidence_before_wal() {
     db.query("CREATE (:Memory {id: 'older'})").unwrap();
     db.query("CREATE (:Memory {id: 'newer'})").unwrap();
     let graph_commit_epoch_before = db.store.commit_epoch();
-    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_before = read_test_wal(&path).unwrap();
 
     let error = db
         .create_knowledge_memory_evolves_batch(&KnowledgeMemoryEvolvesCreateBatchRequest {
@@ -7724,10 +7589,7 @@ fn memory_evolves_create_rejects_non_numeric_confidence_before_wal() {
 
     assert!(error.to_string().contains("numeric finite confidence"));
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
-    assert_eq!(
-        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
-        wal_before
-    );
+    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
     std::fs::remove_dir_all(path).unwrap();
 }
 
@@ -7740,10 +7602,7 @@ fn typed_memory_evolves_create_persists_as_one_wal_batch_and_replays() {
         db.query("CREATE (:Memory {id: 'newer_1'})").unwrap();
         db.query("CREATE (:Memory {id: 'older_2'})").unwrap();
         db.query("CREATE (:Memory {id: 'newer_2'})").unwrap();
-        let batch_count_before_create = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_create = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.create_knowledge_memory_evolves_batch(&KnowledgeMemoryEvolvesCreateBatchRequest {
             creates: vec![
                 KnowledgeMemoryEvolvesCreate {
@@ -7771,13 +7630,10 @@ fn typed_memory_evolves_create_persists_as_one_wal_batch_and_replays() {
             ],
         })
         .unwrap();
-        let batch_count_after_create = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_create = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_create, batch_count_before_create + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("\tbatch\t"));
     {
         let mut db = Database::open(&path).unwrap();
@@ -7960,10 +7816,7 @@ fn typed_skill_usage_stats_batch_persists_as_one_wal_batch_and_replays() {
         .unwrap();
         db.query("CREATE (:Skill {id: 'skill_2', use_count: 1, metadata: '{}'})")
             .unwrap();
-        let batch_count_before_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.update_knowledge_skill_usage_stats_batch(&KnowledgeSkillUsageStatsBatchRequest {
             updates: vec![
                 KnowledgeSkillUsageStatsUpdate {
@@ -7985,13 +7838,10 @@ fn typed_skill_usage_stats_batch_persists_as_one_wal_batch_and_replays() {
             ],
         })
         .unwrap();
-        let batch_count_after_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_update, batch_count_before_update + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("set_node_property"));
     {
         let db = Database::open(&path).unwrap();
@@ -8162,10 +8012,7 @@ fn typed_skill_metadata_update_persists_as_one_wal_batch_and_replays() {
             .unwrap();
         db.query("CREATE (:Skill {id: 'skill_2', metadata: '{}', updated_at: 1})")
             .unwrap();
-        let batch_count_before_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.update_knowledge_skill_metadata_batch(&KnowledgeSkillMetadataBatchRequest {
             updates: vec![
                 KnowledgeSkillMetadataUpdate {
@@ -8181,13 +8028,10 @@ fn typed_skill_metadata_update_persists_as_one_wal_batch_and_replays() {
             ],
         })
         .unwrap();
-        let batch_count_after_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_update, batch_count_before_update + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("set_node_property"));
     {
         let db = Database::open(&path).unwrap();
@@ -8457,10 +8301,7 @@ fn typed_skill_lifecycle_batch_persists_as_one_wal_batch_and_replays() {
         .unwrap();
         db.query("CREATE (:Skill {id: 'skill_2', stage: 'draft', metadata: '{}', updated_at: 1})")
             .unwrap();
-        let batch_count_before_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.update_knowledge_skill_lifecycle_batch(&KnowledgeSkillLifecycleBatchRequest {
             updates: vec![
                 KnowledgeSkillLifecycleUpdate {
@@ -8478,13 +8319,10 @@ fn typed_skill_lifecycle_batch_persists_as_one_wal_batch_and_replays() {
             ],
         })
         .unwrap();
-        let batch_count_after_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_update, batch_count_before_update + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("set_node_property"));
     {
         let db = Database::open(&path).unwrap();
@@ -8628,21 +8466,15 @@ fn typed_skill_delete_persists_as_one_wal_batch_and_replays() {
         db.query("CREATE (:Skill {id: 'skill_1'})-[:SYNTHESIZED_FROM]->(:Memory {id: 'memory_1'})")
             .unwrap();
         db.query("CREATE (:Skill {id: 'skill_2'})").unwrap();
-        let batch_count_before_delete = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_delete = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.delete_knowledge_skills(&KnowledgeSkillDeleteBatchRequest {
             skill_ids: vec!["skill_1".to_string(), "skill_2".to_string()],
         })
         .unwrap();
-        let batch_count_after_delete = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_delete = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_delete, batch_count_before_delete + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("delete_node"));
     {
         let db = Database::open(&path).unwrap();
@@ -8970,7 +8802,7 @@ fn projected_skill_list_rejects_empty_property_names_without_wal() {
     db.query("CREATE (:Skill {id: 'skill-active', stage: 'active'})")
         .unwrap();
     let graph_commit_epoch = db.store.commit_epoch();
-    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_before = read_test_wal(&path).unwrap();
 
     let error = db
         .knowledge_skill_projected_list(&KnowledgeSkillProjectedListRequest {
@@ -8985,10 +8817,7 @@ fn projected_skill_list_rejects_empty_property_names_without_wal() {
 
     assert!(error.to_string().contains("non-empty property names"));
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(
-        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
-        wal_before
-    );
+    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
 }
 
 #[test]
@@ -9709,10 +9538,7 @@ fn typed_thread_metadata_batch_persists_as_one_wal_batch_and_replays() {
             .unwrap();
         db.query("CREATE (:Thread {id: 'thread_2', metadata: '{}', updated_at: 1})")
             .unwrap();
-        let batch_count_before_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.update_knowledge_thread_metadata_batch(&KnowledgeThreadMetadataBatchRequest {
             updates: vec![
                 KnowledgeThreadMetadataUpdate {
@@ -9728,13 +9554,10 @@ fn typed_thread_metadata_batch_persists_as_one_wal_batch_and_replays() {
             ],
         })
         .unwrap();
-        let batch_count_after_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_update, batch_count_before_update + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("set_node_property"));
     {
         let db = Database::open(&path).unwrap();
@@ -9916,10 +9739,7 @@ fn typed_thread_message_count_batch_persists_as_one_wal_batch_and_replays() {
             .unwrap();
         db.query("CREATE (:Thread {id: 'thread_2', message_count: 1, updated_at: 100})")
             .unwrap();
-        let batch_count_before_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.update_knowledge_thread_message_count_batch(&KnowledgeThreadMessageCountBatchRequest {
             updates: vec![
                 KnowledgeThreadMessageCountUpdate {
@@ -9937,13 +9757,10 @@ fn typed_thread_message_count_batch_persists_as_one_wal_batch_and_replays() {
             ],
         })
         .unwrap();
-        let batch_count_after_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_update, batch_count_before_update + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("set_node_property"));
     {
         let db = Database::open(&path).unwrap();
@@ -10095,21 +9912,15 @@ fn typed_thread_delete_persists_as_one_wal_batch_and_replays() {
         db.query("CREATE (:Thread {id: 'thread_1'})-[:CONTAINS]->(:Message {id: 'message_1'})")
             .unwrap();
         db.query("CREATE (:Thread {id: 'thread_2'})").unwrap();
-        let batch_count_before_delete = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_delete = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.delete_knowledge_threads(&KnowledgeThreadDeleteBatchRequest {
             thread_ids: vec!["thread_1".to_string(), "thread_2".to_string()],
         })
         .unwrap();
-        let batch_count_after_delete = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_delete = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_delete, batch_count_before_delete + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("delete_node"));
     {
         let db = Database::open(&path).unwrap();
@@ -10243,21 +10054,15 @@ fn typed_thread_message_delete_persists_as_one_wal_batch_and_replays() {
         db.query("CREATE (:Message {id: 'message_2'})").unwrap();
         db.query("MATCH (t:Thread {id: 'thread_1'}), (m:Message {id: 'message_2'}) CREATE (t)-[:CONTAINS]->(m)")
             .unwrap();
-        let batch_count_before_delete = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_delete = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.delete_knowledge_thread_messages(&KnowledgeThreadMessageDeleteRequest {
             thread_id: "thread_1".to_string(),
         })
         .unwrap();
-        let batch_count_after_delete = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_delete = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_delete, batch_count_before_delete + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("delete_node"));
     {
         let mut db = Database::open(&path).unwrap();
@@ -10429,10 +10234,7 @@ fn typed_thread_compaction_link_persists_as_one_wal_batch_and_replays() {
         let mut db = Database::open(&path).unwrap();
         db.query("CREATE (:Thread {id: 'thread_1'})").unwrap();
         db.query("CREATE (:Memory {id: 'memory_1'})").unwrap();
-        let batch_count_before_link = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_link = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.create_knowledge_thread_compaction_link(&KnowledgeThreadCompactionLinkRequest {
             thread_id: "thread_1".to_string(),
             memory_id: "memory_1".to_string(),
@@ -10441,13 +10243,10 @@ fn typed_thread_compaction_link_persists_as_one_wal_batch_and_replays() {
             properties: Value::String("{\"mode\":\"manual\"}".to_string()),
         })
         .unwrap();
-        let batch_count_after_link = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_link = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_link, batch_count_before_link + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("create_rel"));
     {
         let db = Database::open(&path).unwrap();
@@ -10725,7 +10524,7 @@ fn memory_decay_detail_rejects_empty_inputs_without_wal() {
     db.query("CREATE (:Memory {id: 'scheduler-memory-decay-detail', decay_score_cached: 0.4})")
         .unwrap();
     let graph_commit_epoch = db.store.commit_epoch();
-    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_before = read_test_wal(&path).unwrap();
 
     let err = db
         .knowledge_memory_decay_detail(&KnowledgeMemoryDecayDetailRequest {
@@ -10748,10 +10547,7 @@ fn memory_decay_detail_rejects_empty_inputs_without_wal() {
         .contains("knowledge memory decay detail read requires non-empty property names"));
 
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(
-        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
-        wal_before
-    );
+    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
     std::fs::remove_dir_all(path).unwrap();
 }
 
@@ -10907,7 +10703,7 @@ fn memory_cleanup_fingerprints_reject_empty_inputs_without_wal() {
     db.query("CREATE (:Memory {id: 'cleanup-fingerprint', decay_score_cached: 0.4})")
         .unwrap();
     let graph_commit_epoch = db.store.commit_epoch();
-    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_before = read_test_wal(&path).unwrap();
 
     let err = db
         .knowledge_memory_cleanup_fingerprints(&KnowledgeMemoryCleanupFingerprintRequest {
@@ -10930,10 +10726,7 @@ fn memory_cleanup_fingerprints_reject_empty_inputs_without_wal() {
         .contains("knowledge memory cleanup fingerprint read requires non-empty property names"));
 
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(
-        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
-        wal_before
-    );
+    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
     std::fs::remove_dir_all(path).unwrap();
 }
 
@@ -11067,7 +10860,7 @@ fn thread_compacted_memory_projected_read_rejects_empty_property_names_without_w
     db.query("MATCH (t:Thread {id: 'projected_thread_wal'}), (m:Memory {id: 'projected_memory_wal'}) CREATE (t)-[:COMPACTS_TO]->(m)")
         .unwrap();
     let graph_commit_epoch = db.store.commit_epoch();
-    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_before = read_test_wal(&path).unwrap();
 
     let memory_property_error = db
         .knowledge_thread_compacted_memory_projected_list(
@@ -11103,10 +10896,7 @@ fn thread_compacted_memory_projected_read_rejects_empty_property_names_without_w
         .to_string()
         .contains("non-empty property names"));
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(
-        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
-        wal_before
-    );
+    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
 }
 
 #[test]
@@ -11366,7 +11156,7 @@ fn memory_compacting_thread_projected_read_rejects_empty_property_names_without_
     db.query("MATCH (t:Thread {id: 'projected_compacting_wal_thread'}), (m:Memory {id: 'projected_compacting_wal_memory'}) CREATE (t)-[:COMPACTS_TO]->(m)")
         .unwrap();
     let graph_commit_epoch = db.store.commit_epoch();
-    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_before = read_test_wal(&path).unwrap();
 
     let thread_property_error = db
         .knowledge_memory_compacting_thread_projected_list(
@@ -11400,10 +11190,7 @@ fn memory_compacting_thread_projected_read_rejects_empty_property_names_without_
         .to_string()
         .contains("non-empty property names"));
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(
-        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
-        wal_before
-    );
+    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
 }
 
 #[test]
@@ -11705,7 +11492,9 @@ fn lists_distinct_thread_sources_for_rest_fs_shape() {
     let graph_commit_epoch = db.store.commit_epoch();
     let cache_before_lookup = db.plan_cache_stats();
 
-    let output = db.knowledge_thread_sources(&KnowledgeThreadSourceListRequest { limit: 0 });
+    let output = db
+        .knowledge_thread_sources(&KnowledgeThreadSourceListRequest { limit: 0 })
+        .unwrap();
     assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
     assert_eq!(output.matched_count, 2);
     assert_eq!(output.returned_count, 2);
@@ -11714,14 +11503,18 @@ fn lists_distinct_thread_sources_for_rest_fs_shape() {
         vec!["codex".to_string(), "slack".to_string()]
     );
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    let repeated = db.knowledge_thread_sources(&KnowledgeThreadSourceListRequest { limit: 0 });
+    let repeated = db
+        .knowledge_thread_sources(&KnowledgeThreadSourceListRequest { limit: 0 })
+        .unwrap();
     assert_eq!(output, repeated);
     let stats = db.plan_cache_stats();
     assert_eq!(stats.entries, cache_before_lookup.entries + 1);
     assert_eq!(stats.misses, cache_before_lookup.misses + 1);
     assert_eq!(stats.hits, cache_before_lookup.hits + 1);
 
-    let limited = db.knowledge_thread_sources(&KnowledgeThreadSourceListRequest { limit: 1 });
+    let limited = db
+        .knowledge_thread_sources(&KnowledgeThreadSourceListRequest { limit: 1 })
+        .unwrap();
     assert_eq!(limited.matched_count, 2);
     assert_eq!(limited.returned_count, 1);
     assert_eq!(limited.sources, vec!["codex".to_string()]);
@@ -11729,7 +11522,9 @@ fn lists_distinct_thread_sources_for_rest_fs_shape() {
     let tx = db.begin_read_transaction();
     db.query("CREATE (:Thread {id: 'thread_after', source: 'after'})")
         .unwrap();
-    let snapshot = tx.knowledge_thread_sources(&KnowledgeThreadSourceListRequest { limit: 0 });
+    let snapshot = tx
+        .knowledge_thread_sources(&KnowledgeThreadSourceListRequest { limit: 0 })
+        .unwrap();
     assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
     assert_eq!(
         snapshot.sources,
@@ -12385,10 +12180,7 @@ fn typed_thread_identity_delete_persists_as_one_wal_batch_and_replays() {
             .unwrap();
         db.query("CREATE (:ThreadIdentity {id: 'identity_by_node', thread_node_id: 'thread_uuid', thread_id: 'logical_node'})")
             .unwrap();
-        let batch_count_before_delete = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_delete = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.delete_knowledge_thread_identities(&KnowledgeThreadIdentityDeleteRequest {
             identity_key: None,
             cascade_keys: Some(KnowledgeThreadIdentityCascadeDeleteKeys {
@@ -12398,13 +12190,10 @@ fn typed_thread_identity_delete_persists_as_one_wal_batch_and_replays() {
             }),
         })
         .unwrap();
-        let batch_count_after_delete = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_delete = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_delete, batch_count_before_delete + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("delete_node"));
     {
         let db = Database::open(&path).unwrap();
@@ -12788,10 +12577,7 @@ fn typed_label_lifecycle_batch_persists_as_one_wal_batch_and_replays() {
             .unwrap();
         db.query("CREATE (:Label {id: 'label_rename', name: 'Old', canonical_name: 'old', updated_at: 1})")
             .unwrap();
-        let batch_count_before_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.update_knowledge_label_lifecycle_batch(&KnowledgeLabelLifecycleBatchRequest {
             updates: vec![
                 KnowledgeLabelLifecycleUpdate {
@@ -12811,13 +12597,10 @@ fn typed_label_lifecycle_batch_persists_as_one_wal_batch_and_replays() {
             ],
         })
         .unwrap();
-        let batch_count_after_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_update, batch_count_before_update + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("set_node_property"));
     {
         let db = Database::open(&path).unwrap();
@@ -13414,7 +13197,7 @@ fn entity_label_projected_read_rejects_empty_property_names_without_wal() {
     db.query("MATCH (m:Memory {id: 'projected_label_wal_memory'}), (l:Label {id: 'projected_label_wal_label'}) CREATE (m)-[:HAS_LABEL]->(l)")
         .unwrap();
     let graph_commit_epoch = db.store.commit_epoch();
-    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_before = read_test_wal(&path).unwrap();
 
     let label_property_error = db
         .knowledge_entity_label_projected_list(&KnowledgeEntityLabelProjectedListRequest {
@@ -13446,10 +13229,7 @@ fn entity_label_projected_read_rejects_empty_property_names_without_wal() {
         .to_string()
         .contains("non-empty property names"));
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(
-        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
-        wal_before
-    );
+    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
 }
 
 #[test]
@@ -13606,23 +13386,18 @@ fn typed_label_memory_transfer_persists_as_one_wal_batch_and_replays() {
             .unwrap();
         db.query("MATCH (m:Memory {id: 'memory_2'}), (l:Label {id: 'source_label'}) CREATE (m)-[:HAS_LABEL]->(l)")
             .unwrap();
-        let batch_count_before_transfer = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_transfer =
+            read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.transfer_knowledge_label_memory_edges(&KnowledgeLabelMemoryTransferRequest {
             source_label_id: "source_label".to_string(),
             target_label_id: "target_label".to_string(),
             created_at: Value::Int(10),
         })
         .unwrap();
-        let batch_count_after_transfer = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_transfer = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_transfer, batch_count_before_transfer + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("create_rel"));
     {
         let mut db = Database::open(&path).unwrap();
@@ -13734,7 +13509,7 @@ fn memory_label_transfer_rejects_empty_inputs_before_wal() {
     db.query("CREATE (:Memory {id: 'newer', space_id: 'default'})")
         .unwrap();
     let graph_commit_epoch_before = db.store.commit_epoch();
-    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_before = read_test_wal(&path).unwrap();
 
     let empty_older = db
         .transfer_knowledge_memory_label_edges(&KnowledgeMemoryLabelTransferRequest {
@@ -13771,10 +13546,7 @@ fn memory_label_transfer_rejects_empty_inputs_before_wal() {
     assert!(empty_space.to_string().contains("non-empty space id"));
 
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
-    assert_eq!(
-        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
-        wal_before
-    );
+    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
     std::fs::remove_dir_all(path).unwrap();
 }
 
@@ -13797,10 +13569,8 @@ fn typed_memory_label_transfer_persists_as_one_wal_batch_and_replays() {
             "MATCH (m:Memory {id: 'older'}), (l:Label {id: 'beta'}) CREATE (m)-[:HAS_LABEL]->(l)",
         )
         .unwrap();
-        let batch_count_before_transfer = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_transfer =
+            read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.transfer_knowledge_memory_label_edges(&KnowledgeMemoryLabelTransferRequest {
             older_memory_id: "older".to_string(),
             newer_memory_id: "newer".to_string(),
@@ -13808,13 +13578,10 @@ fn typed_memory_label_transfer_persists_as_one_wal_batch_and_replays() {
             created_at: Value::Int(7300),
         })
         .unwrap();
-        let batch_count_after_transfer = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_transfer = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_transfer, batch_count_before_transfer + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("create_rel"));
     {
         let mut db = Database::open(&path).unwrap();
@@ -14003,22 +13770,16 @@ fn typed_memory_label_delete_persists_as_one_wal_batch_and_replays() {
             "MATCH (m:Memory {id: 'memory_1'}), (l:Label {id: 'beta'}) CREATE (m)-[:HAS_LABEL]->(l)",
         )
         .unwrap();
-        let batch_count_before_delete = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_delete = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.delete_knowledge_memory_labels(&KnowledgeMemoryLabelDeleteRequest {
             memory_id: "memory_1".to_string(),
             label_id: None,
         })
         .unwrap();
-        let batch_count_after_delete = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_delete = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_delete, batch_count_before_delete + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("delete_rel"));
     {
         let mut db = Database::open(&path).unwrap();
@@ -14198,6 +13959,52 @@ fn unique_test_dir(name: &str) -> std::path::PathBuf {
         .unwrap()
         .as_nanos();
     std::env::temp_dir().join(format!("skein_{name}_{nanos}"))
+}
+
+fn active_wal_path(path: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    active_generation_path(path.as_ref(), "wal_generation", "wal", "wal.skein")
+}
+
+fn active_checkpoint_path(path: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    active_generation_path(
+        path.as_ref(),
+        "checkpoint_generation",
+        "checkpoint",
+        "checkpoint.skein",
+    )
+}
+
+fn read_test_wal(path: impl AsRef<std::path::Path>) -> std::io::Result<String> {
+    let wal = std::fs::read_to_string(active_wal_path(path))?;
+    if wal.starts_with("SKEIN_WAL_V2\t") {
+        Ok(wal
+            .split_once('\n')
+            .map_or_else(String::new, |(_, records)| records.to_string()))
+    } else {
+        Ok(wal)
+    }
+}
+
+fn active_generation_path(
+    root: &std::path::Path,
+    manifest_field: &str,
+    prefix: &str,
+    legacy_name: &str,
+) -> std::path::PathBuf {
+    let Ok(manifest) = std::fs::read_to_string(root.join("manifest.skein")) else {
+        return root.join(legacy_name);
+    };
+    if !manifest.contains("SKEIN_MANIFEST_V2\n") {
+        return root.join(legacy_name);
+    }
+    let generation = manifest.lines().find_map(|line| {
+        let (field, value) = line.split_once('\t')?;
+        (field == manifest_field && value != "none").then_some(value)
+    });
+    generation.map_or_else(
+        || root.join(legacy_name),
+        |generation| root.join(format!("{prefix}.{generation}.skein")),
+    )
 }
 
 fn read_test_durable_text(path: &std::path::Path) -> std::io::Result<String> {

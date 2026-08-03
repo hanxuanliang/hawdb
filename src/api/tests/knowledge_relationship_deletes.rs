@@ -238,7 +238,7 @@ fn typed_knowledge_relationship_delete_persists_and_replays_from_wal() {
         })
         .unwrap();
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("delete_rel"));
     {
         let db = Database::open(&path).unwrap();

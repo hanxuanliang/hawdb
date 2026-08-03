@@ -158,7 +158,7 @@ fn schema_ddl_replays_from_wal_without_data_rows() {
         db.query("CREATE CONSTRAINT ON -[:MENTIONS(id)]-> ASSERT UNIQUE")
             .unwrap();
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("create_node_label"));
     assert!(wal.contains("create_rel_type"));
     assert!(wal.contains("create_node_table"));
@@ -244,8 +244,8 @@ fn schema_ddl_survives_checkpoint_without_wal() {
             .unwrap();
         db.checkpoint().unwrap();
     }
-    assert_eq!(std::fs::read_to_string(path.join("wal.skein")).unwrap(), "");
-    let checkpoint = read_test_durable_text(&path.join("checkpoint.skein")).unwrap();
+    assert_eq!(read_test_wal(&path).unwrap(), "");
+    let checkpoint = read_test_durable_text(&active_checkpoint_path(&path)).unwrap();
     assert!(checkpoint.contains("table"));
     assert!(checkpoint.contains("property\t"));
     assert!(checkpoint.contains("property_index"));
@@ -325,7 +325,7 @@ fn schema_state_transitions_are_idempotent_and_persisted() {
         assert_eq!(output.rows[0].get("changed"), Some(&Value::Bool(true)));
     }
 
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("alter_table_state"));
     assert!(wal.contains("write_only"));
     assert!(wal.contains("alter_property_state"));
@@ -342,8 +342,8 @@ fn schema_state_transitions_are_idempotent_and_persisted() {
         db.checkpoint().unwrap();
     }
 
-    assert_eq!(std::fs::read_to_string(path.join("wal.skein")).unwrap(), "");
-    let checkpoint = read_test_durable_text(&path.join("checkpoint.skein")).unwrap();
+    assert_eq!(read_test_wal(&path).unwrap(), "");
+    let checkpoint = read_test_durable_text(&active_checkpoint_path(&path)).unwrap();
     assert!(checkpoint.contains("write_only"));
     assert!(checkpoint.contains("backfill"));
 
@@ -380,7 +380,7 @@ fn non_public_property_schema_is_not_validated_until_public() {
         }));
     }
 
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("backfill"));
     assert!(!wal.contains("public"));
     {
@@ -429,7 +429,7 @@ fn schema_maintenance_advances_backfill_and_validation_in_batch_wal() {
         }));
     }
 
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert_eq!(wal.matches("\tbatch\t").count(), 5);
     assert!(wal.contains("alter_property_state,node,4d656d6f7279,6964,validating"));
     assert!(wal.contains("alter_property_state,node,4d656d6f7279,6964,public"));
@@ -456,10 +456,10 @@ fn schema_maintenance_rejects_invalid_validation_before_wal() {
         db.query("ALTER NODE TABLE Memory SET STATE VALIDATING")
             .unwrap();
 
-        let before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+        let before = read_test_wal(&path).unwrap();
         let error = db.run_schema_maintenance().unwrap_err();
         assert!(error.to_string().contains("property schema violation"));
-        let after = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+        let after = read_test_wal(&path).unwrap();
         assert_eq!(after, before);
         assert!(db.table_descriptors().iter().any(|table| {
             table.name == "Memory" && table.state == SchemaObjectState::Validating
@@ -480,7 +480,7 @@ fn schema_maintenance_plan_reports_pending_property_work_without_wal_write() {
             .unwrap();
         db.query("ALTER PROPERTY ON NODE TABLE Memory(id) SET STATE BACKFILL")
             .unwrap();
-        let before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+        let before = read_test_wal(&path).unwrap();
 
         let plan = db.plan_schema_maintenance();
 
@@ -501,7 +501,7 @@ fn schema_maintenance_plan_reports_pending_property_work_without_wal_write() {
             plan.rows[0].get("estimated_operations"),
             Some(&Value::Int(2))
         );
-        let after = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+        let after = read_test_wal(&path).unwrap();
         assert_eq!(after, before);
         assert!(db.property_descriptors().iter().any(|property| {
             property.name == "id" && property.state == SchemaObjectState::Backfill
@@ -560,12 +560,12 @@ fn bounded_schema_maintenance_skips_work_that_exceeds_budget_without_wal_write()
             .unwrap();
         db.query("ALTER PROPERTY ON NODE TABLE Memory(id) SET STATE BACKFILL")
             .unwrap();
-        let before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+        let before = read_test_wal(&path).unwrap();
 
         let output = db.run_bounded_schema_maintenance(1).unwrap();
 
         assert!(output.rows.is_empty());
-        let after = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+        let after = read_test_wal(&path).unwrap();
         assert_eq!(after, before);
         assert!(db.property_descriptors().iter().any(|property| {
             property.name == "id" && property.state == SchemaObjectState::Backfill
@@ -694,7 +694,7 @@ fn background_schema_maintenance_defers_without_mutating_schema() {
             .unwrap();
         db.query("ALTER PROPERTY ON NODE TABLE Memory(id) SET STATE BACKFILL")
             .unwrap();
-        let before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+        let before = read_test_wal(&path).unwrap();
         let policy = LocalQosPolicy {
             max_background_operations: Some(0),
             ..LocalQosPolicy::default()
@@ -705,7 +705,7 @@ fn background_schema_maintenance_defers_without_mutating_schema() {
             .unwrap_err();
 
         assert!(error.to_string().contains("deferred"));
-        let after = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+        let after = read_test_wal(&path).unwrap();
         assert_eq!(after, before);
         assert!(db.property_descriptors().iter().any(|property| {
             property.name == "id" && property.state == SchemaObjectState::Backfill
@@ -733,7 +733,7 @@ fn planned_background_schema_maintenance_uses_pending_work_estimate() {
             .unwrap();
         db.query("ALTER PROPERTY ON NODE TABLE Memory(id) SET STATE BACKFILL")
             .unwrap();
-        let before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+        let before = read_test_wal(&path).unwrap();
         let policy = LocalQosPolicy {
             max_background_operations: Some(1),
             ..LocalQosPolicy::default()
@@ -744,7 +744,7 @@ fn planned_background_schema_maintenance_uses_pending_work_estimate() {
             .unwrap_err();
 
         assert!(error.to_string().contains("estimated operations 2"));
-        let after = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+        let after = read_test_wal(&path).unwrap();
         assert_eq!(after, before);
         assert!(db.property_descriptors().iter().any(|property| {
             property.name == "id" && property.state == SchemaObjectState::Backfill
@@ -1042,7 +1042,7 @@ fn schema_maintenance_gc_removes_descriptors_and_persists() {
             .all(|property| property.name != "id"));
     }
 
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("gc_property_descriptor,node,4d656d6f7279,6964"));
     {
         let mut db = Database::open(&path).unwrap();
@@ -1449,12 +1449,12 @@ fn bounded_property_index_projection_rebuild_skips_descriptors_over_budget_witho
         db.query("CREATE INDEX ON :Memory(kind, source_id)")
             .unwrap();
         db.query("CREATE FULLTEXT INDEX ON :Memory(title)").unwrap();
-        let before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+        let before = read_test_wal(&path).unwrap();
 
         let output = db.rebuild_bounded_property_index_projections(2);
 
         assert!(output.rows.is_empty());
-        let after = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+        let after = read_test_wal(&path).unwrap();
         assert_eq!(after, before);
     }
     std::fs::remove_dir_all(path).unwrap();
@@ -1571,7 +1571,7 @@ fn bounded_background_property_index_projection_rebuild_defers_without_rebuildin
             .unwrap();
         db.query("CREATE INDEX ON :Memory(kind, source_id)")
             .unwrap();
-        let before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+        let before = read_test_wal(&path).unwrap();
         let policy = LocalQosPolicy {
             max_background_operations: Some(1),
             ..LocalQosPolicy::default()
@@ -1586,7 +1586,7 @@ fn bounded_background_property_index_projection_rebuild_defers_without_rebuildin
             .unwrap_err();
 
         assert!(error.to_string().contains("deferred"));
-        let after = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+        let after = read_test_wal(&path).unwrap();
         assert_eq!(after, before);
     }
     std::fs::remove_dir_all(path).unwrap();
@@ -1901,7 +1901,7 @@ fn range_index_descriptor_persists_through_wal_and_checkpoint() {
         assert_eq!(first.rows[0].get("created"), Some(&Value::Bool(true)));
         assert_eq!(second.rows[0].get("created"), Some(&Value::Bool(false)));
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("create_range_index"));
 
     {
@@ -1912,8 +1912,8 @@ fn range_index_descriptor_persists_through_wal_and_checkpoint() {
             .any(|index| { index.property == "created_at" && index.kind == IndexKind::Range }));
         db.checkpoint().unwrap();
     }
-    assert_eq!(std::fs::read_to_string(path.join("wal.skein")).unwrap(), "");
-    let checkpoint = read_test_durable_text(&path.join("checkpoint.skein")).unwrap();
+    assert_eq!(read_test_wal(&path).unwrap(), "");
+    let checkpoint = read_test_durable_text(&active_checkpoint_path(&path)).unwrap();
     assert!(checkpoint.contains("property_index"));
     assert!(checkpoint.contains("range"));
 
@@ -2154,7 +2154,7 @@ fn property_schema_rejects_invalid_writes_before_wal() {
         db.query("CREATE PROPERTY ON RELATIONSHIP TABLE MENTIONS(weight) TYPE INT")
             .unwrap();
         db.query("CREATE (:Memory {id: 1, title: 'One'})").unwrap();
-        let before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+        let before = read_test_wal(&path).unwrap();
 
         let error = db
             .query("CREATE (:Memory {id: 'bad', title: 'Bad'})")
@@ -2169,7 +2169,7 @@ fn property_schema_rejects_invalid_writes_before_wal() {
             .unwrap_err();
         assert!(error.to_string().contains("property schema violation"));
 
-        let after = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+        let after = read_test_wal(&path).unwrap();
         assert_eq!(before, after);
         let output = db
             .query("MATCH (m:Memory) WHERE m.id = 1 RETURN m.title AS title")
@@ -2200,7 +2200,7 @@ fn failed_transaction_does_not_publish_property_schema_or_wal() {
     let path = unique_test_dir("property_schema_failed_transaction");
     {
         let mut db = Database::open(&path).unwrap();
-        let before = std::fs::read_to_string(path.join("wal.skein")).unwrap_or_default();
+        let before = read_test_wal(&path).unwrap_or_default();
         let mut tx = db.begin_transaction();
         tx.query("CREATE PROPERTY ON NODE TABLE Memory(id) TYPE INT NOT NULL")
             .unwrap();
@@ -2209,7 +2209,7 @@ fn failed_transaction_does_not_publish_property_schema_or_wal() {
         let error = tx.commit().unwrap_err();
         assert!(error.to_string().contains("property schema violation"));
         assert!(db.property_descriptors().is_empty());
-        let after = std::fs::read_to_string(path.join("wal.skein")).unwrap_or_default();
+        let after = read_test_wal(&path).unwrap_or_default();
         assert_eq!(before, after);
     }
     std::fs::remove_dir_all(path).unwrap();

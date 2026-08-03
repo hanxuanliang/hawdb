@@ -10,7 +10,7 @@ fn delete_persists_and_replays_from_wal() {
         db.query("MATCH (m:Memory) WHERE m.id = 1 DELETE m")
             .unwrap();
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("delete_node"));
     {
         let mut db = Database::open(&path).unwrap();
@@ -34,7 +34,7 @@ fn relationship_delete_persists_and_replays_from_wal() {
         db.query("MATCH (m:Memory)-[r:MENTIONS]->(e:Entity) WHERE m.id = 1 DELETE r")
             .unwrap();
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("delete_rel"));
     {
         let mut db = Database::open(&path).unwrap();
@@ -62,7 +62,7 @@ fn relationship_set_persists_and_replays_from_wal() {
         db.query("MATCH (m:Memory)-[r:MENTIONS]->(e:Entity) WHERE m.id = 1 SET r.weight = 2")
             .unwrap();
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("set_rel_property"));
     {
         let db = Database::open(&path).unwrap();

@@ -125,8 +125,11 @@ pub use api::{
     QuerySystemVariables, RankedBackgroundMaintenance, ScheduledSearchProjectionCatchUpReport,
     SearchProjectionCatchUpReport, SearchProjectionCatchUpStopReason,
     SearchProjectionGraphDeltaRequest, SlowQueryLogExportOptions, SlowQueryLogRecordSummary,
+    StorageResourceProfileLimits, StorageResourceProfileReport,
+    DEFAULT_MAX_READ_RESULT_PAYLOAD_BYTES, DEFAULT_MAX_READ_RESULT_ROWS,
     GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION, GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION,
     GRAPH_LIGHTNING_INITIAL_IMPORT_DURABLE_STATE_PROTOCOL, SLOW_QUERY_LOG_EVENT_PROTOCOL,
+    STORAGE_RESOURCE_PROFILE_PROTOCOL,
 };
 pub use background_maintenance_evidence::nowledge_background_maintenance_evidence_json;
 pub use blackbox::{
@@ -280,6 +283,7 @@ pub use nowledge_mem::{
     NowledgeMemGraphSampleOutput, NowledgeMemGraphSampleRouteReport,
     NowledgeMemLibraryProductionPathSummary, NowledgeMemLibraryReadinessReport,
     NowledgeMemOpenOptions, NowledgeMemOpenReport, NowledgeMemOperationsReadinessReport,
+    NowledgeMemOutOfCoreSearchCandidateOutput, NowledgeMemOutOfCoreSearchProjection,
     NowledgeMemProductionStatus, NowledgeMemQueryExecutionPath, NowledgeMemQueryOutput,
     NowledgeMemQueryReport, NowledgeMemQueryReportOptions, NowledgeMemReadControl,
     NowledgeMemReadOptions, NowledgeMemReadOutput, NowledgeMemReadReport,
@@ -393,15 +397,16 @@ pub use search::{
     MetadataRepairSummary, SearchAccessControlContext, SearchAnalyzerLexicon,
     SearchCandidateSetReport, SearchDerivedArtifactReport, SearchDocument, SearchEmbeddingManifest,
     SearchEmptyReasonCode, SearchFallbackReasonCode, SearchFusionWeights, SearchHit, SearchIndex,
-    SearchMode, SearchPredicateFieldPruningReport, SearchPredicatePushdownReport,
-    SearchProjectionDelta, SearchProjectionDeltaReport, SearchProjectionFreshness,
-    SearchProjectionKind, SearchProjectionProbeOptions, SearchProjectionRow, SearchQueryOptions,
-    SearchRangeReadConfig, SearchRebuildOptions, SearchRebuildSummary, SearchResultSet,
-    SearchRetrieverCandidateSetReport, SearchTruncationReasonCode, VectorRecallValidationBlocker,
-    VectorRecallValidationOptions, VectorRecallValidationReport,
-    MAX_VECTOR_RECALL_VALIDATION_SAMPLES, MAX_VECTOR_RECALL_VALIDATION_TOP_K,
-    NOWLEDGE_MEMORY_MATERIALIZED_METADATA_PATHS, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
-    VECTOR_RECALL_VALIDATION_PROTOCOL,
+    SearchMode, SearchOutOfCoreConfig, SearchOutOfCoreHydrationOutput, SearchOutOfCoreMetrics,
+    SearchOutOfCoreOutput, SearchOutOfCoreReader, SearchPredicateFieldPruningReport,
+    SearchPredicatePushdownReport, SearchProjectionDelta, SearchProjectionDeltaReport,
+    SearchProjectionFreshness, SearchProjectionKind, SearchProjectionProbeOptions,
+    SearchProjectionRow, SearchQueryOptions, SearchRangeReadConfig, SearchRebuildOptions,
+    SearchRebuildSummary, SearchResultSet, SearchRetrieverCandidateSetReport,
+    SearchTruncationReasonCode, VectorRecallValidationBlocker, VectorRecallValidationOptions,
+    VectorRecallValidationReport, MAX_VECTOR_RECALL_VALIDATION_SAMPLES,
+    MAX_VECTOR_RECALL_VALIDATION_TOP_K, NOWLEDGE_MEMORY_MATERIALIZED_METADATA_PATHS,
+    NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, VECTOR_RECALL_VALIDATION_PROTOCOL,
 };
 pub use search_candidate_shadow_evidence::parse_search_candidate_shadow_probe;
 pub use search_projection_evidence::{
@@ -467,17 +472,19 @@ pub use skein_runtime_tokio::{
 pub use skein_storage::ScanPredicate;
 pub use storage_recovery_evidence::nowledge_storage_recovery_evidence_json;
 pub use store::{
-    AdjacencyConsistencyReport, AdjacencyConsolidationPlan, AdjacencyConsolidationReport,
-    AdjacencyDirection, AdjacencyGroupConsistencyMismatch, AdjacencyGroupKey, AdjacencyGroupStats,
-    AdjacencyLayout, BasicStatisticsConsistencyReport, DegreeStatisticsConsistencyReport,
-    DegreeStatisticsEntry, DegreeStatisticsKey, DistinctValueStatisticsConsistencyReport,
-    DurabilityPolicy, FileSegmentRangeReader, OrderedAdjacencyEntry,
+    restore_storage_backup, AdjacencyConsistencyReport, AdjacencyConsolidationPlan,
+    AdjacencyConsolidationReport, AdjacencyDirection, AdjacencyGroupConsistencyMismatch,
+    AdjacencyGroupKey, AdjacencyGroupStats, AdjacencyLayout, BasicStatisticsConsistencyReport,
+    DegreeStatisticsConsistencyReport, DegreeStatisticsEntry, DegreeStatisticsKey,
+    DistinctValueStatisticsConsistencyReport, DurabilityPolicy, FileSegmentRangeReader,
+    OptimizerStatisticsRefreshOptions, OptimizerStatisticsRefreshReport, OrderedAdjacencyEntry,
     PropertyIndexConsistencyReport, RecoveryMode, SearchProjectionChangefeedReadiness,
-    SearchProjectionChangefeedStatus, SearchProjectionMutationId, SegmentRangeReader,
-    SegmentReadError, SegmentReadExecutionError, SegmentReadExecutionReport, SegmentReadExecutor,
-    SegmentReadPayload, SegmentReadRange, SegmentReadSchedule, SegmentReadScheduler,
-    SegmentReadWave, StorageReclamationWatermark, StorageRecoveryReport, WalReplayConfig,
-    DENSE_ADJACENCY_DEGREE_THRESHOLD,
+    SearchProjectionChangefeedStatus, SearchProjectionMutationId, SegmentCacheSnapshot,
+    SegmentRangeReader, SegmentReadError, SegmentReadExecutionError, SegmentReadExecutionReport,
+    SegmentReadExecutor, SegmentReadPayload, SegmentReadRange, SegmentReadSchedule,
+    SegmentReadScheduler, SegmentReadWave, StorageBackupReport, StorageReclamationWatermark,
+    StorageRecoveryReport, StorageResidencyMode, StorageResidencyReport, StorageRestoreReport,
+    WalReplayConfig, DENSE_ADJACENCY_DEGREE_THRESHOLD,
 };
 #[cfg(feature = "opentelemetry")]
 pub use telemetry::OpenTelemetryMetrics;

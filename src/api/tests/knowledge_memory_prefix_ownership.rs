@@ -100,7 +100,7 @@ fn memory_prefix_ownership_rejects_empty_prefix_without_wal() {
     db.query("CREATE (:Memory {id: 'skill:alpha:1', space_id: 'team'})")
         .unwrap();
     let graph_commit_epoch = db.store.commit_epoch();
-    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal_before = read_test_wal(&path).unwrap();
 
     let error = db
         .knowledge_memory_prefix_ownership(&KnowledgeMemoryPrefixOwnershipRequest {
@@ -111,8 +111,5 @@ fn memory_prefix_ownership_rejects_empty_prefix_without_wal() {
 
     assert!(error.to_string().contains("non-empty prefix"));
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(
-        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
-        wal_before
-    );
+    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
 }

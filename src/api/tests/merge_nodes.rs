@@ -142,7 +142,7 @@ fn merge_node_post_set_updates_created_and_matched_nodes() {
         assert_eq!(output.rows[0].get("updated"), Some(&Value::Int(1)));
     }
 
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert_eq!(wal.matches("create_node").count(), 1);
     assert_eq!(wal.matches("set_node_property").count(), 3);
     std::fs::remove_dir_all(path).unwrap();

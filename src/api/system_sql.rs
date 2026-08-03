@@ -391,6 +391,7 @@ impl StatementSummaryRecord {
 pub(crate) fn query_sql(
     sql_text: &str,
     max_rows: Option<usize>,
+    max_payload_bytes: Option<usize>,
     plan_cache_stats: &PlanCacheStats,
     slow_queries: &[SlowQueryRecord],
     statement_summaries: &[StatementSummaryRecord],
@@ -404,6 +405,15 @@ pub(crate) fn query_sql(
         statement_summaries,
         max_rows,
     )?;
+    let payload_bytes = rows.iter().fold(0usize, |total, row| {
+        total.saturating_add(crate::executor::map_payload_bytes(row))
+    });
+    if max_payload_bytes.is_some_and(|limit| payload_bytes > limit) {
+        return Err(SkeinError::Execution(format!(
+            "SQL query payload uses {payload_bytes} bytes, exceeding max_read_result_payload_bytes {}",
+            max_payload_bytes.unwrap_or_default()
+        )));
+    }
     Ok(QueryOutput { rows })
 }
 
@@ -930,6 +940,7 @@ mod tests {
         let output = query_sql(
             "SELECT value FROM system.plan_cache WHERE metric = 'hits'",
             None,
+            None,
             &stats,
             &[],
             &[],
@@ -990,6 +1001,7 @@ mod tests {
             "SELECT sequence, elapsed_micros FROM system.slow_queries \
              WHERE slow_log_candidate = true \
              ORDER BY elapsed_micros DESC LIMIT 1",
+            None,
             None,
             &PlanCacheStats {
                 max_entries: None,

@@ -101,14 +101,16 @@ fn typed_knowledge_navigation_uses_projected_identity_for_idless_seed() {
     )
     .unwrap();
 
-    let neighbors = db.knowledge_neighbors(&KnowledgeNeighborsRequest {
-        label: "Memory".to_string(),
-        external_id: "0".to_string(),
-        relationship_type: Some("LINKS".to_string()),
-        direction: KnowledgeNeighborDirection::Outgoing,
-        limit: 4,
-        max_hops: 1,
-    });
+    let neighbors = db
+        .knowledge_neighbors(&KnowledgeNeighborsRequest {
+            label: "Memory".to_string(),
+            external_id: "0".to_string(),
+            relationship_type: Some("LINKS".to_string()),
+            direction: KnowledgeNeighborDirection::Outgoing,
+            limit: 4,
+            max_hops: 1,
+        })
+        .unwrap();
     assert_eq!(neighbors.seed_node_id, Some(0));
     assert_eq!(neighbors.paths.len(), 1);
     assert_eq!(neighbors.paths[0].source_external_id.as_deref(), Some("0"));
@@ -117,16 +119,18 @@ fn typed_knowledge_navigation_uses_projected_identity_for_idless_seed() {
         Some("leaf")
     );
 
-    let paths = db.knowledge_paths(&KnowledgePathRequest {
-        source_label: "Memory".to_string(),
-        source_external_id: "0".to_string(),
-        target_label: "Entity".to_string(),
-        target_external_id: "leaf".to_string(),
-        relationship_type: Some("LINKS".to_string()),
-        direction: KnowledgeNeighborDirection::Outgoing,
-        max_hops: 1,
-        limit: 4,
-    });
+    let paths = db
+        .knowledge_paths(&KnowledgePathRequest {
+            source_label: "Memory".to_string(),
+            source_external_id: "0".to_string(),
+            target_label: "Entity".to_string(),
+            target_external_id: "leaf".to_string(),
+            relationship_type: Some("LINKS".to_string()),
+            direction: KnowledgeNeighborDirection::Outgoing,
+            max_hops: 1,
+            limit: 4,
+        })
+        .unwrap();
     assert_eq!(paths.source_node_id, Some(0));
     assert_eq!(paths.target_node_id, Some(1));
     assert_eq!(paths.paths.len(), 1);
@@ -135,15 +139,17 @@ fn typed_knowledge_navigation_uses_projected_identity_for_idless_seed() {
         Some("0")
     );
 
-    let subgraph = db.knowledge_subgraph(&KnowledgeSubgraphRequest {
-        label: "Memory".to_string(),
-        external_id: "0".to_string(),
-        relationship_type: Some("LINKS".to_string()),
-        direction: KnowledgeNeighborDirection::Outgoing,
-        max_hops: 1,
-        node_limit: 4,
-        relationship_limit: 4,
-    });
+    let subgraph = db
+        .knowledge_subgraph(&KnowledgeSubgraphRequest {
+            label: "Memory".to_string(),
+            external_id: "0".to_string(),
+            relationship_type: Some("LINKS".to_string()),
+            direction: KnowledgeNeighborDirection::Outgoing,
+            max_hops: 1,
+            node_limit: 4,
+            relationship_limit: 4,
+        })
+        .unwrap();
     assert_eq!(subgraph.seed_node_id, Some(0));
     assert!(subgraph
         .nodes
@@ -203,14 +209,16 @@ fn retrieves_knowledge_neighbors_without_search_projection() {
         )
         .unwrap();
 
-    let outgoing = db.knowledge_neighbors(&KnowledgeNeighborsRequest {
-        label: "Memory".to_string(),
-        external_id: "root".to_string(),
-        relationship_type: Some("LINKS".to_string()),
-        direction: KnowledgeNeighborDirection::Outgoing,
-        limit: 8,
-        max_hops: 2,
-    });
+    let outgoing = db
+        .knowledge_neighbors(&KnowledgeNeighborsRequest {
+            label: "Memory".to_string(),
+            external_id: "root".to_string(),
+            relationship_type: Some("LINKS".to_string()),
+            direction: KnowledgeNeighborDirection::Outgoing,
+            limit: 8,
+            max_hops: 2,
+        })
+        .unwrap();
     assert_eq!(outgoing.seed_node_id, Some(0));
     assert_eq!(outgoing.graph_commit_epoch, 5);
     assert_eq!(outgoing.paths.len(), 2);
@@ -257,14 +265,16 @@ fn retrieves_knowledge_neighbors_without_search_projection() {
         && path.target_external_id.as_deref() == Some("leaf")
         && path.relationship_properties.get("weight") == Some(&Value::Int(2))));
 
-    let incoming = db.knowledge_neighbors(&KnowledgeNeighborsRequest {
-        label: "Memory".to_string(),
-        external_id: "root".to_string(),
-        relationship_type: None,
-        direction: KnowledgeNeighborDirection::Incoming,
-        limit: 8,
-        max_hops: 1,
-    });
+    let incoming = db
+        .knowledge_neighbors(&KnowledgeNeighborsRequest {
+            label: "Memory".to_string(),
+            external_id: "root".to_string(),
+            relationship_type: None,
+            direction: KnowledgeNeighborDirection::Incoming,
+            limit: 8,
+            max_hops: 1,
+        })
+        .unwrap();
     assert_eq!(incoming.paths.len(), 1);
     assert_eq!(incoming.paths[0].relationship_type, "MENTIONS");
     assert_eq!(
@@ -272,14 +282,16 @@ fn retrieves_knowledge_neighbors_without_search_projection() {
         Some("mention")
     );
 
-    let unknown_type = db.knowledge_neighbors(&KnowledgeNeighborsRequest {
-        label: "Memory".to_string(),
-        external_id: "root".to_string(),
-        relationship_type: Some("DOES_NOT_EXIST".to_string()),
-        direction: KnowledgeNeighborDirection::Both,
-        limit: 8,
-        max_hops: 2,
-    });
+    let unknown_type = db
+        .knowledge_neighbors(&KnowledgeNeighborsRequest {
+            label: "Memory".to_string(),
+            external_id: "root".to_string(),
+            relationship_type: Some("DOES_NOT_EXIST".to_string()),
+            direction: KnowledgeNeighborDirection::Both,
+            limit: 8,
+            max_hops: 2,
+        })
+        .unwrap();
     assert_eq!(unknown_type.seed_node_id, Some(0));
     assert!(unknown_type.paths.is_empty());
     assert!(unknown_type.diagnostics.seed_found);
@@ -320,7 +332,7 @@ fn scoped_knowledge_neighbors_filters_seed_by_metadata() {
         },
         metadata_filters: BTreeMap::from([("space_id".to_string(), "default".to_string())]),
     };
-    let scoped = db.knowledge_scoped_neighbors(&scoped_request);
+    let scoped = db.knowledge_scoped_neighbors(&scoped_request).unwrap();
 
     assert_eq!(scoped.paths.len(), 1);
     assert!(scoped.diagnostics.seed_found);
@@ -336,24 +348,26 @@ fn scoped_knowledge_neighbors_filters_seed_by_metadata() {
     );
 
     let stats = db.plan_cache_stats();
-    let repeated_scoped = db.knowledge_scoped_neighbors(&scoped_request);
+    let repeated_scoped = db.knowledge_scoped_neighbors(&scoped_request).unwrap();
     assert_eq!(repeated_scoped, scoped);
     let repeated_stats = db.plan_cache_stats();
     assert_eq!(repeated_stats.entries, stats.entries);
     assert_eq!(repeated_stats.misses, stats.misses);
     assert!(repeated_stats.hits > stats.hits);
 
-    let filtered = db.knowledge_scoped_neighbors(&KnowledgeScopedNeighborsRequest {
-        navigation: KnowledgeNeighborsRequest {
-            label: "Memory".to_string(),
-            external_id: "root".to_string(),
-            relationship_type: Some("LINKS".to_string()),
-            direction: KnowledgeNeighborDirection::Outgoing,
-            limit: 4,
-            max_hops: 1,
-        },
-        metadata_filters: BTreeMap::from([("space_id".to_string(), "team".to_string())]),
-    });
+    let filtered = db
+        .knowledge_scoped_neighbors(&KnowledgeScopedNeighborsRequest {
+            navigation: KnowledgeNeighborsRequest {
+                label: "Memory".to_string(),
+                external_id: "root".to_string(),
+                relationship_type: Some("LINKS".to_string()),
+                direction: KnowledgeNeighborDirection::Outgoing,
+                limit: 4,
+                max_hops: 1,
+            },
+            metadata_filters: BTreeMap::from([("space_id".to_string(), "team".to_string())]),
+        })
+        .unwrap();
 
     assert_eq!(filtered.seed_node_id, Some(0));
     assert!(filtered.paths.is_empty());
@@ -608,7 +622,7 @@ fn knowledge_neighbors_reports_limit_and_missing_seed() {
         limit: 1,
         max_hops: 1,
     };
-    let limited = db.knowledge_neighbors(&limited_request);
+    let limited = db.knowledge_neighbors(&limited_request).unwrap();
     assert_eq!(limited.paths.len(), 1);
     assert!(limited.diagnostics.seed_found);
     assert_eq!(limited.diagnostics.path_count, 1);
@@ -630,21 +644,23 @@ fn knowledge_neighbors_reports_limit_and_missing_seed() {
     assert_eq!(limited.diagnostics.fanout_reasons, limited.fanout_reasons);
 
     let stats = db.plan_cache_stats();
-    let repeated_limited = db.knowledge_neighbors(&limited_request);
+    let repeated_limited = db.knowledge_neighbors(&limited_request).unwrap();
     assert_eq!(repeated_limited, limited);
     let repeated_stats = db.plan_cache_stats();
     assert_eq!(repeated_stats.entries, stats.entries);
     assert_eq!(repeated_stats.misses, stats.misses);
     assert!(repeated_stats.hits > stats.hits);
 
-    let disabled = db.knowledge_neighbors(&KnowledgeNeighborsRequest {
-        label: "Memory".to_string(),
-        external_id: "root".to_string(),
-        relationship_type: None,
-        direction: KnowledgeNeighborDirection::Both,
-        limit: 0,
-        max_hops: 1,
-    });
+    let disabled = db
+        .knowledge_neighbors(&KnowledgeNeighborsRequest {
+            label: "Memory".to_string(),
+            external_id: "root".to_string(),
+            relationship_type: None,
+            direction: KnowledgeNeighborDirection::Both,
+            limit: 0,
+            max_hops: 1,
+        })
+        .unwrap();
     assert!(disabled.paths.is_empty());
     assert_eq!(disabled.diagnostics.fanout_reason_count, 1);
     assert_eq!(
@@ -657,14 +673,16 @@ fn knowledge_neighbors_reports_limit_and_missing_seed() {
     );
     assert_eq!(disabled.diagnostics.fanout_reasons, disabled.fanout_reasons);
 
-    let missing = db.knowledge_neighbors(&KnowledgeNeighborsRequest {
-        label: "Memory".to_string(),
-        external_id: "missing".to_string(),
-        relationship_type: None,
-        direction: KnowledgeNeighborDirection::Both,
-        limit: 8,
-        max_hops: 1,
-    });
+    let missing = db
+        .knowledge_neighbors(&KnowledgeNeighborsRequest {
+            label: "Memory".to_string(),
+            external_id: "missing".to_string(),
+            relationship_type: None,
+            direction: KnowledgeNeighborDirection::Both,
+            limit: 8,
+            max_hops: 1,
+        })
+        .unwrap();
     assert_eq!(missing.seed_node_id, None);
     assert!(!missing.diagnostics.seed_found);
     assert_eq!(missing.diagnostics.path_count, 0);
@@ -704,14 +722,16 @@ fn typed_knowledge_navigation_reports_dense_adjacency_groups() {
             .unwrap();
     }
 
-    let neighbors = db.knowledge_neighbors(&KnowledgeNeighborsRequest {
-        label: "Memory".to_string(),
-        external_id: "root".to_string(),
-        relationship_type: Some("LINKS".to_string()),
-        direction: KnowledgeNeighborDirection::Outgoing,
-        limit: DENSE_ADJACENCY_DEGREE_THRESHOLD,
-        max_hops: 1,
-    });
+    let neighbors = db
+        .knowledge_neighbors(&KnowledgeNeighborsRequest {
+            label: "Memory".to_string(),
+            external_id: "root".to_string(),
+            relationship_type: Some("LINKS".to_string()),
+            direction: KnowledgeNeighborDirection::Outgoing,
+            limit: DENSE_ADJACENCY_DEGREE_THRESHOLD,
+            max_hops: 1,
+        })
+        .unwrap();
     assert_eq!(neighbors.paths.len(), DENSE_ADJACENCY_DEGREE_THRESHOLD);
     assert_eq!(neighbors.diagnostics.fanout_reason_count, 1);
     assert_eq!(neighbors.fanout_reasons.len(), 1);
@@ -753,14 +773,16 @@ fn typed_knowledge_navigation_reports_dense_adjacency_groups() {
         neighbors.fanout_reasons
     );
 
-    let untyped_neighbors = db.knowledge_neighbors(&KnowledgeNeighborsRequest {
-        label: "Memory".to_string(),
-        external_id: "root".to_string(),
-        relationship_type: None,
-        direction: KnowledgeNeighborDirection::Outgoing,
-        limit: DENSE_ADJACENCY_DEGREE_THRESHOLD,
-        max_hops: 1,
-    });
+    let untyped_neighbors = db
+        .knowledge_neighbors(&KnowledgeNeighborsRequest {
+            label: "Memory".to_string(),
+            external_id: "root".to_string(),
+            relationship_type: None,
+            direction: KnowledgeNeighborDirection::Outgoing,
+            limit: DENSE_ADJACENCY_DEGREE_THRESHOLD,
+            max_hops: 1,
+        })
+        .unwrap();
     assert_eq!(
         untyped_neighbors.paths.len(),
         DENSE_ADJACENCY_DEGREE_THRESHOLD
@@ -773,15 +795,17 @@ fn typed_knowledge_navigation_reports_dense_adjacency_groups() {
         vec![KnowledgeFanoutReasonCode::DenseAdjacency]
     );
 
-    let subgraph = db.knowledge_subgraph(&KnowledgeSubgraphRequest {
-        label: "Memory".to_string(),
-        external_id: "root".to_string(),
-        relationship_type: Some("LINKS".to_string()),
-        direction: KnowledgeNeighborDirection::Outgoing,
-        max_hops: 1,
-        node_limit: DENSE_ADJACENCY_DEGREE_THRESHOLD + 1,
-        relationship_limit: DENSE_ADJACENCY_DEGREE_THRESHOLD,
-    });
+    let subgraph = db
+        .knowledge_subgraph(&KnowledgeSubgraphRequest {
+            label: "Memory".to_string(),
+            external_id: "root".to_string(),
+            relationship_type: Some("LINKS".to_string()),
+            direction: KnowledgeNeighborDirection::Outgoing,
+            max_hops: 1,
+            node_limit: DENSE_ADJACENCY_DEGREE_THRESHOLD + 1,
+            relationship_limit: DENSE_ADJACENCY_DEGREE_THRESHOLD,
+        })
+        .unwrap();
     assert_eq!(
         subgraph.relationships.len(),
         DENSE_ADJACENCY_DEGREE_THRESHOLD
@@ -820,16 +844,18 @@ fn retrieves_bounded_knowledge_paths_without_search_projection() {
         )
         .unwrap();
 
-    let output = db.knowledge_paths(&KnowledgePathRequest {
-        source_label: "Memory".to_string(),
-        source_external_id: "root".to_string(),
-        target_label: "Entity".to_string(),
-        target_external_id: "leaf".to_string(),
-        relationship_type: Some("LINKS".to_string()),
-        direction: KnowledgeNeighborDirection::Outgoing,
-        max_hops: 2,
-        limit: 4,
-    });
+    let output = db
+        .knowledge_paths(&KnowledgePathRequest {
+            source_label: "Memory".to_string(),
+            source_external_id: "root".to_string(),
+            target_label: "Entity".to_string(),
+            target_external_id: "leaf".to_string(),
+            relationship_type: Some("LINKS".to_string()),
+            direction: KnowledgeNeighborDirection::Outgoing,
+            max_hops: 2,
+            limit: 4,
+        })
+        .unwrap();
 
     assert_eq!(output.graph_commit_epoch, 3);
     assert_eq!(output.source_node_id, Some(0));
@@ -914,7 +940,7 @@ fn scoped_knowledge_paths_filter_source_and_target_by_metadata() {
         )]),
         target_metadata_filters: BTreeMap::from([("space_id".to_string(), "default".to_string())]),
     };
-    let scoped = db.knowledge_scoped_paths(&scoped_request);
+    let scoped = db.knowledge_scoped_paths(&scoped_request).unwrap();
 
     assert_eq!(scoped.paths.len(), 1);
     assert!(scoped.diagnostics.seed_found);
@@ -940,30 +966,35 @@ fn scoped_knowledge_paths_filter_source_and_target_by_metadata() {
     );
 
     let stats = db.plan_cache_stats();
-    let repeated_scoped = db.knowledge_scoped_paths(&scoped_request);
+    let repeated_scoped = db.knowledge_scoped_paths(&scoped_request).unwrap();
     assert_eq!(repeated_scoped, scoped);
     let repeated_stats = db.plan_cache_stats();
     assert_eq!(repeated_stats.entries, stats.entries);
     assert_eq!(repeated_stats.misses, stats.misses);
     assert!(repeated_stats.hits > stats.hits);
 
-    let filtered = db.knowledge_scoped_paths(&KnowledgeScopedPathRequest {
-        navigation: KnowledgePathRequest {
-            source_label: "Memory".to_string(),
-            source_external_id: "root".to_string(),
-            target_label: "Entity".to_string(),
-            target_external_id: "leaf".to_string(),
-            relationship_type: Some("LINKS".to_string()),
-            direction: KnowledgeNeighborDirection::Outgoing,
-            max_hops: 1,
-            limit: 4,
-        },
-        source_metadata_filters: BTreeMap::from([(
-            "source_id".to_string(),
-            "thread_1".to_string(),
-        )]),
-        target_metadata_filters: BTreeMap::from([("space_id".to_string(), "archive".to_string())]),
-    });
+    let filtered = db
+        .knowledge_scoped_paths(&KnowledgeScopedPathRequest {
+            navigation: KnowledgePathRequest {
+                source_label: "Memory".to_string(),
+                source_external_id: "root".to_string(),
+                target_label: "Entity".to_string(),
+                target_external_id: "leaf".to_string(),
+                relationship_type: Some("LINKS".to_string()),
+                direction: KnowledgeNeighborDirection::Outgoing,
+                max_hops: 1,
+                limit: 4,
+            },
+            source_metadata_filters: BTreeMap::from([(
+                "source_id".to_string(),
+                "thread_1".to_string(),
+            )]),
+            target_metadata_filters: BTreeMap::from([(
+                "space_id".to_string(),
+                "archive".to_string(),
+            )]),
+        })
+        .unwrap();
 
     assert_eq!(filtered.source_node_id, Some(0));
     assert_eq!(filtered.target_node_id, Some(1));
@@ -1019,31 +1050,35 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
         )
         .unwrap();
 
-    let wrong_direction = db.knowledge_paths(&KnowledgePathRequest {
-        source_label: "Memory".to_string(),
-        source_external_id: "root".to_string(),
-        target_label: "Entity".to_string(),
-        target_external_id: "right".to_string(),
-        relationship_type: Some("LINKS".to_string()),
-        direction: KnowledgeNeighborDirection::Incoming,
-        max_hops: 1,
-        limit: 4,
-    });
+    let wrong_direction = db
+        .knowledge_paths(&KnowledgePathRequest {
+            source_label: "Memory".to_string(),
+            source_external_id: "root".to_string(),
+            target_label: "Entity".to_string(),
+            target_external_id: "right".to_string(),
+            relationship_type: Some("LINKS".to_string()),
+            direction: KnowledgeNeighborDirection::Incoming,
+            max_hops: 1,
+            limit: 4,
+        })
+        .unwrap();
     assert!(wrong_direction.paths.is_empty());
     assert!(wrong_direction.diagnostics.seed_found);
     assert_eq!(wrong_direction.diagnostics.target_found, Some(true));
     assert_eq!(wrong_direction.diagnostics.path_count, 0);
 
-    let unknown_type = db.knowledge_paths(&KnowledgePathRequest {
-        source_label: "Memory".to_string(),
-        source_external_id: "root".to_string(),
-        target_label: "Entity".to_string(),
-        target_external_id: "right".to_string(),
-        relationship_type: Some("DOES_NOT_EXIST".to_string()),
-        direction: KnowledgeNeighborDirection::Outgoing,
-        max_hops: 1,
-        limit: 4,
-    });
+    let unknown_type = db
+        .knowledge_paths(&KnowledgePathRequest {
+            source_label: "Memory".to_string(),
+            source_external_id: "root".to_string(),
+            target_label: "Entity".to_string(),
+            target_external_id: "right".to_string(),
+            relationship_type: Some("DOES_NOT_EXIST".to_string()),
+            direction: KnowledgeNeighborDirection::Outgoing,
+            max_hops: 1,
+            limit: 4,
+        })
+        .unwrap();
     assert!(unknown_type.paths.is_empty());
     assert!(unknown_type.diagnostics.seed_found);
     assert_eq!(unknown_type.diagnostics.target_found, Some(true));
@@ -1066,7 +1101,7 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
         max_hops: 1,
         limit: 1,
     };
-    let limited = db.knowledge_paths(&limited_request);
+    let limited = db.knowledge_paths(&limited_request).unwrap();
     assert_eq!(limited.paths.len(), 1);
     assert_eq!(limited.diagnostics.path_count, 1);
     assert_eq!(limited.diagnostics.node_count, 2);
@@ -1087,23 +1122,25 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
     assert_eq!(limited.diagnostics.fanout_reasons, limited.fanout_reasons);
 
     let stats = db.plan_cache_stats();
-    let repeated_limited = db.knowledge_paths(&limited_request);
+    let repeated_limited = db.knowledge_paths(&limited_request).unwrap();
     assert_eq!(repeated_limited, limited);
     let repeated_stats = db.plan_cache_stats();
     assert_eq!(repeated_stats.entries, stats.entries);
     assert_eq!(repeated_stats.misses, stats.misses);
     assert!(repeated_stats.hits > stats.hits);
 
-    let disabled = db.knowledge_paths(&KnowledgePathRequest {
-        source_label: "Memory".to_string(),
-        source_external_id: "root".to_string(),
-        target_label: "Entity".to_string(),
-        target_external_id: "right".to_string(),
-        relationship_type: None,
-        direction: KnowledgeNeighborDirection::Outgoing,
-        max_hops: 0,
-        limit: 4,
-    });
+    let disabled = db
+        .knowledge_paths(&KnowledgePathRequest {
+            source_label: "Memory".to_string(),
+            source_external_id: "root".to_string(),
+            target_label: "Entity".to_string(),
+            target_external_id: "right".to_string(),
+            relationship_type: None,
+            direction: KnowledgeNeighborDirection::Outgoing,
+            max_hops: 0,
+            limit: 4,
+        })
+        .unwrap();
     assert!(disabled.paths.is_empty());
     assert_eq!(disabled.diagnostics.fanout_reason_count, 0);
     assert_eq!(
@@ -1115,16 +1152,18 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
         vec![KnowledgeTraversalFallbackReasonCode::MaxHopsZero]
     );
 
-    let missing = db.knowledge_paths(&KnowledgePathRequest {
-        source_label: "Memory".to_string(),
-        source_external_id: "root".to_string(),
-        target_label: "Entity".to_string(),
-        target_external_id: "missing".to_string(),
-        relationship_type: None,
-        direction: KnowledgeNeighborDirection::Both,
-        max_hops: 2,
-        limit: 4,
-    });
+    let missing = db
+        .knowledge_paths(&KnowledgePathRequest {
+            source_label: "Memory".to_string(),
+            source_external_id: "root".to_string(),
+            target_label: "Entity".to_string(),
+            target_external_id: "missing".to_string(),
+            relationship_type: None,
+            direction: KnowledgeNeighborDirection::Both,
+            max_hops: 2,
+            limit: 4,
+        })
+        .unwrap();
     assert_eq!(missing.source_node_id, Some(0));
     assert_eq!(missing.target_node_id, None);
     assert!(missing.diagnostics.seed_found);
@@ -1140,16 +1179,18 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
     );
     assert!(missing.paths.is_empty());
 
-    let missing_source = db.knowledge_paths(&KnowledgePathRequest {
-        source_label: "Memory".to_string(),
-        source_external_id: "missing".to_string(),
-        target_label: "Entity".to_string(),
-        target_external_id: "right".to_string(),
-        relationship_type: None,
-        direction: KnowledgeNeighborDirection::Both,
-        max_hops: 2,
-        limit: 4,
-    });
+    let missing_source = db
+        .knowledge_paths(&KnowledgePathRequest {
+            source_label: "Memory".to_string(),
+            source_external_id: "missing".to_string(),
+            target_label: "Entity".to_string(),
+            target_external_id: "right".to_string(),
+            relationship_type: None,
+            direction: KnowledgeNeighborDirection::Both,
+            max_hops: 2,
+            limit: 4,
+        })
+        .unwrap();
     assert_eq!(missing_source.source_node_id, None);
     assert_eq!(missing_source.target_node_id, Some(2));
     assert!(!missing_source.diagnostics.seed_found);
@@ -1165,16 +1206,18 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
     );
     assert!(missing_source.paths.is_empty());
 
-    let missing_both = db.knowledge_paths(&KnowledgePathRequest {
-        source_label: "Memory".to_string(),
-        source_external_id: "missing-source".to_string(),
-        target_label: "Entity".to_string(),
-        target_external_id: "missing-target".to_string(),
-        relationship_type: None,
-        direction: KnowledgeNeighborDirection::Both,
-        max_hops: 2,
-        limit: 4,
-    });
+    let missing_both = db
+        .knowledge_paths(&KnowledgePathRequest {
+            source_label: "Memory".to_string(),
+            source_external_id: "missing-source".to_string(),
+            target_label: "Entity".to_string(),
+            target_external_id: "missing-target".to_string(),
+            relationship_type: None,
+            direction: KnowledgeNeighborDirection::Both,
+            max_hops: 2,
+            limit: 4,
+        })
+        .unwrap();
     assert_eq!(missing_both.source_node_id, None);
     assert_eq!(missing_both.target_node_id, None);
     assert!(!missing_both.diagnostics.seed_found);
@@ -1239,15 +1282,17 @@ fn retrieves_bounded_knowledge_subgraph_without_search_projection() {
         )
         .unwrap();
 
-    let output = db.knowledge_subgraph(&KnowledgeSubgraphRequest {
-        label: "Memory".to_string(),
-        external_id: "root".to_string(),
-        relationship_type: Some("LINKS".to_string()),
-        direction: KnowledgeNeighborDirection::Outgoing,
-        max_hops: 2,
-        node_limit: 8,
-        relationship_limit: 8,
-    });
+    let output = db
+        .knowledge_subgraph(&KnowledgeSubgraphRequest {
+            label: "Memory".to_string(),
+            external_id: "root".to_string(),
+            relationship_type: Some("LINKS".to_string()),
+            direction: KnowledgeNeighborDirection::Outgoing,
+            max_hops: 2,
+            node_limit: 8,
+            relationship_limit: 8,
+        })
+        .unwrap();
 
     assert_eq!(output.graph_commit_epoch, 5);
     assert_eq!(output.seed_node_id, Some(0));
@@ -1323,7 +1368,7 @@ fn scoped_knowledge_subgraph_filters_seed_by_metadata() {
         },
         metadata_filters: BTreeMap::from([("source_id".to_string(), "thread_1".to_string())]),
     };
-    let scoped = db.knowledge_scoped_subgraph(&scoped_request);
+    let scoped = db.knowledge_scoped_subgraph(&scoped_request).unwrap();
 
     assert_eq!(scoped.nodes.len(), 2);
     assert_eq!(scoped.relationships.len(), 1);
@@ -1340,25 +1385,27 @@ fn scoped_knowledge_subgraph_filters_seed_by_metadata() {
     );
 
     let stats = db.plan_cache_stats();
-    let repeated_scoped = db.knowledge_scoped_subgraph(&scoped_request);
+    let repeated_scoped = db.knowledge_scoped_subgraph(&scoped_request).unwrap();
     assert_eq!(repeated_scoped, scoped);
     let repeated_stats = db.plan_cache_stats();
     assert_eq!(repeated_stats.entries, stats.entries);
     assert_eq!(repeated_stats.misses, stats.misses);
     assert!(repeated_stats.hits > stats.hits);
 
-    let filtered = db.knowledge_scoped_subgraph(&KnowledgeScopedSubgraphRequest {
-        navigation: KnowledgeSubgraphRequest {
-            label: "Memory".to_string(),
-            external_id: "root".to_string(),
-            relationship_type: Some("LINKS".to_string()),
-            direction: KnowledgeNeighborDirection::Outgoing,
-            max_hops: 1,
-            node_limit: 4,
-            relationship_limit: 4,
-        },
-        metadata_filters: BTreeMap::from([("source_id".to_string(), "thread_2".to_string())]),
-    });
+    let filtered = db
+        .knowledge_scoped_subgraph(&KnowledgeScopedSubgraphRequest {
+            navigation: KnowledgeSubgraphRequest {
+                label: "Memory".to_string(),
+                external_id: "root".to_string(),
+                relationship_type: Some("LINKS".to_string()),
+                direction: KnowledgeNeighborDirection::Outgoing,
+                max_hops: 1,
+                node_limit: 4,
+                relationship_limit: 4,
+            },
+            metadata_filters: BTreeMap::from([("source_id".to_string(), "thread_2".to_string())]),
+        })
+        .unwrap();
 
     assert_eq!(filtered.seed_node_id, Some(0));
     assert!(filtered.nodes.is_empty());
@@ -1404,15 +1451,17 @@ fn knowledge_subgraph_reports_limits_and_missing_seed() {
         .create_relationship(&mut db.catalog, NodeId(0), right, "LINKS", BTreeMap::new())
         .unwrap();
 
-    let node_limited = db.knowledge_subgraph(&KnowledgeSubgraphRequest {
-        label: "Memory".to_string(),
-        external_id: "root".to_string(),
-        relationship_type: None,
-        direction: KnowledgeNeighborDirection::Outgoing,
-        max_hops: 1,
-        node_limit: 1,
-        relationship_limit: 8,
-    });
+    let node_limited = db
+        .knowledge_subgraph(&KnowledgeSubgraphRequest {
+            label: "Memory".to_string(),
+            external_id: "root".to_string(),
+            relationship_type: None,
+            direction: KnowledgeNeighborDirection::Outgoing,
+            max_hops: 1,
+            node_limit: 1,
+            relationship_limit: 8,
+        })
+        .unwrap();
     assert_eq!(node_limited.nodes.len(), 1);
     assert!(node_limited.diagnostics.seed_found);
     assert_eq!(node_limited.diagnostics.node_count, 1);
@@ -1444,7 +1493,9 @@ fn knowledge_subgraph_reports_limits_and_missing_seed() {
         node_limit: 8,
         relationship_limit: 1,
     };
-    let relationship_limited = db.knowledge_subgraph(&relationship_limited_request);
+    let relationship_limited = db
+        .knowledge_subgraph(&relationship_limited_request)
+        .unwrap();
     assert_eq!(relationship_limited.relationships.len(), 1);
     assert_eq!(relationship_limited.diagnostics.node_count, 2);
     assert_eq!(relationship_limited.diagnostics.relationship_count, 1);
@@ -1466,22 +1517,26 @@ fn knowledge_subgraph_reports_limits_and_missing_seed() {
     );
 
     let stats = db.plan_cache_stats();
-    let repeated_relationship_limited = db.knowledge_subgraph(&relationship_limited_request);
+    let repeated_relationship_limited = db
+        .knowledge_subgraph(&relationship_limited_request)
+        .unwrap();
     assert_eq!(repeated_relationship_limited, relationship_limited);
     let repeated_stats = db.plan_cache_stats();
     assert_eq!(repeated_stats.entries, stats.entries);
     assert_eq!(repeated_stats.misses, stats.misses);
     assert!(repeated_stats.hits > stats.hits);
 
-    let node_disabled = db.knowledge_subgraph(&KnowledgeSubgraphRequest {
-        label: "Memory".to_string(),
-        external_id: "root".to_string(),
-        relationship_type: None,
-        direction: KnowledgeNeighborDirection::Outgoing,
-        max_hops: 1,
-        node_limit: 0,
-        relationship_limit: 8,
-    });
+    let node_disabled = db
+        .knowledge_subgraph(&KnowledgeSubgraphRequest {
+            label: "Memory".to_string(),
+            external_id: "root".to_string(),
+            relationship_type: None,
+            direction: KnowledgeNeighborDirection::Outgoing,
+            max_hops: 1,
+            node_limit: 0,
+            relationship_limit: 8,
+        })
+        .unwrap();
     assert!(node_disabled.nodes.is_empty());
     assert!(node_disabled.relationships.is_empty());
     assert_eq!(
@@ -1493,15 +1548,17 @@ fn knowledge_subgraph_reports_limits_and_missing_seed() {
         vec![KnowledgeTraversalFallbackReasonCode::NodeLimitZero]
     );
 
-    let relationship_disabled = db.knowledge_subgraph(&KnowledgeSubgraphRequest {
-        label: "Memory".to_string(),
-        external_id: "root".to_string(),
-        relationship_type: None,
-        direction: KnowledgeNeighborDirection::Outgoing,
-        max_hops: 1,
-        node_limit: 8,
-        relationship_limit: 0,
-    });
+    let relationship_disabled = db
+        .knowledge_subgraph(&KnowledgeSubgraphRequest {
+            label: "Memory".to_string(),
+            external_id: "root".to_string(),
+            relationship_type: None,
+            direction: KnowledgeNeighborDirection::Outgoing,
+            max_hops: 1,
+            node_limit: 8,
+            relationship_limit: 0,
+        })
+        .unwrap();
     assert_eq!(relationship_disabled.nodes.len(), 1);
     assert!(relationship_disabled.relationships.is_empty());
     assert_eq!(
@@ -1513,15 +1570,17 @@ fn knowledge_subgraph_reports_limits_and_missing_seed() {
         vec![KnowledgeTraversalFallbackReasonCode::RelationshipLimitZero]
     );
 
-    let unknown_type = db.knowledge_subgraph(&KnowledgeSubgraphRequest {
-        label: "Memory".to_string(),
-        external_id: "root".to_string(),
-        relationship_type: Some("DOES_NOT_EXIST".to_string()),
-        direction: KnowledgeNeighborDirection::Both,
-        max_hops: 1,
-        node_limit: 8,
-        relationship_limit: 8,
-    });
+    let unknown_type = db
+        .knowledge_subgraph(&KnowledgeSubgraphRequest {
+            label: "Memory".to_string(),
+            external_id: "root".to_string(),
+            relationship_type: Some("DOES_NOT_EXIST".to_string()),
+            direction: KnowledgeNeighborDirection::Both,
+            max_hops: 1,
+            node_limit: 8,
+            relationship_limit: 8,
+        })
+        .unwrap();
     assert_eq!(unknown_type.seed_node_id, Some(0));
     assert!(unknown_type.diagnostics.seed_found);
     assert_eq!(unknown_type.diagnostics.node_count, 0);
@@ -1538,15 +1597,17 @@ fn knowledge_subgraph_reports_limits_and_missing_seed() {
         vec![KnowledgeTraversalFallbackReasonCode::RelationshipTypeNotFound]
     );
 
-    let missing = db.knowledge_subgraph(&KnowledgeSubgraphRequest {
-        label: "Memory".to_string(),
-        external_id: "missing".to_string(),
-        relationship_type: None,
-        direction: KnowledgeNeighborDirection::Both,
-        max_hops: 1,
-        node_limit: 8,
-        relationship_limit: 8,
-    });
+    let missing = db
+        .knowledge_subgraph(&KnowledgeSubgraphRequest {
+            label: "Memory".to_string(),
+            external_id: "missing".to_string(),
+            relationship_type: None,
+            direction: KnowledgeNeighborDirection::Both,
+            max_hops: 1,
+            node_limit: 8,
+            relationship_limit: 8,
+        })
+        .unwrap();
     assert_eq!(missing.seed_node_id, None);
     assert!(!missing.diagnostics.seed_found);
     assert_eq!(missing.diagnostics.node_count, 0);

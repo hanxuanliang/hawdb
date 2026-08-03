@@ -1,8 +1,15 @@
 pub mod adjacency;
+pub mod backup;
+pub mod cache;
+pub mod canonical;
+pub mod canonical_adjacency;
 pub mod config;
 pub mod ids;
 pub mod mutation;
+mod ownership;
 pub mod projection;
+pub mod property_projection;
+pub mod property_spill;
 pub mod scan;
 pub mod snapshot;
 
@@ -12,7 +19,30 @@ pub use adjacency::{
     ADJACENCY_DELTA_CONSOLIDATION_ENTRIES, ADJACENCY_DELTA_HARD_MAX_ENTRIES,
     ADJACENCY_MINI_DELTA_MAX_ENTRIES, ADJACENCY_PIVOT_MIN_DEGREE,
 };
-pub use config::{DurabilityPolicy, DurableCompression, RecoveryMode, WalReplayConfig};
+pub use backup::{StorageBackupReport, StorageRestoreReport};
+pub use cache::{
+    content_digest, ContentDigest, ManifestGeneration, RepresentationKind, SegmentCache,
+    SegmentCacheError, SegmentCacheKey, SegmentCacheLease, SegmentCacheSnapshot, StoreId,
+};
+pub use canonical::{
+    CanonicalEndpointBloom, CanonicalEndpointDirection, CanonicalNodeIterator, CanonicalReadReport,
+    CanonicalRelationshipIterator, CanonicalScanControl, CanonicalSegmentConfig,
+    CanonicalSegmentDescriptor, CanonicalSegmentError, CanonicalSegmentKind,
+    CanonicalSegmentManifest, CanonicalSegmentReader, CanonicalSegmentWriter,
+};
+pub use canonical_adjacency::{
+    CanonicalAdjacencyBlockDescriptor, CanonicalAdjacencyBuildReport, CanonicalAdjacencyConfig,
+    CanonicalAdjacencyEntry, CanonicalAdjacencyError, CanonicalAdjacencyManifest,
+    CanonicalAdjacencyReadReport, CanonicalAdjacencyReader, CanonicalAdjacencyWriteOutput,
+    CanonicalAdjacencyWriter,
+};
+pub use config::{
+    DurabilityPolicy, DurableCompression, RecoveryMode, StorageResidencyMode, WalReplayConfig,
+    DEFAULT_AUTO_MATERIALIZE_CHECKPOINT_BYTES, DEFAULT_MAX_CHECKPOINT_DECODED_BYTES,
+    DEFAULT_MAX_CHECKPOINT_ENCODED_BYTES, DEFAULT_MAX_OUT_OF_CORE_DELTA_BYTES,
+    DEFAULT_MAX_WAL_BATCH_OPERATIONS, DEFAULT_MAX_WAL_RECORD_BYTES, DEFAULT_MAX_WAL_REPLAY_BYTES,
+    DEFAULT_MAX_WAL_REPLAY_ENTRIES, DEFAULT_SEGMENT_CACHE_CAPACITY_BYTES,
+};
 pub use ids::{NodeId, NodeRecord, RelId, RelRecord};
 pub use mutation::{
     ConnectedNodesCreate, GraphMutation, MatchedRelationshipCopyMerge, MatchedRelationshipCreate,
@@ -21,11 +51,26 @@ pub use mutation::{
     RelationshipDeleteRequest, RelationshipOnCreatePropertyValue, RelationshipPropertiesUpdate,
     RelationshipPropertyUpdate, RelationshipSetAssignment, RelationshipTargetNodeDelete,
 };
+pub use ownership::{
+    DatabaseDirectoryLease, DatabaseDirectoryLeaseError, DATABASE_DIRECTORY_LOCK_FILE,
+};
 pub use projection::{
     ProjectedGraphDefinition, ProjectedGraphStatus, PropertyIndexProjectionRebuildAction,
     SchemaMaintenanceAction, SchemaMaintenancePlanItem, SearchProjectionChangefeedReadiness,
     SearchProjectionChangefeedStatus, SearchProjectionGraphChange, SearchProjectionMutationId,
     StorageReclamationWatermark, StorageRecoveryReport, StoreStableIdMapping,
+};
+pub use property_projection::{
+    PersistentPropertyProjectionBlockDescriptor, PersistentPropertyProjectionBuildReport,
+    PersistentPropertyProjectionConfig, PersistentPropertyProjectionDefinition,
+    PersistentPropertyProjectionError, PersistentPropertyProjectionKind,
+    PersistentPropertyProjectionManifest, PersistentPropertyProjectionReadReport,
+    PersistentPropertyProjectionReader, PersistentPropertyProjectionWriteOutput,
+    PersistentPropertyProjectionWriter,
+};
+pub use property_spill::{
+    PropertySpillBlockDescriptor, PropertySpillConfig, PropertySpillError, PropertySpillManifest,
+    PropertySpillReader, PropertySpillWriter,
 };
 pub use scan::{
     CandidateCursor, DateTimeMinMax, EnumDictionaryStats, FieldSummary, FileSegmentRangeReader,

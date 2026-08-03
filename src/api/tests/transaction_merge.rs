@@ -17,7 +17,7 @@ fn transaction_merge_deduplicates_pending_nodes_in_one_wal_batch() {
         assert_eq!(output.rows[0].get("node_id"), output.rows[1].get("node_id"));
     }
 
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert_eq!(wal.lines().count(), 1);
     assert_eq!(wal.matches("create_node").count(), 1);
     {
@@ -51,7 +51,7 @@ fn transaction_merge_on_create_set_deduplicates_pending_nodes_by_match_key() {
         assert_eq!(output.rows[0].get("node_id"), output.rows[1].get("node_id"));
     }
 
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert_eq!(wal.lines().count(), 1);
     assert_eq!(wal.matches("create_node").count(), 1);
     {
@@ -88,7 +88,7 @@ fn transaction_merge_node_on_match_set_updates_pending_create() {
         assert_eq!(output.rows[0].get("node_id"), output.rows[1].get("node_id"));
     }
 
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert_eq!(wal.lines().count(), 1);
     assert_eq!(wal.matches("create_node").count(), 1);
     assert_eq!(wal.matches("set_node_property").count(), 0);
@@ -131,7 +131,7 @@ fn transaction_merge_node_post_set_updates_pending_create() {
         assert_eq!(output.rows[0].get("node_id"), output.rows[1].get("node_id"));
     }
 
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert_eq!(wal.lines().count(), 1);
     assert_eq!(wal.matches("create_node").count(), 1);
     assert_eq!(wal.matches("set_node_property").count(), 0);
@@ -176,7 +176,7 @@ fn transaction_merge_relationship_on_create_set_deduplicates_pending_relationshi
         assert_eq!(output.rows[0].get("rel_id"), output.rows[1].get("rel_id"));
     }
 
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert_eq!(wal.matches("create_rel").count(), 1);
     {
         let mut db = Database::open(&path).unwrap();
@@ -215,7 +215,7 @@ fn transaction_merge_relationship_deduplicates_pending_pattern() {
         assert_eq!(output.rows[0].get("rel_id"), output.rows[1].get("rel_id"));
     }
 
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert_eq!(wal.lines().count(), 1);
     assert_eq!(wal.matches("create_node").count(), 2);
     assert_eq!(wal.matches("create_rel").count(), 1);
@@ -296,7 +296,7 @@ fn transaction_set_updates_pending_node_before_relationship_match() {
         transaction.commit().unwrap();
     }
 
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert_eq!(wal.lines().count(), 2);
     assert_eq!(wal.matches("create_node").count(), 2);
     assert_eq!(wal.matches("set_node_property").count(), 0);
@@ -348,7 +348,7 @@ fn transaction_set_updates_pending_relationship_properties() {
         transaction.commit().unwrap();
     }
 
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert_eq!(wal.matches("create_rel").count(), 1);
     assert_eq!(wal.matches("set_rel_property").count(), 0);
 
@@ -402,7 +402,7 @@ fn transaction_delete_removes_pending_relationship_create() {
         assert_eq!(db.commit_epoch(), commit_epoch_before);
     }
 
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert_eq!(wal.matches("create_rel").count(), 0);
     assert_eq!(wal.matches("delete_rel").count(), 0);
 
@@ -439,7 +439,7 @@ fn transaction_delete_removes_pending_node_create() {
         assert_eq!(db.commit_epoch(), commit_epoch_before);
     }
 
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap_or_default();
+    let wal = read_test_wal(&path).unwrap_or_default();
     assert!(!wal.contains("source-temp"));
     assert_eq!(wal.matches("create_node").count(), 0);
     assert_eq!(wal.matches("set_node_property").count(), 0);
@@ -490,7 +490,7 @@ fn transaction_detach_delete_removes_pending_node_and_relationship_create() {
         assert_eq!(db.commit_epoch(), commit_epoch_before + 1);
     }
 
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(!wal.contains("source-v2"));
     assert_eq!(wal.matches("create_rel").count(), 0);
 
@@ -528,7 +528,7 @@ fn transaction_detach_delete_target_nodes_sees_pending_relationship() {
         assert_eq!(db.commit_epoch(), commit_epoch_before + 1);
     }
 
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap_or_default();
+    let wal = read_test_wal(&path).unwrap_or_default();
     assert!(!wal.contains("source-v1"));
     assert_eq!(wal.matches("create_rel").count(), 0);
 
@@ -567,7 +567,7 @@ fn transaction_retarget_to_matched_pending_target_sees_pending_old_relationship(
         transaction.commit().unwrap();
     }
 
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert_eq!(wal.lines().count(), 1);
     assert_eq!(wal.matches("create_node").count(), 3);
     assert_eq!(wal.matches("create_rel").count(), 2);
@@ -610,7 +610,7 @@ fn transaction_retarget_from_pending_source_sees_pending_old_relationship() {
         transaction.commit().unwrap();
     }
 
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert_eq!(wal.lines().count(), 1);
     assert_eq!(wal.matches("create_node").count(), 3);
     assert_eq!(wal.matches("create_rel").count(), 2);
@@ -655,7 +655,7 @@ fn transaction_copy_merge_sees_pending_matched_relationship_properties() {
         transaction.commit().unwrap();
     }
 
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert_eq!(wal.lines().count(), 1);
     assert_eq!(wal.matches("create_node").count(), 2);
     assert_eq!(wal.matches("create_rel").count(), 2);

@@ -27,19 +27,31 @@ use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
-use std::io::{Cursor, Write};
+use std::io::{Cursor, Read, Write};
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 
 mod analyzer_lexicon;
+mod lexical_projection;
+mod out_of_core;
 mod range_io;
 mod recall_validation;
 #[cfg(feature = "turbovec")]
 pub mod turbovec_projection;
 mod vector_execution;
 use analyzer_lexicon::{CORE_SEMANTIC_ALIAS_RULES, NOWLEDGE_MEMORY_SEMANTIC_ALIAS_RULES};
+use lexical_projection::{
+    analyzer_digest as lexical_analyzer_digest, documents_digest as lexical_documents_digest,
+    LexicalMiniDelta, LexicalProjectionConfig, LexicalProjectionReader, LexicalProjectionWriter,
+};
+pub use out_of_core::{
+    SearchOutOfCoreConfig, SearchOutOfCoreHydrationOutput, SearchOutOfCoreMetrics,
+    SearchOutOfCoreOutput, SearchOutOfCoreReader,
+};
 pub use range_io::SearchRangeReadConfig;
 use recall_validation::{sample_positions, VectorRecallValidationAccumulator};
 pub use recall_validation::{
@@ -284,6 +296,19 @@ pub struct SearchResultSet {
     pub projection_freshness: SearchProjectionFreshness,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct SearchScoredCandidate {
+    id: String,
+    score: f64,
+    vector_score: f64,
+    text_score: f64,
+    rrf_score: f64,
+    vector_rrf_score: f64,
+    text_rrf_score: f64,
+    vector_rank: Option<usize>,
+    text_rank: Option<usize>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchTruncationReasonCode {
     LimitExceeded,
@@ -430,6 +455,9 @@ pub struct SearchRetrieverReport {
     pub residual_filtered_count: usize,
     pub reranked_candidate_count: usize,
     pub raw_vector_bytes_read: u64,
+    pub posting_bytes_read: u64,
+    pub candidate_postings_visited: u64,
+    pub segmented_lexical_projection_used: bool,
     pub index_covered_document_count: usize,
     pub index_candidate_document_count: usize,
     pub index_coverage_complete: bool,
@@ -1012,6 +1040,9 @@ pub struct SearchIndex {
     durable_source_graph_commit_epoch: Mutex<Option<u64>>,
     marker_lines: Mutex<BTreeMap<String, Vec<String>>>,
     analyzer_lexicon: SearchAnalyzerLexicon,
+    lexical_projection: Mutex<Option<Arc<LexicalProjectionReader>>>,
+    lexical_delta: Mutex<LexicalMiniDelta>,
+    lexical_config: LexicalProjectionConfig,
     segment_descriptor: Option<SearchSegmentDescriptor>,
     range_read_config: SearchRangeReadConfig,
     runtime_capabilities: RuntimeCapabilities,
@@ -1035,16 +1066,86 @@ impl SearchIndex {
         };
         index.load_snapshot()?;
         index.load_or_rebuild_segment_descriptor()?;
+        index.load_lexical_projection()?;
         Ok(index)
     }
 
     pub fn with_analyzer_lexicon(mut self, analyzer_lexicon: SearchAnalyzerLexicon) -> Self {
         self.analyzer_lexicon = analyzer_lexicon;
+        self.invalidate_lexical_projection();
         self
     }
 
     pub fn set_analyzer_lexicon(&mut self, analyzer_lexicon: SearchAnalyzerLexicon) {
         self.analyzer_lexicon = analyzer_lexicon;
+        self.invalidate_lexical_projection();
+    }
+
+    fn invalidate_lexical_projection(&self) {
+        *self
+            .lexical_projection
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        *self
+            .lexical_delta
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = LexicalMiniDelta::default();
+    }
+
+    fn load_lexical_projection(&self) -> Result<()> {
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        let projection = LexicalProjectionReader::load(
+            path,
+            self.source_graph_commit_epoch,
+            lexical_analyzer_digest(&self.analyzer_lexicon),
+            lexical_documents_digest(&self.documents),
+            self.lexical_config,
+        )?;
+        *self
+            .lexical_projection
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = projection;
+        Ok(())
+    }
+
+    fn record_lexical_upsert(&self, document: &SearchDocument) {
+        if self
+            .lexical_projection
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_none()
+        {
+            return;
+        }
+        let result = self
+            .lexical_delta
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .upsert(document, &self.analyzer_lexicon, self.lexical_config);
+        if result.is_err() {
+            self.invalidate_lexical_projection();
+        }
+    }
+
+    fn record_lexical_delete(&self, document_id: &str) {
+        if self
+            .lexical_projection
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_none()
+        {
+            return;
+        }
+        let admitted = self
+            .lexical_delta
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .delete(document_id, self.lexical_config);
+        if !admitted {
+            self.invalidate_lexical_projection();
+        }
     }
 
     pub fn set_telemetry_sink(&mut self, telemetry: Option<Arc<dyn TelemetrySink>>) {
@@ -1082,6 +1183,7 @@ impl SearchIndex {
         if let Some(embedding) = &document.embedding {
             self.validate_or_set_dimension(embedding.len())?;
         }
+        self.record_lexical_upsert(&document);
         self.documents.insert(document.id.clone(), document);
         self.segment_descriptor = None;
         Ok(())
@@ -1092,6 +1194,7 @@ impl SearchIndex {
     }
 
     pub fn delete(&mut self, id: &str) {
+        self.record_lexical_delete(id);
         self.documents.remove(id);
         self.segment_descriptor = None;
     }
@@ -1144,6 +1247,7 @@ impl SearchIndex {
         let source_graph_commit_epoch_before = self.source_graph_commit_epoch;
         let mut deleted_documents = 0;
         for id in deletes {
+            self.record_lexical_delete(&id);
             if self.documents.remove(&id).is_some() {
                 deleted_documents += 1;
             }
@@ -1151,6 +1255,7 @@ impl SearchIndex {
         let upserted_documents = upserts.len();
         for row in upserts {
             let document = row.into_document();
+            self.record_lexical_upsert(&document);
             self.documents.insert(document.id.clone(), document);
         }
 
@@ -1436,9 +1541,11 @@ impl SearchIndex {
         let mut scanned_nodes = 0;
 
         let result = (|| {
-            for node in store.scan_nodes(None) {
+            for node in store.node_records_owned() {
+                let node = node?;
                 scanned_nodes += 1;
-                let Some(row) = projection_row_from_node_with_graph_metadata(catalog, store, node)
+                let Some(row) =
+                    projection_row_from_node_with_graph_metadata(catalog, store, &node)?
                 else {
                     continue;
                 };
@@ -1458,6 +1565,7 @@ impl SearchIndex {
             }
 
             self.documents = next_documents;
+            self.invalidate_lexical_projection();
             self.source_graph_commit_epoch = Some(store.commit_epoch());
             self.embedding_dimension = self
                 .embedding_manifest
@@ -1476,6 +1584,9 @@ impl SearchIndex {
                 success: result.is_ok(),
                 elapsed_micros: elapsed_micros(started),
                 item_count: scanned_nodes,
+                byte_count: 0,
+                fsync_micros: 0,
+                generation: None,
             });
         }
         result
@@ -1592,9 +1703,11 @@ impl SearchIndex {
         let mut missing_documents = 0;
 
         let result = (|| {
-            for node in store.scan_nodes(None) {
+            for node in store.node_records_owned() {
+                let node = node?;
                 scanned_nodes += 1;
-                let Some(row) = projection_row_from_node_with_graph_metadata(catalog, store, node)
+                let Some(row) =
+                    projection_row_from_node_with_graph_metadata(catalog, store, &node)?
                 else {
                     continue;
                 };
@@ -1620,10 +1733,15 @@ impl SearchIndex {
             }
 
             let repaired_documents = repairs.len();
+            let mut repaired_projection_documents = Vec::with_capacity(repaired_documents);
             for (id, metadata) in repairs {
                 if let Some(existing) = self.documents.get_mut(&id) {
                     existing.metadata = metadata;
+                    repaired_projection_documents.push(existing.clone());
                 }
+            }
+            for document in &repaired_projection_documents {
+                self.record_lexical_upsert(document);
             }
             if missing_documents > 0 {
                 self.mark_full_reindex_needed("metadata repair found missing projection rows")?;
@@ -1641,6 +1759,9 @@ impl SearchIndex {
                 success: result.is_ok(),
                 elapsed_micros: elapsed_micros(started),
                 item_count: scanned_nodes,
+                byte_count: 0,
+                fsync_micros: 0,
+                generation: None,
             });
         }
         result
@@ -1651,7 +1772,7 @@ impl SearchIndex {
         store: &GraphStore,
         hint: BackgroundWorkHint,
     ) -> Option<BackgroundWorkPlan> {
-        let estimated_operations = store.scan_nodes(None).count();
+        let estimated_operations = store.basic_statistics().node_count as usize;
         if estimated_operations == 0 {
             return None;
         }
@@ -1718,7 +1839,7 @@ impl SearchIndex {
     }
 
     fn rebuild_estimated_operations(&self, store: &GraphStore) -> usize {
-        store.scan_nodes(None).count().max(self.documents.len())
+        (store.basic_statistics().node_count as usize).max(self.documents.len())
     }
 
     pub fn checkpoint(&self) -> Result<()> {
@@ -1762,6 +1883,8 @@ impl SearchIndex {
             fs::rename(tmp_path, &snapshot_path)?;
             sync_parent_dir(&snapshot_path)?;
             self.write_segment_artifacts(path)?;
+            self.write_lexical_projection(path)?;
+            out_of_core::publish_out_of_core_projection(self, path)?;
             #[cfg(feature = "turbovec")]
             self.write_turbovec_projection_artifact(path)?;
             *self
@@ -1776,9 +1899,68 @@ impl SearchIndex {
                 success: result.is_ok(),
                 elapsed_micros: elapsed_micros(started),
                 item_count: self.documents.len(),
+                byte_count: 0,
+                fsync_micros: 0,
+                generation: None,
             });
         }
         result
+    }
+
+    fn write_lexical_projection(&self, path: &Path) -> Result<()> {
+        let loaded_generation = self
+            .lexical_projection
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .map(|projection| projection.generation())
+            .unwrap_or(0);
+        let artifact_generation = fs::read_dir(path)?.try_fold(0u64, |generation, entry| {
+            let entry = entry?;
+            let parsed = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.strip_prefix("search_lexical."))
+                .and_then(|value| value.strip_suffix(".skein"))
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0);
+            Ok::<_, std::io::Error>(generation.max(parsed))
+        })?;
+        let generation = loaded_generation.max(artifact_generation).saturating_add(1);
+        let projection = LexicalProjectionWriter::new(self.lexical_config).write(
+            path,
+            generation,
+            self.source_graph_commit_epoch,
+            lexical_analyzer_digest(&self.analyzer_lexicon),
+            lexical_documents_digest(&self.documents),
+            self.documents.values(),
+            &self.analyzer_lexicon,
+        )?;
+        *self
+            .lexical_projection
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(projection);
+        *self
+            .lexical_delta
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = LexicalMiniDelta::default();
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            let Some(stale_generation) = name
+                .strip_prefix("search_lexical.")
+                .and_then(|value| value.strip_suffix(".skein"))
+                .and_then(|value| value.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            if stale_generation.saturating_add(1) < generation {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+        Ok(())
     }
 
     pub fn search(
@@ -2239,7 +2421,8 @@ impl SearchIndex {
             predicate_pushdown.report.physical_bytes_read = range_read.bytes_read;
         }
         predicate_pushdown.report.field_summaries = filtered.field_summaries;
-        let filtered_documents = filtered.documents;
+        let mut filtered_documents = filtered.documents;
+        filtered_documents.sort_unstable_by(|left, right| left.id.cmp(&right.id));
         let filtered_document_count = filtered_documents.len();
         let mut prepared_adaptive_backend = None;
         let vector_backend = match vector_backend_request {
@@ -2325,14 +2508,26 @@ impl SearchIndex {
             } else {
                 (Vec::new(), Vec::new())
             };
-        let text_corpus = if text_available && mode != SearchMode::Vector {
-            Some(TextCorpusStats::from_documents(
-                filtered_documents.iter().copied(),
-                &self.analyzer_lexicon,
-            ))
+        let lexical_projection = if text_available
+            && mode != SearchMode::Vector
+            && matches!(payload_access, SearchPayloadAccess::PrunedRanges)
+        {
+            self.lexical_projection
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
         } else {
             None
         };
+        let text_corpus =
+            if text_available && mode != SearchMode::Vector && lexical_projection.is_none() {
+                Some(TextCorpusStats::from_documents(
+                    filtered_documents.iter().copied(),
+                    &self.analyzer_lexicon,
+                ))
+            } else {
+                None
+            };
         let projection_freshness = self.projection_freshness();
         let (vector_index_covered_document_count, vector_index_candidate_document_count) =
             vector_backend.index_coverage(&filtered_documents);
@@ -2356,22 +2551,70 @@ impl SearchIndex {
             .as_ref()
             .map(|execution| execution.scores.clone())
             .unwrap_or_default();
-        let mut text_scores = BTreeMap::new();
-        for document in &filtered_documents {
-            let text_score = if text_available && mode != SearchMode::Vector {
-                text_corpus
-                    .as_ref()
-                    .map(|corpus| {
-                        bm25_score(&query_terms, document, corpus, &self.analyzer_lexicon)
-                    })
-                    .unwrap_or(0.0)
-            } else {
-                0.0
-            };
-            if text_score > 0.0 {
-                text_scores.insert(document.id.clone(), text_score);
+        let retained_text_score_limit = match mode {
+            SearchMode::Text => Some(options.offset.saturating_add(limit)),
+            SearchMode::Hybrid => options.rank_window,
+            SearchMode::Vector => Some(0),
+        };
+        let lexical_report = lexical_projection
+            .as_ref()
+            .map(|projection| {
+                let delta = self
+                    .lexical_delta
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone();
+                projection.score(
+                    &query_terms,
+                    &delta,
+                    filtered_document_count == document_count,
+                    retained_text_score_limit,
+                    |id| {
+                        Ok(filtered_documents
+                            .binary_search_by(|document| document.id.as_str().cmp(id))
+                            .is_ok())
+                    },
+                )
+            })
+            .transpose()?;
+        let (
+            mut text_scores,
+            lexical_matching_document_count,
+            lexical_postings_visited,
+            lexical_bytes_read,
+        ) = if let Some(report) = lexical_report {
+            (
+                report.scores,
+                report.matching_document_count,
+                report.postings_visited,
+                report.bytes_read,
+            )
+        } else {
+            (BTreeMap::new(), 0, 0, 0)
+        };
+        if lexical_projection.is_none() {
+            for document in &filtered_documents {
+                let text_score = if text_available && mode != SearchMode::Vector {
+                    text_corpus
+                        .as_ref()
+                        .map(|corpus| {
+                            bm25_score(&query_terms, document, corpus, &self.analyzer_lexicon)
+                        })
+                        .unwrap_or(0.0)
+                } else {
+                    0.0
+                };
+                if text_score > 0.0 {
+                    text_scores.insert(document.id.clone(), text_score);
+                }
             }
         }
+        let segmented_lexical_projection_used = lexical_projection.is_some();
+        let text_candidate_count = if segmented_lexical_projection_used {
+            lexical_matching_document_count
+        } else {
+            text_scores.len()
+        };
         let mut fallback_reason_codes = vector_fallback_reason_codes.clone();
         fallback_reason_codes.extend(text_fallback_reason_codes.iter().copied());
         let mut fallback_reasons = vector_fallback_reasons.clone();
@@ -2438,6 +2681,9 @@ impl SearchIndex {
                     .as_ref()
                     .map(|execution| execution.report.raw_vector_bytes_read)
                     .unwrap_or(0),
+                posting_bytes_read: 0,
+                candidate_postings_visited: 0,
+                segmented_lexical_projection_used: false,
                 index_covered_document_count: vector_index_covered_document_count,
                 index_candidate_document_count: vector_index_candidate_document_count,
                 index_coverage_complete: vector_index_covered_document_count
@@ -2459,25 +2705,38 @@ impl SearchIndex {
             },
             SearchRetrieverReport {
                 name: "text".to_string(),
-                backend: "bm25_text".to_string(),
+                backend: if segmented_lexical_projection_used {
+                    "segmented_bm25_text"
+                } else {
+                    "bm25_text"
+                }
+                .to_string(),
                 backend_selection_reason: None,
                 estimated_raw_vector_bytes: None,
                 filter_selectivity_per_million: None,
                 available: text_available && mode != SearchMode::Vector,
                 input_candidate_set: candidate_set.clone(),
                 candidate_score_source: if text_available && mode != SearchMode::Vector {
-                    "bm25"
+                    if segmented_lexical_projection_used {
+                        "segmented_bm25"
+                    } else {
+                        "bm25"
+                    }
                 } else {
                     "none"
                 }
                 .to_string(),
                 final_score_source: if text_available && mode != SearchMode::Vector {
-                    "bm25"
+                    if segmented_lexical_projection_used {
+                        "segmented_bm25"
+                    } else {
+                        "bm25"
+                    }
                 } else {
                     "none"
                 }
                 .to_string(),
-                generated_candidate_count: text_scores.len(),
+                generated_candidate_count: text_candidate_count,
                 candidate_scan_rounds: 0,
                 descriptor_pruned_count: candidate_set
                     .metadata_predicate_pushdown
@@ -2490,10 +2749,13 @@ impl SearchIndex {
                 residual_filtered_count: 0,
                 reranked_candidate_count: 0,
                 raw_vector_bytes_read: 0,
+                posting_bytes_read: lexical_bytes_read,
+                candidate_postings_visited: lexical_postings_visited,
+                segmented_lexical_projection_used,
                 index_covered_document_count: 0,
                 index_candidate_document_count: 0,
                 index_coverage_complete: true,
-                candidate_count: text_scores.len(),
+                candidate_count: text_candidate_count,
                 candidate_set: retriever_candidate_set_report(
                     text_window_ranks.len(),
                     self.source_graph_commit_epoch,
@@ -2506,30 +2768,34 @@ impl SearchIndex {
                 top_candidates: top_ranked_candidates(&text_window_ranks, &text_scores, limit),
             },
         ];
-        let mut hits = Vec::new();
-        for document in filtered_documents {
-            let vector_score = vector_scores.get(&document.id).copied().unwrap_or(0.0);
-            let text_score = text_scores.get(&document.id).copied().unwrap_or(0.0);
-            let vector_rank = match mode {
-                SearchMode::Hybrid => vector_window_ranks.get(&document.id).copied(),
-                SearchMode::Vector | SearchMode::Text => vector_ranks.get(&document.id).copied(),
-            };
-            let text_rank = match mode {
-                SearchMode::Hybrid => text_window_ranks.get(&document.id).copied(),
-                SearchMode::Vector | SearchMode::Text => text_ranks.get(&document.id).copied(),
-            };
-            let vector_rrf_score = rrf_child_score(vector_rank);
-            let text_rrf_score = rrf_child_score(text_rank);
-            let rrf_score =
-                weighted_rrf_score(vector_rrf_score, text_rrf_score, options.fusion_weights);
-            let score = match mode {
-                SearchMode::Hybrid => rrf_score,
-                SearchMode::Vector => vector_score,
-                SearchMode::Text => text_score,
-            };
-            if score > 0.0 {
-                hits.push(SearchHit {
-                    id: document.id.clone(),
+        let mut scored_candidates = vector_scores
+            .keys()
+            .chain(text_scores.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter_map(|id| {
+                let vector_score = vector_scores.get(&id).copied().unwrap_or(0.0);
+                let text_score = text_scores.get(&id).copied().unwrap_or(0.0);
+                let vector_rank = match mode {
+                    SearchMode::Hybrid => vector_window_ranks.get(&id).copied(),
+                    SearchMode::Vector | SearchMode::Text => vector_ranks.get(&id).copied(),
+                };
+                let text_rank = match mode {
+                    SearchMode::Hybrid => text_window_ranks.get(&id).copied(),
+                    SearchMode::Vector | SearchMode::Text => text_ranks.get(&id).copied(),
+                };
+                let vector_rrf_score = rrf_child_score(vector_rank);
+                let text_rrf_score = rrf_child_score(text_rank);
+                let rrf_score =
+                    weighted_rrf_score(vector_rrf_score, text_rrf_score, options.fusion_weights);
+                let score = match mode {
+                    SearchMode::Hybrid => rrf_score,
+                    SearchMode::Vector => vector_score,
+                    SearchMode::Text => text_score,
+                };
+                (score > 0.0).then_some(SearchScoredCandidate {
+                    id,
                     score,
                     vector_score,
                     text_score,
@@ -2538,36 +2804,59 @@ impl SearchIndex {
                     text_rrf_score,
                     vector_rank,
                     text_rank,
-                    kind: document.metadata.get("kind").cloned(),
-                    external_id: document.metadata.get("external_id").cloned(),
-                    source_id: document.metadata.get("source_id").cloned(),
-                    matched_terms: matched_query_terms(
-                        &query_terms,
-                        document,
-                        &self.analyzer_lexicon,
-                    ),
-                    matched_spans: matched_query_spans(
-                        &query_terms,
-                        document,
-                        &self.analyzer_lexicon,
-                    ),
-                    fallback_reason_codes: fallback_reason_codes.clone(),
-                    fallback_reasons: fallback_reasons.clone(),
-                    projection_freshness: projection_freshness.clone(),
-                });
-            }
-        }
-        hits.sort_by(|left, right| {
+                })
+            })
+            .collect::<Vec<_>>();
+        scored_candidates.sort_by(|left, right| {
             right
                 .score
                 .partial_cmp(&left.score)
                 .unwrap_or(Ordering::Equal)
                 .then_with(|| left.id.cmp(&right.id))
         });
-        let total_hits = hits.len();
+        let total_hits = if mode == SearchMode::Text && segmented_lexical_projection_used {
+            lexical_matching_document_count
+        } else {
+            scored_candidates.len()
+        };
         let page_end = options.offset.saturating_add(limit);
         let truncated = total_hits > page_end;
-        hits = hits.into_iter().skip(options.offset).take(limit).collect();
+        let mut hits = Vec::with_capacity(limit.min(scored_candidates.len()));
+        for candidate in scored_candidates
+            .into_iter()
+            .skip(options.offset)
+            .take(limit)
+        {
+            let document = filtered_documents
+                .binary_search_by(|document| document.id.cmp(&candidate.id))
+                .ok()
+                .and_then(|index| filtered_documents.get(index).copied())
+                .ok_or_else(|| {
+                    SkeinError::Storage(format!(
+                        "search candidate {} is missing from the filtered document set",
+                        candidate.id
+                    ))
+                })?;
+            hits.push(SearchHit {
+                id: candidate.id,
+                score: candidate.score,
+                vector_score: candidate.vector_score,
+                text_score: candidate.text_score,
+                rrf_score: candidate.rrf_score,
+                vector_rrf_score: candidate.vector_rrf_score,
+                text_rrf_score: candidate.text_rrf_score,
+                vector_rank: candidate.vector_rank,
+                text_rank: candidate.text_rank,
+                kind: document.metadata.get("kind").cloned(),
+                external_id: document.metadata.get("external_id").cloned(),
+                source_id: document.metadata.get("source_id").cloned(),
+                matched_terms: matched_query_terms(&query_terms, document, &self.analyzer_lexicon),
+                matched_spans: matched_query_spans(&query_terms, document, &self.analyzer_lexicon),
+                fallback_reason_codes: fallback_reason_codes.clone(),
+                fallback_reasons: fallback_reasons.clone(),
+                projection_freshness: projection_freshness.clone(),
+            });
+        }
         let truncation_reasons = if truncated && options.offset > 0 {
             vec![format!(
                 "offset {} limit {limit} returned from {total_hits} matching hits",
@@ -2926,6 +3215,9 @@ impl Default for SearchIndex {
             durable_source_graph_commit_epoch: Mutex::new(None),
             marker_lines: Mutex::new(BTreeMap::new()),
             analyzer_lexicon: SearchAnalyzerLexicon::default(),
+            lexical_projection: Mutex::new(None),
+            lexical_delta: Mutex::new(LexicalMiniDelta::default()),
+            lexical_config: LexicalProjectionConfig::default(),
             segment_descriptor: None,
             range_read_config: SearchRangeReadConfig::default(),
             runtime_capabilities: crate::compiled_runtime_capabilities(),
@@ -3624,48 +3916,59 @@ pub(crate) fn projection_row_from_node_with_graph_metadata(
     catalog: &Catalog,
     store: &GraphStore,
     node: &NodeRecord,
-) -> Option<SearchProjectionRow> {
-    let mut row = projection_row_from_node(catalog, node)?;
-    let labels = projection_business_labels_for_node(catalog, store, node);
+) -> Result<Option<SearchProjectionRow>> {
+    let Some(mut row) = projection_row_from_node(catalog, node) else {
+        return Ok(None);
+    };
+    let labels = projection_business_labels_for_node(catalog, store, node)?;
     if !labels.is_empty() {
         row.metadata.insert(
             "labels".to_string(),
             serde_json::to_string(&labels).expect("label metadata serializes as a string array"),
         );
     }
-    Some(row)
+    Ok(Some(row))
 }
 
 fn projection_business_labels_for_node(
     catalog: &Catalog,
     store: &GraphStore,
     node: &NodeRecord,
-) -> Vec<String> {
+) -> Result<Vec<String>> {
     let Some(has_label_type_id) = catalog.rel_type_id("HAS_LABEL") else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Some(label_label_id) = catalog.label_id("Label") else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    store
-        .scan_relationships(Some(has_label_type_id))
-        .filter_map(|relationship| {
-            let label_node_id = if relationship.source == node.id {
-                relationship.target
-            } else if relationship.target == node.id {
-                relationship.source
-            } else {
-                return None;
-            };
-            let label = store.node(label_node_id)?;
-            label
-                .labels
-                .contains(&label_label_id)
-                .then(|| projection_business_label_value(label))?
-        })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
+    let mut labels = BTreeSet::new();
+    let mut callback_error = None;
+    store.visit_relationships_owned(Some(has_label_type_id), |relationship| {
+        let label_node_id = if relationship.source == node.id {
+            relationship.target
+        } else if relationship.target == node.id {
+            relationship.source
+        } else {
+            return crate::store::GraphScanControl::Continue;
+        };
+        match store.node_owned(label_node_id) {
+            Ok(Some(label)) if label.labels.contains(&label_label_id) => {
+                if let Some(value) = projection_business_label_value(&label) {
+                    labels.insert(value);
+                }
+            }
+            Ok(_) => {}
+            Err(error) => {
+                callback_error = Some(error);
+                return crate::store::GraphScanControl::Stop;
+            }
+        }
+        crate::store::GraphScanControl::Continue
+    })?;
+    if let Some(error) = callback_error {
+        return Err(error);
+    }
+    Ok(labels.into_iter().collect())
 }
 
 fn projection_business_label_value(label: &NodeRecord) -> Option<String> {
@@ -3960,7 +4263,14 @@ fn sync_parent_dir(path: &Path) -> Result<()> {
     let Some(parent) = path.parent() else {
         return Ok(());
     };
-    File::open(parent)?.sync_all()?;
+    #[cfg(not(windows))]
+    let directory = File::open(parent)?;
+    #[cfg(windows)]
+    let directory = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(0x0200_0000)
+        .open(parent)?;
+    directory.sync_all()?;
     Ok(())
 }
 
@@ -5332,85 +5642,97 @@ fn matched_query_spans(
     document: &SearchDocument,
     analyzer_lexicon: &SearchAnalyzerLexicon,
 ) -> Vec<SearchMatchedSpan> {
+    matched_query_spans_bounded(
+        query_terms,
+        document,
+        analyzer_lexicon,
+        usize::MAX,
+        u64::MAX,
+    )
+    .expect("unbounded matched-span collection cannot exhaust its admission limit")
+}
+
+fn matched_query_spans_bounded(
+    query_terms: &BTreeSet<String>,
+    document: &SearchDocument,
+    analyzer_lexicon: &SearchAnalyzerLexicon,
+    max_spans: usize,
+    max_bytes: u64,
+) -> Result<Vec<SearchMatchedSpan>> {
     if query_terms.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    let mut spans = Vec::new();
-    collect_matched_query_spans(
-        "title",
-        &document.title,
+    let mut collector = MatchedSpanCollector {
         query_terms,
         analyzer_lexicon,
-        &mut spans,
-    );
-    collect_matched_query_spans(
-        "content",
-        &document.content,
-        query_terms,
-        analyzer_lexicon,
-        &mut spans,
-    );
-    spans
+        spans: Vec::new(),
+        span_bytes: 0,
+        max_spans,
+        max_bytes,
+    };
+    collector.collect("title", &document.title)?;
+    collector.collect("content", &document.content)?;
+    Ok(collector.spans)
 }
 
-fn collect_matched_query_spans(
-    field: &str,
-    text: &str,
-    query_terms: &BTreeSet<String>,
-    analyzer_lexicon: &SearchAnalyzerLexicon,
-    spans: &mut Vec<SearchMatchedSpan>,
-) {
-    let mut run_start = None::<usize>;
-    for (index, ch) in text.char_indices() {
-        if ch.is_alphanumeric() || ch == '_' {
-            run_start.get_or_insert(index);
-        } else if let Some(start) = run_start.take() {
-            push_matched_query_spans(
-                field,
-                text,
-                start,
-                index,
-                query_terms,
-                analyzer_lexicon,
-                spans,
-            );
+struct MatchedSpanCollector<'a> {
+    query_terms: &'a BTreeSet<String>,
+    analyzer_lexicon: &'a SearchAnalyzerLexicon,
+    spans: Vec<SearchMatchedSpan>,
+    span_bytes: u64,
+    max_spans: usize,
+    max_bytes: u64,
+}
+
+impl MatchedSpanCollector<'_> {
+    fn collect(&mut self, field: &str, text: &str) -> Result<()> {
+        let mut run_start = None::<usize>;
+        for (index, ch) in text.char_indices() {
+            if ch.is_alphanumeric() || ch == '_' {
+                run_start.get_or_insert(index);
+            } else if let Some(start) = run_start.take() {
+                self.push(field, text, start, index)?;
+            }
         }
+        if let Some(start) = run_start {
+            self.push(field, text, start, text.len())?;
+        }
+        Ok(())
     }
-    if let Some(start) = run_start {
-        push_matched_query_spans(
-            field,
-            text,
-            start,
-            text.len(),
-            query_terms,
-            analyzer_lexicon,
-            spans,
-        );
-    }
-}
 
-fn push_matched_query_spans(
-    field: &str,
-    text: &str,
-    start_byte: usize,
-    end_byte: usize,
-    query_terms: &BTreeSet<String>,
-    analyzer_lexicon: &SearchAnalyzerLexicon,
-    spans: &mut Vec<SearchMatchedSpan>,
-) {
-    let raw = &text[start_byte..end_byte];
-    let matching_terms = identifier_tokens(raw, analyzer_lexicon)
-        .into_iter()
-        .filter(|term| query_terms.contains(term))
-        .collect::<BTreeSet<_>>();
-    for term in matching_terms {
-        spans.push(SearchMatchedSpan {
-            field: field.to_string(),
-            start_byte,
-            end_byte,
-            text: raw.to_string(),
-            term,
-        });
+    fn push(&mut self, field: &str, text: &str, start_byte: usize, end_byte: usize) -> Result<()> {
+        let raw = &text[start_byte..end_byte];
+        let matching_terms = identifier_tokens(raw, self.analyzer_lexicon)
+            .into_iter()
+            .filter(|term| self.query_terms.contains(term))
+            .collect::<BTreeSet<_>>();
+        for term in matching_terms {
+            if self.spans.len() >= self.max_spans {
+                return Err(SkeinError::Storage(format!(
+                    "search matched-span hydration exceeded {} spans",
+                    self.max_spans
+                )));
+            }
+            let required = (field.len() as u64)
+                .saturating_add(raw.len() as u64)
+                .saturating_add(term.len() as u64)
+                .saturating_add(std::mem::size_of::<SearchMatchedSpan>() as u64);
+            self.span_bytes = self.span_bytes.saturating_add(required);
+            if self.span_bytes > self.max_bytes {
+                return Err(SkeinError::Storage(format!(
+                    "search matched-span hydration requires {} bytes, exceeding {}",
+                    self.span_bytes, self.max_bytes
+                )));
+            }
+            self.spans.push(SearchMatchedSpan {
+                field: field.to_string(),
+                start_byte,
+                end_byte,
+                text: raw.to_string(),
+                term,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -6114,7 +6436,14 @@ fn validate_search_segment_payload_ranges(segments: &[SearchSegmentDescriptorEnt
 }
 
 fn decode_search_segment_documents(payload: &[u8]) -> Result<Vec<SearchDocument>> {
-    let text = decode_search_snapshot_text(payload)?;
+    decode_search_segment_documents_bounded(payload, u64::MAX)
+}
+
+fn decode_search_segment_documents_bounded(
+    payload: &[u8],
+    max_uncompressed_bytes: u64,
+) -> Result<Vec<SearchDocument>> {
+    let text = decode_search_snapshot_text_bounded(payload, max_uncompressed_bytes)?;
     let mut documents = Vec::new();
     for line in text.lines() {
         if line == "SKEIN_SEARCH_SEGMENT_V1" {
@@ -6323,6 +6652,13 @@ fn read_search_snapshot_text(path: &Path) -> Result<String> {
 }
 
 fn decode_search_snapshot_text(bytes: &[u8]) -> Result<String> {
+    decode_search_snapshot_text_bounded(bytes, u64::MAX)
+}
+
+fn decode_search_snapshot_text_bounded(
+    bytes: &[u8],
+    max_uncompressed_bytes: u64,
+) -> Result<String> {
     let Some(header_end) = bytes.windows(2).position(|window| window == b"\n\n") else {
         return Err(SkeinError::Storage(
             "search projection compressed envelope missing header terminator".to_string(),
@@ -6392,16 +6728,35 @@ fn decode_search_snapshot_text(bytes: &[u8]) -> Result<String> {
             "search projection compressed checksum mismatch: expected {expected_compressed_checksum}, got {actual_compressed_checksum}"
         )));
     }
-    let decoded = zstd::stream::decode_all(Cursor::new(payload)).map_err(|error| {
-        SkeinError::Storage(format!(
-            "search projection zstd decompression failed: {error}"
-        ))
-    })?;
     let expected_uncompressed_len = uncompressed_len.ok_or_else(|| {
         SkeinError::Storage(
             "search projection compressed envelope missing uncompressed_len".to_string(),
         )
     })?;
+    if expected_uncompressed_len as u64 > max_uncompressed_bytes {
+        return Err(SkeinError::Storage(format!(
+            "search projection uncompressed payload requires {expected_uncompressed_len} bytes, exceeding {max_uncompressed_bytes}"
+        )));
+    }
+    let decoder = zstd::stream::read::Decoder::new(Cursor::new(payload)).map_err(|error| {
+        SkeinError::Storage(format!(
+            "search projection zstd decompression failed: {error}"
+        ))
+    })?;
+    let mut decoded = Vec::with_capacity(expected_uncompressed_len.min(1024 * 1024));
+    decoder
+        .take(max_uncompressed_bytes.saturating_add(1))
+        .read_to_end(&mut decoded)
+        .map_err(|error| {
+            SkeinError::Storage(format!(
+                "search projection zstd decompression failed: {error}"
+            ))
+        })?;
+    if decoded.len() as u64 > max_uncompressed_bytes {
+        return Err(SkeinError::Storage(format!(
+            "search projection decompressed payload exceeded {max_uncompressed_bytes} bytes"
+        )));
+    }
     if decoded.len() != expected_uncompressed_len {
         return Err(SkeinError::Storage(format!(
             "search projection uncompressed length mismatch: expected {expected_uncompressed_len}, got {}",
@@ -12199,6 +12554,338 @@ mod tests {
         assert!(index.full_reindex_needed());
         assert!(!index.metadata_repair_needed());
         std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn segmented_lexical_projection_matches_reference_across_delta_and_reopen() {
+        use std::io::{Read, Seek, SeekFrom, Write};
+
+        let path = unique_test_dir("segmented_lexical_projection");
+        let options = SearchQueryOptions {
+            limit: 10,
+            offset: 0,
+            rank_window: Some(10),
+            fusion_weights: SearchFusionWeights::default(),
+            metadata_filters: BTreeMap::from([("space_id".to_string(), "team".to_string())]),
+            policy_epoch: None,
+        };
+        let mut index = SearchIndex::open(&path).unwrap();
+        let documents = [
+            SearchDocument {
+                id: "a".to_string(),
+                title: "Graph Graph".to_string(),
+                content: "storage engine".to_string(),
+                embedding: None,
+                metadata: BTreeMap::from([("space_id".to_string(), "team".to_string())]),
+            },
+            SearchDocument {
+                id: "b".to_string(),
+                title: "Graph memory".to_string(),
+                content: "retrieval".to_string(),
+                embedding: None,
+                metadata: BTreeMap::from([("space_id".to_string(), "team".to_string())]),
+            },
+            SearchDocument {
+                id: "hidden".to_string(),
+                title: "Graph Graph Graph".to_string(),
+                content: "private".to_string(),
+                embedding: None,
+                metadata: BTreeMap::from([("space_id".to_string(), "private".to_string())]),
+            },
+        ];
+        for document in documents.clone() {
+            index.upsert(document).unwrap();
+        }
+        let reference = index
+            .try_search_with_options("graph", None, SearchMode::Text, options.clone())
+            .unwrap();
+        index.checkpoint().unwrap();
+        let segmented = index
+            .try_search_with_options("graph", None, SearchMode::Text, options.clone())
+            .unwrap();
+        assert_eq!(segmented.hits, reference.hits);
+        let text = segmented
+            .retrievers
+            .iter()
+            .find(|retriever| retriever.name == "text")
+            .unwrap();
+        assert!(text.segmented_lexical_projection_used);
+        assert_eq!(text.backend, "segmented_bm25_text");
+        assert!(text.posting_bytes_read > 0);
+        assert!(text.candidate_postings_visited > 0);
+
+        index
+            .upsert(SearchDocument {
+                id: "b".to_string(),
+                title: "Vector memory".to_string(),
+                content: "embedding".to_string(),
+                embedding: None,
+                metadata: BTreeMap::from([("space_id".to_string(), "team".to_string())]),
+            })
+            .unwrap();
+        index.delete("a");
+        index
+            .upsert(SearchDocument {
+                id: "c".to_string(),
+                title: "Graph query".to_string(),
+                content: "optimizer".to_string(),
+                embedding: None,
+                metadata: BTreeMap::from([("space_id".to_string(), "team".to_string())]),
+            })
+            .unwrap();
+        let mut delta_reference = SearchIndex::in_memory();
+        for document in index.documents.values().cloned() {
+            delta_reference.upsert(document).unwrap();
+        }
+        let expected = delta_reference
+            .try_search_with_options("graph", None, SearchMode::Text, options.clone())
+            .unwrap();
+        let actual = index
+            .try_search_with_options("graph", None, SearchMode::Text, options.clone())
+            .unwrap();
+        assert_eq!(actual.hits, expected.hits);
+
+        index.checkpoint().unwrap();
+        let generation = index
+            .lexical_projection
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .generation();
+        drop(index);
+        let reopened = SearchIndex::open(&path).unwrap();
+        let reopened_result = reopened
+            .try_search_with_options("graph", None, SearchMode::Text, options)
+            .unwrap();
+        assert_eq!(reopened_result.hits, expected.hits);
+        drop(reopened);
+
+        let artifact = path.join(lexical_projection::artifact_file(generation));
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&artifact)
+            .unwrap();
+        file.seek(SeekFrom::Start(32)).unwrap();
+        let mut byte = [0u8; 1];
+        file.read_exact(&mut byte).unwrap();
+        file.seek(SeekFrom::Start(32)).unwrap();
+        file.write_all(&[byte[0] ^ 0xff]).unwrap();
+        file.sync_all().unwrap();
+        let error = SearchIndex::open(&path).unwrap_err();
+        assert!(error.to_string().contains("artifact checksum mismatch"));
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn segmented_lexical_topk_preserves_total_hits_and_page() {
+        let path = unique_test_dir("segmented_lexical_topk");
+        let mut reference = SearchIndex::in_memory();
+        let mut index = SearchIndex::open(&path).unwrap();
+        for number in 0..64 {
+            let document = SearchDocument {
+                id: format!("doc-{number:03}"),
+                title: std::iter::repeat_n("graph", number % 4 + 1)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                content: format!("storage document {number}"),
+                embedding: None,
+                metadata: BTreeMap::new(),
+            };
+            reference.upsert(document.clone()).unwrap();
+            index.upsert(document).unwrap();
+        }
+        let options = SearchQueryOptions {
+            limit: 3,
+            offset: 2,
+            rank_window: None,
+            fusion_weights: SearchFusionWeights::default(),
+            metadata_filters: BTreeMap::new(),
+            policy_epoch: None,
+        };
+        let expected = reference
+            .try_search_with_options("graph", None, SearchMode::Text, options.clone())
+            .unwrap();
+        index.checkpoint().unwrap();
+        let actual = index
+            .try_search_with_options("graph", None, SearchMode::Text, options)
+            .unwrap();
+
+        assert_eq!(actual.total_hits, 64);
+        assert_eq!(actual.total_hits, expected.total_hits);
+        assert_eq!(actual.hits.len(), 3);
+        assert!(actual.truncated);
+        assert_eq!(
+            actual
+                .hits
+                .iter()
+                .map(|hit| (&hit.id, hit.score))
+                .collect::<Vec<_>>(),
+            expected
+                .hits
+                .iter()
+                .map(|hit| (&hit.id, hit.score))
+                .collect::<Vec<_>>()
+        );
+        let text = actual
+            .retrievers
+            .iter()
+            .find(|retriever| retriever.name == "text")
+            .unwrap();
+        assert_eq!(text.generated_candidate_count, 64);
+        assert_eq!(text.candidate_count, 64);
+        assert_eq!(text.candidate_set.cardinality, 5);
+        assert!(text.segmented_lexical_projection_used);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn segmented_lexical_hybrid_rank_window_matches_reference() {
+        let path = unique_test_dir("segmented_lexical_hybrid");
+        let mut reference = SearchIndex::in_memory();
+        let mut index = SearchIndex::open(&path).unwrap();
+        for number in 0..12 {
+            let document = SearchDocument {
+                id: format!("doc-{number:02}"),
+                title: std::iter::repeat_n("graph", number % 3 + 1)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                content: format!("hybrid storage {number}"),
+                embedding: Some(vec![number as f32, (12 - number) as f32]),
+                metadata: BTreeMap::new(),
+            };
+            reference.upsert(document.clone()).unwrap();
+            index.upsert(document).unwrap();
+        }
+        let options = SearchQueryOptions {
+            limit: 5,
+            offset: 0,
+            rank_window: Some(3),
+            fusion_weights: SearchFusionWeights::default(),
+            metadata_filters: BTreeMap::new(),
+            policy_epoch: None,
+        };
+        let query_embedding = [1.0, 0.0];
+        let expected = reference
+            .try_search_with_options(
+                "graph",
+                Some(&query_embedding),
+                SearchMode::Hybrid,
+                options.clone(),
+            )
+            .unwrap();
+        index.checkpoint().unwrap();
+        let actual = index
+            .try_search_with_options("graph", Some(&query_embedding), SearchMode::Hybrid, options)
+            .unwrap();
+
+        assert_eq!(actual.total_hits, expected.total_hits);
+        assert_eq!(
+            actual
+                .hits
+                .iter()
+                .map(|hit| (&hit.id, hit.score, hit.vector_rank, hit.text_rank,))
+                .collect::<Vec<_>>(),
+            expected
+                .hits
+                .iter()
+                .map(|hit| (&hit.id, hit.score, hit.vector_rank, hit.text_rank,))
+                .collect::<Vec<_>>()
+        );
+        let text = actual
+            .retrievers
+            .iter()
+            .find(|retriever| retriever.name == "text")
+            .unwrap();
+        assert_eq!(text.candidate_count, 12);
+        assert_eq!(text.candidate_set.cardinality, 3);
+        assert!(text.segmented_lexical_projection_used);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[cfg(feature = "acl")]
+    #[test]
+    fn segmented_lexical_acl_statistics_exclude_unauthorized_documents() {
+        let path = unique_test_dir("segmented_lexical_acl");
+        let mut expected_index = SearchIndex::in_memory();
+        let mut index = SearchIndex::open(&path).unwrap();
+        index.set_runtime_capabilities(
+            RuntimeCapabilities::default().with(RuntimeCapability::AccessControl, true),
+        );
+        let allowed = [
+            SearchDocument {
+                id: "allowed-a".to_string(),
+                title: "Graph graph".to_string(),
+                content: "storage".to_string(),
+                embedding: None,
+                metadata: BTreeMap::from([("space_id".to_string(), "team".to_string())]),
+            },
+            SearchDocument {
+                id: "allowed-b".to_string(),
+                title: "Graph".to_string(),
+                content: "memory".to_string(),
+                embedding: None,
+                metadata: BTreeMap::from([("space_id".to_string(), "team".to_string())]),
+            },
+        ];
+        for document in allowed.clone() {
+            expected_index.upsert(document.clone()).unwrap();
+            index.upsert(document).unwrap();
+        }
+        index
+            .upsert(SearchDocument {
+                id: "hidden".to_string(),
+                title: "Graph graph graph graph".to_string(),
+                content: "private".to_string(),
+                embedding: None,
+                metadata: BTreeMap::from([("space_id".to_string(), "private".to_string())]),
+            })
+            .unwrap();
+        let options = SearchQueryOptions {
+            limit: 10,
+            offset: 0,
+            rank_window: None,
+            fusion_weights: SearchFusionWeights::default(),
+            metadata_filters: BTreeMap::new(),
+            policy_epoch: None,
+        };
+        let expected = expected_index
+            .try_search_with_options("graph", None, SearchMode::Text, options.clone())
+            .unwrap();
+        index.checkpoint().unwrap();
+        let actual = index
+            .try_search_with_options_access_control(
+                "graph",
+                None,
+                SearchMode::Text,
+                options,
+                SearchAccessControlContext::visibility_scopes(7, "space_id", ["team"]),
+            )
+            .unwrap();
+
+        assert_eq!(actual.total_hits, 2);
+        assert_eq!(actual.candidate_set.filtered_out_count, 1);
+        assert_eq!(
+            actual
+                .hits
+                .iter()
+                .map(|hit| (&hit.id, hit.score))
+                .collect::<Vec<_>>(),
+            expected
+                .hits
+                .iter()
+                .map(|hit| (&hit.id, hit.score))
+                .collect::<Vec<_>>()
+        );
+        let text = actual
+            .retrievers
+            .iter()
+            .find(|retriever| retriever.name == "text")
+            .unwrap();
+        assert_eq!(text.candidate_count, 2);
+        assert!(text.segmented_lexical_projection_used);
+        fs::remove_dir_all(path).unwrap();
     }
 
     fn doc<const N: usize>(

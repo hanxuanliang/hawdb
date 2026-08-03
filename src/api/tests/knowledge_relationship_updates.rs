@@ -442,10 +442,7 @@ fn typed_knowledge_relationship_batch_update_persists_as_one_wal_batch_and_repla
             "CREATE (:Memory {id: 'memory_2'})-[:MENTIONS {weight: 2}]->(:Entity {id: 'entity_2'})",
         )
         .unwrap();
-        let batch_count_before_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.update_knowledge_relationship_batch(&KnowledgeRelationshipUpdateBatchRequest {
             updates: vec![
                 KnowledgeRelationshipUpdateRequest {
@@ -477,13 +474,10 @@ fn typed_knowledge_relationship_batch_update_persists_as_one_wal_batch_and_repla
             ],
         })
         .unwrap();
-        let batch_count_after_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_update, batch_count_before_update + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("set_rel_property"));
     {
         let db = Database::open(&path).unwrap();

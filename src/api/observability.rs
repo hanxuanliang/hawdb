@@ -35,12 +35,23 @@ impl Database {
             ),
         };
         if let Some(telemetry) = &self.telemetry {
+            let pipeline = context
+                .execution_profile
+                .map(|profile| &profile.pipeline_memory_report);
             telemetry.record_query(QueryTelemetry {
                 query_language,
                 statement_kind,
                 success: result.is_ok(),
                 elapsed_micros: elapsed_micros.min(u64::MAX as u128) as u64,
                 row_count: result.map_or(0, |output| output.rows.len()),
+                intermediate_rows: pipeline.map_or(0, |report| report.intermediate_rows),
+                intermediate_payload_bytes: pipeline
+                    .map_or(0, |report| report.intermediate_payload_bytes),
+                output_payload_bytes: pipeline.map_or(0, |report| report.output_payload_bytes),
+                steady_resident_bytes: pipeline.and_then(|report| report.steady_resident_bytes),
+                peak_resident_bytes: pipeline.and_then(|report| report.peak_resident_bytes),
+                minor_page_faults: pipeline.and_then(|report| report.minor_page_faults),
+                major_page_faults: pipeline.and_then(|report| report.major_page_faults),
             });
         }
         self.statement_summary.borrow_mut().record(execution);
@@ -83,9 +94,11 @@ impl Database {
         sql_text: &str,
         max_rows: Option<usize>,
     ) -> Result<QueryOutput> {
+        let max_rows = super::restrictive_query_limit(self.config.max_read_result_rows, max_rows);
         system_sql::query_sql(
             sql_text,
             max_rows,
+            self.config.max_read_result_payload_bytes,
             &self.plan_cache.borrow().stats(),
             &self.slow_query_log.borrow().snapshot(),
             &self.statement_summary.borrow().snapshot(),

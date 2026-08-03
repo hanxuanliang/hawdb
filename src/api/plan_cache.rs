@@ -14,12 +14,15 @@ use crate::store::GraphStore;
 use crate::value::Value;
 pub use skein_plan_cache::PlanCacheStats;
 use skein_plan_cache::{
-    bind_physical_plan_parameters, parameterize_logical_plan, LfuCache, PlanParameterCacheKey,
+    bind_physical_plan_parameters, parameterize_logical_plan, parameterize_value_list, LfuCache,
+    PlanParameterCacheKey,
 };
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 pub(crate) const DEFAULT_PLAN_CACHE_MAX_ENTRIES: usize = 128;
+const ACCESS_CONTROL_VALUES_PARAMETER: &str = "\0skein_access_control_visibility_values";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanCacheLookup {
@@ -102,7 +105,24 @@ pub(super) struct PlanCacheKey {
     parameters: PlanParameterCacheKey,
     environment: OptimizerEnvironmentKey,
     max_optimizer_groups: Option<usize>,
-    access_control_policy_epoch: Option<u64>,
+    access_control: Option<AccessControlPlanCacheKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct AccessControlPlanCacheKey {
+    policy_epoch: u64,
+    visibility_property: String,
+    visibility_value_count: usize,
+}
+
+impl From<&QueryAccessControlContext> for AccessControlPlanCacheKey {
+    fn from(access_control: &QueryAccessControlContext) -> Self {
+        Self {
+            policy_epoch: access_control.policy_epoch(),
+            visibility_property: access_control.visibility_property().to_string(),
+            visibility_value_count: access_control.allowed_visibility_values().len(),
+        }
+    }
 }
 
 impl PlanCacheKey {
@@ -112,12 +132,12 @@ impl PlanCacheKey {
         parameters: &BTreeMap<String, Value>,
         environment: &OptimizerEnvironmentKey,
         max_optimizer_groups: Option<usize>,
-        access_control_policy_epoch: Option<u64>,
+        access_control: Option<&AccessControlPlanCacheKey>,
     ) -> bool {
         self.cypher == cypher
             && &self.environment == environment
             && self.max_optimizer_groups == max_optimizer_groups
-            && self.access_control_policy_epoch == access_control_policy_epoch
+            && self.access_control.as_ref() == access_control
             && self.parameters.matches(parameters)
     }
 }
@@ -197,6 +217,11 @@ impl OptimizerSchemaKey {
 }
 
 impl OptimizerPlanningCache {
+    pub(super) fn invalidate(&mut self) {
+        self.statistics = None;
+        self.catalog = None;
+    }
+
     fn environment_hint(catalog: &Catalog, store: &GraphStore) -> OptimizerEnvironmentKey {
         OptimizerEnvironmentKey {
             schema: OptimizerSchemaKey::from_catalog(catalog),
@@ -295,9 +320,8 @@ pub(super) fn optimized_query_plan_for(
     }
     let effective_max_optimizer_groups =
         optimizer_config_from_database_config(context.config).max_groups;
-    let access_control_policy_epoch = context
-        .access_control
-        .map(QueryAccessControlContext::policy_epoch);
+    let access_control_cache_key = context.access_control.map(AccessControlPlanCacheKey::from);
+    let execution_parameters = parameters_with_access_control(parameters, context.access_control);
     let environment_hint = (cache_mode == PlanCacheMode::Use)
         .then(|| OptimizerPlanningCache::environment_hint(context.catalog, context.store));
     if cache_mode == PlanCacheMode::Use {
@@ -310,13 +334,13 @@ pub(super) fn optimized_query_plan_for(
                 parameters,
                 environment,
                 context.config.max_optimizer_groups,
-                access_control_policy_epoch,
+                access_control_cache_key.as_ref(),
             )
         });
         if let Some(cached) = cached {
             let physical_plan = bind_physical_plan_parameters(
                 &cached.physical_template,
-                parameters,
+                execution_parameters.as_ref(),
                 cached.has_parameter_slots,
             )?;
             let mut trace = cached.trace;
@@ -343,7 +367,11 @@ pub(super) fn optimized_query_plan_for(
         planner::plan_with_params(statement_body(statement), parameters)?
     };
     if let Some(access_control) = context.access_control {
-        logical = apply_access_control_to_logical_plan(logical, access_control);
+        logical = apply_access_control_to_logical_plan(
+            logical,
+            access_control,
+            cache_mode == PlanCacheMode::Use,
+        );
     }
     let mut key = parameterized.as_ref().map(|parameterized| PlanCacheKey {
         cypher: cypher_text.to_string(),
@@ -352,7 +380,7 @@ pub(super) fn optimized_query_plan_for(
             .clone()
             .expect("optimizer environment exists for a parameterized plan"),
         max_optimizer_groups: context.config.max_optimizer_groups,
-        access_control_policy_epoch,
+        access_control: access_control_cache_key,
     });
 
     let catalog_access = context
@@ -376,9 +404,13 @@ pub(super) fn optimized_query_plan_for(
     trace.decisions.extend(catalog_access.decisions);
     let has_parameter_slots = parameterized
         .as_ref()
-        .is_some_and(|parameterized| parameterized.slot_count() > 0);
-    let physical_plan =
-        bind_physical_plan_parameters(&physical_template, parameters, has_parameter_slots)?;
+        .is_some_and(|parameterized| parameterized.slot_count() > 0)
+        || (cache_mode == PlanCacheMode::Use && context.access_control.is_some());
+    let physical_plan = bind_physical_plan_parameters(
+        &physical_template,
+        execution_parameters.as_ref(),
+        has_parameter_slots,
+    )?;
     refresh_materialized_plan_trace(&mut trace, &physical_plan);
     if let Some(parameterized) = &parameterized {
         trace.decisions.push(format!(
@@ -387,7 +419,8 @@ pub(super) fn optimized_query_plan_for(
             parameterized.exact_variant_count()
         ));
     }
-    let cached_trace = trace.clone();
+    let mut cached_trace = trace.clone();
+    refresh_materialized_plan_trace(&mut cached_trace, &physical_template);
     record_access_control_plan_decision(&mut trace, context.access_control);
     if cache_mode == PlanCacheMode::Use {
         let mut key = key.take().expect("cache key exists in use mode");
@@ -458,21 +491,59 @@ fn record_access_control_plan_decision(
             "access control policy epoch {} bound to plan cache key",
             access_control.policy_epoch()
         ));
+        trace
+            .decisions
+            .push("access control scope values bound for this execution".to_string());
     }
+}
+
+fn parameters_with_access_control<'a>(
+    parameters: &'a BTreeMap<String, Value>,
+    access_control: Option<&QueryAccessControlContext>,
+) -> Cow<'a, BTreeMap<String, Value>> {
+    let Some(access_control) = access_control else {
+        return Cow::Borrowed(parameters);
+    };
+    let mut execution_parameters = parameters.clone();
+    execution_parameters.insert(
+        ACCESS_CONTROL_VALUES_PARAMETER.to_string(),
+        Value::List(
+            access_control
+                .allowed_visibility_values()
+                .iter()
+                .cloned()
+                .map(Value::String)
+                .collect(),
+        ),
+    );
+    Cow::Owned(execution_parameters)
 }
 
 fn apply_access_control_to_logical_plan(
     logical: LogicalPlan,
     access_control: &QueryAccessControlContext,
+    parameterized_values: bool,
 ) -> LogicalPlan {
     match logical {
         LogicalPlan::NodeScan { variable, label } => LogicalPlan::Filter {
-            predicate: access_control_node_predicate(&variable, access_control),
+            predicate: access_control_node_predicate(
+                &variable,
+                access_control,
+                parameterized_values,
+            ),
             input: Box::new(LogicalPlan::NodeScan { variable, label }),
         },
         LogicalPlan::NodeCartesianProduct { left, right } => LogicalPlan::NodeCartesianProduct {
-            left: Box::new(apply_access_control_to_logical_plan(*left, access_control)),
-            right: Box::new(apply_access_control_to_logical_plan(*right, access_control)),
+            left: Box::new(apply_access_control_to_logical_plan(
+                *left,
+                access_control,
+                parameterized_values,
+            )),
+            right: Box::new(apply_access_control_to_logical_plan(
+                *right,
+                access_control,
+                parameterized_values,
+            )),
         },
         LogicalPlan::NodeColumnLookup {
             variable,
@@ -487,7 +558,11 @@ fn apply_access_control_to_logical_plan(
             property,
             column,
             optional,
-            input: Box::new(apply_access_control_to_logical_plan(*input, access_control)),
+            input: Box::new(apply_access_control_to_logical_plan(
+                *input,
+                access_control,
+                parameterized_values,
+            )),
         },
         LogicalPlan::Expand {
             source_variable,
@@ -503,7 +578,11 @@ fn apply_access_control_to_logical_plan(
             optional,
             input,
         } => {
-            let target_predicate = access_control_node_predicate(&target_variable, access_control);
+            let target_predicate = access_control_node_predicate(
+                &target_variable,
+                access_control,
+                parameterized_values,
+            );
             LogicalPlan::Filter {
                 predicate: target_predicate,
                 input: Box::new(LogicalPlan::Expand {
@@ -518,7 +597,11 @@ fn apply_access_control_to_logical_plan(
                     min_hops,
                     max_hops,
                     optional,
-                    input: Box::new(apply_access_control_to_logical_plan(*input, access_control)),
+                    input: Box::new(apply_access_control_to_logical_plan(
+                        *input,
+                        access_control,
+                        parameterized_values,
+                    )),
                 }),
             }
         }
@@ -539,7 +622,11 @@ fn apply_access_control_to_logical_plan(
             target_label,
             target_properties,
             alias,
-            input: Box::new(apply_access_control_to_logical_plan(*input, access_control)),
+            input: Box::new(apply_access_control_to_logical_plan(
+                *input,
+                access_control,
+                parameterized_values,
+            )),
         },
         LogicalPlan::GraphAlgorithm {
             algorithm,
@@ -552,7 +639,11 @@ fn apply_access_control_to_logical_plan(
             graph_name,
             options,
             score_column,
-            node_visibility_predicate: Some(access_control_node_predicate("node", access_control)),
+            node_visibility_predicate: Some(access_control_node_predicate(
+                "node",
+                access_control,
+                parameterized_values,
+            )),
         },
         LogicalPlan::ShortestPath {
             source_variable,
@@ -572,10 +663,12 @@ fn apply_access_control_to_logical_plan(
             source_visibility_predicate: Some(access_control_node_predicate(
                 &source_variable,
                 access_control,
+                parameterized_values,
             )),
             target_visibility_predicate: Some(access_control_node_predicate(
                 &target_variable,
                 access_control,
+                parameterized_values,
             )),
             source_variable,
             source_label,
@@ -591,11 +684,19 @@ fn apply_access_control_to_logical_plan(
         },
         LogicalPlan::Filter { predicate, input } => LogicalPlan::Filter {
             predicate,
-            input: Box::new(apply_access_control_to_logical_plan(*input, access_control)),
+            input: Box::new(apply_access_control_to_logical_plan(
+                *input,
+                access_control,
+                parameterized_values,
+            )),
         },
         LogicalPlan::Project { items, input } => LogicalPlan::Project {
             items,
-            input: Box::new(apply_access_control_to_logical_plan(*input, access_control)),
+            input: Box::new(apply_access_control_to_logical_plan(
+                *input,
+                access_control,
+                parameterized_values,
+            )),
         },
         LogicalPlan::Aggregate {
             group_keys,
@@ -604,14 +705,26 @@ fn apply_access_control_to_logical_plan(
         } => LogicalPlan::Aggregate {
             group_keys,
             items,
-            input: Box::new(apply_access_control_to_logical_plan(*input, access_control)),
+            input: Box::new(apply_access_control_to_logical_plan(
+                *input,
+                access_control,
+                parameterized_values,
+            )),
         },
         LogicalPlan::Distinct { input } => LogicalPlan::Distinct {
-            input: Box::new(apply_access_control_to_logical_plan(*input, access_control)),
+            input: Box::new(apply_access_control_to_logical_plan(
+                *input,
+                access_control,
+                parameterized_values,
+            )),
         },
         LogicalPlan::Sort { items, input } => LogicalPlan::Sort {
             items,
-            input: Box::new(apply_access_control_to_logical_plan(*input, access_control)),
+            input: Box::new(apply_access_control_to_logical_plan(
+                *input,
+                access_control,
+                parameterized_values,
+            )),
         },
         LogicalPlan::Limit {
             offset,
@@ -620,7 +733,11 @@ fn apply_access_control_to_logical_plan(
         } => LogicalPlan::Limit {
             offset,
             limit,
-            input: Box::new(apply_access_control_to_logical_plan(*input, access_control)),
+            input: Box::new(apply_access_control_to_logical_plan(
+                *input,
+                access_control,
+                parameterized_values,
+            )),
         },
         other => other,
     }
@@ -629,16 +746,22 @@ fn apply_access_control_to_logical_plan(
 fn access_control_node_predicate(
     variable: &str,
     access_control: &QueryAccessControlContext,
+    parameterized_values: bool,
 ) -> Predicate {
+    let values = access_control
+        .allowed_visibility_values()
+        .iter()
+        .cloned()
+        .map(Value::String)
+        .collect::<Vec<_>>();
     Predicate::PropertyIn {
         variable: variable.to_string(),
         property: access_control.visibility_property().to_string(),
-        values: access_control
-            .allowed_visibility_values()
-            .iter()
-            .cloned()
-            .map(Value::String)
-            .collect(),
+        values: if parameterized_values {
+            parameterize_value_list(ACCESS_CONTROL_VALUES_PARAMETER, &values)
+        } else {
+            values
+        },
     }
 }
 

@@ -146,10 +146,7 @@ fn typed_pagerank_score_batch_persists_as_one_wal_batch_and_replays() {
             .unwrap();
         db.query("CREATE (:Entity {id: 'entity_rank_1', name: 'Entity One'})")
             .unwrap();
-        let batch_count_before_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_before_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         db.update_knowledge_pagerank_scores_batch(&KnowledgePageRankScoreBatchRequest {
             updates: vec![
                 KnowledgePageRankScoreUpdate {
@@ -165,13 +162,10 @@ fn typed_pagerank_score_batch_persists_as_one_wal_batch_and_replays() {
             ],
         })
         .unwrap();
-        let batch_count_after_update = std::fs::read_to_string(path.join("wal.skein"))
-            .unwrap()
-            .matches("\tbatch\t")
-            .count();
+        let batch_count_after_update = read_test_wal(&path).unwrap().matches("\tbatch\t").count();
         assert_eq!(batch_count_after_update, batch_count_before_update + 1);
     }
-    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let wal = read_test_wal(&path).unwrap();
     assert!(wal.contains("set_node_property"));
     {
         let db = Database::open(&path).unwrap();

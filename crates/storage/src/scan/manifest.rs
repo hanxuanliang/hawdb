@@ -2,6 +2,7 @@ use super::{
     CandidateCursor, PruningDecision, ScanPredicate, SegmentPruner, SegmentReadRange,
     SegmentSummary,
 };
+use crate::ContentDigest;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::num::NonZeroU64;
@@ -118,7 +119,8 @@ impl ScanSegmentManifest {
                         segment.summary.segment_id,
                         range.offset,
                         range.length,
-                    ),
+                    )
+                    .with_content_digest(ContentDigest(range.checksum)),
                     candidates: CandidateCursor::from_decision(pruning.clone()),
                     pruning,
                 })

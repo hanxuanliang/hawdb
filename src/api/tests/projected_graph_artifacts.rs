@@ -178,8 +178,8 @@ fn projected_graph_definition_survives_checkpoint() {
         db.checkpoint().unwrap();
     }
 
-    assert_eq!(std::fs::read_to_string(path.join("wal.skein")).unwrap(), "");
-    let checkpoint = read_test_durable_text(&path.join("checkpoint.skein")).unwrap();
+    assert_eq!(read_test_wal(&path).unwrap(), "");
+    let checkpoint = read_test_durable_text(&active_checkpoint_path(&path)).unwrap();
     assert!(checkpoint.contains("project_graph"));
 
     {

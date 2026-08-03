@@ -40,8 +40,8 @@ use skein::{
     ExternalShadowCommand, ExternalShadowReady, GraphLightningBootstrapManifest,
     NowledgeCypherMigrationGateJsonOptions, NowledgeMemGraph, NowledgeMemGraphMode,
     NowledgeMemReadOptions, ProjectedGraphFixtureCheck, RecoveryMode, Result, SearchIndex,
-    SkeinError, StorageRecoveryReport, Value, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
-    REQUIRED_EXTERNAL_SHADOW_CAPABILITIES,
+    SkeinError, StorageRecoveryReport, StorageResidencyMode, StorageResourceProfileLimits, Value,
+    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION, REQUIRED_EXTERNAL_SHADOW_CAPABILITIES,
 };
 use skein::{
     nowledge_memory_core_fixture, run_compatibility_fixture_with_shadow,
@@ -903,6 +903,148 @@ fn main() -> Result<()> {
             }
             return Ok(());
         }
+        if command == "storage-resource-profile" {
+            let mut require_ready = false;
+            let mut require_fully_streamed = false;
+            let mut parameters = BTreeMap::new();
+            let mut segment_cache_capacity_bytes = None;
+            let mut min_canonical_artifact_bytes = None;
+            let mut max_steady_resident_bytes = None;
+            let mut max_peak_resident_bytes = None;
+            let mut max_minor_page_faults = None;
+            let mut max_major_page_faults = None;
+            let mut max_intermediate_rows = None;
+            let mut max_intermediate_payload_bytes = None;
+            let mut max_output_rows = None;
+            let mut max_output_payload_bytes = None;
+            while let Some(flag) = args.peek() {
+                match flag.as_str() {
+                    "--require-ready" => {
+                        require_ready = true;
+                        args.next();
+                    }
+                    "--require-fully-streamed" => {
+                        require_fully_streamed = true;
+                        args.next();
+                    }
+                    "--params-json" => {
+                        args.next();
+                        let raw = args.next().ok_or_else(|| {
+                            SkeinError::Semantic(storage_resource_profile_usage())
+                        })?;
+                        parameters = parse_parameters_json(&raw)?;
+                    }
+                    "--segment-cache-bytes" => {
+                        segment_cache_capacity_bytes =
+                            Some(parse_next_u64_flag(&mut args, "--segment-cache-bytes")?);
+                    }
+                    "--min-canonical-bytes" => {
+                        min_canonical_artifact_bytes =
+                            Some(parse_next_u64_flag(&mut args, "--min-canonical-bytes")?);
+                    }
+                    "--max-steady-rss-bytes" => {
+                        max_steady_resident_bytes =
+                            Some(parse_next_u64_flag(&mut args, "--max-steady-rss-bytes")?);
+                    }
+                    "--max-peak-rss-bytes" => {
+                        max_peak_resident_bytes =
+                            Some(parse_next_u64_flag(&mut args, "--max-peak-rss-bytes")?);
+                    }
+                    "--max-minor-page-faults" => {
+                        max_minor_page_faults =
+                            Some(parse_next_u64_flag(&mut args, "--max-minor-page-faults")?);
+                    }
+                    "--max-major-page-faults" => {
+                        max_major_page_faults =
+                            Some(parse_next_u64_flag(&mut args, "--max-major-page-faults")?);
+                    }
+                    "--max-intermediate-rows" => {
+                        max_intermediate_rows =
+                            Some(parse_next_usize_flag(&mut args, "--max-intermediate-rows")?);
+                    }
+                    "--max-intermediate-payload-bytes" => {
+                        max_intermediate_payload_bytes = Some(parse_next_usize_flag(
+                            &mut args,
+                            "--max-intermediate-payload-bytes",
+                        )?);
+                    }
+                    "--max-output-rows" => {
+                        max_output_rows =
+                            Some(parse_next_usize_flag(&mut args, "--max-output-rows")?);
+                    }
+                    "--max-output-payload-bytes" => {
+                        max_output_payload_bytes = Some(parse_next_usize_flag(
+                            &mut args,
+                            "--max-output-payload-bytes",
+                        )?);
+                    }
+                    _ => break,
+                }
+            }
+            let path = args
+                .next()
+                .ok_or_else(|| SkeinError::Semantic(storage_resource_profile_usage()))?;
+            let cypher = args
+                .next()
+                .ok_or_else(|| SkeinError::Semantic(storage_resource_profile_usage()))?;
+            if args.next().is_some() {
+                return Err(SkeinError::Semantic(storage_resource_profile_usage()));
+            }
+            let segment_cache_capacity_bytes = required_positive_profile_u64(
+                segment_cache_capacity_bytes,
+                "--segment-cache-bytes",
+            )?;
+            let limits = StorageResourceProfileLimits {
+                min_canonical_artifact_bytes: required_positive_profile_u64(
+                    min_canonical_artifact_bytes,
+                    "--min-canonical-bytes",
+                )?,
+                max_steady_resident_bytes: required_positive_profile_u64(
+                    max_steady_resident_bytes,
+                    "--max-steady-rss-bytes",
+                )?,
+                max_peak_resident_bytes: required_positive_profile_u64(
+                    max_peak_resident_bytes,
+                    "--max-peak-rss-bytes",
+                )?,
+                max_minor_page_faults,
+                max_major_page_faults,
+                max_intermediate_rows: required_profile_usize(
+                    max_intermediate_rows,
+                    "--max-intermediate-rows",
+                )?,
+                max_intermediate_payload_bytes: required_profile_usize(
+                    max_intermediate_payload_bytes,
+                    "--max-intermediate-payload-bytes",
+                )?,
+                max_output_rows: required_profile_usize(max_output_rows, "--max-output-rows")?,
+                max_output_payload_bytes: required_profile_usize(
+                    max_output_payload_bytes,
+                    "--max-output-payload-bytes",
+                )?,
+                require_fully_streamed,
+            };
+            let db = Database::open_with_config(
+                path,
+                DatabaseConfig {
+                    read_only: true,
+                    segment_cache_capacity_bytes,
+                    storage_residency_mode: StorageResidencyMode::OutOfCore,
+                    max_read_result_rows: Some(limits.max_output_rows),
+                    max_read_result_payload_bytes: Some(limits.max_output_payload_bytes),
+                    ..DatabaseConfig::default()
+                },
+            )?;
+            let report = db.storage_resource_profile(&cypher, &parameters, limits)?;
+            println!("{}", serde_json::to_string_pretty(&report.json()).unwrap());
+            if require_ready && !report.ready {
+                return Err(SkeinError::Execution(format!(
+                    "storage resource profile is not ready: {}",
+                    report.blocker_codes.join(",")
+                )));
+            }
+            return Ok(());
+        }
         if command == "storage-recovery-report" {
             let mut recovery_mode = RecoveryMode::default();
             let mut max_wal_replay_entries = None;
@@ -1000,7 +1142,7 @@ fn main() -> Result<()> {
                     ..DatabaseConfig::default()
                 },
             )?;
-            let snapshot = db.export_canonical_graph_snapshot();
+            let snapshot = db.try_export_canonical_graph_snapshot()?;
             let validation = snapshot.validate();
             let rendered = canonical_snapshot_validation_json(
                 snapshot.graph_commit_epoch,
@@ -1361,6 +1503,11 @@ fn storage_recovery_report_usage() -> String {
         .to_string()
 }
 
+fn storage_resource_profile_usage() -> String {
+    "storage-resource-profile requires [--require-ready] [--require-fully-streamed] [--params-json <json-object>] --segment-cache-bytes <n> --min-canonical-bytes <n> --max-steady-rss-bytes <n> --max-peak-rss-bytes <n> [--max-minor-page-faults <n>] [--max-major-page-faults <n>] --max-intermediate-rows <n> --max-intermediate-payload-bytes <n> --max-output-rows <n> --max-output-payload-bytes <n> <database-path> <cypher>"
+        .to_string()
+}
+
 fn nowledge_bounded_read_report_usage() -> String {
     "nowledge-bounded-read-report requires [--params-json <json-object>] [--max-rows <n>] [--max-estimated-payload-bytes <n>] <database-path> <cypher>".to_string()
 }
@@ -1529,6 +1676,51 @@ fn parse_positive_usize(flag: &str, raw_value: &str) -> Result<usize> {
         )));
     }
     Ok(value)
+}
+
+fn parse_next_u64_flag<I>(args: &mut std::iter::Peekable<I>, expected_flag: &str) -> Result<u64>
+where
+    I: Iterator<Item = String>,
+{
+    let flag = args
+        .next()
+        .ok_or_else(|| SkeinError::Semantic(storage_resource_profile_usage()))?;
+    debug_assert_eq!(flag, expected_flag);
+    let raw = args
+        .next()
+        .ok_or_else(|| SkeinError::Semantic(storage_resource_profile_usage()))?;
+    raw.parse::<u64>()
+        .map_err(|error| SkeinError::Semantic(format!("invalid {expected_flag} '{raw}': {error}")))
+}
+
+fn parse_next_usize_flag<I>(args: &mut std::iter::Peekable<I>, expected_flag: &str) -> Result<usize>
+where
+    I: Iterator<Item = String>,
+{
+    let flag = args
+        .next()
+        .ok_or_else(|| SkeinError::Semantic(storage_resource_profile_usage()))?;
+    debug_assert_eq!(flag, expected_flag);
+    let raw = args
+        .next()
+        .ok_or_else(|| SkeinError::Semantic(storage_resource_profile_usage()))?;
+    parse_positive_usize(expected_flag, &raw)
+}
+
+fn required_positive_profile_u64(value: Option<u64>, flag: &str) -> Result<u64> {
+    match value {
+        Some(value) if value > 0 => Ok(value),
+        Some(_) => Err(SkeinError::Semantic(format!(
+            "{flag} must be greater than zero"
+        ))),
+        None => Err(SkeinError::Semantic(format!(
+            "storage-resource-profile is missing {flag}"
+        ))),
+    }
+}
+
+fn required_profile_usize(value: Option<usize>, flag: &str) -> Result<usize> {
+    value.ok_or_else(|| SkeinError::Semantic(format!("storage-resource-profile is missing {flag}")))
 }
 
 fn merge_replacement_summary_evidence(
@@ -2328,20 +2520,28 @@ fn storage_recovery_report_json(
         "durable": report.durable,
         "recovery_mode": recovery_mode_name(report.recovery_mode),
         "max_wal_replay_entries": report.max_wal_replay_entries,
+        "max_wal_replay_bytes": report.max_wal_replay_bytes,
+        "max_wal_record_bytes": report.max_wal_record_bytes,
         "checkpoint_epoch": report.checkpoint_epoch,
         "checkpoint_commit_epoch": report.checkpoint_commit_epoch,
         "wal_present": report.wal_present,
+        "wal_generation": report.wal_generation,
         "wal_replay_start_lsn": report.wal_replay_start_lsn,
         "next_lsn_after_replay": report.next_lsn_after_replay,
         "replayed_wal_entries": report.replayed_wal_entries,
+        "replayed_wal_bytes": report.replayed_wal_bytes,
         "torn_tail_ignored": report.torn_tail_ignored,
+        "torn_tail_repaired": report.torn_tail_repaired,
+        "discarded_wal_tail_bytes": report.discarded_wal_tail_bytes,
         "torn_tail_reason": &report.torn_tail_reason,
         "recovered_commit_epoch": report.recovered_commit_epoch,
         "readiness": {
             "durable_recovery_observed": report.durable,
             "checkpoint_boundary_present": report.checkpoint_epoch.is_some(),
-            "wal_replay_bounded": report.max_wal_replay_entries.is_some(),
-            "torn_tail_clean": !report.torn_tail_ignored,
+            "wal_replay_bounded": report.max_wal_replay_entries.is_some()
+                && report.max_wal_replay_bytes.is_some()
+                && report.max_wal_record_bytes.is_some(),
+            "torn_tail_clean": !report.torn_tail_ignored || report.torn_tail_repaired,
         },
     })
 }
@@ -5972,6 +6172,8 @@ mod tests {
             durable: true,
             recovery_mode: RecoveryMode::Strict,
             max_wal_replay_entries: Some(64),
+            max_wal_replay_bytes: Some(4096),
+            max_wal_record_bytes: Some(1024),
             checkpoint_epoch: Some(2),
             checkpoint_commit_epoch: Some(8),
             wal_present: true,
@@ -5981,6 +6183,7 @@ mod tests {
             torn_tail_ignored: true,
             torn_tail_reason: Some("checksum mismatch".to_string()),
             recovered_commit_epoch: 10,
+            ..StorageRecoveryReport::default()
         };
 
         let json = storage_recovery_report_json("skein-storage-v1", &report);
@@ -6368,6 +6571,7 @@ mod tests {
             torn_tail_ignored: false,
             torn_tail_reason: None,
             recovered_commit_epoch: 1,
+            ..StorageRecoveryReport::default()
         };
 
         let error = enforce_storage_recovery_requirements(
@@ -8237,6 +8441,8 @@ mod tests {
             durable: true,
             recovery_mode: RecoveryMode::TolerateTornTail,
             max_wal_replay_entries: Some(32),
+            max_wal_replay_bytes: Some(4096),
+            max_wal_record_bytes: Some(1024),
             checkpoint_epoch: Some(1),
             checkpoint_commit_epoch: Some(graph_commit_epoch),
             wal_present: true,
@@ -8246,6 +8452,7 @@ mod tests {
             torn_tail_ignored: false,
             torn_tail_reason: None,
             recovered_commit_epoch: graph_commit_epoch,
+            ..StorageRecoveryReport::default()
         }
     }
 

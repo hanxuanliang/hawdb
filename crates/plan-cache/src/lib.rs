@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 mod template;
 
 pub use template::{
-    bind_physical_plan_parameters, parameterize_logical_plan, ParameterizedLogicalPlan,
-    PlanParameterCacheKey,
+    bind_physical_plan_parameters, parameterize_logical_plan, parameterize_value_list,
+    ParameterizedLogicalPlan, PlanParameterCacheKey,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
