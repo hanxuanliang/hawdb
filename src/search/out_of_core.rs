@@ -2505,6 +2505,35 @@ mod tests {
     }
 
     #[test]
+    fn out_of_core_text_search_uses_chinese_word_segmentation() {
+        let path = test_dir("chinese-tokenization");
+        let term = "\u{5206}\u{5e03}\u{5f0f}\u{7cfb}\u{7edf}";
+        let mut index = SearchIndex::open(&path).unwrap();
+        index
+            .upsert(SearchDocument {
+                id: "memory:cn".to_string(),
+                title: "\u{73b0}\u{4ee3}\u{5206}\u{5e03}\u{5f0f}\u{7cfb}\u{7edf}\u{6570}\u{636e}\u{5e93}\u{8bbe}\u{8ba1}".to_string(),
+                content: String::new(),
+                embedding: None,
+                metadata: BTreeMap::new(),
+            })
+            .unwrap();
+        index.checkpoint().unwrap();
+        let reader = SearchOutOfCoreReader::open(&path).unwrap();
+
+        let output = reader
+            .search_with_options(term, None, SearchMode::Text, options(10, None))
+            .unwrap();
+
+        assert_eq!(output.result.hits[0].id, "memory:cn");
+        assert!(output.result.hits[0]
+            .matched_terms
+            .iter()
+            .any(|token| token == term));
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
     fn out_of_core_candidate_spill_applies_metadata_before_ranking() {
         let path = test_dir("metadata");
         let spill = path.join("spill");
@@ -2514,8 +2543,10 @@ mod tests {
             index.upsert(document(number, space)).unwrap();
         }
         index.checkpoint().unwrap();
-        let mut config = SearchOutOfCoreConfig::default();
-        config.spill_directory = spill.clone();
+        let config = SearchOutOfCoreConfig {
+            spill_directory: spill.clone(),
+            ..SearchOutOfCoreConfig::default()
+        };
         let reader = SearchOutOfCoreReader::open_with_config(&path, config).unwrap();
         let mut options = options(10, None);
         options
@@ -2614,8 +2645,10 @@ mod tests {
         index.upsert(large).unwrap();
         index.checkpoint().unwrap();
 
-        let mut hydration_config = SearchOutOfCoreConfig::default();
-        hydration_config.max_hydrated_bytes = NonZeroU64::new(32).unwrap();
+        let hydration_config = SearchOutOfCoreConfig {
+            max_hydrated_bytes: NonZeroU64::new(32).unwrap(),
+            ..SearchOutOfCoreConfig::default()
+        };
         let hydration_reader =
             SearchOutOfCoreReader::open_with_config(&path, hydration_config).unwrap();
         let error = hydration_reader
@@ -2623,8 +2656,10 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("search hydration requires"));
 
-        let mut span_config = SearchOutOfCoreConfig::default();
-        span_config.max_matched_spans = NonZeroUsize::new(1).unwrap();
+        let span_config = SearchOutOfCoreConfig {
+            max_matched_spans: NonZeroUsize::new(1).unwrap(),
+            ..SearchOutOfCoreConfig::default()
+        };
         let span_reader = SearchOutOfCoreReader::open_with_config(&path, span_config).unwrap();
         let error = span_reader
             .search_with_options("graph", None, SearchMode::Text, options(1, None))
@@ -2633,9 +2668,11 @@ mod tests {
             .to_string()
             .contains("matched-span hydration exceeded"));
 
-        let mut spill_config = SearchOutOfCoreConfig::default();
-        spill_config.spill_directory = path.join("spill-budget");
-        spill_config.max_candidate_spill_bytes = NonZeroU64::new(1).unwrap();
+        let spill_config = SearchOutOfCoreConfig {
+            spill_directory: path.join("spill-budget"),
+            max_candidate_spill_bytes: NonZeroU64::new(1).unwrap(),
+            ..SearchOutOfCoreConfig::default()
+        };
         let spill_reader = SearchOutOfCoreReader::open_with_config(&path, spill_config).unwrap();
         let mut filtered = options(1, None);
         filtered
@@ -2730,6 +2767,31 @@ mod tests {
             .unwrap();
         assert_eq!(old.result.total_hits, 1);
         assert_eq!(new.result.total_hits, 2);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn out_of_core_reader_survives_generation_retention_cleanup() {
+        let path = test_dir("generation-retention");
+        let mut index = SearchIndex::open(&path).unwrap();
+        index.upsert(document(0, "team")).unwrap();
+        index.checkpoint().unwrap();
+        let oldest_reader = SearchOutOfCoreReader::open(&path).unwrap();
+
+        index.upsert(document(1, "team")).unwrap();
+        index.checkpoint().unwrap();
+        index.upsert(document(2, "team")).unwrap();
+        index.checkpoint().unwrap();
+
+        let oldest = oldest_reader
+            .search_with_options("graph", None, SearchMode::Text, options(10, None))
+            .unwrap();
+        let newest = SearchOutOfCoreReader::open(&path)
+            .unwrap()
+            .search_with_options("graph", None, SearchMode::Text, options(10, None))
+            .unwrap();
+        assert_eq!(oldest.result.total_hits, 1);
+        assert_eq!(newest.result.total_hits, 3);
         fs::remove_dir_all(path).unwrap();
     }
 

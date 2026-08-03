@@ -1,3 +1,4 @@
+use super::cjk_tokenizer::ANALYZER_FORMAT_VERSION;
 use super::{document_tokens, SearchAnalyzerLexicon, SearchDocument, BM25_B, BM25_K1};
 use crate::error::{Result, SkeinError};
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,7 @@ pub(super) fn artifact_file(generation: u64) -> String {
 
 pub(super) fn analyzer_digest(analyzer: &SearchAnalyzerLexicon) -> u64 {
     let mut digest = Digest::new();
+    digest.update(ANALYZER_FORMAT_VERSION);
     for rule in &analyzer.alias_rules {
         for input in &rule.inputs {
             digest.update(input.as_bytes());

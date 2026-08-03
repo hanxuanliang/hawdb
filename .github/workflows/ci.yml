@@ -714,6 +714,29 @@ jobs:
       - name: Test Tokio adapter
         run: cargo test -p skein-runtime-tokio
 
+  storage-platform:
+    name: Storage Platform (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - name: Test storage artifacts and ownership
+        run: cargo test -p skein-storage
+
+      - name: Test durable storage recovery
+        run: cargo test -p skein --features acl --lib api::tests::storage_recovery
+
+      - name: Test out-of-core search projection I/O
+        run: cargo test -p skein --features acl --lib search::out_of_core::tests
+
   concurrency-model:
     name: Concurrency Model
     runs-on: ubuntu-latest

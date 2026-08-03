@@ -36,6 +36,7 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 
 mod analyzer_lexicon;
+mod cjk_tokenizer;
 mod lexical_projection;
 mod out_of_core;
 mod range_io;
@@ -44,6 +45,7 @@ mod recall_validation;
 pub mod turbovec_projection;
 mod vector_execution;
 use analyzer_lexicon::{CORE_SEMANTIC_ALIAS_RULES, NOWLEDGE_MEMORY_SEMANTIC_ALIAS_RULES};
+use cjk_tokenizer::{chinese_search_tokens, is_cjk_search_char};
 use lexical_projection::{
     analyzer_digest as lexical_analyzer_digest, documents_digest as lexical_documents_digest,
     LexicalMiniDelta, LexicalProjectionConfig, LexicalProjectionReader, LexicalProjectionWriter,
@@ -5801,6 +5803,9 @@ fn identifier_tokens(raw: &str, analyzer_lexicon: &SearchAnalyzerLexicon) -> Vec
     }
     let mut tokens = Vec::new();
     push_unique_token(&mut tokens, raw.to_lowercase(), analyzer_lexicon);
+    for token in chinese_search_tokens(raw) {
+        push_analyzed_token(&mut tokens, token, analyzer_lexicon);
+    }
     for token in cjk_ngram_tokens(raw, analyzer_lexicon) {
         push_unique_token(&mut tokens, token, analyzer_lexicon);
     }
@@ -5842,18 +5847,6 @@ fn push_cjk_ngram_tokens(
             push_unique_token(tokens, window.iter().collect(), analyzer_lexicon);
         }
     }
-}
-
-fn is_cjk_search_char(ch: char) -> bool {
-    matches!(
-        ch as u32,
-        0x3400..=0x4DBF
-            | 0x4E00..=0x9FFF
-            | 0xF900..=0xFAFF
-            | 0x3040..=0x309F
-            | 0x30A0..=0x30FF
-            | 0xAC00..=0xD7AF
-    )
 }
 
 fn identifier_parts(raw: &str) -> Vec<String> {
@@ -8291,6 +8284,29 @@ mod tests {
             .iter()
             .any(|term| term == "数据库"));
         assert_eq!(projection_hits[0].id, "design");
+    }
+
+    #[test]
+    fn tokenizer_emits_dictionary_backed_chinese_search_terms() {
+        let mut index = SearchIndex::in_memory();
+        let term = "\u{5206}\u{5e03}\u{5f0f}\u{7cfb}\u{7edf}";
+        index
+            .upsert(SearchDocument {
+                id: "distributed".to_string(),
+                title: "\u{73b0}\u{4ee3}\u{5206}\u{5e03}\u{5f0f}\u{7cfb}\u{7edf}\u{6570}\u{636e}\u{5e93}\u{8bbe}\u{8ba1}".to_string(),
+                content: String::new(),
+                embedding: None,
+                metadata: BTreeMap::new(),
+            })
+            .unwrap();
+
+        let output = index.search_with_report(term, None, SearchMode::Text, 10);
+
+        assert_eq!(output.hits[0].id, "distributed");
+        assert!(output.hits[0]
+            .matched_terms
+            .iter()
+            .any(|token| token == term));
     }
 
     #[test]
@@ -12675,6 +12691,54 @@ mod tests {
         file.sync_all().unwrap();
         let error = SearchIndex::open(&path).unwrap_err();
         assert!(error.to_string().contains("artifact checksum mismatch"));
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn segmented_lexical_projection_reopens_with_chinese_search_terms() {
+        let path = unique_test_dir("segmented_lexical_projection_chinese");
+        let term = "\u{5206}\u{5e03}\u{5f0f}\u{7cfb}\u{7edf}";
+        let mut index = SearchIndex::open(&path).unwrap();
+        index
+            .upsert(SearchDocument {
+                id: "distributed".to_string(),
+                title: "\u{73b0}\u{4ee3}\u{5206}\u{5e03}\u{5f0f}\u{7cfb}\u{7edf}\u{6570}\u{636e}\u{5e93}\u{8bbe}\u{8ba1}".to_string(),
+                content: String::new(),
+                embedding: None,
+                metadata: BTreeMap::new(),
+            })
+            .unwrap();
+        index.checkpoint().unwrap();
+        drop(index);
+
+        let reopened = SearchIndex::open(&path).unwrap();
+        let output = reopened
+            .try_search_with_options(
+                term,
+                None,
+                SearchMode::Text,
+                SearchQueryOptions {
+                    limit: 10,
+                    offset: 0,
+                    rank_window: None,
+                    fusion_weights: SearchFusionWeights::default(),
+                    metadata_filters: BTreeMap::new(),
+                    policy_epoch: None,
+                },
+            )
+            .unwrap();
+        let text = output
+            .retrievers
+            .iter()
+            .find(|retriever| retriever.name == "text")
+            .unwrap();
+        assert_eq!(output.hits[0].id, "distributed");
+        assert!(output.hits[0]
+            .matched_terms
+            .iter()
+            .any(|token| token == term));
+        assert!(text.segmented_lexical_projection_used);
+        drop(reopened);
         fs::remove_dir_all(path).unwrap();
     }
 

@@ -1051,6 +1051,24 @@ fn durable_database_open_is_exclusive_until_owner_drops() {
 }
 
 #[test]
+fn durable_database_rejects_path_alias_until_owner_drops() {
+    let path = unique_test_dir("exclusive_database_alias");
+    let alias = path.join(".");
+    let owner = Database::open(&path).unwrap();
+
+    let error = Database::open(&alias).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "storage error: database directory is already open by this or another application"
+    );
+
+    drop(owner);
+    let reopened = Database::open(&alias).unwrap();
+    drop(reopened);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
 fn read_only_open_loads_existing_database_without_allowing_writes() {
     let path = unique_test_dir("read_only_existing");
     {
