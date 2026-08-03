@@ -131,6 +131,7 @@ pub trait Oracle {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum OracleResult {
     Equivalent(DifferentialEvidence),
     Failure(FailureReport),
@@ -170,6 +171,7 @@ impl FailureReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum GraphTlpOracleResult {
     Equivalent(GraphTlpEvidence),
     Failure(GraphTlpFailureReport),

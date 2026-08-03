@@ -330,6 +330,7 @@ pub fn execute_with_row_consumer_profile(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn execute_with_row_consumer_profile_and_external(
     plan: &PhysicalPlan,
     catalog: &mut Catalog,
