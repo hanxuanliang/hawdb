@@ -187,10 +187,12 @@ impl GraphStore {
                     collect_bounded_path_facts(
                         self,
                         source.id,
-                        source.id,
-                        *source_label,
-                        *rel_type,
                         1,
+                        BoundedPathSpec {
+                            root_source: source.id,
+                            source_label: *source_label,
+                            rel_type: *rel_type,
+                        },
                         &mut writer,
                         &mut work,
                     )?;
@@ -241,13 +243,18 @@ impl GraphStore {
     }
 }
 
-fn collect_bounded_path_facts(
-    store: &GraphStore,
+#[derive(Clone, Copy)]
+struct BoundedPathSpec {
     root_source: NodeId,
-    current: NodeId,
     source_label: LabelId,
     rel_type: RelTypeId,
+}
+
+fn collect_bounded_path_facts(
+    store: &GraphStore,
+    current: NodeId,
     hop: usize,
+    spec: BoundedPathSpec,
     writer: &mut StatsRunWriter<'_>,
     work: &mut RefreshWork<'_>,
 ) -> Result<()> {
@@ -256,7 +263,7 @@ fn collect_bounded_path_facts(
     }
     store.try_visit_adjacent_relationships_owned(
         current,
-        Some(rel_type),
+        Some(spec.rel_type),
         AdjacencyDirection::Outgoing,
         |relationship| {
             work.read_relationship()?;
@@ -270,36 +277,27 @@ fn collect_bounded_path_facts(
             work.read_node()?;
             for target_label in &target.labels {
                 writer.push(StatsRecord::BoundedPathCount {
-                    source_label,
-                    rel_type,
+                    source_label: spec.source_label,
+                    rel_type: spec.rel_type,
                     target_label: *target_label,
                     hop,
                 })?;
                 writer.push(StatsRecord::BoundedPathSource {
-                    source_label,
-                    rel_type,
+                    source_label: spec.source_label,
+                    rel_type: spec.rel_type,
                     target_label: *target_label,
                     hop,
-                    node: root_source,
+                    node: spec.root_source,
                 })?;
                 writer.push(StatsRecord::BoundedPathTarget {
-                    source_label,
-                    rel_type,
+                    source_label: spec.source_label,
+                    rel_type: spec.rel_type,
                     target_label: *target_label,
                     hop,
                     node: relationship.target,
                 })?;
             }
-            collect_bounded_path_facts(
-                store,
-                root_source,
-                relationship.target,
-                source_label,
-                rel_type,
-                hop + 1,
-                writer,
-                work,
-            )?;
+            collect_bounded_path_facts(store, relationship.target, hop + 1, spec, writer, work)?;
             Ok(GraphScanControl::Continue)
         },
     )?;

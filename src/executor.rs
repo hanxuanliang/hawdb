@@ -188,6 +188,12 @@ struct ExecutionRuntimeControl<'a> {
     task_context: Option<&'a RuntimeTaskContext>,
 }
 
+#[derive(Clone, Copy)]
+struct ExecutionOutputLimits {
+    max_rows: Option<usize>,
+    max_payload_bytes: Option<usize>,
+}
+
 pub fn execute(
     plan: &PhysicalPlan,
     catalog: &mut Catalog,
@@ -288,8 +294,10 @@ pub fn execute_with_output_limits_profile_and_external(
         store,
         parameters,
         external,
-        max_rows,
-        max_payload_bytes,
+        ExecutionOutputLimits {
+            max_rows,
+            max_payload_bytes,
+        },
         ExecutionRuntimeControl {
             memory: &ExecutionMemoryConfig::default(),
             task_context: None,
@@ -312,8 +320,10 @@ pub fn execute_with_row_limit_profile_and_external_and_memory(
         store,
         parameters,
         external,
-        max_rows,
-        None,
+        ExecutionOutputLimits {
+            max_rows,
+            max_payload_bytes: None,
+        },
         ExecutionRuntimeControl {
             memory,
             task_context: None,
@@ -337,8 +347,10 @@ pub fn execute_with_row_limit_profile_and_external_and_context(
         store,
         parameters,
         external,
-        max_rows,
-        None,
+        ExecutionOutputLimits {
+            max_rows,
+            max_payload_bytes: None,
+        },
         ExecutionRuntimeControl {
             memory: &memory,
             task_context: Some(task_context),
@@ -364,8 +376,10 @@ pub fn execute_with_output_limits_profile_and_external_and_context(
         store,
         parameters,
         external,
-        max_rows,
-        max_payload_bytes,
+        ExecutionOutputLimits {
+            max_rows,
+            max_payload_bytes,
+        },
         ExecutionRuntimeControl {
             memory: &memory,
             task_context: Some(task_context),
@@ -583,10 +597,13 @@ fn execute_with_row_limit_profile_and_external_and_memory_internal(
     store: &mut GraphStore,
     parameters: &BTreeMap<String, Value>,
     external: &mut dyn ExternalReadOperator,
-    max_rows: Option<usize>,
-    max_payload_bytes: Option<usize>,
+    output_limits: ExecutionOutputLimits,
     runtime: ExecutionRuntimeControl<'_>,
 ) -> Result<ProfiledQueryRows> {
+    let ExecutionOutputLimits {
+        max_rows,
+        max_payload_bytes,
+    } = output_limits;
     let ExecutionRuntimeControl {
         memory,
         task_context,

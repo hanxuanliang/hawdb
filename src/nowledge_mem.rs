@@ -7374,11 +7374,10 @@ impl NowledgeMemEmbeddedStoreHandle {
         &self,
         request: &KnowledgeSubgraphRequest,
     ) -> Result<KnowledgeSubgraphOutput> {
-        Ok(self
-            .read_store()?
+        self.read_store()?
             .graph
             .database()
-            .knowledge_subgraph(request)?)
+            .knowledge_subgraph(request)
     }
 
     /// Reads relationships induced by a bounded external-id set through the

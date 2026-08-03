@@ -5449,11 +5449,13 @@ impl GraphStore {
             checkpoint_publish_failpoint(CheckpointPublishStage::WalPrepared)?;
             durable.publish_checkpoint_manifest(
                 generation,
-                checkpoint_artifact,
-                canonical_manifest_artifact,
-                canonical_adjacency_manifest_artifact,
-                property_spill_manifest_artifact,
-                property_projection_manifest_artifact,
+                CheckpointManifestArtifacts {
+                    checkpoint: checkpoint_artifact,
+                    canonical_manifest: canonical_manifest_artifact,
+                    canonical_adjacency_manifest: canonical_adjacency_manifest_artifact,
+                    property_spill_manifest: property_spill_manifest_artifact,
+                    property_projection_manifest: property_projection_manifest_artifact,
+                },
                 commit_epoch,
                 oldest_reader_commit_epoch,
                 source_scan_publication,
@@ -7598,56 +7600,61 @@ impl GraphStore {
             });
         };
         let mut graph_control = GraphScanControl::Continue;
-        let mut consume_canonical = |relationship: RelRecord| {
-            if self.relationship_tombstones.contains(&relationship.id)
-                || self.relationships.contains_key(&relationship.id)
-            {
-                return CanonicalScanControl::Continue;
-            }
-            if consumer(relationship) == GraphScanControl::Stop {
-                graph_control = GraphScanControl::Stop;
-                CanonicalScanControl::Stop
-            } else {
-                CanonicalScanControl::Continue
-            }
-        };
-        let canonical_control = if let Some(adjacency) = &self.canonical_adjacency {
-            adjacency
-                .scan_endpoint_entries_control(node_id, direction, rel_type, |entry| {
-                    let relationship = match entry {
-                        CanonicalAdjacencyEntry::Inline(relationship) => relationship,
-                        CanonicalAdjacencyEntry::CanonicalReference { relationship_id } => reader
-                            .get_relationship(relationship_id)
-                            .map_err(|error| {
-                                skein_storage::CanonicalAdjacencyError::Source(error.to_string())
-                            })?
-                            .ok_or_else(|| {
-                                skein_storage::CanonicalAdjacencyError::Corrupt(format!(
-                                    "canonical adjacency references missing relationship {}",
-                                    relationship_id.0
-                                ))
-                            })?,
-                    };
-                    Ok(consume_canonical(relationship))
-                })
-                .map_err(|error| SkeinError::Storage(error.to_string()))?
-                .1
-        } else {
-            let endpoint_direction = match direction {
-                AdjacencyDirection::Outgoing => CanonicalEndpointDirection::Source,
-                AdjacencyDirection::Incoming => CanonicalEndpointDirection::Target,
+        let canonical_control = {
+            let mut consume_canonical = |relationship: RelRecord| {
+                if self.relationship_tombstones.contains(&relationship.id)
+                    || self.relationships.contains_key(&relationship.id)
+                {
+                    return CanonicalScanControl::Continue;
+                }
+                if consumer(relationship) == GraphScanControl::Stop {
+                    graph_control = GraphScanControl::Stop;
+                    CanonicalScanControl::Stop
+                } else {
+                    CanonicalScanControl::Continue
+                }
             };
-            reader
-                .scan_relationships_for_endpoint_control(
-                    node_id,
-                    endpoint_direction,
-                    rel_type,
-                    |relationship| Ok(consume_canonical(relationship)),
-                )
-                .map_err(canonical_segment_error)?
-                .1
+            if let Some(adjacency) = &self.canonical_adjacency {
+                adjacency
+                    .scan_endpoint_entries_control(node_id, direction, rel_type, |entry| {
+                        let relationship = match entry {
+                            CanonicalAdjacencyEntry::Inline(relationship) => relationship,
+                            CanonicalAdjacencyEntry::CanonicalReference { relationship_id } => {
+                                reader
+                                    .get_relationship(relationship_id)
+                                    .map_err(|error| {
+                                        skein_storage::CanonicalAdjacencyError::Source(
+                                            error.to_string(),
+                                        )
+                                    })?
+                                    .ok_or_else(|| {
+                                        skein_storage::CanonicalAdjacencyError::Corrupt(format!(
+                                            "canonical adjacency references missing relationship {}",
+                                            relationship_id.0
+                                        ))
+                                    })?
+                            }
+                        };
+                        Ok(consume_canonical(relationship))
+                    })
+                    .map_err(|error| SkeinError::Storage(error.to_string()))?
+                    .1
+            } else {
+                let endpoint_direction = match direction {
+                    AdjacencyDirection::Outgoing => CanonicalEndpointDirection::Source,
+                    AdjacencyDirection::Incoming => CanonicalEndpointDirection::Target,
+                };
+                reader
+                    .scan_relationships_for_endpoint_control(
+                        node_id,
+                        endpoint_direction,
+                        rel_type,
+                        |relationship| Ok(consume_canonical(relationship)),
+                    )
+                    .map_err(canonical_segment_error)?
+                    .1
+            }
         };
-        drop(consume_canonical);
         if canonical_control == CanonicalScanControl::Stop {
             return Ok(graph_control);
         }
@@ -10427,6 +10434,15 @@ struct DurableArtifactMetadata {
     encoded_checksum: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CheckpointManifestArtifacts {
+    checkpoint: DurableArtifactMetadata,
+    canonical_manifest: DurableArtifactMetadata,
+    canonical_adjacency_manifest: DurableArtifactMetadata,
+    property_spill_manifest: DurableArtifactMetadata,
+    property_projection_manifest: DurableArtifactMetadata,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BackupFileEntry {
     name: String,
@@ -11462,11 +11478,7 @@ impl DurableStore {
     fn publish_checkpoint_manifest(
         &mut self,
         generation: u64,
-        checkpoint_artifact: DurableArtifactMetadata,
-        canonical_manifest_artifact: DurableArtifactMetadata,
-        canonical_adjacency_manifest_artifact: DurableArtifactMetadata,
-        property_spill_manifest_artifact: DurableArtifactMetadata,
-        property_projection_manifest_artifact: DurableArtifactMetadata,
+        artifacts: CheckpointManifestArtifacts,
         checkpoint_commit_epoch: u64,
         oldest_reader_commit_epoch: Option<u64>,
         source_scan_publication: Option<source_scan::SourceScanPublication>,
@@ -11476,28 +11488,35 @@ impl DurableStore {
         let source_scan_commit_epoch = source_scan_publication.map(|value| value.graph_epoch());
         let source_scan_descriptor_checksum =
             source_scan_publication.map(|value| value.descriptor_checksum());
+        let CheckpointManifestArtifacts {
+            checkpoint,
+            canonical_manifest,
+            canonical_adjacency_manifest,
+            property_spill_manifest,
+            property_projection_manifest,
+        } = artifacts;
         let manifest = DurableManifest {
             format: DurableFormat::GenerationalV2,
             checkpoint_generation: Some(generation),
-            checkpoint_encoded_len: Some(checkpoint_artifact.encoded_len),
-            checkpoint_encoded_checksum: Some(checkpoint_artifact.encoded_checksum),
-            canonical_manifest_encoded_len: Some(canonical_manifest_artifact.encoded_len),
-            canonical_manifest_encoded_checksum: Some(canonical_manifest_artifact.encoded_checksum),
+            checkpoint_encoded_len: Some(checkpoint.encoded_len),
+            checkpoint_encoded_checksum: Some(checkpoint.encoded_checksum),
+            canonical_manifest_encoded_len: Some(canonical_manifest.encoded_len),
+            canonical_manifest_encoded_checksum: Some(canonical_manifest.encoded_checksum),
             canonical_adjacency_manifest_encoded_len: Some(
-                canonical_adjacency_manifest_artifact.encoded_len,
+                canonical_adjacency_manifest.encoded_len,
             ),
             canonical_adjacency_manifest_encoded_checksum: Some(
-                canonical_adjacency_manifest_artifact.encoded_checksum,
+                canonical_adjacency_manifest.encoded_checksum,
             ),
-            property_spill_manifest_encoded_len: Some(property_spill_manifest_artifact.encoded_len),
+            property_spill_manifest_encoded_len: Some(property_spill_manifest.encoded_len),
             property_spill_manifest_encoded_checksum: Some(
-                property_spill_manifest_artifact.encoded_checksum,
+                property_spill_manifest.encoded_checksum,
             ),
             property_projection_manifest_encoded_len: Some(
-                property_projection_manifest_artifact.encoded_len,
+                property_projection_manifest.encoded_len,
             ),
             property_projection_manifest_encoded_checksum: Some(
-                property_projection_manifest_artifact.encoded_checksum,
+                property_projection_manifest.encoded_checksum,
             ),
             wal_generation: generation,
             checkpoint_epoch: generation,
