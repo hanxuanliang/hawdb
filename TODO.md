@@ -1540,6 +1540,40 @@ contract.
 
 ## P0: Storage and Recovery
 
+- [x] Publish generation-scoped checkpoint, canonical segment, and WAL
+  artifacts through one atomic manifest with a durable replay LSN.
+- [x] Keep old canonical generations while read snapshots are pinned and
+  reclaim them only after the pin is released.
+- [x] Add a hard segment-cache capacity and a hard out-of-core mutation-delta
+  budget, including WAL replay admission before applying a complete batch.
+- [x] Make the core Cypher scan, expand, relationship-existence predicate,
+  mutation-return, analytics, search projection, and checked canonical export
+  paths read canonical segments without materializing the whole graph.
+- [x] Route equality, multi-value, composite, range, full-text, and node-column
+  executor lookups through owned out-of-core visitors instead of delta-only
+  borrowed indexes.
+- [x] Preserve checkpoint optimizer statistics in out-of-core mode and expose
+  their stale epoch instead of silently returning delta-only statistics.
+- [x] Bound first out-of-core checkpoint statistics construction to exact basic
+  counts and persist an explicit advanced-statistics completeness flag.
+- [x] Bound the canonical Source fallback by row count and payload bytes while
+  retaining only `limit + 1` candidates.
+- [x] Remove or migrate every remaining borrowed-only compatibility read in
+  `src/api/mod.rs`; no public typed read may silently omit the canonical base
+  after automatic out-of-core admission.
+- [x] Make production query entrypoints require row and payload budgets. Direct,
+  read-transaction, streaming, EXPLAIN ANALYZE, and system SQL reads inherit
+  restrictive database defaults; hosts must explicitly set both limits to
+  `None` to permit an unbounded result.
+- [x] Add fail-closed corruption coverage through the public query API, not
+  only the canonical segment reader.
+- [x] Add an explicit larger-than-cache resource-profile harness that captures
+  query RSS, page faults, intermediate rows, payload bytes, cache residency,
+  evictions, and admission rejections.
+- [ ] Add a production-sized resource profile that proves canonical bytes can
+  exceed the configured cache while steady RSS, peak RSS, page faults,
+  intermediate rows, and payload bytes remain within their admission budgets.
+
 - [x] Keep WAL and checkpoint recovery as cutover blockers.
   - Mutations must recover as whole committed batches or not at all.
   - Torn WAL tails must be detected and bounded.
@@ -1911,6 +1945,10 @@ contract.
         binding in optimizer trace decisions.
       - Runtime capability tests cover fail-closed disabled ACL, zero policy
         epoch rejection, and LFU plan-cache isolation across policy epochs.
+      - Cached ACL plans retain only the visibility predicate shape. Allowed
+        scope values are internal parameter slots rebound from the current
+        authorization result on every execution, including cache hits. Tests
+        cover same-epoch/different-scope reuse and visibility-shape isolation.
     - [x] Bind explicit ACL contexts into executor-facing physical plans and
       slow-query observability without introducing a production CLI or global
       environment control plane.
@@ -1932,8 +1970,10 @@ contract.
         before optimization, so the selected physical plan contains
         `FilterExec(SeqNodeScan)` and the executor can use
         `ScanPruningStrategy::PropertyIn` before result projection.
-      - All visibility inputs stay out of plan-cache keys and traces except
-        for the policy epoch; ordinary no-ACL query APIs remain unchanged.
+      - Allowed visibility values stay out of cached plan keys and trace
+        decisions. The private key carries policy epoch, visibility property,
+        and value count so only compatible templates can be reused; ordinary
+        no-ACL query APIs remain unchanged.
     - [x] Extend policy-visible predicates to adjacency expansion endpoint
       materialization.
       - Explicit ACL graph queries now wrap logical `Expand` targets with a
@@ -2113,6 +2153,30 @@ contract.
 
 ## P1: Performance From Architecture
 
+- [x] Split mutable COW maps by estimated bytes as well as entry count so large
+  records do not create 512-record first-write clones.
+- [x] Scale endpoint and exact-property Bloom summaries with segment
+  cardinality, preserve legacy manifest decoding, and report physical segment
+  pruning.
+- [x] Add a bounded external-memory optimizer-statistics refresh. Persisted
+  checkpoint statistics may be stale after an out-of-core WAL delta, but must
+  never be recomputed with unbounded distinct/path sets.
+- [x] Add physical sparse/dense adjacency blocks ordered by endpoint; adaptive
+  Bloom pruning is a read-amplification reduction, not the final adjacency
+  layout.
+- [x] Add property spill blocks and persistent range/full-text projections for
+  the active Mem query shapes before claiming arbitrary large-value support.
+  - Canonical records spill top-level values larger than 64 KiB into
+    generation-bound, checksummed property blocks and resolve them through the
+    bounded segment cache.
+  - Range and full-text indexes are rebuildable immutable projections bound to
+    the canonical source epoch. Builds use bounded external sort, incomplete
+    definitions fall back to canonical scans, and published corruption fails
+    closed.
+  - Out-of-core reads stream projection candidates, fetch canonical rows for
+    exact residual checks, and merge WAL updates, tombstones, and inserts
+    without materializing the canonical base.
+
 - [x] Split more internal packages into focused crates to improve abstraction
   boundaries and compile-time ownership.
   - Do not split crates for their own sake; every new crate must have a clear
@@ -2188,6 +2252,29 @@ contract.
 - [ ] Replace full-scan BM25 scoring with a BF-Tree-inspired segmented lexical
   inverted projection only after feasibility gates prove a material production
   benefit.
+  - [x] Implement a shadow-capable immutable lexical projection with
+    generation-scoped checksummed manifests, bounded external-sort builds,
+    document-length blocks, sorted posting blocks, and fail-closed corruption
+    handling.
+  - [x] Add a bounded in-memory upsert/delete mini-delta, checkpoint
+    consolidation, query-term posting streams, exact candidate-scoped corpus
+    statistics, and bounded streaming TopK for text and rank-windowed hybrid
+    search.
+  - [x] Preserve analyzer and score parity across metadata and ACL filters,
+    incremental mutations, checkpoint reopen, text pagination, hybrid RRF, and
+    corrupt artifact tests. Query reports expose posting bytes, postings
+    visited, and whether the segmented projection was selected.
+  - [x] Add a no-full-document-residency production read path. Checkpoint now
+    publishes generation-pinned descriptor, metadata-only, vector-only,
+    full-payload, layout, and lexical artifacts before atomically switching the
+    out-of-core manifest. `SearchOutOfCoreReader` streams metadata/ACL candidates
+    into a bounded spill, performs segmented BM25 or vector-sidecar scans with
+    bounded score state, and reads full documents and matched spans only for the
+    final page. The typed
+    `NowledgeMemOutOfCoreSearchProjection` facade exposes the same path without
+    reopening the mutable compatibility index. The mutable `SearchIndex` keeps
+    full residency for rebuild, delta, and borrowed-document APIs and must not
+    be used as the production read owner for larger-than-memory projections.
   - Keep lexical search as a rebuildable projection over canonical graph and
     content state. Do not move lexical index state into the graph WAL or make it
     a source of truth.

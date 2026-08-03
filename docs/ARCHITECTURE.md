@@ -517,7 +517,8 @@ high-concurrency server engine.
 
 The replacement should preserve the current local wrapper shape:
 
-- one embedded database object per path
+- one embedded database object per path, enforced by a process-local canonical
+  path lease and a cross-process exclusive lock held for the handle lifetime
 - shared read access through guarded connections or snapshots
 - exclusive writes, control operations, and checkpoints
 - explicit storage version check at boot
@@ -697,6 +698,33 @@ focused matches. Selected graph-derived projection metadata identifiers
 terms for text fallback, while matched projection-text spans remain limited to
 title and content fields. This keeps text fallback useful while the projection
 remains rebuildable.
+
+Persistent checkpoints also publish a generation-bound segmented lexical
+projection. Its immutable posting and document-length blocks are built with a
+bounded external sort and queried through bounded term streams. The persisted
+fallible path computes candidate-scoped BM25 statistics after metadata and ACL
+filtering, merges a bounded mutation mini-delta, and uses streaming TopK for a
+text page window or hybrid rank window. Declared corruption fails closed.
+
+The larger-than-memory read owner is `SearchOutOfCoreReader`, not the mutable
+compatibility `SearchIndex`. Checkpoint publishes generation-named descriptor,
+full-document payload, metadata-only sidecar, vector-only sidecar, sidecar
+layout, and lexical manifest artifacts, then atomically switches a small
+manifest that binds their checksums, source graph epoch, analyzer, and document
+digest. Readers pin the selected generation. Metadata and ACL predicates decode
+only metadata ranges before ranking into a bounded, disk-backed CandidateSet;
+BM25 consumes that set through fallible membership checks, vector scoring reads
+only vector ranges, and full document ranges are touched only for final-page
+hydration. Explicit budgets cover compressed and decompressed segments,
+candidate spill and block reads, retained score entries, hydrated rows, and
+hydrated bytes. The typed `NowledgeMemOutOfCoreSearchProjection` facade exposes
+this read path to Mem.
+
+`SearchIndex::open()` deliberately retains full residency for mutable rebuild,
+delta, compatibility probe, and borrowed `document()` APIs. Callers must not use
+that maintenance owner as the larger-than-memory production Search read path.
+Production cutover remains gated on differential shadow results and measured
+latency, RSS, payload, and page-fault evidence from a representative replica.
 Application-owned analyzer lexicons can register readable phrase or identifier
 aliases through normalized alias rules and can add domain stopword rules for
 high-frequency application terms. The graph/search kernel keeps only the small

@@ -1,43 +1,58 @@
 # Storage Design
 
-## Current V1 Slice
+## Current V2 Storage
 
 The current storage implementation is a small durable graph store slice. It is
 not an LSM tree and it does not depend on RocksDB or another storage engine.
 
 Files:
 
-- `checkpoint.skein`: full durable snapshot of catalog tokens, nodes, and
-  relationships, written through the default zstd compression envelope.
-- `manifest.skein`: checksummed checkpoint publication metadata with checkpoint
-  epoch, checkpoint commit epoch, WAL replay start LSN, and next WAL LSN.
+- `manifest.skein`: the only published generation pointer. It records the
+  checkpoint generation, checkpoint commit epoch, canonical artifact metadata,
+  WAL generation, durable replay LSN, next LSN, reader watermark, and optional
+  Source sidecar publication.
+- `checkpoint.<generation>.skein`: catalog, schema, projection definitions,
+  stable operational metadata, and optimizer statistics for one generation,
+  written through the default zstd compression envelope. Canonical graph rows
+  are delegated to the generation's canonical artifact.
+- `canonical.<generation>.skein` and
+  `canonical.<generation>.manifest.skein`: immutable ordered node and
+  relationship segments with per-segment digests, record bounds, adaptive
+  endpoint Bloom filters, and exact-property Bloom summaries.
+- `wal.<generation>.skein`: append-only committed mutation records beginning at
+  the replay LSN published by the manifest.
 - `projected_graphs.skein`: checksummed, checkpoint-generated CSR/CSC
   projection artifacts derived from persisted projected graph definitions,
   written through the default zstd compression envelope.
 - `stable_ids.skein`: checksummed persisted stable-ID mapping for records that
   do not carry an `id` property at the physical export boundary, written
   through the default zstd compression envelope.
-- `wal.skein`: append-only committed mutation log.
 
 Recovery:
 
 1. Load `manifest.skein` when present and verify its checksum.
 2. Reject unsupported manifest storage versions before using manifest state.
-3. Load `checkpoint.skein` when present.
+3. Load the checkpoint generation named by the manifest.
 4. Verify the checkpoint checksum.
 5. Reject unsupported checkpoint storage versions before importing records.
 6. Replay valid WAL entries in order. When configured, the WAL replay entry
    limit is checked after a record is decoded and before applying it.
 7. In the default recovery mode, stop replay at a torn tail or checksum
    mismatch. In strict recovery mode, reject the open instead.
-8. Rebuild in-memory adjacency indexes from relationship records.
+8. In materialized mode, rebuild in-memory adjacency and property indexes. In
+   out-of-core mode, retain the immutable canonical reader and keep only the
+   bounded mutation delta resident.
 9. Validate that every recovered relationship references existing source and
    target nodes before accepting the graph state.
 10. Verify projected graph artifacts when present. Corrupt artifacts are
    discarded because they are rebuildable derived state, not canonical graph
    state.
 
-Checkpoint, manifest, and projected graph artifact publication write a
+Checkpoint publication writes the new canonical artifact, canonical manifest,
+checkpoint image, and next WAL generation before atomically replacing
+`manifest.skein`. The manifest's durable replay LSN prevents a crash between
+checkpoint persistence and old-WAL reclamation from replaying checkpointed
+mutations twice. Checkpoint, manifest, and projected graph artifact publication write a
 temporary file, sync the file contents, atomically rename it into place, and
 sync the parent directory. Checkpoint and projected graph artifact payloads use
 zstd by default inside a checksummed binary envelope while preserving legacy
@@ -67,6 +82,15 @@ batch record or rejects the open before applying the next record.
 
 `DatabaseTransaction` buffers mutation statements and commits them as one WAL
 batch. Rollback drops the buffered mutations without touching the store.
+Every durable open acquires an exclusive process-lifetime lease on the database
+directory. The host opens one root `Database` handle and derives sessions,
+transactions, and snapshot readers from that handle. A process-local canonical
+path registry rejects duplicate handles in one application, while the stable
+`owner.skein.lock` sidecar rejects opens from other cooperating applications on
+Windows, Linux, and macOS. The sidecar is not canonical state and remains in
+place after close so every process locks the same file. Lock contention fails
+immediately; it never waits, steals ownership, or falls back to unsafe shared
+access.
 `DatabaseReadTransaction` owns an immutable catalog and graph snapshot for
 read-only Cypher execution. It rejects mutation statements, does not observe
 later commits, and remains usable after the writer checkpoints. Active read
@@ -76,10 +100,13 @@ tracks a commit epoch and publishes a checksummed manifest after each successful
 checkpoint. The manifest records the checkpoint epoch, the checkpoint-covered
 commit epoch, the oldest active reader commit epoch, the safe reclamation commit
 epoch, the WAL replay start LSN, and the next WAL LSN. This does not yet provide
-page-level MVCC visibility, physical page/segment reclamation, or concurrent
-writer coordination. `Database::storage_reclamation_watermark` exposes the same
-boundary in structured form for future page/segment garbage collection: current
-commit epoch, optional checkpoint epoch and checkpoint commit epoch, active
+an in-place page-version chain or concurrent writer coordination. Read snapshots
+share immutable COW map pages and immutable canonical segment readers. A
+checkpoint retains all old generations while any snapshot reader is pinned;
+after the last pin is released, a later checkpoint keeps the current and
+immediately previous generations and reclaims older files.
+`Database::storage_reclamation_watermark` exposes the same boundary in
+structured form: current commit epoch, optional checkpoint epoch and checkpoint commit epoch, active
 oldest reader epoch, computed safe reclaim commit epoch, and whether the store
 is durable.
 `Database::storage_recovery_report` exposes the open-time recovery boundary in
@@ -97,6 +124,73 @@ and prints the same report as JSON. Use this as CI or migration evidence for
 the real database path, separate from in-memory compatibility fixtures. The
 `wal_replay_bounded` readiness flag is true only when the open used an explicit
 WAL replay entry bound.
+
+## Out-of-Core Residency
+
+`DatabaseConfig::storage_residency_mode` selects materialized, out-of-core, or
+automatic checkpoint loading. Automatic mode materializes small canonical
+artifacts and retains larger artifacts behind a bounded `SegmentCache`.
+Canonical node, relationship, adjacency, exact-property, executor, search
+projection, analytics, and checked snapshot-export paths use owned iterators so
+a scan holds at most one decoded segment plus its caller-owned batch or TopN.
+Each checkpoint also publishes a generation-bound canonical adjacency sidecar.
+Entries are externally sorted by `(direction, endpoint, relationship_type,
+neighbor, relationship_id)`. Groups below the dense threshold use one sparse
+block; dense groups are split into bounded blocks and store complete
+relationship rows to avoid random canonical row lookups. The external merge
+uses key-only heap entries, bounded fan-in, and streaming block digests. A
+legacy generation without adjacency metadata falls back to endpoint Bloom
+pruning; a generation that declares the sidecar but fails validation returns an
+error rather than partial traversal results.
+
+The cache has a hard byte capacity, stable generation/digest keys, CLOCK
+eviction, pin accounting, and fail-closed oversized-entry admission. Endpoint
+and property Bloom summaries scale with segment cardinality instead of using a
+fixed bitset; false positives fall through to residual decoding and false
+negatives are not permitted. `CanonicalReadReport` records considered, pruned,
+and read segments, decoded rows, bytes read, and peak segment bytes.
+
+Out-of-core writes copy only touched base records into a mutable delta. Both
+foreground WAL append and recovery replay check
+`max_out_of_core_delta_bytes` before applying a complete mutation batch. The
+admission failure is explicit and never appends or applies a partial batch.
+`StorageResidencyReport` exposes canonical bytes and row counts, delta rows and
+estimated bytes, the configured delta limit, statistics freshness, and cache
+resident, pinned, hit, miss, eviction, admission-rejection, and digest-mismatch
+counters.
+
+The ignored
+`larger_than_cache_query_reports_process_and_storage_resource_evidence` test is
+the reproducible synthetic gate for canonical bytes larger than cache capacity.
+It records process RSS, page-fault deltas, intermediate rows, payload bytes,
+cache residency, evictions, and rejected cache admissions. Production cutover
+still requires the same report from a representative Mem replica.
+
+A first checkpoint that publishes directly into out-of-core mode persists exact
+basic counts but does not construct unbounded distinct sets or path maps.
+`GraphStatistics::advanced_statistics_complete` and
+`StorageResidencyReport::checkpoint_statistics_complete` make that boundary
+explicit. Checkpoints written before this flag was introduced remain readable
+and retain their historical complete-statistics interpretation.
+
+`Database::refresh_optimizer_statistics_external` rebuilds the advanced
+optimizer statistics over canonical base plus WAL delta with explicit memory,
+input-record, generated-fact, path-expansion, spill-byte, and spill-run limits.
+It emits sorted temporary runs, performs a bounded merge for exact distinct and
+path counts, retains bounded deterministic histograms, and removes every run on
+success or failure. The refreshed statistics become visible only after a
+generation checkpoint publishes them; checkpoint failure restores the prior
+live statistics. The report records work, spill, output-state, and publication
+measurements. The operation rejects non-durable or materialized stores because
+the external refresh is the repair path for stale out-of-core statistics, not a
+replacement for the cheaper in-memory computation.
+
+Analytics constructs only the direction required by the selected algorithm,
+scans canonical relationships one segment at a time, and checks the memory
+budget while collecting node IDs and again before allocating adjacency. The
+Source canonical fallback retains only `limit + 1` projected candidates and
+has explicit row and payload budgets instead of sorting every Source record in
+memory.
 `Database::export_canonical_graph_snapshot` and the same method on
 `DatabaseReadTransaction` expose the current or pinned graph snapshot as
 canonical node and relationship records with a deterministic logical checksum.
@@ -296,7 +390,15 @@ Basic graph counters are maintained incrementally in the store for low-cost
 optimizer and monitoring reads: total nodes, total relationships, per-label
 counts, and per-relationship-type counts. The wider histogram, property
 distinct, and path-cardinality statistics remain rebuildable derived data and
-are written to checkpoints for observability and future costing.
+are written to checkpoints for observability and costing. Out-of-core recovery
+loads those persisted statistics instead of silently replacing them with
+delta-only values. Basic counts remain exact across WAL mutations; wider
+statistics retain their checkpoint computation epoch and
+`StorageResidencyReport::checkpoint_statistics_stale` remains true until an
+explicit bounded statistics refresh is available. A first checkpoint written
+directly in out-of-core mode deliberately persists only basic counts and marks
+advanced statistics incomplete instead of constructing an unbounded temporary
+distinct-value working set.
 
 The catalog also stores persistent property constraint descriptors.
 Node unique constraints use
@@ -540,39 +642,123 @@ There are two indexes:
 - outgoing: `(source, type) -> rel_ids`
 - incoming: `(target, type) -> rel_ids`
 
-This is only the first step toward native graph locality. The next storage
-layout should split sparse and dense adjacency:
+Checkpoint storage also publishes two physical layouts:
 
 - sparse nodes keep a compact inline/list adjacency representation
 - dense nodes use copy-on-write adjacency segments or a B+ tree-like structure
-- dense adjacency is ordered by `(edge_type, direction, neighbor_id, edge_id)`
+- dense adjacency is ordered by `(direction, endpoint, edge_type, neighbor_id,
+  edge_id)`
 - hub nodes get isolated storage so they do not pollute ordinary traversal
   locality
 
+## Canonical Property Storage and Projections
+
+Canonical checkpoints keep ordinary properties inline. A top-level value whose
+encoded representation exceeds 64 KiB is stored in a generation-bound property
+spill artifact instead, and the canonical row contains only its spill ID. Spill
+blocks and their manifests are checksummed, read through the bounded segment
+cache, included in verified backups, and reclaimed with their canonical
+generation.
+
+Declared range and full-text indexes are also published as rebuildable,
+generation-bound projection artifacts. Their builders use a bounded external
+sort with explicit resident-memory, spill-byte, run-count, merge-fan-in, key,
+and generated-entry budgets. A range definition becomes incomplete when a key
+exceeds its admitted size; reads then fall back to the canonical scan rather
+than using a partial index.
+
+Out-of-core range and full-text reads stream candidate IDs from a complete
+projection, fetch the canonical row for an exact residual check, skip base rows
+overridden or deleted by the WAL delta, and finally scan the bounded delta.
+Missing legacy projection metadata permits the canonical fallback. Published
+metadata with a corrupt manifest or block fails closed.
+
+## Segmented Lexical Projection
+
+Persistent search checkpoints publish a rebuildable
+`search_lexical.<generation>.skein` artifact followed by a checksummed
+`search_lexical.manifest.skein`. The manifest binds the artifact to the source
+graph epoch, analyzer digest, document snapshot digest, corpus length totals,
+and immutable document-length and posting blocks. Builds use bounded external
+sort runs and bounded fan-in merges; readers admit one bounded block per query
+term and verify artifact and block checksums.
+
+The fallible persisted search path reads only blocks that can contain analyzed
+query terms. It computes exact document frequency and average document length
+for the authorized metadata candidate set, merges a bounded upsert/delete
+mini-delta, and retains only the text page window or hybrid rank window in a
+streaming TopK. Reports expose posting bytes read, candidate postings visited,
+the exact matching-document count, and whether segmented BM25 was selected.
+Checkpoint replaces the base generation and clears the mini-delta. A stale or
+legacy manifest falls back to the reference scorer; a declared corrupt artifact
+fails closed.
+
+Checkpoint also publishes immutable, generation-named document descriptor,
+full-document payload, metadata-only sidecar, vector-only sidecar, sidecar
+layout, and lexical manifest artifacts before atomically switching
+`search_projection.out_of_core.manifest.skein`. The checksummed layout binds one
+metadata and vector range to every descriptor segment. A reader opened before
+the switch remains pinned to its generation; an interrupted publication leaves
+the previous manifest readable. Segment checksums, descriptor, layout, and
+lexical-manifest checksums, document/analyzer digests, source graph epoch, exact
+entry counts, and explicit compressed and uncompressed segment limits fail
+closed on mismatches. Decompression itself is limited to the admitted byte
+count rather than trusting the envelope length.
+
+`SearchOutOfCoreReader` opens only these manifests and descriptors, not the
+complete document snapshot. Metadata and ACL predicates prune descriptors,
+decode only metadata sidecar ranges, and write matching ordered document IDs
+into a temporary, bounded, cross-platform candidate spill. The spill keeps one
+bounded ID block in memory; its fallible membership checks feed exact
+candidate-scoped BM25 corpus statistics. Scalar vector search reads only vector
+sidecar ranges and retains the page window, hybrid rank window, or an explicitly
+bounded full-score map. Full title, content, embedding, and metadata payloads
+are not touched until final-page hydration. `SearchOutOfCoreReader::hydrate_documents`
+provides the same row and payload budgets for projection-owned source chunks or
+other payloads.
+
+The read report separates metadata-sidecar, vector-sidecar, and hydration
+payload bytes, and also exposes range reads, peak decoded sidecar and full
+segment bytes, candidate spill and reread bytes, vector bytes, and final
+hydration rows and bytes. `NowledgeMemOutOfCoreSearchProjection` is the typed Mem
+read facade over this path. It uses exact scalar vector segment scans; callers
+that require a compressed vector projection receive an error rather than a
+silent fallback.
+
+The mutable compatibility `SearchIndex::open()` still materializes the complete
+snapshot because its rebuild, incremental mutation, and borrowed-document APIs
+require stable references. It is a maintenance owner, not the larger-than-memory
+production read owner. Production activation of the out-of-core reader remains
+gated on differential shadow evidence and representative resource profiles.
+
 ## What This Is Not
 
-This is not a production page store yet:
+The remaining page-store gaps are explicit:
 
-- no MVCC snapshots
-- no page cache
-- no delayed garbage collection or reclamation policy
-- no property spill blocks
-- no cost model that consumes persistent statistics for join ordering
+- no concurrent or multi-process writer protocol; directory ownership is
+  exclusive
+- no in-place page-version chain; snapshots use immutable COW pages and pinned
+  canonical generations
 - no columnar property segments
 - no database-owned blob/content parser runtime
+- production-sized resource evidence from a representative Mem replica remains
+  a cutover artifact rather than a property established by unit tests
 
-It is a correctness-first recovery slice that keeps the public direction
-aligned with the intended Adaptive Native Graph Store.
+The current storage path is suitable for a single embedded owner with bounded
+out-of-core Cypher scans and recovery. Typed compatibility reads scan canonical
+base plus mutation delta and fail closed on canonical or declared projection
+corruption. Direct,
+read-transaction, streaming, EXPLAIN ANALYZE, and system SQL reads default to
+100,000 rows and 64 MiB of returned payload; a host can request an unbounded
+result only by explicitly setting both database limits to `None`. The store
+must not be described as a general multi-writer page store. Individual spilled
+values remain subject to the configured value-size admission limit.
 
 ## Next Storage Tasks
 
-1. Add page-level MVCC reader isolation.
-2. Add physical page/segment reclamation using pinned manifest epochs.
-3. Add physical sparse adjacency blocks before dense adjacency segments. The
-   storage API already exposes ordered adjacency entries and sparse/dense group
-   classification over the current in-memory adjacency indexes.
-4. Add property spill blocks for large values.
-5. Add richer index statistics beyond bounded path source/target coverage and
+1. Add richer index statistics beyond bounded path source/target coverage and
    text analyzer parity.
-6. Add richer caller-owned blob/content parser integration at the boundary
+2. Move production Search routes to `NowledgeMemOutOfCoreSearchProjection` only
+   after differential parity and production resource gates pass.
+3. Add richer caller-owned blob/content parser integration at the boundary
    outside the graph kernel.

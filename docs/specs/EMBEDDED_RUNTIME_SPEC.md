@@ -24,6 +24,10 @@ lifecycle, identity, configuration, and telemetry remain owned by the host
 application.
 
 - The host opens one database handle and shares it across application workers.
+- A durable database directory MUST be owned by exactly one active root handle
+  and one application process. Duplicate opens in the same process and opens by
+  another process MUST fail immediately. Read transactions and diagnostics MUST
+  use the owning handle rather than reopening the directory.
 - Foreground reads may use the effective CPU budget.
 - Plan cache, FTS, vector candidate indexes, graph analytics, and bounded
   background maintenance may be enabled.
@@ -115,7 +119,9 @@ multi-version snapshots:
 
 The initial contract is multi-reader, single-writer. Multi-writer execution is
 out of scope until conflict detection, abort semantics, and index delta ordering
-are modeled and tested.
+are modeled and tested. Multi-reader means snapshots derived from the owning
+handle inside one application process; it does not permit multiple root handles
+or another process to reopen the database directory.
 
 ## Runtime Resource Budget
 
@@ -309,9 +315,11 @@ capability surface. Its design MUST:
 - remain disabled by default for `MobileEmbedded`;
 - support compile-time exclusion for applications that do not need it;
 - bind authorization context to planning and execution, not only API handlers;
-- include authorization identity and policy epoch in plan-cache keys;
+- bind authorization decision values for every execution, including plan-cache
+  hits; cached plan identity includes the policy epoch and visibility predicate
+  shape but not allowed scope values;
 - preserve fail-closed behavior for unsupported or stale policy state;
-- avoid storing credentials or secret policy inputs in logs, plans, or
+- avoid storing credentials or allowed scope values in cached plans, logs, or
   telemetry.
 
 Storage-level visibility enforcement is required before ACL can be declared

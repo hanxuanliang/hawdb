@@ -270,8 +270,11 @@ configuration. `read_only` opens only existing database directories without
 creating missing paths, then rejects Cypher mutations, transaction mutations,
 checkpoints, schema maintenance, database-owned projected graph artifact
 rebuilds, and derived artifact job execution before they write database-owned
-state. `max_read_result_rows` caps direct read query and read-transaction
-result rows, and `max_optimizer_groups` caps cascades memo search groups with
+state. `max_read_result_rows` and `max_read_result_payload_bytes` default to
+100,000 rows and 64 MiB, respectively. They cap direct, read-transaction,
+streaming, EXPLAIN ANALYZE, and system SQL results; callers may further tighten
+the limits, while unbounded results require explicitly setting both fields to
+`None`. `max_optimizer_groups` caps cascades memo search groups with
 the existing deterministic direct physical fallback warning. `recovery_mode`
 defaults to torn-tail tolerant WAL replay and can be set to strict recovery to
 reject a torn WAL tail or checksum mismatch during open.
