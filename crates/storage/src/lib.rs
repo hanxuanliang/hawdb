@@ -8,7 +8,8 @@ pub mod snapshot;
 
 pub use adjacency::{
     AdjacencyDirection, AdjacencyGroupConsistencyMismatch, AdjacencyGroupKey, AdjacencyGroupStats,
-    AdjacencyLayout, OrderedAdjacencyEntry,
+    AdjacencyLayout, AdjacencyPostingList, OrderedAdjacencyEntry, ADJACENCY_MINI_DELTA_MAX_ENTRIES,
+    ADJACENCY_PIVOT_MIN_DEGREE,
 };
 pub use config::{DurabilityPolicy, DurableCompression, RecoveryMode, WalReplayConfig};
 pub use ids::{NodeId, NodeRecord, RelId, RelRecord};

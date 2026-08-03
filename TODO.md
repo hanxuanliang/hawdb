@@ -2170,6 +2170,11 @@ contract.
   - Optimize for bounded memory and predictable read amplification.
   - Keep row-oriented canonical records and add projection/index layouts only
     where route evidence proves value.
+  - [x] Buffer mutations to shared high-degree adjacency groups in a bounded
+    pivot/mini-delta state, consolidate after 64 overrides, and retain a
+    pointer-sized posting handle so the no-delta read path preserves map-page
+    density. Gate the change with grouped and 8,192-degree snapshot-retention
+    latency, RSS, and lookup benchmarks.
   - [x] Expose a typed adjacency consistency report that validates maintained
     incoming/outgoing relationship groups against a full relationship scan
     before adding denser read-optimized layouts.

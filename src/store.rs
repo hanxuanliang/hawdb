@@ -12,6 +12,7 @@ use crate::value::Value;
 use skein_core::RuntimeTaskContext;
 #[path = "store/source_scan.rs"]
 mod source_scan;
+use skein_storage::AdjacencyPostingList;
 pub use skein_storage::{
     AdjacencyDirection, AdjacencyGroupConsistencyMismatch, AdjacencyGroupKey, AdjacencyGroupStats,
     AdjacencyLayout, ConnectedNodesCreate, DurabilityPolicy, DurableCompression,
@@ -156,11 +157,12 @@ pub struct PropertyIndexConsistencyReport {
 
 type CompositePropertyKey = Vec<(String, Value)>;
 type NodeIdPostingList = CowSegment<BTreeSet<NodeId>>;
-type RelIdPostingList = CowSegment<BTreeSet<RelId>>;
+type RelIdPropertyPostingList = CowSegment<BTreeSet<RelId>>;
 type NodePropertyIndex = CowSegmentedMap<(LabelId, String, Value), NodeIdPostingList>;
 type CompositePropertyIndex = CowSegmentedMap<(LabelId, CompositePropertyKey), NodeIdPostingList>;
 type FullTextPropertyIndex = CowSegmentedMap<(LabelId, String, String), NodeIdPostingList>;
-type RelationshipPropertyIndex = CowSegmentedMap<(RelTypeId, String, Value), RelIdPostingList>;
+type RelationshipPropertyIndex =
+    CowSegmentedMap<(RelTypeId, String, Value), RelIdPropertyPostingList>;
 
 /// An immutable snapshot segment that is cloned only when a writer mutates it.
 ///
@@ -681,8 +683,8 @@ pub struct GraphStore {
     nodes: CowSegmentedMap<NodeId, NodeRecord>,
     relationships: CowSegmentedMap<RelId, RelRecord>,
     basic_statistics: BasicGraphStatistics,
-    outgoing: CowSegmentedMap<(NodeId, RelTypeId), RelIdPostingList>,
-    incoming: CowSegmentedMap<(NodeId, RelTypeId), RelIdPostingList>,
+    outgoing: CowSegmentedMap<(NodeId, RelTypeId), AdjacencyPostingList>,
+    incoming: CowSegmentedMap<(NodeId, RelTypeId), AdjacencyPostingList>,
     property_index: NodePropertyIndex,
     composite_property_index: CompositePropertyIndex,
     full_text_property_index: FullTextPropertyIndex,
@@ -6122,7 +6124,7 @@ impl GraphStore {
     ) -> AdjacencyGroupStats {
         let degree = self
             .adjacency_relationship_ids(node_id, rel_type, direction)
-            .map(BTreeSet::len)
+            .map(AdjacencyPostingList::len)
             .unwrap_or_default();
         AdjacencyGroupStats {
             node_id,
@@ -6887,16 +6889,10 @@ impl GraphStore {
         node_id: NodeId,
         rel_type: RelTypeId,
         direction: AdjacencyDirection,
-    ) -> Option<&BTreeSet<RelId>> {
+    ) -> Option<&AdjacencyPostingList> {
         match direction {
-            AdjacencyDirection::Outgoing => self
-                .outgoing
-                .get(&(node_id, rel_type))
-                .map(CowSegment::deref),
-            AdjacencyDirection::Incoming => self
-                .incoming
-                .get(&(node_id, rel_type))
-                .map(CowSegment::deref),
+            AdjacencyDirection::Outgoing => self.outgoing.get(&(node_id, rel_type)),
+            AdjacencyDirection::Incoming => self.incoming.get(&(node_id, rel_type)),
         }
     }
 
@@ -10884,8 +10880,8 @@ fn adjacency_layout_for_degree(degree: usize) -> AdjacencyLayout {
 }
 
 fn maintained_adjacency_groups(
-    outgoing: &CowSegmentedMap<(NodeId, RelTypeId), RelIdPostingList>,
-    incoming: &CowSegmentedMap<(NodeId, RelTypeId), RelIdPostingList>,
+    outgoing: &CowSegmentedMap<(NodeId, RelTypeId), AdjacencyPostingList>,
+    incoming: &CowSegmentedMap<(NodeId, RelTypeId), AdjacencyPostingList>,
 ) -> AdjacencyGroups {
     let mut groups = AdjacencyGroups::new();
     for ((node_id, rel_type), rel_ids) in outgoing.iter() {
@@ -10938,8 +10934,8 @@ fn recompute_adjacency_groups(
 
 fn compute_degree_statistics_from_adjacency(
     nodes: &CowSegmentedMap<NodeId, NodeRecord>,
-    outgoing: &CowSegmentedMap<(NodeId, RelTypeId), RelIdPostingList>,
-    incoming: &CowSegmentedMap<(NodeId, RelTypeId), RelIdPostingList>,
+    outgoing: &CowSegmentedMap<(NodeId, RelTypeId), AdjacencyPostingList>,
+    incoming: &CowSegmentedMap<(NodeId, RelTypeId), AdjacencyPostingList>,
 ) -> BTreeMap<DegreeStatisticsKey, DegreeStatisticsEntry> {
     compute_degree_statistics_from_groups(nodes, maintained_adjacency_groups(outgoing, incoming))
 }
@@ -12217,12 +12213,12 @@ mod tests {
             .outgoing
             .get(&(source_a, rel_type))
             .unwrap()
-            .shares_storage_with(snapshot.outgoing.get(&(source_a, rel_type)).unwrap()));
+            .shares_pivot_with(snapshot.outgoing.get(&(source_a, rel_type)).unwrap()));
         assert!(store
             .outgoing
             .get(&(source_b, rel_type))
             .unwrap()
-            .shares_storage_with(snapshot.outgoing.get(&(source_b, rel_type)).unwrap()));
+            .shares_pivot_with(snapshot.outgoing.get(&(source_b, rel_type)).unwrap()));
 
         store
             .create_relationship(
@@ -12238,16 +12234,64 @@ mod tests {
             .outgoing
             .get(&(source_a, rel_type))
             .unwrap()
-            .shares_storage_with(snapshot.outgoing.get(&(source_a, rel_type)).unwrap()));
+            .shares_pivot_with(snapshot.outgoing.get(&(source_a, rel_type)).unwrap()));
         assert!(store
             .outgoing
             .get(&(source_b, rel_type))
             .unwrap()
-            .shares_storage_with(snapshot.outgoing.get(&(source_b, rel_type)).unwrap()));
+            .shares_pivot_with(snapshot.outgoing.get(&(source_b, rel_type)).unwrap()));
         assert_eq!(store.outgoing_relationships(source_a, rel_type).count(), 2);
         assert_eq!(
             snapshot.outgoing_relationships(source_a, rel_type).count(),
             1
+        );
+    }
+
+    #[test]
+    fn active_snapshot_buffers_dense_adjacency_mutation_in_a_mini_delta() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        let source = store
+            .create_node(&mut catalog, "Source", BTreeMap::new())
+            .unwrap();
+        let mut targets = Vec::new();
+        for _ in 0..=DENSE_ADJACENCY_DEGREE_THRESHOLD {
+            targets.push(
+                store
+                    .create_node(&mut catalog, "Target", BTreeMap::new())
+                    .unwrap(),
+            );
+        }
+        for target in targets.iter().take(DENSE_ADJACENCY_DEGREE_THRESHOLD) {
+            store
+                .create_relationship(&mut catalog, source, *target, "LINKS_TO", BTreeMap::new())
+                .unwrap();
+        }
+        let rel_type = catalog.rel_type_id("LINKS_TO").unwrap();
+        let snapshot = store.snapshot();
+
+        store
+            .create_relationship(
+                &mut catalog,
+                source,
+                targets[DENSE_ADJACENCY_DEGREE_THRESHOLD],
+                "LINKS_TO",
+                BTreeMap::new(),
+            )
+            .unwrap();
+
+        let live_posting = store.outgoing.get(&(source, rel_type)).unwrap();
+        let snapshot_posting = snapshot.outgoing.get(&(source, rel_type)).unwrap();
+        assert!(live_posting.shares_pivot_with(snapshot_posting));
+        assert_eq!(live_posting.mini_delta_len(), 1);
+        assert_eq!(snapshot_posting.mini_delta_len(), 0);
+        assert_eq!(
+            store.outgoing_relationships(source, rel_type).count(),
+            DENSE_ADJACENCY_DEGREE_THRESHOLD + 1
+        );
+        assert_eq!(
+            snapshot.outgoing_relationships(source, rel_type).count(),
+            DENSE_ADJACENCY_DEGREE_THRESHOLD
         );
     }
 
