@@ -155,9 +155,12 @@ pub struct PropertyIndexConsistencyReport {
 }
 
 type CompositePropertyKey = Vec<(String, Value)>;
-type CompositePropertyIndex = CowSegmentedMap<(LabelId, CompositePropertyKey), BTreeSet<NodeId>>;
-type FullTextPropertyIndex = CowSegmentedMap<(LabelId, String, String), BTreeSet<NodeId>>;
-type RelationshipPropertyIndex = CowSegmentedMap<(RelTypeId, String, Value), BTreeSet<RelId>>;
+type NodeIdPostingList = CowSegment<BTreeSet<NodeId>>;
+type RelIdPostingList = CowSegment<BTreeSet<RelId>>;
+type NodePropertyIndex = CowSegmentedMap<(LabelId, String, Value), NodeIdPostingList>;
+type CompositePropertyIndex = CowSegmentedMap<(LabelId, CompositePropertyKey), NodeIdPostingList>;
+type FullTextPropertyIndex = CowSegmentedMap<(LabelId, String, String), NodeIdPostingList>;
+type RelationshipPropertyIndex = CowSegmentedMap<(RelTypeId, String, Value), RelIdPostingList>;
 
 /// An immutable snapshot segment that is cloned only when a writer mutates it.
 ///
@@ -165,7 +168,8 @@ type RelationshipPropertyIndex = CowSegmentedMap<(RelTypeId, String, Value), BTr
 /// proportional to the number of segments rather than the number of graph
 /// records. Writers retain the existing `&mut GraphStore` API and detach only
 /// the segment they modify.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
+#[repr(transparent)]
 struct CowSegment<T>(Arc<T>);
 
 impl<T> Clone for CowSegment<T> {
@@ -189,14 +193,23 @@ impl<T> From<T> for CowSegment<T> {
 impl<T> Deref for CowSegment<T> {
     type Target = T;
 
+    #[inline]
     fn deref(&self) -> &Self::Target {
         self.0.as_ref()
     }
 }
 
 impl<T: Clone> DerefMut for CowSegment<T> {
+    #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         Arc::make_mut(&mut self.0)
+    }
+}
+
+#[cfg(test)]
+impl<T> CowSegment<T> {
+    fn shares_storage_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
     }
 }
 
@@ -257,6 +270,7 @@ impl<K: Ord, V> CowSegmentedMap<K, V> {
         self.len == 0
     }
 
+    #[inline]
     fn segment_index(&self, key: &K) -> Option<usize> {
         if self.segments.is_empty() {
             return None;
@@ -269,6 +283,7 @@ impl<K: Ord, V> CowSegmentedMap<K, V> {
         Some(index.min(self.segments.len() - 1))
     }
 
+    #[inline]
     fn get(&self, key: &K) -> Option<&V> {
         self.segment_index(key)
             .and_then(|index| self.segments[index].get(key))
@@ -605,8 +620,8 @@ impl DistinctValueStatisticsConsistencyReport {
 impl PropertyIndexConsistencyReport {
     fn new(
         computed_at_commit_epoch: u64,
-        maintained_node_index: &CowSegmentedMap<(LabelId, String, Value), BTreeSet<NodeId>>,
-        recomputed_node_index: &CowSegmentedMap<(LabelId, String, Value), BTreeSet<NodeId>>,
+        maintained_node_index: &NodePropertyIndex,
+        recomputed_node_index: &NodePropertyIndex,
         maintained_relationship_index: &RelationshipPropertyIndex,
         recomputed_relationship_index: &RelationshipPropertyIndex,
     ) -> Self {
@@ -666,9 +681,9 @@ pub struct GraphStore {
     nodes: CowSegmentedMap<NodeId, NodeRecord>,
     relationships: CowSegmentedMap<RelId, RelRecord>,
     basic_statistics: BasicGraphStatistics,
-    outgoing: CowSegmentedMap<(NodeId, RelTypeId), BTreeSet<RelId>>,
-    incoming: CowSegmentedMap<(NodeId, RelTypeId), BTreeSet<RelId>>,
-    property_index: CowSegmentedMap<(LabelId, String, Value), BTreeSet<NodeId>>,
+    outgoing: CowSegmentedMap<(NodeId, RelTypeId), RelIdPostingList>,
+    incoming: CowSegmentedMap<(NodeId, RelTypeId), RelIdPostingList>,
+    property_index: NodePropertyIndex,
     composite_property_index: CompositePropertyIndex,
     full_text_property_index: FullTextPropertyIndex,
     relationship_property_index: RelationshipPropertyIndex,
@@ -6053,7 +6068,7 @@ impl GraphStore {
         let mut candidates = self
             .full_text_property_index
             .get(&(label_id, property.to_string(), first.clone()))
-            .cloned()
+            .map(|node_ids| node_ids.iter().copied().collect::<BTreeSet<_>>())
             .unwrap_or_default();
         for token in rest {
             let Some(ids) =
@@ -6073,6 +6088,7 @@ impl GraphStore {
             .collect()
     }
 
+    #[inline]
     pub fn outgoing_relationships<'a>(
         &'a self,
         source: NodeId,
@@ -6085,6 +6101,7 @@ impl GraphStore {
             .filter_map(|rel_id| self.relationships.get(rel_id))
     }
 
+    #[inline]
     pub fn incoming_relationships<'a>(
         &'a self,
         target: NodeId,
@@ -6872,8 +6889,14 @@ impl GraphStore {
         direction: AdjacencyDirection,
     ) -> Option<&BTreeSet<RelId>> {
         match direction {
-            AdjacencyDirection::Outgoing => self.outgoing.get(&(node_id, rel_type)),
-            AdjacencyDirection::Incoming => self.incoming.get(&(node_id, rel_type)),
+            AdjacencyDirection::Outgoing => self
+                .outgoing
+                .get(&(node_id, rel_type))
+                .map(CowSegment::deref),
+            AdjacencyDirection::Incoming => self
+                .incoming
+                .get(&(node_id, rel_type))
+                .map(CowSegment::deref),
         }
     }
 
@@ -10428,7 +10451,7 @@ fn compute_statistics_with_basic(
 }
 
 fn compute_node_property_distinct_counts_from_index(
-    property_index: &CowSegmentedMap<(LabelId, String, Value), BTreeSet<NodeId>>,
+    property_index: &NodePropertyIndex,
 ) -> BTreeMap<(LabelId, String), u64> {
     let mut counts = BTreeMap::new();
     for (label_id, property, _) in property_index.keys() {
@@ -10447,10 +10470,8 @@ fn compute_relationship_property_distinct_counts_from_index(
     counts
 }
 
-fn recompute_node_property_index(
-    nodes: &CowSegmentedMap<NodeId, NodeRecord>,
-) -> CowSegmentedMap<(LabelId, String, Value), BTreeSet<NodeId>> {
-    let mut index = CowSegmentedMap::<(LabelId, String, Value), BTreeSet<NodeId>>::default();
+fn recompute_node_property_index(nodes: &CowSegmentedMap<NodeId, NodeRecord>) -> NodePropertyIndex {
+    let mut index = NodePropertyIndex::default();
     for node in nodes.values() {
         for label_id in &node.labels {
             for (property, value) in &node.properties {
@@ -10477,19 +10498,17 @@ fn recompute_relationship_property_index(
     index
 }
 
-fn node_property_index_reference_count(
-    index: &CowSegmentedMap<(LabelId, String, Value), BTreeSet<NodeId>>,
-) -> usize {
-    index.values().map(BTreeSet::len).sum()
+fn node_property_index_reference_count(index: &NodePropertyIndex) -> usize {
+    index.values().map(|node_ids| node_ids.len()).sum()
 }
 
 fn relationship_property_index_reference_count(index: &RelationshipPropertyIndex) -> usize {
-    index.values().map(BTreeSet::len).sum()
+    index.values().map(|rel_ids| rel_ids.len()).sum()
 }
 
 fn property_index_mismatch_summary(
-    maintained: &CowSegmentedMap<(LabelId, String, Value), BTreeSet<NodeId>>,
-    recomputed: &CowSegmentedMap<(LabelId, String, Value), BTreeSet<NodeId>>,
+    maintained: &NodePropertyIndex,
+    recomputed: &NodePropertyIndex,
 ) -> (usize, usize, usize, Vec<(LabelId, String, Value)>) {
     let mut missing_key_count = 0usize;
     let mut extra_key_count = 0usize;
@@ -10865,8 +10884,8 @@ fn adjacency_layout_for_degree(degree: usize) -> AdjacencyLayout {
 }
 
 fn maintained_adjacency_groups(
-    outgoing: &CowSegmentedMap<(NodeId, RelTypeId), BTreeSet<RelId>>,
-    incoming: &CowSegmentedMap<(NodeId, RelTypeId), BTreeSet<RelId>>,
+    outgoing: &CowSegmentedMap<(NodeId, RelTypeId), RelIdPostingList>,
+    incoming: &CowSegmentedMap<(NodeId, RelTypeId), RelIdPostingList>,
 ) -> AdjacencyGroups {
     let mut groups = AdjacencyGroups::new();
     for ((node_id, rel_type), rel_ids) in outgoing.iter() {
@@ -10876,7 +10895,7 @@ fn maintained_adjacency_groups(
                 rel_type: *rel_type,
                 direction: AdjacencyDirection::Outgoing,
             },
-            rel_ids.clone(),
+            rel_ids.iter().copied().collect(),
         );
     }
     for ((node_id, rel_type), rel_ids) in incoming.iter() {
@@ -10886,7 +10905,7 @@ fn maintained_adjacency_groups(
                 rel_type: *rel_type,
                 direction: AdjacencyDirection::Incoming,
             },
-            rel_ids.clone(),
+            rel_ids.iter().copied().collect(),
         );
     }
     groups
@@ -10919,8 +10938,8 @@ fn recompute_adjacency_groups(
 
 fn compute_degree_statistics_from_adjacency(
     nodes: &CowSegmentedMap<NodeId, NodeRecord>,
-    outgoing: &CowSegmentedMap<(NodeId, RelTypeId), BTreeSet<RelId>>,
-    incoming: &CowSegmentedMap<(NodeId, RelTypeId), BTreeSet<RelId>>,
+    outgoing: &CowSegmentedMap<(NodeId, RelTypeId), RelIdPostingList>,
+    incoming: &CowSegmentedMap<(NodeId, RelTypeId), RelIdPostingList>,
 ) -> BTreeMap<DegreeStatisticsKey, DegreeStatisticsEntry> {
     compute_degree_statistics_from_groups(nodes, maintained_adjacency_groups(outgoing, incoming))
 }
@@ -12155,6 +12174,155 @@ mod tests {
         assert!(store
             .relationships
             .shares_storage_with(&snapshot.relationships));
+    }
+
+    #[test]
+    fn active_snapshot_detaches_only_the_mutated_adjacency_posting_list() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        let source_a = store
+            .create_node(&mut catalog, "Source", BTreeMap::new())
+            .unwrap();
+        let source_b = store
+            .create_node(&mut catalog, "Source", BTreeMap::new())
+            .unwrap();
+        let target_a = store
+            .create_node(&mut catalog, "Target", BTreeMap::new())
+            .unwrap();
+        let target_b = store
+            .create_node(&mut catalog, "Target", BTreeMap::new())
+            .unwrap();
+        store
+            .create_relationship(
+                &mut catalog,
+                source_a,
+                target_a,
+                "LINKS_TO",
+                BTreeMap::new(),
+            )
+            .unwrap();
+        store
+            .create_relationship(
+                &mut catalog,
+                source_b,
+                target_a,
+                "LINKS_TO",
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let rel_type = catalog.rel_type_id("LINKS_TO").unwrap();
+        let snapshot = store.snapshot();
+
+        assert!(store
+            .outgoing
+            .get(&(source_a, rel_type))
+            .unwrap()
+            .shares_storage_with(snapshot.outgoing.get(&(source_a, rel_type)).unwrap()));
+        assert!(store
+            .outgoing
+            .get(&(source_b, rel_type))
+            .unwrap()
+            .shares_storage_with(snapshot.outgoing.get(&(source_b, rel_type)).unwrap()));
+
+        store
+            .create_relationship(
+                &mut catalog,
+                source_a,
+                target_b,
+                "LINKS_TO",
+                BTreeMap::new(),
+            )
+            .unwrap();
+
+        assert!(!store
+            .outgoing
+            .get(&(source_a, rel_type))
+            .unwrap()
+            .shares_storage_with(snapshot.outgoing.get(&(source_a, rel_type)).unwrap()));
+        assert!(store
+            .outgoing
+            .get(&(source_b, rel_type))
+            .unwrap()
+            .shares_storage_with(snapshot.outgoing.get(&(source_b, rel_type)).unwrap()));
+        assert_eq!(store.outgoing_relationships(source_a, rel_type).count(), 2);
+        assert_eq!(
+            snapshot.outgoing_relationships(source_a, rel_type).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn active_snapshot_detaches_only_the_mutated_property_posting_list() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        store
+            .create_node(
+                &mut catalog,
+                "Memory",
+                properties([("topic", Value::String("storage".to_string()))]),
+            )
+            .unwrap();
+        store
+            .create_node(
+                &mut catalog,
+                "Memory",
+                properties([("topic", Value::String("retrieval".to_string()))]),
+            )
+            .unwrap();
+        let label_id = catalog.label_id("Memory").unwrap();
+        let storage_key = (
+            label_id,
+            "topic".to_string(),
+            Value::String("storage".to_string()),
+        );
+        let retrieval_key = (
+            label_id,
+            "topic".to_string(),
+            Value::String("retrieval".to_string()),
+        );
+        let snapshot = store.snapshot();
+
+        assert!(store
+            .property_index
+            .get(&storage_key)
+            .unwrap()
+            .shares_storage_with(snapshot.property_index.get(&storage_key).unwrap()));
+        assert!(store
+            .property_index
+            .get(&retrieval_key)
+            .unwrap()
+            .shares_storage_with(snapshot.property_index.get(&retrieval_key).unwrap()));
+
+        store
+            .create_node(
+                &mut catalog,
+                "Memory",
+                properties([("topic", Value::String("storage".to_string()))]),
+            )
+            .unwrap();
+
+        assert!(!store
+            .property_index
+            .get(&storage_key)
+            .unwrap()
+            .shares_storage_with(snapshot.property_index.get(&storage_key).unwrap()));
+        assert!(store
+            .property_index
+            .get(&retrieval_key)
+            .unwrap()
+            .shares_storage_with(snapshot.property_index.get(&retrieval_key).unwrap()));
+        assert_eq!(
+            store
+                .seek_nodes_by_property(label_id, "topic", &Value::String("storage".to_string()),)
+                .count(),
+            2
+        );
+        assert_eq!(
+            snapshot
+                .seek_nodes_by_property(label_id, "topic", &Value::String("storage".to_string()),)
+                .count(),
+            1
+        );
     }
 
     #[test]
