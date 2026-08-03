@@ -6810,7 +6810,7 @@ impl GraphStore {
             })
             .collect::<BTreeMap<_, _>>();
         let schedule = SegmentReadScheduler::new(io_depth, max_coalesced_bytes)
-            .schedule(ranges.values().cloned());
+            .schedule_with_wave_budget(ranges.values().cloned(), max_wave_bytes);
         let mut rows = Vec::new();
         let mut consume = |payload: SegmentReadPayload| {
             for segment_id in &payload.range.segment_ids {

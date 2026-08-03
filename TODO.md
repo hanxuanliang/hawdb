@@ -1605,6 +1605,10 @@ contract.
   - User foreground reads are admitted first.
   - Internal background import, projection, compaction, analytics, and shadow
     migration work must be deferrable under resource pressure.
+  - [x] Pack immutable segment reads into adaptive waves bounded by both I/O
+    depth and admitted bytes. Split otherwise valid ranges into later waves
+    instead of rejecting the whole read, while keeping an individually
+    oversized range fail-closed before allocation.
   - Background work should be scheduled through resource classes and QoS limits;
     foreground user requests should not be throttled by internal maintenance.
   - [x] Require background-maintenance cutover evidence to include a passing

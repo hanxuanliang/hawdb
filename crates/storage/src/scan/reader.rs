@@ -363,6 +363,36 @@ mod tests {
     }
 
     #[test]
+    fn byte_budgeted_schedule_executes_ranges_in_separate_waves() {
+        let path = unique_test_file("byte_budgeted");
+        std::fs::write(&path, b"abcdefghijklmnop").unwrap();
+        let mut reader = FileSegmentRangeReader::new();
+        reader.register(7, &path);
+        let schedule =
+            SegmentReadScheduler::new(NonZeroUsize::new(2).unwrap(), NonZeroU64::new(8).unwrap())
+                .schedule_with_wave_budget(
+                    [
+                        SegmentReadRange::new(7, 1, 0, NonZeroU64::new(8).unwrap()),
+                        SegmentReadRange::new(7, 2, 8, NonZeroU64::new(8).unwrap()),
+                    ],
+                    NonZeroU64::new(8).unwrap(),
+                );
+        let mut payloads = Vec::new();
+
+        let report = SegmentReadExecutor::new(NonZeroU64::new(8).unwrap())
+            .execute(&reader, &schedule, |payload| {
+                payloads.push(payload.bytes);
+                Ok::<(), std::convert::Infallible>(())
+            })
+            .unwrap();
+
+        assert_eq!(payloads, vec![b"abcdefgh".to_vec(), b"ijklmnop".to_vec()]);
+        assert_eq!(report.wave_count, 2);
+        assert_eq!(report.max_wave_bytes_read, 8);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn controlled_reader_stops_between_io_waves() {
         let path = unique_test_file("cancelled");
         std::fs::write(&path, b"abcdefgh").unwrap();

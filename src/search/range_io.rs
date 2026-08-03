@@ -112,7 +112,7 @@ impl SearchIndex {
             NonZeroU64::new(INDEPENDENT_SEARCH_SEGMENT_MAX_COALESCED_BYTES)
                 .expect("independent segment coalescing limit is non-zero"),
         )
-        .schedule(ranges);
+        .schedule_with_wave_budget(ranges, self.range_read_config.max_wave_bytes);
         let mut reader = FileSegmentRangeReader::new();
         reader.register(
             SEARCH_SEGMENT_PAYLOAD_ARTIFACT_ID,

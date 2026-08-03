@@ -62,6 +62,20 @@ impl SegmentReadSchedule {
             .max()
             .unwrap_or(0)
     }
+
+    /// Returns the largest byte sum assigned to one scheduled I/O wave.
+    pub fn max_scheduled_wave_bytes(&self) -> u64 {
+        self.waves
+            .iter()
+            .map(|wave| {
+                wave.ranges
+                    .iter()
+                    .map(|range| range.length.get())
+                    .fold(0, u64::saturating_add)
+            })
+            .max()
+            .unwrap_or(0)
+    }
 }
 
 impl SegmentReadScheduler {
@@ -73,6 +87,27 @@ impl SegmentReadScheduler {
     }
 
     pub fn schedule<I>(self, ranges: I) -> SegmentReadSchedule
+    where
+        I: IntoIterator<Item = SegmentReadRange>,
+    {
+        self.schedule_inner(ranges, None)
+    }
+
+    /// Packs coalesced ranges under both the configured I/O depth and a byte
+    /// budget. A single range larger than the budget stays intact so the
+    /// executor can reject it before allocation.
+    pub fn schedule_with_wave_budget<I>(
+        self,
+        ranges: I,
+        max_wave_bytes: NonZeroU64,
+    ) -> SegmentReadSchedule
+    where
+        I: IntoIterator<Item = SegmentReadRange>,
+    {
+        self.schedule_inner(ranges, Some(max_wave_bytes))
+    }
+
+    fn schedule_inner<I>(self, ranges: I, max_wave_bytes: Option<NonZeroU64>) -> SegmentReadSchedule
     where
         I: IntoIterator<Item = SegmentReadRange>,
     {
@@ -94,9 +129,13 @@ impl SegmentReadScheduler {
             };
             let merged_end = previous.end_offset().max(range.end_offset());
             let merged_length = merged_end.saturating_sub(previous.offset);
+            let max_coalesced_bytes = max_wave_bytes
+                .map_or(self.max_coalesced_bytes.get(), |budget| {
+                    self.max_coalesced_bytes.get().min(budget.get())
+                });
             let can_merge = previous.artifact_id == range.artifact_id
                 && range.offset <= previous.end_offset()
-                && merged_length <= self.max_coalesced_bytes.get();
+                && merged_length <= max_coalesced_bytes;
             if can_merge {
                 previous.length =
                     NonZeroU64::new(merged_length).expect("merged read range remains non-zero");
@@ -107,12 +146,7 @@ impl SegmentReadScheduler {
         }
 
         let coalesced_range_count = coalesced.len();
-        let waves = coalesced
-            .chunks(self.io_depth.get())
-            .map(|ranges| SegmentReadWave {
-                ranges: ranges.to_vec(),
-            })
-            .collect();
+        let waves = build_waves(coalesced, self.io_depth, max_wave_bytes);
         SegmentReadSchedule {
             io_depth: self.io_depth,
             input_range_count,
@@ -120,6 +154,37 @@ impl SegmentReadScheduler {
             waves,
         }
     }
+}
+
+fn build_waves(
+    ranges: Vec<SegmentReadRange>,
+    io_depth: NonZeroUsize,
+    max_wave_bytes: Option<NonZeroU64>,
+) -> Vec<SegmentReadWave> {
+    let mut waves = Vec::new();
+    let mut current_ranges = Vec::new();
+    let mut current_bytes = 0u64;
+    for range in ranges {
+        let range_bytes = range.length.get();
+        let exceeds_depth = current_ranges.len() == io_depth.get();
+        let exceeds_byte_budget = max_wave_bytes.is_some_and(|budget| {
+            !current_ranges.is_empty() && current_bytes.saturating_add(range_bytes) > budget.get()
+        });
+        if exceeds_depth || exceeds_byte_budget {
+            waves.push(SegmentReadWave {
+                ranges: std::mem::take(&mut current_ranges),
+            });
+            current_bytes = 0;
+        }
+        current_bytes = current_bytes.saturating_add(range_bytes);
+        current_ranges.push(range);
+    }
+    if !current_ranges.is_empty() {
+        waves.push(SegmentReadWave {
+            ranges: current_ranges,
+        });
+    }
+    waves
 }
 
 #[cfg(test)]
@@ -166,6 +231,51 @@ mod tests {
 
         assert_eq!(schedule.coalesced_range_count, 3);
         assert_eq!(schedule.wave_count(), 1);
+    }
+
+    #[test]
+    fn partitions_waves_by_io_depth_and_byte_budget() {
+        let scheduler =
+            SegmentReadScheduler::new(NonZeroUsize::new(4).unwrap(), NonZeroU64::new(256).unwrap());
+        let schedule = scheduler.schedule_with_wave_budget(
+            [
+                range(1, 1, 0, 80),
+                range(2, 2, 0, 80),
+                range(3, 3, 0, 80),
+                range(4, 4, 0, 80),
+            ],
+            NonZeroU64::new(160).unwrap(),
+        );
+
+        assert_eq!(schedule.wave_count(), 2);
+        assert_eq!(schedule.max_in_flight(), 2);
+        assert_eq!(schedule.max_scheduled_wave_bytes(), 160);
+        assert_eq!(schedule.scheduled_bytes(), 320);
+    }
+
+    #[test]
+    fn wave_budget_also_bounds_coalesced_ranges() {
+        let scheduler =
+            SegmentReadScheduler::new(NonZeroUsize::new(4).unwrap(), NonZeroU64::new(256).unwrap());
+        let schedule = scheduler.schedule_with_wave_budget(
+            [range(1, 1, 0, 80), range(1, 2, 80, 80)],
+            NonZeroU64::new(128).unwrap(),
+        );
+
+        assert_eq!(schedule.coalesced_range_count, 2);
+        assert_eq!(schedule.wave_count(), 2);
+        assert_eq!(schedule.max_scheduled_wave_bytes(), 80);
+    }
+
+    #[test]
+    fn leaves_an_individually_oversized_range_for_fail_closed_execution() {
+        let scheduler =
+            SegmentReadScheduler::new(NonZeroUsize::new(4).unwrap(), NonZeroU64::new(256).unwrap());
+        let schedule = scheduler
+            .schedule_with_wave_budget([range(1, 1, 0, 256)], NonZeroU64::new(128).unwrap());
+
+        assert_eq!(schedule.wave_count(), 1);
+        assert_eq!(schedule.max_scheduled_wave_bytes(), 256);
     }
 
     #[test]
