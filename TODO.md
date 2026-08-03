@@ -2176,6 +2176,48 @@ contract.
   - [x] Expose a compact property-index consistency report that validates
     maintained node and relationship property indexes against full recompute
     samples before relying on them for read-heavy scan pruning.
+- [ ] Replace full-scan BM25 scoring with a BF-Tree-inspired segmented lexical
+  inverted projection only after feasibility gates prove a material production
+  benefit.
+  - Keep lexical search as a rebuildable projection over canonical graph and
+    content state. Do not move lexical index state into the graph WAL or make it
+    a source of truth.
+  - Persist immutable base segments containing a term dictionary, posting lists
+    with document ordinal and term frequency, document lengths, selected field
+    information, and segment corpus statistics. Publish them through a
+    versioned, checksummed manifest bound to the source graph epoch.
+  - Buffer bounded upserts and delete tombstones in a small in-memory mini-delta
+    per segment, then consolidate into a replacement immutable base segment.
+    Preserve durable-before-publish, snapshot pinning, delayed reclamation, and
+    fail-closed recovery semantics instead of copying BF-Tree's WAL or raw
+    pointer snapshot format.
+  - Apply ACL, space, lifecycle, and metadata predicates before lexical ranking.
+    Compute exact candidate-scoped document count, document frequency, and
+    average document length from the authorized CandidateSet so unauthorized
+    documents cannot affect BM25 scores or rank windows.
+  - Read postings only for analyzed query terms, intersect them with the
+    authorized CandidateSet, maintain a bounded streaming TopK, and fetch title,
+    body, metadata, and matched spans only for final candidates. Do not tokenize
+    every filtered document or rebuild corpus statistics on every query.
+  - Preserve the current analyzer contract: title weighting, identifier
+    splitting, CJK bigrams/trigrams, suffix normalization, stopwords, semantic
+    aliases, matched terms, and matched spans. Treat any ranking-semantic change
+    as a versioned projection change with explicit shadow evidence.
+  - Add a differential oracle against the current BM25 implementation for text
+    and hybrid modes, including metadata and ACL filters, incremental
+    upsert/delete, checkpoint reopen, torn artifacts, stale manifests, and RRF
+    score breakdowns.
+  - Add Mem-shaped benchmarks for selective identifiers, CJK text, common terms,
+    no-hit queries, metadata-filtered search, mixed foreground queries and
+    background consolidation, and datasets larger than the storage memory
+    budget. Record P50/P95/P99 latency, throughput, steady and peak RSS, posting
+    bytes read, candidate postings visited, page faults, update latency,
+    consolidation amplification, checkpoint time, and recovery time.
+  - Do not switch the production path unless TopK and score parity is exact for
+    unchanged semantics, selective text-query P95 improves by at least 50% at
+    100,000 documents, query work is proportional to matching postings rather
+    than corpus size, steady RSS stays within the configured storage budget plus
+    10%, and update/checkpoint P95 regressions remain below 10%.
 - [x] Add workload fixtures based on real Nowledge routes before low-level
   tuning.
   - Benchmark graph reads, bounded expansions, metadata-filtered search, and
