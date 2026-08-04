@@ -130,6 +130,15 @@ equivalent host-owned admission boundary. Raw database access MAY remain a
 low-level library capability, but its use MUST be reported as non-production
 safe unless the host supplies equivalent global admission.
 
+`skein-embedded-query-path-readiness-v1` reports this boundary without
+claiming traffic readiness. `SkeinEmbedded::query_admitted`, its parameterized
+and task-context variants, and `SkeinTokioEmbedded::query` are
+`admission_safe=true`. `SkeinEmbedded::database`, `database_mut`, and
+`into_database` remain controlled-host and test surfaces; their report is
+`admission_safe=false` with `host_equivalent_governor_not_proven`. An
+admission-safe path is only one input to production qualification and MUST NOT
+replace revision-, dataset-, and workload-bound evidence.
+
 An asynchronous facade that returns a materialized result remains subject to
 the result budget. A streaming asynchronous API MUST propagate consumer
 backpressure and cancellation without retaining the complete result.

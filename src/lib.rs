@@ -180,7 +180,9 @@ pub use crash_recovery_evidence::{
 };
 pub use cypher::RelationshipDirection;
 pub use embedded::{
-    EmbeddedDeploymentProfile, EmbeddedRuntimeResources, SkeinEmbedded, SkeinEmbeddedOpenOptions,
+    EmbeddedDeploymentProfile, EmbeddedQueryEntrypoint, EmbeddedQueryError,
+    EmbeddedQueryPathReadiness, EmbeddedRuntimeResources, SkeinEmbedded, SkeinEmbeddedOpenOptions,
+    EMBEDDED_QUERY_PATH_READINESS_PROTOCOL,
 };
 #[cfg(feature = "tokio-runtime")]
 pub use embedded_tokio::{SkeinTokioEmbedded, SkeinTokioEmbeddedError};

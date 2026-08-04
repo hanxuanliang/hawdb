@@ -1,11 +1,9 @@
 use crate::{
-    QueryOutput, QueryStreamOptions, SkeinEmbedded, SkeinEmbeddedOpenOptions, SkeinError, Value,
+    EmbeddedQueryEntrypoint, EmbeddedQueryPathReadiness, QueryOutput, QueryStreamOptions,
+    SkeinEmbedded, SkeinEmbeddedOpenOptions, SkeinError, Value,
 };
 use skein_core::RuntimeTaskContext;
-use skein_qos::{
-    RuntimeGovernorSnapshot, RuntimeWorkKind, RuntimeWorkPriority, RuntimeWorkRequest, WorkClass,
-    WorkPriority,
-};
+use skein_qos::{RuntimeGovernorSnapshot, RuntimeWorkKind, RuntimeWorkRequest};
 use skein_runtime_tokio::{
     TokioHandle, TokioRuntimeAdapter, TokioRuntimeConfig, TokioRuntimeError, TokioRuntimeOwnership,
     TokioTaskError,
@@ -134,6 +132,10 @@ impl SkeinTokioEmbedded {
         self.runtime.governor_snapshot()
     }
 
+    pub fn admitted_query_path_readiness(&self) -> EmbeddedQueryPathReadiness {
+        EmbeddedQueryPathReadiness::admitted(EmbeddedQueryEntrypoint::AdmittedTokio)
+    }
+
     pub fn refresh_runtime_resources(&self) -> bool {
         lock_embedded(&self.embedded).refresh_runtime_resources()
     }
@@ -167,28 +169,8 @@ impl SkeinTokioEmbedded {
                 .database_mut()
                 .runtime_admission_plan(&cypher_text, &parameters)
         })?;
-        let result_budget_bytes = self.runtime_snapshot().limits.result_budget_bytes;
-        let priority = match admission.work_request.priority {
-            WorkPriority::Foreground => RuntimeWorkPriority::Foreground,
-            WorkPriority::Background => RuntimeWorkPriority::Background,
-        };
-        let request = if admission.is_mutation {
-            RuntimeWorkRequest::mutation(priority, admission.estimated_memory_bytes)
-        } else {
-            let kind = match admission.work_request.class {
-                WorkClass::Query | WorkClass::Mutation | WorkClass::Analytics => {
-                    RuntimeWorkKind::Query
-                }
-                WorkClass::Projection | WorkClass::Import => RuntimeWorkKind::Maintenance,
-                WorkClass::Shadow => RuntimeWorkKind::Control,
-            };
-            RuntimeWorkRequest::query(
-                priority,
-                admission.estimated_memory_bytes,
-                result_budget_bytes,
-            )
-            .with_kind(kind)
-        };
+        let result_budget_bytes = self.with_embedded(SkeinEmbedded::admitted_result_budget_bytes);
+        let request = admission.clone().runtime_work_request(result_budget_bytes);
         self.execute_query_with_request(
             cypher_text,
             parameters,
@@ -224,10 +206,13 @@ impl SkeinTokioEmbedded {
         } else {
             request.with_memory_bytes(request.memory_bytes.max(admission.estimated_memory_bytes))
         };
-        let request = if admission.is_mutation || request.result_bytes > 0 {
+        let result_budget_bytes = self.with_embedded(SkeinEmbedded::admitted_result_budget_bytes);
+        let request = if admission.is_mutation {
             request
+        } else if request.result_bytes > 0 {
+            request.with_result_bytes(request.result_bytes.min(result_budget_bytes))
         } else {
-            request.with_result_bytes(self.runtime_snapshot().limits.result_budget_bytes)
+            request.with_result_bytes(result_budget_bytes)
         };
         self.execute_query_with_request(
             cypher_text,
@@ -328,6 +313,9 @@ mod tests {
         let embedded =
             SkeinTokioEmbedded::open_owned(SkeinEmbeddedOpenOptions::new(&path)).unwrap();
         assert_eq!(embedded.ownership(), TokioRuntimeOwnership::Owned);
+        let readiness = embedded.admitted_query_path_readiness();
+        assert_eq!(readiness.entrypoint, EmbeddedQueryEntrypoint::AdmittedTokio);
+        assert!(readiness.admission_safe);
 
         embedded
             .runtime()
@@ -392,7 +380,7 @@ mod tests {
             .runtime_admission_plan("MATCH (p:Probe) RETURN p.value AS value", &BTreeMap::new())
             .unwrap();
 
-        assert_eq!(create.work_request.class, WorkClass::Query);
+        assert_eq!(create.work_request.class, skein_qos::WorkClass::Query);
         assert!(create.is_mutation);
         assert!(!read.is_mutation);
         assert!(create.estimated_memory_bytes > 0);

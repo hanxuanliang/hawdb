@@ -9,6 +9,34 @@ pub(crate) struct RuntimeAdmissionPlan {
     pub streaming_eligible: bool,
 }
 
+impl RuntimeAdmissionPlan {
+    pub(crate) fn runtime_work_request(
+        self,
+        result_budget_bytes: u64,
+    ) -> skein_qos::RuntimeWorkRequest {
+        let priority = match self.work_request.priority {
+            WorkPriority::Foreground => skein_qos::RuntimeWorkPriority::Foreground,
+            WorkPriority::Background => skein_qos::RuntimeWorkPriority::Background,
+        };
+        if self.is_mutation {
+            return skein_qos::RuntimeWorkRequest::mutation(priority, self.estimated_memory_bytes);
+        }
+        let kind = match self.work_request.class {
+            WorkClass::Query | WorkClass::Mutation | WorkClass::Analytics => {
+                skein_qos::RuntimeWorkKind::Query
+            }
+            WorkClass::Projection | WorkClass::Import => skein_qos::RuntimeWorkKind::Maintenance,
+            WorkClass::Shadow => skein_qos::RuntimeWorkKind::Control,
+        };
+        skein_qos::RuntimeWorkRequest::query(
+            priority,
+            self.estimated_memory_bytes,
+            result_budget_bytes,
+        )
+        .with_kind(kind)
+    }
+}
+
 #[cfg_attr(not(feature = "tokio-runtime"), allow(dead_code))]
 const CONTROL_STATEMENT_MEMORY_BYTES: u64 = 1024 * 1024;
 

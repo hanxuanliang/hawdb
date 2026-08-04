@@ -4,14 +4,18 @@ use crate::nowledge_mem::{
 };
 use crate::store::DurabilityPolicy;
 use crate::{
-    AdaptiveVectorBackendPolicy, Database, DatabaseConfig, Result, RuntimeCapabilities,
-    SearchIndex, SearchRangeReadConfig,
+    AdaptiveVectorBackendPolicy, Database, DatabaseConfig, QueryOutput, QueryStreamOptions, Result,
+    RuntimeCapabilities, SearchIndex, SearchRangeReadConfig, SkeinError, Value,
 };
+use skein_core::{RuntimeCancellationReason, RuntimeTaskContext};
 use skein_qos::{
-    IoConcurrencyBudget, RuntimeGovernor, RuntimeGovernorConfig, RuntimeMemorySnapshot,
-    RuntimeResourceBudget, RuntimeResourceSnapshot, StorageDeviceProfile,
+    IoConcurrencyBudget, RuntimeAdmissionError, RuntimeGovernor, RuntimeGovernorConfig,
+    RuntimeMemorySnapshot, RuntimeResourceBudget, RuntimeResourceSnapshot, StorageDeviceProfile,
 };
 use skein_storage::SegmentReadScheduler;
+use std::collections::BTreeMap;
+use std::error::Error;
+use std::fmt::{self, Display, Formatter};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
@@ -65,6 +69,107 @@ pub struct SkeinEmbedded {
     deployment_profile: EmbeddedDeploymentProfile,
     runtime_resources: EmbeddedRuntimeResources,
     runtime_governor: RuntimeGovernor,
+}
+
+pub const EMBEDDED_QUERY_PATH_READINESS_PROTOCOL: &str = "skein-embedded-query-path-readiness-v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbeddedQueryEntrypoint {
+    AdmittedSync,
+    AdmittedTokio,
+    RawDatabase,
+}
+
+impl EmbeddedQueryEntrypoint {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AdmittedSync => "skein_embedded_admitted",
+            Self::AdmittedTokio => "skein_tokio_embedded_admitted",
+            Self::RawDatabase => "raw_database",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddedQueryPathReadiness {
+    pub protocol: &'static str,
+    pub entrypoint: EmbeddedQueryEntrypoint,
+    pub governor_enforced: bool,
+    pub result_budget_enforced: bool,
+    pub cancellation_enforced: bool,
+    pub mutation_serialized: bool,
+    pub admission_safe: bool,
+    pub blockers: Vec<&'static str>,
+}
+
+impl EmbeddedQueryPathReadiness {
+    pub(crate) fn admitted(entrypoint: EmbeddedQueryEntrypoint) -> Self {
+        Self {
+            protocol: EMBEDDED_QUERY_PATH_READINESS_PROTOCOL,
+            entrypoint,
+            governor_enforced: true,
+            result_budget_enforced: true,
+            cancellation_enforced: true,
+            mutation_serialized: true,
+            admission_safe: true,
+            blockers: Vec::new(),
+        }
+    }
+
+    fn raw_database() -> Self {
+        Self {
+            protocol: EMBEDDED_QUERY_PATH_READINESS_PROTOCOL,
+            entrypoint: EmbeddedQueryEntrypoint::RawDatabase,
+            governor_enforced: false,
+            result_budget_enforced: false,
+            cancellation_enforced: false,
+            mutation_serialized: true,
+            admission_safe: false,
+            blockers: vec![
+                "runtime_governor_not_enforced",
+                "host_equivalent_governor_not_proven",
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EmbeddedQueryError {
+    Database(SkeinError),
+    Admission(RuntimeAdmissionError),
+    Stopped(RuntimeCancellationReason),
+}
+
+impl Display for EmbeddedQueryError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Database(error) => Display::fmt(error, formatter),
+            Self::Admission(error) => Display::fmt(error, formatter),
+            Self::Stopped(reason) => write!(formatter, "runtime task stopped: {reason}"),
+        }
+    }
+}
+
+impl Error for EmbeddedQueryError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Database(error) => Some(error),
+            Self::Admission(error) => Some(error),
+            Self::Stopped(reason) => Some(reason),
+        }
+    }
+}
+
+impl From<SkeinError> for EmbeddedQueryError {
+    fn from(error: SkeinError) -> Self {
+        Self::Database(error)
+    }
+}
+
+impl From<RuntimeAdmissionError> for EmbeddedQueryError {
+    fn from(error: RuntimeAdmissionError) -> Self {
+        Self::Admission(error)
+    }
 }
 
 impl SkeinEmbeddedOpenOptions {
@@ -209,6 +314,115 @@ impl SkeinEmbedded {
 
     pub fn runtime_capabilities(&self) -> RuntimeCapabilities {
         self.database.runtime_capabilities()
+    }
+
+    pub fn admitted_query_path_readiness(&self) -> EmbeddedQueryPathReadiness {
+        EmbeddedQueryPathReadiness::admitted(EmbeddedQueryEntrypoint::AdmittedSync)
+    }
+
+    pub fn raw_database_query_path_readiness() -> EmbeddedQueryPathReadiness {
+        EmbeddedQueryPathReadiness::raw_database()
+    }
+
+    pub fn query_admitted(
+        &mut self,
+        cypher_text: &str,
+    ) -> std::result::Result<QueryOutput, EmbeddedQueryError> {
+        self.query_with_params_admitted_context(
+            cypher_text,
+            &BTreeMap::new(),
+            &RuntimeTaskContext::default(),
+        )
+    }
+
+    pub fn query_with_params_admitted(
+        &mut self,
+        cypher_text: &str,
+        parameters: &BTreeMap<String, Value>,
+    ) -> std::result::Result<QueryOutput, EmbeddedQueryError> {
+        self.query_with_params_admitted_context(
+            cypher_text,
+            parameters,
+            &RuntimeTaskContext::default(),
+        )
+    }
+
+    pub fn query_with_params_admitted_context(
+        &mut self,
+        cypher_text: &str,
+        parameters: &BTreeMap<String, Value>,
+        task_context: &RuntimeTaskContext,
+    ) -> std::result::Result<QueryOutput, EmbeddedQueryError> {
+        self.check_admitted_query_context(task_context)?;
+        let admission = self
+            .database
+            .runtime_admission_plan(cypher_text, parameters)?;
+        let result_budget_bytes = self.admitted_result_budget_bytes();
+        let request = admission.clone().runtime_work_request(result_budget_bytes);
+        let is_mutation = admission.is_mutation;
+        let streaming_eligible = admission.streaming_eligible;
+        let _permit = match self.runtime_governor.try_admit(request) {
+            Ok(permit) => permit,
+            Err(error) => {
+                if error.is_retryable() {
+                    self.runtime_governor
+                        .record_admission_wait(request, error.code);
+                }
+                return Err(EmbeddedQueryError::Admission(error));
+            }
+        };
+        let result = if is_mutation || !streaming_eligible {
+            self.database
+                .query_with_params_context(cypher_text, parameters, task_context)
+        } else {
+            let max_rows = self.database.config().max_read_result_rows;
+            let max_payload_bytes = usize::try_from(request.result_bytes).unwrap_or(usize::MAX);
+            let mut rows = Vec::new();
+            self.database
+                .begin_read_transaction()
+                .query_with_params_streaming_context(
+                    cypher_text,
+                    parameters,
+                    QueryStreamOptions {
+                        max_rows,
+                        max_payload_bytes: Some(max_payload_bytes),
+                    },
+                    task_context,
+                    |row| {
+                        rows.push(row);
+                        Ok(())
+                    },
+                )
+                .map(|_| QueryOutput { rows })
+        };
+        if !is_mutation {
+            self.check_admitted_query_context(task_context)?;
+        } else if result.is_err()
+            && let Err(reason) = task_context.checkpoint()
+        {
+            self.runtime_governor.record_cancellation(reason);
+            return Err(EmbeddedQueryError::Stopped(reason));
+        }
+        result.map_err(EmbeddedQueryError::Database)
+    }
+
+    pub(crate) fn admitted_result_budget_bytes(&self) -> u64 {
+        let governor_budget = self.runtime_governor.snapshot().limits.result_budget_bytes;
+        self.database
+            .config()
+            .max_read_result_payload_bytes
+            .map(|bytes| u64::try_from(bytes).unwrap_or(u64::MAX))
+            .map_or(governor_budget, |bytes| bytes.min(governor_budget))
+    }
+
+    fn check_admitted_query_context(
+        &self,
+        task_context: &RuntimeTaskContext,
+    ) -> std::result::Result<(), EmbeddedQueryError> {
+        task_context.checkpoint().map_err(|reason| {
+            self.runtime_governor.record_cancellation(reason);
+            EmbeddedQueryError::Stopped(reason)
+        })
     }
 
     pub fn database(&self) -> &Database {
@@ -418,6 +632,96 @@ mod tests {
         assert!(options.config.runtime_capabilities.vector_search);
         assert!(!options.config.runtime_capabilities.graph_analytics);
         assert!(!options.config.runtime_capabilities.background_maintenance);
+    }
+
+    #[test]
+    fn query_path_readiness_rejects_raw_database_access() {
+        let raw = SkeinEmbedded::raw_database_query_path_readiness();
+
+        assert_eq!(raw.protocol, EMBEDDED_QUERY_PATH_READINESS_PROTOCOL);
+        assert_eq!(raw.entrypoint, EmbeddedQueryEntrypoint::RawDatabase);
+        assert!(!raw.admission_safe);
+        assert!(raw.blockers.contains(&"runtime_governor_not_enforced"));
+        assert!(raw
+            .blockers
+            .contains(&"host_equivalent_governor_not_proven"));
+    }
+
+    #[test]
+    fn admitted_sync_queries_hold_runtime_governor_permits() {
+        let root = unique_test_dir("embedded-admitted-query");
+        let mut engine = SkeinEmbedded::open(root.join("graph")).unwrap();
+
+        engine
+            .query_admitted("CREATE (:Memory {id: 'admitted'})")
+            .unwrap();
+        let output = engine
+            .query_admitted("MATCH (m:Memory) RETURN m.id AS id")
+            .unwrap();
+
+        assert_eq!(
+            output.rows[0].get("id"),
+            Some(&Value::String("admitted".to_string()))
+        );
+        let snapshot = engine.runtime_governor().snapshot();
+        assert_eq!(snapshot.admissions, 2);
+        assert_eq!(snapshot.completions, 2);
+        assert_eq!(snapshot.admitted_memory_bytes, 0);
+        assert!(engine.admitted_query_path_readiness().admission_safe);
+    }
+
+    #[test]
+    fn admitted_sync_query_rejects_before_mutation_when_memory_is_unavailable() {
+        let root = unique_test_dir("embedded-admission-reject");
+        let governor = RuntimeGovernorConfig {
+            memory_budget_bytes: Some(1),
+            ..RuntimeGovernorConfig::default()
+        };
+        let mut engine = SkeinEmbedded::open_with_options(
+            SkeinEmbeddedOpenOptions::new(root.join("graph"))
+                .with_runtime_governor_config(governor),
+        )
+        .unwrap();
+
+        let error = engine
+            .query_admitted("CREATE (:Memory {id: 'rejected'})")
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            EmbeddedQueryError::Admission(RuntimeAdmissionError {
+                code: skein_qos::RuntimeAdmissionCode::MemorySaturated,
+                retryable: false,
+                ..
+            })
+        ));
+        assert!(engine
+            .database_mut()
+            .query("MATCH (m:Memory) RETURN m.id AS id")
+            .unwrap()
+            .rows
+            .is_empty());
+    }
+
+    #[test]
+    fn admitted_sync_query_reports_pre_execution_cancellation() {
+        let root = unique_test_dir("embedded-admission-cancel");
+        let mut engine = SkeinEmbedded::open(root.join("graph")).unwrap();
+        let cancellation = skein_core::RuntimeCancellationToken::new();
+        cancellation.cancel();
+        let context = RuntimeTaskContext::without_deadline(cancellation);
+
+        let error = engine
+            .query_with_params_admitted_context("RETURN 1", &BTreeMap::new(), &context)
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            EmbeddedQueryError::Stopped(RuntimeCancellationReason::Cancelled)
+        );
+        let snapshot = engine.runtime_governor().snapshot();
+        assert_eq!(snapshot.admissions, 0);
+        assert_eq!(snapshot.cancellations, 1);
     }
 
     #[test]
