@@ -2255,7 +2255,7 @@ contract.
   - [x] Expose a compact property-index consistency report that validates
     maintained node and relationship property indexes against full recompute
     samples before relying on them for read-heavy scan pruning.
-- [ ] Replace full-scan BM25 scoring with a BF-Tree-inspired segmented lexical
+- [x] Replace full-scan BM25 scoring with a BF-Tree-inspired segmented lexical
   inverted projection only after feasibility gates prove a material production
   benefit.
   - [x] Implement a shadow-capable immutable lexical projection with

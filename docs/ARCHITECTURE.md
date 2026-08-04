@@ -727,6 +727,17 @@ candidate spill and block reads, retained score entries, hydrated rows, and
 hydrated bytes. The typed `NowledgeMemOutOfCoreSearchProjection` facade exposes
 this read path to Mem.
 
+Production callers must use `NowledgeMemOutOfCoreSearchProjection::open_production`
+or `open_production_with_config`. These constructors require a
+generation-bound `SearchLexicalProductionQualificationReport` and recompute the
+admission decision from raw evidence instead of trusting its `ready` field. The
+gate requires exact TopK and score parity across metadata, ACL, hybrid,
+incremental, reopen, and corruption cases; at least 100,000 documents; a
+larger-than-memory workload; at least 50% selective-query P95 improvement;
+posting-proportional query work; RSS within 110% of the storage budget; and no
+more than 10% update or checkpoint P95 regression. Rebuilding or republishing
+the projection changes its generation and invalidates earlier evidence.
+
 `SearchIndex::open()` deliberately retains full residency for mutable rebuild,
 delta, compatibility probe, and borrowed `document()` APIs. Callers must not use
 that maintenance owner as the larger-than-memory production Search read path.

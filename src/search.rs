@@ -36,6 +36,7 @@ use std::sync::{Arc, Mutex};
 mod analyzer_lexicon;
 mod cjk_tokenizer;
 mod lexical_projection;
+mod lexical_readiness;
 mod out_of_core;
 mod range_io;
 mod recall_validation;
@@ -47,6 +48,11 @@ use cjk_tokenizer::{chinese_search_tokens, is_cjk_search_char};
 use lexical_projection::{
     analyzer_digest as lexical_analyzer_digest, documents_digest as lexical_documents_digest,
     LexicalMiniDelta, LexicalProjectionConfig, LexicalProjectionReader, LexicalProjectionWriter,
+};
+pub use lexical_readiness::{
+    SearchLexicalFeasibilityCoverage, SearchLexicalFeasibilityMetrics,
+    SearchLexicalProductionQualificationReport, SEARCH_LEXICAL_QUALIFICATION_PROTOCOL,
+    SEARCH_LEXICAL_QUALIFICATION_PROTOCOL_VERSION,
 };
 pub use out_of_core::{
     SearchOutOfCoreConfig, SearchOutOfCoreHydrationOutput, SearchOutOfCoreMetrics,

@@ -5,11 +5,11 @@ use crate::api::{
 };
 use crate::search::{
     AdaptiveVectorSearchOptions, CompressedVectorSearchMode, SearchCandidateSetReport,
-    SearchFallbackReasonCode, SearchFusionWeights, SearchMode, SearchOutOfCoreConfig,
-    SearchOutOfCoreHydrationOutput, SearchOutOfCoreMetrics, SearchOutOfCoreReader,
-    SearchQueryOptions, SearchRangeReadConfig, VectorRecallValidationOptions,
-    VectorRecallValidationReport, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
-    VECTOR_RECALL_VALIDATION_PROTOCOL,
+    SearchFallbackReasonCode, SearchFusionWeights, SearchLexicalProductionQualificationReport,
+    SearchMode, SearchOutOfCoreConfig, SearchOutOfCoreHydrationOutput, SearchOutOfCoreMetrics,
+    SearchOutOfCoreReader, SearchQueryOptions, SearchRangeReadConfig,
+    VectorRecallValidationOptions, VectorRecallValidationReport,
+    NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, VECTOR_RECALL_VALIDATION_PROTOCOL,
 };
 use crate::search_projection_evidence::{
     nowledge_search_projection_evidence_json, nowledge_search_projection_shadow_evidence_json,
@@ -6943,6 +6943,36 @@ impl NowledgeMemOutOfCoreSearchProjection {
         Ok(Self {
             reader: SearchOutOfCoreReader::open_with_config(path, config)?,
         })
+    }
+
+    pub fn open_production(
+        path: impl AsRef<Path>,
+        qualification: &SearchLexicalProductionQualificationReport,
+    ) -> Result<Self> {
+        let projection = Self::open(path)?;
+        projection.validate_lexical_production_qualification(qualification)?;
+        Ok(projection)
+    }
+
+    pub fn open_production_with_config(
+        path: impl AsRef<Path>,
+        config: SearchOutOfCoreConfig,
+        qualification: &SearchLexicalProductionQualificationReport,
+    ) -> Result<Self> {
+        let projection = Self::open_with_config(path, config)?;
+        projection.validate_lexical_production_qualification(qualification)?;
+        Ok(projection)
+    }
+
+    pub fn validate_lexical_production_qualification(
+        &self,
+        qualification: &SearchLexicalProductionQualificationReport,
+    ) -> Result<()> {
+        qualification.validate_for_projection(
+            self.reader.generation(),
+            self.reader.source_graph_commit_epoch(),
+            self.reader.document_count(),
+        )
     }
 
     pub fn reader(&self) -> &SearchOutOfCoreReader {

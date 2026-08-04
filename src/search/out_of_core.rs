@@ -526,6 +526,14 @@ impl SearchOutOfCoreReader {
         self.manifest.document_count
     }
 
+    pub fn generation(&self) -> u64 {
+        self.manifest.generation
+    }
+
+    pub fn source_graph_commit_epoch(&self) -> Option<u64> {
+        self.manifest.source_graph_commit_epoch
+    }
+
     pub fn resident_document_count(&self) -> usize {
         0
     }
@@ -2392,7 +2400,10 @@ mod tests {
     use crate::nowledge_mem::{
         NowledgeMemOutOfCoreSearchProjection, NowledgeMemSearchCandidateRequest,
     };
-    use crate::search::SearchFusionWeights;
+    use crate::search::{
+        SearchFusionWeights, SearchLexicalFeasibilityCoverage, SearchLexicalFeasibilityMetrics,
+        SearchLexicalProductionQualificationReport,
+    };
     use std::io::{Seek, SeekFrom};
 
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -2828,6 +2839,28 @@ mod tests {
         assert_eq!(output.result.hits[0].id, "memory:000");
         assert_eq!(output.metrics.hydrated_documents, 1);
         assert_eq!(projection.reader().resident_document_count(), 0);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn production_facade_rejects_unqualified_or_stale_lexical_evidence() {
+        let path = test_dir("nowledge-production-qualification");
+        let mut index = SearchIndex::open(&path).unwrap();
+        index.upsert(document(0, "team")).unwrap();
+        index.checkpoint().unwrap();
+        let qualification = SearchLexicalProductionQualificationReport::evaluate(
+            999,
+            Some(999),
+            100_000,
+            true,
+            SearchLexicalFeasibilityCoverage::default(),
+            SearchLexicalFeasibilityMetrics::default(),
+        );
+
+        let error = NowledgeMemOutOfCoreSearchProjection::open_production(&path, &qualification)
+            .unwrap_err();
+        assert!(error.to_string().contains("projection_identity_mismatch"));
+        assert!(error.to_string().contains("workload_coverage_incomplete"));
         fs::remove_dir_all(path).unwrap();
     }
 
