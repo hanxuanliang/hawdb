@@ -79,6 +79,28 @@ cargo build --locked --release -p skein --no-default-features \
 development and CI compile coverage, but their outputs are not production
 artifacts.
 
+### Bazel validation
+
+Build the embedded library and run every Bazel unit-test target with the default
+repository configuration:
+
+```console
+bazel build //:skein
+bazel test --test_output=errors //...
+```
+
+The Bazel graph covers the root library and CLI tests plus every Cargo workspace
+crate, including the Tokio runtime, Linux cgroup parser, optimizer fuzz library,
+vector projection, and synthetic qualification workload. CI checks that every
+Cargo workspace package has a `BUILD.bazel` file and an explicit `rust_test`
+target before running the reviewed target lists, so a newly added crate cannot
+be silently omitted from Bazel testing.
+
+Bazel unit tests complement rather than replace Cargo feature-matrix, doctest,
+ignored resource-profile, Loom, scheduled fuzz, and release soak jobs. Those
+remain separate gates because they require different features, platforms, or
+runtime inputs.
+
 The default `vector-search` implementation keeps raw embeddings canonical and
 publishes an immutable, checksummed `search_turboquant.<generation>.skein`
 candidate projection. Projection construction is segment-bounded, filtered
