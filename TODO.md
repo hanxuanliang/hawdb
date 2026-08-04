@@ -2215,6 +2215,12 @@ contract.
     forcibly cancelled.
   - Control query and operator memory admission, result bytes, I/O depth, and
     background concurrency independently of Tokio worker counts.
+  - [x] Close executor-owned unbounded intermediate state. Stream ordinary
+    read results through the row consumer, admit DISTINCT, Cartesian build
+    sides, aggregate state, path frontiers, expansion candidates, source
+    sidecar candidates, and materialized fallbacks against the configured
+    blocking budget, and give Sort, grouped aggregate, and TopN bounded
+    two-way merge spill with cumulative byte and run limits.
   - Add cross-platform tests for borrowed and owned runtime lifecycles, nested
     runtime rejection, Linux cgroup limit parsing, platform fallbacks, bounded
     blocking admission, cancellation latency, and adaptive budget changes.

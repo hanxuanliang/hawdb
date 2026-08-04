@@ -232,7 +232,7 @@ impl Database {
             } else {
                 let profiled = match task_context {
                     Some(task_context) => {
-                        executor::execute_with_output_limits_profile_and_external_and_context(
+                        executor::execute_with_output_limits_profile_and_external_and_context_and_memory(
                             &optimized.physical_plan,
                             &mut self.catalog,
                             &mut self.store,
@@ -241,9 +241,10 @@ impl Database {
                             self.config.max_read_result_rows,
                             self.config.max_read_result_payload_bytes,
                             task_context,
+                            &self.config.execution_memory,
                         )
                     }
-                    None => executor::execute_with_output_limits_profile_and_external(
+                    None => executor::execute_with_output_limits_profile_and_external_and_memory(
                         &optimized.physical_plan,
                         &mut self.catalog,
                         &mut self.store,
@@ -251,6 +252,7 @@ impl Database {
                         external,
                         self.config.max_read_result_rows,
                         self.config.max_read_result_payload_bytes,
+                        &self.config.execution_memory,
                     ),
                 }?;
                 (profiled.rows, Some(profiled.profile))
@@ -317,7 +319,7 @@ impl Database {
             }
             let profiled = match task_context {
                 Some(task_context) => {
-                    executor::execute_with_output_limits_profile_and_external_and_context(
+                    executor::execute_with_output_limits_profile_and_external_and_context_and_memory(
                         &optimized.physical_plan,
                         &mut self.catalog,
                         &mut self.store,
@@ -326,9 +328,10 @@ impl Database {
                         self.config.max_read_result_rows,
                         self.config.max_read_result_payload_bytes,
                         task_context,
+                        &self.config.execution_memory,
                     )
                 }
-                None => executor::execute_with_output_limits_profile_and_external(
+                None => executor::execute_with_output_limits_profile_and_external_and_memory(
                     &optimized.physical_plan,
                     &mut self.catalog,
                     &mut self.store,
@@ -336,6 +339,7 @@ impl Database {
                     external,
                     self.config.max_read_result_rows,
                     self.config.max_read_result_payload_bytes,
+                    &self.config.execution_memory,
                 ),
             }?;
             return Ok(QueryOutput {

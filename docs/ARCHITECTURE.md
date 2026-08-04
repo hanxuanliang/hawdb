@@ -111,6 +111,13 @@ machine-readable artifact path. Per-operator row estimates and runtime rows are
 rendered as `N/A` until the executor measures them; root estimates, root output
 rows, blocking-operator memory/spill reports, RSS, and page faults are emitted
 only from existing typed measurements.
+`DatabaseConfig::execution_memory` is the admission boundary for executor-owned
+state. Transfer batches have row and byte limits; `DISTINCT`, Cartesian build
+sides, aggregate state, path frontiers, expansion candidates, and materialized
+fallbacks fail before row publication when their resident estimate exceeds the
+blocking-operator budget. Sort, grouped aggregate, and TopN use bounded
+two-way external merge passes with cumulative spill-byte and spill-run limits.
+Spill files are query-scoped and removed on both success and failure.
 Hard limits and background admission remain owned by `DatabaseConfig`,
 `LocalQosPolicy`, and caller-owned schedulers.
 These variables are runtime state only: they do not write WAL, are rejected

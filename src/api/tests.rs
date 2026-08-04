@@ -132,6 +132,7 @@ use crate::NowledgeMemStorageRecoveryReport;
 use crate::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Write};
+use std::num::NonZeroUsize;
 
 mod aggregates;
 mod augmentation_jobs_interrupt;
@@ -226,6 +227,28 @@ fn runs_create_match_return_demo() {
         output.rows[0].get("title"),
         Some(&Value::String("Graph foundations".to_string()))
     );
+}
+
+#[test]
+fn database_config_applies_execution_memory_to_read_queries() {
+    let mut execution_memory = crate::executor::ExecutionMemoryConfig::default();
+    execution_memory.blocking_operator_bytes = NonZeroUsize::new(1024).unwrap();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        execution_memory,
+        ..DatabaseConfig::default()
+    });
+    for value in 0..10 {
+        db.query(&format!(
+            "CREATE (:Memory {{title: '{value}-{}'}})",
+            "x".repeat(96)
+        ))
+        .unwrap();
+    }
+
+    let error = db
+        .query("MATCH (m:Memory) RETURN DISTINCT m.title AS title")
+        .unwrap_err();
+    assert!(error.to_string().contains("DistinctExec state exceeds"));
 }
 
 fn search_projection_row(external_id: &str, title: &str, body: &str) -> SearchProjectionRow {

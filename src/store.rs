@@ -8388,6 +8388,7 @@ impl GraphStore {
             max_coalesced_bytes,
             max_wave_bytes,
             None,
+            None,
         )
     }
 
@@ -8404,7 +8405,27 @@ impl GraphStore {
             io_depth,
             max_coalesced_bytes,
             max_wave_bytes,
+            None,
             Some(task_context),
+        )
+    }
+
+    pub(crate) fn read_published_source_scan_candidates_bounded(
+        &self,
+        predicate: &ScanPredicate,
+        io_depth: NonZeroUsize,
+        max_coalesced_bytes: NonZeroU64,
+        max_wave_bytes: NonZeroU64,
+        max_candidate_bytes: NonZeroUsize,
+        task_context: Option<&RuntimeTaskContext>,
+    ) -> Result<SourceScanCandidateRead> {
+        self.read_published_source_scan_candidates_internal(
+            predicate,
+            io_depth,
+            max_coalesced_bytes,
+            max_wave_bytes,
+            Some(max_candidate_bytes.get()),
+            task_context,
         )
     }
 
@@ -8414,6 +8435,7 @@ impl GraphStore {
         io_depth: NonZeroUsize,
         max_coalesced_bytes: NonZeroU64,
         max_wave_bytes: NonZeroU64,
+        max_candidate_bytes: Option<usize>,
         task_context: Option<&RuntimeTaskContext>,
     ) -> Result<SourceScanCandidateRead> {
         let plan = self.plan_published_source_scan(predicate);
@@ -8459,6 +8481,7 @@ impl GraphStore {
         let schedule = SegmentReadScheduler::new(io_depth, max_coalesced_bytes)
             .schedule_with_wave_budget(ranges.values().cloned(), max_wave_bytes);
         let mut rows = Vec::new();
+        let mut candidate_bytes = 0usize;
         let mut consume = |payload: SegmentReadPayload| {
             for segment_id in &payload.range.segment_ids {
                 let range = ranges.get(segment_id).ok_or_else(|| {
@@ -8492,12 +8515,27 @@ impl GraphStore {
                         )));
                 }
                 let segment_rows = source_scan::decode_payload(bytes)?;
-                if let Some(positions) = candidates.remove(segment_id).flatten() {
-                    rows.extend(segment_rows.into_iter().enumerate().filter_map(
-                        |(row_id, row)| positions.contains(&(row_id as u64)).then_some(row),
-                    ));
-                } else {
-                    rows.extend(segment_rows);
+                let positions = candidates.remove(segment_id).flatten();
+                for (row_id, row) in segment_rows.into_iter().enumerate() {
+                    if positions
+                        .as_ref()
+                        .is_some_and(|positions| !positions.contains(&(row_id as u64)))
+                    {
+                        continue;
+                    }
+                    let row_bytes = std::mem::size_of::<SourceScanRow>().saturating_add(
+                        usize::try_from(estimated_properties_bytes(&row.properties))
+                            .unwrap_or(usize::MAX),
+                    );
+                    let next_candidate_bytes = candidate_bytes.saturating_add(row_bytes);
+                    if max_candidate_bytes.is_some_and(|limit| next_candidate_bytes > limit) {
+                        return Err(SkeinError::Execution(format!(
+                            "SourceSegmentScan candidates exceed blocking_operator_bytes {}",
+                            max_candidate_bytes.unwrap_or_default()
+                        )));
+                    }
+                    candidate_bytes = next_candidate_bytes;
+                    rows.push(row);
                 }
             }
             Ok::<_, SkeinError>(())

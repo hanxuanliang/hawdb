@@ -224,6 +224,7 @@ pub struct DatabaseConfig {
     pub read_only: bool,
     pub max_read_result_rows: Option<usize>,
     pub max_read_result_payload_bytes: Option<usize>,
+    pub execution_memory: executor::ExecutionMemoryConfig,
     pub max_optimizer_groups: Option<usize>,
     pub recovery_mode: RecoveryMode,
     pub max_wal_replay_entries: Option<usize>,
@@ -264,6 +265,7 @@ impl Default for DatabaseConfig {
             read_only: false,
             max_read_result_rows: Some(DEFAULT_MAX_READ_RESULT_ROWS),
             max_read_result_payload_bytes: Some(DEFAULT_MAX_READ_RESULT_PAYLOAD_BYTES),
+            execution_memory: executor::ExecutionMemoryConfig::default(),
             max_optimizer_groups: None,
             recovery_mode: RecoveryMode::default(),
             max_wal_replay_entries: Some(skein_storage::DEFAULT_MAX_WAL_REPLAY_ENTRIES),
@@ -5967,7 +5969,7 @@ impl Database {
             ));
         }
         let mut external = executor::NoExternalReadOperator;
-        let profiled = executor::execute_with_output_limits_profile_and_external(
+        let profiled = executor::execute_with_output_limits_profile_and_external_and_memory(
             &optimized.physical_plan,
             &mut self.catalog,
             &mut self.store,
@@ -5975,6 +5977,7 @@ impl Database {
             &mut external,
             self.config.max_read_result_rows,
             self.config.max_read_result_payload_bytes,
+            &self.config.execution_memory,
         )?;
         Ok(ExplainAnalyzeOutput {
             output: QueryOutput {
@@ -36440,7 +36443,7 @@ impl DatabaseSession<'_> {
                 ));
             }
             let mut external = executor::NoExternalReadOperator;
-            let profiled = executor::execute_with_output_limits_profile_and_external(
+            let profiled = executor::execute_with_output_limits_profile_and_external_and_memory(
                 &optimized.physical_plan,
                 &mut self.db.catalog,
                 &mut self.db.store,
@@ -36448,6 +36451,7 @@ impl DatabaseSession<'_> {
                 &mut external,
                 self.db.config.max_read_result_rows,
                 self.db.config.max_read_result_payload_bytes,
+                &self.db.config.execution_memory,
             )?;
             return Ok(QueryOutput {
                 rows: vec![explain_analyze_output_row(
@@ -36636,14 +36640,17 @@ impl DatabaseReadTransaction {
                 "read transaction query must not be a mutation".to_string(),
             ));
         }
-        let streamed = executor::execute_with_row_consumer_profile(
+        let mut external = executor::NoExternalReadOperator;
+        let streamed = executor::execute_with_row_consumer_profile_and_external_and_memory(
             &optimized.physical_plan,
             &mut self.catalog,
             &mut self.store,
             parameters,
+            &mut external,
             max_rows,
             max_payload_bytes,
             &mut consumer,
+            &self.config.execution_memory,
         )?;
         let pipeline = &streamed.profile.pipeline_memory_report;
         Ok(QueryStreamReport {
@@ -36697,17 +36704,19 @@ impl DatabaseReadTransaction {
             ));
         }
         let mut external = executor::NoExternalReadOperator;
-        let streamed = executor::execute_with_row_consumer_profile_and_external_and_context(
-            &optimized.physical_plan,
-            &mut self.catalog,
-            &mut self.store,
-            parameters,
-            &mut external,
-            max_rows,
-            max_payload_bytes,
-            &mut consumer,
-            task_context,
-        )?;
+        let streamed =
+            executor::execute_with_row_consumer_profile_and_external_and_context_and_memory(
+                &optimized.physical_plan,
+                &mut self.catalog,
+                &mut self.store,
+                parameters,
+                &mut external,
+                max_rows,
+                max_payload_bytes,
+                &mut consumer,
+                task_context,
+                &self.config.execution_memory,
+            )?;
         let pipeline = &streamed.profile.pipeline_memory_report;
         Ok(QueryStreamReport {
             fully_streamed: streamed.fully_streamed,
@@ -36783,7 +36792,7 @@ impl DatabaseReadTransaction {
         let profiled = match task_context {
             Some(task_context) => {
                 let mut external = executor::NoExternalReadOperator;
-                executor::execute_with_output_limits_profile_and_external_and_context(
+                executor::execute_with_output_limits_profile_and_external_and_context_and_memory(
                     &optimized.physical_plan,
                     &mut self.catalog,
                     &mut self.store,
@@ -36792,11 +36801,12 @@ impl DatabaseReadTransaction {
                     max_rows,
                     max_payload_bytes,
                     task_context,
+                    &self.config.execution_memory,
                 )
             }
             None => {
                 let mut external = executor::NoExternalReadOperator;
-                executor::execute_with_output_limits_profile_and_external(
+                executor::execute_with_output_limits_profile_and_external_and_memory(
                     &optimized.physical_plan,
                     &mut self.catalog,
                     &mut self.store,
@@ -36804,6 +36814,7 @@ impl DatabaseReadTransaction {
                     &mut external,
                     max_rows,
                     max_payload_bytes,
+                    &self.config.execution_memory,
                 )
             }
         }?;
@@ -36849,7 +36860,7 @@ impl DatabaseReadTransaction {
             let profiled = match task_context {
                 Some(task_context) => {
                     let mut external = executor::NoExternalReadOperator;
-                    executor::execute_with_output_limits_profile_and_external_and_context(
+                    executor::execute_with_output_limits_profile_and_external_and_context_and_memory(
                         &optimized.physical_plan,
                         &mut self.catalog,
                         &mut self.store,
@@ -36858,11 +36869,12 @@ impl DatabaseReadTransaction {
                         max_rows,
                         self.config.max_read_result_payload_bytes,
                         task_context,
+                        &self.config.execution_memory,
                     )
                 }
                 None => {
                     let mut external = executor::NoExternalReadOperator;
-                    executor::execute_with_output_limits_profile_and_external(
+                    executor::execute_with_output_limits_profile_and_external_and_memory(
                         &optimized.physical_plan,
                         &mut self.catalog,
                         &mut self.store,
@@ -36870,6 +36882,7 @@ impl DatabaseReadTransaction {
                         &mut external,
                         max_rows,
                         self.config.max_read_result_payload_bytes,
+                        &self.config.execution_memory,
                     )
                 }
             }?;

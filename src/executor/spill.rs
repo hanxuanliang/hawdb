@@ -78,17 +78,31 @@ pub(super) struct SpillWriter {
 }
 
 impl SpillWriter {
-    pub(super) fn write(&mut self, ordinal: u64, binding: &Binding) -> Result<()> {
+    pub(super) fn write(
+        &mut self,
+        ordinal: u64,
+        binding: &Binding,
+        max_record_bytes: u64,
+    ) -> Result<u64> {
         let mut payload = Vec::with_capacity(super::binding_payload_bytes(binding));
         write_u64(&mut payload, ordinal)?;
         write_binding(&mut payload, binding)?;
         let payload_len = u64::try_from(payload.len()).map_err(|_| {
             SkeinError::Execution("spill record exceeds the supported size".to_string())
         })?;
+        let record_bytes = payload_len.saturating_add(8);
+        if record_bytes > max_record_bytes {
+            return Err(SkeinError::Execution(format!(
+                "spill record uses {record_bytes} bytes, exceeding the remaining spill budget {max_record_bytes}"
+            )));
+        }
         self.writer
             .write_all(&payload_len.to_le_bytes())
             .and_then(|_| self.writer.write_all(&payload))
-            .map_err(|error| SkeinError::Execution(format!("failed to write spill run: {error}")))
+            .map_err(|error| {
+                SkeinError::Execution(format!("failed to write spill run: {error}"))
+            })?;
+        Ok(record_bytes)
     }
 
     pub(super) fn finish(mut self) -> Result<()> {
@@ -103,7 +117,7 @@ pub(super) struct SpillReader {
 }
 
 impl SpillReader {
-    pub(super) fn read(&mut self) -> Result<Option<(u64, Binding)>> {
+    pub(super) fn read(&mut self, max_record_bytes: usize) -> Result<Option<(u64, Binding)>> {
         let mut encoded_len = [0u8; 8];
         let bytes_read = self.reader.read(&mut encoded_len).map_err(|error| {
             SkeinError::Execution(format!("failed to read spill record length: {error}"))
@@ -119,9 +133,10 @@ impl SpillReader {
         let payload_len = usize::try_from(u64::from_le_bytes(encoded_len)).map_err(|_| {
             SkeinError::Execution("spill record length does not fit in memory".to_string())
         })?;
-        if payload_len > MAX_SPILL_RECORD_BYTES {
+        let safety_limit = MAX_SPILL_RECORD_BYTES.min(max_record_bytes);
+        if payload_len > safety_limit {
             return Err(SkeinError::Execution(format!(
-                "spill record length {payload_len} exceeds the safety limit"
+                "spill record length {payload_len} exceeds the admitted limit {safety_limit}"
             )));
         }
         let mut payload = vec![0; payload_len];
@@ -415,10 +430,10 @@ mod tests {
         };
         let directory = std::env::temp_dir();
         let (run, mut writer) = SpillRun::create(&directory, "codec-test").unwrap();
-        writer.write(42, &binding).unwrap();
+        writer.write(42, &binding, u64::MAX).unwrap();
         writer.finish().unwrap();
         let mut reader = run.reader().unwrap();
-        assert_eq!(reader.read().unwrap(), Some((42, binding)));
-        assert_eq!(reader.read().unwrap(), None);
+        assert_eq!(reader.read(usize::MAX).unwrap(), Some((42, binding)));
+        assert_eq!(reader.read(usize::MAX).unwrap(), None);
     }
 }

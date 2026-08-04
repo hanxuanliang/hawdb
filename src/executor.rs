@@ -48,14 +48,24 @@ const SOURCE_SEGMENT_SCAN_MAX_WAVE_BYTES: u64 = 2 * 1024 * 1024;
 const DEFAULT_EXECUTION_BATCH_ROWS: usize = 256;
 const DEFAULT_EXECUTION_BATCH_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_BLOCKING_OPERATOR_MEMORY_BYTES: usize = 64 * 1024 * 1024;
+const DEFAULT_EXECUTION_MAX_SPILL_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const DEFAULT_EXECUTION_MAX_SPILL_RUNS: usize = 128;
 #[cfg_attr(not(feature = "tokio-runtime"), allow(dead_code))]
 const DEFAULT_STREAMING_OPERATOR_MEMORY_BYTES: u64 = DEFAULT_EXECUTION_BATCH_PAYLOAD_BYTES as u64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionMemoryConfig {
+    /// Maximum row count in an executor-owned transfer batch.
     pub batch_rows: NonZeroUsize,
+    /// Maximum estimated resident bytes in an executor-owned transfer batch.
     pub batch_payload_bytes: NonZeroUsize,
+    /// Maximum estimated resident bytes retained by one blocking operator.
     pub blocking_operator_bytes: NonZeroUsize,
+    /// Maximum cumulative serialized spill bytes, including merge passes.
+    pub max_spill_bytes: NonZeroU64,
+    /// Maximum cumulative spill runs created, including merge passes.
+    pub max_spill_runs: NonZeroUsize,
+    /// Directory for query-scoped spill runs removed when execution finishes.
     pub spill_directory: PathBuf,
 }
 
@@ -68,6 +78,10 @@ impl Default for ExecutionMemoryConfig {
                 .expect("default execution batch byte size is non-zero"),
             blocking_operator_bytes: NonZeroUsize::new(DEFAULT_BLOCKING_OPERATOR_MEMORY_BYTES)
                 .expect("default blocking operator memory budget is non-zero"),
+            max_spill_bytes: NonZeroU64::new(DEFAULT_EXECUTION_MAX_SPILL_BYTES)
+                .expect("default spill byte budget is non-zero"),
+            max_spill_runs: NonZeroUsize::new(DEFAULT_EXECUTION_MAX_SPILL_RUNS)
+                .expect("default spill run budget is non-zero"),
             spill_directory: std::env::temp_dir(),
         }
     }
@@ -139,8 +153,17 @@ struct Binding {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TopNBinding {
     sort_values: Vec<(Value, SortDirection)>,
-    ordinal: usize,
+    ordinal: u64,
     binding: Binding,
+}
+
+impl TopNBinding {
+    fn memory_bytes(&self) -> usize {
+        binding_memory_bytes(&self.binding).saturating_add(self.sort_values.iter().fold(
+            std::mem::size_of::<Vec<(Value, SortDirection)>>(),
+            |total, (value, _)| total.saturating_add(value_memory_bytes(value)),
+        ))
+    }
 }
 
 impl Ord for TopNBinding {
@@ -167,12 +190,126 @@ impl PartialOrd for TopNBinding {
     }
 }
 
+#[derive(Clone, Copy)]
 struct NodeColumnLookupSpec<'a> {
     variable: &'a str,
     label: &'a str,
     property: &'a str,
     column: &'a str,
     optional: bool,
+}
+
+fn stream_node_column_lookup_batches(
+    spec: NodeColumnLookupSpec<'_>,
+    input: &PhysicalPlan,
+    context: BatchReadContext<'_>,
+    execution_limit: ExecutionLimit,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    let mut output = Vec::with_capacity(context.memory.batch_rows.get());
+    let mut emitted = 0usize;
+    execute_binding_batches(input, context, ExecutionLimit::unlimited(), &mut |batch| {
+        let remaining = execution_limit
+            .output_rows
+            .unwrap_or(usize::MAX)
+            .saturating_sub(emitted);
+        if remaining == 0 {
+            return Ok(BatchControl::Stop);
+        }
+        let bindings = execute_node_column_lookup(
+            spec,
+            batch,
+            context.catalog,
+            context.store,
+            ExecutionLimit {
+                output_rows: Some(remaining),
+            },
+            context.memory.blocking_operator_bytes,
+        )?;
+        for binding in bindings {
+            output.push(binding);
+            emitted = emitted.saturating_add(1);
+            if output.len() == context.memory.batch_rows.get()
+                && emit(std::mem::replace(
+                    &mut output,
+                    Vec::with_capacity(context.memory.batch_rows.get()),
+                ))? == BatchControl::Stop
+            {
+                return Ok(BatchControl::Stop);
+            }
+            if execution_limit.is_reached(emitted) {
+                return Ok(BatchControl::Stop);
+            }
+        }
+        Ok(BatchControl::Continue)
+    })?;
+    if !output.is_empty() && emit(output)? == BatchControl::Stop {
+        return Ok(BatchControl::Stop);
+    }
+    Ok(BatchControl::Continue)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stream_optional_degree_batches(
+    source_variable: &str,
+    rel_type: &str,
+    rel_properties: &BTreeMap<String, Value>,
+    direction: RelationshipDirection,
+    target_label: &str,
+    target_properties: &BTreeMap<String, Value>,
+    alias: &str,
+    input: &PhysicalPlan,
+    context: BatchReadContext<'_>,
+    execution_limit: ExecutionLimit,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    let rel_type_id = if rel_type.is_empty() {
+        None
+    } else {
+        context.catalog.rel_type_id(rel_type)
+    };
+    let target_label_ids = label_ids_for_pattern(context.catalog, target_label);
+    let mut emitted = 0usize;
+    execute_binding_batches(input, context, execution_limit, &mut |batch| {
+        let mut output = Vec::with_capacity(batch.len());
+        for mut binding in batch {
+            let degree = if !rel_type.is_empty() && rel_type_id.is_none() {
+                0
+            } else {
+                let source = binding.nodes.get(source_variable).ok_or_else(|| {
+                    SkeinError::Execution(format!(
+                        "missing variable '{source_variable}' during optional degree"
+                    ))
+                })?;
+                one_hop_relationships_with_budget(
+                    context.store,
+                    source.id,
+                    rel_type_id,
+                    target_label_ids.as_deref(),
+                    rel_properties,
+                    None,
+                    direction,
+                    context.memory.blocking_operator_bytes.get(),
+                )?
+                .into_iter()
+                .filter(|(_, target)| node_properties_match(target, target_properties))
+                .count()
+            };
+            binding
+                .values
+                .insert(alias.to_string(), Value::Int(degree as i64));
+            output.push(binding);
+        }
+        emitted = emitted.saturating_add(output.len());
+        if !output.is_empty() && emit(output)? == BatchControl::Stop {
+            return Ok(BatchControl::Stop);
+        }
+        Ok(if execution_limit.is_reached(emitted) {
+            BatchControl::Stop
+        } else {
+            BatchControl::Continue
+        })
+    })
 }
 
 struct ExecutionContext<'a> {
@@ -228,19 +365,28 @@ fn execute_with_row_limit_internal(
     max_rows: Option<usize>,
     task_context: Option<&RuntimeTaskContext>,
 ) -> Result<Vec<Row>> {
-    let execution_limit = ExecutionLimit::from_user_max_rows(max_rows)?;
     let parameters = BTreeMap::new();
     let mut external = NoExternalReadOperator;
     let memory = ExecutionMemoryConfig::default();
-    let mut context = ExecutionContext {
-        parameters: &parameters,
-        external: &mut external,
-        memory: &memory,
-        task_context,
-    };
-    let bindings =
-        execute_bindings_with_limit(plan, catalog, store, &mut context, execution_limit)?;
-    collect_rows(bindings, max_rows, None)
+    let mut rows = Vec::new();
+    execute_with_row_consumer_profile_internal(
+        plan,
+        catalog,
+        store,
+        &parameters,
+        &mut external,
+        max_rows,
+        None,
+        &mut |row| {
+            rows.push(row);
+            Ok(())
+        },
+        ExecutionRuntimeControl {
+            memory: &memory,
+            task_context,
+        },
+    )?;
+    Ok(rows)
 }
 
 pub fn execute_with_row_limit_profile(
@@ -288,6 +434,29 @@ pub fn execute_with_output_limits_profile_and_external(
     max_rows: Option<usize>,
     max_payload_bytes: Option<usize>,
 ) -> Result<ProfiledQueryRows> {
+    execute_with_output_limits_profile_and_external_and_memory(
+        plan,
+        catalog,
+        store,
+        parameters,
+        external,
+        max_rows,
+        max_payload_bytes,
+        &ExecutionMemoryConfig::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn execute_with_output_limits_profile_and_external_and_memory(
+    plan: &PhysicalPlan,
+    catalog: &mut Catalog,
+    store: &mut GraphStore,
+    parameters: &BTreeMap<String, Value>,
+    external: &mut dyn ExternalReadOperator,
+    max_rows: Option<usize>,
+    max_payload_bytes: Option<usize>,
+    memory: &ExecutionMemoryConfig,
+) -> Result<ProfiledQueryRows> {
     execute_with_row_limit_profile_and_external_and_memory_internal(
         plan,
         catalog,
@@ -299,7 +468,7 @@ pub fn execute_with_output_limits_profile_and_external(
             max_payload_bytes,
         },
         ExecutionRuntimeControl {
-            memory: &ExecutionMemoryConfig::default(),
+            memory,
             task_context: None,
         },
     )
@@ -369,7 +538,31 @@ pub fn execute_with_output_limits_profile_and_external_and_context(
     max_payload_bytes: Option<usize>,
     task_context: &RuntimeTaskContext,
 ) -> Result<ProfiledQueryRows> {
-    let memory = ExecutionMemoryConfig::default();
+    execute_with_output_limits_profile_and_external_and_context_and_memory(
+        plan,
+        catalog,
+        store,
+        parameters,
+        external,
+        max_rows,
+        max_payload_bytes,
+        task_context,
+        &ExecutionMemoryConfig::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn execute_with_output_limits_profile_and_external_and_context_and_memory(
+    plan: &PhysicalPlan,
+    catalog: &mut Catalog,
+    store: &mut GraphStore,
+    parameters: &BTreeMap<String, Value>,
+    external: &mut dyn ExternalReadOperator,
+    max_rows: Option<usize>,
+    max_payload_bytes: Option<usize>,
+    task_context: &RuntimeTaskContext,
+    memory: &ExecutionMemoryConfig,
+) -> Result<ProfiledQueryRows> {
     execute_with_row_limit_profile_and_external_and_memory_internal(
         plan,
         catalog,
@@ -381,7 +574,7 @@ pub fn execute_with_output_limits_profile_and_external_and_context(
             max_payload_bytes,
         },
         ExecutionRuntimeControl {
-            memory: &memory,
+            memory,
             task_context: Some(task_context),
         },
     )
@@ -424,6 +617,31 @@ pub fn execute_with_row_consumer_profile_and_external(
     max_payload_bytes: Option<usize>,
     consumer: &mut dyn FnMut(Row) -> Result<()>,
 ) -> Result<ProfiledQueryStream> {
+    execute_with_row_consumer_profile_and_external_and_memory(
+        plan,
+        catalog,
+        store,
+        parameters,
+        external,
+        max_rows,
+        max_payload_bytes,
+        consumer,
+        &ExecutionMemoryConfig::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn execute_with_row_consumer_profile_and_external_and_memory(
+    plan: &PhysicalPlan,
+    catalog: &mut Catalog,
+    store: &mut GraphStore,
+    parameters: &BTreeMap<String, Value>,
+    external: &mut dyn ExternalReadOperator,
+    max_rows: Option<usize>,
+    max_payload_bytes: Option<usize>,
+    consumer: &mut dyn FnMut(Row) -> Result<()>,
+    memory: &ExecutionMemoryConfig,
+) -> Result<ProfiledQueryStream> {
     execute_with_row_consumer_profile_internal(
         plan,
         catalog,
@@ -434,7 +652,7 @@ pub fn execute_with_row_consumer_profile_and_external(
         max_payload_bytes,
         consumer,
         ExecutionRuntimeControl {
-            memory: &ExecutionMemoryConfig::default(),
+            memory,
             task_context: None,
         },
     )
@@ -452,7 +670,33 @@ pub fn execute_with_row_consumer_profile_and_external_and_context(
     consumer: &mut dyn FnMut(Row) -> Result<()>,
     task_context: &RuntimeTaskContext,
 ) -> Result<ProfiledQueryStream> {
-    let memory = ExecutionMemoryConfig::default();
+    execute_with_row_consumer_profile_and_external_and_context_and_memory(
+        plan,
+        catalog,
+        store,
+        parameters,
+        external,
+        max_rows,
+        max_payload_bytes,
+        consumer,
+        task_context,
+        &ExecutionMemoryConfig::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn execute_with_row_consumer_profile_and_external_and_context_and_memory(
+    plan: &PhysicalPlan,
+    catalog: &mut Catalog,
+    store: &mut GraphStore,
+    parameters: &BTreeMap<String, Value>,
+    external: &mut dyn ExternalReadOperator,
+    max_rows: Option<usize>,
+    max_payload_bytes: Option<usize>,
+    consumer: &mut dyn FnMut(Row) -> Result<()>,
+    task_context: &RuntimeTaskContext,
+    memory: &ExecutionMemoryConfig,
+) -> Result<ProfiledQueryStream> {
     execute_with_row_consumer_profile_internal(
         plan,
         catalog,
@@ -463,7 +707,7 @@ pub fn execute_with_row_consumer_profile_and_external_and_context(
         max_payload_bytes,
         consumer,
         ExecutionRuntimeControl {
-            memory: &memory,
+            memory,
             task_context: Some(task_context),
         },
     )
@@ -495,7 +739,7 @@ fn execute_with_row_consumer_profile_internal(
         if max_rows.is_some_and(|limit| output_rows >= limit) {
             return Err(SkeinError::Execution(format!(
                 "read query returned more than {} rows, exceeding max_read_result_rows {}",
-                output_rows.saturating_add(1),
+                max_rows.unwrap_or_default(),
                 max_rows.unwrap_or_default()
             )));
         }
@@ -504,7 +748,8 @@ fn execute_with_row_consumer_profile_internal(
         let next_payload_bytes = output_payload_bytes.saturating_add(row_payload_bytes);
         if max_payload_bytes.is_some_and(|limit| next_payload_bytes > limit) {
             return Err(SkeinError::Execution(format!(
-                "read query payload would exceed max_payload_bytes {} (next total {})",
+                "read query payload would exceed max_payload_bytes {} (max_read_result_payload_bytes {}; next total {})",
+                max_payload_bytes.unwrap_or_default(),
                 max_payload_bytes.unwrap_or_default(),
                 next_payload_bytes
             )));
@@ -604,64 +849,25 @@ fn execute_with_row_limit_profile_and_external_and_memory_internal(
         max_rows,
         max_payload_bytes,
     } = output_limits;
-    let ExecutionRuntimeControl {
-        memory,
-        task_context,
-    } = runtime;
-    let process_memory_start = skein_qos::ProcessMemorySnapshot::capture().ok();
-    let execution_limit = ExecutionLimit::from_user_max_rows(max_rows)?;
-    let mut profile = read_execution_profile(plan, max_rows)?;
-    let mut context = ExecutionContext {
+    let mut rows = Vec::new();
+    let streamed = execute_with_row_consumer_profile_internal(
+        plan,
+        catalog,
+        store,
         parameters,
         external,
-        memory,
-        task_context,
-    };
-    let (
-        (
-            (((bindings, scan_pruning_reports), vector_execution_reports), graph_expansion_reports),
-            blocking_operator_memory_reports,
-        ),
-        mut pipeline_memory_report,
-    ) = capture_pipeline_memory_report(|| {
-        capture_blocking_memory_reports(|| {
-            capture_graph_expansion_reports(|| {
-                capture_vector_execution_reports(|| {
-                    capture_scan_pruning_reports(|| {
-                        execute_bindings_with_limit(
-                            plan,
-                            catalog,
-                            store,
-                            &mut context,
-                            execution_limit,
-                        )
-                    })
-                })
-            })
-        })
-    })?;
-    profile.scan_pruning_reports = scan_pruning_reports;
-    profile.vector_execution_reports = vector_execution_reports;
-    profile.graph_expansion_reports = graph_expansion_reports;
-    profile.blocking_operator_memory_reports = blocking_operator_memory_reports;
-    let rows = collect_rows(bindings, max_rows, max_payload_bytes)?;
-    pipeline_memory_report.output_rows = rows.len();
-    pipeline_memory_report.output_payload_bytes = rows.iter().fold(0usize, |total, row| {
-        total.saturating_add(map_payload_bytes(row))
-    });
-    if let Ok(process_memory_end) = skein_qos::ProcessMemorySnapshot::capture() {
-        pipeline_memory_report.steady_resident_bytes = Some(process_memory_end.resident_bytes);
-        pipeline_memory_report.peak_resident_bytes = Some(process_memory_end.peak_resident_bytes);
-        if let Some(process_memory_start) = process_memory_start {
-            let process_memory =
-                skein_qos::ProcessMemoryProfile::between(process_memory_start, process_memory_end);
-            pipeline_memory_report.start_resident_bytes = Some(process_memory.start_resident_bytes);
-            pipeline_memory_report.minor_page_faults = Some(process_memory.minor_page_faults);
-            pipeline_memory_report.major_page_faults = Some(process_memory.major_page_faults);
-        }
-    }
-    profile.pipeline_memory_report = pipeline_memory_report;
-    Ok(ProfiledQueryRows { rows, profile })
+        max_rows,
+        max_payload_bytes,
+        &mut |row| {
+            rows.push(row);
+            Ok(())
+        },
+        runtime,
+    )?;
+    Ok(ProfiledQueryRows {
+        rows,
+        profile: streamed.profile,
+    })
 }
 
 pub fn read_execution_profile(
@@ -826,6 +1032,7 @@ fn collect_blocking_operator_kinds(plan: &PhysicalPlan, output: &mut BTreeSet<St
             collect_blocking_operator_kinds(input, output);
         }
         PhysicalPlan::NodeCartesianProductExec { left, right } => {
+            output.insert("NodeCartesianProductExec".to_string());
             collect_blocking_operator_kinds(left, output);
             collect_blocking_operator_kinds(right, output);
         }
@@ -839,39 +1046,6 @@ fn collect_blocking_operator_kinds(plan: &PhysicalPlan, output: &mut BTreeSet<St
         }
         _ => {}
     }
-}
-
-fn collect_rows(
-    bindings: Vec<Binding>,
-    max_rows: Option<usize>,
-    max_payload_bytes: Option<usize>,
-) -> Result<Vec<Row>> {
-    let capacity = max_rows
-        .map(|max_rows| bindings.len().min(max_rows))
-        .unwrap_or(bindings.len());
-    let mut rows = Vec::with_capacity(capacity);
-    let mut payload_bytes = 0usize;
-    for binding in bindings {
-        if max_rows.is_some_and(|max_rows| rows.len() == max_rows) {
-            return Err(SkeinError::Execution(format!(
-                "read query returned more than {} rows, exceeding max_read_result_rows {}",
-                max_rows.unwrap_or_default(),
-                max_rows.unwrap_or_default()
-            )));
-        }
-        let row = binding.values;
-        let next_payload_bytes = payload_bytes.saturating_add(map_payload_bytes(&row));
-        if max_payload_bytes.is_some_and(|limit| next_payload_bytes > limit) {
-            return Err(SkeinError::Execution(format!(
-                "read query payload would exceed max_read_result_payload_bytes {} (next total {})",
-                max_payload_bytes.unwrap_or_default(),
-                next_payload_bytes
-            )));
-        }
-        rows.push(row);
-        payload_bytes = next_payload_bytes;
-    }
-    Ok(rows)
 }
 
 fn vector_embedding_parameter(
@@ -1560,13 +1734,21 @@ fn batch_pipeline_capable(plan: &PhysicalPlan) -> bool {
         | PhysicalPlan::IndexNodeMultiSeek { .. }
         | PhysicalPlan::IndexNodeCompositeSeek { .. }
         | PhysicalPlan::IndexNodeRangeSeek { .. }
-        | PhysicalPlan::IndexNodeTextSeek { .. } => true,
+        | PhysicalPlan::IndexNodeTextSeek { .. }
+        | PhysicalPlan::ThreadRepairStatsExec { .. }
+        | PhysicalPlan::ShortestPathExec { .. } => true,
         PhysicalPlan::FilterExec { input, .. }
         | PhysicalPlan::ProjectExec { input, .. }
         | PhysicalPlan::LimitExec { input, .. }
+        | PhysicalPlan::DistinctExec { input }
+        | PhysicalPlan::NodeColumnLookupExec { input, .. }
+        | PhysicalPlan::OptionalDegreeExec { input, .. }
         | PhysicalPlan::TopNExec { input, .. }
         | PhysicalPlan::SortExec { input, .. }
         | PhysicalPlan::AggregateExec { input, .. } => batch_pipeline_capable(input),
+        PhysicalPlan::NodeCartesianProductExec { left, right } => {
+            batch_pipeline_capable(left) && batch_pipeline_capable(right)
+        }
         PhysicalPlan::AdjacencyExpandExec { input, .. } => batch_pipeline_capable(input),
         _ => false,
     }
@@ -1581,6 +1763,7 @@ fn collect_batch_pipeline(
     execution_limit: ExecutionLimit,
 ) -> Result<Vec<Binding>> {
     let mut output = Vec::new();
+    let mut tracker = OperatorMemoryTracker::new(memory.blocking_operator_bytes);
     let context = BatchReadContext {
         catalog,
         store,
@@ -1589,7 +1772,12 @@ fn collect_batch_pipeline(
     };
     execute_binding_batches(plan, context, execution_limit, &mut |batch| {
         for binding in batch {
-            output.push(binding);
+            push_bounded_operator_binding(
+                "MaterializedBatchPipeline",
+                &mut output,
+                binding,
+                &mut tracker,
+            )?;
             if execution_limit.is_reached(output.len()) {
                 return Ok(BatchControl::Stop);
             }
@@ -1677,6 +1865,7 @@ fn execute_binding_batches_inner(
                 catalog,
                 store,
                 execution_limit,
+                memory,
                 context.task_context,
             )?;
             emit_owned_binding_batches(bindings, memory.batch_rows.get(), emit)
@@ -1774,6 +1963,118 @@ fn execute_binding_batches_inner(
                 },
             )
         }
+        PhysicalPlan::ShortestPathExec {
+            source_label,
+            source_id,
+            source_visibility_predicate,
+            rel_type,
+            direction,
+            target_label,
+            target_id,
+            target_visibility_predicate,
+            min_hops,
+            max_hops,
+            returns,
+            ..
+        } => {
+            let source_visibility_filter = source_visibility_predicate
+                .as_ref()
+                .map(property_filter_from_predicate)
+                .transpose()?;
+            let target_visibility_filter = target_visibility_predicate
+                .as_ref()
+                .map(property_filter_from_predicate)
+                .transpose()?;
+            let bindings = execute_shortest_path(
+                catalog,
+                store,
+                ShortestPathExecInput {
+                    source_label,
+                    source_id,
+                    source_visibility_filter: source_visibility_filter.as_ref(),
+                    path_node_visibility_filter: source_visibility_filter.as_ref(),
+                    rel_type,
+                    direction: *direction,
+                    target_label,
+                    target_id,
+                    target_visibility_filter: target_visibility_filter.as_ref(),
+                    min_hops: *min_hops,
+                    max_hops: *max_hops,
+                    returns,
+                },
+                context.memory,
+                execution_limit,
+                context.task_context,
+            )?;
+            emit_owned_binding_batches(bindings, memory.batch_rows.get(), emit)
+        }
+        PhysicalPlan::ThreadRepairStatsExec {
+            label,
+            identity_label,
+            identity_ref_property,
+            thread_id_property,
+            message_rel_type,
+            message_label,
+            memory_rel_type,
+            memory_label,
+        } => {
+            let bindings = thread_repair_stats_rows(
+                catalog,
+                store,
+                label,
+                identity_label,
+                identity_ref_property,
+                thread_id_property,
+                message_rel_type,
+                message_label,
+                memory_rel_type,
+                memory_label,
+                memory.blocking_operator_bytes,
+            )?;
+            emit_owned_binding_batches(bindings, memory.batch_rows.get(), emit)
+        }
+        PhysicalPlan::NodeColumnLookupExec {
+            variable,
+            label,
+            property,
+            column,
+            optional,
+            input,
+        } => stream_node_column_lookup_batches(
+            NodeColumnLookupSpec {
+                variable,
+                label,
+                property,
+                column,
+                optional: *optional,
+            },
+            input,
+            context,
+            execution_limit,
+            emit,
+        ),
+        PhysicalPlan::OptionalDegreeExec {
+            source_variable,
+            rel_type,
+            rel_properties,
+            direction,
+            target_label,
+            target_properties,
+            alias,
+            input,
+        } => stream_optional_degree_batches(
+            source_variable,
+            rel_type,
+            rel_properties,
+            *direction,
+            target_label,
+            target_properties,
+            alias,
+            input,
+            context,
+            execution_limit,
+            emit,
+        ),
         PhysicalPlan::AdjacencyExpandExec { input, .. } => stream_adjacency_expand_batches(
             plan,
             input,
@@ -1782,6 +2083,9 @@ fn execute_binding_batches_inner(
             AdjacencyExpandFilters::default(),
             emit,
         ),
+        PhysicalPlan::NodeCartesianProductExec { left, right } => {
+            stream_cartesian_product_batches(left, right, context, execution_limit, emit)
+        }
         PhysicalPlan::FilterExec { predicate, input } => {
             if let PhysicalPlan::SeqNodeScan { variable, label } = input.as_ref()
                 && let Ok(filter) = property_filter_from_predicate(predicate)
@@ -1946,8 +2250,12 @@ fn execute_binding_batches_inner(
             if retained == 0 {
                 return Ok(BatchControl::Continue);
             }
-            let mut heap = BinaryHeap::with_capacity(retained);
-            let mut ordinal = 0usize;
+            let mut tracker = OperatorMemoryTracker::new(memory.blocking_operator_bytes);
+            let mut spill_budget = SpillBudgetTracker::new("TopNExec", memory);
+            let mut runs = Vec::<spill::SpillRun>::new();
+            let mut heap = BinaryHeap::new();
+            let mut ordinal = 0u64;
+            let mut spilled_rows = 0usize;
             execute_binding_batches(input, context, ExecutionLimit::unlimited(), &mut |batch| {
                 for binding in batch {
                     let sort_values = items
@@ -1960,15 +2268,94 @@ fn execute_binding_batches_inner(
                         binding,
                     };
                     ordinal = ordinal.saturating_add(1);
+                    let bytes = candidate.memory_bytes();
+                    ensure_operator_item_fits("TopNExec", bytes, &tracker)?;
                     if heap.len() < retained {
+                        if tracker.would_exceed(bytes) {
+                            spilled_rows = spilled_rows.saturating_add(heap.len());
+                            runs.push(spill_top_n_run(
+                                &mut heap,
+                                &memory.spill_directory,
+                                &mut spill_budget,
+                                context.task_context,
+                            )?);
+                            tracker.reset();
+                        }
+                        tracker.charge(bytes);
                         heap.push(candidate);
                     } else if heap.peek().is_some_and(|worst| candidate < *worst) {
-                        heap.pop();
+                        let worst_bytes = heap.peek().map(TopNBinding::memory_bytes).unwrap_or(0);
+                        if tracker
+                            .used_bytes
+                            .saturating_sub(worst_bytes)
+                            .saturating_add(bytes)
+                            > tracker.budget_bytes
+                        {
+                            spilled_rows = spilled_rows.saturating_add(heap.len());
+                            runs.push(spill_top_n_run(
+                                &mut heap,
+                                &memory.spill_directory,
+                                &mut spill_budget,
+                                context.task_context,
+                            )?);
+                            tracker.reset();
+                        } else {
+                            heap.pop();
+                            tracker.release(worst_bytes);
+                        }
+                        tracker.charge(bytes);
                         heap.push(candidate);
                     }
                 }
                 Ok(BatchControl::Continue)
             })?;
+
+            if !runs.is_empty() {
+                if !heap.is_empty() {
+                    spilled_rows = spilled_rows.saturating_add(heap.len());
+                    runs.push(spill_top_n_run(
+                        &mut heap,
+                        &memory.spill_directory,
+                        &mut spill_budget,
+                        context.task_context,
+                    )?);
+                }
+                runs = compact_sort_runs(
+                    runs,
+                    items,
+                    catalog,
+                    memory,
+                    &mut spill_budget,
+                    context.task_context,
+                )?;
+                record_blocking_memory_report(skein_executor::BlockingOperatorMemoryReport {
+                    operator: "TopNExec".to_string(),
+                    budget_bytes: tracker.budget_bytes,
+                    peak_tracked_bytes: tracker.peak_bytes,
+                    input_rows: ordinal as usize,
+                    spill_run_count: spill_budget.run_count,
+                    spilled_rows,
+                });
+                return merge_sort_runs(
+                    &runs,
+                    items,
+                    catalog,
+                    memory.blocking_operator_bytes,
+                    memory.batch_rows.get(),
+                    *offset,
+                    (*limit).min(execution_limit.output_rows.unwrap_or(usize::MAX)),
+                    context.task_context,
+                    emit,
+                );
+            }
+            record_blocking_memory_report(skein_executor::BlockingOperatorMemoryReport {
+                operator: "TopNExec".to_string(),
+                budget_bytes: tracker.budget_bytes,
+                peak_tracked_bytes: tracker.peak_bytes,
+                input_rows: ordinal as usize,
+                spill_run_count: 0,
+                spilled_rows: 0,
+            });
             let mut selected = heap.into_vec();
             selected.sort();
             let bindings = selected
@@ -1987,8 +2374,138 @@ fn execute_binding_batches_inner(
             items,
             input,
         } => stream_aggregate_batches(input, group_keys, items, context, execution_limit, emit),
+        PhysicalPlan::DistinctExec { input } => {
+            stream_distinct_batches(input, context, execution_limit, emit)
+        }
         _ => unreachable!("batch pipeline capability check rejected this operator"),
     }
+}
+
+fn stream_cartesian_product_batches(
+    left: &PhysicalPlan,
+    right: &PhysicalPlan,
+    context: BatchReadContext<'_>,
+    execution_limit: ExecutionLimit,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    let mut tracker = OperatorMemoryTracker::new(context.memory.blocking_operator_bytes);
+    let mut right_bindings = Vec::new();
+    execute_binding_batches(right, context, ExecutionLimit::unlimited(), &mut |batch| {
+        for binding in batch {
+            let bytes = binding_memory_bytes(&binding);
+            ensure_operator_item_fits("NodeCartesianProductExec", bytes, &tracker)?;
+            if tracker.would_exceed(bytes) {
+                return Err(SkeinError::Execution(format!(
+                    "NodeCartesianProductExec build side exceeds blocking_operator_bytes {}",
+                    tracker.budget_bytes
+                )));
+            }
+            tracker.charge(bytes);
+            right_bindings.push(binding);
+        }
+        Ok(BatchControl::Continue)
+    })?;
+    record_blocking_memory_report(skein_executor::BlockingOperatorMemoryReport {
+        operator: "NodeCartesianProductExec".to_string(),
+        budget_bytes: tracker.budget_bytes,
+        peak_tracked_bytes: tracker.peak_bytes,
+        input_rows: right_bindings.len(),
+        spill_run_count: 0,
+        spilled_rows: 0,
+    });
+    if right_bindings.is_empty() {
+        return Ok(BatchControl::Continue);
+    }
+
+    let mut output = Vec::with_capacity(context.memory.batch_rows.get());
+    let mut emitted = 0usize;
+    execute_binding_batches(left, context, ExecutionLimit::unlimited(), &mut |batch| {
+        for left_binding in batch {
+            for right_binding in &right_bindings {
+                let mut values = left_binding.values.clone();
+                values.extend(right_binding.values.clone());
+                let mut nodes = left_binding.nodes.clone();
+                nodes.extend(right_binding.nodes.clone());
+                let mut relationships = left_binding.relationships.clone();
+                relationships.extend(right_binding.relationships.clone());
+                output.push(Binding {
+                    values,
+                    nodes,
+                    relationships,
+                });
+                emitted = emitted.saturating_add(1);
+                if output.len() == context.memory.batch_rows.get()
+                    && emit(std::mem::replace(
+                        &mut output,
+                        Vec::with_capacity(context.memory.batch_rows.get()),
+                    ))? == BatchControl::Stop
+                {
+                    return Ok(BatchControl::Stop);
+                }
+                if execution_limit.is_reached(emitted) {
+                    return Ok(BatchControl::Stop);
+                }
+            }
+        }
+        Ok(BatchControl::Continue)
+    })?;
+    if !output.is_empty() && emit(output)? == BatchControl::Stop {
+        return Ok(BatchControl::Stop);
+    }
+    Ok(BatchControl::Continue)
+}
+
+fn stream_distinct_batches(
+    input: &PhysicalPlan,
+    context: BatchReadContext<'_>,
+    execution_limit: ExecutionLimit,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    let mut tracker = OperatorMemoryTracker::new(context.memory.blocking_operator_bytes);
+    let mut distinct = BTreeMap::<Vec<(String, Value)>, (u64, Binding)>::new();
+    let mut ordinal = 0u64;
+    execute_binding_batches(input, context, ExecutionLimit::unlimited(), &mut |batch| {
+        for binding in batch {
+            let key = binding
+                .values
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect::<Vec<_>>();
+            let entry_bytes =
+                binding_memory_bytes(&binding).saturating_add(distinct_key_memory_bytes(&key));
+            ensure_operator_item_fits("DistinctExec", entry_bytes, &tracker)?;
+            if let std::collections::btree_map::Entry::Vacant(entry) = distinct.entry(key) {
+                if tracker.would_exceed(entry_bytes) {
+                    return Err(SkeinError::Execution(format!(
+                        "DistinctExec state exceeds blocking_operator_bytes {}",
+                        tracker.budget_bytes
+                    )));
+                }
+                tracker.charge(entry_bytes);
+                entry.insert((ordinal, binding));
+            }
+            ordinal = ordinal.saturating_add(1);
+        }
+        Ok(BatchControl::Continue)
+    })?;
+    record_blocking_memory_report(skein_executor::BlockingOperatorMemoryReport {
+        operator: "DistinctExec".to_string(),
+        budget_bytes: tracker.budget_bytes,
+        peak_tracked_bytes: tracker.peak_bytes,
+        input_rows: ordinal as usize,
+        spill_run_count: 0,
+        spilled_rows: 0,
+    });
+    let mut selected = distinct.into_values().collect::<Vec<_>>();
+    selected.sort_by_key(|(ordinal, _)| *ordinal);
+    emit_binding_iterator(
+        selected
+            .into_iter()
+            .take(execution_limit.output_rows.unwrap_or(usize::MAX))
+            .map(|(_, binding)| binding),
+        context.memory.batch_rows.get(),
+        emit,
+    )
 }
 
 struct OperatorMemoryTracker {
@@ -2007,7 +2524,7 @@ impl OperatorMemoryTracker {
     }
 
     fn would_exceed(&self, bytes: usize) -> bool {
-        self.used_bytes > 0 && self.used_bytes.saturating_add(bytes) > self.budget_bytes
+        self.used_bytes.saturating_add(bytes) > self.budget_bytes
     }
 
     fn charge(&mut self, bytes: usize) {
@@ -2015,9 +2532,106 @@ impl OperatorMemoryTracker {
         self.peak_bytes = self.peak_bytes.max(self.used_bytes);
     }
 
+    fn release(&mut self, bytes: usize) {
+        self.used_bytes = self.used_bytes.saturating_sub(bytes);
+    }
+
     fn reset(&mut self) {
         self.used_bytes = 0;
     }
+}
+
+struct SpillBudgetTracker {
+    operator: &'static str,
+    max_bytes: u64,
+    max_runs: usize,
+    used_bytes: u64,
+    run_count: usize,
+}
+
+impl SpillBudgetTracker {
+    fn new(operator: &'static str, memory: &ExecutionMemoryConfig) -> Self {
+        Self {
+            operator,
+            max_bytes: memory.max_spill_bytes.get(),
+            max_runs: memory.max_spill_runs.get(),
+            used_bytes: 0,
+            run_count: 0,
+        }
+    }
+
+    fn begin_run(&mut self) -> Result<()> {
+        if self.run_count == self.max_runs {
+            return Err(SkeinError::Execution(format!(
+                "{} exceeded max_spill_runs {}",
+                self.operator, self.max_runs
+            )));
+        }
+        self.run_count = self.run_count.saturating_add(1);
+        Ok(())
+    }
+
+    fn remaining_bytes(&self) -> u64 {
+        self.max_bytes.saturating_sub(self.used_bytes)
+    }
+
+    fn charge(&mut self, bytes: u64) -> Result<()> {
+        let next = self.used_bytes.saturating_add(bytes);
+        if next > self.max_bytes {
+            return Err(SkeinError::Execution(format!(
+                "{} exceeded max_spill_bytes {} (next total {})",
+                self.operator, self.max_bytes, next
+            )));
+        }
+        self.used_bytes = next;
+        Ok(())
+    }
+}
+
+fn ensure_operator_item_fits(
+    operator: &str,
+    bytes: usize,
+    tracker: &OperatorMemoryTracker,
+) -> Result<()> {
+    if bytes > tracker.budget_bytes {
+        return Err(SkeinError::Execution(format!(
+            "{operator} item uses {bytes} bytes, exceeding blocking_operator_bytes {}",
+            tracker.budget_bytes
+        )));
+    }
+    Ok(())
+}
+
+fn push_bounded_operator_binding(
+    operator: &str,
+    output: &mut Vec<Binding>,
+    binding: Binding,
+    tracker: &mut OperatorMemoryTracker,
+) -> Result<()> {
+    let bytes = binding_memory_bytes(&binding);
+    ensure_operator_item_fits(operator, bytes, tracker)?;
+    if tracker.would_exceed(bytes) {
+        return Err(SkeinError::Execution(format!(
+            "{operator} state exceeds blocking_operator_bytes {}",
+            tracker.budget_bytes
+        )));
+    }
+    tracker.charge(bytes);
+    output.push(binding);
+    Ok(())
+}
+
+fn collect_bounded_operator_bindings(
+    operator: &str,
+    bindings: impl IntoIterator<Item = Binding>,
+    memory_budget: NonZeroUsize,
+) -> Result<Vec<Binding>> {
+    let mut output = Vec::new();
+    let mut tracker = OperatorMemoryTracker::new(memory_budget);
+    for binding in bindings {
+        push_bounded_operator_binding(operator, &mut output, binding, &mut tracker)?;
+    }
+    Ok(output)
 }
 
 fn binding_memory_bytes(binding: &Binding) -> usize {
@@ -2031,6 +2645,32 @@ fn binding_memory_bytes(binding: &Binding) -> usize {
                 .saturating_add(binding.relationships.len())
                 .saturating_mul(std::mem::size_of::<usize>() * 6),
         )
+}
+
+fn node_memory_bytes(node: &NodeRecord) -> usize {
+    std::mem::size_of::<NodeRecord>()
+        .saturating_add(
+            node.labels
+                .len()
+                .saturating_mul(std::mem::size_of::<crate::schema::LabelId>() * 3),
+        )
+        .saturating_add(map_memory_bytes(&node.properties))
+}
+
+fn relationship_memory_bytes(relationship: &RelRecord) -> usize {
+    std::mem::size_of::<RelRecord>().saturating_add(map_memory_bytes(&relationship.properties))
+}
+
+fn distinct_key_memory_bytes(key: &[(String, Value)]) -> usize {
+    std::mem::size_of::<Vec<(String, Value)>>().saturating_add(key.iter().fold(
+        0usize,
+        |total, (name, value)| {
+            total
+                .saturating_add(std::mem::size_of::<(String, Value)>())
+                .saturating_add(name.len())
+                .saturating_add(value_memory_bytes(value))
+        },
+    ))
 }
 
 struct SortRunRow {
@@ -2055,6 +2695,13 @@ impl SortRunRow {
     fn cmp_key(&self, other: &Self) -> Ordering {
         compare_sort_values(&self.sort_values, &other.sort_values)
             .then_with(|| self.ordinal.cmp(&other.ordinal))
+    }
+
+    fn memory_bytes(&self) -> usize {
+        binding_memory_bytes(&self.binding).saturating_add(self.sort_values.iter().fold(
+            std::mem::size_of::<Vec<(Value, SortDirection)>>(),
+            |total, (value, _)| total.saturating_add(value_memory_bytes(value)),
+        ))
     }
 }
 
@@ -2115,6 +2762,7 @@ fn stream_sort_batches(
         catalog, memory, ..
     } = context;
     let mut tracker = OperatorMemoryTracker::new(memory.blocking_operator_bytes);
+    let mut spill_budget = SpillBudgetTracker::new("SortExec", memory);
     let mut rows = Vec::<SortRunRow>::new();
     let mut runs = Vec::<spill::SpillRun>::new();
     let mut ordinal = 0u64;
@@ -2122,15 +2770,13 @@ fn stream_sort_batches(
         runtime_checkpoint(context.task_context)?;
         for binding in batch {
             let row = SortRunRow::new(catalog, items, ordinal, binding);
-            let bytes = binding_memory_bytes(&row.binding).saturating_add(
-                row.sort_values.iter().fold(0usize, |total, (value, _)| {
-                    total.saturating_add(value_payload_bytes(value))
-                }),
-            );
+            let bytes = row.memory_bytes();
+            ensure_operator_item_fits("SortExec", bytes, &tracker)?;
             if tracker.would_exceed(bytes) {
                 runs.push(spill_sort_run(
                     &mut rows,
                     &memory.spill_directory,
+                    &mut spill_budget,
                     context.task_context,
                 )?);
                 tracker.reset();
@@ -2165,23 +2811,34 @@ fn stream_sort_batches(
         runs.push(spill_sort_run(
             &mut rows,
             &memory.spill_directory,
+            &mut spill_budget,
             context.task_context,
         )?);
     }
+    runs = compact_sort_runs(
+        runs,
+        items,
+        catalog,
+        memory,
+        &mut spill_budget,
+        context.task_context,
+    )?;
     record_blocking_memory_report(skein_executor::BlockingOperatorMemoryReport {
         operator: "SortExec".to_string(),
         budget_bytes: tracker.budget_bytes,
         peak_tracked_bytes: tracker.peak_bytes,
         input_rows: ordinal as usize,
-        spill_run_count: runs.len(),
+        spill_run_count: spill_budget.run_count,
         spilled_rows: ordinal as usize,
     });
     merge_sort_runs(
         &runs,
         items,
         catalog,
+        memory.blocking_operator_bytes,
         memory.batch_rows.get(),
-        execution_limit,
+        0,
+        execution_limit.output_rows.unwrap_or(usize::MAX),
         context.task_context,
         emit,
     )
@@ -2190,26 +2847,151 @@ fn stream_sort_batches(
 fn spill_sort_run(
     rows: &mut Vec<SortRunRow>,
     directory: &std::path::Path,
+    spill_budget: &mut SpillBudgetTracker,
     task_context: Option<&RuntimeTaskContext>,
 ) -> Result<spill::SpillRun> {
     runtime_checkpoint(task_context)?;
     rows.sort_by(SortRunRow::cmp_key);
+    spill_budget.begin_run()?;
     let (run, mut writer) = spill::SpillRun::create(directory, "sort")?;
     for row in rows.drain(..) {
         runtime_checkpoint(task_context)?;
-        writer.write(row.ordinal, &row.binding)?;
+        let bytes = writer.write(row.ordinal, &row.binding, spill_budget.remaining_bytes())?;
+        spill_budget.charge(bytes)?;
     }
     runtime_checkpoint(task_context)?;
     writer.finish()?;
     Ok(run)
 }
 
+fn spill_top_n_run(
+    heap: &mut BinaryHeap<TopNBinding>,
+    directory: &std::path::Path,
+    spill_budget: &mut SpillBudgetTracker,
+    task_context: Option<&RuntimeTaskContext>,
+) -> Result<spill::SpillRun> {
+    runtime_checkpoint(task_context)?;
+    let mut rows = std::mem::take(heap).into_vec();
+    rows.sort();
+    spill_budget.begin_run()?;
+    let (run, mut writer) = spill::SpillRun::create(directory, "topn")?;
+    for row in rows {
+        runtime_checkpoint(task_context)?;
+        let bytes = writer.write(row.ordinal, &row.binding, spill_budget.remaining_bytes())?;
+        spill_budget.charge(bytes)?;
+    }
+    runtime_checkpoint(task_context)?;
+    writer.finish()?;
+    Ok(run)
+}
+
+fn compact_sort_runs(
+    mut runs: Vec<spill::SpillRun>,
+    items: &[SortItem],
+    catalog: &Catalog,
+    memory: &ExecutionMemoryConfig,
+    spill_budget: &mut SpillBudgetTracker,
+    task_context: Option<&RuntimeTaskContext>,
+) -> Result<Vec<spill::SpillRun>> {
+    while runs.len() > 2 {
+        runtime_checkpoint(task_context)?;
+        let mut compacted = Vec::with_capacity(runs.len().div_ceil(2));
+        let mut pending = runs.into_iter();
+        while let Some(left) = pending.next() {
+            let Some(right) = pending.next() else {
+                compacted.push(left);
+                break;
+            };
+            compacted.push(merge_sort_run_pair(
+                &left,
+                &right,
+                items,
+                catalog,
+                memory,
+                spill_budget,
+                task_context,
+            )?);
+        }
+        runs = compacted;
+    }
+    Ok(runs)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn merge_sort_run_pair(
+    left: &spill::SpillRun,
+    right: &spill::SpillRun,
+    items: &[SortItem],
+    catalog: &Catalog,
+    memory: &ExecutionMemoryConfig,
+    spill_budget: &mut SpillBudgetTracker,
+    task_context: Option<&RuntimeTaskContext>,
+) -> Result<spill::SpillRun> {
+    runtime_checkpoint(task_context)?;
+    let mut readers = [left.reader()?, right.reader()?];
+    let mut heap = BinaryHeap::new();
+    let mut tracker = OperatorMemoryTracker::new(memory.blocking_operator_bytes);
+    let per_row_budget = memory.blocking_operator_bytes.get() / 2;
+    for (run_index, reader) in readers.iter_mut().enumerate() {
+        if let Some((ordinal, binding)) = reader.read(memory.blocking_operator_bytes.get())? {
+            let entry = SortMergeEntry {
+                row: SortRunRow::new(catalog, items, ordinal, binding),
+                run_index,
+            };
+            let bytes = entry.row.memory_bytes();
+            if bytes > per_row_budget {
+                return Err(SkeinError::Execution(format!(
+                    "SortExec spill merge row uses {bytes} bytes, exceeding half of blocking_operator_bytes {}",
+                    memory.blocking_operator_bytes
+                )));
+            }
+            tracker.charge(bytes);
+            heap.push(entry);
+        }
+    }
+    spill_budget.begin_run()?;
+    let (run, mut writer) = spill::SpillRun::create(&memory.spill_directory, "sort-merge")?;
+    while let Some(entry) = heap.pop() {
+        runtime_checkpoint(task_context)?;
+        tracker.release(entry.row.memory_bytes());
+        let run_index = entry.run_index;
+        let bytes = writer.write(
+            entry.row.ordinal,
+            &entry.row.binding,
+            spill_budget.remaining_bytes(),
+        )?;
+        spill_budget.charge(bytes)?;
+        if let Some((ordinal, binding)) =
+            readers[run_index].read(memory.blocking_operator_bytes.get())?
+        {
+            let next = SortMergeEntry {
+                row: SortRunRow::new(catalog, items, ordinal, binding),
+                run_index,
+            };
+            let bytes = next.row.memory_bytes();
+            if bytes > per_row_budget || tracker.would_exceed(bytes) {
+                return Err(SkeinError::Execution(format!(
+                    "SortExec spill merge exceeds blocking_operator_bytes {}",
+                    memory.blocking_operator_bytes
+                )));
+            }
+            tracker.charge(bytes);
+            heap.push(next);
+        }
+    }
+    writer.finish()?;
+    Ok(run)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn merge_sort_runs(
     runs: &[spill::SpillRun],
     items: &[SortItem],
     catalog: &Catalog,
+    memory_budget: NonZeroUsize,
     batch_rows: usize,
-    execution_limit: ExecutionLimit,
+    skip_rows: usize,
+    output_rows: usize,
     task_context: Option<&RuntimeTaskContext>,
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
@@ -2219,30 +3001,59 @@ fn merge_sort_runs(
         .map(spill::SpillRun::reader)
         .collect::<Result<Vec<_>>>()?;
     let mut heap = BinaryHeap::new();
+    let mut tracker = OperatorMemoryTracker::new(memory_budget);
     for (run_index, reader) in readers.iter_mut().enumerate() {
         runtime_checkpoint(task_context)?;
-        if let Some((ordinal, binding)) = reader.read()? {
-            heap.push(SortMergeEntry {
+        if let Some((ordinal, binding)) = reader.read(memory_budget.get())? {
+            let entry = SortMergeEntry {
                 row: SortRunRow::new(catalog, items, ordinal, binding),
                 run_index,
-            });
+            };
+            let bytes = entry.row.memory_bytes();
+            ensure_operator_item_fits("SortExec merge", bytes, &tracker)?;
+            if tracker.would_exceed(bytes) {
+                return Err(SkeinError::Execution(format!(
+                    "SortExec merge fan-in uses more than blocking_operator_bytes {}",
+                    tracker.budget_bytes
+                )));
+            }
+            tracker.charge(bytes);
+            heap.push(entry);
         }
     }
-    let cap = execution_limit.output_rows.unwrap_or(usize::MAX);
+    if output_rows == 0 {
+        return Ok(BatchControl::Continue);
+    }
+    let mut skipped = 0usize;
     let mut emitted = 0usize;
     let mut batch = Vec::with_capacity(batch_rows);
     while let Some(entry) = heap.pop() {
         runtime_checkpoint(task_context)?;
+        tracker.release(entry.row.memory_bytes());
         let run_index = entry.run_index;
-        batch.push(entry.row.binding);
-        emitted = emitted.saturating_add(1);
-        if let Some((ordinal, binding)) = readers[run_index].read()? {
-            heap.push(SortMergeEntry {
+        if let Some((ordinal, binding)) = readers[run_index].read(memory_budget.get())? {
+            let next = SortMergeEntry {
                 row: SortRunRow::new(catalog, items, ordinal, binding),
                 run_index,
-            });
+            };
+            let bytes = next.row.memory_bytes();
+            ensure_operator_item_fits("SortExec merge", bytes, &tracker)?;
+            if tracker.would_exceed(bytes) {
+                return Err(SkeinError::Execution(format!(
+                    "SortExec merge fan-in uses more than blocking_operator_bytes {}",
+                    tracker.budget_bytes
+                )));
+            }
+            tracker.charge(bytes);
+            heap.push(next);
         }
-        if (batch.len() == batch_rows || emitted == cap)
+        if skipped < skip_rows {
+            skipped = skipped.saturating_add(1);
+            continue;
+        }
+        batch.push(entry.row.binding);
+        emitted = emitted.saturating_add(1);
+        if (batch.len() == batch_rows || emitted == output_rows)
             && emit(std::mem::replace(
                 &mut batch,
                 Vec::with_capacity(batch_rows),
@@ -2250,7 +3061,7 @@ fn merge_sort_runs(
         {
             return Ok(BatchControl::Stop);
         }
-        if emitted == cap {
+        if emitted == output_rows {
             return Ok(BatchControl::Stop);
         }
     }
@@ -2284,6 +3095,33 @@ enum AggregateState {
     },
 }
 
+#[derive(Default)]
+struct MemoryDelta {
+    added_bytes: usize,
+    released_bytes: usize,
+}
+
+impl MemoryDelta {
+    fn between(previous: usize, next: usize) -> Self {
+        if next >= previous {
+            Self {
+                added_bytes: next - previous,
+                released_bytes: 0,
+            }
+        } else {
+            Self {
+                added_bytes: 0,
+                released_bytes: previous - next,
+            }
+        }
+    }
+
+    fn combine(&mut self, other: Self) {
+        self.added_bytes = self.added_bytes.saturating_add(other.added_bytes);
+        self.released_bytes = self.released_bytes.saturating_add(other.released_bytes);
+    }
+}
+
 impl AggregateState {
     fn new(item: &Aggregation) -> Self {
         match item.function {
@@ -2301,7 +3139,7 @@ impl AggregateState {
         }
     }
 
-    fn update(&mut self, item: &Aggregation, catalog: &Catalog, binding: &Binding) {
+    fn update(&mut self, item: &Aggregation, catalog: &Catalog, binding: &Binding) -> MemoryDelta {
         match self {
             Self::Count { count, distinct } => {
                 if distinct.is_none() {
@@ -2318,12 +3156,12 @@ impl AggregateState {
                     if matched {
                         *count = count.saturating_add(1);
                     }
-                    return;
+                    return MemoryDelta::default();
                 }
                 let value = match &item.target {
                     AggregateTarget::All => {
                         *count = count.saturating_add(1);
-                        return;
+                        return MemoryDelta::default();
                     }
                     AggregateTarget::Variable(variable) => binding_identity_key(binding, variable)
                         .map(|(kind, id)| AggregateDistinctValue::Identity(kind, id)),
@@ -2342,29 +3180,44 @@ impl AggregateState {
                         .map(AggregateDistinctValue::Value),
                 };
                 let Some(value) = value else {
-                    return;
+                    return MemoryDelta::default();
                 };
+                let value_bytes = aggregate_distinct_value_memory_bytes(&value)
+                    .saturating_add(std::mem::size_of::<usize>() * 4);
                 if let Some(distinct) = distinct {
                     if distinct.insert(value) {
                         *count = count.saturating_add(1);
+                        return MemoryDelta {
+                            added_bytes: value_bytes,
+                            released_bytes: 0,
+                        };
                     }
                 } else {
                     *count = count.saturating_add(1);
                 }
+                MemoryDelta::default()
             }
             Self::Min(current) => {
                 if let Some(value) = aggregate_property_value(&item.target, binding)
                     && current.as_ref().is_none_or(|current| value < *current)
                 {
+                    let previous = current.as_ref().map_or(0, value_memory_bytes);
+                    let next = value_memory_bytes(&value);
                     *current = Some(value);
+                    return MemoryDelta::between(previous, next);
                 }
+                MemoryDelta::default()
             }
             Self::Max(current) => {
                 if let Some(value) = aggregate_property_value(&item.target, binding)
                     && current.as_ref().is_none_or(|current| value > *current)
                 {
+                    let previous = current.as_ref().map_or(0, value_memory_bytes);
+                    let next = value_memory_bytes(&value);
                     *current = Some(value);
+                    return MemoryDelta::between(previous, next);
                 }
+                MemoryDelta::default()
             }
             Self::Avg { sum, count } => {
                 if let Some(value) = aggregate_property_value(&item.target, binding) {
@@ -2380,6 +3233,7 @@ impl AggregateState {
                         _ => {}
                     }
                 }
+                MemoryDelta::default()
             }
             Self::Collect { values, distinct } => {
                 let value = match &item.target {
@@ -2392,13 +3246,25 @@ impl AggregateState {
                     AggregateTarget::All => None,
                 };
                 let Some(value) = value.filter(|value| value != &Value::Null) else {
-                    return;
+                    return MemoryDelta::default();
                 };
+                let value_bytes =
+                    value_memory_bytes(&value).saturating_add(std::mem::size_of::<usize>() * 4);
                 if let Some(distinct) = distinct {
-                    distinct.insert(value);
+                    if distinct.insert(value) {
+                        return MemoryDelta {
+                            added_bytes: value_bytes,
+                            released_bytes: 0,
+                        };
+                    }
                 } else {
                     values.push(value);
+                    return MemoryDelta {
+                        added_bytes: value_bytes,
+                        released_bytes: 0,
+                    };
                 }
+                MemoryDelta::default()
             }
         }
     }
@@ -2419,6 +3285,13 @@ impl AggregateState {
             } => Value::List(values.into_iter().collect()),
         }
     }
+}
+
+fn aggregate_distinct_value_memory_bytes(value: &AggregateDistinctValue) -> usize {
+    std::mem::size_of::<AggregateDistinctValue>().saturating_add(match value {
+        AggregateDistinctValue::Identity(_, _) => 0,
+        AggregateDistinctValue::Value(value) => value_memory_bytes(value),
+    })
 }
 
 fn aggregate_property_value(target: &AggregateTarget, binding: &Binding) -> Option<Value> {
@@ -2447,10 +3320,24 @@ impl<'a> GroupAccumulator<'a> {
         }
     }
 
-    fn update(&mut self, catalog: &Catalog, binding: &Binding) {
+    fn base_memory_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            .saturating_add(self.key.iter().fold(0usize, |total, value| {
+                total.saturating_add(value_memory_bytes(value))
+            }))
+            .saturating_add(
+                self.states
+                    .len()
+                    .saturating_mul(std::mem::size_of::<AggregateState>()),
+            )
+    }
+
+    fn update(&mut self, catalog: &Catalog, binding: &Binding) -> MemoryDelta {
+        let mut delta = MemoryDelta::default();
         for (state, item) in self.states.iter_mut().zip(self.items) {
-            state.update(item, catalog, binding);
+            delta.combine(state.update(item, catalog, binding));
         }
+        delta
     }
 
     fn finish(self) -> Binding {
@@ -2481,6 +3368,16 @@ impl GroupRunRow {
             .cmp(&other.key)
             .then_with(|| self.ordinal.cmp(&other.ordinal))
     }
+
+    fn memory_bytes(&self) -> usize {
+        binding_memory_bytes(&self.binding).saturating_add(
+            self.key
+                .iter()
+                .fold(std::mem::size_of::<Vec<Value>>(), |total, value| {
+                    total.saturating_add(value_memory_bytes(value))
+                }),
+        )
+    }
 }
 
 struct GroupMergeEntry {
@@ -2494,6 +3391,7 @@ struct AggregateExecutionContext<'a> {
     items: &'a [Aggregation],
     catalog: &'a Catalog,
     batch_rows: usize,
+    memory_budget: NonZeroUsize,
     execution_limit: ExecutionLimit,
     task_context: Option<&'a RuntimeTaskContext>,
 }
@@ -2535,19 +3433,23 @@ fn stream_aggregate_batches(
     } = context;
     if group_keys.is_empty() {
         let mut accumulator = GroupAccumulator::new(Vec::new(), group_keys, items);
+        let mut tracker = OperatorMemoryTracker::new(memory.blocking_operator_bytes);
+        let base_bytes = accumulator.base_memory_bytes();
+        ensure_operator_item_fits("AggregateExec", base_bytes, &tracker)?;
+        tracker.charge(base_bytes);
         let mut input_rows = 0usize;
         execute_binding_batches(input, context, ExecutionLimit::unlimited(), &mut |batch| {
             runtime_checkpoint(context.task_context)?;
             for binding in &batch {
-                accumulator.update(catalog, binding);
+                update_group_accumulator(&mut accumulator, catalog, binding, &mut tracker)?;
                 input_rows = input_rows.saturating_add(1);
             }
             Ok(BatchControl::Continue)
         })?;
         record_blocking_memory_report(skein_executor::BlockingOperatorMemoryReport {
             operator: "AggregateExec".to_string(),
-            budget_bytes: memory.blocking_operator_bytes.get(),
-            peak_tracked_bytes: 0,
+            budget_bytes: tracker.budget_bytes,
+            peak_tracked_bytes: tracker.peak_bytes,
             input_rows,
             spill_run_count: 0,
             spilled_rows: 0,
@@ -2556,6 +3458,7 @@ fn stream_aggregate_batches(
     }
 
     let mut tracker = OperatorMemoryTracker::new(memory.blocking_operator_bytes);
+    let mut spill_budget = SpillBudgetTracker::new("AggregateExec", memory);
     let mut rows = Vec::<GroupRunRow>::new();
     let mut runs = Vec::<spill::SpillRun>::new();
     let mut ordinal = 0u64;
@@ -2568,13 +3471,15 @@ fn stream_aggregate_batches(
                 .collect::<Vec<_>>();
             let bytes = binding_memory_bytes(&binding).saturating_add(
                 key.iter().fold(0usize, |total, value| {
-                    total.saturating_add(value_payload_bytes(value))
+                    total.saturating_add(value_memory_bytes(value))
                 }),
             );
+            ensure_operator_item_fits("AggregateExec", bytes, &tracker)?;
             if tracker.would_exceed(bytes) {
                 runs.push(spill_group_run(
                     &mut rows,
                     &memory.spill_directory,
+                    &mut spill_budget,
                     context.task_context,
                 )?);
                 tracker.reset();
@@ -2605,6 +3510,7 @@ fn stream_aggregate_batches(
             items,
             catalog,
             batch_rows: memory.batch_rows.get(),
+            memory_budget: memory.blocking_operator_bytes,
             execution_limit,
             task_context: context.task_context,
         };
@@ -2614,15 +3520,24 @@ fn stream_aggregate_batches(
         runs.push(spill_group_run(
             &mut rows,
             &memory.spill_directory,
+            &mut spill_budget,
             context.task_context,
         )?);
     }
+    runs = compact_group_runs(
+        runs,
+        group_keys,
+        catalog,
+        memory,
+        &mut spill_budget,
+        context.task_context,
+    )?;
     record_blocking_memory_report(skein_executor::BlockingOperatorMemoryReport {
         operator: "AggregateExec".to_string(),
         budget_bytes: tracker.budget_bytes,
         peak_tracked_bytes: tracker.peak_bytes,
         input_rows: ordinal as usize,
-        spill_run_count: runs.len(),
+        spill_run_count: spill_budget.run_count,
         spilled_rows: ordinal as usize,
     });
     let aggregate_context = AggregateExecutionContext {
@@ -2630,6 +3545,7 @@ fn stream_aggregate_batches(
         items,
         catalog,
         batch_rows: memory.batch_rows.get(),
+        memory_budget: memory.blocking_operator_bytes,
         execution_limit,
         task_context: context.task_context,
     };
@@ -2639,16 +3555,133 @@ fn stream_aggregate_batches(
 fn spill_group_run(
     rows: &mut Vec<GroupRunRow>,
     directory: &std::path::Path,
+    spill_budget: &mut SpillBudgetTracker,
     task_context: Option<&RuntimeTaskContext>,
 ) -> Result<spill::SpillRun> {
     runtime_checkpoint(task_context)?;
     rows.sort_by(GroupRunRow::cmp_key);
+    spill_budget.begin_run()?;
     let (run, mut writer) = spill::SpillRun::create(directory, "aggregate")?;
     for row in rows.drain(..) {
         runtime_checkpoint(task_context)?;
-        writer.write(row.ordinal, &row.binding)?;
+        let bytes = writer.write(row.ordinal, &row.binding, spill_budget.remaining_bytes())?;
+        spill_budget.charge(bytes)?;
     }
     runtime_checkpoint(task_context)?;
+    writer.finish()?;
+    Ok(run)
+}
+
+fn compact_group_runs(
+    mut runs: Vec<spill::SpillRun>,
+    group_keys: &[Projection],
+    catalog: &Catalog,
+    memory: &ExecutionMemoryConfig,
+    spill_budget: &mut SpillBudgetTracker,
+    task_context: Option<&RuntimeTaskContext>,
+) -> Result<Vec<spill::SpillRun>> {
+    while runs.len() > 2 {
+        runtime_checkpoint(task_context)?;
+        let mut compacted = Vec::with_capacity(runs.len().div_ceil(2));
+        let mut pending = runs.into_iter();
+        while let Some(left) = pending.next() {
+            let Some(right) = pending.next() else {
+                compacted.push(left);
+                break;
+            };
+            compacted.push(merge_group_run_pair(
+                &left,
+                &right,
+                group_keys,
+                catalog,
+                memory,
+                spill_budget,
+                task_context,
+            )?);
+        }
+        runs = compacted;
+    }
+    Ok(runs)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn merge_group_run_pair(
+    left: &spill::SpillRun,
+    right: &spill::SpillRun,
+    group_keys: &[Projection],
+    catalog: &Catalog,
+    memory: &ExecutionMemoryConfig,
+    spill_budget: &mut SpillBudgetTracker,
+    task_context: Option<&RuntimeTaskContext>,
+) -> Result<spill::SpillRun> {
+    runtime_checkpoint(task_context)?;
+    let mut readers = [left.reader()?, right.reader()?];
+    let mut heap = BinaryHeap::new();
+    let mut tracker = OperatorMemoryTracker::new(memory.blocking_operator_bytes);
+    let per_row_budget = memory.blocking_operator_bytes.get() / 2;
+    for (run_index, reader) in readers.iter_mut().enumerate() {
+        if let Some((ordinal, binding)) = reader.read(memory.blocking_operator_bytes.get())? {
+            let key = group_keys
+                .iter()
+                .map(|item| group_key_value(item, catalog, &binding))
+                .collect();
+            let entry = GroupMergeEntry {
+                row: GroupRunRow {
+                    key,
+                    ordinal,
+                    binding,
+                },
+                run_index,
+            };
+            let bytes = entry.row.memory_bytes();
+            if bytes > per_row_budget {
+                return Err(SkeinError::Execution(format!(
+                    "AggregateExec spill merge row uses {bytes} bytes, exceeding half of blocking_operator_bytes {}",
+                    memory.blocking_operator_bytes
+                )));
+            }
+            tracker.charge(bytes);
+            heap.push(entry);
+        }
+    }
+    spill_budget.begin_run()?;
+    let (run, mut writer) = spill::SpillRun::create(&memory.spill_directory, "aggregate-merge")?;
+    while let Some(entry) = heap.pop() {
+        runtime_checkpoint(task_context)?;
+        tracker.release(entry.row.memory_bytes());
+        let run_index = entry.run_index;
+        let bytes = writer.write(
+            entry.row.ordinal,
+            &entry.row.binding,
+            spill_budget.remaining_bytes(),
+        )?;
+        spill_budget.charge(bytes)?;
+        if let Some((ordinal, binding)) =
+            readers[run_index].read(memory.blocking_operator_bytes.get())?
+        {
+            let key = group_keys
+                .iter()
+                .map(|item| group_key_value(item, catalog, &binding))
+                .collect();
+            let next = GroupMergeEntry {
+                row: GroupRunRow {
+                    key,
+                    ordinal,
+                    binding,
+                },
+                run_index,
+            };
+            let bytes = next.row.memory_bytes();
+            if bytes > per_row_budget || tracker.would_exceed(bytes) {
+                return Err(SkeinError::Execution(format!(
+                    "AggregateExec spill merge exceeds blocking_operator_bytes {}",
+                    memory.blocking_operator_bytes
+                )));
+            }
+            tracker.charge(bytes);
+            heap.push(next);
+        }
+    }
     writer.finish()?;
     Ok(run)
 }
@@ -2663,10 +3696,12 @@ fn aggregate_sorted_group_rows(
         items,
         catalog,
         batch_rows,
+        memory_budget,
         execution_limit,
         task_context,
     } = context;
     runtime_checkpoint(task_context)?;
+    let mut tracker = OperatorMemoryTracker::new(memory_budget);
     let mut batch = Vec::with_capacity(batch_rows);
     let mut accumulator: Option<GroupAccumulator<'_>> = None;
     let mut emitted = 0usize;
@@ -2677,6 +3712,7 @@ fn aggregate_sorted_group_rows(
             .is_some_and(|accumulator| accumulator.key != row.key)
         {
             batch.push(accumulator.take().expect("group exists").finish());
+            tracker.reset();
             emitted = emitted.saturating_add(1);
             if flush_aggregate_batch(&mut batch, batch_rows, emitted, execution_limit, emit)?
                 == BatchControl::Stop
@@ -2684,9 +3720,19 @@ fn aggregate_sorted_group_rows(
                 return Ok(BatchControl::Stop);
             }
         }
-        let accumulator = accumulator
-            .get_or_insert_with(|| GroupAccumulator::new(row.key.clone(), group_keys, items));
-        accumulator.update(catalog, &row.binding);
+        if accumulator.is_none() {
+            let next = GroupAccumulator::new(row.key.clone(), group_keys, items);
+            let base_bytes = next.base_memory_bytes();
+            ensure_operator_item_fits("AggregateExec group state", base_bytes, &tracker)?;
+            tracker.charge(base_bytes);
+            accumulator = Some(next);
+        }
+        update_group_accumulator(
+            accumulator.as_mut().expect("group exists"),
+            catalog,
+            &row.binding,
+            &mut tracker,
+        )?;
     }
     runtime_checkpoint(task_context)?;
     if let Some(accumulator) = accumulator {
@@ -2708,30 +3754,43 @@ fn merge_group_runs(
         items,
         catalog,
         batch_rows,
+        memory_budget,
         execution_limit,
         task_context,
     } = context;
     runtime_checkpoint(task_context)?;
+    let mut accumulator_tracker = OperatorMemoryTracker::new(memory_budget);
     let mut readers = runs
         .iter()
         .map(spill::SpillRun::reader)
         .collect::<Result<Vec<_>>>()?;
     let mut heap = BinaryHeap::new();
+    let mut merge_tracker = OperatorMemoryTracker::new(memory_budget);
     for (run_index, reader) in readers.iter_mut().enumerate() {
         runtime_checkpoint(task_context)?;
-        if let Some((ordinal, binding)) = reader.read()? {
+        if let Some((ordinal, binding)) = reader.read(memory_budget.get())? {
             let key = group_keys
                 .iter()
                 .map(|item| group_key_value(item, catalog, &binding))
                 .collect();
-            heap.push(GroupMergeEntry {
+            let entry = GroupMergeEntry {
                 row: GroupRunRow {
                     key,
                     ordinal,
                     binding,
                 },
                 run_index,
-            });
+            };
+            let bytes = entry.row.memory_bytes();
+            ensure_operator_item_fits("AggregateExec merge", bytes, &merge_tracker)?;
+            if merge_tracker.would_exceed(bytes) {
+                return Err(SkeinError::Execution(format!(
+                    "AggregateExec merge fan-in uses more than blocking_operator_bytes {}",
+                    merge_tracker.budget_bytes
+                )));
+            }
+            merge_tracker.charge(bytes);
+            heap.push(entry);
         }
     }
     let mut batch = Vec::with_capacity(batch_rows);
@@ -2739,6 +3798,7 @@ fn merge_group_runs(
     let mut emitted = 0usize;
     while let Some(entry) = heap.pop() {
         runtime_checkpoint(task_context)?;
+        merge_tracker.release(entry.row.memory_bytes());
         let run_index = entry.run_index;
         let row = entry.row;
         if accumulator
@@ -2746,6 +3806,7 @@ fn merge_group_runs(
             .is_some_and(|accumulator| accumulator.key != row.key)
         {
             batch.push(accumulator.take().expect("group exists").finish());
+            accumulator_tracker.reset();
             emitted = emitted.saturating_add(1);
             if flush_aggregate_batch(&mut batch, batch_rows, emitted, execution_limit, emit)?
                 == BatchControl::Stop
@@ -2753,22 +3814,46 @@ fn merge_group_runs(
                 return Ok(BatchControl::Stop);
             }
         }
-        accumulator
-            .get_or_insert_with(|| GroupAccumulator::new(row.key.clone(), group_keys, items))
-            .update(catalog, &row.binding);
-        if let Some((ordinal, binding)) = readers[run_index].read()? {
+        if accumulator.is_none() {
+            let next = GroupAccumulator::new(row.key.clone(), group_keys, items);
+            let base_bytes = next.base_memory_bytes();
+            ensure_operator_item_fits(
+                "AggregateExec group state",
+                base_bytes,
+                &accumulator_tracker,
+            )?;
+            accumulator_tracker.charge(base_bytes);
+            accumulator = Some(next);
+        }
+        update_group_accumulator(
+            accumulator.as_mut().expect("group exists"),
+            catalog,
+            &row.binding,
+            &mut accumulator_tracker,
+        )?;
+        if let Some((ordinal, binding)) = readers[run_index].read(memory_budget.get())? {
             let key = group_keys
                 .iter()
                 .map(|item| group_key_value(item, catalog, &binding))
                 .collect();
-            heap.push(GroupMergeEntry {
+            let next = GroupMergeEntry {
                 row: GroupRunRow {
                     key,
                     ordinal,
                     binding,
                 },
                 run_index,
-            });
+            };
+            let bytes = next.row.memory_bytes();
+            ensure_operator_item_fits("AggregateExec merge", bytes, &merge_tracker)?;
+            if merge_tracker.would_exceed(bytes) {
+                return Err(SkeinError::Execution(format!(
+                    "AggregateExec merge fan-in uses more than blocking_operator_bytes {}",
+                    merge_tracker.budget_bytes
+                )));
+            }
+            merge_tracker.charge(bytes);
+            heap.push(next);
         }
     }
     runtime_checkpoint(task_context)?;
@@ -2779,6 +3864,24 @@ fn merge_group_runs(
         return Ok(BatchControl::Stop);
     }
     Ok(BatchControl::Continue)
+}
+
+fn update_group_accumulator(
+    accumulator: &mut GroupAccumulator<'_>,
+    catalog: &Catalog,
+    binding: &Binding,
+    tracker: &mut OperatorMemoryTracker,
+) -> Result<()> {
+    let delta = accumulator.update(catalog, binding);
+    tracker.release(delta.released_bytes);
+    if tracker.would_exceed(delta.added_bytes) {
+        return Err(SkeinError::Execution(format!(
+            "AggregateExec state exceeds blocking_operator_bytes {}",
+            tracker.budget_bytes
+        )));
+    }
+    tracker.charge(delta.added_bytes);
+    Ok(())
 }
 
 fn flush_aggregate_batch(
@@ -2816,6 +3919,10 @@ fn stream_node_scan_batches(
     let exact_label_id = exact_label.flatten();
     if !store.is_out_of_core()
         && let Some(label_id) = exact_label
+        && store
+            .node_count_for_label(label_id)
+            .saturating_mul(std::mem::size_of::<&NodeRecord>())
+            <= memory.blocking_operator_bytes.get()
     {
         let scan = store.scan_nodes_with_filter_pruning(label_id, filter.map(|(_, filter)| filter));
         record_scan_pruning_report(scan.report.clone());
@@ -3418,50 +4525,56 @@ fn execute_bindings_with_limit(
                     budget,
                 )
             }?;
-            Ok(match algorithm {
-                GraphAlgorithmKind::PageRank => graph
-                    .page_rank(PageRankOptions {
-                        iterations: options
-                            .max_iterations
-                            .unwrap_or_else(|| PageRankOptions::default().iterations),
-                        damping: options
-                            .damping
-                            .unwrap_or_else(|| PageRankOptions::default().damping),
-                    })
-                    .into_iter()
-                    .map(|score| Binding {
-                        values: BTreeMap::from([
-                            ("node".to_string(), Value::Int(score.node.0 as i64)),
-                            (score_column.clone(), Value::Float(score.score)),
-                        ]),
-                        nodes: BTreeMap::new(),
-                        relationships: BTreeMap::new(),
-                    })
-                    .collect(),
-                GraphAlgorithmKind::Louvain => graph
-                    .hierarchical_louvain_communities(LouvainOptions {
-                        max_iterations: options
-                            .max_iterations
-                            .unwrap_or_else(|| LouvainOptions::default().max_iterations),
-                        max_levels: options
-                            .max_levels
-                            .unwrap_or_else(|| LouvainOptions::default().max_levels),
-                    })
-                    .into_iter()
-                    .map(|assignment| Binding {
-                        values: BTreeMap::from([
-                            ("node".to_string(), Value::Int(assignment.node.0 as i64)),
-                            ("level".to_string(), Value::Int(assignment.level as i64)),
-                            (
-                                "louvain_id".to_string(),
-                                Value::Int(assignment.community.0 as i64),
-                            ),
-                        ]),
-                        nodes: BTreeMap::new(),
-                        relationships: BTreeMap::new(),
-                    })
-                    .collect(),
-            })
+            match algorithm {
+                GraphAlgorithmKind::PageRank => collect_bounded_operator_bindings(
+                    "GraphAlgorithm",
+                    graph
+                        .page_rank(PageRankOptions {
+                            iterations: options
+                                .max_iterations
+                                .unwrap_or_else(|| PageRankOptions::default().iterations),
+                            damping: options
+                                .damping
+                                .unwrap_or_else(|| PageRankOptions::default().damping),
+                        })
+                        .into_iter()
+                        .map(|score| Binding {
+                            values: BTreeMap::from([
+                                ("node".to_string(), Value::Int(score.node.0 as i64)),
+                                (score_column.clone(), Value::Float(score.score)),
+                            ]),
+                            nodes: BTreeMap::new(),
+                            relationships: BTreeMap::new(),
+                        }),
+                    context.memory.blocking_operator_bytes,
+                ),
+                GraphAlgorithmKind::Louvain => collect_bounded_operator_bindings(
+                    "GraphAlgorithm",
+                    graph
+                        .hierarchical_louvain_communities(LouvainOptions {
+                            max_iterations: options
+                                .max_iterations
+                                .unwrap_or_else(|| LouvainOptions::default().max_iterations),
+                            max_levels: options
+                                .max_levels
+                                .unwrap_or_else(|| LouvainOptions::default().max_levels),
+                        })
+                        .into_iter()
+                        .map(|assignment| Binding {
+                            values: BTreeMap::from([
+                                ("node".to_string(), Value::Int(assignment.node.0 as i64)),
+                                ("level".to_string(), Value::Int(assignment.level as i64)),
+                                (
+                                    "louvain_id".to_string(),
+                                    Value::Int(assignment.community.0 as i64),
+                                ),
+                            ]),
+                            nodes: BTreeMap::new(),
+                            relationships: BTreeMap::new(),
+                        }),
+                    context.memory.blocking_operator_bytes,
+                ),
+            }
         }
         PhysicalPlan::VectorSeedScan {
             embedding_parameter,
@@ -3479,10 +4592,9 @@ fn execute_bindings_with_limit(
                     vector_plan,
                 })?;
             record_vector_execution_report(output.report);
-            Ok(output
-                .rows
-                .into_iter()
-                .map(|row| {
+            collect_bounded_operator_bindings(
+                "VectorSeedScan",
+                output.rows.into_iter().map(|row| {
                     let mut values = BTreeMap::from([
                         ("id".to_string(), Value::String(row.id)),
                         ("score".to_string(), Value::Float(row.score)),
@@ -3495,8 +4607,9 @@ fn execute_bindings_with_limit(
                         nodes: BTreeMap::new(),
                         relationships: BTreeMap::new(),
                     }
-                })
-                .collect())
+                }),
+                context.memory.blocking_operator_bytes,
+            )
         }
         PhysicalPlan::CreateNode { label, properties } => {
             let id = store.create_node(catalog, label, properties.clone())?;
@@ -4199,6 +5312,7 @@ fn execute_bindings_with_limit(
             catalog,
             store,
             execution_limit,
+            context.memory.blocking_operator_bytes,
         ),
         PhysicalPlan::SourceSegmentScan {
             variable,
@@ -4209,12 +5323,25 @@ fn execute_bindings_with_limit(
             catalog,
             store,
             execution_limit,
+            context.memory,
             context.task_context,
         ),
         PhysicalPlan::NodeCartesianProductExec { left, right } => {
             let left = execute_child_bindings(left, catalog, store, context)?;
             let right = execute_child_bindings(right, catalog, store, context)?;
             let mut output = Vec::new();
+            let mut tracker = OperatorMemoryTracker::new(context.memory.blocking_operator_bytes);
+            for binding in left.iter().chain(&right) {
+                let bytes = binding_memory_bytes(binding);
+                ensure_operator_item_fits("NodeCartesianProductExec", bytes, &tracker)?;
+                if tracker.would_exceed(bytes) {
+                    return Err(SkeinError::Execution(format!(
+                        "NodeCartesianProductExec inputs exceed blocking_operator_bytes {}",
+                        tracker.budget_bytes
+                    )));
+                }
+                tracker.charge(bytes);
+            }
             for left_binding in &left {
                 for right_binding in &right {
                     let mut values = left_binding.values.clone();
@@ -4223,11 +5350,17 @@ fn execute_bindings_with_limit(
                     nodes.extend(right_binding.nodes.clone());
                     let mut relationships = left_binding.relationships.clone();
                     relationships.extend(right_binding.relationships.clone());
-                    output.push(Binding {
+                    let binding = Binding {
                         values,
                         nodes,
                         relationships,
-                    });
+                    };
+                    push_bounded_operator_binding(
+                        "NodeCartesianProductExec",
+                        &mut output,
+                        binding,
+                        &mut tracker,
+                    )?;
                     if execution_limit.is_reached(output.len()) {
                         return Ok(output);
                     }
@@ -4256,6 +5389,7 @@ fn execute_bindings_with_limit(
                 catalog,
                 store,
                 execution_limit,
+                context.memory.blocking_operator_bytes,
             )
         }
         PhysicalPlan::IndexNodeSeek {
@@ -4463,7 +5597,7 @@ fn execute_bindings_with_limit(
                             "missing variable '{source_variable}' during optional degree"
                         ))
                     })?;
-                    let degree = one_hop_relationships(
+                    let degree = one_hop_relationships_with_budget(
                         store,
                         source.id,
                         rel_type_id,
@@ -4471,6 +5605,7 @@ fn execute_bindings_with_limit(
                         rel_properties,
                         None,
                         *direction,
+                        context.memory.blocking_operator_bytes.get(),
                     )?
                     .into_iter()
                     .filter(|(_, target)| node_properties_match(target, target_properties))
@@ -4538,6 +5673,7 @@ fn execute_bindings_with_limit(
             message_label,
             memory_rel_type,
             memory_label,
+            context.memory.blocking_operator_bytes,
         ),
         PhysicalPlan::ShortestPathExec {
             source_label,
@@ -4578,6 +5714,9 @@ fn execute_bindings_with_limit(
                     max_hops: *max_hops,
                     returns,
                 },
+                context.memory,
+                execution_limit,
+                context.task_context,
             )
         }
         PhysicalPlan::FilterExec { predicate, input } => {
@@ -4591,6 +5730,7 @@ fn execute_bindings_with_limit(
                     catalog,
                     store,
                     execution_limit,
+                    context.memory.blocking_operator_bytes,
                 );
             }
             if let PhysicalPlan::AdjacencyExpandExec {
@@ -4744,6 +5884,8 @@ fn execute_top_n_bindings(
     let input = execute_child_bindings(input, catalog, store, context)?;
     let mut heap = BinaryHeap::with_capacity(retained.min(input.len()));
     for (ordinal, binding) in input.into_iter().enumerate() {
+        let ordinal = u64::try_from(ordinal)
+            .map_err(|_| SkeinError::Execution("TopNExec input ordinal exceeds u64".to_string()))?;
         let sort_values = items
             .iter()
             .map(|item| (sort_value(catalog, &binding, &item.key), item.direction))
@@ -4786,15 +5928,21 @@ fn execute_node_scan_with_optional_filter(
     catalog: &Catalog,
     store: &GraphStore,
     execution_limit: ExecutionLimit,
+    memory_budget: NonZeroUsize,
 ) -> Result<Vec<Binding>> {
     let exact_label = exact_scan_label_id(catalog, label);
     let exact_label_id = exact_label.flatten();
     if !store.is_out_of_core()
         && let Some(label_id) = exact_label
+        && store
+            .node_count_for_label(label_id)
+            .saturating_mul(std::mem::size_of::<&NodeRecord>())
+            <= memory_budget.get()
     {
         let scan = store.scan_nodes_with_filter_pruning(label_id, filter.map(|(_, filter)| filter));
         record_scan_pruning_report(scan.report.clone());
         let mut output = Vec::new();
+        let mut tracker = OperatorMemoryTracker::new(memory_budget);
         for node in scan.nodes {
             let binding = node_binding(variable, node.clone());
             if let Some((predicate, _)) = filter
@@ -4802,7 +5950,7 @@ fn execute_node_scan_with_optional_filter(
             {
                 continue;
             }
-            output.push(binding);
+            push_bounded_operator_binding("NodeScanExec", &mut output, binding, &mut tracker)?;
             if execution_limit.is_reached(output.len()) {
                 break;
             }
@@ -4811,6 +5959,7 @@ fn execute_node_scan_with_optional_filter(
     }
     let label_ids = label_ids_for_pattern(catalog, label);
     let mut output = Vec::new();
+    let mut tracker = OperatorMemoryTracker::new(memory_budget);
     let mut callback_error = None;
     store.visit_nodes_owned(exact_label_id, |node| {
         if callback_error.is_some() {
@@ -4840,7 +5989,12 @@ fn execute_node_scan_with_optional_filter(
                 }
             }
         }
-        output.push(binding);
+        if let Err(error) =
+            push_bounded_operator_binding("NodeScanExec", &mut output, binding, &mut tracker)
+        {
+            callback_error = Some(error);
+            return GraphScanControl::Stop;
+        }
         if execution_limit.is_reached(output.len()) {
             GraphScanControl::Stop
         } else {
@@ -4873,6 +6027,7 @@ fn execute_source_segment_scan(
     catalog: &Catalog,
     store: &GraphStore,
     execution_limit: ExecutionLimit,
+    memory: &ExecutionMemoryConfig,
     task_context: Option<&RuntimeTaskContext>,
 ) -> Result<Vec<Binding>> {
     runtime_checkpoint(task_context)?;
@@ -4884,6 +6039,7 @@ fn execute_source_segment_scan(
             catalog,
             store,
             execution_limit,
+            memory.blocking_operator_bytes,
         );
     };
     let io_depth = NonZeroUsize::new(SOURCE_SEGMENT_SCAN_IO_DEPTH)
@@ -4892,21 +6048,14 @@ fn execute_source_segment_scan(
         .expect("source segment scan coalesced range limit is non-zero");
     let max_wave_bytes = NonZeroU64::new(SOURCE_SEGMENT_SCAN_MAX_WAVE_BYTES)
         .expect("source segment scan wave byte limit is non-zero");
-    let read = match task_context {
-        Some(task_context) => store.read_published_source_scan_candidates_with_context(
-            &storage_predicate,
-            io_depth,
-            max_coalesced_bytes,
-            max_wave_bytes,
-            task_context,
-        ),
-        None => store.read_published_source_scan_candidates(
-            &storage_predicate,
-            io_depth,
-            max_coalesced_bytes,
-            max_wave_bytes,
-        ),
-    };
+    let read = store.read_published_source_scan_candidates_bounded(
+        &storage_predicate,
+        io_depth,
+        max_coalesced_bytes,
+        max_wave_bytes,
+        memory.blocking_operator_bytes,
+        task_context,
+    );
     runtime_checkpoint(task_context)?;
     let rows = match read {
         Ok(SourceScanCandidateRead::Rows {
@@ -4935,6 +6084,7 @@ fn execute_source_segment_scan(
             });
             rows
         }
+        Err(error @ SkeinError::Execution(_)) => return Err(error),
         Ok(SourceScanCandidateRead::Fallback(_)) | Err(_) => {
             return execute_node_scan_with_optional_filter(
                 variable,
@@ -4943,11 +6093,13 @@ fn execute_source_segment_scan(
                 catalog,
                 store,
                 execution_limit,
+                memory.blocking_operator_bytes,
             );
         }
     };
     let source_label_id = catalog.label_id("Source");
     let mut bindings = Vec::new();
+    let mut tracker = OperatorMemoryTracker::new(memory.blocking_operator_bytes);
     for row in rows {
         let Some(node) = store.node_owned(NodeId(row.node_id))? else {
             return execute_node_scan_with_optional_filter(
@@ -4957,6 +6109,7 @@ fn execute_source_segment_scan(
                 catalog,
                 store,
                 execution_limit,
+                memory.blocking_operator_bytes,
             );
         };
         if source_label_id.is_none_or(|label_id| !node.labels.contains(&label_id))
@@ -4969,13 +6122,15 @@ fn execute_source_segment_scan(
                 catalog,
                 store,
                 execution_limit,
+                memory.blocking_operator_bytes,
             );
         }
-        bindings.push(Binding {
+        let binding = Binding {
             values: BTreeMap::new(),
             nodes: BTreeMap::from([(variable.to_string(), node)]),
             relationships: BTreeMap::new(),
-        });
+        };
+        push_bounded_operator_binding("SourceSegmentScan", &mut bindings, binding, &mut tracker)?;
         if execution_limit.is_reached(bindings.len()) {
             break;
         }
@@ -5108,13 +6263,22 @@ fn execute_node_column_lookup(
     catalog: &Catalog,
     store: &GraphStore,
     execution_limit: ExecutionLimit,
+    memory_budget: NonZeroUsize,
 ) -> Result<Vec<Binding>> {
     if let Some(Some(label_id)) = exact_scan_label_id(catalog, spec.label) {
-        return execute_indexed_node_column_lookup(&spec, input, label_id, store, execution_limit);
+        return execute_indexed_node_column_lookup(
+            &spec,
+            input,
+            label_id,
+            store,
+            execution_limit,
+            memory_budget,
+        );
     }
 
     let label_ids = label_ids_for_pattern(catalog, spec.label);
     let mut output = Vec::new();
+    let mut tracker = OperatorMemoryTracker::new(memory_budget);
     for binding in input {
         let expected = binding.values.get(spec.column).ok_or_else(|| {
             SkeinError::Execution(format!(
@@ -5123,13 +6287,22 @@ fn execute_node_column_lookup(
             ))
         })?;
         let mut matched = false;
+        let mut callback_error = None;
         store.visit_nodes_owned(None, |node| {
             if node_matches_label_pattern(&node, label_ids.as_deref())
                 && node.properties.get(spec.property) == Some(expected)
             {
                 let mut next = binding.clone();
                 next.nodes.insert(spec.variable.to_string(), node);
-                output.push(next);
+                if let Err(error) = push_bounded_operator_binding(
+                    "NodeColumnLookupExec",
+                    &mut output,
+                    next,
+                    &mut tracker,
+                ) {
+                    callback_error = Some(error);
+                    return GraphScanControl::Stop;
+                }
                 matched = true;
                 if execution_limit.is_reached(output.len()) {
                     return GraphScanControl::Stop;
@@ -5137,6 +6310,9 @@ fn execute_node_column_lookup(
             }
             GraphScanControl::Continue
         })?;
+        if let Some(error) = callback_error {
+            return Err(error);
+        }
         if execution_limit.is_reached(output.len()) {
             return Ok(output);
         }
@@ -5144,7 +6320,7 @@ fn execute_node_column_lookup(
             let mut next = binding;
             next.nodes
                 .insert(spec.variable.to_string(), null_lookup_node());
-            output.push(next);
+            push_bounded_operator_binding("NodeColumnLookupExec", &mut output, next, &mut tracker)?;
             if execution_limit.is_reached(output.len()) {
                 return Ok(output);
             }
@@ -5159,6 +6335,7 @@ fn execute_indexed_node_column_lookup(
     label_id: crate::schema::LabelId,
     store: &GraphStore,
     execution_limit: ExecutionLimit,
+    memory_budget: NonZeroUsize,
 ) -> Result<Vec<Binding>> {
     let mut lookup_values = BTreeSet::new();
     for binding in &input {
@@ -5173,6 +6350,7 @@ fn execute_indexed_node_column_lookup(
 
     let mut unique_candidate_ids = BTreeSet::new();
     let mut output = Vec::new();
+    let mut tracker = OperatorMemoryTracker::new(memory_budget);
     for binding in input {
         let expected = binding
             .values
@@ -5180,6 +6358,7 @@ fn execute_indexed_node_column_lookup(
             .expect("lookup column was validated before index lookup")
             .clone();
         let mut matched = false;
+        let mut callback_error = None;
         store.visit_nodes_by_property_owned(
             label_id,
             spec.property,
@@ -5188,7 +6367,15 @@ fn execute_indexed_node_column_lookup(
                 unique_candidate_ids.insert(node.id);
                 let mut next = binding.clone();
                 next.nodes.insert(spec.variable.to_string(), node);
-                output.push(next);
+                if let Err(error) = push_bounded_operator_binding(
+                    "NodeColumnLookupExec",
+                    &mut output,
+                    next,
+                    &mut tracker,
+                ) {
+                    callback_error = Some(error);
+                    return GraphScanControl::Stop;
+                }
                 matched = true;
                 if execution_limit.is_reached(output.len()) {
                     GraphScanControl::Stop
@@ -5197,6 +6384,9 @@ fn execute_indexed_node_column_lookup(
                 }
             },
         )?;
+        if let Some(error) = callback_error {
+            return Err(error);
+        }
         if execution_limit.is_reached(output.len()) {
             record_node_column_lookup_scan_pruning_report(
                 label_id,
@@ -5212,7 +6402,7 @@ fn execute_indexed_node_column_lookup(
             let mut next = binding;
             next.nodes
                 .insert(spec.variable.to_string(), null_lookup_node());
-            output.push(next);
+            push_bounded_operator_binding("NodeColumnLookupExec", &mut output, next, &mut tracker)?;
             if execution_limit.is_reached(output.len()) {
                 record_node_column_lookup_scan_pruning_report(
                     label_id,
@@ -5296,6 +6486,7 @@ struct AdjacencyExpandSpec<'a> {
     optional: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn expand_binding(
     binding: Binding,
     spec: AdjacencyExpandSpec<'_>,
@@ -5303,6 +6494,7 @@ fn expand_binding(
     target_label_ids: Option<&[crate::schema::LabelId]>,
     filters: &AdjacencyExpandFilters<'_>,
     store: &GraphStore,
+    memory_budget_bytes: usize,
     task_context: Option<&RuntimeTaskContext>,
 ) -> Result<Vec<ExpandedBinding>> {
     runtime_checkpoint(task_context)?;
@@ -5314,12 +6506,13 @@ fn expand_binding(
     })?;
     let bound_target_id = binding.nodes.get(spec.target_variable).map(|node| node.id);
     let mut output = Vec::new();
+    let mut output_bytes = 0usize;
     if spec.rel_variable.is_some()
         || !spec.rel_properties.is_empty()
         || filters.relationship_scan_filter.is_some()
         || spec.direction != RelationshipDirection::Outgoing
     {
-        for (relationship, target) in one_hop_relationships(
+        for (relationship, target) in one_hop_relationships_with_budget(
             store,
             source.id,
             rel_type_id,
@@ -5327,6 +6520,7 @@ fn expand_binding(
             spec.rel_properties,
             filters.relationship_scan_filter,
             spec.direction,
+            memory_budget_bytes,
         )? {
             runtime_checkpoint(task_context)?;
             if bound_target_id.is_some_and(|node_id| node_id != target.id)
@@ -5342,7 +6536,7 @@ fn expand_binding(
             if let Some(rel_variable) = spec.rel_variable {
                 relationships.insert(rel_variable.to_string(), relationship.clone());
             }
-            output.push(ExpandedBinding {
+            let expanded = ExpandedBinding {
                 binding: Binding {
                     values: binding.values.clone(),
                     nodes,
@@ -5350,7 +6544,9 @@ fn expand_binding(
                 },
                 target_id: Some(target.id),
                 hop: 1,
-            });
+            };
+            admit_expanded_binding(&expanded, &mut output_bytes, memory_budget_bytes)?;
+            output.push(expanded);
         }
     } else {
         for (target, hop) in bounded_expand_targets(
@@ -5360,6 +6556,7 @@ fn expand_binding(
             target_label_ids,
             spec.min_hops,
             spec.max_hops,
+            memory_budget_bytes,
         )? {
             runtime_checkpoint(task_context)?;
             if bound_target_id.is_some_and(|node_id| node_id != target.id)
@@ -5371,7 +6568,7 @@ fn expand_binding(
             }
             let mut nodes = binding.nodes.clone();
             nodes.insert(spec.target_variable.to_string(), target.clone());
-            output.push(ExpandedBinding {
+            let expanded = ExpandedBinding {
                 binding: Binding {
                     values: binding.values.clone(),
                     nodes,
@@ -5379,13 +6576,15 @@ fn expand_binding(
                 },
                 target_id: Some(target.id),
                 hop,
-            });
+            };
+            admit_expanded_binding(&expanded, &mut output_bytes, memory_budget_bytes)?;
+            output.push(expanded);
         }
     }
     if spec.optional && output.is_empty() {
         let mut nodes = binding.nodes;
         nodes.insert(spec.target_variable.to_string(), null_lookup_node());
-        output.push(ExpandedBinding {
+        let expanded = ExpandedBinding {
             binding: Binding {
                 values: binding.values,
                 nodes,
@@ -5393,9 +6592,26 @@ fn expand_binding(
             },
             target_id: None,
             hop: 0,
-        });
+        };
+        admit_expanded_binding(&expanded, &mut output_bytes, memory_budget_bytes)?;
+        output.push(expanded);
     }
     Ok(output)
+}
+
+fn admit_expanded_binding(
+    expanded: &ExpandedBinding,
+    used_bytes: &mut usize,
+    memory_budget_bytes: usize,
+) -> Result<()> {
+    let bytes = binding_memory_bytes(&expanded.binding);
+    if bytes > memory_budget_bytes || used_bytes.saturating_add(bytes) > memory_budget_bytes {
+        return Err(SkeinError::Execution(format!(
+            "AdjacencyExpandExec seed state exceeds blocking_operator_bytes {memory_budget_bytes}"
+        )));
+    }
+    *used_bytes = used_bytes.saturating_add(bytes);
+    Ok(())
 }
 
 fn stream_filtered_adjacency_expand_batches(
@@ -5515,6 +6731,7 @@ fn stream_adjacency_expand_batches(
                     target_label_ids.as_deref(),
                     &filters,
                     store,
+                    memory.blocking_operator_bytes.get(),
                     context.task_context,
                 )? {
                     runtime_checkpoint(context.task_context)?;
@@ -5625,6 +6842,7 @@ fn execute_adjacency_expand(
             target_label_ids.as_deref(),
             &filters,
             store,
+            context.memory.blocking_operator_bytes.get(),
             context.task_context,
         )? {
             runtime_checkpoint(context.task_context)?;
@@ -5765,6 +6983,31 @@ pub(crate) fn map_payload_bytes(values: &BTreeMap<String, Value>) -> usize {
         total
             .saturating_add(name.len())
             .saturating_add(value_payload_bytes(value))
+    })
+}
+
+fn map_memory_bytes(values: &BTreeMap<String, Value>) -> usize {
+    std::mem::size_of::<BTreeMap<String, Value>>().saturating_add(values.iter().fold(
+        0usize,
+        |total, (name, value)| {
+            total
+                .saturating_add(std::mem::size_of::<(String, Value)>() * 3)
+                .saturating_add(name.len())
+                .saturating_add(value_memory_bytes(value))
+        },
+    ))
+}
+
+fn value_memory_bytes(value: &Value) -> usize {
+    std::mem::size_of::<Value>().saturating_add(match value {
+        Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_) => 0,
+        Value::String(value) => value.len(),
+        Value::List(values) => values
+            .iter()
+            .fold(std::mem::size_of::<Vec<Value>>(), |total, value| {
+                total.saturating_add(value_memory_bytes(value))
+            }),
+        Value::Map(values) => map_memory_bytes(values),
     })
 }
 
@@ -6411,7 +7654,11 @@ fn execute_shortest_path(
     catalog: &Catalog,
     store: &GraphStore,
     input: ShortestPathExecInput<'_>,
+    memory: &ExecutionMemoryConfig,
+    execution_limit: ExecutionLimit,
+    task_context: Option<&RuntimeTaskContext>,
 ) -> Result<Vec<Binding>> {
+    runtime_checkpoint(task_context)?;
     let Some(source) =
         find_node_by_id_property(catalog, store, input.source_label, input.source_id)?
     else {
@@ -6441,7 +7688,7 @@ fn execute_shortest_path(
         };
         Some(rel_type_id)
     };
-    let paths = all_shortest_paths(
+    let (paths, search_peak_bytes, visited_paths) = all_shortest_paths(
         store,
         ShortestPathSearch {
             source: source.id,
@@ -6452,11 +7699,35 @@ fn execute_shortest_path(
             max_hops: input.max_hops,
             path_node_visibility_filter: input.path_node_visibility_filter,
         },
+        memory.blocking_operator_bytes,
+        execution_limit.output_rows.unwrap_or(usize::MAX),
+        task_context,
     )?;
-    paths
-        .iter()
-        .map(|path| shortest_path_binding(store, path, input.returns))
-        .collect()
+    let mut output = Vec::with_capacity(paths.len());
+    let mut output_tracker = OperatorMemoryTracker::new(memory.blocking_operator_bytes);
+    for path in paths {
+        runtime_checkpoint(task_context)?;
+        let binding = shortest_path_binding(store, &path, input.returns)?;
+        let bytes = binding_memory_bytes(&binding);
+        ensure_operator_item_fits("ShortestPathExec result", bytes, &output_tracker)?;
+        if output_tracker.would_exceed(bytes) {
+            return Err(SkeinError::Execution(format!(
+                "ShortestPathExec result state exceeds blocking_operator_bytes {}",
+                output_tracker.budget_bytes
+            )));
+        }
+        output_tracker.charge(bytes);
+        output.push(binding);
+    }
+    record_blocking_memory_report(skein_executor::BlockingOperatorMemoryReport {
+        operator: "ShortestPathExec".to_string(),
+        budget_bytes: memory.blocking_operator_bytes.get(),
+        peak_tracked_bytes: search_peak_bytes.max(output_tracker.peak_bytes),
+        input_rows: visited_paths,
+        spill_run_count: 0,
+        spilled_rows: 0,
+    });
+    Ok(output)
 }
 
 fn find_node_by_id_property(
@@ -6498,17 +7769,28 @@ struct ShortestPathSearch<'a> {
 fn all_shortest_paths(
     store: &GraphStore,
     search: ShortestPathSearch<'_>,
-) -> Result<Vec<Vec<NodeId>>> {
-    let mut queue = VecDeque::from([vec![search.source]]);
+    memory_budget: NonZeroUsize,
+    result_limit: usize,
+    task_context: Option<&RuntimeTaskContext>,
+) -> Result<(Vec<Vec<NodeId>>, usize, usize)> {
+    let initial_path = vec![search.source];
+    let mut tracker = OperatorMemoryTracker::new(memory_budget);
+    tracker.charge(path_memory_bytes(&initial_path));
+    let mut queue = VecDeque::from([initial_path]);
     let mut results = Vec::new();
     let mut found_depth = None;
+    let mut visited_paths = 0usize;
     while let Some(path) = queue.pop_front() {
+        runtime_checkpoint(task_context)?;
+        visited_paths = visited_paths.saturating_add(1);
+        let path_bytes = path_memory_bytes(&path);
         let depth = path.len() - 1;
         if found_depth.is_some_and(|found| depth >= found) || depth == search.max_hops {
+            tracker.release(path_bytes);
             continue;
         }
         let current = *path.last().expect("path is never empty");
-        for (_, next) in one_hop_relationships(
+        for (_, next) in one_hop_relationships_with_budget(
             store,
             current,
             search.rel_type_id,
@@ -6516,7 +7798,9 @@ fn all_shortest_paths(
             &BTreeMap::new(),
             None,
             search.direction,
+            memory_budget.get(),
         )? {
+            runtime_checkpoint(task_context)?;
             if search
                 .path_node_visibility_filter
                 .map(|filter| !node_matches_property_filter(&next, filter))
@@ -6530,15 +7814,38 @@ fn all_shortest_paths(
             let next_depth = depth + 1;
             let mut next_path = path.clone();
             next_path.push(next.id);
+            let next_path_bytes = path_memory_bytes(&next_path);
+            ensure_operator_item_fits("ShortestPathExec", next_path_bytes, &tracker)?;
+            if tracker.would_exceed(next_path_bytes) {
+                return Err(SkeinError::Execution(format!(
+                    "ShortestPathExec frontier exceeds blocking_operator_bytes {}",
+                    tracker.budget_bytes
+                )));
+            }
+            tracker.charge(next_path_bytes);
             if next.id == search.target && next_depth >= search.min_hops {
                 found_depth = Some(next_depth);
                 results.push(next_path);
+                if results.len() >= result_limit {
+                    break;
+                }
             } else if found_depth.is_none() && next_depth < search.max_hops {
                 queue.push_back(next_path);
+            } else {
+                tracker.release(next_path_bytes);
             }
         }
+        tracker.release(path_bytes);
+        if results.len() >= result_limit {
+            break;
+        }
     }
-    Ok(results)
+    Ok((results, tracker.peak_bytes, visited_paths))
+}
+
+fn path_memory_bytes(path: &[NodeId]) -> usize {
+    std::mem::size_of::<Vec<NodeId>>()
+        .saturating_add(path.len().saturating_mul(std::mem::size_of::<NodeId>()))
 }
 
 fn shortest_path_binding(
@@ -6579,43 +7886,41 @@ fn one_hop_relationships(
     relationship_scan_filter: Option<&PropertyFilter>,
     direction: RelationshipDirection,
 ) -> Result<Vec<(RelRecord, NodeRecord)>> {
+    one_hop_relationships_with_budget(
+        store,
+        source,
+        rel_type_id,
+        target_label_ids,
+        rel_properties,
+        relationship_scan_filter,
+        direction,
+        DEFAULT_BLOCKING_OPERATOR_MEMORY_BYTES,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn one_hop_relationships_with_budget(
+    store: &GraphStore,
+    source: NodeId,
+    rel_type_id: Option<crate::schema::RelTypeId>,
+    target_label_ids: Option<&[crate::schema::LabelId]>,
+    rel_properties: &BTreeMap<String, Value>,
+    relationship_scan_filter: Option<&PropertyFilter>,
+    direction: RelationshipDirection,
+    memory_budget_bytes: usize,
+) -> Result<Vec<(RelRecord, NodeRecord)>> {
     let mut matches = Vec::new();
-    let mut seen = std::collections::BTreeSet::new();
+    let mut seen = BTreeSet::new();
+    let mut used_bytes = 0usize;
     let relationship_filter = combine_property_filters(
         property_filter_from_properties(rel_properties),
         relationship_scan_filter.cloned(),
     );
-    if !store.is_out_of_core()
-        && let Some(filter) = relationship_filter.as_ref()
-    {
-        let scan = store.scan_relationships_with_filter_pruning(rel_type_id, Some(filter));
-        record_scan_pruning_report(scan.report.clone());
-        for relationship in scan.relationships {
-            let Some(target_id) =
-                relationship_target_for_source_direction(relationship, source, direction)
-            else {
-                continue;
-            };
-            if !seen.insert(relationship.id)
-                || !relationship_properties_match(relationship, rel_properties)
-            {
-                continue;
-            }
-            if let Some(target) = store.node_owned(target_id)?
-                && node_matches_label_pattern(&target, target_label_ids)
-            {
-                matches.push((relationship.clone(), target));
-            }
-        }
-        matches.sort_by_key(|(relationship, target)| (target.id, relationship.id));
-        return Ok(matches);
-    }
-    let mut callback_error = None;
-    store.visit_relationships_owned(rel_type_id, |relationship| {
+    let mut admit_relationship = |relationship: RelRecord| -> Result<()> {
         let Some(target_id) =
             relationship_target_for_source_direction(&relationship, source, direction)
         else {
-            return GraphScanControl::Continue;
+            return Ok(());
         };
         if !seen.insert(relationship.id)
             || !relationship_properties_match(&relationship, rel_properties)
@@ -6623,22 +7928,67 @@ fn one_hop_relationships(
                 !property_filter_matches_values(filter, relationship.id.0, &relationship.properties)
             })
         {
-            return GraphScanControl::Continue;
+            return Ok(());
         }
-        match store.node_owned(target_id) {
-            Ok(Some(target)) if node_matches_label_pattern(&target, target_label_ids) => {
-                matches.push((relationship, target));
-            }
-            Ok(_) => {}
-            Err(error) => {
-                callback_error = Some(error);
-                return GraphScanControl::Stop;
-            }
+        let seen_bytes = std::mem::size_of::<crate::store::RelId>()
+            .saturating_add(std::mem::size_of::<usize>() * 4);
+        if used_bytes.saturating_add(seen_bytes) > memory_budget_bytes {
+            return Err(SkeinError::Execution(format!(
+                "adjacency state exceeds blocking_operator_bytes {memory_budget_bytes}"
+            )));
         }
-        GraphScanControl::Continue
-    })?;
-    if let Some(error) = callback_error {
-        return Err(error);
+        used_bytes = used_bytes.saturating_add(seen_bytes);
+        if let Some(target) = store.node_owned(target_id)?
+            && node_matches_label_pattern(&target, target_label_ids)
+        {
+            let match_bytes =
+                relationship_memory_bytes(&relationship).saturating_add(node_memory_bytes(&target));
+            if match_bytes > memory_budget_bytes
+                || used_bytes.saturating_add(match_bytes) > memory_budget_bytes
+            {
+                return Err(SkeinError::Execution(format!(
+                    "adjacency result state exceeds blocking_operator_bytes {memory_budget_bytes}"
+                )));
+            }
+            used_bytes = used_bytes.saturating_add(match_bytes);
+            matches.push((relationship, target));
+        }
+        Ok(())
+    };
+    if !store.is_out_of_core()
+        && let Some(filter) = relationship_filter.as_ref()
+        && store
+            .relationship_count_for_type(rel_type_id)
+            .saturating_mul(std::mem::size_of::<&RelRecord>())
+            <= memory_budget_bytes
+    {
+        let scan = store.scan_relationships_with_filter_pruning(rel_type_id, Some(filter));
+        record_scan_pruning_report(scan.report.clone());
+        for relationship in scan.relationships {
+            admit_relationship(relationship.clone())?;
+        }
+        matches.sort_by_key(|(relationship, target)| (target.id, relationship.id));
+        return Ok(matches);
+    }
+    let mut visit_direction = |adjacency_direction: AdjacencyDirection| -> Result<()> {
+        store.try_visit_adjacent_relationships_owned(
+            source,
+            rel_type_id,
+            adjacency_direction,
+            |relationship| {
+                admit_relationship(relationship)?;
+                Ok(GraphScanControl::Continue)
+            },
+        )?;
+        Ok(())
+    };
+    match direction {
+        RelationshipDirection::Outgoing => visit_direction(AdjacencyDirection::Outgoing)?,
+        RelationshipDirection::Incoming => visit_direction(AdjacencyDirection::Incoming)?,
+        RelationshipDirection::Undirected => {
+            visit_direction(AdjacencyDirection::Outgoing)?;
+            visit_direction(AdjacencyDirection::Incoming)?;
+        }
     }
     matches.sort_by_key(|(relationship, target)| (target.id, relationship.id));
     Ok(matches)
@@ -6726,6 +8076,7 @@ fn thread_repair_stats_rows(
     message_label: &str,
     memory_rel_type: &str,
     memory_label: &str,
+    memory_budget: NonZeroUsize,
 ) -> Result<Vec<Binding>> {
     let thread_label_ids = label_ids_for_pattern(catalog, label);
     let identity_label_ids = label_ids_for_pattern(catalog, identity_label);
@@ -6735,15 +8086,38 @@ fn thread_repair_stats_rows(
     let memory_rel_type_id = catalog.rel_type_id(memory_rel_type);
     let mut identities = Vec::new();
     let mut threads = Vec::new();
+    let mut tracker = OperatorMemoryTracker::new(memory_budget);
+    let mut callback_error = None;
     store.visit_nodes_owned(None, |node| {
         if node_matches_label_pattern(&node, identity_label_ids.as_deref()) {
+            let bytes = node_memory_bytes(&node);
+            if tracker.would_exceed(bytes) {
+                callback_error = Some(SkeinError::Execution(format!(
+                    "ThreadRepairStatsExec state exceeds blocking_operator_bytes {}",
+                    tracker.budget_bytes
+                )));
+                return GraphScanControl::Stop;
+            }
+            tracker.charge(bytes);
             identities.push(node.clone());
         }
         if node_matches_label_pattern(&node, thread_label_ids.as_deref()) {
+            let bytes = node_memory_bytes(&node);
+            if tracker.would_exceed(bytes) {
+                callback_error = Some(SkeinError::Execution(format!(
+                    "ThreadRepairStatsExec state exceeds blocking_operator_bytes {}",
+                    tracker.budget_bytes
+                )));
+                return GraphScanControl::Stop;
+            }
+            tracker.charge(bytes);
             threads.push(node);
         }
         GraphScanControl::Continue
     })?;
+    if let Some(error) = callback_error {
+        return Err(error);
+    }
     threads.sort_by(|left, right| {
         left.properties
             .get("id")
@@ -6762,7 +8136,7 @@ fn thread_repair_stats_rows(
             .filter(|identity| identity.properties.get(identity_ref_property) == Some(&thread_id))
             .count();
         let legacy_messages = match message_rel_type_id {
-            Some(rel_type_id) => one_hop_relationships(
+            Some(rel_type_id) => one_hop_relationships_with_budget(
                 store,
                 thread.id,
                 Some(rel_type_id),
@@ -6770,12 +8144,13 @@ fn thread_repair_stats_rows(
                 &BTreeMap::new(),
                 None,
                 RelationshipDirection::Outgoing,
+                memory_budget.get(),
             )?
             .len(),
             None => 0,
         };
         let compacted_memories = match memory_rel_type_id {
-            Some(rel_type_id) => one_hop_relationships(
+            Some(rel_type_id) => one_hop_relationships_with_budget(
                 store,
                 thread.id,
                 Some(rel_type_id),
@@ -6783,6 +8158,7 @@ fn thread_repair_stats_rows(
                 &BTreeMap::new(),
                 None,
                 RelationshipDirection::Outgoing,
+                memory_budget.get(),
             )?
             .len(),
             None => 0,
@@ -6795,8 +8171,8 @@ fn thread_repair_stats_rows(
             Some(Value::Null) | None => Value::Int(0),
             Some(value) => value.clone(),
         };
-        rows.push(Binding {
-                values: BTreeMap::from([
+        let binding = Binding {
+            values: BTreeMap::from([
                     (
                         "t.id".to_string(),
                         thread.properties.get("id").cloned().unwrap_or(Value::Null),
@@ -6822,9 +8198,10 @@ fn thread_repair_stats_rows(
                     ),
                     ("COUNT(m)".to_string(), Value::Int(compacted_memories as i64)),
                 ]),
-                nodes: BTreeMap::new(),
-                relationships: BTreeMap::new(),
-            });
+            nodes: BTreeMap::new(),
+            relationships: BTreeMap::new(),
+        };
+        push_bounded_operator_binding("ThreadRepairStatsExec", &mut rows, binding, &mut tracker)?;
     }
     Ok(rows)
 }
@@ -6992,59 +8369,64 @@ fn bounded_expand_targets(
     target_label_ids: Option<&[crate::schema::LabelId]>,
     min_hops: usize,
     max_hops: usize,
+    memory_budget_bytes: usize,
 ) -> Result<Vec<(NodeRecord, usize)>> {
     let mut targets = Vec::new();
-    BoundedExpand {
-        store,
-        rel_type_id,
-        target_label_ids: target_label_ids.map(|label_ids| label_ids.to_vec()),
-        min_hops,
-        max_hops,
-    }
-    .collect(source, 0, &mut targets)?;
-    Ok(targets)
-}
-
-struct BoundedExpand<'a> {
-    store: &'a GraphStore,
-    rel_type_id: crate::schema::RelTypeId,
-    target_label_ids: Option<Vec<crate::schema::LabelId>>,
-    min_hops: usize,
-    max_hops: usize,
-}
-
-impl<'a> BoundedExpand<'a> {
-    fn collect(
-        &self,
-        current: NodeId,
-        depth: usize,
-        targets: &mut Vec<(NodeRecord, usize)>,
-    ) -> Result<()> {
-        if depth >= self.min_hops
-            && let Some(node) = self.store.node_owned(current)?
-            && node_matches_label_pattern(&node, self.target_label_ids.as_deref())
+    let mut tracker = OperatorMemoryTracker::new(
+        NonZeroUsize::new(memory_budget_bytes)
+            .expect("execution memory budget is represented by NonZeroUsize"),
+    );
+    let stack_entry_bytes = std::mem::size_of::<(NodeId, usize)>();
+    tracker.charge(stack_entry_bytes);
+    let mut stack = vec![(source, 0usize)];
+    while let Some((current, depth)) = stack.pop() {
+        tracker.release(stack_entry_bytes);
+        if depth >= min_hops
+            && let Some(node) = store.node_owned(current)?
+            && node_matches_label_pattern(&node, target_label_ids)
         {
+            let bytes = node_memory_bytes(&node).saturating_add(std::mem::size_of::<usize>());
+            ensure_operator_item_fits("AdjacencyExpandExec", bytes, &tracker)?;
+            if tracker.would_exceed(bytes) {
+                return Err(SkeinError::Execution(format!(
+                    "AdjacencyExpandExec traversal state exceeds blocking_operator_bytes {}",
+                    tracker.budget_bytes
+                )));
+            }
+            tracker.charge(bytes);
             targets.push((node, depth));
         }
-        if depth == self.max_hops {
-            return Ok(());
+        if depth == max_hops {
+            continue;
         }
         let mut neighbors = Vec::new();
-        self.store.visit_adjacent_relationships_owned(
+        let mut callback_error = None;
+        store.visit_adjacent_relationships_owned(
             current,
-            Some(self.rel_type_id),
+            Some(rel_type_id),
             AdjacencyDirection::Outgoing,
             |relationship| {
+                if tracker.would_exceed(stack_entry_bytes) {
+                    callback_error = Some(SkeinError::Execution(format!(
+                        "AdjacencyExpandExec traversal state exceeds blocking_operator_bytes {}",
+                        tracker.budget_bytes
+                    )));
+                    return GraphScanControl::Stop;
+                }
+                tracker.charge(stack_entry_bytes);
                 neighbors.push((relationship.target, relationship.id));
                 GraphScanControl::Continue
             },
         )?;
-        neighbors.sort_unstable();
-        for (neighbor_id, _) in neighbors {
-            self.collect(neighbor_id, depth + 1, targets)?;
+        if let Some(error) = callback_error {
+            return Err(error);
         }
-        Ok(())
+        neighbors.sort_unstable_by(|left, right| right.cmp(left));
+        for (neighbor_id, _) in neighbors {
+            stack.push((neighbor_id, depth + 1));
+        }
     }
+    Ok(targets)
 }
 
 fn aggregate_value(catalog: &Catalog, item: &Aggregation, input: &[Binding]) -> Value {
@@ -8004,7 +9386,9 @@ mod tests {
         ExecutionMemoryConfig {
             batch_rows: NonZeroUsize::new(2).unwrap(),
             batch_payload_bytes: NonZeroUsize::new(1024 * 1024).unwrap(),
-            blocking_operator_bytes: NonZeroUsize::new(128).unwrap(),
+            blocking_operator_bytes: NonZeroUsize::new(1024).unwrap(),
+            max_spill_bytes: NonZeroU64::new(64 * 1024 * 1024).unwrap(),
+            max_spill_runs: NonZeroUsize::new(64).unwrap(),
             spill_directory: std::env::temp_dir().join(format!("skein-{name}-{nonce}")),
         }
     }
@@ -8166,6 +9550,363 @@ mod tests {
     }
 
     #[test]
+    fn top_n_pipeline_spills_without_changing_order_or_offset() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        for rank in (0..50).rev() {
+            store
+                .create_node(
+                    &mut catalog,
+                    "Item",
+                    properties([("rank", Value::Int(rank))]),
+                )
+                .unwrap();
+        }
+        let plan = PhysicalPlan::ProjectExec {
+            items: vec![Projection {
+                expression: ProjectionExpression::Property {
+                    variable: "n".to_string(),
+                    property: "rank".to_string(),
+                },
+                name: "rank".to_string(),
+            }],
+            input: Box::new(PhysicalPlan::TopNExec {
+                items: vec![SortItem {
+                    key: SortKey::Property {
+                        variable: "n".to_string(),
+                        property: "rank".to_string(),
+                    },
+                    direction: SortDirection::Asc,
+                }],
+                offset: 7,
+                limit: 5,
+                input: Box::new(PhysicalPlan::SeqNodeScan {
+                    variable: "n".to_string(),
+                    label: "Item".to_string(),
+                }),
+            }),
+        };
+        let memory = spill_test_config("topn-spill");
+        let mut external = NoExternalReadOperator;
+        let output = execute_with_row_limit_profile_and_external_and_memory(
+            &plan,
+            &mut catalog,
+            &mut store,
+            &BTreeMap::new(),
+            &mut external,
+            None,
+            &memory,
+        )
+        .unwrap();
+
+        assert_eq!(
+            output
+                .rows
+                .iter()
+                .map(|row| row["rank"].clone())
+                .collect::<Vec<_>>(),
+            (7..12).map(Value::Int).collect::<Vec<_>>()
+        );
+        let report = output
+            .profile
+            .blocking_operator_memory_reports
+            .iter()
+            .find(|report| report.operator == "TopNExec")
+            .unwrap();
+        assert!(report.spill_run_count > 1);
+        assert!(report.spilled_rows > 0);
+        assert!(report.spilled_rows <= report.input_rows);
+        assert!(std::fs::read_dir(&memory.spill_directory)
+            .unwrap()
+            .next()
+            .is_none());
+        std::fs::remove_dir(memory.spill_directory).unwrap();
+    }
+
+    #[test]
+    fn distinct_rejects_state_over_memory_budget_before_output() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        for value in 0..10 {
+            store
+                .create_node(
+                    &mut catalog,
+                    "Item",
+                    properties([(
+                        "value",
+                        Value::String(format!("{value}-{}", "x".repeat(96))),
+                    )]),
+                )
+                .unwrap();
+        }
+        let plan = PhysicalPlan::DistinctExec {
+            input: Box::new(PhysicalPlan::ProjectExec {
+                items: vec![Projection {
+                    expression: ProjectionExpression::Property {
+                        variable: "n".to_string(),
+                        property: "value".to_string(),
+                    },
+                    name: "value".to_string(),
+                }],
+                input: Box::new(PhysicalPlan::SeqNodeScan {
+                    variable: "n".to_string(),
+                    label: "Item".to_string(),
+                }),
+            }),
+        };
+        let memory = ExecutionMemoryConfig {
+            blocking_operator_bytes: NonZeroUsize::new(1024).unwrap(),
+            ..spill_test_config("distinct-admission")
+        };
+        let mut external = NoExternalReadOperator;
+        let error = execute_with_row_limit_profile_and_external_and_memory(
+            &plan,
+            &mut catalog,
+            &mut store,
+            &BTreeMap::new(),
+            &mut external,
+            None,
+            &memory,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("DistinctExec state exceeds"));
+    }
+
+    #[test]
+    fn collect_aggregate_rejects_unbounded_group_state() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        for value in 0..20 {
+            store
+                .create_node(
+                    &mut catalog,
+                    "Item",
+                    properties([(
+                        "value",
+                        Value::String(format!("{value}-{}", "x".repeat(64))),
+                    )]),
+                )
+                .unwrap();
+        }
+        let plan = PhysicalPlan::AggregateExec {
+            group_keys: Vec::new(),
+            items: vec![Aggregation {
+                function: AggregateFunction::Collect,
+                target: AggregateTarget::Property {
+                    variable: "n".to_string(),
+                    property: "value".to_string(),
+                },
+                distinct: false,
+                name: "values".to_string(),
+            }],
+            input: Box::new(PhysicalPlan::SeqNodeScan {
+                variable: "n".to_string(),
+                label: "Item".to_string(),
+            }),
+        };
+        let memory = ExecutionMemoryConfig {
+            blocking_operator_bytes: NonZeroUsize::new(1024).unwrap(),
+            ..spill_test_config("collect-admission")
+        };
+        let mut external = NoExternalReadOperator;
+        let error = execute_with_row_limit_profile_and_external_and_memory(
+            &plan,
+            &mut catalog,
+            &mut store,
+            &BTreeMap::new(),
+            &mut external,
+            None,
+            &memory,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("AggregateExec state exceeds"));
+    }
+
+    #[test]
+    fn cartesian_product_rejects_an_oversized_build_side() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        for value in 0..20 {
+            store
+                .create_node(
+                    &mut catalog,
+                    "Right",
+                    properties([("value", Value::Int(value))]),
+                )
+                .unwrap();
+        }
+        store
+            .create_node(&mut catalog, "Left", BTreeMap::new())
+            .unwrap();
+        let plan = PhysicalPlan::NodeCartesianProductExec {
+            left: Box::new(PhysicalPlan::SeqNodeScan {
+                variable: "left".to_string(),
+                label: "Left".to_string(),
+            }),
+            right: Box::new(PhysicalPlan::SeqNodeScan {
+                variable: "right".to_string(),
+                label: "Right".to_string(),
+            }),
+        };
+        let memory = ExecutionMemoryConfig {
+            blocking_operator_bytes: NonZeroUsize::new(1024).unwrap(),
+            ..spill_test_config("cartesian-admission")
+        };
+        let mut external = NoExternalReadOperator;
+        let error = execute_with_row_limit_profile_and_external_and_memory(
+            &plan,
+            &mut catalog,
+            &mut store,
+            &BTreeMap::new(),
+            &mut external,
+            None,
+            &memory,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("NodeCartesianProductExec build side exceeds"));
+    }
+
+    #[test]
+    fn shortest_path_rejects_an_oversized_frontier() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        let source = store
+            .create_node(&mut catalog, "Node", BTreeMap::new())
+            .unwrap();
+        let target = store
+            .create_node(&mut catalog, "Node", BTreeMap::new())
+            .unwrap();
+        for _ in 0..32 {
+            let middle = store
+                .create_node(&mut catalog, "Node", BTreeMap::new())
+                .unwrap();
+            store
+                .create_relationship(&mut catalog, source, middle, "LINK", BTreeMap::new())
+                .unwrap();
+            store
+                .create_relationship(&mut catalog, middle, target, "LINK", BTreeMap::new())
+                .unwrap();
+        }
+        let error = all_shortest_paths(
+            &store,
+            ShortestPathSearch {
+                source,
+                target,
+                rel_type_id: catalog.rel_type_id("LINK"),
+                direction: RelationshipDirection::Outgoing,
+                min_hops: 1,
+                max_hops: 2,
+                path_node_visibility_filter: None,
+            },
+            NonZeroUsize::new(512).unwrap(),
+            usize::MAX,
+            None,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("blocking_operator_bytes"));
+    }
+
+    #[test]
+    fn sort_rejects_spill_run_count_over_budget() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        for rank in (0..50).rev() {
+            store
+                .create_node(
+                    &mut catalog,
+                    "Item",
+                    properties([("rank", Value::Int(rank))]),
+                )
+                .unwrap();
+        }
+        let plan = PhysicalPlan::SortExec {
+            items: vec![SortItem {
+                key: SortKey::Property {
+                    variable: "n".to_string(),
+                    property: "rank".to_string(),
+                },
+                direction: SortDirection::Asc,
+            }],
+            input: Box::new(PhysicalPlan::SeqNodeScan {
+                variable: "n".to_string(),
+                label: "Item".to_string(),
+            }),
+        };
+        let memory = ExecutionMemoryConfig {
+            max_spill_runs: NonZeroUsize::new(1).unwrap(),
+            ..spill_test_config("sort-run-admission")
+        };
+        let mut external = NoExternalReadOperator;
+        let error = execute_with_row_limit_profile_and_external_and_memory(
+            &plan,
+            &mut catalog,
+            &mut store,
+            &BTreeMap::new(),
+            &mut external,
+            None,
+            &memory,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("exceeded max_spill_runs 1"));
+        assert!(std::fs::read_dir(&memory.spill_directory)
+            .unwrap()
+            .next()
+            .is_none());
+        std::fs::remove_dir(memory.spill_directory).unwrap();
+    }
+
+    #[test]
+    fn sort_rejects_spill_bytes_over_budget_and_removes_partial_run() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        for rank in (0..20).rev() {
+            store
+                .create_node(
+                    &mut catalog,
+                    "Item",
+                    properties([("rank", Value::Int(rank))]),
+                )
+                .unwrap();
+        }
+        let plan = PhysicalPlan::SortExec {
+            items: vec![SortItem {
+                key: SortKey::Property {
+                    variable: "n".to_string(),
+                    property: "rank".to_string(),
+                },
+                direction: SortDirection::Asc,
+            }],
+            input: Box::new(PhysicalPlan::SeqNodeScan {
+                variable: "n".to_string(),
+                label: "Item".to_string(),
+            }),
+        };
+        let memory = ExecutionMemoryConfig {
+            max_spill_bytes: NonZeroU64::new(32).unwrap(),
+            ..spill_test_config("sort-byte-admission")
+        };
+        let mut external = NoExternalReadOperator;
+        let error = execute_with_row_limit_profile_and_external_and_memory(
+            &plan,
+            &mut catalog,
+            &mut store,
+            &BTreeMap::new(),
+            &mut external,
+            None,
+            &memory,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("remaining spill budget 32"));
+        assert!(std::fs::read_dir(&memory.spill_directory)
+            .unwrap()
+            .next()
+            .is_none());
+        std::fs::remove_dir(memory.spill_directory).unwrap();
+    }
+
+    #[test]
     fn graph_algorithms_admit_direction_specific_projections() {
         let mut catalog = Catalog::default();
         let mut store = GraphStore::in_memory();
@@ -8188,7 +9929,7 @@ mod tests {
             )
             .unwrap();
         let memory = ExecutionMemoryConfig {
-            blocking_operator_bytes: NonZeroUsize::new(128).unwrap(),
+            blocking_operator_bytes: NonZeroUsize::new(1024).unwrap(),
             ..spill_test_config("algorithm-admission")
         };
 
