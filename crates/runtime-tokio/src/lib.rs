@@ -10,10 +10,59 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::runtime::{Builder, Runtime};
+use tokio::sync::mpsc;
 use tokio::task::{JoinError, JoinHandle};
 
 pub use tokio::runtime::Handle as TokioHandle;
 pub use tokio::runtime::{Builder as TokioRuntimeBuilder, Runtime as TokioRuntime};
+
+#[derive(Debug)]
+pub struct TokioBoundedSender<T>(mpsc::Sender<T>);
+
+impl<T> Clone for TokioBoundedSender<T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<T> TokioBoundedSender<T> {
+    pub async fn send(&self, value: T) -> Result<(), T> {
+        self.0.send(value).await.map_err(|error| error.0)
+    }
+
+    pub fn try_send(&self, value: T) -> Result<(), TokioBoundedTrySendError<T>> {
+        self.0.try_send(value).map_err(|error| match error {
+            mpsc::error::TrySendError::Full(value) => TokioBoundedTrySendError::Full(value),
+            mpsc::error::TrySendError::Closed(value) => TokioBoundedTrySendError::Closed(value),
+        })
+    }
+}
+
+#[derive(Debug)]
+pub enum TokioBoundedTrySendError<T> {
+    Full(T),
+    Closed(T),
+}
+
+#[derive(Debug)]
+pub struct TokioBoundedReceiver<T>(mpsc::Receiver<T>);
+
+impl<T> TokioBoundedReceiver<T> {
+    pub async fn recv(&mut self) -> Option<T> {
+        self.0.recv().await
+    }
+
+    pub fn close(&mut self) {
+        self.0.close();
+    }
+}
+
+pub fn tokio_bounded_channel<T>(
+    capacity: NonZeroUsize,
+) -> (TokioBoundedSender<T>, TokioBoundedReceiver<T>) {
+    let (sender, receiver) = mpsc::channel(capacity.get());
+    (TokioBoundedSender(sender), TokioBoundedReceiver(receiver))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokioRuntimeOwnership {

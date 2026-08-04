@@ -185,9 +185,11 @@ pub use embedded::{
     EMBEDDED_QUERY_PATH_READINESS_PROTOCOL,
 };
 #[cfg(feature = "tokio-runtime")]
-pub use embedded_tokio::{SkeinTokioEmbedded, SkeinTokioEmbeddedError};
+pub use embedded_tokio::{
+    SkeinTokioEmbedded, SkeinTokioEmbeddedError, TokioQueryBatchStream, TokioQueryStreamOptions,
+};
 pub use error::{Result, SkeinError};
-pub use executor::ReadExecutionProfile;
+pub use executor::{ReadExecutionProfile, Row};
 pub use graph_route_evidence::{
     nowledge_graph_route_evidence_json, nowledge_mem_graph_augmentation_state_route_query,
     nowledge_mem_graph_community_members_route_query,

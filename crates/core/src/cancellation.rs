@@ -4,9 +4,26 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct RuntimeCancellationToken {
-    cancelled: Arc<AtomicBool>,
+    state: Arc<RuntimeCancellationState>,
+}
+
+#[derive(Debug)]
+struct RuntimeCancellationState {
+    cancelled: AtomicBool,
+    parent: Option<RuntimeCancellationToken>,
+}
+
+impl Default for RuntimeCancellationToken {
+    fn default() -> Self {
+        Self {
+            state: Arc::new(RuntimeCancellationState {
+                cancelled: AtomicBool::new(false),
+                parent: None,
+            }),
+        }
+    }
 }
 
 impl RuntimeCancellationToken {
@@ -15,11 +32,25 @@ impl RuntimeCancellationToken {
     }
 
     pub fn cancel(&self) -> bool {
-        !self.cancelled.swap(true, Ordering::AcqRel)
+        !self.state.cancelled.swap(true, Ordering::AcqRel)
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Acquire)
+        self.state.cancelled.load(Ordering::Acquire)
+            || self
+                .state
+                .parent
+                .as_ref()
+                .is_some_and(RuntimeCancellationToken::is_cancelled)
+    }
+
+    pub fn child(&self) -> Self {
+        Self {
+            state: Arc::new(RuntimeCancellationState {
+                cancelled: AtomicBool::new(false),
+                parent: Some(self.clone()),
+            }),
+        }
     }
 }
 
@@ -50,6 +81,10 @@ impl RuntimeTaskContext {
 
     pub fn cancellation(&self) -> &RuntimeCancellationToken {
         &self.cancellation
+    }
+
+    pub fn child(&self) -> Self {
+        Self::new(self.cancellation.child(), self.deadline)
     }
 
     pub fn deadline(&self) -> Option<Instant> {
@@ -131,5 +166,21 @@ mod tests {
             context.checkpoint(),
             Err(RuntimeCancellationReason::DeadlineExceeded)
         );
+    }
+
+    #[test]
+    fn child_cancellation_is_local_and_parent_cancellation_propagates() {
+        let parent_token = RuntimeCancellationToken::new();
+        let parent = RuntimeTaskContext::without_deadline(parent_token.clone());
+        let child = parent.child();
+
+        assert!(child.cancellation().cancel());
+        assert!(child.checkpoint().is_err());
+        assert!(parent.checkpoint().is_ok());
+
+        let sibling = parent.child();
+        assert!(parent_token.cancel());
+        assert!(parent.checkpoint().is_err());
+        assert!(sibling.checkpoint().is_err());
     }
 }

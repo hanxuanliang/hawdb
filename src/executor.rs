@@ -7789,7 +7789,7 @@ pub(crate) fn map_payload_bytes(values: &BTreeMap<String, Value>) -> usize {
     })
 }
 
-fn map_memory_bytes(values: &BTreeMap<String, Value>) -> usize {
+pub(crate) fn map_memory_bytes(values: &BTreeMap<String, Value>) -> usize {
     std::mem::size_of::<BTreeMap<String, Value>>().saturating_add(values.iter().fold(
         0usize,
         |total, (name, value)| {

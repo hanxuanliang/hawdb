@@ -51,13 +51,6 @@ and algorithms outside active routes are not implied backlog items.
 
 ## P1: Runtime And Availability Hardening
 
-- [ ] Add a backpressured asynchronous row-consumer API.
-  - Preserve the admitted Tokio facade and cancellation/deadline semantics.
-  - Deliver bounded batches without collecting the complete result into a
-    `Vec` before returning control to the host.
-  - Bound channel capacity and payload bytes, propagate consumer cancellation,
-    and keep mutation execution serialized.
-
 - [ ] Close the remaining blocking-operator availability gaps for active
   workloads.
   - Capture route evidence for high-cardinality `DISTINCT` and Cartesian build

@@ -150,6 +150,13 @@ replace revision-, dataset-, and workload-bound evidence.
 An asynchronous facade that returns a materialized result remains subject to
 the result budget. A streaming asynchronous API MUST propagate consumer
 backpressure and cancellation without retaining the complete result.
+`SkeinTokioEmbedded::query_stream` and its parameterized/options variants use
+the admitted query request, add the bounded channel residency to admitted
+memory, and deliver execution-memory-sized batches through a finite channel.
+The producer retains its runtime permit until the terminal report, observes a
+child cancellation token linked to the caller deadline/token, and is cancelled
+when the consumer is dropped. Mutation statements are rejected by this API and
+continue through the serialized materialized mutation path.
 
 ## Durability Qualification
 
