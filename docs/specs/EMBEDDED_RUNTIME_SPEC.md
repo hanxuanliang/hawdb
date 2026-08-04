@@ -128,8 +128,18 @@ or another process to reopen the database directory.
 The default concurrency budget MUST be derived from the smallest known limit:
 
 1. `std::thread::available_parallelism`;
-2. cgroup v2 `cpu.max` quota when present;
-3. the effective cgroup cpuset when present.
+2. cgroup v2 `cpu.max` or cgroup v1 `cpu.cfs_quota_us` and
+   `cpu.cfs_period_us` when present;
+3. the effective cgroup v2 or inherited cgroup v1 cpuset when present.
+
+Linux cgroup discovery MUST resolve the process controller path against the
+controller mount root from `/proc/self/mountinfo`; it MUST NOT assume every
+controller is mounted directly below `/sys/fs/cgroup`. Cgroup v1 memory sizing
+uses the hard limit, optional soft limit, current usage, and derived headroom.
+Known unlimited sentinels do not constrain the host limit. If a controller is
+present but its mount, quota, cpuset, memory limit, or usage cannot be parsed,
+runtime detection MUST fail closed to one CPU or zero memory admission instead
+of using host-wide resources.
 
 Explicit library configuration MAY lower or raise derived defaults. Foreground
 requests MAY use the effective CPU budget. Internal background tasks MUST use a

@@ -99,10 +99,11 @@ platform fixture, identify `target_os` as `windows`, expose resident-memory and
 total-page-fault capability, and leave Unix split page-fault fields absent.
 
 Linux runtime sizing MUST derive effective CPU and memory from the smallest
-known host and cgroup limits. Cgroup v2 is mandatory. A release that supports
-cgroup v1 environments MUST either implement and test a v1 fallback or declare
-those environments unsupported; it MUST NOT silently use host-wide limits
-inside an undetected container limit.
+known host and cgroup limits. Cgroup v2 and cgroup v1 CPU, cpuset, hard/soft
+memory limit, usage, and headroom detection are supported. Cgroup v1 paths MUST
+be resolved from the process controller membership and mount root. A detected
+controller with an unreadable or invalid limit fails closed; it MUST NOT
+silently use host-wide limits inside a container.
 
 ## Resource Qualification
 

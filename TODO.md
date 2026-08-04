@@ -70,13 +70,6 @@ and algorithms outside active routes are not implied backlog items.
   - Keep direct low-level access available for tests and controlled hosts
     without allowing it to satisfy production-path readiness accidentally.
 
-- [ ] Complete the Linux cgroup compatibility decision.
-  - Add cgroup v1 CPU, cpuset, memory limit, usage, and headroom detection with
-    parser tests, or explicitly reject cgroup v1 environments during production
-    qualification.
-  - Never fall back silently to host-wide limits when a container limit exists
-    but cannot be interpreted.
-
 - [ ] Add scheduled supply-chain and long-running quality gates.
   - Add dependency advisory and license-policy checks.
   - Run the optimizer differential/metamorphic corpus on a schedule and retain
