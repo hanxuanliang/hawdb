@@ -23,10 +23,28 @@ jobs:
         run: cargo fmt --check
 
       - name: Check scripts
-        run: bash -n scripts/nowledge-previous-wrapper-preflight.sh
+        run: |
+          bash -n scripts/nowledge-previous-wrapper-preflight.sh
+          bash -n scripts/check-storage-tla.sh
 
       - name: Lint
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  storage-formal-models:
+    name: Storage Formal Models
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Check storage TLA+ models
+        run: scripts/check-storage-tla.sh
 
   test:
     name: Test
