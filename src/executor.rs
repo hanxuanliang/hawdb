@@ -12,20 +12,18 @@ use crate::planner::{
 };
 use crate::schema::Catalog;
 use crate::store::{
-    AdjacencyDirection, ConnectedNodesCreate, GraphMutation, GraphScanControl, GraphStore,
+    ConnectedNodesCreate, GraphMutation, GraphScanControl, GraphStore,
     MatchedRelationshipCopyMerge, MatchedRelationshipCreate, MatchedRelationshipMerge,
     MatchedRelationshipRetargetMerge, MatchedRelationshipSourceRetargetMerge, MutationLimits,
     NodeId, NodeRecord, NodeSetAssignment, NodeSetValue, ProjectedGraphDefinition, PropertyFilter,
     RelRecord, RelationshipDeleteRequest, RelationshipOnCreatePropertyValue,
     RelationshipPropertiesUpdate, RelationshipPropertyUpdate, RelationshipSetAssignment,
-    RelationshipTargetNodeDelete, ScanPredicate, ScanPruningReport, ScanPruningStrategy,
-    SourceScanCandidateRead,
+    RelationshipTargetNodeDelete, ScanPruningReport, ScanPruningStrategy, SourceScanCandidateRead,
 };
 use crate::value::Value;
 use skein_core::RuntimeTaskContext;
 use skein_ddl::{object_state_to_core, property_type_to_core, table_kind_to_core};
 use skein_executor::{ExecutionLimit, VectorExecutionReport};
-use skein_storage::RangeBound;
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
@@ -35,6 +33,7 @@ mod batch;
 mod blocking;
 mod expression;
 mod mutation;
+mod observer;
 mod read;
 mod scan;
 mod store_adapter;
@@ -48,16 +47,17 @@ use mutation::{
     node_set_assignment, relationship_on_create_property_value,
     try_projected_graph_with_node_filter,
 };
+use observer::RootExecutionObserver;
 use read::*;
 use scan::*;
 #[cfg(feature = "tokio-runtime")]
 pub(crate) use skein_executor::binding::map_memory_bytes;
 pub(crate) use skein_executor::binding::map_payload_bytes;
 use skein_executor::binding::{
-    binding_memory_bytes, binding_payload_bytes, node_memory_bytes, value_memory_bytes, Binding,
-    TopNBinding,
+    binding_memory_bytes, binding_payload_bytes, value_memory_bytes, Binding, TopNBinding,
 };
 pub(crate) use skein_executor::external::NoExternalReadOperator;
+use skein_executor::graph::GraphExpansionExecutionState;
 use skein_executor::kernel::{
     collect_bounded_operator_bindings, ensure_operator_item_fits, push_bounded_operator_binding,
     OperatorMemoryTracker, SpillBudgetTracker,
@@ -66,10 +66,19 @@ pub(crate) use skein_executor::memory::{
     estimated_execution_memory, estimated_mutation_memory_bytes,
 };
 use skein_executor::memory::{DEFAULT_EXECUTION_BATCH_ROWS, SOURCE_SEGMENT_SCAN_MAX_WAVE_BYTES};
+use skein_executor::pipeline::{
+    emit_binding_iterator, emit_owned_binding_batches, runtime_checkpoint, BatchControl,
+    BindingBatch,
+};
 use skein_executor::predicate::{
     combine_property_filters, compare_property_values, label_ids_for_pattern,
     node_matches_label_pattern, node_matches_property_filter, node_properties_match,
     property_filter_from_properties,
+};
+use skein_executor::scan::{
+    expand_binding, single_node_binding, source_scan_pruning_strategy,
+    source_storage_scan_predicate, AdjacencyExpandFilters, AdjacencyExpandSpec,
+    NodeColumnLookupSpec, NodeScanContext, NodeScanSpec,
 };
 use skein_executor::spill;
 pub use skein_executor::ExecutionMemoryConfig;

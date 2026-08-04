@@ -9,8 +9,14 @@ pub mod kernel;
 pub mod limit;
 pub mod memory;
 #[doc(hidden)]
+pub mod observer;
+#[doc(hidden)]
+pub mod pipeline;
+#[doc(hidden)]
 pub mod predicate;
 pub mod profile;
+#[doc(hidden)]
+pub mod scan;
 #[doc(hidden)]
 pub mod spill;
 #[doc(hidden)]

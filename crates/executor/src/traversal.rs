@@ -5,6 +5,8 @@ use crate::kernel::{
     ensure_operator_item_fits, push_bounded_operator_binding, OperatorMemoryTracker,
 };
 use crate::memory::DEFAULT_BLOCKING_OPERATOR_MEMORY_BYTES;
+use crate::observer::ExecutionObserver;
+use crate::pipeline::runtime_checkpoint;
 use crate::predicate::{
     combine_property_filters, label_ids_for_pattern, node_matches_label_pattern,
     node_matches_property_filter, property_filter_from_properties, property_filter_matches_values,
@@ -23,26 +25,6 @@ use skein_plan::{
 use skein_storage::{AdjacencyDirection, NodeId, NodeRecord, PropertyFilter, RelId, RelRecord};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::num::NonZeroUsize;
-
-pub trait ExecutionObserver {
-    fn record_scan_pruning_report(&mut self, _report: skein_storage::ScanPruningReport) {}
-
-    fn record_blocking_memory_report(&mut self, _report: BlockingOperatorMemoryReport) {}
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-pub struct NoopExecutionObserver;
-
-impl ExecutionObserver for NoopExecutionObserver {}
-
-fn runtime_checkpoint(task_context: Option<&RuntimeTaskContext>) -> Result<()> {
-    match task_context {
-        Some(task_context) => task_context
-            .checkpoint()
-            .map_err(|reason| SkeinError::Execution(format!("runtime task stopped: {reason}"))),
-        None => Ok(()),
-    }
-}
 
 pub struct ShortestPathExecInput<'a> {
     pub source_label: &'a str,
@@ -414,6 +396,69 @@ pub fn one_hop_relationships_with_budget(
     }
     matches.sort_by_key(|(relationship, target)| (target.id, relationship.id));
     Ok(matches)
+}
+
+pub fn bounded_expand_targets(
+    store: &dyn GraphExecutionRead,
+    source: NodeId,
+    rel_type_id: RelTypeId,
+    target_label_ids: Option<&[LabelId]>,
+    min_hops: usize,
+    max_hops: usize,
+    memory_budget_bytes: usize,
+) -> Result<Vec<(NodeRecord, usize)>> {
+    let mut targets = Vec::new();
+    let mut tracker = OperatorMemoryTracker::new(
+        NonZeroUsize::new(memory_budget_bytes)
+            .expect("execution memory budget is represented by NonZeroUsize"),
+    );
+    let stack_entry_bytes = std::mem::size_of::<(NodeId, usize)>();
+    tracker.charge(stack_entry_bytes);
+    let mut stack = vec![(source, 0usize)];
+    while let Some((current, depth)) = stack.pop() {
+        tracker.release(stack_entry_bytes);
+        if depth >= min_hops
+            && let Some(node) = store.node_owned(current)?
+            && node_matches_label_pattern(&node, target_label_ids)
+        {
+            let bytes = node_memory_bytes(&node).saturating_add(std::mem::size_of::<usize>());
+            ensure_operator_item_fits("AdjacencyExpandExec", bytes, &tracker)?;
+            if tracker.would_exceed(bytes) {
+                return Err(SkeinError::Execution(format!(
+                    "AdjacencyExpandExec traversal state exceeds blocking_operator_bytes {}",
+                    tracker.budget_bytes
+                )));
+            }
+            tracker.charge(bytes);
+            targets.push((node, depth));
+        }
+        if depth == max_hops {
+            continue;
+        }
+        let mut neighbors = Vec::new();
+        let mut visit = |relationship: RelRecord| {
+            if tracker.would_exceed(stack_entry_bytes) {
+                return Err(SkeinError::Execution(format!(
+                    "AdjacencyExpandExec traversal state exceeds blocking_operator_bytes {}",
+                    tracker.budget_bytes
+                )));
+            }
+            tracker.charge(stack_entry_bytes);
+            neighbors.push((relationship.target, relationship.id));
+            Ok(ScanControl::Continue)
+        };
+        store.visit_adjacent_relationships_owned(
+            current,
+            Some(rel_type_id),
+            AdjacencyDirection::Outgoing,
+            &mut visit,
+        )?;
+        neighbors.sort_unstable_by(|left, right| right.cmp(left));
+        for (neighbor_id, _) in neighbors {
+            stack.push((neighbor_id, depth + 1));
+        }
+    }
+    Ok(targets)
 }
 
 fn relationship_target_for_source_direction(

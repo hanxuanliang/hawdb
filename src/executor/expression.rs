@@ -552,14 +552,6 @@ fn node_value(node: &NodeRecord, catalog: &Catalog) -> Value {
     Value::Map(values)
 }
 
-pub(super) fn null_lookup_node() -> NodeRecord {
-    NodeRecord {
-        id: NodeId(0),
-        labels: BTreeSet::new(),
-        properties: BTreeMap::new(),
-    }
-}
-
 fn relationship_value(relationship: &RelRecord, catalog: &Catalog) -> Value {
     let mut values = relationship.properties.clone();
     values.insert("_id".to_string(), Value::Int(relationship.id.0 as i64));
@@ -592,73 +584,6 @@ fn binding_id(binding: &Binding, variable: &str) -> Option<Value> {
                 .get(variable)
                 .map(|relationship| Value::Int(relationship.id.0 as i64))
         })
-}
-
-pub(super) fn bounded_expand_targets(
-    store: &GraphStore,
-    source: NodeId,
-    rel_type_id: crate::schema::RelTypeId,
-    target_label_ids: Option<&[crate::schema::LabelId]>,
-    min_hops: usize,
-    max_hops: usize,
-    memory_budget_bytes: usize,
-) -> Result<Vec<(NodeRecord, usize)>> {
-    let mut targets = Vec::new();
-    let mut tracker = OperatorMemoryTracker::new(
-        NonZeroUsize::new(memory_budget_bytes)
-            .expect("execution memory budget is represented by NonZeroUsize"),
-    );
-    let stack_entry_bytes = std::mem::size_of::<(NodeId, usize)>();
-    tracker.charge(stack_entry_bytes);
-    let mut stack = vec![(source, 0usize)];
-    while let Some((current, depth)) = stack.pop() {
-        tracker.release(stack_entry_bytes);
-        if depth >= min_hops
-            && let Some(node) = store.node_owned(current)?
-            && node_matches_label_pattern(&node, target_label_ids)
-        {
-            let bytes = node_memory_bytes(&node).saturating_add(std::mem::size_of::<usize>());
-            ensure_operator_item_fits("AdjacencyExpandExec", bytes, &tracker)?;
-            if tracker.would_exceed(bytes) {
-                return Err(SkeinError::Execution(format!(
-                    "AdjacencyExpandExec traversal state exceeds blocking_operator_bytes {}",
-                    tracker.budget_bytes
-                )));
-            }
-            tracker.charge(bytes);
-            targets.push((node, depth));
-        }
-        if depth == max_hops {
-            continue;
-        }
-        let mut neighbors = Vec::new();
-        let mut callback_error = None;
-        store.visit_adjacent_relationships_owned(
-            current,
-            Some(rel_type_id),
-            AdjacencyDirection::Outgoing,
-            |relationship| {
-                if tracker.would_exceed(stack_entry_bytes) {
-                    callback_error = Some(SkeinError::Execution(format!(
-                        "AdjacencyExpandExec traversal state exceeds blocking_operator_bytes {}",
-                        tracker.budget_bytes
-                    )));
-                    return GraphScanControl::Stop;
-                }
-                tracker.charge(stack_entry_bytes);
-                neighbors.push((relationship.target, relationship.id));
-                GraphScanControl::Continue
-            },
-        )?;
-        if let Some(error) = callback_error {
-            return Err(error);
-        }
-        neighbors.sort_unstable_by(|left, right| right.cmp(left));
-        for (neighbor_id, _) in neighbors {
-            stack.push((neighbor_id, depth + 1));
-        }
-    }
-    Ok(targets)
 }
 
 fn aggregate_value(catalog: &Catalog, item: &Aggregation, input: &[Binding]) -> Value {

@@ -646,46 +646,6 @@ fn evaluates_nested_projection_expression_without_rebuilding_projection() {
 }
 
 #[test]
-fn graph_expansion_state_enforces_candidate_and_payload_budgets_before_push() {
-    let binding = Binding {
-        values: BTreeMap::from([("value".to_string(), Value::String("payload".to_string()))]),
-        nodes: BTreeMap::new(),
-        relationships: BTreeMap::new(),
-    };
-    let mut candidate_limited = GraphExpansionExecutionState::new(
-        Some(skein_plan::GraphExpansionBudget {
-            candidate_limit: 1,
-            payload_byte_limit: usize::MAX,
-        }),
-        1,
-        1,
-    );
-    let mut output = Vec::new();
-    assert!(candidate_limited.try_push(&mut output, binding.clone(), None, 1));
-    assert!(!candidate_limited.try_push(&mut output, binding.clone(), None, 1));
-    assert_eq!(
-        candidate_limited.truncation_reason,
-        Some(skein_executor::GraphExpansionTruncationReason::CandidateLimit)
-    );
-
-    let mut payload_limited = GraphExpansionExecutionState::new(
-        Some(skein_plan::GraphExpansionBudget {
-            candidate_limit: 2,
-            payload_byte_limit: binding_payload_bytes(&binding).saturating_sub(1),
-        }),
-        1,
-        1,
-    );
-    let mut output = Vec::new();
-    assert!(!payload_limited.try_push(&mut output, binding, None, 1));
-    assert!(output.is_empty());
-    assert_eq!(
-        payload_limited.truncation_reason,
-        Some(skein_executor::GraphExpansionTruncationReason::PayloadByteLimit)
-    );
-}
-
-#[test]
 fn node_column_lookup_uses_property_index_pruning_for_exact_label() {
     let mut catalog = Catalog::default();
     let mut store = GraphStore::in_memory();

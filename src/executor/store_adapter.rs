@@ -3,7 +3,9 @@
 use crate::error::Result;
 use crate::store::{GraphScanControl, GraphStore};
 use skein_core::{LabelId, RelTypeId};
-use skein_executor::store::{GraphExecutionRead, PrunedRelationshipScan, ScanControl};
+use skein_executor::store::{
+    GraphExecutionRead, PrunedNodeScan, PrunedRelationshipScan, ScanControl,
+};
 use skein_storage::{AdjacencyDirection, NodeId, NodeRecord, PropertyFilter, RelRecord};
 
 fn to_store_control(control: ScanControl) -> GraphScanControl {
@@ -29,6 +31,10 @@ impl GraphExecutionRead for GraphStore {
         GraphStore::node_owned(self, id)
     }
 
+    fn node_count_for_label(&self, label_id: Option<LabelId>) -> usize {
+        GraphStore::node_count_for_label(self, label_id)
+    }
+
     fn relationship_count_for_type(&self, rel_type: Option<RelTypeId>) -> usize {
         GraphStore::relationship_count_for_type(self, rel_type)
     }
@@ -42,6 +48,30 @@ impl GraphExecutionRead for GraphStore {
             consumer(node).map(to_store_control)
         })
         .map(to_execution_control)
+    }
+
+    fn visit_nodes_by_property_owned(
+        &self,
+        label_id: LabelId,
+        property: &str,
+        values: &[skein_core::Value],
+        consumer: &mut dyn FnMut(NodeRecord) -> Result<ScanControl>,
+    ) -> Result<ScanControl> {
+        let mut consumer_error = None;
+        let control =
+            GraphStore::visit_nodes_by_property_owned(self, label_id, property, values, |node| {
+                match consumer(node) {
+                    Ok(control) => to_store_control(control),
+                    Err(error) => {
+                        consumer_error = Some(error);
+                        GraphScanControl::Stop
+                    }
+                }
+            })?;
+        match consumer_error {
+            Some(error) => Err(error),
+            None => Ok(to_execution_control(control)),
+        }
     }
 
     fn visit_adjacent_relationships_owned(
@@ -69,6 +99,18 @@ impl GraphExecutionRead for GraphStore {
         let scan = GraphStore::scan_relationships_with_filter_pruning(self, rel_type, filter);
         Ok(PrunedRelationshipScan {
             relationships: Box::new(scan.relationships.into_iter().cloned()),
+            report: scan.report,
+        })
+    }
+
+    fn scan_nodes_with_filter_pruning<'a>(
+        &'a self,
+        label_id: Option<LabelId>,
+        filter: Option<&PropertyFilter>,
+    ) -> Result<PrunedNodeScan<'a>> {
+        let scan = GraphStore::scan_nodes_with_filter_pruning(self, label_id, filter);
+        Ok(PrunedNodeScan {
+            nodes: Box::new(scan.nodes.into_iter().cloned()),
             report: scan.report,
         })
     }

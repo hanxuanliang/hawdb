@@ -2,15 +2,6 @@
 
 use super::*;
 
-#[derive(Clone, Copy)]
-pub(super) struct NodeColumnLookupSpec<'a> {
-    pub(super) variable: &'a str,
-    pub(super) label: &'a str,
-    pub(super) property: &'a str,
-    pub(super) column: &'a str,
-    pub(super) optional: bool,
-}
-
 fn stream_node_column_lookup_batches(
     spec: NodeColumnLookupSpec<'_>,
     input: &PhysicalPlan,
@@ -124,29 +115,12 @@ fn stream_optional_degree_batches(
     })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum BatchControl {
-    Continue,
-    Stop,
-}
-
-pub(super) type BindingBatch = Vec<Binding>;
-
 #[derive(Clone, Copy)]
 pub(super) struct BatchReadContext<'a> {
     pub(super) catalog: &'a Catalog,
     pub(super) store: &'a GraphStore,
     pub(super) memory: &'a ExecutionMemoryConfig,
     pub(super) task_context: Option<&'a RuntimeTaskContext>,
-}
-
-pub(super) fn runtime_checkpoint(task_context: Option<&RuntimeTaskContext>) -> Result<()> {
-    match task_context {
-        Some(task_context) => task_context
-            .checkpoint()
-            .map_err(|reason| SkeinError::Execution(format!("runtime task stopped: {reason}"))),
-        None => Ok(()),
-    }
 }
 
 pub(super) fn batch_pipeline_capable(plan: &PhysicalPlan) -> bool {

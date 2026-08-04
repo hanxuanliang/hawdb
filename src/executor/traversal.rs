@@ -7,21 +7,6 @@ pub(super) use executor_traversal::ShortestPathExecInput;
 #[cfg(test)]
 pub(super) use executor_traversal::ShortestPathSearch;
 
-struct RootExecutionObserver;
-
-impl executor_traversal::ExecutionObserver for RootExecutionObserver {
-    fn record_scan_pruning_report(&mut self, report: ScanPruningReport) {
-        super::record_scan_pruning_report(report);
-    }
-
-    fn record_blocking_memory_report(
-        &mut self,
-        report: skein_executor::BlockingOperatorMemoryReport,
-    ) {
-        super::record_blocking_memory_report(report);
-    }
-}
-
 pub(super) fn execute_shortest_path(
     catalog: &Catalog,
     store: &GraphStore,

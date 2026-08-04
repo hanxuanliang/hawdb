@@ -16,6 +16,11 @@ pub struct PrunedRelationshipScan<'a> {
     pub report: ScanPruningReport,
 }
 
+pub struct PrunedNodeScan<'a> {
+    pub nodes: Box<dyn Iterator<Item = NodeRecord> + 'a>,
+    pub report: ScanPruningReport,
+}
+
 /// The graph reads required by storage-independent execution operators.
 ///
 /// Implementations own storage layout, residency, and pruning details. Owned
@@ -26,11 +31,21 @@ pub trait GraphExecutionRead {
 
     fn node_owned(&self, id: NodeId) -> Result<Option<NodeRecord>>;
 
+    fn node_count_for_label(&self, label_id: Option<LabelId>) -> usize;
+
     fn relationship_count_for_type(&self, rel_type: Option<RelTypeId>) -> usize;
 
     fn visit_nodes_owned(
         &self,
         label_id: Option<LabelId>,
+        consumer: &mut dyn FnMut(NodeRecord) -> Result<ScanControl>,
+    ) -> Result<ScanControl>;
+
+    fn visit_nodes_by_property_owned(
+        &self,
+        label_id: LabelId,
+        property: &str,
+        values: &[skein_core::Value],
         consumer: &mut dyn FnMut(NodeRecord) -> Result<ScanControl>,
     ) -> Result<ScanControl>;
 
@@ -47,4 +62,10 @@ pub trait GraphExecutionRead {
         rel_type: Option<RelTypeId>,
         filter: Option<&PropertyFilter>,
     ) -> Result<PrunedRelationshipScan<'a>>;
+
+    fn scan_nodes_with_filter_pruning<'a>(
+        &'a self,
+        label_id: Option<LabelId>,
+        filter: Option<&PropertyFilter>,
+    ) -> Result<PrunedNodeScan<'a>>;
 }
