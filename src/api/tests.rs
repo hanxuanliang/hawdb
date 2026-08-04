@@ -231,8 +231,10 @@ fn runs_create_match_return_demo() {
 
 #[test]
 fn database_config_applies_execution_memory_to_read_queries() {
-    let mut execution_memory = crate::executor::ExecutionMemoryConfig::default();
-    execution_memory.blocking_operator_bytes = NonZeroUsize::new(1024).unwrap();
+    let execution_memory = crate::executor::ExecutionMemoryConfig {
+        blocking_operator_bytes: NonZeroUsize::new(1024).unwrap(),
+        ..crate::executor::ExecutionMemoryConfig::default()
+    };
     let mut db = Database::new_with_config(DatabaseConfig {
         execution_memory,
         ..DatabaseConfig::default()
