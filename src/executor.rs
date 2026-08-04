@@ -5,10 +5,8 @@ use crate::cypher::RelationshipDirection;
 use crate::error::{Result, SkeinError};
 use crate::optimizer::PhysicalPlan;
 use crate::planner::{
-    AggregateFunction, AggregateTarget, Aggregation, CoalesceDifferenceProjectionTerm,
-    ComparisonOp, DatePart, GraphAlgorithmKind, Predicate, Projection, ProjectionExpression,
-    RelationshipCountLeg, RelationshipOnCreateValue, SetNodePropertiesReturnMode, SetValue,
-    SortDirection, SortItem, SortKey,
+    Aggregation, GraphAlgorithmKind, Predicate, Projection, RelationshipCountLeg,
+    RelationshipOnCreateValue, SetNodePropertiesReturnMode, SetValue, SortItem,
 };
 use crate::schema::Catalog;
 use crate::store::{
@@ -25,7 +23,6 @@ use skein_core::RuntimeTaskContext;
 use skein_ddl::{object_state_to_core, property_type_to_core, table_kind_to_core};
 use skein_executor::{ExecutionLimit, VectorExecutionReport};
 use std::cell::RefCell;
-use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::num::{NonZeroU64, NonZeroUsize};
 
@@ -53,9 +50,7 @@ use scan::*;
 #[cfg(feature = "tokio-runtime")]
 pub(crate) use skein_executor::binding::map_memory_bytes;
 pub(crate) use skein_executor::binding::map_payload_bytes;
-use skein_executor::binding::{
-    binding_memory_bytes, binding_payload_bytes, value_memory_bytes, Binding, TopNBinding,
-};
+use skein_executor::binding::{binding_memory_bytes, binding_payload_bytes, Binding, TopNBinding};
 pub(crate) use skein_executor::external::NoExternalReadOperator;
 use skein_executor::graph::GraphExpansionExecutionState;
 use skein_executor::kernel::{
@@ -71,9 +66,8 @@ use skein_executor::pipeline::{
     BindingBatch,
 };
 use skein_executor::predicate::{
-    combine_property_filters, compare_property_values, label_ids_for_pattern,
-    node_matches_label_pattern, node_matches_property_filter, node_properties_match,
-    property_filter_from_properties,
+    label_ids_for_pattern, node_matches_label_pattern, node_matches_property_filter,
+    node_properties_match, property_filter_from_properties,
 };
 use skein_executor::scan::{
     expand_binding, single_node_binding, source_scan_pruning_strategy,
@@ -92,9 +86,6 @@ pub type Row = skein_executor::Row;
 pub type ReadExecutionProfile = skein_executor::ReadExecutionProfile<ScanPruningReport>;
 pub type ProfiledQueryRows = skein_executor::ProfiledQueryRows<ScanPruningReport>;
 pub type ProfiledQueryStream = skein_executor::ProfiledQueryStream<ScanPruningReport>;
-type ValueRangeBound = (Value, bool);
-type ValueRangeBounds = (Option<ValueRangeBound>, Option<ValueRangeBound>);
-
 const SOURCE_SEGMENT_SCAN_IO_DEPTH: usize = 2;
 const SOURCE_SEGMENT_SCAN_MAX_COALESCED_BYTES: u64 = 512 * 1024;
 thread_local! {

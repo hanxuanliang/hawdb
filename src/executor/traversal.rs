@@ -44,27 +44,6 @@ pub(super) fn all_shortest_paths(
     )
 }
 
-pub(super) fn one_hop_relationships(
-    store: &GraphStore,
-    source: NodeId,
-    rel_type_id: Option<crate::schema::RelTypeId>,
-    target_label_ids: Option<&[crate::schema::LabelId]>,
-    rel_properties: &BTreeMap<String, Value>,
-    relationship_scan_filter: Option<&PropertyFilter>,
-    direction: RelationshipDirection,
-) -> Result<Vec<(RelRecord, NodeRecord)>> {
-    executor_traversal::one_hop_relationships(
-        store,
-        source,
-        rel_type_id,
-        target_label_ids,
-        rel_properties,
-        relationship_scan_filter,
-        direction,
-        &mut RootExecutionObserver,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) fn one_hop_relationships_with_budget(
     store: &GraphStore,

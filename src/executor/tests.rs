@@ -1,6 +1,9 @@
 //! Executor admission, streaming, spill, and graph operator regressions.
 
 use super::*;
+use crate::planner::{
+    AggregateFunction, AggregateTarget, ProjectionExpression, SortDirection, SortKey,
+};
 
 fn spill_test_config(name: &str) -> ExecutionMemoryConfig {
     let nonce = std::time::SystemTime::now()
@@ -620,29 +623,6 @@ fn graph_algorithms_admit_direction_specific_projections() {
         .unwrap();
         assert_eq!(output.rows.len(), 2);
     }
-}
-
-#[test]
-fn evaluates_nested_projection_expression_without_rebuilding_projection() {
-    let expression = ProjectionExpression::Coalesce(vec![
-        ProjectionExpression::Literal(Value::Null),
-        ProjectionExpression::Lower(Box::new(ProjectionExpression::Left {
-            expression: Box::new(ProjectionExpression::Literal(Value::String(
-                "SKEIN".to_string(),
-            ))),
-            length: 3,
-        })),
-    ]);
-    let binding = Binding {
-        values: BTreeMap::new(),
-        nodes: BTreeMap::new(),
-        relationships: BTreeMap::new(),
-    };
-
-    let value = evaluate_projection_expression(&expression, &Catalog::default(), &binding)
-        .expect("nested projection expression should evaluate");
-
-    assert_eq!(value, Value::String("ske".to_string()));
 }
 
 #[test]

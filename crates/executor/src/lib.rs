@@ -1,6 +1,10 @@
 #[doc(hidden)]
 pub mod binding;
+#[doc(hidden)]
+pub mod blocking;
 pub mod concurrent;
+#[doc(hidden)]
+pub mod expression;
 #[doc(hidden)]
 pub mod external;
 pub mod graph;
