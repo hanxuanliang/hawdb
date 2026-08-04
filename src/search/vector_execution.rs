@@ -1,9 +1,9 @@
 use super::{cosine_similarity, SearchDocument, SearchFallbackReasonCode, VectorSearchBackend};
 use crate::error::{Result, SkeinError};
 use skein_executor::{
-    execute_vector_plan, VectorCandidate, VectorCandidateBatch, VectorCandidateScanRequest,
-    VectorExecutionReport, VectorExecutionSource, VectorRawRerankRequest, VectorRawScore,
-    VectorResidualFilterRequest, VectorScoreSource,
+    execute_vector_plan, VectorCandidate, VectorCandidateBatch, VectorCandidateScanMetrics,
+    VectorCandidateScanRequest, VectorExecutionReport, VectorExecutionSource,
+    VectorRawRerankRequest, VectorRawScore, VectorResidualFilterRequest, VectorScoreSource,
 };
 use skein_optimizer::{
     plan_vector_search, OptimizerContext, QueryFamily, ResourceHints, VectorPrecision,
@@ -73,6 +73,7 @@ pub(super) fn execute_search_vector_plan(
         fallback_reason_codes,
         fallback_reasons,
         raw_vector_bytes_read: 0,
+        candidate_scan_metrics: None,
     };
     let output = execute_vector_plan(&planned.plan, &mut source).map_err(|error| {
         SkeinError::Storage(format!("vector physical execution failed: {error}"))
@@ -95,6 +96,7 @@ struct SearchVectorSource<'a, 'b> {
     fallback_reason_codes: &'b mut Vec<SearchFallbackReasonCode>,
     fallback_reasons: &'b mut Vec<String>,
     raw_vector_bytes_read: u64,
+    candidate_scan_metrics: Option<VectorCandidateScanMetrics>,
 }
 
 impl VectorExecutionSource for SearchVectorSource<'_, '_> {
@@ -120,9 +122,64 @@ impl VectorExecutionSource for SearchVectorSource<'_, '_> {
                     candidates: Vec::new(),
                 })
             }
-            #[cfg(not(feature = "turbovec"))]
+            #[cfg(not(feature = "vector-search"))]
             VectorSearchBackend::_Lifetime(_) => {
                 unreachable!("lifetime marker is never constructed")
+            }
+            #[cfg(feature = "vector-search")]
+            VectorSearchBackend::TurboQuant {
+                projection,
+                required,
+            } => {
+                let filtered_vector_count = self
+                    .documents
+                    .iter()
+                    .filter(|document| document.embedding.is_some())
+                    .count();
+                let allowlist = (filtered_vector_count != projection.manifest().document_count)
+                    .then_some(self.documents);
+                match projection.search_candidates_for_documents_with_options(
+                    self.query_embedding,
+                    request.candidate_limit,
+                    allowlist,
+                    super::turboquant_projection::TurboQuantCandidateScanOptions::default(),
+                ) {
+                    Ok(output) => {
+                        self.record_candidate_scan_metrics(&output.report);
+                        Ok(VectorCandidateBatch {
+                            score_source: VectorScoreSource::QuantizedApproximate,
+                            candidates: output
+                                .candidates
+                                .into_iter()
+                                .map(|hit| VectorCandidate {
+                                    id: hit.id,
+                                    score: hit.score,
+                                })
+                                .collect(),
+                        })
+                    }
+                    Err(error) => {
+                        if required {
+                            self.fallback_reason_codes.push(
+                                SearchFallbackReasonCode::CompressedVectorProjectionUnavailable,
+                            );
+                            self.fallback_reasons.push(format!(
+                                "Skein TurboQuant projection is required but candidate scan failed: {error}"
+                            ));
+                            Ok(VectorCandidateBatch {
+                                score_source: VectorScoreSource::Unavailable,
+                                candidates: Vec::new(),
+                            })
+                        } else {
+                            self.fallback_reason_codes
+                                .push(SearchFallbackReasonCode::VectorIndexEmpty);
+                            self.fallback_reasons.push(format!(
+                                "Skein TurboQuant projection unavailable; fell back to scalar vector scan: {error}"
+                            ));
+                            Ok(self.raw_vector_candidates())
+                        }
+                    }
+                }
             }
             #[cfg(feature = "turbovec")]
             VectorSearchBackend::Turbovec(projection) => {
@@ -205,9 +262,62 @@ impl VectorExecutionSource for SearchVectorSource<'_, '_> {
     fn raw_vector_bytes_read(&self) -> u64 {
         self.raw_vector_bytes_read
     }
+
+    fn candidate_scan_metrics(&self) -> Option<VectorCandidateScanMetrics> {
+        self.candidate_scan_metrics.clone()
+    }
 }
 
 impl SearchVectorSource<'_, '_> {
+    #[cfg(feature = "vector-search")]
+    fn record_candidate_scan_metrics(
+        &mut self,
+        report: &skein_vector_projection::ProjectionSearchReport,
+    ) {
+        let next = VectorCandidateScanMetrics {
+            kernel: report.kernel.as_str().to_string(),
+            worker_count: report.worker_count,
+            segment_count: report.segment_count,
+            scanned_segment_count: report.scanned_segment_count,
+            scored_document_count: report.scored_document_count,
+            filtered_document_count: report.filtered_document_count,
+            scanned_block_count: report.scanned_block_count,
+            skipped_block_count: report.skipped_block_count,
+            payload_bytes_read: report.payload_bytes_read,
+            admitted_working_bytes: report.admitted_working_bytes,
+        };
+        if let Some(existing) = &mut self.candidate_scan_metrics {
+            if existing.kernel != next.kernel {
+                existing.kernel = "mixed".to_string();
+            }
+            existing.worker_count = existing.worker_count.max(next.worker_count);
+            existing.segment_count = existing.segment_count.max(next.segment_count);
+            existing.scanned_segment_count = existing
+                .scanned_segment_count
+                .saturating_add(next.scanned_segment_count);
+            existing.scored_document_count = existing
+                .scored_document_count
+                .saturating_add(next.scored_document_count);
+            existing.filtered_document_count = existing
+                .filtered_document_count
+                .saturating_add(next.filtered_document_count);
+            existing.scanned_block_count = existing
+                .scanned_block_count
+                .saturating_add(next.scanned_block_count);
+            existing.skipped_block_count = existing
+                .skipped_block_count
+                .saturating_add(next.skipped_block_count);
+            existing.payload_bytes_read = existing
+                .payload_bytes_read
+                .saturating_add(next.payload_bytes_read);
+            existing.admitted_working_bytes = existing
+                .admitted_working_bytes
+                .max(next.admitted_working_bytes);
+        } else {
+            self.candidate_scan_metrics = Some(next);
+        }
+    }
+
     fn raw_vector_candidates(&mut self) -> VectorCandidateBatch {
         let mut candidates = Vec::with_capacity(self.documents.len());
         for document in self.documents {

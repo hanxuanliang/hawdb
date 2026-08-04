@@ -717,6 +717,46 @@ jobs:
       - name: Test Tokio adapter
         run: cargo test -p skein-runtime-tokio
 
+  vector-projection-platform:
+    name: Vector Projection (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - name: Check default and minimal feature sets
+        run: |
+          cargo check -p skein
+          cargo check -p skein --no-default-features
+
+      - name: Test TurboQuant projection
+        run: cargo test -p skein-vector-projection
+
+      - name: Test embedded TurboQuant facade
+        run: cargo test -p skein --lib search::turboquant_projection::tests
+
+  vector-projection-aarch64:
+    name: Vector Projection (Linux AArch64 Compile)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Check AArch64 NEON projection
+        run: cargo check -p skein-vector-projection --target aarch64-unknown-linux-gnu
+
   storage-platform:
     name: Storage Platform (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

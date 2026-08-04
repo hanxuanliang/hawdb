@@ -1521,6 +1521,7 @@ dependencies = [
  "skein-runtime-tokio",
  "skein-sql",
  "skein-storage",
+ "skein-vector-projection",
  "turbovec",
  "unicode-width",
  "zstd",
@@ -1648,6 +1649,16 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "roaring",
+ "skein-core",
+]
+
+[[package]]
+name = "skein-vector-projection"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
+ "serde",
+ "serde_json",
  "skein-core",
 ]
 

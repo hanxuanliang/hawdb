@@ -1,10 +1,9 @@
-use super::SearchRetrieverReport;
+use super::{SearchRetrieverReport, TURBOQUANT_CANDIDATE_BACKEND};
 use std::collections::BTreeSet;
 
 pub const VECTOR_RECALL_VALIDATION_PROTOCOL: &str = "skein-vector-recall-validation-v1";
 pub const MAX_VECTOR_RECALL_VALIDATION_SAMPLES: usize = 128;
 pub const MAX_VECTOR_RECALL_VALIDATION_TOP_K: usize = 100;
-const APPROXIMATE_VECTOR_BACKEND: &str = "turbovec_projection";
 const PER_MILLION: u64 = 1_000_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,7 +80,7 @@ impl VectorRecallValidationReport {
     pub fn validates_required_approximate_backend(&self) -> bool {
         self.protocol == VECTOR_RECALL_VALIDATION_PROTOCOL
             && self.ready
-            && self.approximate_backend == APPROXIMATE_VECTOR_BACKEND
+            && self.approximate_backend == TURBOQUANT_CANDIDATE_BACKEND
             && self.requested_sample_count > 0
             && self.executed_sample_count == self.requested_sample_count
             && self.exact_hit_count > 0
@@ -191,7 +190,7 @@ impl VectorRecallValidationAccumulator {
                 .filter(|id| exact_ids.contains(id.as_str()))
                 .count(),
         );
-        if approximate_retriever.backend == "turbovec_projection" {
+        if approximate_retriever.backend == TURBOQUANT_CANDIDATE_BACKEND {
             self.approximate_backend_count = self.approximate_backend_count.saturating_add(1);
         }
         if !approximate_retriever.fallback_reason_codes.is_empty() {
@@ -249,7 +248,7 @@ impl VectorRecallValidationAccumulator {
         VectorRecallValidationReport {
             protocol: VECTOR_RECALL_VALIDATION_PROTOCOL.to_string(),
             ready: blocker_codes.is_empty(),
-            approximate_backend: APPROXIMATE_VECTOR_BACKEND.to_string(),
+            approximate_backend: TURBOQUANT_CANDIDATE_BACKEND.to_string(),
             sample_candidate_count: self.sample_candidate_count,
             requested_sample_count: self.requested_sample_count,
             executed_sample_count: self.executed_sample_count,
@@ -340,6 +339,16 @@ mod tests {
             residual_filtered_count: 0,
             reranked_candidate_count: 0,
             raw_vector_bytes_read: 0,
+            candidate_scan_kernel: None,
+            candidate_scan_worker_count: 0,
+            candidate_scan_segment_count: 0,
+            candidate_scan_scanned_segment_count: 0,
+            candidate_scan_scored_document_count: 0,
+            candidate_scan_filtered_document_count: 0,
+            candidate_scan_scanned_block_count: 0,
+            candidate_scan_skipped_block_count: 0,
+            candidate_scan_payload_bytes_read: 0,
+            candidate_scan_admitted_working_bytes: 0,
             posting_bytes_read: 0,
             candidate_postings_visited: 0,
             segmented_lexical_projection_used: false,
@@ -374,12 +383,12 @@ mod tests {
         accumulator.record(
             &["a".to_string(), "b".to_string()],
             &["a".to_string(), "x".to_string()],
-            &retriever("turbovec_projection"),
+            &retriever(TURBOQUANT_CANDIDATE_BACKEND),
         );
         accumulator.record(
             &["c".to_string(), "d".to_string()],
             &["c".to_string(), "d".to_string()],
-            &retriever("turbovec_projection"),
+            &retriever(TURBOQUANT_CANDIDATE_BACKEND),
         );
 
         let report = accumulator.finish();

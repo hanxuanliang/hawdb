@@ -148,6 +148,24 @@ pub trait VectorExecutionSource {
     fn raw_vector_bytes_read(&self) -> u64 {
         0
     }
+
+    fn candidate_scan_metrics(&self) -> Option<VectorCandidateScanMetrics> {
+        None
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VectorCandidateScanMetrics {
+    pub kernel: String,
+    pub worker_count: usize,
+    pub segment_count: usize,
+    pub scanned_segment_count: usize,
+    pub scored_document_count: usize,
+    pub filtered_document_count: usize,
+    pub scanned_block_count: usize,
+    pub skipped_block_count: usize,
+    pub payload_bytes_read: u64,
+    pub admitted_working_bytes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,6 +186,7 @@ pub struct VectorExecutionReport {
     pub reranked_candidate_count: usize,
     pub returned_count: usize,
     pub raw_vector_bytes_read: u64,
+    pub candidate_scan_metrics: Option<VectorCandidateScanMetrics>,
     pub index_covered_document_count: Option<usize>,
     pub index_candidate_document_count: Option<usize>,
     pub index_coverage_complete: Option<bool>,
@@ -364,6 +383,7 @@ pub fn execute_vector_plan<S: VectorExecutionSource>(
             reranked_candidate_count,
             returned_count: raw_scores.len(),
             raw_vector_bytes_read: source.raw_vector_bytes_read(),
+            candidate_scan_metrics: source.candidate_scan_metrics(),
             index_covered_document_count: None,
             index_candidate_document_count: None,
             index_coverage_complete: None,

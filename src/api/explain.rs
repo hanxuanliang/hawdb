@@ -385,6 +385,62 @@ fn vector_execution_report_value(report: &skein_executor::VectorExecutionReport)
             u64_value(report.raw_vector_bytes_read),
         ),
         (
+            "candidate_scan_kernel".to_string(),
+            report
+                .candidate_scan_metrics
+                .as_ref()
+                .map(|metrics| Value::String(metrics.kernel.clone()))
+                .unwrap_or(Value::Null),
+        ),
+        (
+            "candidate_scan_worker_count".to_string(),
+            report
+                .candidate_scan_metrics
+                .as_ref()
+                .map(|metrics| usize_value(metrics.worker_count))
+                .unwrap_or(Value::Null),
+        ),
+        (
+            "candidate_scan_segment_count".to_string(),
+            report
+                .candidate_scan_metrics
+                .as_ref()
+                .map(|metrics| usize_value(metrics.segment_count))
+                .unwrap_or(Value::Null),
+        ),
+        (
+            "candidate_scan_scanned_block_count".to_string(),
+            report
+                .candidate_scan_metrics
+                .as_ref()
+                .map(|metrics| usize_value(metrics.scanned_block_count))
+                .unwrap_or(Value::Null),
+        ),
+        (
+            "candidate_scan_skipped_block_count".to_string(),
+            report
+                .candidate_scan_metrics
+                .as_ref()
+                .map(|metrics| usize_value(metrics.skipped_block_count))
+                .unwrap_or(Value::Null),
+        ),
+        (
+            "candidate_scan_payload_bytes_read".to_string(),
+            report
+                .candidate_scan_metrics
+                .as_ref()
+                .map(|metrics| u64_value(metrics.payload_bytes_read))
+                .unwrap_or(Value::Null),
+        ),
+        (
+            "candidate_scan_admitted_working_bytes".to_string(),
+            report
+                .candidate_scan_metrics
+                .as_ref()
+                .map(|metrics| usize_value(metrics.admitted_working_bytes))
+                .unwrap_or(Value::Null),
+        ),
+        (
             "index_covered_document_count".to_string(),
             report
                 .index_covered_document_count

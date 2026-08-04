@@ -37,6 +37,18 @@ and algorithms outside active routes are not implied backlog items.
     production constructor and the final cutover report recomputes readiness
     from the bound raw evidence.
 
+- [ ] Qualify the default TurboQuant candidate projection on representative
+  Mem embeddings.
+  - Compare 4-bit candidate recall against canonical raw-vector TopK and use
+    the optional `turbovec` feature as a differential oracle, not as truth.
+  - Cover unfiltered, metadata-filtered, ACL-filtered, incremental, checkpoint,
+    reopen, stale-generation, corruption, cancellation, and mixed-load cases.
+  - Record candidate recall, final raw-reranked recall, P50/P95/P99 latency,
+    steady and peak RSS, page faults, projection bytes, build amplification,
+    skipped blocks, admitted workers, and kernel selection.
+  - Require evidence for Windows x86_64, Linux x86_64, Linux AArch64, macOS
+    AArch64, and the scalar reference before production admission.
+
 ## P1: Runtime And Availability Hardening
 
 - [ ] Add a backpressured asynchronous row-consumer API.

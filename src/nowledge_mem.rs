@@ -7288,6 +7288,20 @@ impl crate::executor::ExternalReadOperator for SearchProjectionExternalReadOpera
                 reranked_candidate_count: retriever.reranked_candidate_count,
                 returned_count: retriever.candidate_count,
                 raw_vector_bytes_read: retriever.raw_vector_bytes_read,
+                candidate_scan_metrics: retriever.candidate_scan_kernel.as_ref().map(|kernel| {
+                    skein_executor::VectorCandidateScanMetrics {
+                        kernel: kernel.clone(),
+                        worker_count: retriever.candidate_scan_worker_count,
+                        segment_count: retriever.candidate_scan_segment_count,
+                        scanned_segment_count: retriever.candidate_scan_scanned_segment_count,
+                        scored_document_count: retriever.candidate_scan_scored_document_count,
+                        filtered_document_count: retriever.candidate_scan_filtered_document_count,
+                        scanned_block_count: retriever.candidate_scan_scanned_block_count,
+                        skipped_block_count: retriever.candidate_scan_skipped_block_count,
+                        payload_bytes_read: retriever.candidate_scan_payload_bytes_read,
+                        admitted_working_bytes: retriever.candidate_scan_admitted_working_bytes,
+                    }
+                }),
                 index_covered_document_count: Some(retriever.index_covered_document_count),
                 index_candidate_document_count: Some(retriever.index_candidate_document_count),
                 index_coverage_complete: Some(retriever.index_coverage_complete),
@@ -9031,6 +9045,18 @@ fn vector_execution_report_json(
         "reranked_candidate_count": report.reranked_candidate_count,
         "returned_count": report.returned_count,
         "raw_vector_bytes_read": report.raw_vector_bytes_read,
+        "candidate_scan": report.candidate_scan_metrics.as_ref().map(|metrics| serde_json::json!({
+            "kernel": metrics.kernel,
+            "worker_count": metrics.worker_count,
+            "segment_count": metrics.segment_count,
+            "scanned_segment_count": metrics.scanned_segment_count,
+            "scored_document_count": metrics.scored_document_count,
+            "filtered_document_count": metrics.filtered_document_count,
+            "scanned_block_count": metrics.scanned_block_count,
+            "skipped_block_count": metrics.skipped_block_count,
+            "payload_bytes_read": metrics.payload_bytes_read,
+            "admitted_working_bytes": metrics.admitted_working_bytes,
+        })),
         "index_covered_document_count": report.index_covered_document_count,
         "index_candidate_document_count": report.index_candidate_document_count,
         "index_coverage_complete": report.index_coverage_complete,
@@ -11515,7 +11541,6 @@ mod tests {
     use crate::workload_fixtures::{
         nowledge_graph_route_workload_fixture_report, NowledgeGraphRouteWorkloadFixtureOptions,
     };
-    #[cfg(feature = "turbovec")]
     use crate::AdaptiveVectorBackendPolicy;
     use crate::Value;
     use crate::{
@@ -11541,7 +11566,7 @@ mod tests {
         VectorRecallValidationReport {
             protocol: VECTOR_RECALL_VALIDATION_PROTOCOL.to_string(),
             ready: true,
-            approximate_backend: "turbovec_projection".to_string(),
+            approximate_backend: "skein_turboquant_candidate_projection".to_string(),
             sample_candidate_count: 2,
             requested_sample_count: 2,
             executed_sample_count: 2,
@@ -15261,7 +15286,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "turbovec")]
     fn embedded_store_handle_exposes_sampled_vector_recall_validation() {
         let index = persisted_nowledge_projection_evidence_index("handle_recall_validation");
         let projection = NowledgeMemSearchProjection::from_index(index);
@@ -15284,7 +15308,10 @@ mod tests {
         assert!(report.ready, "{:?}", report.blocker_codes);
         assert_eq!(report.protocol, VECTOR_RECALL_VALIDATION_PROTOCOL);
         assert_eq!(report.executed_sample_count, 2);
-        assert_eq!(report.approximate_backend, "turbovec_projection");
+        assert_eq!(
+            report.approximate_backend,
+            "skein_turboquant_candidate_projection"
+        );
         assert!(report.validates_required_approximate_backend());
     }
 
@@ -15323,26 +15350,11 @@ mod tests {
             evidence["protocol"],
             "skein-nowledge-search-projection-evidence"
         );
-        #[cfg(feature = "turbovec")]
         assert_eq!(evidence["ready"], true, "evidence={evidence:#}");
-        #[cfg(not(feature = "turbovec"))]
-        {
-            assert_eq!(evidence["ready"], false);
-            assert_eq!(
-                evidence["compressed_vector_projection_ready"],
-                serde_json::json!(false)
-            );
-            assert!(evidence["blocker_codes"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|code| code == "compressed_vector_projection_not_ready"));
-        }
         assert_eq!(evidence["covered_table_count"], 6);
         assert_eq!(evidence["required_table_count"], 6);
         assert_eq!(evidence["source_chunk_ready"], true);
         assert_eq!(evidence["incremental_update_ready"], true);
-        #[cfg(feature = "turbovec")]
         assert_eq!(evidence["blocker_codes"], serde_json::json!([]));
     }
 
@@ -15362,17 +15374,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(report.protocol, "skein-nowledge-search-projection-evidence");
-        #[cfg(feature = "turbovec")]
         assert!(report.ready);
-        #[cfg(not(feature = "turbovec"))]
-        {
-            assert!(!report.ready);
-            assert!(!report.compressed_vector_projection_ready);
-            assert!(report
-                .blocker_codes
-                .iter()
-                .any(|code| code == "compressed_vector_projection_not_ready"));
-        }
+        assert!(report.compressed_vector_projection_ready);
         assert!(report.derived_projection);
         assert!(report.all_tables_covered);
         assert_eq!(report.covered_table_count, 6);
@@ -15405,19 +15408,9 @@ mod tests {
             evidence["protocol"],
             "skein-nowledge-search-projection-shadow-evidence"
         );
-        #[cfg(feature = "turbovec")]
-        {
-            assert_eq!(evidence["ready"], true, "evidence={evidence:#}");
-            assert_eq!(evidence["primary_ready"], true);
-            assert_eq!(evidence["shadow_ready"], true);
-        }
-        #[cfg(not(feature = "turbovec"))]
-        {
-            assert_eq!(evidence["ready"], false);
-            assert_eq!(evidence["primary_ready"], false);
-            assert_eq!(evidence["shadow_ready"], false);
-            assert!(!evidence["blocker_codes"].as_array().unwrap().is_empty());
-        }
+        assert_eq!(evidence["ready"], true, "evidence={evidence:#}");
+        assert_eq!(evidence["primary_ready"], true);
+        assert_eq!(evidence["shadow_ready"], true);
         assert_eq!(evidence["document_count_parity"], true);
         assert_eq!(evidence["table_parity"]["ready"], true);
         assert_eq!(evidence["embedding_identity_parity"], true);
@@ -15438,7 +15431,6 @@ mod tests {
             evidence["pushdown_evidence"]["shadow_segment_scanned_document_count"],
             2
         );
-        #[cfg(feature = "turbovec")]
         assert_eq!(evidence["blocker_codes"], serde_json::json!([]));
     }
 
@@ -18247,7 +18239,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "turbovec")]
     fn embedded_store_open_options_can_prefer_compressed_vector_search() {
         let root = unique_nowledge_mem_test_dir("compressed_vector_open_options");
         let graph_path = root.join("graph");
@@ -18352,18 +18343,21 @@ mod tests {
         );
         assert!(report.retrieval_projection_advisor.ready());
         assert_eq!(output.search.hits[0].id, "memory:mem-vector");
-        assert_eq!(output.search.retrievers[0].backend, "turbovec_projection");
+        assert_eq!(
+            output.search.retrievers[0].backend,
+            "skein_turboquant_candidate_projection"
+        );
         assert_eq!(
             retrieval.report.compressed_vector_search_mode,
             CompressedVectorSearchMode::Preferred
         );
         assert_eq!(
             retrieval.report.vector_backend,
-            Some("turbovec_projection".to_string())
+            Some("skein_turboquant_candidate_projection".to_string())
         );
         assert_eq!(
             retrieval.report.json()["vector_backend"],
-            "turbovec_projection"
+            "skein_turboquant_candidate_projection"
         );
 
         std::fs::remove_dir_all(root).unwrap();

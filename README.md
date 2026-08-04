@@ -9,6 +9,86 @@ The staged implementation and compatibility gates are tracked in
 [docs/EMBEDDED_DEVELOPMENT_PLAN.md](docs/EMBEDDED_DEVELOPMENT_PLAN.md).
 Open development work is tracked in [TODO.md](TODO.md).
 
+## Building
+
+Build the default embedded library with the repository's locked dependency
+versions:
+
+```console
+cargo build --locked -p skein
+```
+
+The default build makes full-text search, vector search, graph analytics, and
+bounded background maintenance available. Build-time availability is only an
+upper bound: the host must also enable a capability through the typed runtime
+configuration. A capability omitted at build time cannot be restored at
+runtime and fails with `SkeinError::CapabilityUnavailable` instead of silently
+falling back.
+
+Use a minimal build when the host only needs canonical graph storage, WAL and
+recovery, transactions, parameterized Cypher, and incremental base indexes:
+
+```console
+cargo build --locked -p skein --no-default-features
+```
+
+Add back only the capabilities required by a constrained host:
+
+```console
+cargo build --locked -p skein --no-default-features \
+  --features full-text-search,vector-search
+```
+
+### Cargo features
+
+| Feature | Default | Purpose |
+| --- | --- | --- |
+| `full-text-search` | yes | Makes full-text indexing and search available to the runtime capability matrix. |
+| `vector-search` | yes | Enables scalar vector search and Skein's bounded 4-bit TurboQuant candidate projection. Adaptive selection may use the projection, but final ranking always reads canonical raw vectors. |
+| `graph-analytics` | yes | Makes bounded graph projection and analytics operations available. |
+| `background-maintenance` | yes | Makes QoS-admitted background schema, index, projection, and maintenance work available. |
+| `acl` | no | Compiles the optional access-control capability. The host must still provide fresh policy state and enable it at runtime; enabling this feature alone does not establish an authorization boundary. |
+| `turbovec` | no | Adds the upstream `turbovec` implementation as a development-only differential/shadow oracle and also enables `vector-search`. It is not the default production backend. |
+| `tokio-runtime` | no | Exposes the optional owned-or-borrowed Tokio adapter for asynchronous host integration. The synchronous embedded facade remains available without it. |
+| `opentelemetry` | no | Compiles the host-injected OpenTelemetry metrics adapter. It does not install a global provider, create an OTLP exporter, read an endpoint, or start a network worker. This feature is restricted to nightly non-production monitoring builds. |
+| `loom-tests` | no | Enables Loom-only concurrency model tests. It is a validation feature, not an application capability. |
+
+Compile a nightly non-production monitoring variant with the metrics adapter and
+Tokio integration explicitly:
+
+```console
+cargo build --locked --release -p skein \
+  --features opentelemetry,tokio-runtime
+```
+
+The nightly host owns the OpenTelemetry SDK, bounded exporter queue, OTLP
+endpoint, credentials, shutdown, and flush lifecycle. Skein only records
+low-cardinality metrics through the supplied `Meter` and `TelemetrySink`; it
+does not export query text, parameters, document identifiers, or database paths.
+
+Production packaging must use an explicit feature allowlist and must not use
+`--all-features`, because `opentelemetry` and test-only features are deliberately
+outside the production build:
+
+```console
+cargo build --locked --release -p skein --no-default-features \
+  --features background-maintenance,full-text-search,graph-analytics,vector-search
+```
+
+`cargo build --all-features` and `cargo clippy --all-features` remain useful for
+development and CI compile coverage, but their outputs are not production
+artifacts.
+
+The default `vector-search` implementation keeps raw embeddings canonical and
+publishes an immutable, checksummed `search_turboquant.<generation>.skein`
+candidate projection. Projection construction is segment-bounded, filtered
+scans use a compact allowlist bitmap, and the scalar, AVX2, or NEON kernel is
+selected for each query without changing the artifact. Parallel segment scans
+are opt-in through a caller-supplied limit and memory budget; Skein does not
+create a global vector-search thread pool. See
+[`docs/specs/TURBOQUANT_VECTOR_PROJECTION_SPEC.md`](docs/specs/TURBOQUANT_VECTOR_PROJECTION_SPEC.md)
+for the algorithm, recovery, and readiness contract.
+
 ## Production Boundary
 
 Skein is intended to be embedded by Mem as a Rust library. Production callers

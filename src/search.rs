@@ -37,6 +37,10 @@ mod analyzer_lexicon;
 mod cjk_tokenizer;
 mod lexical_projection;
 mod lexical_readiness;
+#[cfg(feature = "vector-search")]
+pub mod turboquant_projection {
+    include!("search/turboquant_projection.rs");
+}
 mod out_of_core;
 mod range_io;
 mod recall_validation;
@@ -68,11 +72,21 @@ pub use recall_validation::{
 };
 use vector_execution::{execute_search_vector_plan, SearchVectorExecutionRequest};
 
+#[cfg(feature = "vector-search")]
+use turboquant_projection::{
+    TurboQuantCandidateProjection, TurboQuantCandidateProjectionBuildOptions,
+};
+
 const SEARCH_SNAPSHOT_FILE: &str = "search_projection.skein";
 const SEARCH_SEGMENT_DESCRIPTOR_FILE: &str = "search_projection_segments.skein";
 const SEARCH_SEGMENT_PAYLOAD_FILE: &str = "search_projection_segment_payloads.skein";
 const SEARCH_SEGMENT_PAYLOAD_ARTIFACT_ID: u64 = 1;
+const TURBOQUANT_CANDIDATE_BACKEND: &str = "skein_turboquant_candidate_projection";
 static QUARANTINE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "vector-search")]
+const SEARCH_TURBOQUANT_PROJECTION_PREFIX: &str = "search_turboquant.";
+#[cfg(feature = "vector-search")]
+const SEARCH_TURBOQUANT_PROJECTION_SUFFIX: &str = ".skein";
 #[cfg(feature = "turbovec")]
 const SEARCH_TURBOVEC_PROJECTION_FILE: &str = "search_projection.tvim";
 #[cfg(feature = "turbovec")]
@@ -462,6 +476,16 @@ pub struct SearchRetrieverReport {
     pub residual_filtered_count: usize,
     pub reranked_candidate_count: usize,
     pub raw_vector_bytes_read: u64,
+    pub candidate_scan_kernel: Option<String>,
+    pub candidate_scan_worker_count: usize,
+    pub candidate_scan_segment_count: usize,
+    pub candidate_scan_scanned_segment_count: usize,
+    pub candidate_scan_scored_document_count: usize,
+    pub candidate_scan_filtered_document_count: usize,
+    pub candidate_scan_scanned_block_count: usize,
+    pub candidate_scan_skipped_block_count: usize,
+    pub candidate_scan_payload_bytes_read: u64,
+    pub candidate_scan_admitted_working_bytes: usize,
     pub posting_bytes_read: u64,
     pub candidate_postings_visited: u64,
     pub segmented_lexical_projection_used: bool,
@@ -697,8 +721,13 @@ fn recall_validation_hit_ids(
 enum VectorSearchBackend<'a> {
     Scalar,
     CompressedRequiredUnavailable,
-    #[cfg(not(feature = "turbovec"))]
+    #[cfg(not(feature = "vector-search"))]
     _Lifetime(std::marker::PhantomData<&'a ()>),
+    #[cfg(feature = "vector-search")]
+    TurboQuant {
+        projection: &'a TurboQuantCandidateProjection,
+        required: bool,
+    },
     #[cfg(feature = "turbovec")]
     Turbovec(&'a turbovec_projection::TurbovecSearchProjection),
 }
@@ -731,8 +760,8 @@ struct AdaptiveVectorSearchRequest {
 struct PreparedAdaptiveVectorBackend {
     decision: AdaptiveVectorBackendDecision,
     fallback_reason: Option<String>,
-    #[cfg(feature = "turbovec")]
-    projection: Option<turbovec_projection::TurbovecSearchProjection>,
+    #[cfg(feature = "vector-search")]
+    projection: Option<Arc<TurboQuantCandidateProjection>>,
 }
 
 impl<'a> SearchExecutionStrategy<'a> {
@@ -782,17 +811,20 @@ impl PreparedAdaptiveVectorBackend {
                 VectorSearchBackend::CompressedRequiredUnavailable
             }
             AdaptiveVectorBackend::QuantizedProjection => {
-                #[cfg(feature = "turbovec")]
+                #[cfg(feature = "vector-search")]
                 {
-                    VectorSearchBackend::Turbovec(
-                        self.projection
+                    VectorSearchBackend::TurboQuant {
+                        projection: self
+                            .projection
                             .as_ref()
                             .expect("quantized backend requires a loaded projection"),
-                    )
+                        required: self.decision.reason
+                            == VectorBackendSelectionReason::QuantizedRequired,
+                    }
                 }
-                #[cfg(not(feature = "turbovec"))]
+                #[cfg(not(feature = "vector-search"))]
                 {
-                    unreachable!("quantized backend is unavailable without turbovec")
+                    unreachable!("quantized backend is unavailable without vector-search")
                 }
             }
         }
@@ -804,8 +836,10 @@ impl VectorSearchBackend<'_> {
         match self {
             Self::Scalar => "scalar_vector_scan",
             Self::CompressedRequiredUnavailable => "compressed_vector_projection_required",
-            #[cfg(not(feature = "turbovec"))]
+            #[cfg(not(feature = "vector-search"))]
             Self::_Lifetime(_) => "scalar_vector_scan",
+            #[cfg(feature = "vector-search")]
+            Self::TurboQuant { .. } => TURBOQUANT_CANDIDATE_BACKEND,
             #[cfg(feature = "turbovec")]
             Self::Turbovec(_) => "turbovec_projection",
         }
@@ -814,8 +848,10 @@ impl VectorSearchBackend<'_> {
     fn candidate_source(self) -> VectorCandidateSource {
         match self {
             Self::Scalar | Self::CompressedRequiredUnavailable => VectorCandidateSource::Scalar,
-            #[cfg(not(feature = "turbovec"))]
+            #[cfg(not(feature = "vector-search"))]
             Self::_Lifetime(_) => VectorCandidateSource::Scalar,
+            #[cfg(feature = "vector-search")]
+            Self::TurboQuant { .. } => VectorCandidateSource::Quantized,
             #[cfg(feature = "turbovec")]
             Self::Turbovec(_) => VectorCandidateSource::Quantized,
         }
@@ -829,8 +865,16 @@ impl VectorSearchBackend<'_> {
         let covered_count = match self {
             Self::Scalar => candidate_count,
             Self::CompressedRequiredUnavailable => 0,
-            #[cfg(not(feature = "turbovec"))]
+            #[cfg(not(feature = "vector-search"))]
             Self::_Lifetime(_) => candidate_count,
+            #[cfg(feature = "vector-search")]
+            Self::TurboQuant { projection, .. } => documents
+                .iter()
+                .filter(|document| {
+                    document.embedding.is_some()
+                        && projection.contains_document_id(document.id.as_str())
+                })
+                .count(),
             #[cfg(feature = "turbovec")]
             Self::Turbovec(projection) => documents
                 .iter()
@@ -1050,6 +1094,10 @@ pub struct SearchIndex {
     lexical_projection: Mutex<Option<Arc<LexicalProjectionReader>>>,
     lexical_delta: Mutex<LexicalMiniDelta>,
     lexical_config: LexicalProjectionConfig,
+    #[cfg(feature = "vector-search")]
+    turboquant_projection: Mutex<Option<Arc<TurboQuantCandidateProjection>>>,
+    #[cfg(feature = "vector-search")]
+    turboquant_build_options: TurboQuantCandidateProjectionBuildOptions,
     segment_descriptor: Option<SearchSegmentDescriptor>,
     range_read_config: SearchRangeReadConfig,
     runtime_capabilities: RuntimeCapabilities,
@@ -1074,6 +1122,8 @@ impl SearchIndex {
         index.load_snapshot()?;
         index.load_or_rebuild_segment_descriptor()?;
         index.load_lexical_projection()?;
+        #[cfg(feature = "vector-search")]
+        index.load_turboquant_projection();
         Ok(index)
     }
 
@@ -1115,6 +1165,99 @@ impl SearchIndex {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = projection;
         Ok(())
+    }
+
+    #[cfg(feature = "vector-search")]
+    pub fn set_turboquant_projection_build_options(
+        &mut self,
+        options: TurboQuantCandidateProjectionBuildOptions,
+    ) {
+        self.turboquant_build_options = options;
+        self.invalidate_turboquant_projection();
+    }
+
+    #[cfg(feature = "vector-search")]
+    fn invalidate_turboquant_projection(&self) {
+        *self
+            .turboquant_projection
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
+    #[cfg(feature = "vector-search")]
+    fn load_turboquant_projection(&self) {
+        let Some(path) = &self.path else {
+            return;
+        };
+        for (generation, artifact_path) in turboquant_artifacts_descending(path) {
+            let identity = self.turboquant_projection_identity(generation);
+            match TurboQuantCandidateProjection::load_from_path(
+                &artifact_path,
+                &self.documents,
+                &identity,
+            ) {
+                Ok(projection) => {
+                    *self
+                        .turboquant_projection
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                        Some(Arc::new(projection));
+                    return;
+                }
+                Err(_) => {
+                    if let Some(name) = artifact_path.file_name().and_then(|name| name.to_str()) {
+                        quarantine_rebuildable_artifact(path, name);
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "vector-search")]
+    fn turboquant_projection_identity(
+        &self,
+        generation: u64,
+    ) -> skein_vector_projection::ProjectionIdentity {
+        skein_vector_projection::ProjectionIdentity {
+            generation,
+            source_epoch: self.source_graph_commit_epoch,
+            embedding_model: self
+                .embedding_manifest
+                .as_ref()
+                .map(|manifest| manifest.model.clone()),
+            embedding_version: self
+                .embedding_manifest
+                .as_ref()
+                .and_then(|manifest| manifest.version.clone()),
+        }
+    }
+
+    #[cfg(feature = "vector-search")]
+    fn turboquant_projection(&self) -> Option<Arc<TurboQuantCandidateProjection>> {
+        self.turboquant_projection
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    #[cfg(feature = "vector-search")]
+    fn build_in_memory_turboquant_projection(
+        &self,
+    ) -> Result<Option<Arc<TurboQuantCandidateProjection>>> {
+        if let Some(projection) = self.turboquant_projection() {
+            return Ok(Some(projection));
+        }
+        let projection = TurboQuantCandidateProjection::build_from_documents(
+            &self.documents,
+            self.turboquant_projection_identity(0),
+            self.turboquant_build_options,
+        )?
+        .map(Arc::new);
+        *self
+            .turboquant_projection
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = projection.clone();
+        Ok(projection)
     }
 
     fn record_lexical_upsert(&self, document: &SearchDocument) {
@@ -1192,6 +1335,8 @@ impl SearchIndex {
         }
         self.record_lexical_upsert(&document);
         self.documents.insert(document.id.clone(), document);
+        #[cfg(feature = "vector-search")]
+        self.invalidate_turboquant_projection();
         self.segment_descriptor = None;
         Ok(())
     }
@@ -1203,6 +1348,8 @@ impl SearchIndex {
     pub fn delete(&mut self, id: &str) {
         self.record_lexical_delete(id);
         self.documents.remove(id);
+        #[cfg(feature = "vector-search")]
+        self.invalidate_turboquant_projection();
         self.segment_descriptor = None;
     }
 
@@ -1265,6 +1412,9 @@ impl SearchIndex {
             self.record_lexical_upsert(&document);
             self.documents.insert(document.id.clone(), document);
         }
+
+        #[cfg(feature = "vector-search")]
+        self.invalidate_turboquant_projection();
 
         self.segment_descriptor = None;
         self.embedding_dimension = next_embedding_dimension;
@@ -1534,6 +1684,8 @@ impl SearchIndex {
         }
         self.embedding_dimension = Some(manifest.dimension);
         self.embedding_manifest = Some(manifest);
+        #[cfg(feature = "vector-search")]
+        self.invalidate_turboquant_projection();
         Ok(())
     }
 
@@ -1573,6 +1725,8 @@ impl SearchIndex {
 
             self.documents = next_documents;
             self.invalidate_lexical_projection();
+            #[cfg(feature = "vector-search")]
+            self.invalidate_turboquant_projection();
             self.source_graph_commit_epoch = Some(store.commit_epoch());
             self.embedding_dimension = self
                 .embedding_manifest
@@ -1891,6 +2045,8 @@ impl SearchIndex {
             self.write_segment_artifacts(path)?;
             self.write_lexical_projection(path)?;
             out_of_core::publish_out_of_core_projection(self, path)?;
+            #[cfg(feature = "vector-search")]
+            self.write_turboquant_projection(path)?;
             #[cfg(feature = "turbovec")]
             self.write_turbovec_projection_artifact(path)?;
             *self
@@ -1966,6 +2122,46 @@ impl SearchIndex {
                 let _ = fs::remove_file(entry.path());
             }
         }
+        Ok(())
+    }
+
+    #[cfg(feature = "vector-search")]
+    fn write_turboquant_projection(&self, path: &Path) -> Result<()> {
+        if self
+            .documents
+            .values()
+            .all(|document| document.embedding.is_none())
+        {
+            self.invalidate_turboquant_projection();
+            remove_turboquant_artifacts(path);
+            return Ok(());
+        }
+        let loaded_generation = self
+            .turboquant_projection()
+            .map(|projection| projection.manifest().identity.generation)
+            .unwrap_or(0);
+        let artifact_generation = latest_turboquant_artifact(path)
+            .map(|(generation, _)| generation)
+            .unwrap_or(0);
+        let generation = loaded_generation.max(artifact_generation).saturating_add(1);
+        let artifact_path = path.join(turboquant_artifact_file(generation));
+        let projection = TurboQuantCandidateProjection::write_from_documents(
+            &artifact_path,
+            &self.documents,
+            self.turboquant_projection_identity(generation),
+            self.turboquant_build_options,
+        )?
+        .ok_or_else(|| {
+            SkeinError::Storage(
+                "Skein TurboQuant projection build produced no artifact for vector documents"
+                    .to_string(),
+            )
+        })?;
+        *self
+            .turboquant_projection
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(projection));
+        cleanup_turboquant_artifacts(path, generation);
         Ok(())
     }
 
@@ -2279,14 +2475,19 @@ impl SearchIndex {
             return PreparedAdaptiveVectorBackend {
                 decision: preliminary,
                 fallback_reason: None,
-                #[cfg(feature = "turbovec")]
+                #[cfg(feature = "vector-search")]
                 projection: None,
             };
         }
 
-        #[cfg(feature = "turbovec")]
+        #[cfg(feature = "vector-search")]
         {
-            let projection = self.load_turbovec_projection().ok().flatten();
+            let projection = self.turboquant_projection().or_else(|| {
+                self.path
+                    .is_none()
+                    .then(|| self.build_in_memory_turboquant_projection().ok().flatten())
+                    .flatten()
+            });
             let covered_document_count = projection
                 .as_ref()
                 .map(|projection| {
@@ -2313,7 +2514,7 @@ impl SearchIndex {
             }
         }
 
-        #[cfg(not(feature = "turbovec"))]
+        #[cfg(not(feature = "vector-search"))]
         {
             let decision = select_adaptive_vector_backend(decision_input(false, 0), request.policy);
             PreparedAdaptiveVectorBackend {
@@ -2687,6 +2888,55 @@ impl SearchIndex {
                     .as_ref()
                     .map(|execution| execution.report.raw_vector_bytes_read)
                     .unwrap_or(0),
+                candidate_scan_kernel: vector_execution
+                    .as_ref()
+                    .and_then(|execution| execution.report.candidate_scan_metrics.as_ref())
+                    .map(|metrics| metrics.kernel.clone()),
+                candidate_scan_worker_count: vector_execution
+                    .as_ref()
+                    .and_then(|execution| execution.report.candidate_scan_metrics.as_ref())
+                    .map(|metrics| metrics.worker_count)
+                    .unwrap_or(0),
+                candidate_scan_segment_count: vector_execution
+                    .as_ref()
+                    .and_then(|execution| execution.report.candidate_scan_metrics.as_ref())
+                    .map(|metrics| metrics.segment_count)
+                    .unwrap_or(0),
+                candidate_scan_scanned_segment_count: vector_execution
+                    .as_ref()
+                    .and_then(|execution| execution.report.candidate_scan_metrics.as_ref())
+                    .map(|metrics| metrics.scanned_segment_count)
+                    .unwrap_or(0),
+                candidate_scan_scored_document_count: vector_execution
+                    .as_ref()
+                    .and_then(|execution| execution.report.candidate_scan_metrics.as_ref())
+                    .map(|metrics| metrics.scored_document_count)
+                    .unwrap_or(0),
+                candidate_scan_filtered_document_count: vector_execution
+                    .as_ref()
+                    .and_then(|execution| execution.report.candidate_scan_metrics.as_ref())
+                    .map(|metrics| metrics.filtered_document_count)
+                    .unwrap_or(0),
+                candidate_scan_scanned_block_count: vector_execution
+                    .as_ref()
+                    .and_then(|execution| execution.report.candidate_scan_metrics.as_ref())
+                    .map(|metrics| metrics.scanned_block_count)
+                    .unwrap_or(0),
+                candidate_scan_skipped_block_count: vector_execution
+                    .as_ref()
+                    .and_then(|execution| execution.report.candidate_scan_metrics.as_ref())
+                    .map(|metrics| metrics.skipped_block_count)
+                    .unwrap_or(0),
+                candidate_scan_payload_bytes_read: vector_execution
+                    .as_ref()
+                    .and_then(|execution| execution.report.candidate_scan_metrics.as_ref())
+                    .map(|metrics| metrics.payload_bytes_read)
+                    .unwrap_or(0),
+                candidate_scan_admitted_working_bytes: vector_execution
+                    .as_ref()
+                    .and_then(|execution| execution.report.candidate_scan_metrics.as_ref())
+                    .map(|metrics| metrics.admitted_working_bytes)
+                    .unwrap_or(0),
                 posting_bytes_read: 0,
                 candidate_postings_visited: 0,
                 segmented_lexical_projection_used: false,
@@ -2755,6 +3005,16 @@ impl SearchIndex {
                 residual_filtered_count: 0,
                 reranked_candidate_count: 0,
                 raw_vector_bytes_read: 0,
+                candidate_scan_kernel: None,
+                candidate_scan_worker_count: 0,
+                candidate_scan_segment_count: 0,
+                candidate_scan_scanned_segment_count: 0,
+                candidate_scan_scored_document_count: 0,
+                candidate_scan_filtered_document_count: 0,
+                candidate_scan_scanned_block_count: 0,
+                candidate_scan_skipped_block_count: 0,
+                candidate_scan_payload_bytes_read: 0,
+                candidate_scan_admitted_working_bytes: 0,
                 posting_bytes_read: lexical_bytes_read,
                 candidate_postings_visited: lexical_postings_visited,
                 segmented_lexical_projection_used,
@@ -3224,6 +3484,10 @@ impl Default for SearchIndex {
             lexical_projection: Mutex::new(None),
             lexical_delta: Mutex::new(LexicalMiniDelta::default()),
             lexical_config: LexicalProjectionConfig::default(),
+            #[cfg(feature = "vector-search")]
+            turboquant_projection: Mutex::new(None),
+            #[cfg(feature = "vector-search")]
+            turboquant_build_options: TurboQuantCandidateProjectionBuildOptions::default(),
             segment_descriptor: None,
             range_read_config: SearchRangeReadConfig::default(),
             runtime_capabilities: crate::compiled_runtime_capabilities(),
@@ -3240,6 +3504,81 @@ fn quarantine_rebuildable_artifact(parent: &Path, name: &str) {
     let sequence = QUARANTINE_SEQUENCE.fetch_add(1, AtomicOrdering::Relaxed);
     let quarantine_name = format!("{name}.corrupt.{}.{}", std::process::id(), sequence);
     let _ = fs::rename(source, parent.join(quarantine_name));
+}
+
+#[cfg(feature = "vector-search")]
+fn turboquant_artifact_file(generation: u64) -> String {
+    format!(
+        "{SEARCH_TURBOQUANT_PROJECTION_PREFIX}{generation}{SEARCH_TURBOQUANT_PROJECTION_SUFFIX}"
+    )
+}
+
+#[cfg(feature = "vector-search")]
+fn turboquant_artifact_generation(name: &str) -> Option<u64> {
+    name.strip_prefix(SEARCH_TURBOQUANT_PROJECTION_PREFIX)
+        .and_then(|value| value.strip_suffix(SEARCH_TURBOQUANT_PROJECTION_SUFFIX))
+        .and_then(|value| value.parse().ok())
+}
+
+#[cfg(feature = "vector-search")]
+fn latest_turboquant_artifact(path: &Path) -> Option<(u64, PathBuf)> {
+    turboquant_artifacts_descending(path).into_iter().next()
+}
+
+#[cfg(feature = "vector-search")]
+fn turboquant_artifacts_descending(path: &Path) -> Vec<(u64, PathBuf)> {
+    let Ok(entries) = fs::read_dir(path) else {
+        return Vec::new();
+    };
+    let mut artifacts = entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let generation = entry
+                .file_name()
+                .to_str()
+                .and_then(turboquant_artifact_generation)?;
+            Some((generation, entry.path()))
+        })
+        .collect::<Vec<_>>();
+    artifacts.sort_unstable_by_key(|(generation, _)| std::cmp::Reverse(*generation));
+    artifacts
+}
+
+#[cfg(feature = "vector-search")]
+fn cleanup_turboquant_artifacts(path: &Path, current_generation: u64) {
+    let retain_from = current_generation.saturating_sub(1);
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Some(generation) = entry
+            .file_name()
+            .to_str()
+            .and_then(turboquant_artifact_generation)
+        else {
+            continue;
+        };
+        if generation < retain_from {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+#[cfg(feature = "vector-search")]
+fn remove_turboquant_artifacts(path: &Path) {
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry
+            .file_name()
+            .to_str()
+            .and_then(turboquant_artifact_generation)
+            .is_some()
+        {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 const NOWLEDGE_SEARCH_PROJECTION_TABLES: &[(&str, &str, bool)] = &[
@@ -3749,85 +4088,91 @@ struct SearchProjectionProbeFieldSummary {
     unique_key_summary_segment_count: usize,
 }
 
-#[cfg(feature = "turbovec")]
+#[cfg(feature = "vector-search")]
 fn search_projection_probe_compressed_vector_projection_report(
     index: &SearchIndex,
 ) -> serde_json::Value {
-    match index.load_turbovec_projection() {
-        Ok(Some(projection)) => {
-            return serde_json::json!({
-                "engine": "turbovec",
-                "compiled": true,
-                "ready": true,
-                "bit_width": projection.bit_width(),
-                "dimension": projection.dimension(),
-                "document_count": projection.document_count(),
-                "supports_allowlist": true,
-                "persisted_artifact_used": true,
-                "artifact_rebuilt_from_snapshot": false,
-                "blocker_codes": [],
-            });
-        }
-        Ok(None) => {}
-        Err(_) => {}
-    }
-
-    match index.build_turbovec_projection(SEARCH_TURBOVEC_PROJECTION_BIT_WIDTH) {
-        Ok(Some(projection)) => serde_json::json!({
-            "engine": "turbovec",
+    let projection = index.turboquant_projection().or_else(|| {
+        index
+            .path
+            .is_none()
+            .then(|| index.build_in_memory_turboquant_projection().ok().flatten())
+            .flatten()
+    });
+    match projection {
+        Some(projection) => serde_json::json!({
+            "engine": "skein_turboquant_scan",
             "compiled": true,
             "ready": true,
-            "bit_width": projection.bit_width(),
-            "dimension": projection.dimension(),
-            "document_count": projection.document_count(),
+            "format_version": projection.manifest().format_version,
+            "algorithm": projection.manifest().algorithm,
+            "bit_width": projection.manifest().bit_width,
+            "dimension": projection.manifest().dimension,
+            "document_count": projection.manifest().document_count,
+            "generation": projection.manifest().identity.generation,
+            "source_epoch": projection.manifest().identity.source_epoch,
+            "embedding_model": projection.manifest().identity.embedding_model,
+            "embedding_version": projection.manifest().identity.embedding_version,
+            "transform": projection.manifest().transform,
+            "quantizer": projection.manifest().quantizer,
+            "calibration": projection.manifest().calibration,
+            "segment_count": projection.manifest().segments.len(),
+            "payload_bytes": projection.manifest().payload_bytes,
+            "peak_build_working_bytes": projection.build_report().peak_working_bytes,
             "supports_allowlist": true,
-            "persisted_artifact_used": false,
-            "artifact_rebuilt_from_snapshot": true,
+            "supports_filter_bitmap": true,
+            "supports_scalar_reference": true,
+            "supports_runtime_simd_dispatch": true,
+            "supports_governed_parallelism": true,
+            "raw_rerank_required": true,
+            "persisted_artifact_used": projection.is_file_backed(),
+            "artifact_rebuilt_from_snapshot": !projection.is_file_backed(),
             "blocker_codes": [],
         }),
-        Ok(None) => serde_json::json!({
-            "engine": "turbovec",
+        None => serde_json::json!({
+            "engine": "skein_turboquant_scan",
             "compiled": true,
             "ready": false,
-            "bit_width": SEARCH_TURBOVEC_PROJECTION_BIT_WIDTH,
+            "algorithm": skein_vector_projection::PROJECTION_ALGORITHM,
+            "bit_width": skein_vector_projection::PROJECTION_BIT_WIDTH,
             "dimension": serde_json::Value::Null,
             "document_count": 0,
+            "quantizer": skein_vector_projection::PROJECTION_QUANTIZER,
+            "calibration": skein_vector_projection::PROJECTION_CALIBRATION,
             "supports_allowlist": true,
+            "supports_filter_bitmap": true,
+            "supports_scalar_reference": true,
+            "supports_runtime_simd_dispatch": true,
+            "supports_governed_parallelism": true,
+            "raw_rerank_required": true,
             "persisted_artifact_used": false,
             "artifact_rebuilt_from_snapshot": false,
-            "blocker_codes": ["missing_vector_leg"],
-        }),
-        Err(error) => serde_json::json!({
-            "engine": "turbovec",
-            "compiled": true,
-            "ready": false,
-            "bit_width": SEARCH_TURBOVEC_PROJECTION_BIT_WIDTH,
-            "dimension": serde_json::Value::Null,
-            "document_count": 0,
-            "supports_allowlist": true,
-            "persisted_artifact_used": false,
-            "artifact_rebuilt_from_snapshot": false,
-            "blocker_codes": ["compressed_vector_projection_unavailable"],
-            "error": error.to_string(),
+            "blocker_codes": ["turboquant_projection_unavailable"],
         }),
     }
 }
 
-#[cfg(not(feature = "turbovec"))]
+#[cfg(not(feature = "vector-search"))]
 fn search_projection_probe_compressed_vector_projection_report(
     _index: &SearchIndex,
 ) -> serde_json::Value {
     serde_json::json!({
-        "engine": "turbovec",
+        "engine": "skein_turboquant_scan",
         "compiled": false,
         "ready": false,
+        "algorithm": "turboquant",
         "bit_width": serde_json::Value::Null,
         "dimension": serde_json::Value::Null,
         "document_count": 0,
         "supports_allowlist": false,
+        "supports_filter_bitmap": false,
+        "supports_scalar_reference": false,
+        "supports_runtime_simd_dispatch": false,
+        "supports_governed_parallelism": false,
+        "raw_rerank_required": true,
         "persisted_artifact_used": false,
         "artifact_rebuilt_from_snapshot": false,
-        "blocker_codes": ["turbovec_feature_disabled"],
+        "blocker_codes": ["vector_search_feature_disabled"],
     })
 }
 
@@ -9189,6 +9534,65 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "vector-search")]
+    fn turboquant_reopen_falls_back_to_previous_valid_generation() {
+        let path = unique_test_dir("turboquant_generation_fallback");
+        {
+            let mut index = SearchIndex::open(&path).unwrap();
+            index
+                .upsert(doc(
+                    "memory:a",
+                    "Vector A",
+                    "Generation fallback",
+                    [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                ))
+                .unwrap();
+            index.checkpoint().unwrap();
+            index.checkpoint().unwrap();
+        }
+
+        let latest = path.join(turboquant_artifact_file(2));
+        let mut bytes = std::fs::read(&latest).unwrap();
+        bytes[0] ^= 0xff;
+        std::fs::write(&latest, bytes).unwrap();
+
+        let index = SearchIndex::open(&path).unwrap();
+        let probe = index.nowledge_search_projection_probe_json(SearchProjectionProbeOptions {
+            active_embedding_model: None,
+            active_embedding_dimension: Some(8),
+        });
+        assert_eq!(probe["compressed_vector_projection"]["ready"], true);
+        assert_eq!(probe["compressed_vector_projection"]["generation"], 1);
+        assert!(std::fs::read_dir(&path).unwrap().flatten().any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("search_turboquant.2.skein.corrupt.")
+        }));
+
+        let result = index.search_with_options_compressed_vector_projection_mode(
+            "",
+            Some(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            SearchMode::Vector,
+            SearchQueryOptions {
+                limit: 1,
+                offset: 0,
+                rank_window: None,
+                fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::new(),
+                policy_epoch: None,
+            },
+            CompressedVectorSearchMode::Required,
+        );
+        assert_eq!(result.hits[0].id, "memory:a");
+        assert_eq!(
+            result.retrievers[0].backend,
+            "skein_turboquant_candidate_projection"
+        );
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
     #[cfg(feature = "turbovec")]
     fn projection_checkpoint_publishes_turbovec_artifact() {
         let path = unique_test_dir("search_turbovec_artifact_publish");
@@ -9384,7 +9788,7 @@ mod tests {
     }
 
     #[test]
-    fn compressed_vector_projection_required_does_not_use_scalar_fallback() {
+    fn compressed_vector_projection_required_uses_turboquant_projection() {
         let mut index = SearchIndex::in_memory();
         index
             .upsert(doc(
@@ -9410,25 +9814,21 @@ mod tests {
             CompressedVectorSearchMode::Required,
         );
 
-        assert!(result.hits.is_empty());
+        assert_eq!(result.hits[0].id, "memory:a");
         assert_eq!(
             result.retrievers[0].backend,
-            "compressed_vector_projection_required"
+            "skein_turboquant_candidate_projection"
         );
-        assert_eq!(result.retrievers[0].candidate_count, 0);
-        assert_eq!(result.retrievers[0].candidate_score_source, "unavailable");
-        assert_eq!(result.retrievers[0].final_score_source, "unavailable");
         assert_eq!(
-            result.retrievers[0].backend_selection_reason,
-            Some(VectorBackendSelectionReason::QuantizedProjectionUnavailable)
+            result.retrievers[0].candidate_score_source,
+            "quantized_approximate"
         );
-        assert!(!result.retrievers[0].candidate_set.exact);
-        assert!(result.retrievers[0]
-            .fallback_reason_codes
-            .contains(&SearchFallbackReasonCode::CompressedVectorProjectionUnavailable));
-        assert!(result
-            .fallback_reason_codes
-            .contains(&SearchFallbackReasonCode::CompressedVectorProjectionUnavailable));
+        assert_eq!(result.retrievers[0].final_score_source, "raw_vector");
+        assert!(result.retrievers[0].raw_vector_bytes_read > 0);
+        assert!(result.retrievers[0].candidate_scan_kernel.is_some());
+        assert_eq!(result.retrievers[0].candidate_scan_scored_document_count, 1);
+        assert!(result.retrievers[0].fallback_reason_codes.is_empty());
+        assert!(result.fallback_reason_codes.is_empty());
     }
 
     #[test]
@@ -9560,7 +9960,7 @@ mod tests {
     }
 
     #[test]
-    fn sampled_vector_recall_fails_closed_without_approximate_projection() {
+    fn sampled_vector_recall_validates_turboquant_candidate_projection() {
         let mut index = SearchIndex::in_memory();
         index
             .upsert(doc(
@@ -9586,20 +9986,12 @@ mod tests {
             metadata_filters: BTreeMap::new(),
         });
 
-        assert!(!report.ready);
+        assert!(report.ready, "{:?}", report.blocker_codes);
         assert_eq!(report.executed_sample_count, 2);
         assert_eq!(report.exact_hit_count, 2);
-        assert_eq!(report.approximate_hit_count, 0);
-        assert_eq!(report.fallback_count, 2);
-        assert!(report
-            .blocker_codes
-            .contains(&VectorRecallValidationBlocker::ApproximateBackendUnavailable));
-        assert!(report
-            .blocker_codes
-            .contains(&VectorRecallValidationBlocker::ApproximateFallbackObserved));
-        assert!(report
-            .blocker_codes
-            .contains(&VectorRecallValidationBlocker::RecallBelowThreshold));
+        assert_eq!(report.approximate_hit_count, 2);
+        assert_eq!(report.fallback_count, 0);
+        assert!(report.blocker_codes.is_empty());
     }
 
     #[test]
@@ -10943,14 +11335,24 @@ mod tests {
         assert_eq!(probe["lifecycle"]["rebuild_marker_ready"], true);
         assert_eq!(probe["lifecycle"]["metadata_repair_marker_ready"], true);
         assert_eq!(probe["incremental_update"]["ready"], true);
-        assert_eq!(probe["compressed_vector_projection"]["engine"], "turbovec");
+        assert_eq!(
+            probe["compressed_vector_projection"]["engine"],
+            "skein_turboquant_scan"
+        );
+        assert_eq!(probe["compressed_vector_projection"]["compiled"], true);
+        assert_eq!(probe["compressed_vector_projection"]["ready"], true);
+        assert_eq!(probe["compressed_vector_projection"]["bit_width"], 4);
+        assert_eq!(probe["compressed_vector_projection"]["dimension"], 2);
+        assert_eq!(
+            probe["compressed_vector_projection"]["persisted_artifact_used"],
+            true
+        );
         assert_eq!(probe["blocker_codes"], serde_json::json!([]));
         std::fs::remove_dir_all(path).unwrap();
     }
 
     #[test]
-    #[cfg(not(feature = "turbovec"))]
-    fn nowledge_search_projection_probe_reports_turbovec_disabled_by_default() {
+    fn nowledge_search_projection_probe_reports_turboquant_projection_without_vectors() {
         let index = SearchIndex::in_memory();
 
         let probe = index.nowledge_search_projection_probe_json(SearchProjectionProbeOptions {
@@ -10958,18 +11360,21 @@ mod tests {
             active_embedding_dimension: None,
         });
 
-        assert_eq!(probe["compressed_vector_projection"]["engine"], "turbovec");
-        assert_eq!(probe["compressed_vector_projection"]["compiled"], false);
+        assert_eq!(
+            probe["compressed_vector_projection"]["engine"],
+            "skein_turboquant_scan"
+        );
+        assert_eq!(probe["compressed_vector_projection"]["compiled"], true);
         assert_eq!(probe["compressed_vector_projection"]["ready"], false);
         assert_eq!(
             probe["compressed_vector_projection"]["blocker_codes"],
-            serde_json::json!(["turbovec_feature_disabled"])
+            serde_json::json!(["turboquant_projection_unavailable"])
         );
     }
 
     #[test]
     #[cfg(feature = "turbovec")]
-    fn nowledge_search_projection_probe_reports_turbovec_ready_when_feature_enabled() {
+    fn nowledge_search_projection_probe_keeps_turboquant_engine_with_turbovec_oracle() {
         let mut index = SearchIndex::in_memory();
         index
             .upsert(SearchDocument {
@@ -10989,7 +11394,10 @@ mod tests {
             active_embedding_dimension: Some(8),
         });
 
-        assert_eq!(probe["compressed_vector_projection"]["engine"], "turbovec");
+        assert_eq!(
+            probe["compressed_vector_projection"]["engine"],
+            "skein_turboquant_scan"
+        );
         assert_eq!(probe["compressed_vector_projection"]["compiled"], true);
         assert_eq!(probe["compressed_vector_projection"]["ready"], true);
         assert_eq!(probe["compressed_vector_projection"]["bit_width"], 4);
@@ -11068,6 +11476,65 @@ mod tests {
         assert_eq!(result.candidate_set.cardinality, 1);
         assert_eq!(result.candidate_set.filtered_out_count, 1);
         assert_eq!(result.candidate_set.policy_epoch, Some(42));
+    }
+
+    #[test]
+    #[cfg(feature = "turbovec")]
+    fn turboquant_raw_rerank_matches_turbovec_oracle_on_deterministic_corpus() {
+        let mut index = SearchIndex::in_memory();
+        for (id, embedding) in [
+            ("memory:a", [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            ("memory:b", [0.8, 0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            ("memory:c", [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        ] {
+            index
+                .upsert(doc(id, id, "Differential oracle", embedding))
+                .unwrap();
+        }
+        let query = [0.9, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let options = SearchQueryOptions {
+            limit: 2,
+            offset: 0,
+            rank_window: None,
+            fusion_weights: SearchFusionWeights::default(),
+            metadata_filters: BTreeMap::new(),
+            policy_epoch: None,
+        };
+        let turboquant = index.search_with_options_compressed_vector_projection_mode(
+            "",
+            Some(&query),
+            SearchMode::Vector,
+            options.clone(),
+            CompressedVectorSearchMode::Required,
+        );
+        let turbovec_projection = index.build_turbovec_projection(4).unwrap().unwrap();
+        let oracle = index.search_with_turbovec_projection(
+            &turbovec_projection,
+            "",
+            Some(&query),
+            SearchMode::Vector,
+            options,
+        );
+
+        assert_eq!(
+            turboquant
+                .hits
+                .iter()
+                .map(|hit| hit.id.as_str())
+                .collect::<Vec<_>>(),
+            oracle
+                .hits
+                .iter()
+                .map(|hit| hit.id.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            turboquant.retrievers[0].backend,
+            "skein_turboquant_candidate_projection"
+        );
+        assert_eq!(oracle.retrievers[0].backend, "turbovec_projection");
+        assert_eq!(turboquant.retrievers[0].final_score_source, "raw_vector");
+        assert_eq!(oracle.retrievers[0].final_score_source, "raw_vector");
     }
 
     #[test]

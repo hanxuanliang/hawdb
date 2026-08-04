@@ -838,10 +838,13 @@ fn ready_probe_template(engine: &str) -> serde_json::Value {
         },
         "production_filter_pruning": ready_production_filter_pruning_template(),
         "compressed_vector_projection": {
-            "engine": "turbovec",
+            "engine": "skein_turboquant_scan",
+            "algorithm": "turboquant",
             "compiled": true,
             "ready": true,
             "bit_width": 4,
+            "quantizer": "gaussian_lloyd_max_4bit_v1",
+            "calibration": "none",
             "dimension": 1024,
             "document_count": 5,
             "supports_allowlist": true,
@@ -1760,7 +1763,7 @@ mod tests {
         probe["compressed_vector_projection"]["ready"] = serde_json::json!(false);
         probe["compressed_vector_projection"]["compiled"] = serde_json::json!(false);
         probe["compressed_vector_projection"]["blocker_codes"] =
-            serde_json::json!(["turbovec_feature_disabled"]);
+            serde_json::json!(["turboquant_projection_unavailable"]);
 
         let report = nowledge_search_projection_evidence_json(&probe);
 
@@ -1769,7 +1772,7 @@ mod tests {
         assert_eq!(report["compressed_vector_projection_ready"], false);
         assert_eq!(
             report["compressed_vector_projection"]["blocker_codes"],
-            serde_json::json!(["turbovec_feature_disabled"])
+            serde_json::json!(["turboquant_projection_unavailable"])
         );
         assert!(report["blocker_codes"]
             .as_array()
@@ -2197,13 +2200,10 @@ mod tests {
         let evidence = nowledge_search_projection_evidence_json(&probe);
 
         assert_eq!(probe["protocol"], "skein-nowledge-search-projection-probe");
-        #[cfg(feature = "turbovec")]
         assert_eq!(
             evidence["ready"], true,
             "probe={probe:#}\nevidence={evidence:#}"
         );
-        #[cfg(not(feature = "turbovec"))]
-        assert_eq!(evidence["ready"], false);
         assert_eq!(evidence["covered_table_count"], 6);
         assert_eq!(evidence["source_chunk_ready"], true);
         assert_eq!(evidence["predicate_pushdown_ready"], true);
@@ -2213,20 +2213,11 @@ mod tests {
             true
         );
         assert_eq!(evidence["compressed_vector_projection_required"], true);
-        #[cfg(feature = "turbovec")]
         assert_eq!(evidence["compressed_vector_projection_ready"], true);
-        #[cfg(not(feature = "turbovec"))]
-        assert_eq!(evidence["compressed_vector_projection_ready"], false);
         assert_eq!(
             probe["predicate_pushdown"]["supported_ops"],
             serde_json::json!(["eq", "in", "not_in", "gt", "gte", "lt", "lte"])
         );
-        #[cfg(not(feature = "turbovec"))]
-        assert!(evidence["blocker_codes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|code| code == "compressed_vector_projection_not_ready"));
         std::fs::remove_dir_all(path).unwrap();
     }
 
@@ -2458,10 +2449,13 @@ mod tests {
             },
             "production_filter_pruning": ready_production_filter_pruning_template(),
             "compressed_vector_projection": {
-                "engine": "turbovec",
+                "engine": "skein_turboquant_scan",
+                "algorithm": "turboquant",
                 "compiled": true,
                 "ready": true,
                 "bit_width": 4,
+                "quantizer": "gaussian_lloyd_max_4bit_v1",
+                "calibration": "none",
                 "dimension": 1024,
                 "document_count": 5,
                 "supports_allowlist": true,

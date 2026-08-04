@@ -12,8 +12,9 @@ pub use profile::{
     ReadExecutionProfile, Row,
 };
 pub use vector::{
-    execute_vector_plan, VectorCandidate, VectorCandidateBatch, VectorCandidateScanRequest,
-    VectorCompressionMode, VectorExecutionBackend, VectorExecutionError, VectorExecutionOutput,
-    VectorExecutionReport, VectorExecutionSource, VectorFallbackReasonCode, VectorRawRerankRequest,
-    VectorRawScore, VectorResidualFilterRequest, VectorScoreSource,
+    execute_vector_plan, VectorCandidate, VectorCandidateBatch, VectorCandidateScanMetrics,
+    VectorCandidateScanRequest, VectorCompressionMode, VectorExecutionBackend,
+    VectorExecutionError, VectorExecutionOutput, VectorExecutionReport, VectorExecutionSource,
+    VectorFallbackReasonCode, VectorRawRerankRequest, VectorRawScore, VectorResidualFilterRequest,
+    VectorScoreSource,
 };

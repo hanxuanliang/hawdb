@@ -25,6 +25,7 @@ skein-route-ownership = { path = "crates/route-ownership" }
 skein-runtime-tokio = { path = "crates/runtime-tokio", optional = true }
 skein-sql = { path = "crates/sql" }
 skein-storage = { path = "crates/storage" }
+skein-vector-projection = { path = "crates/vector-projection", optional = true }
 zstd = "0.13"
 turbovec = { version = "0.9.0", optional = true }
 unicode-width = "0.2.2"
@@ -42,7 +43,7 @@ acl = []
 background-maintenance = []
 full-text-search = []
 graph-analytics = []
-vector-search = []
+vector-search = ["dep:skein-vector-projection"]
 turbovec = ["vector-search", "dep:turbovec"]
 loom-tests = ["dep:loom"]
 opentelemetry = ["dep:opentelemetry"]
@@ -65,6 +66,7 @@ members = [
   "crates/sql",
   "crates/storage",
   "crates/runtime-tokio",
+  "crates/vector-projection",
 ]
 resolver = "2"
 

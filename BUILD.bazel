@@ -36,6 +36,7 @@ rust_library(
         "//crates/route-ownership:skein_route_ownership",
         "//crates/sql:skein_sql",
         "//crates/storage:skein_storage",
+        "//crates/vector-projection:skein_vector_projection",
     ],
     proc_macro_deps = all_crate_deps(proc_macro = True),
 )
