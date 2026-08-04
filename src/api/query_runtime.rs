@@ -42,10 +42,20 @@ impl Database {
             | cypher::Statement::Rollback => (true, CONTROL_STATEMENT_MEMORY_BYTES),
             _ => {
                 let optimized = self.optimized_query_plan(cypher_text, &statement, parameters)?;
-                (
-                    executor::is_mutation_plan(&optimized.physical_plan)?,
-                    executor::estimated_execution_memory_bytes(&optimized.physical_plan),
-                )
+                let is_mutation = executor::is_mutation_plan(&optimized.physical_plan)?;
+                let estimated_memory_bytes = if is_mutation {
+                    executor::estimated_mutation_memory_bytes(
+                        self.config.mutation_limits,
+                        self.config.max_wal_record_bytes,
+                    )
+                } else {
+                    executor::estimated_execution_memory(
+                        &optimized.physical_plan,
+                        &self.config.execution_memory,
+                    )
+                    .total_bytes
+                };
+                (is_mutation, estimated_memory_bytes)
             }
         };
         Ok(RuntimeAdmissionPlan {

@@ -268,6 +268,12 @@ fn default_database_config(profile: EmbeddedDeploymentProfile) -> DatabaseConfig
             max_wal_replay_bytes: Some(128 * 1024 * 1024),
             max_wal_record_bytes: Some(4 * 1024 * 1024),
             max_wal_batch_operations: Some(25_000),
+            mutation_limits: skein_storage::MutationLimits {
+                max_affected_rows: std::num::NonZeroUsize::new(25_000).unwrap(),
+                max_operations: std::num::NonZeroUsize::new(25_000).unwrap(),
+                max_result_rows: std::num::NonZeroUsize::new(512).unwrap(),
+                max_result_payload_bytes: std::num::NonZeroUsize::new(8 * 1024 * 1024).unwrap(),
+            },
             max_checkpoint_encoded_bytes: Some(64 * 1024 * 1024 * 1024),
             max_checkpoint_decoded_bytes: Some(256 * 1024 * 1024 * 1024),
             segment_cache_capacity_bytes: 32 * 1024 * 1024,
@@ -387,6 +393,15 @@ mod tests {
             EmbeddedDeploymentProfile::MobileEmbedded
         );
         assert_eq!(options.config.max_read_result_rows, Some(512));
+        assert_eq!(options.config.mutation_limits.max_operations.get(), 25_000);
+        assert_eq!(
+            options
+                .config
+                .mutation_limits
+                .max_result_payload_bytes
+                .get(),
+            8 * 1024 * 1024
+        );
         assert_eq!(options.config.max_plan_cache_entries, Some(32));
         assert_eq!(
             options

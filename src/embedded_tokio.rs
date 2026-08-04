@@ -401,6 +401,41 @@ mod tests {
     }
 
     #[test]
+    fn admission_uses_database_execution_and_mutation_limits() {
+        let path = unique_test_path("admission-config");
+        let mut config = crate::DatabaseConfig::default();
+        config.execution_memory.batch_payload_bytes = std::num::NonZeroUsize::new(1024).unwrap();
+        config.execution_memory.blocking_operator_bytes =
+            std::num::NonZeroUsize::new(4096).unwrap();
+        config.max_wal_record_bytes = Some(1024);
+        config.mutation_limits = skein_storage::MutationLimits {
+            max_affected_rows: std::num::NonZeroUsize::new(3).unwrap(),
+            max_operations: std::num::NonZeroUsize::new(2).unwrap(),
+            max_result_rows: std::num::NonZeroUsize::new(4).unwrap(),
+            max_result_payload_bytes: std::num::NonZeroUsize::new(5).unwrap(),
+        };
+        let mut embedded = SkeinEmbedded::open_with_options(
+            SkeinEmbeddedOpenOptions::new(&path).with_config(config),
+        )
+        .unwrap();
+
+        let read = embedded
+            .database_mut()
+            .runtime_admission_plan("MATCH (p:Probe) RETURN p.value AS value", &BTreeMap::new())
+            .unwrap();
+        let mutation = embedded
+            .database_mut()
+            .runtime_admission_plan("CREATE (:Probe {value: 1})", &BTreeMap::new())
+            .unwrap();
+
+        assert!((2 * 1024..64 * 1024).contains(&read.estimated_memory_bytes));
+        assert_eq!(
+            mutation.estimated_memory_bytes,
+            2 * 1024 + 2 * 64 + 3 * 16 + 4 * 64 + 5
+        );
+    }
+
+    #[test]
     fn cancelled_query_is_rejected_before_database_execution() {
         let path = unique_test_path("cancelled-before-start");
         let embedded =
