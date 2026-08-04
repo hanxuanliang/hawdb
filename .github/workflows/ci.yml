@@ -751,6 +751,9 @@ jobs:
       - name: Test expression IR
         run: cargo test -p skein-expression
 
+      - name: Test telemetry contract
+        run: cargo test -p skein-telemetry
+
       - name: Test process memory metrics
         run: cargo test -p skein-qos process_memory::tests
 

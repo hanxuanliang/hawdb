@@ -31,7 +31,7 @@ zstd = "0.13"
 turbovec = { version = "0.9.0", optional = true }
 unicode-width = "0.2.2"
 loom = { version = "0.7", optional = true }
-opentelemetry = { version = "0.31", default-features = false, features = ["metrics"], optional = true }
+skein-telemetry = { path = "crates/telemetry" }
 
 [features]
 default = [
@@ -47,7 +47,7 @@ graph-analytics = []
 vector-search = ["dep:skein-vector-projection"]
 turbovec = ["vector-search", "dep:turbovec"]
 loom-tests = ["dep:loom"]
-opentelemetry = ["dep:opentelemetry"]
+opentelemetry = ["skein-telemetry/opentelemetry"]
 tokio-runtime = ["dep:skein-runtime-tokio"]
 
 [workspace]
@@ -69,6 +69,7 @@ members = [
   "crates/route-ownership",
   "crates/sql",
   "crates/storage",
+  "crates/telemetry",
   "crates/runtime-tokio",
   "crates/vector-projection",
 ]

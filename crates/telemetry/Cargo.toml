@@ -1,0 +1,13 @@
+[package]
+name = "skein-telemetry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+opentelemetry = { version = "0.31", default-features = false, features = ["metrics"], optional = true }
+skein-qos = { path = "../qos" }
+
+[features]
+default = []
+opentelemetry = ["dep:opentelemetry"]

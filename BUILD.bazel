@@ -39,6 +39,7 @@ rust_library(
         "//crates/runtime-tokio:skein_runtime_tokio",
         "//crates/sql:skein_sql",
         "//crates/storage:skein_storage",
+        "//crates/telemetry:skein_telemetry",
         "//crates/vector-projection:skein_vector_projection",
     ],
     proc_macro_deps = all_crate_deps(proc_macro = True),

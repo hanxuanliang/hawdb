@@ -119,4 +119,5 @@ jobs:
             //crates/runtime-tokio:skein_runtime_tokio_tests \
             //crates/sql:skein_sql_tests \
             //crates/storage:skein_storage_tests \
+            //crates/telemetry:skein_telemetry_tests \
             //crates/vector-projection:skein_vector_projection_tests
