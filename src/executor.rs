@@ -725,6 +725,7 @@ fn execute_with_row_consumer_profile_internal(
     consumer: &mut dyn FnMut(Row) -> Result<()>,
     runtime: ExecutionRuntimeControl<'_>,
 ) -> Result<ProfiledQueryStream> {
+    store.ensure_usable()?;
     let ExecutionRuntimeControl {
         memory,
         task_context,

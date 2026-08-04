@@ -5903,6 +5903,7 @@ impl Database {
         parameters: &BTreeMap<String, Value>,
         access_control: Option<QueryAccessControlContext>,
     ) -> Result<ExplainOutput> {
+        self.store.ensure_usable()?;
         let statement = cypher::parse(cypher_text)?;
         let work_request = query_work_request_for_statement(&self.system_variables, &statement)?;
         let optimized = self.optimized_query_plan_with_access_control(
@@ -5955,6 +5956,7 @@ impl Database {
         parameters: &BTreeMap<String, Value>,
         access_control: Option<QueryAccessControlContext>,
     ) -> Result<ExplainAnalyzeOutput> {
+        self.store.ensure_usable()?;
         let statement = cypher::parse(cypher_text)?;
         let work_request = query_work_request_for_statement(&self.system_variables, &statement)?;
         let optimized = self.optimized_query_plan_with_access_control(
@@ -6093,6 +6095,10 @@ impl Database {
 
     pub fn storage_recovery_report(&self) -> StorageRecoveryReport {
         self.store.storage_recovery_report()
+    }
+
+    pub fn storage_handle_poisoned(&self) -> bool {
+        self.store.post_wal_apply_poisoned()
     }
 
     pub fn storage_residency_report(&self) -> crate::store::StorageResidencyReport {
@@ -8705,6 +8711,7 @@ impl Database {
     }
 
     fn ensure_writable(&self) -> Result<()> {
+        self.store.ensure_usable()?;
         if self.config.read_only {
             return Err(SkeinError::Execution(
                 "database is opened in read-only mode".to_string(),
@@ -36606,6 +36613,7 @@ impl DatabaseReadTransaction {
         options: QueryStreamOptions,
         mut consumer: impl FnMut(Row) -> Result<()>,
     ) -> Result<QueryStreamReport> {
+        self.store.ensure_usable()?;
         let max_rows = restrictive_query_limit(self.config.max_read_result_rows, options.max_rows);
         let max_payload_bytes = restrictive_query_limit(
             self.config.max_read_result_payload_bytes,
@@ -36669,6 +36677,7 @@ impl DatabaseReadTransaction {
         task_context: &skein_core::RuntimeTaskContext,
         mut consumer: impl FnMut(Row) -> Result<()>,
     ) -> Result<QueryStreamReport> {
+        self.store.ensure_usable()?;
         let max_rows = restrictive_query_limit(self.config.max_read_result_rows, options.max_rows);
         let max_payload_bytes = restrictive_query_limit(
             self.config.max_read_result_payload_bytes,
@@ -36750,6 +36759,7 @@ impl DatabaseReadTransaction {
         access_control: Option<QueryAccessControlContext>,
         task_context: Option<&skein_core::RuntimeTaskContext>,
     ) -> Result<BoundedReadQueryOutput> {
+        self.store.ensure_usable()?;
         query_runtime::query_runtime_checkpoint(task_context)?;
         let max_rows = restrictive_query_limit(self.config.max_read_result_rows, max_rows);
         let max_payload_bytes = self.config.max_read_result_payload_bytes;
@@ -36922,6 +36932,7 @@ impl DatabaseReadTransaction {
         sql_text: &str,
         max_rows: Option<usize>,
     ) -> Result<QueryOutput> {
+        self.store.ensure_usable()?;
         let max_rows = restrictive_query_limit(self.config.max_read_result_rows, max_rows);
         system_sql::query_sql(
             sql_text,
@@ -36942,6 +36953,7 @@ impl DatabaseReadTransaction {
         cypher_text: &str,
         parameters: &BTreeMap<String, Value>,
     ) -> Result<ExplainOutput> {
+        self.store.ensure_usable()?;
         let statement = cypher::parse(cypher_text)?;
         let work_request =
             query_work_request_for_statement(&QuerySystemVariables::default(), &statement)?;

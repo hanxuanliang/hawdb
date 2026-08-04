@@ -28,6 +28,7 @@ impl Database {
         cypher_text: &str,
         parameters: &BTreeMap<String, Value>,
     ) -> Result<RuntimeAdmissionPlan> {
+        self.store.ensure_usable()?;
         let statement = cypher::parse(cypher_text)?;
         let work_request = query_work_request_for_statement(&self.system_variables, &statement)?;
         let body = statement_body(&statement);
@@ -155,6 +156,7 @@ impl Database {
         task_context: Option<&skein_core::RuntimeTaskContext>,
     ) -> Result<(QueryOutput, QueryExecutionTrace)> {
         let started = std::time::Instant::now();
+        self.store.ensure_usable()?;
         query_runtime_checkpoint(task_context)?;
         let statement = cypher::parse(cypher_text)?;
         let body = statement_body(&statement);

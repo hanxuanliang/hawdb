@@ -118,6 +118,38 @@ fn set_checkpoint_failpoint(stage: Option<CheckpointPublishStage>) {
     CHECKPOINT_FAILPOINT.with(|failpoint| failpoint.set(stage));
 }
 
+#[cfg(test)]
+thread_local! {
+    static WAL_APPLY_FAILPOINT_REMAINING: std::cell::Cell<Option<usize>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+fn wal_apply_failpoint() -> Result<()> {
+    #[cfg(test)]
+    {
+        let should_fail = WAL_APPLY_FAILPOINT_REMAINING.with(|remaining| match remaining.get() {
+            Some(0) => true,
+            Some(value) => {
+                remaining.set(Some(value - 1));
+                false
+            }
+            None => false,
+        });
+        if should_fail {
+            return Err(SkeinError::Storage(
+                "injected failure while applying a durable WAL batch".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn set_wal_apply_failpoint(operations_before_failure: Option<usize>) {
+    WAL_APPLY_FAILPOINT_REMAINING.with(|remaining| remaining.set(operations_before_failure));
+}
+
 fn checkpoint_generation_file(generation: u64) -> String {
     format!("checkpoint.{generation}.skein")
 }
@@ -1068,6 +1100,7 @@ pub struct GraphStore {
     residency_mode: StorageResidencyMode,
     auto_materialize_checkpoint_bytes: u64,
     max_out_of_core_delta_bytes: Option<u64>,
+    post_wal_apply_poisoned: bool,
     durable: Option<DurableStore>,
 }
 
@@ -1332,6 +1365,20 @@ impl GraphStore {
         Self::default()
     }
 
+    pub(crate) fn ensure_usable(&self) -> Result<()> {
+        if self.post_wal_apply_poisoned {
+            return Err(SkeinError::Storage(
+                "database handle is poisoned after a durable WAL batch failed during in-memory apply; close and reopen the database before issuing more operations"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn post_wal_apply_poisoned(&self) -> bool {
+        self.post_wal_apply_poisoned
+    }
+
     pub fn open(path: impl AsRef<Path>, catalog: &mut Catalog) -> Result<Self> {
         Self::open_with_durability(path, catalog, DurabilityPolicy::default())
     }
@@ -1467,6 +1514,7 @@ impl GraphStore {
             residency_mode: replay_config.residency_mode,
             auto_materialize_checkpoint_bytes: replay_config.auto_materialize_checkpoint_bytes,
             max_out_of_core_delta_bytes: replay_config.max_out_of_core_delta_bytes,
+            post_wal_apply_poisoned: false,
             durable: Some(durable),
         };
         store.load_checkpoint(catalog, replay_config)?;
@@ -6201,6 +6249,7 @@ impl GraphStore {
             residency_mode: self.residency_mode,
             auto_materialize_checkpoint_bytes: self.auto_materialize_checkpoint_bytes,
             max_out_of_core_delta_bytes: self.max_out_of_core_delta_bytes,
+            post_wal_apply_poisoned: self.post_wal_apply_poisoned,
             durable: None,
         }
     }
@@ -10211,6 +10260,15 @@ impl GraphStore {
     }
 
     fn apply_wal_op(&mut self, catalog: &mut Catalog, op: WalOp) -> Result<()> {
+        let result = self.apply_wal_op_inner(catalog, op);
+        if result.is_err() && self.durable.is_some() {
+            self.post_wal_apply_poisoned = true;
+        }
+        result
+    }
+
+    fn apply_wal_op_inner(&mut self, catalog: &mut Catalog, op: WalOp) -> Result<()> {
+        wal_apply_failpoint()?;
         match op {
             WalOp::CreateNodeLabel { label } => {
                 catalog.get_or_create_label(&label);

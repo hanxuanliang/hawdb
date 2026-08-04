@@ -1,5 +1,56 @@
 use super::*;
+use crate::store::set_wal_apply_failpoint;
 use crate::StorageResidencyMode;
+
+#[test]
+fn post_wal_apply_failure_poisons_handle_until_reopen() {
+    let path = unique_test_dir("post_wal_apply_poison");
+    let mut db = Database::open(&path).unwrap();
+    let mut stable_read = db.begin_read_transaction();
+    let mut transaction = db.begin_transaction();
+    transaction.query("CREATE (:Memory {id: 'first'})").unwrap();
+    transaction
+        .query("CREATE (:Memory {id: 'second'})")
+        .unwrap();
+
+    set_wal_apply_failpoint(Some(1));
+    let commit_error = transaction.commit().unwrap_err();
+    set_wal_apply_failpoint(None);
+
+    assert!(commit_error
+        .to_string()
+        .contains("injected failure while applying a durable WAL batch"));
+    assert!(db.storage_handle_poisoned());
+    let stable_output = stable_read
+        .query("MATCH (m:Memory) RETURN m.id AS id")
+        .unwrap();
+    assert!(stable_output.rows.is_empty());
+    let read_error = db
+        .query("MATCH (m:Memory) RETURN m.id AS id ORDER BY id")
+        .unwrap_err();
+    assert!(read_error.to_string().contains("close and reopen"));
+    let checkpoint_error = db.checkpoint().unwrap_err();
+    assert!(checkpoint_error.to_string().contains("close and reopen"));
+
+    drop(db);
+    let mut reopened = Database::open(&path).unwrap();
+    assert!(!reopened.storage_handle_poisoned());
+    let output = reopened
+        .query("MATCH (m:Memory) RETURN m.id AS id ORDER BY id")
+        .unwrap();
+    assert_eq!(output.rows.len(), 2);
+    assert_eq!(
+        output.rows[0].get("id"),
+        Some(&Value::String("first".to_string()))
+    );
+    assert_eq!(
+        output.rows[1].get("id"),
+        Some(&Value::String("second".to_string()))
+    );
+
+    drop(reopened);
+    std::fs::remove_dir_all(path).unwrap();
+}
 
 #[test]
 fn forced_out_of_core_checkpoint_reopen_and_mutation_are_equivalent() {
