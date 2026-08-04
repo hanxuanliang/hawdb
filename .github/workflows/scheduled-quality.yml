@@ -1,0 +1,120 @@
+name: Scheduled Quality
+
+on:
+  schedule:
+    - cron: "17 2 * * 6"
+  workflow_dispatch:
+    inputs:
+      fuzz_cases:
+        description: Cases per deterministic optimizer fuzz seed
+        required: false
+        default: "4096"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scheduled-quality-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  supply-chain:
+    name: Supply Chain Refresh
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check current advisories and licenses
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          rust-version: "1.97.1"
+          command: check advisories licenses
+
+  optimizer-fuzz:
+    name: Optimizer Differential And Metamorphic Fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      SKEIN_FUZZ_CASES: ${{ inputs.fuzz_cases || '4096' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - name: Run deterministic campaigns
+        id: fuzz
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p artifacts/fuzz
+          campaign_status=0
+          for seed in 7 104729 4294967291; do
+            report="artifacts/fuzz/campaign-${seed}.json"
+            if ! cargo run --release -p skein-fuzz --quiet -- \
+              --seed "$seed" \
+              --cases "$SKEIN_FUZZ_CASES" \
+              > "$report"; then
+              campaign_status=1
+            fi
+            if ! jq -e \
+              '.protocol == "skein-multi-oracle-fuzz-v3" and
+               .executed_case_count == .requested_case_count and
+               .complete_shape_coverage == true and
+               .success == true' \
+              "$report" > /dev/null; then
+              campaign_status=1
+            fi
+            jq '{
+              protocol,
+              seed,
+              failed_case_count,
+              failures: [
+                .cases[]
+                | select(.success == false)
+                | {
+                    index,
+                    seed,
+                    shape,
+                    graph_tlp_shape,
+                    reproduction_command,
+                    failure,
+                    graph_tlp_failure,
+                    metamorphic_failure
+                  }
+              ]
+            }' "$report" > "artifacts/fuzz/replay-${seed}.json"
+          done
+          jq -n \
+            --arg protocol "skein-scheduled-fuzz-manifest-v1" \
+            --arg revision "$GITHUB_SHA" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg cases_per_seed "$SKEIN_FUZZ_CASES" \
+            --argjson seeds '[7, 104729, 4294967291]' \
+            '{
+              protocol: $protocol,
+              revision: $revision,
+              run_id: $run_id,
+              run_attempt: $run_attempt,
+              cases_per_seed: ($cases_per_seed | tonumber),
+              seeds: $seeds
+            }' > artifacts/fuzz/manifest.json
+          exit "$campaign_status"
+
+      - name: Retain campaign and minimized replay reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: optimizer-fuzz-${{ github.sha }}-${{ github.run_attempt }}
+          path: artifacts/fuzz
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Enforce campaign result
+        if: always()
+        shell: bash
+        run: test "${{ steps.fuzz.outcome }}" = "success"
