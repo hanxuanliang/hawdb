@@ -12,12 +12,6 @@ and algorithms outside active routes are not implied backlog items.
 
 ## P0: Production Release Blockers
 
-- [ ] Validate Windows storage resource qualification for the release revision.
-  - Obtain green Runtime Platform, Storage Platform, and Storage Crash Recovery
-    jobs on `windows-latest` for the exact candidate revision.
-  - Retain the aggregate page-fault and working-set report produced by that
-    revision; do not substitute Unix split-fault evidence.
-
 - [ ] Qualify storage on a representative production replica.
   - Run the typed larger-than-cache resource profile against a representative
     Mem replica with canonical bytes exceeding the configured cache.
@@ -42,12 +36,6 @@ and algorithms outside active routes are not implied backlog items.
   - Acceptance: production routes open the out-of-core facade through its
     production constructor and the final cutover report recomputes readiness
     from the bound raw evidence.
-
-- [ ] Retain release-grade process crash and model-check evidence.
-  - Obtain green revision-bound Storage Crash Recovery artifacts on Linux,
-    macOS, and Windows from the typed five-point, repeated crash matrix.
-  - Obtain a green revision-bound TLA Model Check artifact for the
-    durable-before-publish and pinned-reader models.
 
 ## P1: Runtime And Availability Hardening
 

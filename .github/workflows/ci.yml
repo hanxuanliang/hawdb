@@ -740,6 +740,30 @@ jobs:
       - name: Test out-of-core search projection I/O
         run: cargo test -p skein --features acl --lib search::out_of_core::tests
 
+      - name: Capture Windows storage resource evidence
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        env:
+          SKEIN_TEST_RUST_TOOLCHAIN: "1.97.1"
+          SKEIN_TEST_STORAGE_RESOURCE_EVIDENCE_PATH: storage-resource-results/report.json
+        run: |
+          set -euo pipefail
+          mkdir -p storage-resource-results
+          cargo test -p skein --features acl --lib \
+            api::tests::storage_recovery::platform_storage_resource_profile_emits_bound_evidence \
+            -- --exact --nocapture
+          printf '{"source_revision":"%s","runner_os":"%s","test_status":0}\n' \
+            "$GITHUB_SHA" "$RUNNER_OS" \
+            > storage-resource-results/manifest.json
+
+      - name: Upload Windows storage resource evidence
+        if: always() && matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: storage-resource-windows-latest-${{ github.sha }}
+          path: storage-resource-results
+          if-no-files-found: error
+
   concurrency-model:
     name: Concurrency Model
     runs-on: ubuntu-latest

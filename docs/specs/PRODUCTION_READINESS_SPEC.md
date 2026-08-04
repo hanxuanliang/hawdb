@@ -92,6 +92,12 @@ evidence/expected-identity match. `metric_capabilities.total_page_faults`
 applies on Unix and Windows; `metric_capabilities.split_page_faults` is false
 on Windows, where the split fields MUST remain absent.
 
+The Windows storage-platform CI job MUST retain a
+`storage-resource-windows-latest-<revision>` artifact containing the bound v2
+report and a runner manifest. The report MUST be production-ready for the
+platform fixture, identify `target_os` as `windows`, expose resident-memory and
+total-page-fault capability, and leave Unix split page-fault fields absent.
+
 Linux runtime sizing MUST derive effective CPU and memory from the smallest
 known host and cgroup limits. Cgroup v2 is mandatory. A release that supports
 cgroup v1 environments MUST either implement and test a v1 fallback or declare

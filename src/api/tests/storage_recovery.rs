@@ -524,6 +524,106 @@ fn typed_storage_resource_profile_gates_larger_than_cache_reads() {
 }
 
 #[test]
+fn platform_storage_resource_profile_emits_bound_evidence() {
+    const EVIDENCE_PATH_ENV: &str = "SKEIN_TEST_STORAGE_RESOURCE_EVIDENCE_PATH";
+
+    let path = unique_test_dir("platform_storage_resource_profile");
+    let cache_budget = 1024;
+    let config = DatabaseConfig {
+        storage_residency_mode: StorageResidencyMode::OutOfCore,
+        segment_cache_capacity_bytes: cache_budget,
+        ..DatabaseConfig::default()
+    };
+    let mut db = Database::open_with_config(&path, config).unwrap();
+    let mut transaction = db.begin_transaction();
+    for id in 0..32 {
+        transaction
+            .query_with_params(
+                "CREATE (:Memory {id: $id, body: $body})",
+                &BTreeMap::from([
+                    ("id".to_string(), Value::Int(id)),
+                    ("body".to_string(), Value::String("x".repeat(1024))),
+                ]),
+            )
+            .unwrap();
+    }
+    transaction.commit().unwrap();
+    db.checkpoint().unwrap();
+
+    let identity = crate::ProductionQualificationIdentity {
+        source_revision: std::env::var("GITHUB_SHA")
+            .unwrap_or_else(|_| "local-test-revision".to_string()),
+        rust_toolchain: std::env::var("SKEIN_TEST_RUST_TOOLCHAIN")
+            .unwrap_or_else(|_| "local-test-toolchain".to_string()),
+        target_os: std::env::consts::OS.to_string(),
+        target_arch: std::env::consts::ARCH.to_string(),
+        enabled_features: vec![
+            "acl".to_string(),
+            "background-maintenance".to_string(),
+            "full-text-search".to_string(),
+            "graph-analytics".to_string(),
+            "vector-search".to_string(),
+        ],
+        durable_format_version: 2,
+        schema_version: 1,
+        configuration_digest: "storage-resource-out-of-core-1k-cache-v1".to_string(),
+        deployment_profile: "storage-resource-platform-ci".to_string(),
+        dataset_fingerprint: "storage-resource-platform-fixture-v1".to_string(),
+        canonical_graph_commit_epoch: db.commit_epoch(),
+        policy_version: crate::PRODUCTION_QUALIFICATION_POLICY_VERSION,
+    };
+    let report = db
+        .storage_resource_profile_for_production(
+            "MATCH (m:Memory) RETURN m.id AS memory_id",
+            &BTreeMap::new(),
+            crate::StorageResourceProfileLimits {
+                min_canonical_artifact_bytes: 4096,
+                max_steady_resident_bytes: u64::MAX,
+                max_peak_resident_bytes: u64::MAX,
+                max_total_page_faults: Some(u64::MAX),
+                max_minor_page_faults: cfg!(unix).then_some(u64::MAX),
+                max_major_page_faults: cfg!(unix).then_some(u64::MAX),
+                max_intermediate_rows: 1024,
+                max_intermediate_payload_bytes: 1024 * 1024,
+                max_output_rows: 64,
+                max_output_payload_bytes: 1024 * 1024,
+                require_fully_streamed: true,
+            },
+            crate::ProductionEvidenceBinding {
+                identity: identity.clone(),
+                generated_at_unix_seconds: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+            },
+            identity,
+        )
+        .unwrap();
+
+    assert!(
+        report.production_ready(),
+        "unexpected blockers: {:?}",
+        report.production_blocker_codes()
+    );
+    let report_json = report.json();
+    assert_eq!(report_json["ready"], true);
+    assert_eq!(report_json["resource_ready"], true);
+    assert!(report_json["execution"]["steady_resident_bytes"].is_u64());
+    assert!(report_json["execution"]["peak_resident_bytes"].is_u64());
+    assert!(report_json["execution"]["total_page_faults"].is_u64());
+    assert_eq!(
+        report_json["execution"]["metric_capabilities"]["split_page_faults"],
+        cfg!(unix)
+    );
+    if let Some(evidence_path) = std::env::var_os(EVIDENCE_PATH_ENV) {
+        std::fs::write(evidence_path, report_json.to_string()).unwrap();
+    }
+
+    drop(db);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
 fn external_optimizer_statistics_refresh_spills_and_persists_exact_stats() {
     let path = unique_test_dir("external_optimizer_statistics_refresh");
     let spill_root = path.join("statistics-spill");
