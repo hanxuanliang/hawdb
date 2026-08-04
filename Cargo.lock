@@ -1571,6 +1571,7 @@ dependencies = [
  "skein-cypher",
  "skein-ddl",
  "skein-executor",
+ "skein-expression",
  "skein-optimizer",
  "skein-plan",
  "skein-plan-cache",
@@ -1627,6 +1628,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "skein-expression"
+version = "0.1.0"
+dependencies = [
+ "skein-core",
+]
+
+[[package]]
 name = "skein-fuzz"
 version = "0.1.0"
 dependencies = [
@@ -1651,6 +1659,7 @@ dependencies = [
  "skein-core",
  "skein-cypher",
  "skein-ddl",
+ "skein-expression",
 ]
 
 [[package]]

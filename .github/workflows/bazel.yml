@@ -103,6 +103,7 @@ jobs:
             //crates/cypher:skein_cypher_tests \
             //crates/ddl:skein_ddl_tests \
             //crates/executor:skein_executor_tests \
+            //crates/expression:skein_expression_tests \
             //crates/fuzz:skein_fuzz_cli_tests \
             //crates/fuzz:skein_fuzz_tests \
             //crates/cgroup:skein_cgroup_tests \

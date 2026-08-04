@@ -8,3 +8,4 @@ license.workspace = true
 skein-core = { path = "../core" }
 skein-cypher = { path = "../cypher" }
 skein-ddl = { path = "../ddl" }
+skein-expression = { path = "../expression" }

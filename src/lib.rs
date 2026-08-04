@@ -11,6 +11,9 @@ pub mod embedded;
 #[cfg(feature = "tokio-runtime")]
 pub mod embedded_tokio;
 pub mod executor;
+pub mod expression {
+    pub use skein_expression::*;
+}
 pub mod graph_route_evidence;
 pub mod graph_route_readiness;
 pub mod mem_integration_bundle;

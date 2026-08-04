@@ -1,3 +1,4 @@
+pub use skein_core::RelationshipDirection;
 use skein_core::Value;
 use std::collections::BTreeMap;
 
@@ -529,13 +530,6 @@ pub struct RelationshipExpand {
     pub target_properties: BTreeMap<String, ValueExpression>,
     pub min_hops: usize,
     pub max_hops: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RelationshipDirection {
-    Outgoing,
-    Incoming,
-    Undirected,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
