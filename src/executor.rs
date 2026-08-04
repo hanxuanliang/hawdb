@@ -2856,73 +2856,165 @@ fn stream_cartesian_product_batches(
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
     let mut tracker = OperatorMemoryTracker::new(context.memory.blocking_operator_bytes);
+    let mut spill_budget = SpillBudgetTracker::new("NodeCartesianProductExec", context.memory);
     let mut right_bindings = Vec::new();
+    let mut runs = Vec::new();
+    let mut right_ordinal = 0u64;
     execute_binding_batches(right, context, ExecutionLimit::unlimited(), &mut |batch| {
         for binding in batch {
             let bytes = binding_memory_bytes(&binding);
             ensure_operator_item_fits("NodeCartesianProductExec", bytes, &tracker)?;
             if tracker.would_exceed(bytes) {
-                return Err(SkeinError::Execution(format!(
-                    "NodeCartesianProductExec build side exceeds blocking_operator_bytes {}",
-                    tracker.budget_bytes
-                )));
+                runs.push(spill_binding_run(
+                    "cartesian",
+                    &mut right_bindings,
+                    &context.memory.spill_directory,
+                    &mut spill_budget,
+                    context.task_context,
+                )?);
+                tracker.reset();
             }
             tracker.charge(bytes);
             right_bindings.push(binding);
+            right_ordinal = right_ordinal.saturating_add(1);
         }
         Ok(BatchControl::Continue)
     })?;
+    if !runs.is_empty() && !right_bindings.is_empty() {
+        runs.push(spill_binding_run(
+            "cartesian",
+            &mut right_bindings,
+            &context.memory.spill_directory,
+            &mut spill_budget,
+            context.task_context,
+        )?);
+        tracker.reset();
+    }
     record_blocking_memory_report(skein_executor::BlockingOperatorMemoryReport {
         operator: "NodeCartesianProductExec".to_string(),
         budget_bytes: tracker.budget_bytes,
         peak_tracked_bytes: tracker.peak_bytes,
-        input_rows: right_bindings.len(),
-        max_spill_bytes: context.memory.max_spill_bytes.get(),
-        max_spill_runs: context.memory.max_spill_runs.get(),
-        spilled_bytes: 0,
-        spill_run_count: 0,
-        spilled_rows: 0,
+        input_rows: right_ordinal as usize,
+        max_spill_bytes: spill_budget.max_bytes,
+        max_spill_runs: spill_budget.max_runs,
+        spilled_bytes: spill_budget.used_bytes,
+        spill_run_count: spill_budget.run_count,
+        spilled_rows: if runs.is_empty() {
+            0
+        } else {
+            right_ordinal as usize
+        },
     });
-    if right_bindings.is_empty() {
+    if right_bindings.is_empty() && runs.is_empty() {
         return Ok(BatchControl::Continue);
     }
 
     let mut output = Vec::with_capacity(context.memory.batch_rows.get());
     let mut emitted = 0usize;
-    execute_binding_batches(left, context, ExecutionLimit::unlimited(), &mut |batch| {
-        for left_binding in batch {
-            for right_binding in &right_bindings {
-                let mut values = left_binding.values.clone();
-                values.extend(right_binding.values.clone());
-                let mut nodes = left_binding.nodes.clone();
-                nodes.extend(right_binding.nodes.clone());
-                let mut relationships = left_binding.relationships.clone();
-                relationships.extend(right_binding.relationships.clone());
-                output.push(Binding {
-                    values,
-                    nodes,
-                    relationships,
-                });
-                emitted = emitted.saturating_add(1);
-                if output.len() == context.memory.batch_rows.get()
-                    && emit(std::mem::replace(
-                        &mut output,
-                        Vec::with_capacity(context.memory.batch_rows.get()),
-                    ))? == BatchControl::Stop
-                {
-                    return Ok(BatchControl::Stop);
-                }
-                if execution_limit.is_reached(emitted) {
-                    return Ok(BatchControl::Stop);
+    let control =
+        execute_binding_batches(left, context, ExecutionLimit::unlimited(), &mut |batch| {
+            for left_binding in batch {
+                if runs.is_empty() {
+                    for right_binding in &right_bindings {
+                        if push_cartesian_output(
+                            &left_binding,
+                            right_binding,
+                            context.memory.batch_rows.get(),
+                            execution_limit,
+                            &mut output,
+                            &mut emitted,
+                            emit,
+                        )? == BatchControl::Stop
+                        {
+                            return Ok(BatchControl::Stop);
+                        }
+                    }
+                } else {
+                    for run in &runs {
+                        runtime_checkpoint(context.task_context)?;
+                        let mut reader = run.reader()?;
+                        while let Some((_, right_binding)) =
+                            reader.read(context.memory.blocking_operator_bytes.get())?
+                        {
+                            runtime_checkpoint(context.task_context)?;
+                            if push_cartesian_output(
+                                &left_binding,
+                                &right_binding,
+                                context.memory.batch_rows.get(),
+                                execution_limit,
+                                &mut output,
+                                &mut emitted,
+                                emit,
+                            )? == BatchControl::Stop
+                            {
+                                return Ok(BatchControl::Stop);
+                            }
+                        }
+                    }
+                    if execution_limit.is_reached(emitted) {
+                        return Ok(BatchControl::Stop);
+                    }
                 }
             }
-        }
-        Ok(BatchControl::Continue)
-    })?;
+            Ok(BatchControl::Continue)
+        })?;
     if !output.is_empty() && emit(output)? == BatchControl::Stop {
         return Ok(BatchControl::Stop);
     }
-    Ok(BatchControl::Continue)
+    Ok(control)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_cartesian_output(
+    left: &Binding,
+    right: &Binding,
+    batch_rows: usize,
+    execution_limit: ExecutionLimit,
+    output: &mut BindingBatch,
+    emitted: &mut usize,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    let mut values = left.values.clone();
+    values.extend(right.values.clone());
+    let mut nodes = left.nodes.clone();
+    nodes.extend(right.nodes.clone());
+    let mut relationships = left.relationships.clone();
+    relationships.extend(right.relationships.clone());
+    output.push(Binding {
+        values,
+        nodes,
+        relationships,
+    });
+    *emitted = (*emitted).saturating_add(1);
+    if output.len() == batch_rows
+        && emit(std::mem::replace(output, Vec::with_capacity(batch_rows)))? == BatchControl::Stop
+    {
+        return Ok(BatchControl::Stop);
+    }
+    Ok(if execution_limit.is_reached(*emitted) {
+        BatchControl::Stop
+    } else {
+        BatchControl::Continue
+    })
+}
+
+fn spill_binding_run(
+    operator: &str,
+    bindings: &mut Vec<Binding>,
+    directory: &std::path::Path,
+    spill_budget: &mut SpillBudgetTracker,
+    task_context: Option<&RuntimeTaskContext>,
+) -> Result<spill::SpillRun> {
+    runtime_checkpoint(task_context)?;
+    spill_budget.begin_run()?;
+    let (run, mut writer) = spill::SpillRun::create(directory, operator)?;
+    for binding in bindings.drain(..) {
+        runtime_checkpoint(task_context)?;
+        let bytes = writer.write(0, &binding, spill_budget.remaining_bytes())?;
+        spill_budget.charge(bytes)?;
+    }
+    writer.finish()?;
+    Ok(run)
 }
 
 fn stream_distinct_batches(
@@ -2932,53 +3024,276 @@ fn stream_distinct_batches(
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
     let mut tracker = OperatorMemoryTracker::new(context.memory.blocking_operator_bytes);
+    let mut spill_budget = SpillBudgetTracker::new("DistinctExec", context.memory);
     let mut distinct = BTreeMap::<Vec<(String, Value)>, (u64, Binding)>::new();
+    let mut runs = Vec::new();
     let mut ordinal = 0u64;
     execute_binding_batches(input, context, ExecutionLimit::unlimited(), &mut |batch| {
         for binding in batch {
-            let key = binding
-                .values
-                .iter()
-                .map(|(name, value)| (name.clone(), value.clone()))
-                .collect::<Vec<_>>();
+            let key = distinct_binding_key(&binding);
             let entry_bytes =
                 binding_memory_bytes(&binding).saturating_add(distinct_key_memory_bytes(&key));
             ensure_operator_item_fits("DistinctExec", entry_bytes, &tracker)?;
-            if let std::collections::btree_map::Entry::Vacant(entry) = distinct.entry(key) {
+            if !distinct.contains_key(&key) {
                 if tracker.would_exceed(entry_bytes) {
-                    return Err(SkeinError::Execution(format!(
-                        "DistinctExec state exceeds blocking_operator_bytes {}",
-                        tracker.budget_bytes
-                    )));
+                    runs.push(spill_distinct_run(
+                        &mut distinct,
+                        &context.memory.spill_directory,
+                        &mut spill_budget,
+                        context.task_context,
+                    )?);
+                    tracker.reset();
                 }
                 tracker.charge(entry_bytes);
-                entry.insert((ordinal, binding));
+                distinct.insert(key, (ordinal, binding));
             }
             ordinal = ordinal.saturating_add(1);
         }
         Ok(BatchControl::Continue)
     })?;
+    if runs.is_empty() {
+        record_blocking_memory_report(skein_executor::BlockingOperatorMemoryReport {
+            operator: "DistinctExec".to_string(),
+            budget_bytes: tracker.budget_bytes,
+            peak_tracked_bytes: tracker.peak_bytes,
+            input_rows: ordinal as usize,
+            max_spill_bytes: context.memory.max_spill_bytes.get(),
+            max_spill_runs: context.memory.max_spill_runs.get(),
+            spilled_bytes: 0,
+            spill_run_count: 0,
+            spilled_rows: 0,
+        });
+        let mut selected = distinct.into_values().collect::<Vec<_>>();
+        selected.sort_by_key(|(ordinal, _)| *ordinal);
+        return emit_binding_iterator(
+            selected
+                .into_iter()
+                .take(execution_limit.output_rows.unwrap_or(usize::MAX))
+                .map(|(_, binding)| binding),
+            context.memory.batch_rows.get(),
+            emit,
+        );
+    }
+    if !distinct.is_empty() {
+        runs.push(spill_distinct_run(
+            &mut distinct,
+            &context.memory.spill_directory,
+            &mut spill_budget,
+            context.task_context,
+        )?);
+        tracker.reset();
+    }
+    let mut peak_tracked_bytes = tracker.peak_bytes;
+    runs = compact_distinct_runs(
+        runs,
+        context.memory,
+        &mut spill_budget,
+        context.task_context,
+        &mut peak_tracked_bytes,
+    )?;
     record_blocking_memory_report(skein_executor::BlockingOperatorMemoryReport {
         operator: "DistinctExec".to_string(),
         budget_bytes: tracker.budget_bytes,
-        peak_tracked_bytes: tracker.peak_bytes,
+        peak_tracked_bytes,
         input_rows: ordinal as usize,
-        max_spill_bytes: context.memory.max_spill_bytes.get(),
-        max_spill_runs: context.memory.max_spill_runs.get(),
-        spilled_bytes: 0,
-        spill_run_count: 0,
-        spilled_rows: 0,
+        max_spill_bytes: spill_budget.max_bytes,
+        max_spill_runs: spill_budget.max_runs,
+        spilled_bytes: spill_budget.used_bytes,
+        spill_run_count: spill_budget.run_count,
+        spilled_rows: ordinal as usize,
     });
-    let mut selected = distinct.into_values().collect::<Vec<_>>();
-    selected.sort_by_key(|(ordinal, _)| *ordinal);
-    emit_binding_iterator(
-        selected
-            .into_iter()
-            .take(execution_limit.output_rows.unwrap_or(usize::MAX))
-            .map(|(_, binding)| binding),
+    emit_distinct_run(
+        runs.first().expect("compaction retains one distinct run"),
+        context.memory.blocking_operator_bytes,
         context.memory.batch_rows.get(),
+        execution_limit,
+        context.task_context,
         emit,
     )
+}
+
+fn distinct_binding_key(binding: &Binding) -> Vec<(String, Value)> {
+    binding
+        .values
+        .iter()
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
+}
+
+fn spill_distinct_run(
+    distinct: &mut BTreeMap<Vec<(String, Value)>, (u64, Binding)>,
+    directory: &std::path::Path,
+    spill_budget: &mut SpillBudgetTracker,
+    task_context: Option<&RuntimeTaskContext>,
+) -> Result<spill::SpillRun> {
+    runtime_checkpoint(task_context)?;
+    spill_budget.begin_run()?;
+    let (run, mut writer) = spill::SpillRun::create(directory, "distinct")?;
+    for (_, (ordinal, binding)) in std::mem::take(distinct) {
+        runtime_checkpoint(task_context)?;
+        let bytes = writer.write(ordinal, &binding, spill_budget.remaining_bytes())?;
+        spill_budget.charge(bytes)?;
+    }
+    writer.finish()?;
+    Ok(run)
+}
+
+fn compact_distinct_runs(
+    mut runs: Vec<spill::SpillRun>,
+    memory: &ExecutionMemoryConfig,
+    spill_budget: &mut SpillBudgetTracker,
+    task_context: Option<&RuntimeTaskContext>,
+    peak_tracked_bytes: &mut usize,
+) -> Result<Vec<spill::SpillRun>> {
+    while runs.len() > 1 {
+        runtime_checkpoint(task_context)?;
+        let mut compacted = Vec::with_capacity(runs.len().div_ceil(2));
+        let mut pending = runs.into_iter();
+        while let Some(left) = pending.next() {
+            let Some(right) = pending.next() else {
+                compacted.push(left);
+                break;
+            };
+            compacted.push(merge_distinct_run_pair(
+                &left,
+                &right,
+                memory,
+                spill_budget,
+                task_context,
+                peak_tracked_bytes,
+            )?);
+        }
+        runs = compacted;
+    }
+    Ok(runs)
+}
+
+struct DistinctRunRow {
+    key: Vec<(String, Value)>,
+    ordinal: u64,
+    binding: Binding,
+    memory_bytes: usize,
+}
+
+fn read_distinct_run_row(
+    reader: &mut spill::SpillReader,
+    memory_limit: usize,
+) -> Result<Option<DistinctRunRow>> {
+    let Some((ordinal, binding)) = reader.read(memory_limit)? else {
+        return Ok(None);
+    };
+    let key = distinct_binding_key(&binding);
+    let memory_bytes =
+        binding_memory_bytes(&binding).saturating_add(distinct_key_memory_bytes(&key));
+    if memory_bytes > memory_limit {
+        return Err(SkeinError::Execution(format!(
+            "DistinctExec spill merge row uses {memory_bytes} bytes, exceeding the per-row memory limit {memory_limit}"
+        )));
+    }
+    Ok(Some(DistinctRunRow {
+        key,
+        ordinal,
+        binding,
+        memory_bytes,
+    }))
+}
+
+fn merge_distinct_run_pair(
+    left: &spill::SpillRun,
+    right: &spill::SpillRun,
+    memory: &ExecutionMemoryConfig,
+    spill_budget: &mut SpillBudgetTracker,
+    task_context: Option<&RuntimeTaskContext>,
+    peak_tracked_bytes: &mut usize,
+) -> Result<spill::SpillRun> {
+    runtime_checkpoint(task_context)?;
+    let per_row_memory = memory.blocking_operator_bytes.get() / 2;
+    if per_row_memory == 0 {
+        return Err(SkeinError::Execution(
+            "DistinctExec spill merge requires at least two bytes of blocking memory".to_string(),
+        ));
+    }
+    let mut left_reader = left.reader()?;
+    let mut right_reader = right.reader()?;
+    let mut left_row = read_distinct_run_row(&mut left_reader, per_row_memory)?;
+    let mut right_row = read_distinct_run_row(&mut right_reader, per_row_memory)?;
+    spill_budget.begin_run()?;
+    let (run, mut writer) = spill::SpillRun::create(&memory.spill_directory, "distinct-merge")?;
+    loop {
+        runtime_checkpoint(task_context)?;
+        *peak_tracked_bytes = (*peak_tracked_bytes).max(
+            left_row
+                .as_ref()
+                .map_or(0, |row| row.memory_bytes)
+                .saturating_add(right_row.as_ref().map_or(0, |row| row.memory_bytes)),
+        );
+        let selected = match (&left_row, &right_row) {
+            (None, None) => break,
+            (Some(_), None) => left_row.take(),
+            (None, Some(_)) => right_row.take(),
+            (Some(left), Some(right)) => match left.key.cmp(&right.key) {
+                Ordering::Less => left_row.take(),
+                Ordering::Greater => right_row.take(),
+                Ordering::Equal => {
+                    let left = left_row.take().expect("left row exists");
+                    let right = right_row.take().expect("right row exists");
+                    Some(if left.ordinal <= right.ordinal {
+                        left
+                    } else {
+                        right
+                    })
+                }
+            },
+        };
+        let selected = selected.expect("distinct merge selected one row");
+        let bytes = writer.write(
+            selected.ordinal,
+            &selected.binding,
+            spill_budget.remaining_bytes(),
+        )?;
+        spill_budget.charge(bytes)?;
+        if left_row.is_none() {
+            left_row = read_distinct_run_row(&mut left_reader, per_row_memory)?;
+        }
+        if right_row.is_none() {
+            right_row = read_distinct_run_row(&mut right_reader, per_row_memory)?;
+        }
+    }
+    writer.finish()?;
+    Ok(run)
+}
+
+fn emit_distinct_run(
+    run: &spill::SpillRun,
+    memory_budget: NonZeroUsize,
+    batch_rows: usize,
+    execution_limit: ExecutionLimit,
+    task_context: Option<&RuntimeTaskContext>,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    let mut reader = run.reader()?;
+    let mut output = Vec::with_capacity(batch_rows);
+    let mut emitted = 0usize;
+    while let Some((_, binding)) = reader.read(memory_budget.get())? {
+        runtime_checkpoint(task_context)?;
+        output.push(binding);
+        emitted = emitted.saturating_add(1);
+        if output.len() == batch_rows
+            && emit(std::mem::replace(
+                &mut output,
+                Vec::with_capacity(batch_rows),
+            ))? == BatchControl::Stop
+        {
+            return Ok(BatchControl::Stop);
+        }
+        if execution_limit.is_reached(emitted) {
+            break;
+        }
+    }
+    if !output.is_empty() && emit(output)? == BatchControl::Stop {
+        return Ok(BatchControl::Stop);
+    }
+    Ok(BatchControl::Continue)
 }
 
 struct OperatorMemoryTracker {
@@ -10226,17 +10541,17 @@ mod tests {
     }
 
     #[test]
-    fn distinct_rejects_state_over_memory_budget_before_output() {
+    fn distinct_spills_and_deduplicates_across_memory_bounded_runs() {
         let mut catalog = Catalog::default();
         let mut store = GraphStore::in_memory();
-        for value in 0..10 {
+        for value in 0..20 {
             store
                 .create_node(
                     &mut catalog,
                     "Item",
                     properties([(
                         "value",
-                        Value::String(format!("{value}-{}", "x".repeat(96))),
+                        Value::String(format!("{}-{}", value % 5, "x".repeat(96))),
                     )]),
                 )
                 .unwrap();
@@ -10257,11 +10572,11 @@ mod tests {
             }),
         };
         let memory = ExecutionMemoryConfig {
-            blocking_operator_bytes: NonZeroUsize::new(1024).unwrap(),
+            blocking_operator_bytes: NonZeroUsize::new(2048).unwrap(),
             ..spill_test_config("distinct-admission")
         };
         let mut external = NoExternalReadOperator;
-        let error = execute_with_row_limit_profile_and_external_and_memory(
+        let output = execute_with_row_limit_profile_and_external_and_memory(
             &plan,
             &mut catalog,
             &mut store,
@@ -10270,8 +10585,23 @@ mod tests {
             None,
             &memory,
         )
-        .unwrap_err();
-        assert!(error.to_string().contains("DistinctExec state exceeds"));
+        .unwrap();
+        assert_eq!(output.rows.len(), 5);
+        let report = output
+            .profile
+            .blocking_operator_memory_reports
+            .iter()
+            .find(|report| report.operator == "DistinctExec")
+            .unwrap();
+        assert!(report.spilled_bytes > 0);
+        assert!(report.spill_run_count > 1);
+        assert_eq!(report.spilled_rows, 20);
+        assert!(report.peak_tracked_bytes <= report.budget_bytes);
+        assert!(std::fs::read_dir(&memory.spill_directory)
+            .unwrap()
+            .next()
+            .is_none());
+        std::fs::remove_dir(memory.spill_directory).unwrap();
     }
 
     #[test]
@@ -10325,7 +10655,7 @@ mod tests {
     }
 
     #[test]
-    fn cartesian_product_rejects_an_oversized_build_side() {
+    fn cartesian_product_spills_an_oversized_build_side() {
         let mut catalog = Catalog::default();
         let mut store = GraphStore::in_memory();
         for value in 0..20 {
@@ -10355,7 +10685,7 @@ mod tests {
             ..spill_test_config("cartesian-admission")
         };
         let mut external = NoExternalReadOperator;
-        let error = execute_with_row_limit_profile_and_external_and_memory(
+        let output = execute_with_row_limit_profile_and_external_and_memory(
             &plan,
             &mut catalog,
             &mut store,
@@ -10364,10 +10694,23 @@ mod tests {
             None,
             &memory,
         )
-        .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("NodeCartesianProductExec build side exceeds"));
+        .unwrap();
+        assert_eq!(output.rows.len(), 20);
+        let report = output
+            .profile
+            .blocking_operator_memory_reports
+            .iter()
+            .find(|report| report.operator == "NodeCartesianProductExec")
+            .unwrap();
+        assert!(report.spilled_bytes > 0);
+        assert!(report.spill_run_count > 0);
+        assert_eq!(report.spilled_rows, 20);
+        assert!(report.peak_tracked_bytes <= report.budget_bytes);
+        assert!(std::fs::read_dir(&memory.spill_directory)
+            .unwrap()
+            .next()
+            .is_none());
+        std::fs::remove_dir(memory.spill_directory).unwrap();
     }
 
     #[test]

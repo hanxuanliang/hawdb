@@ -125,6 +125,14 @@ memory:
 - prove through route-bound admission evidence that the active production
   shape cannot exceed the limit.
 
+`SortExec`, `TopNExec`, and grouped `AggregateExec` use byte- and run-bounded
+ordered spill. `DistinctExec` uses ordered spill runs followed by bounded merge
+deduplication. `NodeCartesianProductExec` partitions an oversized build side
+into bounded spill runs and replays those runs for each streamed probe row.
+All of these paths MUST report tracked peak memory, input rows, spill bytes,
+spill runs, and spilled rows, and MUST remove query-scoped runs on success,
+error, cancellation, and consumer stop.
+
 Production query entrypoints MUST pass through the runtime governor or an
 equivalent host-owned admission boundary. Raw database access MAY remain a
 low-level library capability, but its use MUST be reported as non-production

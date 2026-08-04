@@ -230,9 +230,9 @@ fn runs_create_match_return_demo() {
 }
 
 #[test]
-fn database_config_applies_execution_memory_to_read_queries() {
+fn database_config_applies_execution_memory_spill_to_read_queries() {
     let execution_memory = crate::executor::ExecutionMemoryConfig {
-        blocking_operator_bytes: NonZeroUsize::new(1024).unwrap(),
+        blocking_operator_bytes: NonZeroUsize::new(2048).unwrap(),
         ..crate::executor::ExecutionMemoryConfig::default()
     };
     let mut db = Database::new_with_config(DatabaseConfig {
@@ -247,10 +247,10 @@ fn database_config_applies_execution_memory_to_read_queries() {
         .unwrap();
     }
 
-    let error = db
+    let output = db
         .query("MATCH (m:Memory) RETURN DISTINCT m.title AS title")
-        .unwrap_err();
-    assert!(error.to_string().contains("DistinctExec state exceeds"));
+        .unwrap();
+    assert_eq!(output.rows.len(), 10);
 }
 
 fn search_projection_row(external_id: &str, title: &str, body: &str) -> SearchProjectionRow {
