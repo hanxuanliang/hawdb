@@ -14565,10 +14565,21 @@ mod tests {
         assert_eq!(
             readiness_dashboard_area(&dashboard, "storage").blocker_codes,
             vec![
-                "durable_recovery_not_observed".to_string(),
-                "checkpoint_boundary_missing".to_string(),
-                "wal_replay_unbounded".to_string(),
-                "replay_boundary_inconsistent".to_string()
+                "storage_recovery_not_ready".to_string(),
+                "production_resource_profile_has_blockers".to_string(),
+                "production_resource_profile_intermediate_payload_bytes_invalid".to_string(),
+                "production_resource_profile_intermediate_rows_invalid".to_string(),
+                "production_resource_profile_major_page_faults_invalid".to_string(),
+                "production_resource_profile_minor_page_faults_invalid".to_string(),
+                "production_resource_profile_missing".to_string(),
+                "production_resource_profile_not_ready".to_string(),
+                "production_resource_profile_output_payload_bytes_invalid".to_string(),
+                "production_resource_profile_output_rows_invalid".to_string(),
+                "production_resource_profile_peak_resident_bytes_invalid".to_string(),
+                "production_resource_profile_resident_growth_missing".to_string(),
+                "production_resource_profile_steady_resident_bytes_invalid".to_string(),
+                "production_resource_profile_storage_budget_invalid".to_string(),
+                "production_resource_profile_streaming_invalid".to_string()
             ]
         );
         assert_eq!(

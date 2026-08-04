@@ -2935,6 +2935,7 @@ mod tests {
                 "graph_opened": true,
                 "search_projection_opened": true
             },
+            "production_resource_profile": ready_production_resource_profile(),
             "readiness_by_area": {
                 "graph": {"ready": true, "blocker_codes": []},
                 "query": {"ready": true, "blocker_codes": []},
@@ -2947,6 +2948,52 @@ mod tests {
                 "search_projection_shadow": {"ready": true, "blocker_codes": []},
                 "search_candidate_shadow": {"ready": true, "blocker_codes": []},
                 "workload_fixture": {"ready": true, "blocker_codes": []}
+            }
+        })
+    }
+
+    fn ready_production_resource_profile() -> serde_json::Value {
+        serde_json::json!({
+            "protocol": crate::STORAGE_RESOURCE_PROFILE_PROTOCOL,
+            "protocol_version": 1,
+            "present": true,
+            "ready": true,
+            "blocker_codes": [],
+            "limits": {
+                "min_canonical_artifact_bytes": 536870912u64,
+                "max_steady_resident_bytes": 536870912u64,
+                "max_peak_resident_bytes": 805306368u64,
+                "max_minor_page_faults": 1000,
+                "max_major_page_faults": 10,
+                "max_intermediate_rows": 1000,
+                "max_intermediate_payload_bytes": 1048576,
+                "max_output_rows": 100,
+                "max_output_payload_bytes": 1048576,
+                "require_fully_streamed": true
+            },
+            "storage": {
+                "durable": true,
+                "out_of_core": true,
+                "canonical_artifact_bytes": 1073741824u64,
+                "canonical_exceeds_cache": true,
+                "segment_cache_capacity_bytes": 67108864,
+                "segment_cache_resident_bytes_after": 33554432,
+                "delta_within_budget": true
+            },
+            "execution": {
+                "fully_streamed": true,
+                "start_resident_bytes": 251658240,
+                "start_peak_resident_bytes": 377487360,
+                "steady_resident_bytes": 268435456,
+                "peak_resident_bytes": 402653184,
+                "steady_resident_growth_bytes": 16777216,
+                "lifetime_peak_resident_growth_bytes": 25165824,
+                "minor_page_faults": 100,
+                "major_page_faults": 0,
+                "intermediate_rows": 200,
+                "intermediate_payload_bytes": 524288,
+                "output_rows": 100,
+                "output_payload_bytes": 262144
             }
         })
     }
