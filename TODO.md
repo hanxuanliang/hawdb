@@ -106,3 +106,16 @@ and algorithms outside active routes are not implied backlog items.
 
 - [ ] Add NoREC only after the supported Cypher subset can express the general
   row-wise boolean-count relation without a fuzz-only executor.
+
+## P2: Deferred Replica Repair
+
+- [ ] Add replica-assisted storage repair after Skein has a replication layer.
+  - Require an exact database identity, manifest lineage, generation, LSN range,
+    and content-digest match before accepting repair bytes from a follower.
+  - Stage and verify replacement WAL or segment data before atomic publication;
+    never extend tolerant open into an implicit replica-repair path.
+  - Record the source replica, repaired range, and old/new digests in a durable
+    repair audit record.
+  - Fall back to verified backup restore when no follower covers the missing
+    commit. Any lossy salvage must target a new database directory and require
+    explicit authorization while preserving the original database unchanged.

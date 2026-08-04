@@ -10106,36 +10106,16 @@ impl GraphStore {
         while let Some(record) = read_bounded_wal_record(&mut reader, config.max_record_bytes)? {
             let record_start = byte_offset;
             byte_offset = byte_offset.saturating_add(record.encoded_len);
-            let line = std::str::from_utf8(&record.bytes).map_err(|error| {
-                SkeinError::Storage(format!("WAL record is not valid UTF-8: {error}"))
-            })?;
-            if !saw_wal_header {
-                let (generation, start_lsn) = decode_wal_header(line)?;
-                if generation != wal_generation || start_lsn != wal_replay_start_lsn {
-                    return Err(SkeinError::Storage(format!(
-                        "WAL header generation/start ({generation}, {start_lsn}) does not match manifest ({wal_generation}, {wal_replay_start_lsn})"
-                    )));
+            if !record.terminated_by_newline {
+                if !saw_wal_header {
+                    return Err(SkeinError::Storage(
+                        "WAL header is not newline-terminated".to_string(),
+                    ));
                 }
-                saw_wal_header = true;
-                last_valid_offset = byte_offset;
-                continue;
-            }
-            if line.is_empty() {
-                return Err(SkeinError::Storage(format!(
-                    "WAL contains an empty record at byte offset {record_start}"
-                )));
-            }
-            let entry = match WalEntry::decode(line)? {
-                WalDecodeResult::Entry(entry) => entry,
-                WalDecodeResult::TornTail(reason) => match config.recovery_mode {
+                let reason = "WAL tail record is not newline-terminated";
+                match config.recovery_mode {
                     RecoveryMode::TolerateTornTail => {
-                        if !reader.fill_buf()?.is_empty() {
-                            quarantine_corrupt_wal(&wal_path, wal_generation, read_only)?;
-                            return Err(SkeinError::Storage(format!(
-                                "WAL corruption at byte offset {record_start} is not a torn tail: {reason}"
-                            )));
-                        }
-                        torn_tail_reason = Some(reason);
+                        torn_tail_reason = Some(reason.to_string());
                         discarded_wal_tail_bytes = wal_len.saturating_sub(last_valid_offset);
                         if !read_only {
                             let file = OpenOptions::new().write(true).open(&wal_path)?;
@@ -10150,7 +10130,71 @@ impl GraphStore {
                             "strict WAL recovery rejected torn tail: {reason}"
                         )));
                     }
-                },
+                }
+            }
+            let line = match std::str::from_utf8(&record.bytes) {
+                Ok(line) => line,
+                Err(error) => {
+                    return reject_corrupt_wal_record(
+                        &wal_path,
+                        wal_generation,
+                        read_only,
+                        record_start,
+                        format!("record is not valid UTF-8: {error}"),
+                    );
+                }
+            };
+            if !saw_wal_header {
+                let (generation, start_lsn) = match decode_wal_header(line) {
+                    Ok(header) => header,
+                    Err(error) => {
+                        return reject_corrupt_wal_record(
+                            &wal_path,
+                            wal_generation,
+                            read_only,
+                            record_start,
+                            error.to_string(),
+                        );
+                    }
+                };
+                if generation != wal_generation || start_lsn != wal_replay_start_lsn {
+                    return Err(SkeinError::Storage(format!(
+                        "WAL header generation/start ({generation}, {start_lsn}) does not match manifest ({wal_generation}, {wal_replay_start_lsn})"
+                    )));
+                }
+                saw_wal_header = true;
+                last_valid_offset = byte_offset;
+                continue;
+            }
+            if line.is_empty() {
+                return reject_corrupt_wal_record(
+                    &wal_path,
+                    wal_generation,
+                    read_only,
+                    record_start,
+                    "record is empty",
+                );
+            }
+            let entry = match WalEntry::decode(line) {
+                Err(error) => {
+                    return reject_corrupt_wal_record(
+                        &wal_path,
+                        wal_generation,
+                        read_only,
+                        record_start,
+                        error.to_string(),
+                    );
+                }
+                Ok(WalDecodeResult::Entry(entry)) => entry,
+                Ok(WalDecodeResult::Corrupt(reason)) => {
+                    return reject_corrupt_wal_record(
+                        &wal_path,
+                        wal_generation,
+                        read_only,
+                        record_start,
+                        reason,
+                    );
+                }
             };
             if entry.lsn != expected_lsn {
                 quarantine_corrupt_wal(&wal_path, wal_generation, read_only)?;
@@ -12987,6 +13031,7 @@ fn safe_reclaim_commit_epoch(
 struct BoundedWalRecord {
     bytes: Vec<u8>,
     encoded_len: u64,
+    terminated_by_newline: bool,
 }
 
 fn read_bounded_wal_record<R: BufRead>(
@@ -12995,6 +13040,7 @@ fn read_bounded_wal_record<R: BufRead>(
 ) -> Result<Option<BoundedWalRecord>> {
     let mut bytes = Vec::new();
     let mut encoded_len = 0u64;
+    let mut terminated_by_newline = false;
     loop {
         let (consumed, complete) = {
             let available = reader.fill_buf()?;
@@ -13022,6 +13068,7 @@ fn read_bounded_wal_record<R: BufRead>(
         reader.consume(consumed);
         encoded_len = encoded_len.saturating_add(consumed as u64);
         if complete {
+            terminated_by_newline = true;
             break;
         }
     }
@@ -13031,7 +13078,11 @@ fn read_bounded_wal_record<R: BufRead>(
     if bytes.last() == Some(&b'\r') {
         bytes.pop();
     }
-    Ok(Some(BoundedWalRecord { bytes, encoded_len }))
+    Ok(Some(BoundedWalRecord {
+        bytes,
+        encoded_len,
+        terminated_by_newline,
+    }))
 }
 
 fn decode_wal_header(line: &str) -> Result<(u64, u64)> {
@@ -13082,6 +13133,19 @@ fn quarantine_corrupt_wal(path: &Path, generation: u64, read_only: bool) -> Resu
     sync_parent_dir(&quarantine_path)
 }
 
+fn reject_corrupt_wal_record<T>(
+    path: &Path,
+    generation: u64,
+    read_only: bool,
+    record_start: u64,
+    reason: impl std::fmt::Display,
+) -> Result<T> {
+    quarantine_corrupt_wal(path, generation, read_only)?;
+    Err(SkeinError::Storage(format!(
+        "WAL corruption at byte offset {record_start}: {reason}"
+    )))
+}
+
 #[derive(Debug)]
 struct WalEntry {
     lsn: u64,
@@ -13090,7 +13154,7 @@ struct WalEntry {
 
 enum WalDecodeResult {
     Entry(WalEntry),
-    TornTail(String),
+    Corrupt(String),
 }
 
 #[derive(Debug, Clone)]
@@ -13390,18 +13454,18 @@ impl WalEntry {
 
     fn decode(line: &str) -> Result<WalDecodeResult> {
         let Some((body, raw_checksum)) = line.rsplit_once('\t') else {
-            return Ok(WalDecodeResult::TornTail(
+            return Ok(WalDecodeResult::Corrupt(
                 "missing checksum field".to_string(),
             ));
         };
         let Ok(expected) = raw_checksum.parse::<u64>() else {
-            return Ok(WalDecodeResult::TornTail(
+            return Ok(WalDecodeResult::Corrupt(
                 "invalid checksum field".to_string(),
             ));
         };
         let actual = checksum_bytes(body.as_bytes());
         if expected != actual {
-            return Ok(WalDecodeResult::TornTail(format!(
+            return Ok(WalDecodeResult::Corrupt(format!(
                 "checksum mismatch: expected {expected}, got {actual}"
             )));
         }
@@ -19978,7 +20042,40 @@ mod tests {
 
         let mut catalog = Catalog::default();
         let error = GraphStore::open(&path, &mut catalog).unwrap_err();
-        assert!(error.to_string().contains("is not a torn tail"));
+        assert!(error.to_string().contains("WAL corruption at byte offset"));
+        assert!(error.to_string().contains("checksum mismatch"));
+        assert_eq!(
+            std::fs::read_dir(path.join("quarantine")).unwrap().count(),
+            1
+        );
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn rejects_and_quarantines_checksum_corruption_at_wal_tail() {
+        let path = unique_test_dir("wal_tail_checksum_corruption");
+        {
+            let mut catalog = Catalog::default();
+            let mut store = GraphStore::open(&path, &mut catalog).unwrap();
+            store
+                .create_node(&mut catalog, "Memory", properties([("id", Value::Int(1))]))
+                .unwrap();
+        }
+        let wal_path = active_wal_path(&path);
+        let wal = std::fs::read_to_string(&wal_path).unwrap();
+        let mut lines = wal.lines().map(str::to_string).collect::<Vec<_>>();
+        let (body, raw_checksum) = lines.last().unwrap().rsplit_once('\t').unwrap();
+        let body = body.to_string();
+        let corrupt_checksum = raw_checksum.parse::<u64>().unwrap().wrapping_add(1);
+        *lines.last_mut().unwrap() = format!("{body}\t{corrupt_checksum}");
+        let corrupt_wal = format!("{}\n", lines.join("\n"));
+        std::fs::write(&wal_path, &corrupt_wal).unwrap();
+
+        let mut catalog = Catalog::default();
+        let error = GraphStore::open(&path, &mut catalog).unwrap_err();
+        assert!(error.to_string().contains("WAL corruption at byte offset"));
+        assert!(error.to_string().contains("checksum mismatch"));
+        assert_eq!(std::fs::read_to_string(&wal_path).unwrap(), corrupt_wal);
         assert_eq!(
             std::fs::read_dir(path.join("quarantine")).unwrap().count(),
             1

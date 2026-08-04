@@ -76,6 +76,12 @@ The relationship pattern create path uses a single batch record for source node,
 target node, and relationship creation. Recovery only applies a batch after its
 whole record passes checksum validation, so a torn tail cannot leave behind a
 half-created path.
+Torn-tail tolerance applies only to the final physical record when it is not
+newline-terminated. A newline-terminated record is a complete frame: malformed
+UTF-8, a missing or invalid checksum, or a checksum mismatch is corruption even
+at the end of the WAL, so recovery quarantines the WAL and fails closed instead
+of truncating a potentially acknowledged commit.
+
 `max_wal_replay_entries` counts these top-level WAL records, not the child
 operations inside a batch, so a budgeted recovery either applies a complete
 batch record or rejects the open before applying the next record.
