@@ -62,6 +62,7 @@ impl StorageResourceProfileReport {
         serde_json::json!({
             "protocol": STORAGE_RESOURCE_PROFILE_PROTOCOL,
             "protocol_version": 1,
+            "present": true,
             "ready": self.ready,
             "blocker_codes": self.blocker_codes,
             "limits": {
@@ -113,8 +114,11 @@ impl StorageResourceProfileReport {
                 "peak_batch_rows": pipeline.peak_batch_rows,
                 "peak_batch_payload_bytes": pipeline.peak_batch_payload_bytes,
                 "start_resident_bytes": pipeline.start_resident_bytes,
+                "start_peak_resident_bytes": pipeline.start_peak_resident_bytes,
                 "steady_resident_bytes": pipeline.steady_resident_bytes,
                 "peak_resident_bytes": pipeline.peak_resident_bytes,
+                "steady_resident_growth_bytes": pipeline.steady_resident_growth_bytes,
+                "lifetime_peak_resident_growth_bytes": pipeline.lifetime_peak_resident_growth_bytes,
                 "minor_page_faults": pipeline.minor_page_faults,
                 "major_page_faults": pipeline.major_page_faults,
                 "blocking_operator_kinds": self.query.execution_profile.blocking_operator_kinds,

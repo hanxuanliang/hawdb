@@ -364,11 +364,12 @@ fn public_query_fails_closed_when_an_out_of_core_segment_is_corrupted() {
 }
 
 #[test]
-#[ignore = "resource profile; run explicitly for larger-than-cache evidence"]
-fn larger_than_cache_query_reports_process_and_storage_resource_evidence() {
-    let path = unique_test_dir("out_of_core_resource_profile");
-    let node_count = 2_048usize;
-    let cache_budget = 1024 * 1024;
+#[ignore = "production profile; allocates a 256 MiB canonical dataset"]
+fn production_sized_resource_profile_stays_within_admission_budgets() {
+    let path = unique_test_dir("production_resource_profile");
+    let node_count = 8_192usize;
+    let body_bytes = 32 * 1024;
+    let cache_budget = 32 * 1024 * 1024;
     let config = DatabaseConfig {
         storage_residency_mode: StorageResidencyMode::OutOfCore,
         segment_cache_capacity_bytes: cache_budget,
@@ -379,10 +380,13 @@ fn larger_than_cache_query_reports_process_and_storage_resource_evidence() {
         let mut db = Database::open_with_config(&path, config.clone()).unwrap();
         let mut tx = db.begin_transaction();
         for id in 0..node_count {
-            tx.query(&format!(
-                "CREATE (:Memory {{id: {id}, body: '{}'}})",
-                "x".repeat(4096)
-            ))
+            tx.query_with_params(
+                "CREATE (:Memory {id: $id, body: $body})",
+                &BTreeMap::from([
+                    ("id".to_string(), Value::Int(id as i64)),
+                    ("body".to_string(), Value::String("x".repeat(body_bytes))),
+                ]),
+            )
             .unwrap();
         }
         tx.commit().unwrap();
@@ -390,28 +394,58 @@ fn larger_than_cache_query_reports_process_and_storage_resource_evidence() {
         assert!(db.storage_residency_report().out_of_core);
     }
 
-    let mut db = Database::open_with_config(&path, config).unwrap();
-    let before = db.storage_residency_report();
-    assert!(before.canonical_artifact_bytes > cache_budget.saturating_mul(4));
-    let analyzed = db
-        .explain_analyze_query("MATCH (m:Memory) RETURN m.id AS memory_id")
+    let db = Database::open_with_config(&path, config).unwrap();
+    let report = db
+        .storage_resource_profile(
+            "MATCH (m:Memory) RETURN m.id AS memory_id",
+            &BTreeMap::new(),
+            crate::StorageResourceProfileLimits {
+                min_canonical_artifact_bytes: 256 * 1024 * 1024,
+                max_steady_resident_bytes: 2 * 1024 * 1024 * 1024,
+                max_peak_resident_bytes: 4 * 1024 * 1024 * 1024,
+                max_minor_page_faults: Some(10_000_000),
+                max_major_page_faults: Some(100_000),
+                max_intermediate_rows: node_count * 4,
+                max_intermediate_payload_bytes: 1536 * 1024 * 1024,
+                max_output_rows: node_count,
+                max_output_payload_bytes: 16 * 1024 * 1024,
+                require_fully_streamed: true,
+            },
+        )
         .unwrap();
-    assert_eq!(analyzed.output.rows.len(), node_count);
-    let pipeline = &analyzed.execution_profile.pipeline_memory_report;
+
+    assert!(
+        report.ready,
+        "unexpected blockers: {:?}; profile: {}",
+        report.blocker_codes,
+        report.json()
+    );
+    assert!(report.after.canonical_artifact_bytes > cache_budget);
+    assert!(report.after.segment_cache_resident_bytes <= cache_budget);
+    assert!(report.after.segment_cache_miss_count > report.before.segment_cache_miss_count);
+    assert_eq!(report.query.output_rows, node_count);
+    let pipeline = &report.query.execution_profile.pipeline_memory_report;
     assert!(pipeline.intermediate_rows >= node_count);
     assert!(pipeline.output_payload_bytes > 0);
     assert!(pipeline.start_resident_bytes.is_some());
+    assert!(pipeline.start_peak_resident_bytes.is_some());
     assert!(pipeline.steady_resident_bytes.is_some());
     assert!(pipeline.peak_resident_bytes.is_some());
+    assert!(pipeline
+        .steady_resident_growth_bytes
+        .is_some_and(|bytes| bytes <= 128 * 1024 * 1024));
+    assert!(pipeline
+        .lifetime_peak_resident_growth_bytes
+        .is_some_and(|bytes| bytes <= 128 * 1024 * 1024));
     assert!(pipeline.minor_page_faults.is_some());
     assert!(pipeline.major_page_faults.is_some());
 
-    let after = db.storage_residency_report();
-    assert!(after.segment_cache_resident_bytes <= after.segment_cache_capacity_bytes);
-    assert!(after.segment_cache_miss_count > 0);
     assert!(
-        after.segment_cache_eviction_count > 0 || after.segment_cache_admission_rejection_count > 0
+        report.after.segment_cache_eviction_count > report.before.segment_cache_eviction_count
+            || report.after.segment_cache_admission_rejection_count
+                > report.before.segment_cache_admission_rejection_count
     );
+    assert!(report.after.canonical_artifact_bytes >= report.limits.min_canonical_artifact_bytes);
 
     drop(db);
     std::fs::remove_dir_all(path).unwrap();

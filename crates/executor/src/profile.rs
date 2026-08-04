@@ -28,10 +28,16 @@ pub struct PipelineMemoryReport {
     pub output_payload_bytes: usize,
     /// Resident memory before execution, when process sampling is supported.
     pub start_resident_bytes: Option<u64>,
+    /// Process high-water resident memory before execution.
+    pub start_peak_resident_bytes: Option<u64>,
     /// Resident memory after the output rows have been materialized.
     pub steady_resident_bytes: Option<u64>,
     /// Process high-water resident memory at completion.
     pub peak_resident_bytes: Option<u64>,
+    /// Positive resident-memory delta retained at completion.
+    pub steady_resident_growth_bytes: Option<u64>,
+    /// Positive process high-water delta observed during execution.
+    pub lifetime_peak_resident_growth_bytes: Option<u64>,
     /// Page-fault deltas observed during execution and output materialization.
     pub minor_page_faults: Option<u64>,
     pub major_page_faults: Option<u64>,

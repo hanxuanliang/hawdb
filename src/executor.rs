@@ -826,6 +826,12 @@ fn execute_with_row_consumer_profile_internal(
             let process_memory =
                 skein_qos::ProcessMemoryProfile::between(process_memory_start, process_memory_end);
             pipeline_memory_report.start_resident_bytes = Some(process_memory.start_resident_bytes);
+            pipeline_memory_report.start_peak_resident_bytes =
+                Some(process_memory.start_peak_resident_bytes);
+            pipeline_memory_report.steady_resident_growth_bytes =
+                Some(process_memory.steady_resident_growth_bytes);
+            pipeline_memory_report.lifetime_peak_resident_growth_bytes =
+                Some(process_memory.lifetime_peak_resident_growth_bytes);
             pipeline_memory_report.minor_page_faults = Some(process_memory.minor_page_faults);
             pipeline_memory_report.major_page_faults = Some(process_memory.major_page_faults);
         }

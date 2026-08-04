@@ -305,6 +305,7 @@ pub struct LibraryReadinessCutoverReadiness {
     pub search_projection_shadow_ready: bool,
     pub search_candidate_shadow_ready: bool,
     pub workload_fixture_ready: bool,
+    pub production_resource_profile_ready: bool,
     pub blocker_codes: Vec<String>,
 }
 
@@ -740,6 +741,7 @@ impl LibraryReadinessCutoverReadiness {
             && self.search_projection_shadow_ready
             && self.search_candidate_shadow_ready
             && self.workload_fixture_ready
+            && self.production_resource_profile_ready
     }
 }
 
@@ -5649,6 +5651,11 @@ pub fn library_readiness_cutover_readiness(
             "search_candidate_shadow",
         ),
         workload_fixture_ready: library_readiness_area_ready(bundle, "workload_fixture"),
+        production_resource_profile_ready: json_get_path(
+            bundle,
+            &["library_readiness", "production_resource_profile"],
+        )
+        .is_some_and(crate::nowledge_mem::production_resource_profile_ready),
         blocker_codes: blocker_codes(
             bundle,
             &[
@@ -5826,6 +5833,10 @@ fn library_readiness_cutover_conditions(
         (
             "library_readiness.readiness_by_area.workload_fixture.ready",
             readiness.workload_fixture_ready,
+        ),
+        (
+            "library_readiness.production_resource_profile",
+            readiness.production_resource_profile_ready,
         ),
     ]
 }
@@ -10258,7 +10269,8 @@ mod tests {
                 "library_readiness.readiness_by_area.search_projection.ready",
                 "library_readiness.readiness_by_area.search_projection_shadow.ready",
                 "library_readiness.readiness_by_area.search_candidate_shadow.ready",
-                "library_readiness.readiness_by_area.workload_fixture.ready"
+                "library_readiness.readiness_by_area.workload_fixture.ready",
+                "library_readiness.production_resource_profile"
             ])
         );
         assert!(report["next_actions"]
@@ -10266,6 +10278,30 @@ mod tests {
             .unwrap()
             .iter()
             .any(|action| action["action"] == "attach_library_readiness_evidence"));
+    }
+
+    #[test]
+    fn rejects_library_readiness_with_over_budget_production_resource_profile() {
+        let mut bundle = ready_bundle();
+        bundle["library_readiness"]["production_resource_profile"]["execution"]
+            ["steady_resident_bytes"] = serde_json::json!(536870913u64);
+
+        let typed = super::library_readiness_cutover_readiness(&bundle);
+
+        assert!(!typed.evidence_ready());
+        assert!(!typed.production_resource_profile_ready);
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+        let library_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "library_readiness")
+            .unwrap();
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            library_check["failed_evidence_fields"],
+            serde_json::json!(["library_readiness.production_resource_profile"])
+        );
     }
 
     #[test]
@@ -12079,6 +12115,7 @@ mod tests {
             "background_maintenance": {
                 "blocker_codes": []
             },
+            "production_resource_profile": ready_production_resource_profile(),
             "search_projection_evidence": {
                 "ready": true,
                 "blocker_codes": []
@@ -12086,6 +12123,52 @@ mod tests {
             "search_projection_shadow_evidence": {
                 "ready": true,
                 "blocker_codes": []
+            }
+        })
+    }
+
+    fn ready_production_resource_profile() -> serde_json::Value {
+        serde_json::json!({
+            "protocol": crate::STORAGE_RESOURCE_PROFILE_PROTOCOL,
+            "protocol_version": 1,
+            "present": true,
+            "ready": true,
+            "blocker_codes": [],
+            "limits": {
+                "min_canonical_artifact_bytes": 536870912u64,
+                "max_steady_resident_bytes": 536870912u64,
+                "max_peak_resident_bytes": 805306368u64,
+                "max_minor_page_faults": 1000,
+                "max_major_page_faults": 10,
+                "max_intermediate_rows": 1000,
+                "max_intermediate_payload_bytes": 1048576,
+                "max_output_rows": 100,
+                "max_output_payload_bytes": 1048576,
+                "require_fully_streamed": true
+            },
+            "storage": {
+                "durable": true,
+                "out_of_core": true,
+                "canonical_artifact_bytes": 1073741824u64,
+                "canonical_exceeds_cache": true,
+                "segment_cache_capacity_bytes": 67108864,
+                "segment_cache_resident_bytes_after": 33554432,
+                "delta_within_budget": true
+            },
+            "execution": {
+                "fully_streamed": true,
+                "start_resident_bytes": 251658240,
+                "start_peak_resident_bytes": 377487360,
+                "steady_resident_bytes": 268435456,
+                "peak_resident_bytes": 402653184,
+                "steady_resident_growth_bytes": 16777216,
+                "lifetime_peak_resident_growth_bytes": 25165824,
+                "minor_page_faults": 100,
+                "major_page_faults": 0,
+                "intermediate_rows": 200,
+                "intermediate_payload_bytes": 524288,
+                "output_rows": 100,
+                "output_payload_bytes": 262144
             }
         })
     }

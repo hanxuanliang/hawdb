@@ -1570,7 +1570,7 @@ contract.
 - [x] Add an explicit larger-than-cache resource-profile harness that captures
   query RSS, page faults, intermediate rows, payload bytes, cache residency,
   evictions, and admission rejections.
-- [ ] Add a production-sized resource profile that proves canonical bytes can
+- [x] Add a production-sized resource profile that proves canonical bytes can
   exceed the configured cache while steady RSS, peak RSS, page faults,
   intermediate rows, and payload bytes remain within their admission budgets.
 

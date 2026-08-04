@@ -34,7 +34,8 @@ use crate::{
     SearchProjectionChangefeedStatus, SearchProjectionDelta, SearchProjectionDeltaReport,
     SearchProjectionFreshness, SearchProjectionGraphDeltaRequest, SearchProjectionMutationId,
     SearchProjectionProbeOptions, SearchResultSet, SkeinError, SlowQueryLogRecordSummary,
-    TelemetrySink, Value,
+    StorageResourceProfileLimits, StorageResourceProfileReport, TelemetrySink, Value,
+    STORAGE_RESOURCE_PROFILE_PROTOCOL,
 };
 use crate::{
     graph_route_readiness::NMEM_GRAPH_ROUTE_READINESS_PROTOCOL,
@@ -4154,6 +4155,7 @@ pub struct NowledgeMemReadinessOptions {
     pub search_projection_shadow_evidence: Option<serde_json::Value>,
     pub search_candidate_shadow_evidence: Option<serde_json::Value>,
     pub workload_fixture_evidence: Option<NowledgeGraphRouteWorkloadFixtureReport>,
+    pub production_resource_profile: Option<StorageResourceProfileReport>,
     pub qos_policy: LocalQosPolicy,
     pub qos_state: LocalQosState,
     pub background_maintenance_options: BackgroundMaintenanceOptions,
@@ -4185,6 +4187,7 @@ pub struct NowledgeMemLibraryReadinessReport {
     pub search_projection_shadow_evidence: serde_json::Value,
     pub search_candidate_shadow_evidence: serde_json::Value,
     pub workload_fixture_evidence: serde_json::Value,
+    pub production_resource_profile: serde_json::Value,
 }
 
 impl NowledgeMemLibraryReadinessReport {
@@ -4223,6 +4226,7 @@ impl NowledgeMemLibraryReadinessReport {
             "search_projection_shadow_evidence": self.search_projection_shadow_evidence,
             "search_candidate_shadow_evidence": self.search_candidate_shadow_evidence,
             "workload_fixture_evidence": self.workload_fixture_evidence,
+            "production_resource_profile": self.production_resource_profile,
         })
     }
 }
@@ -7784,6 +7788,15 @@ impl NowledgeMemEmbeddedStoreHandle {
         Ok(self.read_store()?.runtime_status())
     }
 
+    pub fn production_resource_profile(
+        &self,
+        statement: &NowledgeGraphStatement,
+        limits: StorageResourceProfileLimits,
+    ) -> Result<StorageResourceProfileReport> {
+        self.read_store()?
+            .production_resource_profile(statement, limits)
+    }
+
     pub fn production_status(
         &self,
         route_ownership: Option<&NowledgeMemRouteOwnershipReadinessReport>,
@@ -8072,6 +8085,18 @@ impl NowledgeMemEmbeddedStore {
 
     pub fn storage_recovery_report_json(&self) -> serde_json::Value {
         self.storage_recovery_report().json()
+    }
+
+    pub fn production_resource_profile(
+        &self,
+        statement: &NowledgeGraphStatement,
+        limits: StorageResourceProfileLimits,
+    ) -> Result<StorageResourceProfileReport> {
+        self.graph.database().storage_resource_profile(
+            &statement.cypher,
+            &statement.parameters,
+            limits,
+        )
     }
 
     pub fn storage_lifecycle_decision(&self) -> NowledgeMemStorageLifecycleDecision {
@@ -8722,6 +8747,11 @@ impl NowledgeMemEmbeddedStore {
             .as_ref()
             .map(NowledgeGraphRouteWorkloadFixtureReport::json)
             .unwrap_or_else(missing_workload_fixture_evidence_json);
+        let production_resource_profile = options
+            .production_resource_profile
+            .as_ref()
+            .map(StorageResourceProfileReport::json)
+            .unwrap_or_else(missing_production_resource_profile_json);
         let evidence = LibraryReadinessEvidence {
             bounded_read_evidence: &bounded_read_evidence,
             storage_recovery: &storage_recovery,
@@ -8735,6 +8765,7 @@ impl NowledgeMemEmbeddedStore {
             search_projection_shadow_evidence: &search_projection_shadow_evidence,
             search_candidate_shadow_evidence: &search_candidate_shadow_evidence,
             workload_fixture_evidence: &workload_fixture_evidence,
+            production_resource_profile: &production_resource_profile,
         };
         let blocker_codes = library_readiness_blocker_codes(&evidence);
         let readiness_by_area = library_readiness_by_area(&evidence);
@@ -8772,6 +8803,7 @@ impl NowledgeMemEmbeddedStore {
             search_projection_shadow_evidence,
             search_candidate_shadow_evidence,
             workload_fixture_evidence,
+            production_resource_profile,
         }
     }
 
@@ -8975,8 +9007,11 @@ fn pipeline_memory_report_json(report: &skein_executor::PipelineMemoryReport) ->
         "output_rows": report.output_rows,
         "output_payload_bytes": report.output_payload_bytes,
         "start_resident_bytes": report.start_resident_bytes,
+        "start_peak_resident_bytes": report.start_peak_resident_bytes,
         "steady_resident_bytes": report.steady_resident_bytes,
         "peak_resident_bytes": report.peak_resident_bytes,
+        "steady_resident_growth_bytes": report.steady_resident_growth_bytes,
+        "lifetime_peak_resident_growth_bytes": report.lifetime_peak_resident_growth_bytes,
         "minor_page_faults": report.minor_page_faults,
         "major_page_faults": report.major_page_faults,
     })
@@ -9555,6 +9590,16 @@ fn missing_workload_fixture_evidence_json() -> serde_json::Value {
     })
 }
 
+fn missing_production_resource_profile_json() -> serde_json::Value {
+    serde_json::json!({
+        "protocol": STORAGE_RESOURCE_PROFILE_PROTOCOL,
+        "protocol_version": 1,
+        "present": false,
+        "ready": false,
+        "blocker_codes": ["production_resource_profile_missing"],
+    })
+}
+
 fn query_family_replacement_evidence_json(
     replacement_readiness_by_query_family: Option<&serde_json::Value>,
 ) -> serde_json::Value {
@@ -9822,6 +9867,7 @@ struct LibraryReadinessEvidence<'a> {
     search_projection_shadow_evidence: &'a serde_json::Value,
     search_candidate_shadow_evidence: &'a serde_json::Value,
     workload_fixture_evidence: &'a serde_json::Value,
+    production_resource_profile: &'a serde_json::Value,
 }
 
 fn library_readiness_blocker_codes(evidence: &LibraryReadinessEvidence<'_>) -> Vec<&'static str> {
@@ -9877,6 +9923,9 @@ fn library_readiness_blocker_codes(evidence: &LibraryReadinessEvidence<'_>) -> V
     if !workload_fixture_evidence_ready(evidence.workload_fixture_evidence) {
         blockers.push("workload_fixture_evidence_not_ready");
     }
+    if !production_resource_profile_ready(evidence.production_resource_profile) {
+        blockers.push("production_resource_profile_not_ready");
+    }
     blockers
 }
 
@@ -9901,10 +9950,9 @@ fn library_readiness_by_area(
             evidence.active_search_route_ownership,
             evidence.active_search_route_readiness,
         ),
-        storage: readiness_area(
-            "storage",
+        storage: storage_readiness_area(
             evidence.storage_recovery,
-            "storage_recovery_not_ready",
+            evidence.production_resource_profile,
         ),
         search_projection: search_projection_readiness_area(evidence.search_projection_evidence),
         search_projection_shadow: search_projection_shadow_readiness_area(
@@ -9916,6 +9964,110 @@ fn library_readiness_by_area(
         workload_fixture: workload_fixture_readiness_area(evidence.workload_fixture_evidence),
         background: background_maintenance_readiness_area(evidence.background_maintenance),
     }
+}
+
+fn storage_readiness_area(
+    storage_recovery: &serde_json::Value,
+    production_resource_profile: &serde_json::Value,
+) -> NowledgeMemReadinessAreaSummary {
+    let mut blocker_codes = Vec::new();
+    if storage_recovery
+        .get("ready")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        blocker_codes.push("storage_recovery_not_ready".to_string());
+    }
+    blocker_codes.extend(production_resource_profile_blocker_codes(
+        production_resource_profile,
+    ));
+    NowledgeMemReadinessAreaSummary::new("storage", blocker_codes.is_empty(), blocker_codes)
+}
+
+pub(crate) fn production_resource_profile_ready(evidence: &serde_json::Value) -> bool {
+    production_resource_profile_blocker_codes(evidence).is_empty()
+}
+
+fn production_resource_profile_blocker_codes(evidence: &serde_json::Value) -> Vec<String> {
+    let mut blockers = BTreeSet::new();
+    if evidence_string(evidence, "protocol") != Some(STORAGE_RESOURCE_PROFILE_PROTOCOL)
+        || evidence_u64(evidence, "protocol_version") != Some(1)
+    {
+        blockers.insert("production_resource_profile_protocol_mismatch".to_string());
+    }
+    if evidence_bool(evidence, "present") != Some(true) {
+        blockers.insert("production_resource_profile_missing".to_string());
+    }
+    if evidence_bool(evidence, "ready") != Some(true) {
+        blockers.insert("production_resource_profile_not_ready".to_string());
+    }
+    if !string_array_at(evidence, &["blocker_codes"]).is_some_and(|codes| codes.is_empty()) {
+        blockers.insert("production_resource_profile_has_blockers".to_string());
+    }
+
+    let canonical_bytes = nested_u64(evidence, &["storage", "canonical_artifact_bytes"]);
+    let cache_capacity = nested_u64(evidence, &["storage", "segment_cache_capacity_bytes"]);
+    let cache_resident = nested_u64(evidence, &["storage", "segment_cache_resident_bytes_after"]);
+    let minimum_canonical_bytes = nested_u64(evidence, &["limits", "min_canonical_artifact_bytes"]);
+    let storage_bytes_within_budget = matches!(
+        (
+            canonical_bytes,
+            cache_capacity,
+            cache_resident,
+            minimum_canonical_bytes,
+        ),
+        (Some(canonical), Some(capacity), Some(resident), Some(minimum))
+            if canonical >= minimum && canonical > capacity && resident <= capacity
+    );
+    if nested_bool(evidence, &["storage", "durable"]) != Some(true)
+        || nested_bool(evidence, &["storage", "out_of_core"]) != Some(true)
+        || nested_bool(evidence, &["storage", "canonical_exceeds_cache"]) != Some(true)
+        || nested_bool(evidence, &["storage", "delta_within_budget"]) != Some(true)
+        || !storage_bytes_within_budget
+    {
+        blockers.insert("production_resource_profile_storage_budget_invalid".to_string());
+    }
+
+    let require_fully_streamed = nested_bool(evidence, &["limits", "require_fully_streamed"]);
+    let fully_streamed = nested_bool(evidence, &["execution", "fully_streamed"]);
+    if require_fully_streamed.is_none()
+        || fully_streamed.is_none()
+        || (require_fully_streamed == Some(true) && fully_streamed != Some(true))
+    {
+        blockers.insert("production_resource_profile_streaming_invalid".to_string());
+    }
+    if nested_u64(evidence, &["execution", "start_resident_bytes"]).is_none()
+        || nested_u64(evidence, &["execution", "start_peak_resident_bytes"]).is_none()
+        || nested_u64(evidence, &["execution", "steady_resident_growth_bytes"]).is_none()
+        || nested_u64(
+            evidence,
+            &["execution", "lifetime_peak_resident_growth_bytes"],
+        )
+        .is_none()
+    {
+        blockers.insert("production_resource_profile_resident_growth_missing".to_string());
+    }
+
+    for (metric, limit) in [
+        ("steady_resident_bytes", "max_steady_resident_bytes"),
+        ("peak_resident_bytes", "max_peak_resident_bytes"),
+        ("minor_page_faults", "max_minor_page_faults"),
+        ("major_page_faults", "max_major_page_faults"),
+        ("intermediate_rows", "max_intermediate_rows"),
+        (
+            "intermediate_payload_bytes",
+            "max_intermediate_payload_bytes",
+        ),
+        ("output_rows", "max_output_rows"),
+        ("output_payload_bytes", "max_output_payload_bytes"),
+    ] {
+        let measured = nested_u64(evidence, &["execution", metric]);
+        let admitted = nested_u64(evidence, &["limits", limit]);
+        if measured.is_none() || admitted.is_none() || measured > admitted {
+            blockers.insert(format!("production_resource_profile_{metric}_invalid"));
+        }
+    }
+    blockers.into_iter().collect()
 }
 
 fn bounded_read_readiness_area(evidence: &serde_json::Value) -> NowledgeMemReadinessAreaSummary {
@@ -11243,8 +11395,8 @@ mod tests {
         NowledgeGraphStatement, RecoveryMode, SearchEmbeddingManifest, SearchIndex, SearchMode,
         SearchProjectionDelta, SearchProjectionFreshness, SearchProjectionKind,
         SearchProjectionProbeOptions, SearchProjectionRow, StorageRecoveryReport,
-        VectorRecallValidationOptions, VectorRecallValidationReport, WorkClass,
-        VECTOR_RECALL_VALIDATION_PROTOCOL,
+        StorageResidencyMode, StorageResourceProfileLimits, VectorRecallValidationOptions,
+        VectorRecallValidationReport, WorkClass, VECTOR_RECALL_VALIDATION_PROTOCOL,
     };
     use std::collections::BTreeMap;
     use std::sync::mpsc;
@@ -13772,6 +13924,12 @@ mod tests {
         );
         assert_eq!(readiness["readiness_by_area"]["storage"]["ready"], false);
         assert_eq!(readiness["readiness_by_area"]["background"]["ready"], false);
+        assert_eq!(readiness["production_resource_profile"]["present"], false);
+        assert!(readiness["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "production_resource_profile_not_ready"));
         assert_eq!(
             readiness["readiness_by_area"]["background"]["blocker_codes"],
             serde_json::json!(["no_candidates", "no_ranked_work"])
@@ -13847,6 +14005,82 @@ mod tests {
         assert_eq!(readiness["ready_area_count"], 1);
         assert_eq!(readiness["blocked_area_count"], 10);
         assert!(!readiness.to_string().contains("redacted"));
+    }
+
+    #[test]
+    fn embedded_store_library_readiness_consumes_typed_production_resource_profile() {
+        let path = unique_nowledge_mem_test_dir("production_resource_profile");
+        let cache_capacity = 1024;
+        let config = DatabaseConfig {
+            storage_residency_mode: StorageResidencyMode::OutOfCore,
+            segment_cache_capacity_bytes: cache_capacity,
+            ..DatabaseConfig::default()
+        };
+        let mut db = Database::open_with_config(&path, config.clone()).unwrap();
+        let mut transaction = db.begin_transaction();
+        for id in 0..32 {
+            transaction
+                .query_with_params(
+                    "CREATE (:Memory {id: $id, body: $body})",
+                    &BTreeMap::from([
+                        ("id".to_string(), Value::Int(id)),
+                        ("body".to_string(), Value::String("x".repeat(1024))),
+                    ]),
+                )
+                .unwrap();
+        }
+        transaction.commit().unwrap();
+        db.checkpoint().unwrap();
+        drop(db);
+        let db = Database::open_with_config(&path, config).unwrap();
+        let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        let store = NowledgeMemEmbeddedStore::new(graph, None);
+        let statement = NowledgeGraphStatement {
+            cypher: "MATCH (m:Memory) RETURN m.id AS memory_id".to_string(),
+            parameters: BTreeMap::new(),
+        };
+        let profile = store
+            .production_resource_profile(
+                &statement,
+                StorageResourceProfileLimits {
+                    min_canonical_artifact_bytes: 4096,
+                    max_steady_resident_bytes: u64::MAX,
+                    max_peak_resident_bytes: u64::MAX,
+                    max_minor_page_faults: Some(u64::MAX),
+                    max_major_page_faults: Some(u64::MAX),
+                    max_intermediate_rows: 1024,
+                    max_intermediate_payload_bytes: 1024 * 1024,
+                    max_output_rows: 64,
+                    max_output_payload_bytes: 1024 * 1024,
+                    require_fully_streamed: true,
+                },
+            )
+            .unwrap();
+
+        assert!(
+            profile.ready,
+            "unexpected blockers: {:?}",
+            profile.blocker_codes
+        );
+        assert!(profile.after.canonical_artifact_bytes > cache_capacity);
+        let readiness = store.library_readiness(&NowledgeMemReadinessOptions {
+            production_resource_profile: Some(profile),
+            ..NowledgeMemReadinessOptions::default()
+        });
+
+        assert_eq!(readiness.production_resource_profile["ready"], true);
+        assert!(
+            readiness.readiness_by_area.storage.ready,
+            "unexpected storage blockers: {:?}",
+            readiness.readiness_by_area.storage.blocker_codes
+        );
+        assert!(!readiness
+            .blocker_codes
+            .iter()
+            .any(|code| code == "production_resource_profile_not_ready"));
+
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
     }
 
     #[test]

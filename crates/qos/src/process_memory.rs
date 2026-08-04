@@ -17,8 +17,11 @@ impl ProcessMemorySnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessMemoryProfile {
     pub start_resident_bytes: u64,
+    pub start_peak_resident_bytes: u64,
     pub steady_resident_bytes: u64,
     pub peak_resident_bytes: u64,
+    pub steady_resident_growth_bytes: u64,
+    pub lifetime_peak_resident_growth_bytes: u64,
     pub minor_page_faults: u64,
     pub major_page_faults: u64,
 }
@@ -27,8 +30,13 @@ impl ProcessMemoryProfile {
     pub fn between(start: ProcessMemorySnapshot, end: ProcessMemorySnapshot) -> Self {
         Self {
             start_resident_bytes: start.resident_bytes,
+            start_peak_resident_bytes: start.peak_resident_bytes,
             steady_resident_bytes: end.resident_bytes,
             peak_resident_bytes: end.peak_resident_bytes,
+            steady_resident_growth_bytes: end.resident_bytes.saturating_sub(start.resident_bytes),
+            lifetime_peak_resident_growth_bytes: end
+                .peak_resident_bytes
+                .saturating_sub(start.peak_resident_bytes),
             minor_page_faults: end
                 .minor_page_faults
                 .saturating_sub(start.minor_page_faults),
@@ -162,8 +170,11 @@ mod tests {
         };
         let profile = ProcessMemoryProfile::between(start, end);
         assert_eq!(profile.start_resident_bytes, 10);
+        assert_eq!(profile.start_peak_resident_bytes, 20);
         assert_eq!(profile.steady_resident_bytes, 12);
         assert_eq!(profile.peak_resident_bytes, 24);
+        assert_eq!(profile.steady_resident_growth_bytes, 2);
+        assert_eq!(profile.lifetime_peak_resident_growth_bytes, 4);
         assert_eq!(profile.minor_page_faults, 0);
         assert_eq!(profile.major_page_faults, 5);
     }

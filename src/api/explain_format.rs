@@ -283,6 +283,18 @@ fn root_execution_info(profile: &ReadExecutionProfile) -> String {
     if let Some(peak_resident_bytes) = pipeline.peak_resident_bytes {
         fields.push(format!("peak_rss={}", format_bytes(peak_resident_bytes)));
     }
+    if let Some(resident_growth_bytes) = pipeline.steady_resident_growth_bytes {
+        fields.push(format!(
+            "steady_rss_growth={}",
+            format_bytes(resident_growth_bytes)
+        ));
+    }
+    if let Some(peak_growth_bytes) = pipeline.lifetime_peak_resident_growth_bytes {
+        fields.push(format!(
+            "lifetime_peak_rss_growth={}",
+            format_bytes(peak_growth_bytes)
+        ));
+    }
     if let Some(minor_page_faults) = pipeline.minor_page_faults {
         fields.push(format!("minor_faults={minor_page_faults}"));
     }

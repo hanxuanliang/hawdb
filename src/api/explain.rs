@@ -220,12 +220,24 @@ fn pipeline_memory_report_value(report: &skein_executor::PipelineMemoryReport) -
             optional_u64_value(report.start_resident_bytes),
         ),
         (
+            "start_peak_resident_bytes".to_string(),
+            optional_u64_value(report.start_peak_resident_bytes),
+        ),
+        (
             "steady_resident_bytes".to_string(),
             optional_u64_value(report.steady_resident_bytes),
         ),
         (
             "peak_resident_bytes".to_string(),
             optional_u64_value(report.peak_resident_bytes),
+        ),
+        (
+            "steady_resident_growth_bytes".to_string(),
+            optional_u64_value(report.steady_resident_growth_bytes),
+        ),
+        (
+            "lifetime_peak_resident_growth_bytes".to_string(),
+            optional_u64_value(report.lifetime_peak_resident_growth_bytes),
         ),
         (
             "minor_page_faults".to_string(),
