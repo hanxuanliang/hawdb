@@ -1,8 +1,6 @@
-use super::Binding;
-use crate::error::{Result, SkeinError};
-use crate::schema::{LabelId, RelTypeId};
-use crate::store::{NodeId, NodeRecord, RelId, RelRecord};
-use crate::value::Value;
+use crate::binding::{binding_payload_bytes, Binding};
+use skein_core::{LabelId, RelTypeId, Result, SkeinError, Value};
+use skein_storage::{NodeId, NodeRecord, RelId, RelRecord};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Cursor, ErrorKind, Read, Write};
@@ -13,12 +11,12 @@ const MAX_SPILL_RECORD_BYTES: usize = 1024 * 1024 * 1024;
 const MAX_VALUE_DEPTH: usize = 64;
 static NEXT_SPILL_ID: AtomicU64 = AtomicU64::new(0);
 
-pub(super) struct SpillRun {
+pub struct SpillRun {
     path: PathBuf,
 }
 
 impl SpillRun {
-    pub(super) fn create(directory: &Path, operator: &str) -> Result<(Self, SpillWriter)> {
+    pub fn create(directory: &Path, operator: &str) -> Result<(Self, SpillWriter)> {
         std::fs::create_dir_all(directory).map_err(|error| {
             SkeinError::Execution(format!(
                 "failed to create spill directory '{}': {error}",
@@ -54,7 +52,7 @@ impl SpillRun {
         ))
     }
 
-    pub(super) fn reader(&self) -> Result<SpillReader> {
+    pub fn reader(&self) -> Result<SpillReader> {
         let file = File::open(&self.path).map_err(|error| {
             SkeinError::Execution(format!(
                 "failed to open spill run '{}': {error}",
@@ -73,18 +71,13 @@ impl Drop for SpillRun {
     }
 }
 
-pub(super) struct SpillWriter {
+pub struct SpillWriter {
     writer: BufWriter<File>,
 }
 
 impl SpillWriter {
-    pub(super) fn write(
-        &mut self,
-        ordinal: u64,
-        binding: &Binding,
-        max_record_bytes: u64,
-    ) -> Result<u64> {
-        let mut payload = Vec::with_capacity(super::binding_payload_bytes(binding));
+    pub fn write(&mut self, ordinal: u64, binding: &Binding, max_record_bytes: u64) -> Result<u64> {
+        let mut payload = Vec::with_capacity(binding_payload_bytes(binding));
         write_u64(&mut payload, ordinal)?;
         write_binding(&mut payload, binding)?;
         let payload_len = u64::try_from(payload.len()).map_err(|_| {
@@ -105,19 +98,19 @@ impl SpillWriter {
         Ok(record_bytes)
     }
 
-    pub(super) fn finish(mut self) -> Result<()> {
+    pub fn finish(mut self) -> Result<()> {
         self.writer
             .flush()
             .map_err(|error| SkeinError::Execution(format!("failed to flush spill run: {error}")))
     }
 }
 
-pub(super) struct SpillReader {
+pub struct SpillReader {
     reader: BufReader<File>,
 }
 
 impl SpillReader {
-    pub(super) fn read(&mut self, max_record_bytes: usize) -> Result<Option<(u64, Binding)>> {
+    pub fn read(&mut self, max_record_bytes: usize) -> Result<Option<(u64, Binding)>> {
         let mut encoded_len = [0u8; 8];
         let bytes_read = self.reader.read(&mut encoded_len).map_err(|error| {
             SkeinError::Execution(format!("failed to read spill record length: {error}"))

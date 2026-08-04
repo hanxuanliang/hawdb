@@ -1,0 +1,961 @@
+//! Streaming batch orchestration and pipeline dispatch.
+
+use super::*;
+
+#[derive(Clone, Copy)]
+pub(super) struct NodeColumnLookupSpec<'a> {
+    pub(super) variable: &'a str,
+    pub(super) label: &'a str,
+    pub(super) property: &'a str,
+    pub(super) column: &'a str,
+    pub(super) optional: bool,
+}
+
+fn stream_node_column_lookup_batches(
+    spec: NodeColumnLookupSpec<'_>,
+    input: &PhysicalPlan,
+    context: BatchReadContext<'_>,
+    execution_limit: ExecutionLimit,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    let mut output = Vec::with_capacity(context.memory.batch_rows.get());
+    let mut emitted = 0usize;
+    execute_binding_batches(input, context, ExecutionLimit::unlimited(), &mut |batch| {
+        let remaining = execution_limit
+            .output_rows
+            .unwrap_or(usize::MAX)
+            .saturating_sub(emitted);
+        if remaining == 0 {
+            return Ok(BatchControl::Stop);
+        }
+        let bindings = execute_node_column_lookup(
+            spec,
+            batch,
+            context.catalog,
+            context.store,
+            ExecutionLimit {
+                output_rows: Some(remaining),
+            },
+            context.memory.blocking_operator_bytes,
+        )?;
+        for binding in bindings {
+            output.push(binding);
+            emitted = emitted.saturating_add(1);
+            if output.len() == context.memory.batch_rows.get()
+                && emit(std::mem::replace(
+                    &mut output,
+                    Vec::with_capacity(context.memory.batch_rows.get()),
+                ))? == BatchControl::Stop
+            {
+                return Ok(BatchControl::Stop);
+            }
+            if execution_limit.is_reached(emitted) {
+                return Ok(BatchControl::Stop);
+            }
+        }
+        Ok(BatchControl::Continue)
+    })?;
+    if !output.is_empty() && emit(output)? == BatchControl::Stop {
+        return Ok(BatchControl::Stop);
+    }
+    Ok(BatchControl::Continue)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stream_optional_degree_batches(
+    source_variable: &str,
+    rel_type: &str,
+    rel_properties: &BTreeMap<String, Value>,
+    direction: RelationshipDirection,
+    target_label: &str,
+    target_properties: &BTreeMap<String, Value>,
+    alias: &str,
+    input: &PhysicalPlan,
+    context: BatchReadContext<'_>,
+    execution_limit: ExecutionLimit,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    let rel_type_id = if rel_type.is_empty() {
+        None
+    } else {
+        context.catalog.rel_type_id(rel_type)
+    };
+    let target_label_ids = label_ids_for_pattern(context.catalog, target_label);
+    let mut emitted = 0usize;
+    execute_binding_batches(input, context, execution_limit, &mut |batch| {
+        let mut output = Vec::with_capacity(batch.len());
+        for mut binding in batch {
+            let degree = if !rel_type.is_empty() && rel_type_id.is_none() {
+                0
+            } else {
+                let source = binding.nodes.get(source_variable).ok_or_else(|| {
+                    SkeinError::Execution(format!(
+                        "missing variable '{source_variable}' during optional degree"
+                    ))
+                })?;
+                one_hop_relationships_with_budget(
+                    context.store,
+                    source.id,
+                    rel_type_id,
+                    target_label_ids.as_deref(),
+                    rel_properties,
+                    None,
+                    direction,
+                    context.memory.blocking_operator_bytes.get(),
+                )?
+                .into_iter()
+                .filter(|(_, target)| node_properties_match(target, target_properties))
+                .count()
+            };
+            binding
+                .values
+                .insert(alias.to_string(), Value::Int(degree as i64));
+            output.push(binding);
+        }
+        emitted = emitted.saturating_add(output.len());
+        if !output.is_empty() && emit(output)? == BatchControl::Stop {
+            return Ok(BatchControl::Stop);
+        }
+        Ok(if execution_limit.is_reached(emitted) {
+            BatchControl::Stop
+        } else {
+            BatchControl::Continue
+        })
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BatchControl {
+    Continue,
+    Stop,
+}
+
+pub(super) type BindingBatch = Vec<Binding>;
+
+#[derive(Clone, Copy)]
+pub(super) struct BatchReadContext<'a> {
+    pub(super) catalog: &'a Catalog,
+    pub(super) store: &'a GraphStore,
+    pub(super) memory: &'a ExecutionMemoryConfig,
+    pub(super) task_context: Option<&'a RuntimeTaskContext>,
+}
+
+pub(super) fn runtime_checkpoint(task_context: Option<&RuntimeTaskContext>) -> Result<()> {
+    match task_context {
+        Some(task_context) => task_context
+            .checkpoint()
+            .map_err(|reason| SkeinError::Execution(format!("runtime task stopped: {reason}"))),
+        None => Ok(()),
+    }
+}
+
+pub(super) fn batch_pipeline_capable(plan: &PhysicalPlan) -> bool {
+    match plan {
+        PhysicalPlan::SeqNodeScan { .. }
+        | PhysicalPlan::SourceSegmentScan { .. }
+        | PhysicalPlan::IndexNodeSeek { .. }
+        | PhysicalPlan::IndexNodeMultiSeek { .. }
+        | PhysicalPlan::IndexNodeCompositeSeek { .. }
+        | PhysicalPlan::IndexNodeRangeSeek { .. }
+        | PhysicalPlan::IndexNodeTextSeek { .. }
+        | PhysicalPlan::ThreadRepairStatsExec { .. }
+        | PhysicalPlan::ShortestPathExec { .. } => true,
+        PhysicalPlan::FilterExec { input, .. }
+        | PhysicalPlan::ProjectExec { input, .. }
+        | PhysicalPlan::LimitExec { input, .. }
+        | PhysicalPlan::DistinctExec { input }
+        | PhysicalPlan::NodeColumnLookupExec { input, .. }
+        | PhysicalPlan::OptionalDegreeExec { input, .. }
+        | PhysicalPlan::TopNExec { input, .. }
+        | PhysicalPlan::SortExec { input, .. }
+        | PhysicalPlan::AggregateExec { input, .. } => batch_pipeline_capable(input),
+        PhysicalPlan::NodeCartesianProductExec { left, right } => {
+            batch_pipeline_capable(left) && batch_pipeline_capable(right)
+        }
+        PhysicalPlan::AdjacencyExpandExec { input, .. } => batch_pipeline_capable(input),
+        _ => false,
+    }
+}
+
+pub(super) fn collect_batch_pipeline(
+    plan: &PhysicalPlan,
+    catalog: &Catalog,
+    store: &GraphStore,
+    memory: &ExecutionMemoryConfig,
+    task_context: Option<&RuntimeTaskContext>,
+    execution_limit: ExecutionLimit,
+) -> Result<Vec<Binding>> {
+    let mut output = Vec::new();
+    let mut tracker = OperatorMemoryTracker::new(memory.blocking_operator_bytes);
+    let context = BatchReadContext {
+        catalog,
+        store,
+        memory,
+        task_context,
+    };
+    execute_binding_batches(plan, context, execution_limit, &mut |batch| {
+        for binding in batch {
+            push_bounded_operator_binding(
+                "MaterializedBatchPipeline",
+                &mut output,
+                binding,
+                &mut tracker,
+            )?;
+            if execution_limit.is_reached(output.len()) {
+                return Ok(BatchControl::Stop);
+            }
+        }
+        Ok(BatchControl::Continue)
+    })?;
+    Ok(output)
+}
+
+pub(super) fn execute_binding_batches(
+    plan: &PhysicalPlan,
+    context: BatchReadContext<'_>,
+    execution_limit: ExecutionLimit,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    runtime_checkpoint(context.task_context)?;
+    let mut measured_emit = |batch: BindingBatch| {
+        runtime_checkpoint(context.task_context)?;
+        let control =
+            emit_byte_bounded_batches(batch, context.memory.batch_payload_bytes.get(), emit)?;
+        runtime_checkpoint(context.task_context)?;
+        Ok(control)
+    };
+    execute_binding_batches_inner(plan, context, execution_limit, &mut measured_emit)
+}
+
+fn emit_byte_bounded_batches(
+    batch: BindingBatch,
+    max_payload_bytes: usize,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    let mut bounded = Vec::with_capacity(batch.len());
+    let mut bounded_bytes = 0usize;
+    for binding in batch {
+        let binding_bytes = binding_memory_bytes(&binding);
+        if binding_bytes > max_payload_bytes {
+            return Err(SkeinError::Execution(format!(
+                "intermediate row uses {binding_bytes} bytes, exceeding batch_payload_bytes {max_payload_bytes}"
+            )));
+        }
+        if !bounded.is_empty() && bounded_bytes.saturating_add(binding_bytes) > max_payload_bytes {
+            record_pipeline_batch(&bounded);
+            if emit(std::mem::take(&mut bounded))? == BatchControl::Stop {
+                return Ok(BatchControl::Stop);
+            }
+            bounded_bytes = 0;
+        }
+        bounded_bytes = bounded_bytes.saturating_add(binding_bytes);
+        bounded.push(binding);
+    }
+    if !bounded.is_empty() {
+        record_pipeline_batch(&bounded);
+        if emit(bounded)? == BatchControl::Stop {
+            return Ok(BatchControl::Stop);
+        }
+    }
+    Ok(BatchControl::Continue)
+}
+
+fn execute_binding_batches_inner(
+    plan: &PhysicalPlan,
+    context: BatchReadContext<'_>,
+    execution_limit: ExecutionLimit,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    runtime_checkpoint(context.task_context)?;
+    debug_assert!(batch_pipeline_capable(plan));
+    let BatchReadContext {
+        catalog,
+        store,
+        memory,
+        task_context: _,
+    } = context;
+    match plan {
+        PhysicalPlan::SeqNodeScan { variable, label } => {
+            stream_node_scan_batches(variable, label, None, context, execution_limit, emit)
+        }
+        PhysicalPlan::SourceSegmentScan {
+            variable,
+            predicate,
+        } => {
+            let bindings = execute_source_segment_scan(
+                variable,
+                predicate,
+                catalog,
+                store,
+                execution_limit,
+                memory,
+                context.task_context,
+            )?;
+            emit_owned_binding_batches(bindings, memory.batch_rows.get(), emit)
+        }
+        PhysicalPlan::IndexNodeSeek {
+            variable,
+            label,
+            property,
+            value,
+        } => stream_index_node_seek_batches(
+            variable,
+            label,
+            property,
+            std::slice::from_ref(value),
+            context,
+            execution_limit,
+            emit,
+        ),
+        PhysicalPlan::IndexNodeMultiSeek {
+            variable,
+            label,
+            property,
+            values,
+        } => stream_index_node_seek_batches(
+            variable,
+            label,
+            property,
+            values,
+            context,
+            execution_limit,
+            emit,
+        ),
+        PhysicalPlan::IndexNodeCompositeSeek {
+            variable,
+            label,
+            predicates,
+        } => {
+            let Some(label_id) = catalog.label_id(label) else {
+                return Ok(BatchControl::Continue);
+            };
+            stream_visited_node_batches(
+                variable,
+                memory.batch_rows.get(),
+                execution_limit,
+                emit,
+                |consumer| {
+                    store.visit_nodes_by_composite_property_owned(label_id, predicates, consumer)
+                },
+            )
+        }
+        PhysicalPlan::IndexNodeRangeSeek {
+            variable,
+            label,
+            property,
+            lower,
+            upper,
+        } => {
+            let Some(label_id) = catalog.label_id(label) else {
+                return Ok(BatchControl::Continue);
+            };
+            stream_visited_node_batches(
+                variable,
+                memory.batch_rows.get(),
+                execution_limit,
+                emit,
+                |consumer| {
+                    store.visit_nodes_by_property_range_owned(
+                        label_id,
+                        property,
+                        lower.as_ref(),
+                        upper.as_ref(),
+                        consumer,
+                    )
+                },
+            )
+        }
+        PhysicalPlan::IndexNodeTextSeek {
+            variable,
+            label,
+            property,
+            query,
+        } => {
+            let Some(label_id) = catalog.label_id(label) else {
+                return Ok(BatchControl::Continue);
+            };
+            stream_visited_node_batches(
+                variable,
+                memory.batch_rows.get(),
+                execution_limit,
+                emit,
+                |consumer| {
+                    store.visit_nodes_by_full_text_property_owned(
+                        label_id, property, query, consumer,
+                    )
+                },
+            )
+        }
+        PhysicalPlan::ShortestPathExec {
+            source_label,
+            source_id,
+            source_visibility_predicate,
+            rel_type,
+            direction,
+            target_label,
+            target_id,
+            target_visibility_predicate,
+            min_hops,
+            max_hops,
+            returns,
+            ..
+        } => {
+            let source_visibility_filter = source_visibility_predicate
+                .as_ref()
+                .map(property_filter_from_predicate)
+                .transpose()?;
+            let target_visibility_filter = target_visibility_predicate
+                .as_ref()
+                .map(property_filter_from_predicate)
+                .transpose()?;
+            let bindings = execute_shortest_path(
+                catalog,
+                store,
+                ShortestPathExecInput {
+                    source_label,
+                    source_id,
+                    source_visibility_filter: source_visibility_filter.as_ref(),
+                    path_node_visibility_filter: source_visibility_filter.as_ref(),
+                    rel_type,
+                    direction: *direction,
+                    target_label,
+                    target_id,
+                    target_visibility_filter: target_visibility_filter.as_ref(),
+                    min_hops: *min_hops,
+                    max_hops: *max_hops,
+                    returns,
+                },
+                context.memory,
+                execution_limit,
+                context.task_context,
+            )?;
+            emit_owned_binding_batches(bindings, memory.batch_rows.get(), emit)
+        }
+        PhysicalPlan::ThreadRepairStatsExec {
+            label,
+            identity_label,
+            identity_ref_property,
+            thread_id_property,
+            message_rel_type,
+            message_label,
+            memory_rel_type,
+            memory_label,
+        } => {
+            let bindings = thread_repair_stats_rows(
+                catalog,
+                store,
+                label,
+                identity_label,
+                identity_ref_property,
+                thread_id_property,
+                message_rel_type,
+                message_label,
+                memory_rel_type,
+                memory_label,
+                memory.blocking_operator_bytes,
+            )?;
+            emit_owned_binding_batches(bindings, memory.batch_rows.get(), emit)
+        }
+        PhysicalPlan::NodeColumnLookupExec {
+            variable,
+            label,
+            property,
+            column,
+            optional,
+            input,
+        } => stream_node_column_lookup_batches(
+            NodeColumnLookupSpec {
+                variable,
+                label,
+                property,
+                column,
+                optional: *optional,
+            },
+            input,
+            context,
+            execution_limit,
+            emit,
+        ),
+        PhysicalPlan::OptionalDegreeExec {
+            source_variable,
+            rel_type,
+            rel_properties,
+            direction,
+            target_label,
+            target_properties,
+            alias,
+            input,
+        } => stream_optional_degree_batches(
+            source_variable,
+            rel_type,
+            rel_properties,
+            *direction,
+            target_label,
+            target_properties,
+            alias,
+            input,
+            context,
+            execution_limit,
+            emit,
+        ),
+        PhysicalPlan::AdjacencyExpandExec { input, .. } => stream_adjacency_expand_batches(
+            plan,
+            input,
+            context,
+            execution_limit,
+            AdjacencyExpandFilters::default(),
+            emit,
+        ),
+        PhysicalPlan::NodeCartesianProductExec { left, right } => {
+            stream_cartesian_product_batches(left, right, context, execution_limit, emit)
+        }
+        PhysicalPlan::FilterExec { predicate, input } => {
+            if let PhysicalPlan::SeqNodeScan { variable, label } = input.as_ref()
+                && let Ok(filter) = property_filter_from_predicate(predicate)
+            {
+                return stream_node_scan_batches(
+                    variable,
+                    label,
+                    Some((predicate, &filter)),
+                    context,
+                    execution_limit,
+                    emit,
+                );
+            }
+            if let PhysicalPlan::AdjacencyExpandExec {
+                rel_variable: Some(rel_variable),
+                input: expand_input,
+                ..
+            } = input.as_ref()
+                && let Some(filter) =
+                    exact_relationship_scan_filter_from_predicate(predicate, rel_variable)
+            {
+                return stream_filtered_adjacency_expand_batches(
+                    input,
+                    expand_input,
+                    predicate,
+                    context,
+                    execution_limit,
+                    AdjacencyExpandFilters {
+                        relationship_scan_filter: Some(&filter),
+                        target_scan_filter: None,
+                    },
+                    emit,
+                );
+            }
+            if let PhysicalPlan::AdjacencyExpandExec {
+                target_variable,
+                input: expand_input,
+                ..
+            } = input.as_ref()
+                && predicate_references_only_variable(predicate, target_variable)
+                && let Ok(filter) = property_filter_from_predicate(predicate)
+            {
+                return stream_filtered_adjacency_expand_batches(
+                    input,
+                    expand_input,
+                    predicate,
+                    context,
+                    execution_limit,
+                    AdjacencyExpandFilters {
+                        relationship_scan_filter: None,
+                        target_scan_filter: Some(&filter),
+                    },
+                    emit,
+                );
+            }
+            let mut emitted = 0usize;
+            execute_binding_batches(input, context, ExecutionLimit::unlimited(), &mut |batch| {
+                let remaining = execution_limit
+                    .output_rows
+                    .unwrap_or(usize::MAX)
+                    .saturating_sub(emitted);
+                if remaining == 0 {
+                    return Ok(BatchControl::Stop);
+                }
+                let mut filtered = Vec::with_capacity(batch.len().min(remaining));
+                for binding in batch {
+                    if evaluate_predicate(predicate, catalog, store, &binding)? {
+                        filtered.push(binding);
+                        if filtered.len() == remaining {
+                            break;
+                        }
+                    }
+                }
+                emitted = emitted.saturating_add(filtered.len());
+                if !filtered.is_empty() && emit(filtered)? == BatchControl::Stop {
+                    return Ok(BatchControl::Stop);
+                }
+                Ok(if execution_limit.is_reached(emitted) {
+                    BatchControl::Stop
+                } else {
+                    BatchControl::Continue
+                })
+            })
+        }
+        PhysicalPlan::ProjectExec { items, input } => {
+            let mut emitted = 0usize;
+            execute_binding_batches(input, context, execution_limit, &mut |batch| {
+                let mut projected = Vec::with_capacity(batch.len());
+                for binding in batch {
+                    let mut values = BTreeMap::new();
+                    for item in items {
+                        let value = project_value(item, catalog, &binding)?;
+                        insert_projected_value(&mut values, &item.name, value);
+                    }
+                    projected.push(Binding {
+                        values,
+                        nodes: binding.nodes,
+                        relationships: binding.relationships,
+                    });
+                }
+                emitted = emitted.saturating_add(projected.len());
+                if !projected.is_empty() && emit(projected)? == BatchControl::Stop {
+                    return Ok(BatchControl::Stop);
+                }
+                Ok(if execution_limit.is_reached(emitted) {
+                    BatchControl::Stop
+                } else {
+                    BatchControl::Continue
+                })
+            })
+        }
+        PhysicalPlan::LimitExec {
+            offset,
+            limit,
+            input,
+        } => {
+            let mut skipped = 0usize;
+            let mut emitted = 0usize;
+            let output_cap = match (limit, execution_limit.output_rows) {
+                (Some(limit), Some(parent)) => (*limit).min(parent),
+                (Some(limit), None) => *limit,
+                (None, Some(parent)) => parent,
+                (None, None) => usize::MAX,
+            };
+            execute_binding_batches(
+                input,
+                context,
+                ExecutionLimit {
+                    output_rows: Some(offset.saturating_add(output_cap)),
+                },
+                &mut |batch| {
+                    let mut output = Vec::new();
+                    for binding in batch {
+                        if skipped < *offset {
+                            skipped += 1;
+                            continue;
+                        }
+                        if emitted == output_cap {
+                            break;
+                        }
+                        output.push(binding);
+                        emitted += 1;
+                    }
+                    if !output.is_empty() && emit(output)? == BatchControl::Stop {
+                        return Ok(BatchControl::Stop);
+                    }
+                    Ok(if emitted == output_cap {
+                        BatchControl::Stop
+                    } else {
+                        BatchControl::Continue
+                    })
+                },
+            )
+        }
+        PhysicalPlan::TopNExec {
+            items,
+            offset,
+            limit,
+            input,
+        } => {
+            let retained = offset.saturating_add(*limit);
+            if retained == 0 {
+                return Ok(BatchControl::Continue);
+            }
+            let mut tracker = OperatorMemoryTracker::new(memory.blocking_operator_bytes);
+            let mut spill_budget = SpillBudgetTracker::new("TopNExec", memory);
+            let mut runs = Vec::<spill::SpillRun>::new();
+            let mut heap = BinaryHeap::new();
+            let mut ordinal = 0u64;
+            let mut spilled_rows = 0usize;
+            execute_binding_batches(input, context, ExecutionLimit::unlimited(), &mut |batch| {
+                for binding in batch {
+                    let sort_values = items
+                        .iter()
+                        .map(|item| (sort_value(catalog, &binding, &item.key), item.direction))
+                        .collect();
+                    let candidate = TopNBinding {
+                        sort_values,
+                        ordinal,
+                        binding,
+                    };
+                    ordinal = ordinal.saturating_add(1);
+                    let bytes = candidate.memory_bytes();
+                    ensure_operator_item_fits("TopNExec", bytes, &tracker)?;
+                    if heap.len() < retained {
+                        if tracker.would_exceed(bytes) {
+                            spilled_rows = spilled_rows.saturating_add(heap.len());
+                            runs.push(spill_top_n_run(
+                                &mut heap,
+                                &memory.spill_directory,
+                                &mut spill_budget,
+                                context.task_context,
+                            )?);
+                            tracker.reset();
+                        }
+                        tracker.charge(bytes);
+                        heap.push(candidate);
+                    } else if heap.peek().is_some_and(|worst| candidate < *worst) {
+                        let worst_bytes = heap.peek().map(TopNBinding::memory_bytes).unwrap_or(0);
+                        if tracker
+                            .used_bytes
+                            .saturating_sub(worst_bytes)
+                            .saturating_add(bytes)
+                            > tracker.budget_bytes
+                        {
+                            spilled_rows = spilled_rows.saturating_add(heap.len());
+                            runs.push(spill_top_n_run(
+                                &mut heap,
+                                &memory.spill_directory,
+                                &mut spill_budget,
+                                context.task_context,
+                            )?);
+                            tracker.reset();
+                        } else {
+                            heap.pop();
+                            tracker.release(worst_bytes);
+                        }
+                        tracker.charge(bytes);
+                        heap.push(candidate);
+                    }
+                }
+                Ok(BatchControl::Continue)
+            })?;
+
+            if !runs.is_empty() {
+                if !heap.is_empty() {
+                    spilled_rows = spilled_rows.saturating_add(heap.len());
+                    runs.push(spill_top_n_run(
+                        &mut heap,
+                        &memory.spill_directory,
+                        &mut spill_budget,
+                        context.task_context,
+                    )?);
+                }
+                runs = compact_sort_runs(
+                    runs,
+                    items,
+                    catalog,
+                    memory,
+                    &mut spill_budget,
+                    context.task_context,
+                )?;
+                record_blocking_memory_report(skein_executor::BlockingOperatorMemoryReport {
+                    operator: "TopNExec".to_string(),
+                    budget_bytes: tracker.budget_bytes,
+                    peak_tracked_bytes: tracker.peak_bytes,
+                    input_rows: ordinal as usize,
+                    max_spill_bytes: spill_budget.max_bytes,
+                    max_spill_runs: spill_budget.max_runs,
+                    spilled_bytes: spill_budget.used_bytes,
+                    spill_run_count: spill_budget.run_count,
+                    spilled_rows,
+                });
+                return merge_sort_runs(
+                    &runs,
+                    items,
+                    catalog,
+                    memory.blocking_operator_bytes,
+                    memory.batch_rows.get(),
+                    *offset,
+                    (*limit).min(execution_limit.output_rows.unwrap_or(usize::MAX)),
+                    context.task_context,
+                    emit,
+                );
+            }
+            record_blocking_memory_report(skein_executor::BlockingOperatorMemoryReport {
+                operator: "TopNExec".to_string(),
+                budget_bytes: tracker.budget_bytes,
+                peak_tracked_bytes: tracker.peak_bytes,
+                input_rows: ordinal as usize,
+                max_spill_bytes: memory.max_spill_bytes.get(),
+                max_spill_runs: memory.max_spill_runs.get(),
+                spilled_bytes: 0,
+                spill_run_count: 0,
+                spilled_rows: 0,
+            });
+            let mut selected = heap.into_vec();
+            selected.sort();
+            let bindings = selected
+                .into_iter()
+                .skip(*offset)
+                .take(*limit)
+                .take(execution_limit.output_rows.unwrap_or(usize::MAX))
+                .map(|entry| entry.binding);
+            emit_binding_iterator(bindings, memory.batch_rows.get(), emit)
+        }
+        PhysicalPlan::SortExec { items, input } => {
+            stream_sort_batches(input, items, context, execution_limit, emit)
+        }
+        PhysicalPlan::AggregateExec {
+            group_keys,
+            items,
+            input,
+        } => stream_aggregate_batches(input, group_keys, items, context, execution_limit, emit),
+        PhysicalPlan::DistinctExec { input } => {
+            stream_distinct_batches(input, context, execution_limit, emit)
+        }
+        _ => unreachable!("batch pipeline capability check rejected this operator"),
+    }
+}
+
+fn stream_cartesian_product_batches(
+    left: &PhysicalPlan,
+    right: &PhysicalPlan,
+    context: BatchReadContext<'_>,
+    execution_limit: ExecutionLimit,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    let mut tracker = OperatorMemoryTracker::new(context.memory.blocking_operator_bytes);
+    let mut spill_budget = SpillBudgetTracker::new("NodeCartesianProductExec", context.memory);
+    let mut right_bindings = Vec::new();
+    let mut runs = Vec::new();
+    let mut right_ordinal = 0u64;
+    execute_binding_batches(right, context, ExecutionLimit::unlimited(), &mut |batch| {
+        for binding in batch {
+            let bytes = binding_memory_bytes(&binding);
+            ensure_operator_item_fits("NodeCartesianProductExec", bytes, &tracker)?;
+            if tracker.would_exceed(bytes) {
+                runs.push(spill_binding_run(
+                    "cartesian",
+                    &mut right_bindings,
+                    &context.memory.spill_directory,
+                    &mut spill_budget,
+                    context.task_context,
+                )?);
+                tracker.reset();
+            }
+            tracker.charge(bytes);
+            right_bindings.push(binding);
+            right_ordinal = right_ordinal.saturating_add(1);
+        }
+        Ok(BatchControl::Continue)
+    })?;
+    if !runs.is_empty() && !right_bindings.is_empty() {
+        runs.push(spill_binding_run(
+            "cartesian",
+            &mut right_bindings,
+            &context.memory.spill_directory,
+            &mut spill_budget,
+            context.task_context,
+        )?);
+        tracker.reset();
+    }
+    record_blocking_memory_report(skein_executor::BlockingOperatorMemoryReport {
+        operator: "NodeCartesianProductExec".to_string(),
+        budget_bytes: tracker.budget_bytes,
+        peak_tracked_bytes: tracker.peak_bytes,
+        input_rows: right_ordinal as usize,
+        max_spill_bytes: spill_budget.max_bytes,
+        max_spill_runs: spill_budget.max_runs,
+        spilled_bytes: spill_budget.used_bytes,
+        spill_run_count: spill_budget.run_count,
+        spilled_rows: if runs.is_empty() {
+            0
+        } else {
+            right_ordinal as usize
+        },
+    });
+    if right_bindings.is_empty() && runs.is_empty() {
+        return Ok(BatchControl::Continue);
+    }
+
+    let mut output = Vec::with_capacity(context.memory.batch_rows.get());
+    let mut emitted = 0usize;
+    let control =
+        execute_binding_batches(left, context, ExecutionLimit::unlimited(), &mut |batch| {
+            for left_binding in batch {
+                if runs.is_empty() {
+                    for right_binding in &right_bindings {
+                        if push_cartesian_output(
+                            &left_binding,
+                            right_binding,
+                            context.memory.batch_rows.get(),
+                            execution_limit,
+                            &mut output,
+                            &mut emitted,
+                            emit,
+                        )? == BatchControl::Stop
+                        {
+                            return Ok(BatchControl::Stop);
+                        }
+                    }
+                } else {
+                    for run in &runs {
+                        runtime_checkpoint(context.task_context)?;
+                        let mut reader = run.reader()?;
+                        while let Some((_, right_binding)) =
+                            reader.read(context.memory.blocking_operator_bytes.get())?
+                        {
+                            runtime_checkpoint(context.task_context)?;
+                            if push_cartesian_output(
+                                &left_binding,
+                                &right_binding,
+                                context.memory.batch_rows.get(),
+                                execution_limit,
+                                &mut output,
+                                &mut emitted,
+                                emit,
+                            )? == BatchControl::Stop
+                            {
+                                return Ok(BatchControl::Stop);
+                            }
+                        }
+                    }
+                    if execution_limit.is_reached(emitted) {
+                        return Ok(BatchControl::Stop);
+                    }
+                }
+            }
+            Ok(BatchControl::Continue)
+        })?;
+    if !output.is_empty() && emit(output)? == BatchControl::Stop {
+        return Ok(BatchControl::Stop);
+    }
+    Ok(control)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_cartesian_output(
+    left: &Binding,
+    right: &Binding,
+    batch_rows: usize,
+    execution_limit: ExecutionLimit,
+    output: &mut BindingBatch,
+    emitted: &mut usize,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    let mut values = left.values.clone();
+    values.extend(right.values.clone());
+    let mut nodes = left.nodes.clone();
+    nodes.extend(right.nodes.clone());
+    let mut relationships = left.relationships.clone();
+    relationships.extend(right.relationships.clone());
+    output.push(Binding {
+        values,
+        nodes,
+        relationships,
+    });
+    *emitted = (*emitted).saturating_add(1);
+    if output.len() == batch_rows
+        && emit(std::mem::replace(output, Vec::with_capacity(batch_rows)))? == BatchControl::Stop
+    {
+        return Ok(BatchControl::Stop);
+    }
+    Ok(if execution_limit.is_reached(*emitted) {
+        BatchControl::Stop
+    } else {
+        BatchControl::Continue
+    })
+}

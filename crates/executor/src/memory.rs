@@ -1,0 +1,297 @@
+//! Execution memory defaults and admission estimates.
+
+use skein_plan::{PhysicalPlan, PlanChildren};
+use skein_storage::MutationLimits;
+use std::num::{NonZeroU64, NonZeroUsize};
+use std::path::PathBuf;
+
+#[doc(hidden)]
+pub const DEFAULT_EXECUTION_BATCH_ROWS: usize = 256;
+const DEFAULT_EXECUTION_BATCH_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+#[doc(hidden)]
+pub const DEFAULT_BLOCKING_OPERATOR_MEMORY_BYTES: usize = 64 * 1024 * 1024;
+const DEFAULT_EXECUTION_MAX_SPILL_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const DEFAULT_EXECUTION_MAX_SPILL_RUNS: usize = 128;
+const MUTATION_OPERATION_BOOKKEEPING_BYTES: u64 = 64;
+const MUTATION_AFFECTED_ROW_BOOKKEEPING_BYTES: u64 = 16;
+const MUTATION_RESULT_ROW_BOOKKEEPING_BYTES: u64 = 64;
+#[doc(hidden)]
+pub const SOURCE_SEGMENT_SCAN_MAX_WAVE_BYTES: u64 = 2 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionMemoryConfig {
+    /// Maximum row count in an executor-owned transfer batch.
+    pub batch_rows: NonZeroUsize,
+    /// Maximum estimated resident bytes in an executor-owned transfer batch.
+    pub batch_payload_bytes: NonZeroUsize,
+    /// Maximum estimated resident bytes retained by one blocking operator.
+    pub blocking_operator_bytes: NonZeroUsize,
+    /// Maximum cumulative serialized spill bytes, including merge passes.
+    pub max_spill_bytes: NonZeroU64,
+    /// Maximum cumulative spill runs created, including merge passes.
+    pub max_spill_runs: NonZeroUsize,
+    /// Directory for query-scoped spill runs removed when execution finishes.
+    pub spill_directory: PathBuf,
+}
+
+impl Default for ExecutionMemoryConfig {
+    fn default() -> Self {
+        Self {
+            batch_rows: NonZeroUsize::new(DEFAULT_EXECUTION_BATCH_ROWS)
+                .expect("default execution batch size is non-zero"),
+            batch_payload_bytes: NonZeroUsize::new(DEFAULT_EXECUTION_BATCH_PAYLOAD_BYTES)
+                .expect("default execution batch byte size is non-zero"),
+            blocking_operator_bytes: NonZeroUsize::new(DEFAULT_BLOCKING_OPERATOR_MEMORY_BYTES)
+                .expect("default blocking operator memory budget is non-zero"),
+            max_spill_bytes: NonZeroU64::new(DEFAULT_EXECUTION_MAX_SPILL_BYTES)
+                .expect("default spill byte budget is non-zero"),
+            max_spill_runs: NonZeroUsize::new(DEFAULT_EXECUTION_MAX_SPILL_RUNS)
+                .expect("default spill run budget is non-zero"),
+            spill_directory: std::env::temp_dir(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct ExecutionMemoryEstimate {
+    pub pipeline_batch_count: usize,
+    pub blocking_operator_count: usize,
+    pub pipeline_bytes: u64,
+    pub blocking_bytes: u64,
+    pub fixed_operator_bytes: u64,
+    pub total_bytes: u64,
+}
+
+#[doc(hidden)]
+pub fn estimated_execution_memory(
+    plan: &PhysicalPlan,
+    memory: &ExecutionMemoryConfig,
+) -> ExecutionMemoryEstimate {
+    let shape = peak_execution_memory_shape(plan, memory);
+    let pipeline_bytes = usize_to_u64(shape.pipeline_batch_count)
+        .saturating_mul(usize_to_u64(memory.batch_payload_bytes.get()));
+    let blocking_bytes = usize_to_u64(shape.blocking_operator_count)
+        .saturating_mul(usize_to_u64(memory.blocking_operator_bytes.get()));
+    let fixed_operator_bytes = shape.fixed_operator_bytes;
+    ExecutionMemoryEstimate {
+        pipeline_batch_count: shape.pipeline_batch_count,
+        blocking_operator_count: shape.blocking_operator_count,
+        pipeline_bytes,
+        blocking_bytes,
+        fixed_operator_bytes,
+        total_bytes: pipeline_bytes
+            .saturating_add(blocking_bytes)
+            .saturating_add(fixed_operator_bytes),
+    }
+}
+
+#[doc(hidden)]
+pub fn estimated_mutation_memory_bytes(
+    limits: MutationLimits,
+    max_wal_record_bytes: Option<usize>,
+) -> u64 {
+    let Some(max_wal_record_bytes) = max_wal_record_bytes else {
+        return u64::MAX;
+    };
+    usize_to_u64(max_wal_record_bytes)
+        .saturating_mul(2)
+        .saturating_add(
+            usize_to_u64(limits.max_operations.get())
+                .saturating_mul(MUTATION_OPERATION_BOOKKEEPING_BYTES),
+        )
+        .saturating_add(
+            usize_to_u64(limits.max_affected_rows.get())
+                .saturating_mul(MUTATION_AFFECTED_ROW_BOOKKEEPING_BYTES),
+        )
+        .saturating_add(
+            usize_to_u64(limits.max_result_rows.get())
+                .saturating_mul(MUTATION_RESULT_ROW_BOOKKEEPING_BYTES),
+        )
+        .saturating_add(usize_to_u64(limits.max_result_payload_bytes.get()))
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ExecutionMemoryShape {
+    pipeline_batch_count: usize,
+    blocking_operator_count: usize,
+    fixed_operator_bytes: u64,
+}
+
+fn peak_execution_memory_shape(
+    plan: &PhysicalPlan,
+    memory: &ExecutionMemoryConfig,
+) -> ExecutionMemoryShape {
+    let mut shape = match plan.children() {
+        PlanChildren::None => ExecutionMemoryShape::default(),
+        PlanChildren::Unary(input) => peak_execution_memory_shape(input, memory),
+        PlanChildren::Binary(left, right) => peak_shape_max(
+            peak_execution_memory_shape(left, memory),
+            peak_execution_memory_shape(right, memory),
+            memory,
+        ),
+    };
+    shape.pipeline_batch_count = shape.pipeline_batch_count.saturating_add(1);
+    if retains_blocking_state(plan) {
+        shape.blocking_operator_count = shape.blocking_operator_count.saturating_add(1);
+    }
+    if matches!(plan, PhysicalPlan::SourceSegmentScan { .. }) {
+        shape.fixed_operator_bytes = shape
+            .fixed_operator_bytes
+            .saturating_add(SOURCE_SEGMENT_SCAN_MAX_WAVE_BYTES);
+    }
+    shape
+}
+
+fn peak_shape_max(
+    left: ExecutionMemoryShape,
+    right: ExecutionMemoryShape,
+    memory: &ExecutionMemoryConfig,
+) -> ExecutionMemoryShape {
+    let shape_bytes = |shape: ExecutionMemoryShape| {
+        usize_to_u64(shape.pipeline_batch_count)
+            .saturating_mul(usize_to_u64(memory.batch_payload_bytes.get()))
+            .saturating_add(
+                usize_to_u64(shape.blocking_operator_count)
+                    .saturating_mul(usize_to_u64(memory.blocking_operator_bytes.get())),
+            )
+            .saturating_add(shape.fixed_operator_bytes)
+    };
+    let left_total = shape_bytes(left);
+    let right_total = shape_bytes(right);
+    if left_total > right_total
+        || (left_total == right_total && left.fixed_operator_bytes >= right.fixed_operator_bytes)
+    {
+        left
+    } else {
+        right
+    }
+}
+
+fn retains_blocking_state(plan: &PhysicalPlan) -> bool {
+    matches!(
+        plan,
+        PhysicalPlan::GraphAlgorithm { .. }
+            | PhysicalPlan::VectorSeedScan { .. }
+            | PhysicalPlan::NodeCartesianProductExec { .. }
+            | PhysicalPlan::AdjacencyExpandExec { .. }
+            | PhysicalPlan::OptionalRelationshipCountSumExec { .. }
+            | PhysicalPlan::ThreadRepairStatsExec { .. }
+            | PhysicalPlan::ShortestPathExec { .. }
+            | PhysicalPlan::AggregateExec { .. }
+            | PhysicalPlan::DistinctExec { .. }
+            | PhysicalPlan::SortExec { .. }
+            | PhysicalPlan::TopNExec { .. }
+    )
+}
+
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use skein_plan::Predicate;
+
+    fn admission_test_config() -> ExecutionMemoryConfig {
+        ExecutionMemoryConfig {
+            batch_rows: NonZeroUsize::new(8).unwrap(),
+            batch_payload_bytes: NonZeroUsize::new(1024).unwrap(),
+            blocking_operator_bytes: NonZeroUsize::new(4096).unwrap(),
+            max_spill_bytes: NonZeroU64::new(1024 * 1024).unwrap(),
+            max_spill_runs: NonZeroUsize::new(8).unwrap(),
+            spill_directory: std::env::temp_dir(),
+        }
+    }
+
+    #[test]
+    fn execution_admission_uses_configured_pipeline_and_blocking_budgets() {
+        let plan = PhysicalPlan::SortExec {
+            items: Vec::new(),
+            input: Box::new(PhysicalPlan::DistinctExec {
+                input: Box::new(PhysicalPlan::SeqNodeScan {
+                    variable: "n".to_string(),
+                    label: "Node".to_string(),
+                }),
+            }),
+        };
+
+        let estimate = estimated_execution_memory(&plan, &admission_test_config());
+
+        assert_eq!(estimate.pipeline_batch_count, 3);
+        assert_eq!(estimate.blocking_operator_count, 2);
+        assert_eq!(estimate.pipeline_bytes, 3 * 1024);
+        assert_eq!(estimate.blocking_bytes, 2 * 4096);
+        assert_eq!(estimate.fixed_operator_bytes, 0);
+        assert_eq!(estimate.total_bytes, 11 * 1024);
+    }
+
+    #[test]
+    fn binary_admission_uses_the_higher_memory_child_path() {
+        let plan = PhysicalPlan::NodeCartesianProductExec {
+            left: Box::new(PhysicalPlan::ProjectExec {
+                items: Vec::new(),
+                input: Box::new(PhysicalPlan::ProjectExec {
+                    items: Vec::new(),
+                    input: Box::new(PhysicalPlan::SeqNodeScan {
+                        variable: "left".to_string(),
+                        label: "Left".to_string(),
+                    }),
+                }),
+            }),
+            right: Box::new(PhysicalPlan::DistinctExec {
+                input: Box::new(PhysicalPlan::SeqNodeScan {
+                    variable: "right".to_string(),
+                    label: "Right".to_string(),
+                }),
+            }),
+        };
+
+        let estimate = estimated_execution_memory(&plan, &admission_test_config());
+
+        assert_eq!(estimate.pipeline_batch_count, 3);
+        assert_eq!(estimate.blocking_operator_count, 2);
+        assert_eq!(estimate.total_bytes, 11 * 1024);
+    }
+
+    #[test]
+    fn source_segment_admission_includes_the_fixed_io_wave() {
+        let plan = PhysicalPlan::SourceSegmentScan {
+            variable: "n".to_string(),
+            predicate: Predicate::ConstantBool(true),
+        };
+
+        let estimate = estimated_execution_memory(&plan, &admission_test_config());
+
+        assert_eq!(estimate.pipeline_bytes, 1024);
+        assert_eq!(
+            estimate.fixed_operator_bytes,
+            SOURCE_SEGMENT_SCAN_MAX_WAVE_BYTES
+        );
+        assert_eq!(
+            estimate.total_bytes,
+            1024 + SOURCE_SEGMENT_SCAN_MAX_WAVE_BYTES
+        );
+    }
+
+    #[test]
+    fn mutation_admission_reserves_wal_staging_and_bounded_results() {
+        let limits = MutationLimits {
+            max_affected_rows: NonZeroUsize::new(3).unwrap(),
+            max_operations: NonZeroUsize::new(5).unwrap(),
+            max_result_rows: NonZeroUsize::new(7).unwrap(),
+            max_result_payload_bytes: NonZeroUsize::new(11).unwrap(),
+        };
+
+        assert_eq!(
+            estimated_mutation_memory_bytes(limits, Some(13)),
+            2 * 13
+                + 5 * MUTATION_OPERATION_BOOKKEEPING_BYTES
+                + 3 * MUTATION_AFFECTED_ROW_BOOKKEEPING_BYTES
+                + 7 * MUTATION_RESULT_ROW_BOOKKEEPING_BYTES
+                + 11
+        );
+        assert_eq!(estimated_mutation_memory_bytes(limits, None), u64::MAX);
+    }
+}

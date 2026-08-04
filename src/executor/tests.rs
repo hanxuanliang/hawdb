@@ -1,0 +1,885 @@
+//! Executor admission, streaming, spill, and graph operator regressions.
+
+use super::*;
+
+fn spill_test_config(name: &str) -> ExecutionMemoryConfig {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    ExecutionMemoryConfig {
+        batch_rows: NonZeroUsize::new(2).unwrap(),
+        batch_payload_bytes: NonZeroUsize::new(1024 * 1024).unwrap(),
+        blocking_operator_bytes: NonZeroUsize::new(1024).unwrap(),
+        max_spill_bytes: NonZeroU64::new(64 * 1024 * 1024).unwrap(),
+        max_spill_runs: NonZeroUsize::new(64).unwrap(),
+        spill_directory: std::env::temp_dir().join(format!("skein-{name}-{nonce}")),
+    }
+}
+
+#[test]
+fn sort_pipeline_spills_runs_under_a_tight_memory_budget() {
+    let mut catalog = Catalog::default();
+    let mut store = GraphStore::in_memory();
+    for rank in (0..12).rev() {
+        store
+            .create_node(
+                &mut catalog,
+                "Item",
+                properties([("rank", Value::Int(rank))]),
+            )
+            .unwrap();
+    }
+    let plan = PhysicalPlan::ProjectExec {
+        items: vec![Projection {
+            expression: ProjectionExpression::Property {
+                variable: "n".to_string(),
+                property: "rank".to_string(),
+            },
+            name: "rank".to_string(),
+        }],
+        input: Box::new(PhysicalPlan::SortExec {
+            items: vec![SortItem {
+                key: SortKey::Property {
+                    variable: "n".to_string(),
+                    property: "rank".to_string(),
+                },
+                direction: SortDirection::Asc,
+            }],
+            input: Box::new(PhysicalPlan::SeqNodeScan {
+                variable: "n".to_string(),
+                label: "Item".to_string(),
+            }),
+        }),
+    };
+    let memory = spill_test_config("sort-spill");
+    let mut external = NoExternalReadOperator;
+    let output = execute_with_row_limit_profile_and_external_and_memory(
+        &plan,
+        &mut catalog,
+        &mut store,
+        &BTreeMap::new(),
+        &mut external,
+        None,
+        &memory,
+    )
+    .unwrap();
+
+    assert_eq!(
+        output
+            .rows
+            .iter()
+            .map(|row| row["rank"].clone())
+            .collect::<Vec<_>>(),
+        (0..12).map(Value::Int).collect::<Vec<_>>()
+    );
+    let report = output
+        .profile
+        .blocking_operator_memory_reports
+        .iter()
+        .find(|report| report.operator == "SortExec")
+        .unwrap();
+    assert_eq!(report.input_rows, 12);
+    assert!(report.spill_run_count > 1);
+    assert_eq!(report.spilled_rows, 12);
+    assert!(report.spilled_bytes > 0);
+    assert!(report.spilled_bytes <= report.max_spill_bytes);
+    assert!(report.spill_run_count <= report.max_spill_runs);
+    let pipeline = &output.profile.pipeline_memory_report;
+    assert_eq!(pipeline.intermediate_rows, 36);
+    assert!(pipeline.intermediate_payload_bytes >= pipeline.output_payload_bytes);
+    assert_eq!(pipeline.peak_batch_rows, 2);
+    assert_eq!(pipeline.output_rows, 12);
+    assert!(pipeline.output_payload_bytes > 0);
+    assert!(pipeline.start_resident_bytes.is_some());
+    assert!(pipeline.steady_resident_bytes.is_some());
+    assert!(pipeline.peak_resident_bytes.is_some());
+    assert!(pipeline.total_page_faults.is_some());
+    assert_eq!(pipeline.minor_page_faults.is_some(), cfg!(unix));
+    assert_eq!(pipeline.major_page_faults.is_some(), cfg!(unix));
+    assert!(std::fs::read_dir(&memory.spill_directory)
+        .unwrap()
+        .next()
+        .is_none());
+    std::fs::remove_dir(memory.spill_directory).unwrap();
+}
+
+#[test]
+fn grouped_aggregate_pipeline_spills_and_merges_groups() {
+    let mut catalog = Catalog::default();
+    let mut store = GraphStore::in_memory();
+    for value in 0..20 {
+        store
+            .create_node(
+                &mut catalog,
+                "Item",
+                properties([("group", Value::Int(value % 3))]),
+            )
+            .unwrap();
+    }
+    let plan = PhysicalPlan::AggregateExec {
+        group_keys: vec![Projection {
+            expression: ProjectionExpression::Property {
+                variable: "n".to_string(),
+                property: "group".to_string(),
+            },
+            name: "group".to_string(),
+        }],
+        items: vec![Aggregation {
+            function: AggregateFunction::Count,
+            target: AggregateTarget::All,
+            distinct: false,
+            name: "count".to_string(),
+        }],
+        input: Box::new(PhysicalPlan::SeqNodeScan {
+            variable: "n".to_string(),
+            label: "Item".to_string(),
+        }),
+    };
+    let memory = spill_test_config("aggregate-spill");
+    let mut external = NoExternalReadOperator;
+    let output = execute_with_row_limit_profile_and_external_and_memory(
+        &plan,
+        &mut catalog,
+        &mut store,
+        &BTreeMap::new(),
+        &mut external,
+        None,
+        &memory,
+    )
+    .unwrap();
+
+    assert_eq!(
+        output
+            .rows
+            .iter()
+            .map(|row| (row["group"].clone(), row["count"].clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (Value::Int(0), Value::Int(7)),
+            (Value::Int(1), Value::Int(7)),
+            (Value::Int(2), Value::Int(6)),
+        ]
+    );
+    let report = output
+        .profile
+        .blocking_operator_memory_reports
+        .iter()
+        .find(|report| report.operator == "AggregateExec")
+        .unwrap();
+    assert_eq!(report.input_rows, 20);
+    assert!(report.spill_run_count > 1);
+    assert_eq!(report.spilled_rows, 20);
+    assert!(report.spilled_bytes > 0);
+    assert!(report.spilled_bytes <= report.max_spill_bytes);
+    assert!(report.spill_run_count <= report.max_spill_runs);
+    assert!(std::fs::read_dir(&memory.spill_directory)
+        .unwrap()
+        .next()
+        .is_none());
+    std::fs::remove_dir(memory.spill_directory).unwrap();
+}
+
+#[test]
+fn top_n_pipeline_spills_without_changing_order_or_offset() {
+    let mut catalog = Catalog::default();
+    let mut store = GraphStore::in_memory();
+    for rank in (0..50).rev() {
+        store
+            .create_node(
+                &mut catalog,
+                "Item",
+                properties([("rank", Value::Int(rank))]),
+            )
+            .unwrap();
+    }
+    let plan = PhysicalPlan::ProjectExec {
+        items: vec![Projection {
+            expression: ProjectionExpression::Property {
+                variable: "n".to_string(),
+                property: "rank".to_string(),
+            },
+            name: "rank".to_string(),
+        }],
+        input: Box::new(PhysicalPlan::TopNExec {
+            items: vec![SortItem {
+                key: SortKey::Property {
+                    variable: "n".to_string(),
+                    property: "rank".to_string(),
+                },
+                direction: SortDirection::Asc,
+            }],
+            offset: 7,
+            limit: 5,
+            input: Box::new(PhysicalPlan::SeqNodeScan {
+                variable: "n".to_string(),
+                label: "Item".to_string(),
+            }),
+        }),
+    };
+    let memory = spill_test_config("topn-spill");
+    let mut external = NoExternalReadOperator;
+    let output = execute_with_row_limit_profile_and_external_and_memory(
+        &plan,
+        &mut catalog,
+        &mut store,
+        &BTreeMap::new(),
+        &mut external,
+        None,
+        &memory,
+    )
+    .unwrap();
+
+    assert_eq!(
+        output
+            .rows
+            .iter()
+            .map(|row| row["rank"].clone())
+            .collect::<Vec<_>>(),
+        (7..12).map(Value::Int).collect::<Vec<_>>()
+    );
+    let report = output
+        .profile
+        .blocking_operator_memory_reports
+        .iter()
+        .find(|report| report.operator == "TopNExec")
+        .unwrap();
+    assert!(report.spill_run_count > 1);
+    assert!(report.spilled_rows > 0);
+    assert!(report.spilled_rows <= report.input_rows);
+    assert!(report.spilled_bytes > 0);
+    assert!(report.spilled_bytes <= report.max_spill_bytes);
+    assert!(report.spill_run_count <= report.max_spill_runs);
+    assert!(std::fs::read_dir(&memory.spill_directory)
+        .unwrap()
+        .next()
+        .is_none());
+    std::fs::remove_dir(memory.spill_directory).unwrap();
+}
+
+#[test]
+fn distinct_spills_and_deduplicates_across_memory_bounded_runs() {
+    let mut catalog = Catalog::default();
+    let mut store = GraphStore::in_memory();
+    for value in 0..20 {
+        store
+            .create_node(
+                &mut catalog,
+                "Item",
+                properties([(
+                    "value",
+                    Value::String(format!("{}-{}", value % 5, "x".repeat(96))),
+                )]),
+            )
+            .unwrap();
+    }
+    let plan = PhysicalPlan::DistinctExec {
+        input: Box::new(PhysicalPlan::ProjectExec {
+            items: vec![Projection {
+                expression: ProjectionExpression::Property {
+                    variable: "n".to_string(),
+                    property: "value".to_string(),
+                },
+                name: "value".to_string(),
+            }],
+            input: Box::new(PhysicalPlan::SeqNodeScan {
+                variable: "n".to_string(),
+                label: "Item".to_string(),
+            }),
+        }),
+    };
+    let memory = ExecutionMemoryConfig {
+        blocking_operator_bytes: NonZeroUsize::new(2048).unwrap(),
+        ..spill_test_config("distinct-admission")
+    };
+    let mut external = NoExternalReadOperator;
+    let output = execute_with_row_limit_profile_and_external_and_memory(
+        &plan,
+        &mut catalog,
+        &mut store,
+        &BTreeMap::new(),
+        &mut external,
+        None,
+        &memory,
+    )
+    .unwrap();
+    assert_eq!(output.rows.len(), 5);
+    let report = output
+        .profile
+        .blocking_operator_memory_reports
+        .iter()
+        .find(|report| report.operator == "DistinctExec")
+        .unwrap();
+    assert!(report.spilled_bytes > 0);
+    assert!(report.spill_run_count > 1);
+    assert_eq!(report.spilled_rows, 20);
+    assert!(report.peak_tracked_bytes <= report.budget_bytes);
+    assert!(std::fs::read_dir(&memory.spill_directory)
+        .unwrap()
+        .next()
+        .is_none());
+    std::fs::remove_dir(memory.spill_directory).unwrap();
+}
+
+#[test]
+fn collect_aggregate_rejects_unbounded_group_state() {
+    let mut catalog = Catalog::default();
+    let mut store = GraphStore::in_memory();
+    for value in 0..20 {
+        store
+            .create_node(
+                &mut catalog,
+                "Item",
+                properties([(
+                    "value",
+                    Value::String(format!("{value}-{}", "x".repeat(64))),
+                )]),
+            )
+            .unwrap();
+    }
+    let plan = PhysicalPlan::AggregateExec {
+        group_keys: Vec::new(),
+        items: vec![Aggregation {
+            function: AggregateFunction::Collect,
+            target: AggregateTarget::Property {
+                variable: "n".to_string(),
+                property: "value".to_string(),
+            },
+            distinct: false,
+            name: "values".to_string(),
+        }],
+        input: Box::new(PhysicalPlan::SeqNodeScan {
+            variable: "n".to_string(),
+            label: "Item".to_string(),
+        }),
+    };
+    let memory = ExecutionMemoryConfig {
+        blocking_operator_bytes: NonZeroUsize::new(1024).unwrap(),
+        ..spill_test_config("collect-admission")
+    };
+    let mut external = NoExternalReadOperator;
+    let error = execute_with_row_limit_profile_and_external_and_memory(
+        &plan,
+        &mut catalog,
+        &mut store,
+        &BTreeMap::new(),
+        &mut external,
+        None,
+        &memory,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("AggregateExec state exceeds"));
+}
+
+#[test]
+fn cartesian_product_spills_an_oversized_build_side() {
+    let mut catalog = Catalog::default();
+    let mut store = GraphStore::in_memory();
+    for value in 0..20 {
+        store
+            .create_node(
+                &mut catalog,
+                "Right",
+                properties([("value", Value::Int(value))]),
+            )
+            .unwrap();
+    }
+    store
+        .create_node(&mut catalog, "Left", BTreeMap::new())
+        .unwrap();
+    let plan = PhysicalPlan::NodeCartesianProductExec {
+        left: Box::new(PhysicalPlan::SeqNodeScan {
+            variable: "left".to_string(),
+            label: "Left".to_string(),
+        }),
+        right: Box::new(PhysicalPlan::SeqNodeScan {
+            variable: "right".to_string(),
+            label: "Right".to_string(),
+        }),
+    };
+    let memory = ExecutionMemoryConfig {
+        blocking_operator_bytes: NonZeroUsize::new(1024).unwrap(),
+        ..spill_test_config("cartesian-admission")
+    };
+    let mut external = NoExternalReadOperator;
+    let output = execute_with_row_limit_profile_and_external_and_memory(
+        &plan,
+        &mut catalog,
+        &mut store,
+        &BTreeMap::new(),
+        &mut external,
+        None,
+        &memory,
+    )
+    .unwrap();
+    assert_eq!(output.rows.len(), 20);
+    let report = output
+        .profile
+        .blocking_operator_memory_reports
+        .iter()
+        .find(|report| report.operator == "NodeCartesianProductExec")
+        .unwrap();
+    assert!(report.spilled_bytes > 0);
+    assert!(report.spill_run_count > 0);
+    assert_eq!(report.spilled_rows, 20);
+    assert!(report.peak_tracked_bytes <= report.budget_bytes);
+    assert!(std::fs::read_dir(&memory.spill_directory)
+        .unwrap()
+        .next()
+        .is_none());
+    std::fs::remove_dir(memory.spill_directory).unwrap();
+}
+
+#[test]
+fn shortest_path_rejects_an_oversized_frontier() {
+    let mut catalog = Catalog::default();
+    let mut store = GraphStore::in_memory();
+    let source = store
+        .create_node(&mut catalog, "Node", BTreeMap::new())
+        .unwrap();
+    let target = store
+        .create_node(&mut catalog, "Node", BTreeMap::new())
+        .unwrap();
+    for _ in 0..32 {
+        let middle = store
+            .create_node(&mut catalog, "Node", BTreeMap::new())
+            .unwrap();
+        store
+            .create_relationship(&mut catalog, source, middle, "LINK", BTreeMap::new())
+            .unwrap();
+        store
+            .create_relationship(&mut catalog, middle, target, "LINK", BTreeMap::new())
+            .unwrap();
+    }
+    let error = all_shortest_paths(
+        &store,
+        ShortestPathSearch {
+            source,
+            target,
+            rel_type_id: catalog.rel_type_id("LINK"),
+            direction: RelationshipDirection::Outgoing,
+            min_hops: 1,
+            max_hops: 2,
+            path_node_visibility_filter: None,
+        },
+        NonZeroUsize::new(512).unwrap(),
+        usize::MAX,
+        None,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("blocking_operator_bytes"));
+}
+
+#[test]
+fn sort_rejects_spill_run_count_over_budget() {
+    let mut catalog = Catalog::default();
+    let mut store = GraphStore::in_memory();
+    for rank in (0..50).rev() {
+        store
+            .create_node(
+                &mut catalog,
+                "Item",
+                properties([("rank", Value::Int(rank))]),
+            )
+            .unwrap();
+    }
+    let plan = PhysicalPlan::SortExec {
+        items: vec![SortItem {
+            key: SortKey::Property {
+                variable: "n".to_string(),
+                property: "rank".to_string(),
+            },
+            direction: SortDirection::Asc,
+        }],
+        input: Box::new(PhysicalPlan::SeqNodeScan {
+            variable: "n".to_string(),
+            label: "Item".to_string(),
+        }),
+    };
+    let memory = ExecutionMemoryConfig {
+        max_spill_runs: NonZeroUsize::new(1).unwrap(),
+        ..spill_test_config("sort-run-admission")
+    };
+    let mut external = NoExternalReadOperator;
+    let error = execute_with_row_limit_profile_and_external_and_memory(
+        &plan,
+        &mut catalog,
+        &mut store,
+        &BTreeMap::new(),
+        &mut external,
+        None,
+        &memory,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("exceeded max_spill_runs 1"));
+    assert!(std::fs::read_dir(&memory.spill_directory)
+        .unwrap()
+        .next()
+        .is_none());
+    std::fs::remove_dir(memory.spill_directory).unwrap();
+}
+
+#[test]
+fn sort_rejects_spill_bytes_over_budget_and_removes_partial_run() {
+    let mut catalog = Catalog::default();
+    let mut store = GraphStore::in_memory();
+    for rank in (0..20).rev() {
+        store
+            .create_node(
+                &mut catalog,
+                "Item",
+                properties([("rank", Value::Int(rank))]),
+            )
+            .unwrap();
+    }
+    let plan = PhysicalPlan::SortExec {
+        items: vec![SortItem {
+            key: SortKey::Property {
+                variable: "n".to_string(),
+                property: "rank".to_string(),
+            },
+            direction: SortDirection::Asc,
+        }],
+        input: Box::new(PhysicalPlan::SeqNodeScan {
+            variable: "n".to_string(),
+            label: "Item".to_string(),
+        }),
+    };
+    let memory = ExecutionMemoryConfig {
+        max_spill_bytes: NonZeroU64::new(32).unwrap(),
+        ..spill_test_config("sort-byte-admission")
+    };
+    let mut external = NoExternalReadOperator;
+    let error = execute_with_row_limit_profile_and_external_and_memory(
+        &plan,
+        &mut catalog,
+        &mut store,
+        &BTreeMap::new(),
+        &mut external,
+        None,
+        &memory,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("remaining spill budget 32"));
+    assert!(std::fs::read_dir(&memory.spill_directory)
+        .unwrap()
+        .next()
+        .is_none());
+    std::fs::remove_dir(memory.spill_directory).unwrap();
+}
+
+#[test]
+fn graph_algorithms_admit_direction_specific_projections() {
+    let mut catalog = Catalog::default();
+    let mut store = GraphStore::in_memory();
+    let source = store
+        .create_node(&mut catalog, "Memory", properties([("id", Value::Int(1))]))
+        .unwrap();
+    let target = store
+        .create_node(&mut catalog, "Memory", properties([("id", Value::Int(2))]))
+        .unwrap();
+    store
+        .create_relationship(&mut catalog, source, target, "MENTIONS", BTreeMap::new())
+        .unwrap();
+    store
+        .register_projected_graph(
+            "MemoryGraph",
+            ProjectedGraphDefinition {
+                node_labels: vec!["Memory".to_string()],
+                rel_types: vec!["MENTIONS".to_string()],
+            },
+        )
+        .unwrap();
+    let memory = ExecutionMemoryConfig {
+        blocking_operator_bytes: NonZeroUsize::new(1024).unwrap(),
+        ..spill_test_config("algorithm-admission")
+    };
+
+    for algorithm in [GraphAlgorithmKind::PageRank, GraphAlgorithmKind::Louvain] {
+        let plan = PhysicalPlan::GraphAlgorithm {
+            algorithm,
+            graph_name: "MemoryGraph".to_string(),
+            options: crate::planner::GraphAlgorithmOptions {
+                damping: None,
+                max_iterations: Some(2),
+                max_levels: Some(1),
+            },
+            score_column: "score".to_string(),
+            node_visibility_predicate: None,
+        };
+        let mut external = NoExternalReadOperator;
+        let output = execute_with_row_limit_profile_and_external_and_memory(
+            &plan,
+            &mut catalog,
+            &mut store,
+            &BTreeMap::new(),
+            &mut external,
+            None,
+            &memory,
+        )
+        .unwrap();
+        assert_eq!(output.rows.len(), 2);
+    }
+}
+
+#[test]
+fn evaluates_nested_projection_expression_without_rebuilding_projection() {
+    let expression = ProjectionExpression::Coalesce(vec![
+        ProjectionExpression::Literal(Value::Null),
+        ProjectionExpression::Lower(Box::new(ProjectionExpression::Left {
+            expression: Box::new(ProjectionExpression::Literal(Value::String(
+                "SKEIN".to_string(),
+            ))),
+            length: 3,
+        })),
+    ]);
+    let binding = Binding {
+        values: BTreeMap::new(),
+        nodes: BTreeMap::new(),
+        relationships: BTreeMap::new(),
+    };
+
+    let value = evaluate_projection_expression(&expression, &Catalog::default(), &binding)
+        .expect("nested projection expression should evaluate");
+
+    assert_eq!(value, Value::String("ske".to_string()));
+}
+
+#[test]
+fn graph_expansion_state_enforces_candidate_and_payload_budgets_before_push() {
+    let binding = Binding {
+        values: BTreeMap::from([("value".to_string(), Value::String("payload".to_string()))]),
+        nodes: BTreeMap::new(),
+        relationships: BTreeMap::new(),
+    };
+    let mut candidate_limited = GraphExpansionExecutionState::new(
+        Some(skein_plan::GraphExpansionBudget {
+            candidate_limit: 1,
+            payload_byte_limit: usize::MAX,
+        }),
+        1,
+        1,
+    );
+    let mut output = Vec::new();
+    assert!(candidate_limited.try_push(&mut output, binding.clone(), None, 1));
+    assert!(!candidate_limited.try_push(&mut output, binding.clone(), None, 1));
+    assert_eq!(
+        candidate_limited.truncation_reason,
+        Some(skein_executor::GraphExpansionTruncationReason::CandidateLimit)
+    );
+
+    let mut payload_limited = GraphExpansionExecutionState::new(
+        Some(skein_plan::GraphExpansionBudget {
+            candidate_limit: 2,
+            payload_byte_limit: binding_payload_bytes(&binding).saturating_sub(1),
+        }),
+        1,
+        1,
+    );
+    let mut output = Vec::new();
+    assert!(!payload_limited.try_push(&mut output, binding, None, 1));
+    assert!(output.is_empty());
+    assert_eq!(
+        payload_limited.truncation_reason,
+        Some(skein_executor::GraphExpansionTruncationReason::PayloadByteLimit)
+    );
+}
+
+#[test]
+fn node_column_lookup_uses_property_index_pruning_for_exact_label() {
+    let mut catalog = Catalog::default();
+    let mut store = GraphStore::in_memory();
+    store
+        .create_node(
+            &mut catalog,
+            "Memory",
+            properties([
+                ("stable_id", Value::String("memory:1".to_string())),
+                ("title", Value::String("Graph foundations".to_string())),
+            ]),
+        )
+        .unwrap();
+    store
+        .create_node(
+            &mut catalog,
+            "Memory",
+            properties([
+                ("stable_id", Value::String("memory:2".to_string())),
+                ("title", Value::String("Storage notes".to_string())),
+            ]),
+        )
+        .unwrap();
+    store
+        .create_node(
+            &mut catalog,
+            "Memory",
+            properties([
+                ("stable_id", Value::String("memory:3".to_string())),
+                ("title", Value::String("Runtime notes".to_string())),
+            ]),
+        )
+        .unwrap();
+    store
+        .create_node(
+            &mut catalog,
+            "Seed",
+            properties([("target_stable_id", Value::String("memory:2".to_string()))]),
+        )
+        .unwrap();
+    store
+        .create_node(
+            &mut catalog,
+            "Seed",
+            properties([("target_stable_id", Value::String("memory:4".to_string()))]),
+        )
+        .unwrap();
+
+    let plan = PhysicalPlan::ProjectExec {
+        items: vec![
+            Projection {
+                expression: ProjectionExpression::Property {
+                    variable: "m".to_string(),
+                    property: "stable_id".to_string(),
+                },
+                name: "stable_id".to_string(),
+            },
+            Projection {
+                expression: ProjectionExpression::Property {
+                    variable: "m".to_string(),
+                    property: "title".to_string(),
+                },
+                name: "title".to_string(),
+            },
+        ],
+        input: Box::new(PhysicalPlan::NodeColumnLookupExec {
+            variable: "m".to_string(),
+            label: "Memory".to_string(),
+            property: "stable_id".to_string(),
+            column: "lookup_id".to_string(),
+            optional: true,
+            input: Box::new(PhysicalPlan::ProjectExec {
+                items: vec![Projection {
+                    expression: ProjectionExpression::Property {
+                        variable: "s".to_string(),
+                        property: "target_stable_id".to_string(),
+                    },
+                    name: "lookup_id".to_string(),
+                }],
+                input: Box::new(PhysicalPlan::SeqNodeScan {
+                    variable: "s".to_string(),
+                    label: "Seed".to_string(),
+                }),
+            }),
+        }),
+    };
+
+    let output = execute_with_row_limit_profile(&plan, &mut catalog, &mut store, None).unwrap();
+
+    assert_eq!(output.rows.len(), 2);
+    assert_eq!(
+        output.rows[0].get("stable_id"),
+        Some(&Value::String("memory:2".to_string()))
+    );
+    assert_eq!(
+        output.rows[0].get("title"),
+        Some(&Value::String("Storage notes".to_string()))
+    );
+    assert_eq!(output.rows[1].get("stable_id"), Some(&Value::Null));
+    assert_eq!(output.rows[1].get("title"), Some(&Value::Null));
+    let lookup_scan = output
+        .profile
+        .scan_pruning_reports
+        .iter()
+        .find(|report| {
+            report.strategy
+                == ScanPruningStrategy::PropertyIn {
+                    property: "stable_id".to_string(),
+                }
+        })
+        .expect("node column lookup should emit property-in pruning evidence");
+    assert_eq!(
+        lookup_scan.target_kind,
+        crate::store::ScanPruningTargetKind::Node
+    );
+    assert!(lookup_scan.pruned);
+    assert!(!lookup_scan.exact_empty);
+    assert_eq!(lookup_scan.candidate_count_before_pruning, 3);
+    assert_eq!(lookup_scan.candidate_count_before_filter, 1);
+    assert_eq!(lookup_scan.pruned_candidate_count, 2);
+    assert_eq!(lookup_scan.output_count, 2);
+}
+
+#[test]
+fn source_segment_scan_uses_checkpoint_sidecar_and_keeps_filter_semantics() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("skein-source-segment-executor-{nonce}"));
+    let mut catalog = Catalog::default();
+    let mut store = GraphStore::open(&path, &mut catalog).unwrap();
+    store
+        .create_node(
+            &mut catalog,
+            "Source",
+            BTreeMap::from([
+                ("id".to_string(), Value::String("source-a".to_string())),
+                ("space_id".to_string(), Value::String("alpha".to_string())),
+            ]),
+        )
+        .unwrap();
+    store
+        .create_node(
+            &mut catalog,
+            "Source",
+            BTreeMap::from([
+                ("id".to_string(), Value::String("source-b".to_string())),
+                ("space_id".to_string(), Value::String("beta".to_string())),
+            ]),
+        )
+        .unwrap();
+    store.checkpoint(&catalog).unwrap();
+
+    let predicate = Predicate::PropertyEq {
+        variable: "s".to_string(),
+        property: "space_id".to_string(),
+        value: Value::String("alpha".to_string()),
+    };
+    let plan = PhysicalPlan::FilterExec {
+        predicate: predicate.clone(),
+        input: Box::new(PhysicalPlan::SourceSegmentScan {
+            variable: "s".to_string(),
+            predicate,
+        }),
+    };
+    let parameters = BTreeMap::new();
+    let mut external = NoExternalReadOperator;
+    let memory = ExecutionMemoryConfig::default();
+    let mut context = ExecutionContext {
+        parameters: &parameters,
+        external: &mut external,
+        memory: &memory,
+        task_context: None,
+    };
+    let bindings = execute_bindings_with_limit(
+        &plan,
+        &mut catalog,
+        &mut store,
+        &mut context,
+        ExecutionLimit::unlimited(),
+    )
+    .unwrap();
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(
+        bindings[0].nodes["s"].properties["id"],
+        Value::String("source-a".to_string())
+    );
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+fn properties(items: impl IntoIterator<Item = (&'static str, Value)>) -> BTreeMap<String, Value> {
+    items
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect()
+}

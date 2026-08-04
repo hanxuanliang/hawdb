@@ -7,3 +7,4 @@ license.workspace = true
 [dependencies]
 skein-core = { path = "../core" }
 skein-plan = { path = "../plan" }
+skein-storage = { path = "../storage" }
