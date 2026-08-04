@@ -159,7 +159,7 @@ impl CascadesOptimizer {
                 DIRECT_PHYSICAL_FALLBACK_STAGE.trace(StageStats::new(required_groups, 1)),
             );
             report.extend_decisions(decisions);
-            let selected = selected_plan_trace(&plan, catalog);
+            let selected = selected_plan_trace(&plan, catalog, &self.context);
             report.push_stage_event(SELECTED_PLAN_COSTING_STAGE.trace(StageStats::new(1, 1)));
             report.record_selected_plan_cost(selected.cost);
             return Ok(PhysicalPlanRoot::new(plan, report.into_trace(selected)));
@@ -180,7 +180,7 @@ impl CascadesOptimizer {
             StageStats::new(memo.group_count(), 1).with_rule_counts(applied_rules, skipped_rules),
         ));
         report.extend_decisions(decisions);
-        let selected = selected_plan_trace(&plan, catalog);
+        let selected = selected_plan_trace(&plan, catalog, &self.context);
         report.push_stage_event(SELECTED_PLAN_COSTING_STAGE.trace(StageStats::new(1, 1)));
         report.record_selected_plan_cost(selected.cost);
         if directive == OptimizerSearchDirective::Memo {
@@ -1081,7 +1081,7 @@ fn order_single_row_cartesian_product_children(
         .into_iter()
         .map(|plan| {
             let cost = estimate_physical_plan_cost(&plan, catalog);
-            let fingerprint = plan.fingerprint();
+            let fingerprint = plan.instance_fingerprint();
             (cost, fingerprint, plan)
         })
         .collect::<Vec<_>>();

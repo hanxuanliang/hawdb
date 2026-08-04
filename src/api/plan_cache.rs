@@ -308,6 +308,12 @@ pub(super) fn optimized_query_plan_for(
     cache_mode: PlanCacheMode,
     context: PlanCacheContext<'_>,
 ) -> Result<OptimizedQueryPlan> {
+    let query_identity = skein_query::QueryIdentity::new("cypher", cypher_text);
+    let query_optimizer =
+        CascadesOptimizer::with_context(context.optimizer.context().clone().with_query_identity(
+            query_identity.normalized_query(),
+            query_identity.query_digest(),
+        ));
     if let Some(access_control) = context.access_control {
         context
             .config
@@ -344,6 +350,7 @@ pub(super) fn optimized_query_plan_for(
                 cached.has_parameter_slots,
             )?;
             let mut trace = cached.trace;
+            trace.query_digest = Some(query_identity.query_digest().to_string());
             refresh_materialized_plan_trace(&mut trace, &physical_plan);
             trace
                 .decisions
@@ -388,8 +395,7 @@ pub(super) fn optimized_query_plan_for(
         .borrow_mut()
         .optimizer_catalog(context.catalog, context.store);
     let logical_root = LogicalPlanRoot::new(logical);
-    let physical_root = context
-        .optimizer
+    let physical_root = query_optimizer
         .optimize_root_with_catalog_and_directive(
             &logical_root,
             &catalog_access.catalog,

@@ -38,11 +38,12 @@ impl Display for ExplainOutput {
         )?;
         write!(
             formatter,
-            "\noptimizer: mode={}, groups={}, cost={}, cache={}\nfingerprint: {}",
+            "\noptimizer: mode={}, groups={}, cost={}, cache={}\nquery digest: {}\nplan shape: {}",
             self.trace.search_mode.as_str(),
             self.trace.groups,
             self.trace.selected_plan_cost.cost,
             self.plan_cache_lookup.as_str(),
+            self.trace.query_digest.as_deref().unwrap_or(NOT_AVAILABLE),
             self.trace.selected_plan_fingerprint,
         )
     }
@@ -133,11 +134,12 @@ impl Display for ExplainAnalyzeOutput {
         )?;
         write!(
             formatter,
-            "\noptimizer: mode={}, groups={}, cost={}, cache={}\nfingerprint: {}",
+            "\noptimizer: mode={}, groups={}, cost={}, cache={}\nquery digest: {}\nplan shape: {}",
             self.trace.search_mode.as_str(),
             self.trace.groups,
             self.trace.selected_plan_cost.cost,
             self.plan_cache_lookup.as_str(),
+            self.trace.query_digest.as_deref().unwrap_or(NOT_AVAILABLE),
             self.trace.selected_plan_fingerprint,
         )
     }
@@ -411,7 +413,8 @@ mod tests {
         assert!(rendered.contains("  └─SeqNodeScan"));
         assert!(rendered.contains("label:Memory"));
         assert!(rendered.contains("optimizer: mode=memo"));
-        assert!(rendered.contains("fingerprint:"));
+        assert!(rendered.contains("query digest:"));
+        assert!(rendered.contains("plan shape:"));
     }
 
     #[test]

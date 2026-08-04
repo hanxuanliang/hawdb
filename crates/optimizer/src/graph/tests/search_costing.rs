@@ -250,7 +250,7 @@ fn cartesian_product_orders_single_row_inputs_by_cost() {
             decision == "estimate NodeCartesianProduct: left_rows=1 right_rows=1 output_rows=1 left_cost=3 right_cost=5 cost=9"
         }));
     assert!(plan
-        .fingerprint()
+        .instance_fingerprint()
         .contains("NodeCartesianProductExec(IndexNodeSeek(1:s:6:Source"));
     assert_eq!(
         trace.selected_plan_cost,
@@ -349,7 +349,7 @@ fn cartesian_product_orders_nested_single_row_inputs() {
     assert!(trace.decisions.iter().any(|decision| {
             decision == "estimate NodeCartesianProduct: left_rows=1 right_rows=1 output_rows=1 left_cost=3 right_cost=9 cost=13"
         }));
-    let fingerprint = plan.fingerprint();
+    let fingerprint = plan.instance_fingerprint();
     assert!(fingerprint.contains("NodeCartesianProductExec(IndexNodeSeek(1:e:6:Entity"));
     assert!(fingerprint.contains("IndexNodeSeek(1:s:6:Source"));
     assert!(fingerprint.contains("FilterExec(And(PropertyEq(1:m.2:id=string:9:memory-42)"));
@@ -428,7 +428,7 @@ fn cartesian_product_keeps_nested_multi_row_inputs() {
     assert!(trace.decisions.iter().any(|decision| {
             decision == "keep NodeCartesianProduct input order: left_rows=10 right_rows=1 reason=non_single_row_input"
         }));
-    assert!(plan.fingerprint().starts_with(
+    assert!(plan.instance_fingerprint().starts_with(
         "NodeCartesianProductExec(NodeCartesianProductExec(SeqNodeScan(1:m:6:Memory)"
     ));
     assert_eq!(

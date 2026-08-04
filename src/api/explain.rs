@@ -30,6 +30,15 @@ pub(super) fn explain_output_row(
         Value::String(optimized.trace.selected_plan_fingerprint.clone()),
     );
     row.insert(
+        "query_digest".to_string(),
+        optimized
+            .trace
+            .query_digest
+            .as_ref()
+            .map(|digest| Value::String(digest.clone()))
+            .unwrap_or(Value::Null),
+    );
+    row.insert(
         "selected_plan_cost".to_string(),
         explain_plan_cost_value(optimized.trace.selected_plan_cost),
     );

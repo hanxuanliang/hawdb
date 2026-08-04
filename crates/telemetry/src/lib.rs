@@ -5,6 +5,9 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueryTelemetry<'a> {
     pub query_language: &'a str,
+    /// A literal-free query shape digest. Metrics adapters should avoid using
+    /// this high-cardinality value as a metric attribute.
+    pub query_digest: &'a str,
     pub statement_kind: &'a str,
     pub success: bool,
     pub elapsed_micros: u64,
@@ -281,6 +284,7 @@ mod tests {
         let sink = RecordingSink::default();
         sink.record_query(QueryTelemetry {
             query_language: "cypher",
+            query_digest: "q1:test",
             statement_kind: "read",
             success: true,
             elapsed_micros: 10,

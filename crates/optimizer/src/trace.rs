@@ -19,7 +19,9 @@ impl Default for OptimizerConfig {
 pub struct OptimizerTrace {
     pub groups: usize,
     pub search_mode: SearchMode,
+    pub query_digest: Option<String>,
     pub selected_plan: String,
+    /// The physical operator-tree shape. Bound values are intentionally absent.
     pub selected_plan_fingerprint: String,
     pub selected_plan_cost: PlanCost,
     pub selected_plan_cost_breakdown: PlanCostBreakdown,

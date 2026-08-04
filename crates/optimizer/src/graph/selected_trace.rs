@@ -1,12 +1,14 @@
 use super::{costing, properties, OptimizerCatalog, PhysicalPlan};
-use crate::{plan_class_counts, plan_operator_counts, SelectedPlanTrace};
+use crate::{plan_class_counts, plan_operator_counts, OptimizerContext, SelectedPlanTrace};
 
 pub(super) fn selected_plan_trace(
     plan: &PhysicalPlan,
     catalog: &OptimizerCatalog,
+    context: &OptimizerContext,
 ) -> SelectedPlanTrace {
     let selected_plan_cost = costing::estimate_physical_plan_cost(plan, catalog);
     SelectedPlanTrace {
+        query_digest: context.query_digest().map(str::to_string),
         explain: plan.explain(0),
         fingerprint: plan.fingerprint(),
         cost: selected_plan_cost,

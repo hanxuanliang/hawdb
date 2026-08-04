@@ -488,11 +488,11 @@ fn cypher_access_control_filters_shortest_path_nodes_before_path_projection() {
     assert!(output.physical_plan.explain(0).contains("ShortestPathExec"));
     assert!(output
         .physical_plan
-        .fingerprint()
+        .instance_fingerprint()
         .contains("source_visibility="));
     assert!(output
         .physical_plan
-        .fingerprint()
+        .instance_fingerprint()
         .contains("target_visibility="));
 }
 
@@ -542,7 +542,7 @@ fn cypher_access_control_filters_graph_algorithm_nodes_before_result_projection(
     assert!(output.physical_plan.explain(0).contains("GraphAlgorithm"));
     assert!(output
         .physical_plan
-        .fingerprint()
+        .instance_fingerprint()
         .contains("node_visibility="));
 }
 

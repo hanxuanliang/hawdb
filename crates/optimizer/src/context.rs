@@ -48,11 +48,11 @@ impl Default for ResourceHints {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OptimizerContext {
     normalized_query: Option<String>,
+    query_digest: Option<String>,
     query_family: QueryFamily,
     statement_class: StatementClass,
     resource_hints: ResourceHints,
     explain_mode: ExplainMode,
-    plan_cache_key_digest: Option<u64>,
     trace_sink: TraceSink,
     optimizer_config: OptimizerConfig,
 }
@@ -61,11 +61,11 @@ impl Default for OptimizerContext {
     fn default() -> Self {
         Self {
             normalized_query: None,
+            query_digest: None,
             query_family: QueryFamily::GraphRead,
             statement_class: StatementClass::Read,
             resource_hints: ResourceHints::default(),
             explain_mode: ExplainMode::None,
-            plan_cache_key_digest: None,
             trace_sink: TraceSink::Collect,
             optimizer_config: OptimizerConfig::default(),
         }
@@ -82,6 +82,16 @@ impl OptimizerContext {
 
     pub fn with_normalized_query(mut self, normalized_query: impl Into<String>) -> Self {
         self.normalized_query = Some(normalized_query.into());
+        self
+    }
+
+    pub fn with_query_identity(
+        mut self,
+        normalized_query: impl Into<String>,
+        query_digest: impl Into<String>,
+    ) -> Self {
+        self.normalized_query = Some(normalized_query.into());
+        self.query_digest = Some(query_digest.into());
         self
     }
 
@@ -106,11 +116,6 @@ impl OptimizerContext {
         self
     }
 
-    pub fn with_plan_cache_key_digest(mut self, plan_cache_key_digest: u64) -> Self {
-        self.plan_cache_key_digest = Some(plan_cache_key_digest);
-        self
-    }
-
     pub fn with_trace_sink(mut self, trace_sink: TraceSink) -> Self {
         self.trace_sink = trace_sink;
         self
@@ -118,6 +123,10 @@ impl OptimizerContext {
 
     pub fn normalized_query(&self) -> Option<&str> {
         self.normalized_query.as_deref()
+    }
+
+    pub fn query_digest(&self) -> Option<&str> {
+        self.query_digest.as_deref()
     }
 
     pub fn query_family(&self) -> QueryFamily {
@@ -136,10 +145,6 @@ impl OptimizerContext {
         self.explain_mode
     }
 
-    pub fn plan_cache_key_digest(&self) -> Option<u64> {
-        self.plan_cache_key_digest
-    }
-
     pub fn trace_sink(&self) -> TraceSink {
         self.trace_sink
     }
@@ -154,14 +159,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn query_family_derives_statement_class_without_raw_cache_key() {
+    fn query_family_derives_statement_class_with_query_identity() {
         let context = OptimizerContext::default()
             .with_query_family(QueryFamily::VectorSearch)
-            .with_plan_cache_key_digest(42);
+            .with_query_identity("match (m) return m", "q1:test");
 
         assert_eq!(context.statement_class(), StatementClass::Read);
-        assert_eq!(context.plan_cache_key_digest(), Some(42));
-        assert_eq!(context.normalized_query(), None);
+        assert_eq!(context.query_digest(), Some("q1:test"));
+        assert_eq!(context.normalized_query(), Some("match (m) return m"));
     }
 
     #[test]

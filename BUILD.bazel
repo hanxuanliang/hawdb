@@ -34,6 +34,7 @@ rust_library(
         "//crates/plan:skein_plan",
         "//crates/plan-cache:skein_plan_cache",
         "//crates/qos:skein_qos",
+        "//crates/query:skein_query",
         "//crates/readiness:skein_readiness",
         "//crates/route-ownership:skein_route_ownership",
         "//crates/runtime-tokio:skein_runtime_tokio",

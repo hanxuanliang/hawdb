@@ -45,6 +45,7 @@ mod tests {
         let sink = RecordingSink::default();
         sink.record_query(QueryTelemetry {
             query_language: "cypher",
+            query_digest: "q1:test",
             statement_kind: "match_return",
             success: true,
             elapsed_micros: 12,

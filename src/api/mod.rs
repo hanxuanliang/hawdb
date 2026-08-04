@@ -402,6 +402,7 @@ pub struct SlowQueryLogExportOptions {
 pub struct SlowQueryLogRecordSummary {
     pub sequence: u64,
     pub query_language: String,
+    pub statement_kind: String,
     pub query_digest: String,
     pub started_unix_micros: i64,
     pub elapsed_micros: i64,

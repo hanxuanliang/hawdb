@@ -1,4 +1,4 @@
-use super::PhysicalPlan;
+use super::{PhysicalPlan, PlanChildren};
 use crate::{
     AggregateFunction, AggregateTarget, Aggregation, ComparisonOp, GraphAlgorithmKind, Predicate,
     Projection, ProjectionExpression, RelationshipCountFilter, RelationshipCountLeg,
@@ -19,13 +19,42 @@ pub use projection::write_projection_expression;
 use projection::*;
 
 impl PhysicalPlan {
+    /// Returns the physical operator-tree shape without identifiers, literals,
+    /// runtime parameters, estimates, or other per-instance payloads.
     pub fn fingerprint(&self) -> String {
         let mut output = String::new();
-        self.write_fingerprint(&mut output);
+        self.write_shape_fingerprint(&mut output);
         output
     }
 
-    fn write_fingerprint(&self, output: &mut String) {
+    /// Returns the deterministic full-plan serialization used for internal
+    /// tie-breaking and diagnostics that need bound plan details.
+    pub fn instance_fingerprint(&self) -> String {
+        let mut output = String::new();
+        self.write_instance_fingerprint(&mut output);
+        output
+    }
+
+    fn write_shape_fingerprint(&self, output: &mut String) {
+        output.push_str(self.kind().as_str());
+        match self.children() {
+            PlanChildren::None => {}
+            PlanChildren::Unary(input) => {
+                output.push('(');
+                input.write_shape_fingerprint(output);
+                output.push(')');
+            }
+            PlanChildren::Binary(left, right) => {
+                output.push('(');
+                left.write_shape_fingerprint(output);
+                output.push(',');
+                right.write_shape_fingerprint(output);
+                output.push(')');
+            }
+        }
+    }
+
+    fn write_instance_fingerprint(&self, output: &mut String) {
         match self {
             PhysicalPlan::CreateNodeLabel { label } => {
                 output.push_str("CreateNodeLabel(");
@@ -674,9 +703,9 @@ impl PhysicalPlan {
             }
             PhysicalPlan::NodeCartesianProductExec { left, right } => {
                 output.push_str("NodeCartesianProductExec(");
-                left.write_fingerprint(output);
+                left.write_instance_fingerprint(output);
                 output.push(',');
-                right.write_fingerprint(output);
+                right.write_instance_fingerprint(output);
                 output.push(')');
             }
             PhysicalPlan::NodeColumnLookupExec {
@@ -698,7 +727,7 @@ impl PhysicalPlan {
                 output.push(',');
                 output.push_str(if *optional { "optional" } else { "required" });
                 output.push(',');
-                input.write_fingerprint(output);
+                input.write_instance_fingerprint(output);
                 output.push(')');
             }
             PhysicalPlan::IndexNodeSeek {
@@ -846,7 +875,7 @@ impl PhysicalPlan {
                     output.push_str(&graph_budget.payload_byte_limit.to_string());
                 }
                 output.push_str(",input=");
-                input.write_fingerprint(output);
+                input.write_instance_fingerprint(output);
                 output.push(')');
             }
             PhysicalPlan::OptionalDegreeExec {
@@ -881,7 +910,7 @@ impl PhysicalPlan {
                 output.push_str(",alias=");
                 write_identifier(output, alias);
                 output.push_str(",input=");
-                input.write_fingerprint(output);
+                input.write_instance_fingerprint(output);
                 output.push(')');
             }
             PhysicalPlan::OptionalRelationshipCountSumExec {
@@ -993,14 +1022,14 @@ impl PhysicalPlan {
                 output.push_str("FilterExec(");
                 write_predicate(output, predicate);
                 output.push_str(",input=");
-                input.write_fingerprint(output);
+                input.write_instance_fingerprint(output);
                 output.push(')');
             }
             PhysicalPlan::ProjectExec { items, input } => {
                 output.push_str("ProjectExec(");
                 write_projection_list(output, items);
                 output.push_str(",input=");
-                input.write_fingerprint(output);
+                input.write_instance_fingerprint(output);
                 output.push(')');
             }
             PhysicalPlan::AggregateExec {
@@ -1013,19 +1042,19 @@ impl PhysicalPlan {
                 output.push_str(",aggs=");
                 write_aggregation_list(output, items);
                 output.push_str(",input=");
-                input.write_fingerprint(output);
+                input.write_instance_fingerprint(output);
                 output.push(')');
             }
             PhysicalPlan::DistinctExec { input } => {
                 output.push_str("DistinctExec(input=");
-                input.write_fingerprint(output);
+                input.write_instance_fingerprint(output);
                 output.push(')');
             }
             PhysicalPlan::SortExec { items, input } => {
                 output.push_str("SortExec(");
                 write_sort_list(output, items);
                 output.push_str(",input=");
-                input.write_fingerprint(output);
+                input.write_instance_fingerprint(output);
                 output.push(')');
             }
             PhysicalPlan::TopNExec {
@@ -1041,7 +1070,7 @@ impl PhysicalPlan {
                 output.push_str(",limit=");
                 output.push_str(&limit.to_string());
                 output.push_str(",input=");
-                input.write_fingerprint(output);
+                input.write_instance_fingerprint(output);
                 output.push(')');
             }
             PhysicalPlan::LimitExec {
@@ -1057,9 +1086,49 @@ impl PhysicalPlan {
                     None => output.push_str("none"),
                 }
                 output.push_str(",input=");
-                input.write_fingerprint(output);
+                input.write_instance_fingerprint(output);
                 output.push(')');
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn index_seek(value: i64) -> PhysicalPlan {
+        PhysicalPlan::IndexNodeSeek {
+            variable: "m".to_string(),
+            label: "Memory".to_string(),
+            property: "id".to_string(),
+            value: Value::Int(value),
+        }
+    }
+
+    #[test]
+    fn plan_fingerprint_represents_operator_shape_not_bound_values() {
+        let first = index_seek(1);
+        let second = index_seek(2);
+
+        assert_eq!(first.fingerprint(), "IndexNodeSeek");
+        assert_eq!(first.fingerprint(), second.fingerprint());
+        assert_ne!(first.instance_fingerprint(), second.instance_fingerprint());
+    }
+
+    #[test]
+    fn plan_fingerprint_preserves_tree_topology() {
+        let plan = PhysicalPlan::NodeCartesianProductExec {
+            left: Box::new(index_seek(1)),
+            right: Box::new(PhysicalPlan::SeqNodeScan {
+                variable: "e".to_string(),
+                label: "Entity".to_string(),
+            }),
+        };
+
+        assert_eq!(
+            plan.fingerprint(),
+            "NodeCartesianProductExec(IndexNodeSeek,SeqNodeScan)"
+        );
     }
 }

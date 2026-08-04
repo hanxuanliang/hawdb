@@ -4806,6 +4806,7 @@ fn explain_diagnostics_json(input: ExplainDiagnosticsJsonInput<'_>) -> serde_jso
         ),
         "groups": input.trace.groups,
         "search_mode": input.trace.search_mode.as_str(),
+        "query_digest": input.trace.query_digest,
         "selected_plan": input.trace.selected_plan,
         "selected_plan_fingerprint": input.trace.selected_plan_fingerprint,
         "selected_plan_cost": {
@@ -6361,8 +6362,9 @@ mod tests {
             trace: OptimizerTrace {
                 groups: 1,
                 search_mode: skein::optimizer::SearchMode::Memo,
+                query_digest: Some("q1:fixture".to_string()),
                 selected_plan: "SeqNodeScan variable=m label=Memory".to_string(),
-                selected_plan_fingerprint: "SeqNodeScan(1:m:6:Memory)".to_string(),
+                selected_plan_fingerprint: "SeqNodeScan".to_string(),
                 selected_plan_cost: PlanCost {
                     estimated_rows: 42,
                     cost: 42,
@@ -6423,10 +6425,8 @@ mod tests {
         assert_eq!(json["search_mode"], "memo");
         assert_eq!(json["statement_kind"], "match_return");
         assert_eq!(json["parameters"]["id"], 42);
-        assert_eq!(
-            json["selected_plan_fingerprint"],
-            "SeqNodeScan(1:m:6:Memory)"
-        );
+        assert_eq!(json["selected_plan_fingerprint"], "SeqNodeScan");
+        assert_eq!(json["query_digest"], "q1:fixture");
         assert_eq!(json["selected_plan_cost"]["estimated_rows"], 42);
         assert_eq!(json["selected_plan_cost_breakdown"]["cost"], 42);
         assert_eq!(json["selected_plan_cost_breakdown"]["cpu"], 10);

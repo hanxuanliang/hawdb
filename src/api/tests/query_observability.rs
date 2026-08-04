@@ -609,7 +609,11 @@ fn cypher_explain_returns_structured_plan_row() {
     assert!(matches!(row.get("plan"), Some(Value::String(plan)) if plan.contains("ProjectExec")));
     assert!(matches!(
         row.get("selected_plan_fingerprint"),
-        Some(Value::String(fingerprint)) if fingerprint.contains("Memory")
+        Some(Value::String(fingerprint)) if fingerprint.contains("IndexNodeSeek")
+    ));
+    assert!(matches!(
+        row.get("query_digest"),
+        Some(Value::String(digest)) if digest.starts_with("q1:")
     ));
     let Some(Value::Map(selected_plan_cost)) = row.get("selected_plan_cost") else {
         panic!("expected selected plan cost map");
@@ -1354,6 +1358,73 @@ fn sql_reads_statement_summary_virtual_table() {
 }
 
 #[test]
+fn statement_summary_groups_normalized_query_shapes() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 'first', title: 'First'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'second', title: 'Second'})")
+        .unwrap();
+
+    db.query("MATCH (m:Memory {id: 'first'}) RETURN m.title AS title")
+        .unwrap();
+    db.query(" match (m:Memory { id : \"second\" }) return m.title as title; ")
+        .unwrap();
+
+    let output = db
+        .query_sql(
+            "SELECT digest, sample_query_text_hash, execution_count \
+             FROM system.statement_summary \
+             WHERE statement_kind = 'match_return'",
+        )
+        .unwrap();
+
+    assert_eq!(output.rows.len(), 1);
+    assert_eq!(output.rows[0].get("execution_count"), Some(&Value::Int(2)));
+    assert!(matches!(
+        output.rows[0].get("digest"),
+        Some(Value::String(digest)) if digest.starts_with("q1:")
+    ));
+    assert!(matches!(
+        output.rows[0].get("sample_query_text_hash"),
+        Some(Value::String(hash)) if hash.starts_with("t1:")
+    ));
+}
+
+#[test]
+fn slow_query_and_statement_summary_share_query_identity() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        slow_query_log_threshold_micros: 0,
+        slow_query_log_capacity: 8,
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 'shared-digest'})").unwrap();
+    db.query("MATCH (m:Memory {id: 'shared-digest'}) RETURN m.id AS id")
+        .unwrap();
+
+    let slow = db
+        .slow_query_log_snapshot()
+        .into_iter()
+        .find(|record| record.statement_kind == "match_return")
+        .unwrap();
+    let summary = db
+        .query_sql(
+            "SELECT digest FROM system.statement_summary \
+             WHERE statement_kind = 'match_return'",
+        )
+        .unwrap();
+
+    assert_eq!(slow.statement_kind, "match_return");
+    assert_eq!(
+        summary.rows[0].get("digest"),
+        Some(&Value::String(slow.query_digest))
+    );
+}
+
+#[test]
 fn plan_cache_misses_after_graph_commit_epoch_changes() {
     let mut db = Database::new_with_config(DatabaseConfig {
         max_plan_cache_entries: Some(8),
@@ -1637,4 +1708,28 @@ fn plan_fingerprint_is_deterministic_and_changes_with_plan_shape() {
         .trace
         .selected_plan_fingerprint
         .contains("IndexNodeRangeSeek"));
+}
+
+#[test]
+fn plan_fingerprint_excludes_bound_values_but_instance_fingerprint_retains_them() {
+    let mut db = Database::new();
+    for id in 1..=16 {
+        db.query(&format!("CREATE (:Memory {{id: {id}}})")).unwrap();
+    }
+
+    let first = db
+        .explain_query("MATCH (m:Memory) WHERE m.id = 1 RETURN m.id AS id")
+        .unwrap();
+    let second = db
+        .explain_query("MATCH (m:Memory) WHERE m.id = 2 RETURN m.id AS id")
+        .unwrap();
+
+    assert_eq!(
+        first.trace.selected_plan_fingerprint,
+        second.trace.selected_plan_fingerprint
+    );
+    assert_ne!(
+        first.physical_plan.instance_fingerprint(),
+        second.physical_plan.instance_fingerprint()
+    );
 }

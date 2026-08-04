@@ -27,6 +27,9 @@ pub mod planner;
 pub mod previous_wrapper_preflight;
 pub mod production_evidence;
 pub mod qos;
+pub mod query {
+    pub use skein_query::*;
+}
 pub mod query_family_evidence;
 pub mod query_runtime_preflight;
 pub mod replacement_summary;

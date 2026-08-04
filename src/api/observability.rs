@@ -18,11 +18,13 @@ impl Database {
         context: StatementExecutionContext<'_>,
     ) {
         let elapsed_micros = started.elapsed().as_micros();
+        let query_identity = skein_query::QueryIdentity::new(query_language, query_text);
         let execution = match result {
             Ok(output) => system_sql::StatementExecution::completed(
                 query_language,
                 query_text,
                 statement_kind,
+                &query_identity,
                 elapsed_micros,
                 output.rows.len(),
             ),
@@ -30,6 +32,7 @@ impl Database {
                 query_language,
                 query_text,
                 statement_kind,
+                &query_identity,
                 elapsed_micros,
                 error.to_string(),
             ),
@@ -40,6 +43,7 @@ impl Database {
                 .map(|profile| &profile.pipeline_memory_report);
             telemetry.record_query(QueryTelemetry {
                 query_language,
+                query_digest: query_identity.query_digest(),
                 statement_kind,
                 success: result.is_ok(),
                 elapsed_micros: elapsed_micros.min(u64::MAX as u128) as u64,
@@ -69,7 +73,9 @@ impl Database {
             .push(system_sql::SlowQueryRecord::completed(
                 system_sql::SlowQueryCompletion {
                     query_language,
+                    statement_kind,
                     query_text,
+                    query_identity: &query_identity,
                     elapsed_micros,
                     row_count: output.rows.len(),
                     success: true,

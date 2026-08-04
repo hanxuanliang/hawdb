@@ -6,6 +6,7 @@ use crate::sql::{
     SqlOrderDirection, SqlPredicate, SqlStatement,
 };
 use crate::value::Value;
+use skein_query::QueryIdentity;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -21,6 +22,9 @@ const MAX_STATEMENT_ERROR_BYTES: usize = 1024;
 pub(crate) struct SlowQueryRecord {
     pub(crate) sequence: u64,
     pub(crate) query_language: String,
+    pub(crate) statement_kind: String,
+    pub(crate) query_digest: String,
+    pub(crate) query_text_hash: String,
     pub(crate) query_text: String,
     pub(crate) started_unix_micros: i64,
     pub(crate) elapsed_micros: i64,
@@ -34,7 +38,9 @@ pub(crate) struct SlowQueryRecord {
 
 pub(crate) struct SlowQueryCompletion<'a> {
     pub(crate) query_language: &'a str,
+    pub(crate) statement_kind: &'a str,
     pub(crate) query_text: &'a str,
+    pub(crate) query_identity: &'a QueryIdentity,
     pub(crate) elapsed_micros: u128,
     pub(crate) row_count: usize,
     pub(crate) success: bool,
@@ -56,6 +62,8 @@ pub(crate) struct StatementExecution {
     pub(crate) query_language: String,
     pub(crate) query_text: String,
     pub(crate) statement_kind: String,
+    pub(crate) query_digest: String,
+    pub(crate) query_text_hash: String,
     pub(crate) elapsed_micros: i64,
     pub(crate) row_count: i64,
     pub(crate) success: bool,
@@ -67,6 +75,7 @@ pub(crate) struct StatementSummaryRecord {
     pub(crate) digest: String,
     pub(crate) query_language: String,
     pub(crate) query_text: String,
+    pub(crate) sample_query_text_hash: String,
     pub(crate) statement_kind: String,
     pub(crate) execution_count: i64,
     pub(crate) success_count: i64,
@@ -120,6 +129,9 @@ impl SlowQueryRecord {
         Self {
             sequence: 0,
             query_language: completion.query_language.to_string(),
+            statement_kind: completion.statement_kind.to_string(),
+            query_digest: completion.query_identity.query_digest().to_string(),
+            query_text_hash: completion.query_identity.query_text_hash().to_string(),
             query_text: truncate_utf8(completion.query_text, MAX_SLOW_QUERY_TEXT_BYTES),
             started_unix_micros: unix_now_micros(),
             elapsed_micros: saturating_i64_from_u128(completion.elapsed_micros),
@@ -181,7 +193,8 @@ pub(crate) fn slow_query_record_summary(
     super::SlowQueryLogRecordSummary {
         sequence: record.sequence,
         query_language: record.query_language.clone(),
-        query_digest: statement_digest(&record.query_language, "unknown", &record.query_text),
+        statement_kind: record.statement_kind.clone(),
+        query_digest: record.query_digest.clone(),
         started_unix_micros: record.started_unix_micros,
         elapsed_micros: record.elapsed_micros,
         row_count: record.row_count,
@@ -197,11 +210,8 @@ fn slow_query_record_json(record: &SlowQueryRecord, include_query_text: bool) ->
         "protocol_version": 1,
         "sequence": record.sequence,
         "query_language": record.query_language,
-        "query_digest": statement_digest(
-            &record.query_language,
-            "unknown",
-            &record.query_text
-        ),
+        "statement_kind": record.statement_kind,
+        "query_digest": record.query_digest,
         "started_unix_micros": record.started_unix_micros,
         "elapsed_micros": record.elapsed_micros,
         "row_count": record.row_count,
@@ -277,6 +287,7 @@ impl StatementExecution {
         query_language: &str,
         query_text: &str,
         statement_kind: &str,
+        query_identity: &QueryIdentity,
         elapsed_micros: u128,
         row_count: usize,
     ) -> Self {
@@ -284,6 +295,8 @@ impl StatementExecution {
             query_language: query_language.to_string(),
             query_text: truncate_utf8(query_text, MAX_STATEMENT_TEXT_BYTES),
             statement_kind: statement_kind.to_string(),
+            query_digest: query_identity.query_digest().to_string(),
+            query_text_hash: query_identity.query_text_hash().to_string(),
             elapsed_micros: saturating_i64_from_u128(elapsed_micros),
             row_count: i64::try_from(row_count).unwrap_or(i64::MAX),
             success: true,
@@ -295,6 +308,7 @@ impl StatementExecution {
         query_language: &str,
         query_text: &str,
         statement_kind: &str,
+        query_identity: &QueryIdentity,
         elapsed_micros: u128,
         error: String,
     ) -> Self {
@@ -302,6 +316,8 @@ impl StatementExecution {
             query_language: query_language.to_string(),
             query_text: truncate_utf8(query_text, MAX_STATEMENT_TEXT_BYTES),
             statement_kind: statement_kind.to_string(),
+            query_digest: query_identity.query_digest().to_string(),
+            query_text_hash: query_identity.query_text_hash().to_string(),
             elapsed_micros: saturating_i64_from_u128(elapsed_micros),
             row_count: 0,
             success: false,
@@ -324,11 +340,7 @@ impl StatementSummary {
             return;
         }
 
-        let digest = statement_digest(
-            &execution.query_language,
-            &execution.statement_kind,
-            &execution.query_text,
-        );
+        let digest = execution.query_digest.clone();
         if let Some(record) = self.records.get_mut(&digest) {
             record.apply(execution);
             return;
@@ -365,6 +377,7 @@ impl StatementSummaryRecord {
             digest,
             query_language: execution.query_language,
             query_text: execution.query_text,
+            sample_query_text_hash: execution.query_text_hash,
             statement_kind: execution.statement_kind,
             execution_count: 1,
             success_count,
@@ -583,6 +596,18 @@ fn slow_query_rows(records: &[SlowQueryRecord]) -> Vec<Row> {
                     Value::String(record.query_language.clone()),
                 ),
                 (
+                    "statement_kind".to_string(),
+                    Value::String(record.statement_kind.clone()),
+                ),
+                (
+                    "query_digest".to_string(),
+                    Value::String(record.query_digest.clone()),
+                ),
+                (
+                    "query_text_hash".to_string(),
+                    Value::String(record.query_text_hash.clone()),
+                ),
+                (
                     "query_text".to_string(),
                     Value::String(record.query_text.clone()),
                 ),
@@ -633,6 +658,10 @@ fn statement_summary_rows(records: &[StatementSummaryRecord]) -> Vec<Row> {
                 (
                     "query_text".to_string(),
                     Value::String(record.query_text.clone()),
+                ),
+                (
+                    "sample_query_text_hash".to_string(),
+                    Value::String(record.sample_query_text_hash.clone()),
                 ),
                 (
                     "statement_kind".to_string(),
@@ -836,6 +865,9 @@ fn table_columns(table: SystemTable) -> &'static [&'static str] {
         SystemTable::SlowQueries => &[
             "sequence",
             "query_language",
+            "statement_kind",
+            "query_digest",
+            "query_text_hash",
             "query_text",
             "started_unix_micros",
             "elapsed_micros",
@@ -849,6 +881,7 @@ fn table_columns(table: SystemTable) -> &'static [&'static str] {
             "digest",
             "query_language",
             "query_text",
+            "sample_query_text_hash",
             "statement_kind",
             "execution_count",
             "success_count",
@@ -895,21 +928,6 @@ fn avg_i64(total: i64, count: i64) -> i64 {
 
 fn saturating_i64_from_u128(value: u128) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
-}
-
-fn statement_digest(query_language: &str, statement_kind: &str, query_text: &str) -> String {
-    let mut hash = 0xcbf29ce484222325u64;
-    for byte in query_language
-        .bytes()
-        .chain([0xff])
-        .chain(statement_kind.bytes())
-        .chain([0xfe])
-        .chain(query_text.bytes())
-    {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("{hash:016x}")
 }
 
 fn unix_now_micros() -> i64 {
@@ -971,6 +989,9 @@ mod tests {
             SlowQueryRecord {
                 sequence: 1,
                 query_language: "cypher".to_string(),
+                statement_kind: "match_return".to_string(),
+                query_digest: "q1:first".to_string(),
+                query_text_hash: "t1:first".to_string(),
                 query_text: "MATCH (m:Memory) RETURN m".to_string(),
                 started_unix_micros: 10,
                 elapsed_micros: 200,
@@ -984,6 +1005,9 @@ mod tests {
             SlowQueryRecord {
                 sequence: 2,
                 query_language: "cypher".to_string(),
+                statement_kind: "match_return".to_string(),
+                query_digest: "q1:second".to_string(),
+                query_text_hash: "t1:second".to_string(),
                 query_text: "MATCH (m:Memory) RETURN m ORDER BY m.id".to_string(),
                 started_unix_micros: 20,
                 elapsed_micros: 500,
@@ -997,6 +1021,9 @@ mod tests {
             SlowQueryRecord {
                 sequence: 3,
                 query_language: "cypher".to_string(),
+                statement_kind: "match_return".to_string(),
+                query_digest: "q1:third".to_string(),
+                query_text_hash: "t1:third".to_string(),
                 query_text: "MATCH (m:Memory {id: 'x'}) RETURN m".to_string(),
                 started_unix_micros: 30,
                 elapsed_micros: 300,
@@ -1046,6 +1073,7 @@ pub(crate) mod loom_tests {
     use super::{SlowQueryCompletion, SlowQueryLog, SlowQueryRecord};
     use loom::sync::{Arc, Mutex};
     use loom::thread;
+    use skein_query::QueryIdentity;
 
     #[test]
     fn slow_query_ring_preserves_bounds_under_modeled_concurrent_access() {
@@ -1078,11 +1106,14 @@ pub(crate) mod loom_tests {
         query_text: &'static str,
     ) -> thread::JoinHandle<()> {
         thread::spawn(move || {
+            let query_identity = QueryIdentity::new("cypher", query_text);
             log.lock()
                 .unwrap()
                 .push(SlowQueryRecord::completed(SlowQueryCompletion {
                     query_language: "cypher",
+                    statement_kind: "match_return",
                     query_text,
+                    query_identity: &query_identity,
                     elapsed_micros: 1,
                     row_count: 1,
                     success: true,

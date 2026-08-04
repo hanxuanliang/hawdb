@@ -21,6 +21,7 @@ skein-optimizer = { path = "crates/optimizer" }
 skein-plan = { path = "crates/plan" }
 skein-plan-cache = { path = "crates/plan-cache" }
 skein-qos = { path = "crates/qos" }
+skein-query = { path = "crates/query" }
 skein-readiness = { path = "crates/readiness" }
 skein-route-ownership = { path = "crates/route-ownership" }
 skein-runtime-tokio = { path = "crates/runtime-tokio", optional = true }
@@ -64,6 +65,7 @@ members = [
   "crates/plan",
   "crates/plan-cache",
   "crates/qos",
+  "crates/query",
   "crates/qualification",
   "crates/readiness",
   "crates/route-ownership",

@@ -40,6 +40,7 @@ pub struct OptimizationSearchReport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectedPlanTrace {
+    pub query_digest: Option<String>,
     pub explain: String,
     pub fingerprint: String,
     pub cost: PlanCost,
@@ -164,6 +165,7 @@ impl OptimizationSearchReport {
         OptimizerTrace {
             groups: self.groups,
             search_mode: self.mode,
+            query_digest: selected.query_digest,
             selected_plan: selected.explain,
             selected_plan_fingerprint: selected.fingerprint,
             selected_plan_cost: selected.cost,
@@ -419,6 +421,7 @@ mod tests {
         });
 
         let trace = report.into_trace(SelectedPlanTrace {
+            query_digest: None,
             explain: "IndexNodeSeek".to_string(),
             fingerprint: "IndexNodeSeek(1:m:6:Memory.id=i:1)".to_string(),
             cost: PlanCost {

@@ -4042,6 +4042,7 @@ pub struct NowledgeMemQueryReportOptions {
 pub struct NowledgeMemSlowQueryRecord {
     pub sequence: u64,
     pub query_language: String,
+    pub statement_kind: String,
     pub query_digest: String,
     pub started_unix_micros: i64,
     pub elapsed_micros: i64,
@@ -4077,6 +4078,7 @@ impl NowledgeMemSlowQueryReport {
             .map(|record| NowledgeMemSlowQueryRecord {
                 sequence: record.sequence,
                 query_language: record.query_language,
+                statement_kind: record.statement_kind,
                 query_digest: record.query_digest,
                 started_unix_micros: record.started_unix_micros,
                 elapsed_micros: record.elapsed_micros,
@@ -4128,6 +4130,7 @@ impl NowledgeMemSlowQueryReport {
                 serde_json::json!({
                     "sequence": record.sequence,
                     "query_language": record.query_language,
+                    "statement_kind": record.statement_kind,
                     "query_digest": record.query_digest,
                     "started_unix_micros": record.started_unix_micros,
                     "elapsed_micros": record.elapsed_micros,
