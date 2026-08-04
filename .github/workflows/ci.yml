@@ -7,6 +7,19 @@ on:
       - main
 
 jobs:
+  supply-chain:
+    name: Supply Chain
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check advisories and licenses
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          rust-version: "1.97.1"
+          command: check advisories licenses
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
