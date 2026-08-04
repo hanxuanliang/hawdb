@@ -1,4 +1,11 @@
-use crate::{FuzzCase, GraphTlpCase, Mutation, Parameters, QueryInvocation, ResultSemantics};
+use crate::query_ast::{
+    GeneratedSchema, MatchPattern, NodePattern, OrderItem, PatternDirection, PropertyExpression,
+    QueryAst, QueryPredicate, ReturnItem,
+};
+use crate::{
+    FuzzCase, GraphTlpCase, MetamorphicCase, MetamorphicRelation, Mutation, Parameters,
+    QueryInvocation, ResultSemantics,
+};
 use skein::Value;
 
 const ENTITY_COUNT: usize = 6;
@@ -20,13 +27,16 @@ impl StateAwareCaseGenerator {
         let index_enabled = seed & 1 == 0;
         let graph = GeneratedGraphState::from_seed(seed);
         let query = graph.plan_differential_query(seed, index);
+        let metamorphic = graph.metamorphic_case(index_enabled, &query.ast);
 
         FuzzCase {
             seed,
             shape: query.name.clone(),
             mutations: graph.mutations(index_enabled),
             query: query.invocation,
+            query_ast: query.ast,
             graph_tlp: graph.graph_tlp_case(seed),
+            metamorphic,
             index_enabled,
         }
     }
@@ -45,6 +55,15 @@ impl GeneratedGraphState {
     }
 
     fn mutations(self, index_enabled: bool) -> Vec<Mutation> {
+        self.transformed_mutations(index_enabled, "", false)
+    }
+
+    fn transformed_mutations(
+        self,
+        index_enabled: bool,
+        identifier_prefix: &str,
+        reverse_relationships: bool,
+    ) -> Vec<Mutation> {
         let mut mutations = Vec::new();
         for index in 0..self.memory_count {
             let kind = memory_kind(index);
@@ -58,38 +77,70 @@ impl GeneratedGraphState {
                 1 => format!(", optional_score: {index}"),
                 _ => String::new(),
             };
+            let id = format!("{identifier_prefix}mem-{index}");
             mutations.push(Mutation::new(format!(
-                "CREATE (:Memory {{id: 'mem-{index}', kind: '{kind}', title: 'Memory {index}', importance: {index}{optional_note}{optional_score}}})"
+                "CREATE (:Memory {{id: '{id}', kind: '{kind}', title: 'Memory {index}', importance: {index}{optional_note}{optional_score}}})"
             )));
         }
         for index in 0..ENTITY_COUNT {
+            let id = format!("{identifier_prefix}entity-{index}");
             mutations.push(Mutation::new(format!(
-                "CREATE (:Entity {{id: 'entity-{index}', name: 'Entity {index}'}})"
+                "CREATE (:Entity {{id: '{id}', name: 'Entity {index}'}})"
             )));
         }
         for index in 0..self.memory_count {
+            let memory_id = format!("{identifier_prefix}mem-{index}");
+            let entity_id = format!("{identifier_prefix}entity-{}", index % ENTITY_COUNT);
+            let relationship = if reverse_relationships {
+                format!("(e)-[:MENTIONS {{weight: {}}}]->(m)", index % 4)
+            } else {
+                format!("(m)-[:MENTIONS {{weight: {}}}]->(e)", index % 4)
+            };
+            let matched = if reverse_relationships {
+                format!("(e:Entity {{id: '{entity_id}'}}), (m:Memory {{id: '{memory_id}'}})")
+            } else {
+                format!("(m:Memory {{id: '{memory_id}'}}), (e:Entity {{id: '{entity_id}'}})")
+            };
             mutations.push(Mutation::new(format!(
-                "MATCH (m:Memory {{id: 'mem-{index}'}}), (e:Entity {{id: 'entity-{}'}}) CREATE (m)-[:MENTIONS {{weight: {}}}]->(e)",
-                index % ENTITY_COUNT,
-                index % 4,
+                "MATCH {matched} CREATE {relationship}",
             )));
         }
-        mutations.push(Mutation::new(
-            "MATCH (source:Entity {id: 'entity-0'}), (target:Entity {id: 'entity-0'}) CREATE (source)-[:RELATES_TO {weight: 0}]->(target)",
+        mutations.push(relationship_mutation(
+            identifier_prefix,
+            0,
+            0,
+            Some(0),
+            reverse_relationships,
         ));
         for weight in [1, 2] {
-            mutations.push(Mutation::new(format!(
-                "MATCH (a:Entity {{id: 'entity-1'}}), (b:Entity {{id: 'entity-2'}}) CREATE (a)-[:RELATES_TO {{weight: {weight}}}]->(b)"
-            )));
+            mutations.push(relationship_mutation(
+                identifier_prefix,
+                1,
+                2,
+                Some(weight),
+                reverse_relationships,
+            ));
         }
-        mutations.push(Mutation::new(
-            "MATCH (a:Entity {id: 'entity-2'}), (b:Entity {id: 'entity-3'}) CREATE (a)-[:RELATES_TO {weight: 3}]->(b)",
+        mutations.push(relationship_mutation(
+            identifier_prefix,
+            2,
+            3,
+            Some(3),
+            reverse_relationships,
         ));
-        mutations.push(Mutation::new(
-            "MATCH (a:Entity {id: 'entity-4'}), (b:Entity {id: 'entity-5'}) CREATE (a)-[:RELATES_TO {weight: null}]->(b)",
+        mutations.push(nullable_relationship_mutation(
+            identifier_prefix,
+            4,
+            5,
+            "weight: null",
+            reverse_relationships,
         ));
-        mutations.push(Mutation::new(
-            "MATCH (a:Entity {id: 'entity-5'}), (b:Entity {id: 'entity-4'}) CREATE (a)-[:RELATES_TO]->(b)",
+        mutations.push(nullable_relationship_mutation(
+            identifier_prefix,
+            5,
+            4,
+            "",
+            reverse_relationships,
         ));
         if index_enabled {
             mutations.push(Mutation::new("CREATE INDEX ON :Memory(id)"));
@@ -98,24 +149,72 @@ impl GeneratedGraphState {
         mutations
     }
 
+    fn metamorphic_case(self, index_enabled: bool, query: &QueryAst) -> MetamorphicCase {
+        let isomorphic_query = query.map_identifier_parameters("iso-");
+        let graph_isomorphism = MetamorphicRelation {
+            name: "graph_isomorphism",
+            applicability_guard: "identifier values are projected as scalar values only",
+            mutations: self.transformed_mutations(index_enabled, "iso-", false),
+            query: isomorphic_query.invocation(),
+            identifier_prefix_to_strip: Some("iso-".to_string()),
+        };
+        let direction_reversal =
+            query
+                .reversed_directions()
+                .map(|reversed_query| MetamorphicRelation {
+                    name: "direction_reversal",
+                    applicability_guard:
+                        "query contains at least one directed relationship pattern",
+                    mutations: self.transformed_mutations(index_enabled, "", true),
+                    query: reversed_query.invocation(),
+                    identifier_prefix_to_strip: None,
+                });
+        MetamorphicCase {
+            graph_isomorphism,
+            direction_reversal,
+        }
+    }
+
     fn plan_differential_query(self, seed: u64, index: usize) -> GeneratedQuery {
         let selected_memory = (seed as usize) % self.memory_count;
         let alternate_memory = ((seed >> 16) as usize) % self.memory_count;
         let kind = if seed & 2 == 0 { "note" } else { "thread" };
         let mut parameters = Parameters::new();
+        let memory = || MatchPattern::Node(NodePattern::new("m", "Memory"));
+        let entity = || MatchPattern::Node(NodePattern::new("e", "Entity"));
 
-        let (name, cypher, result_semantics) = match index % crate::QUERY_SHAPE_COUNT {
+        let (name, ast) = match index % crate::QUERY_SHAPE_COUNT {
             0 => (
                 "node_scan",
-                "MATCH (m:Memory) RETURN m.id AS id, m.kind AS kind ORDER BY id ASC",
-                ResultSemantics::Ordered,
+                QueryAst {
+                    matches: vec![memory()],
+                    predicate: None,
+                    returns: vec![
+                        ReturnItem::property("m", "id", "id"),
+                        ReturnItem::property("m", "kind", "kind"),
+                    ],
+                    distinct: false,
+                    order_by: vec![OrderItem::ascending("id")],
+                    limit: None,
+                    parameters,
+                },
             ),
             1 => {
                 parameters.insert("kind".to_string(), Value::String(kind.to_string()));
                 (
                     "equality_filter",
-                    "MATCH (m:Memory) WHERE m.kind = $kind RETURN m.id AS id",
-                    ResultSemantics::Bag,
+                    QueryAst {
+                        matches: vec![memory()],
+                        predicate: Some(QueryPredicate::Equal(
+                            PropertyExpression::new("m", "kind"),
+                            "kind",
+                        )),
+                        returns: vec![ReturnItem::property("m", "id", "id")],
+                        distinct: false,
+                        order_by: Vec::new(),
+                        limit: None,
+                        parameters,
+                    },
                 )
             }
             2 => {
@@ -129,8 +228,18 @@ impl GeneratedGraphState {
                 );
                 (
                     "in_filter",
-                    "MATCH (m:Memory) WHERE m.id IN $ids RETURN m.id AS id ORDER BY id ASC",
-                    ResultSemantics::Ordered,
+                    QueryAst {
+                        matches: vec![memory()],
+                        predicate: Some(QueryPredicate::In(
+                            PropertyExpression::new("m", "id"),
+                            "ids",
+                        )),
+                        returns: vec![ReturnItem::property("m", "id", "id")],
+                        distinct: false,
+                        order_by: vec![OrderItem::ascending("id")],
+                        limit: None,
+                        parameters,
+                    },
                 )
             }
             3 => {
@@ -140,66 +249,186 @@ impl GeneratedGraphState {
                 );
                 (
                     "range_filter",
-                    "MATCH (m:Memory) WHERE m.importance >= $minimum RETURN m.id AS id, m.importance AS importance ORDER BY importance ASC, id ASC",
-                    ResultSemantics::Ordered,
+                    QueryAst {
+                        matches: vec![memory()],
+                        predicate: Some(QueryPredicate::GreaterThanOrEqual(
+                            PropertyExpression::new("m", "importance"),
+                            "minimum",
+                        )),
+                        returns: vec![
+                            ReturnItem::property("m", "id", "id"),
+                            ReturnItem::property("m", "importance", "importance"),
+                        ],
+                        distinct: false,
+                        order_by: vec![
+                            OrderItem::ascending("importance"),
+                            OrderItem::ascending("id"),
+                        ],
+                        limit: None,
+                        parameters,
+                    },
                 )
             }
             4 => {
                 parameters.insert("id".to_string(), memory_id(selected_memory));
                 (
                     "one_hop_expand",
-                    "MATCH (m:Memory {id: $id})-[r:MENTIONS]->(e:Entity) RETURN m.id AS memory_id, e.id AS entity_id ORDER BY entity_id ASC",
-                    ResultSemantics::Ordered,
+                    QueryAst {
+                        matches: vec![MatchPattern::Relationship {
+                            source: NodePattern::new("m", "Memory")
+                                .with_property_parameter("id", "id"),
+                            relationship_variable: "r",
+                            relationship_type: "MENTIONS",
+                            direction: PatternDirection::Outgoing,
+                            target: NodePattern::new("e", "Entity"),
+                        }],
+                        predicate: None,
+                        returns: vec![
+                            ReturnItem::property("m", "id", "memory_id"),
+                            ReturnItem::property("e", "id", "entity_id"),
+                        ],
+                        distinct: false,
+                        order_by: vec![OrderItem::ascending("entity_id")],
+                        limit: None,
+                        parameters,
+                    },
                 )
             }
             5 => (
                 "self_loop",
-                "MATCH (e:Entity)-[r:RELATES_TO]->(e) RETURN e.id AS id",
-                ResultSemantics::Bag,
+                QueryAst {
+                    matches: vec![MatchPattern::Relationship {
+                        source: NodePattern::new("e", "Entity"),
+                        relationship_variable: "r",
+                        relationship_type: "RELATES_TO",
+                        direction: PatternDirection::Outgoing,
+                        target: NodePattern::new("e", "Entity"),
+                    }],
+                    predicate: None,
+                    returns: vec![ReturnItem::property("e", "id", "id")],
+                    distinct: false,
+                    order_by: Vec::new(),
+                    limit: None,
+                    parameters,
+                },
             ),
             6 => {
                 parameters.insert("source".to_string(), entity_id(1));
                 parameters.insert("target".to_string(), entity_id(2));
                 (
                     "parallel_edges",
-                    "MATCH (a:Entity {id: $source})-[r:RELATES_TO]->(b:Entity {id: $target}) RETURN a.id AS source, b.id AS target",
-                    ResultSemantics::Bag,
+                    QueryAst {
+                        matches: vec![MatchPattern::Relationship {
+                            source: NodePattern::new("a", "Entity")
+                                .with_property_parameter("id", "source"),
+                            relationship_variable: "r",
+                            relationship_type: "RELATES_TO",
+                            direction: PatternDirection::Outgoing,
+                            target: NodePattern::new("b", "Entity")
+                                .with_property_parameter("id", "target"),
+                        }],
+                        predicate: None,
+                        returns: vec![
+                            ReturnItem::property("a", "id", "source"),
+                            ReturnItem::property("b", "id", "target"),
+                        ],
+                        distinct: false,
+                        order_by: Vec::new(),
+                        limit: None,
+                        parameters,
+                    },
                 )
             }
             7 => (
                 "cartesian_product",
-                "MATCH (m:Memory), (e:Entity) RETURN m.id AS memory_id, e.id AS entity_id",
-                ResultSemantics::Bag,
+                QueryAst {
+                    matches: vec![memory(), entity()],
+                    predicate: None,
+                    returns: vec![
+                        ReturnItem::property("m", "id", "memory_id"),
+                        ReturnItem::property("e", "id", "entity_id"),
+                    ],
+                    distinct: false,
+                    order_by: Vec::new(),
+                    limit: None,
+                    parameters,
+                },
             ),
             8 => (
                 "distinct_projection",
-                "MATCH (m:Memory) RETURN DISTINCT m.kind AS kind ORDER BY kind ASC",
-                ResultSemantics::Ordered,
+                QueryAst {
+                    matches: vec![memory()],
+                    predicate: None,
+                    returns: vec![ReturnItem::property("m", "kind", "kind")],
+                    distinct: true,
+                    order_by: vec![OrderItem::ascending("kind")],
+                    limit: None,
+                    parameters,
+                },
             ),
             9 => (
                 "aggregate",
-                "MATCH (m:Memory) RETURN m.kind AS kind, count(m) AS count ORDER BY kind ASC",
-                ResultSemantics::Ordered,
+                QueryAst {
+                    matches: vec![memory()],
+                    predicate: None,
+                    returns: vec![
+                        ReturnItem::property("m", "kind", "kind"),
+                        ReturnItem::count("m", "count"),
+                    ],
+                    distinct: false,
+                    order_by: vec![OrderItem::ascending("kind")],
+                    limit: None,
+                    parameters,
+                },
             ),
             10 => (
                 "top_n",
-                "MATCH (m:Memory) RETURN m.id AS id, m.importance AS importance ORDER BY importance DESC, id ASC LIMIT 5",
-                ResultSemantics::Ordered,
+                QueryAst {
+                    matches: vec![memory()],
+                    predicate: None,
+                    returns: vec![
+                        ReturnItem::property("m", "id", "id"),
+                        ReturnItem::property("m", "importance", "importance"),
+                    ],
+                    distinct: false,
+                    order_by: vec![
+                        OrderItem::descending("importance"),
+                        OrderItem::ascending("id"),
+                    ],
+                    limit: Some(5),
+                    parameters,
+                },
             ),
             _ => (
                 "missing_or_null",
-                "MATCH (m:Memory) WHERE m.optional_note IS NULL RETURN m.id AS id ORDER BY id ASC",
-                ResultSemantics::Ordered,
+                QueryAst {
+                    matches: vec![memory()],
+                    predicate: Some(QueryPredicate::IsNull(PropertyExpression::new(
+                        "m",
+                        if seed & 4 == 0 {
+                            "optional_note"
+                        } else {
+                            "optional_score"
+                        },
+                    ))),
+                    returns: vec![ReturnItem::property("m", "id", "id")],
+                    distinct: false,
+                    order_by: vec![OrderItem::ascending("id")],
+                    limit: None,
+                    parameters,
+                },
             ),
         };
 
+        let schema = GeneratedSchema::nowledge_fixture();
+        ast.validate(&schema)
+            .unwrap_or_else(|error| panic!("generated schema-invalid query AST: {error}"));
+        let invocation = ast.invocation();
+
         GeneratedQuery {
             name: name.to_string(),
-            invocation: QueryInvocation {
-                cypher: cypher.to_string(),
-                parameters,
-                result_semantics,
-            },
+            ast,
+            invocation,
         }
     }
 
@@ -251,6 +480,7 @@ impl GeneratedGraphState {
 #[derive(Debug)]
 struct GeneratedQuery {
     name: String,
+    ast: QueryAst,
     invocation: QueryInvocation,
 }
 
@@ -386,6 +616,48 @@ impl GeneratedPredicate {
             Self::Not(predicate) => format!("NOT ({})", predicate.render()),
         }
     }
+}
+
+fn relationship_mutation(
+    identifier_prefix: &str,
+    source: usize,
+    target: usize,
+    weight: Option<usize>,
+    reverse: bool,
+) -> Mutation {
+    let weight = weight
+        .map(|weight| format!(" {{weight: {weight}}}"))
+        .unwrap_or_default();
+    nullable_relationship_mutation(identifier_prefix, source, target, weight.trim(), reverse)
+}
+
+fn nullable_relationship_mutation(
+    identifier_prefix: &str,
+    source: usize,
+    target: usize,
+    properties: &str,
+    reverse: bool,
+) -> Mutation {
+    let source_id = format!("{identifier_prefix}entity-{source}");
+    let target_id = format!("{identifier_prefix}entity-{target}");
+    let properties = if properties.is_empty() {
+        String::new()
+    } else if properties.starts_with('{') {
+        format!(" {properties}")
+    } else {
+        format!(" {{{properties}}}")
+    };
+    let relationship = if reverse {
+        format!("(b)-[:RELATES_TO{properties}]->(a)")
+    } else {
+        format!("(a)-[:RELATES_TO{properties}]->(b)")
+    };
+    let matched = if reverse {
+        format!("(b:Entity {{id: '{target_id}'}}), (a:Entity {{id: '{source_id}'}})")
+    } else {
+        format!("(a:Entity {{id: '{source_id}'}}), (b:Entity {{id: '{target_id}'}})")
+    };
+    Mutation::new(format!("MATCH {matched} CREATE {relationship}"))
 }
 
 fn memory_kind(index: usize) -> &'static str {

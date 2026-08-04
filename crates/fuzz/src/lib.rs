@@ -9,14 +9,17 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 mod generator;
+mod query_ast;
 
 use generator::StateAwareCaseGenerator;
+use query_ast::QueryAst;
 
-pub const CAMPAIGN_PROTOCOL: &str = "skein-multi-oracle-fuzz-v2";
+pub const CAMPAIGN_PROTOCOL: &str = "skein-multi-oracle-fuzz-v3";
 pub const GRAPH_TLP_PROTOCOL: &str = "skein-graph-tlp-fuzz-v1";
+pub const METAMORPHIC_PROTOCOL: &str = "skein-graph-metamorphic-fuzz-v1";
 pub const PLAN_DIFFERENTIAL_PROTOCOL: &str = "skein-plan-differential-fuzz-v1";
-pub const REPLAY_BUNDLE_PROTOCOL: &str = "skein-multi-oracle-replay-v2";
-const QUERY_SHAPE_COUNT: usize = 12;
+pub const REPLAY_BUNDLE_PROTOCOL: &str = "skein-multi-oracle-replay-v3";
+pub(crate) const QUERY_SHAPE_COUNT: usize = 12;
 const DEFAULT_CASE_COUNT: usize = 128;
 const MAX_CASE_COUNT: usize = 10_000;
 const MAX_REDUCTION_ATTEMPTS: usize = 64;
@@ -59,7 +62,9 @@ pub struct FuzzCase {
     pub shape: String,
     pub mutations: Vec<Mutation>,
     pub query: QueryInvocation,
+    pub(crate) query_ast: QueryAst,
     pub graph_tlp: GraphTlpCase,
+    pub metamorphic: MetamorphicCase,
     pub index_enabled: bool,
 }
 
@@ -77,6 +82,21 @@ pub struct GraphTlpCase {
     pub predicate_true: QueryInvocation,
     pub predicate_false: QueryInvocation,
     pub predicate_null: QueryInvocation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetamorphicCase {
+    pub graph_isomorphism: MetamorphicRelation,
+    pub direction_reversal: Option<MetamorphicRelation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetamorphicRelation {
+    pub name: &'static str,
+    pub applicability_guard: &'static str,
+    pub mutations: Vec<Mutation>,
+    pub query: QueryInvocation,
+    pub identifier_prefix_to_strip: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +135,16 @@ impl CapabilityProfile {
     pub fn graph_tlp_v1() -> Self {
         Self {
             shapes: vec!["nullable_node_property", "node_range", "relationship_range"],
+            compares_duplicates: true,
+            compares_missing_and_null: true,
+            compares_float_bit_patterns: true,
+            compares_path_values: false,
+        }
+    }
+
+    pub fn graph_metamorphic_v1() -> Self {
+        Self {
+            shapes: vec!["graph_isomorphism", "direction_reversal"],
             compares_duplicates: true,
             compares_missing_and_null: true,
             compares_float_bit_patterns: true,
@@ -199,6 +229,49 @@ pub struct GraphTlpFailureReport {
     pub evidence: GraphTlpEvidence,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
+pub enum MetamorphicOracleResult {
+    Equivalent(MetamorphicEvidence),
+    Failure(MetamorphicFailureReport),
+}
+
+impl MetamorphicOracleResult {
+    pub const fn is_equivalent(&self) -> bool {
+        matches!(self, Self::Equivalent(_))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetamorphicEvidence {
+    pub original: ExecutionObservation,
+    pub graph_isomorphism: ExecutionObservation,
+    pub direction_reversal: Option<ExecutionObservation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetamorphicFailureReport {
+    pub signature: &'static str,
+    pub relation: &'static str,
+    pub reason: String,
+    pub replay: ReplayBundle,
+    pub evidence: MetamorphicEvidence,
+}
+
+impl MetamorphicFailureReport {
+    pub fn json(&self) -> JsonValue {
+        json!({
+            "signature": self.signature,
+            "relation": self.relation,
+            "reason": self.reason,
+            "replay": self.replay.json(),
+            "original": self.evidence.original.json(),
+            "graph_isomorphism": self.evidence.graph_isomorphism.json(),
+            "direction_reversal": self.evidence.direction_reversal.as_ref().map(ExecutionObservation::json),
+        })
+    }
+}
+
 impl GraphTlpFailureReport {
     pub fn json(&self) -> JsonValue {
         json!({
@@ -219,7 +292,9 @@ pub struct ReplayBundle {
     pub shape: String,
     pub mutations: Vec<Mutation>,
     pub query: QueryInvocation,
+    pub(crate) query_ast: QueryAst,
     pub graph_tlp: GraphTlpCase,
+    pub metamorphic: MetamorphicCase,
     pub index_enabled: bool,
 }
 
@@ -230,7 +305,9 @@ impl ReplayBundle {
             shape: case.shape.clone(),
             mutations: case.mutations.clone(),
             query: case.query.clone(),
+            query_ast: case.query_ast.clone(),
             graph_tlp: case.graph_tlp.clone(),
+            metamorphic: case.metamorphic.clone(),
             index_enabled: case.index_enabled,
         }
     }
@@ -244,7 +321,9 @@ impl ReplayBundle {
             "optimizer_search_variants": ["memo", "direct_fallback"],
             "mutations": self.mutations.iter().map(mutation_json).collect::<Vec<_>>(),
             "query": query_invocation_json(&self.query),
+            "query_ast": self.query_ast.json(),
             "graph_tlp": graph_tlp_case_json(&self.graph_tlp),
+            "metamorphic": metamorphic_case_json(&self.metamorphic),
         })
     }
 }
@@ -254,6 +333,8 @@ pub struct ReductionReport {
     pub oracle: &'static str,
     pub original_mutation_count: usize,
     pub reduced_mutation_count: usize,
+    pub original_query_node_count: usize,
+    pub reduced_query_node_count: usize,
     pub attempts: usize,
     pub replay: ReplayBundle,
 }
@@ -264,6 +345,8 @@ impl ReductionReport {
             "oracle": self.oracle,
             "original_mutation_count": self.original_mutation_count,
             "reduced_mutation_count": self.reduced_mutation_count,
+            "original_query_node_count": self.original_query_node_count,
+            "reduced_query_node_count": self.reduced_query_node_count,
             "attempts": self.attempts,
             "replay": self.replay.json(),
         })
@@ -386,6 +469,166 @@ impl Oracle for GraphTlpOracle {
             GraphTlpOracleResult::Equivalent(evidence)
         }
     }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct GraphMetamorphicOracle;
+
+impl Oracle for GraphMetamorphicOracle {
+    type Output = MetamorphicOracleResult;
+
+    fn capability_profile(&self) -> CapabilityProfile {
+        CapabilityProfile::graph_metamorphic_v1()
+    }
+
+    fn evaluate(&self, case: &FuzzCase) -> MetamorphicOracleResult {
+        let original = execute_mutations_query(&case.mutations, &case.query);
+        let graph_isomorphism = normalized_observation(
+            execute_mutations_query(
+                &case.metamorphic.graph_isomorphism.mutations,
+                &case.metamorphic.graph_isomorphism.query,
+            ),
+            case.metamorphic
+                .graph_isomorphism
+                .identifier_prefix_to_strip
+                .as_deref(),
+        );
+        let direction_reversal = case
+            .metamorphic
+            .direction_reversal
+            .as_ref()
+            .map(|relation| execute_mutations_query(&relation.mutations, &relation.query));
+        let evidence = MetamorphicEvidence {
+            original,
+            graph_isomorphism,
+            direction_reversal,
+        };
+        if let Some((signature, relation, reason)) =
+            classify_metamorphic_failure(&evidence, case.query.result_semantics)
+        {
+            MetamorphicOracleResult::Failure(MetamorphicFailureReport {
+                signature,
+                relation,
+                reason,
+                replay: ReplayBundle::from_case(case),
+                evidence,
+            })
+        } else {
+            MetamorphicOracleResult::Equivalent(evidence)
+        }
+    }
+}
+
+fn execute_mutations_query(
+    mutations: &[Mutation],
+    query: &QueryInvocation,
+) -> ExecutionObservation {
+    let mut db = Database::new();
+    for mutation in mutations {
+        if let Err(error) = db.query_with_params(&mutation.cypher, &mutation.parameters) {
+            return error_observation("mutation", error);
+        }
+    }
+    let snapshot_epoch = db.commit_epoch();
+    execute_snapshot_case(
+        &mut db.begin_read_transaction(),
+        snapshot_epoch,
+        query,
+        OptimizerSearchDirective::Memo,
+    )
+}
+
+fn normalized_observation(
+    mut observation: ExecutionObservation,
+    identifier_prefix_to_strip: Option<&str>,
+) -> ExecutionObservation {
+    let Some(prefix) = identifier_prefix_to_strip else {
+        return observation;
+    };
+    if let ExecutionOutcome::Rows(rows) = &mut observation.outcome {
+        for row in rows {
+            for value in row.values_mut() {
+                normalize_identifier_value(value, prefix);
+            }
+        }
+    }
+    observation
+}
+
+fn normalize_identifier_value(value: &mut Value, prefix: &str) {
+    match value {
+        Value::String(identifier)
+            if identifier
+                .strip_prefix(prefix)
+                .is_some_and(|id| id.starts_with("mem-") || id.starts_with("entity-")) =>
+        {
+            identifier.drain(..prefix.len());
+        }
+        Value::List(values) => {
+            for value in values {
+                normalize_identifier_value(value, prefix);
+            }
+        }
+        Value::Map(values) => {
+            for value in values.values_mut() {
+                normalize_identifier_value(value, prefix);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn classify_metamorphic_failure(
+    evidence: &MetamorphicEvidence,
+    semantics: ResultSemantics,
+) -> Option<(&'static str, &'static str, String)> {
+    if let ExecutionOutcome::Error { phase, class, .. } = &evidence.original.outcome {
+        return Some((
+            "metamorphic_original_errored",
+            "original",
+            format!("metamorphic original query failed in {phase}/{class}"),
+        ));
+    }
+    if let ExecutionOutcome::Error { phase, class, .. } = &evidence.graph_isomorphism.outcome {
+        return Some((
+            "graph_isomorphism_transformed_errored",
+            "graph_isomorphism",
+            format!("graph-isomorphism transformed query failed in {phase}/{class}"),
+        ));
+    }
+    let ExecutionOutcome::Rows(original_rows) = &evidence.original.outcome else {
+        unreachable!("original error was classified above")
+    };
+    let ExecutionOutcome::Rows(isomorphic_rows) = &evidence.graph_isomorphism.outcome else {
+        unreachable!("isomorphism error was classified above")
+    };
+    if let Err(reason) = compare_rows(original_rows, isomorphic_rows, semantics) {
+        return Some((
+            "graph_isomorphism_result_mismatch",
+            "graph_isomorphism",
+            format!("graph-isomorphism result mismatch: {reason}"),
+        ));
+    }
+    if let Some(direction_reversal) = &evidence.direction_reversal {
+        if let ExecutionOutcome::Error { phase, class, .. } = &direction_reversal.outcome {
+            return Some((
+                "direction_reversal_transformed_errored",
+                "direction_reversal",
+                format!("direction-reversal transformed query failed in {phase}/{class}"),
+            ));
+        }
+        let ExecutionOutcome::Rows(reversed_rows) = &direction_reversal.outcome else {
+            unreachable!("direction-reversal error was classified above")
+        };
+        if let Err(reason) = compare_rows(original_rows, reversed_rows, semantics) {
+            return Some((
+                "direction_reversal_result_mismatch",
+                "direction_reversal",
+                format!("direction-reversal result mismatch: {reason}"),
+            ));
+        }
+    }
+    None
 }
 
 fn execute_case(case: &FuzzCase) -> (ExecutionObservation, ExecutionObservation) {
@@ -768,6 +1011,7 @@ fn reduce_failure(
     expected: &FailureSignature,
 ) -> ReductionReport {
     let original_mutation_count = case.mutations.len();
+    let original_query_node_count = case.query_ast.node_count();
     let mut reduced = case.clone();
     let mut attempts = 0;
     let mut granularity = 2;
@@ -802,10 +1046,35 @@ fn reduce_failure(
         }
     }
 
+    if oracle == OracleKind::PlanDifferential {
+        loop {
+            let mut accepted = None;
+            for query_ast in reduced.query_ast.reduction_candidates() {
+                if attempts >= MAX_REDUCTION_ATTEMPTS {
+                    break;
+                }
+                let mut candidate = reduced.clone();
+                candidate.query = query_ast.invocation();
+                candidate.query_ast = query_ast;
+                attempts += 1;
+                if failure_signature(&candidate, oracle).as_ref() == Some(expected) {
+                    accepted = Some(candidate);
+                    break;
+                }
+            }
+            let Some(candidate) = accepted else {
+                break;
+            };
+            reduced = candidate;
+        }
+    }
+
     ReductionReport {
         oracle: oracle.as_str(),
         original_mutation_count,
         reduced_mutation_count: reduced.mutations.len(),
+        original_query_node_count,
+        reduced_query_node_count: reduced.query_ast.node_count(),
         attempts,
         replay: ReplayBundle::from_case(&reduced),
     }
@@ -895,11 +1164,14 @@ pub struct CampaignCaseReport {
     pub success: bool,
     pub plan_differential_success: bool,
     pub graph_tlp_success: bool,
+    pub metamorphic_success: bool,
+    pub direction_reversal_applicable: bool,
     pub reproduction_command: Option<String>,
     pub memo_plan_fingerprint: Option<String>,
     pub direct_fallback_plan_fingerprint: Option<String>,
     pub failure: Option<FailureReport>,
     pub graph_tlp_failure: Option<GraphTlpFailureReport>,
+    pub metamorphic_failure: Option<MetamorphicFailureReport>,
 }
 
 impl CampaignCaseReport {
@@ -913,11 +1185,14 @@ impl CampaignCaseReport {
             "success": self.success,
             "plan_differential_success": self.plan_differential_success,
             "graph_tlp_success": self.graph_tlp_success,
+            "metamorphic_success": self.metamorphic_success,
+            "direction_reversal_applicable": self.direction_reversal_applicable,
             "reproduction_command": self.reproduction_command,
             "memo_plan_fingerprint": self.memo_plan_fingerprint,
             "direct_fallback_plan_fingerprint": self.direct_fallback_plan_fingerprint,
             "failure": self.failure.as_ref().map(FailureReport::json),
             "graph_tlp_failure": self.graph_tlp_failure.as_ref().map(GraphTlpFailureReport::json),
+            "metamorphic_failure": self.metamorphic_failure.as_ref().map(MetamorphicFailureReport::json),
         })
     }
 }
@@ -941,6 +1216,7 @@ impl CampaignReport {
     pub fn json(&self) -> JsonValue {
         let plan_profile = CapabilityProfile::plan_differential_v1();
         let tlp_profile = CapabilityProfile::graph_tlp_v1();
+        let metamorphic_profile = CapabilityProfile::graph_metamorphic_v1();
         json!({
             "protocol": CAMPAIGN_PROTOCOL,
             "success": self.success(),
@@ -950,14 +1226,16 @@ impl CampaignReport {
             "passed_case_count": self.passed_case_count,
             "failed_case_count": self.failed_case_count,
             "complete_shape_coverage": self.complete_shape_coverage,
-            "oracles": ["plan_differential", "graph_tlp"],
+            "oracles": ["plan_differential", "graph_tlp", "graph_metamorphic"],
             "oracle_protocols": {
                 "plan_differential": PLAN_DIFFERENTIAL_PROTOCOL,
                 "graph_tlp": GRAPH_TLP_PROTOCOL,
+                "graph_metamorphic": METAMORPHIC_PROTOCOL,
             },
             "capability_profiles": {
                 "plan_differential": capability_profile_json(&plan_profile),
                 "graph_tlp": capability_profile_json(&tlp_profile),
+                "graph_metamorphic": capability_profile_json(&metamorphic_profile),
             },
             "cases": self.cases.iter().map(CampaignCaseReport::json).collect::<Vec<_>>(),
         })
@@ -976,6 +1254,7 @@ pub fn run_campaign(options: CampaignOptions) -> Result<CampaignReport, FuzzErro
 
     let plan_oracle = PlanDifferentialOracle;
     let graph_tlp_oracle = GraphTlpOracle;
+    let metamorphic_oracle = GraphMetamorphicOracle;
     let mut generator = StateAwareCaseGenerator::new(options.seed);
     let mut cases = Vec::with_capacity(options.case_count);
     for index in 0..options.case_count {
@@ -1003,7 +1282,12 @@ pub fn run_campaign(options: CampaignOptions) -> Result<CampaignReport, FuzzErro
             GraphTlpOracleResult::Equivalent(_) => (true, None),
             GraphTlpOracleResult::Failure(failure) => (false, Some(failure)),
         };
-        let success = plan_differential_success && graph_tlp_success;
+        let (metamorphic_success, metamorphic_failure) = match metamorphic_oracle.evaluate(&case) {
+            MetamorphicOracleResult::Equivalent(_) => (true, None),
+            MetamorphicOracleResult::Failure(failure) => (false, Some(failure)),
+        };
+        let success = plan_differential_success && graph_tlp_success && metamorphic_success;
+        let direction_reversal_applicable = case.metamorphic.direction_reversal.is_some();
         cases.push(CampaignCaseReport {
             index,
             seed: case.seed,
@@ -1013,6 +1297,8 @@ pub fn run_campaign(options: CampaignOptions) -> Result<CampaignReport, FuzzErro
             success,
             plan_differential_success,
             graph_tlp_success,
+            metamorphic_success,
+            direction_reversal_applicable,
             reproduction_command: (!success).then(|| {
                 format!(
                     "cargo run -p skein-fuzz -- --seed {} --cases {}",
@@ -1024,6 +1310,7 @@ pub fn run_campaign(options: CampaignOptions) -> Result<CampaignReport, FuzzErro
             direct_fallback_plan_fingerprint,
             failure,
             graph_tlp_failure,
+            metamorphic_failure,
         });
     }
 
@@ -1071,6 +1358,22 @@ fn graph_tlp_case_json(case: &GraphTlpCase) -> JsonValue {
         "predicate_true": query_invocation_json(&case.predicate_true),
         "predicate_false": query_invocation_json(&case.predicate_false),
         "predicate_null": query_invocation_json(&case.predicate_null),
+    })
+}
+
+fn metamorphic_case_json(case: &MetamorphicCase) -> JsonValue {
+    let relation_json = |relation: &MetamorphicRelation| {
+        json!({
+            "name": relation.name,
+            "applicability_guard": relation.applicability_guard,
+            "mutations": relation.mutations.iter().map(mutation_json).collect::<Vec<_>>(),
+            "query": query_invocation_json(&relation.query),
+            "identifier_prefix_to_strip": relation.identifier_prefix_to_strip,
+        })
+    };
+    json!({
+        "graph_isomorphism": relation_json(&case.graph_isomorphism),
+        "direction_reversal": case.direction_reversal.as_ref().map(relation_json),
     })
 }
 
@@ -1201,7 +1504,7 @@ mod tests {
     }
 
     #[test]
-    fn campaign_covers_every_query_shape_and_both_oracles() {
+    fn campaign_covers_every_query_shape_and_all_oracles() {
         let report = run_campaign(CampaignOptions {
             seed: 7,
             case_count: QUERY_SHAPE_COUNT,
@@ -1221,17 +1524,27 @@ mod tests {
             .iter()
             .all(|case| case.direct_fallback_plan_fingerprint.is_some()));
         assert!(report.cases.iter().all(|case| case.graph_tlp_success));
+        assert!(report.cases.iter().all(|case| case.metamorphic_success));
+        assert!(report
+            .cases
+            .iter()
+            .any(|case| case.direction_reversal_applicable));
         assert!(report.cases.iter().any(|case| case.index_enabled));
         assert!(report.cases.iter().any(|case| !case.index_enabled));
         let json = report.json();
         assert_eq!(json["protocol"], CAMPAIGN_PROTOCOL);
         assert_eq!(json["oracles"][0], "plan_differential");
         assert_eq!(json["oracles"][1], "graph_tlp");
+        assert_eq!(json["oracles"][2], "graph_metamorphic");
         assert_eq!(
             json["oracle_protocols"]["plan_differential"],
             PLAN_DIFFERENTIAL_PROTOCOL
         );
         assert_eq!(json["oracle_protocols"]["graph_tlp"], GRAPH_TLP_PROTOCOL);
+        assert_eq!(
+            json["oracle_protocols"]["graph_metamorphic"],
+            METAMORPHIC_PROTOCOL
+        );
     }
 
     #[test]
@@ -1260,18 +1573,22 @@ mod tests {
     }
 
     #[test]
-    fn state_aware_generator_emits_parseable_queries_for_both_oracles() {
+    fn state_aware_generator_emits_parseable_queries_for_all_oracles() {
         let mut generator = StateAwareCaseGenerator::new(7);
 
         for index in 0..QUERY_SHAPE_COUNT {
             let case = generator.case(index);
-            let queries = [
+            let mut queries = vec![
                 &case.query,
                 &case.graph_tlp.original,
                 &case.graph_tlp.predicate_true,
                 &case.graph_tlp.predicate_false,
                 &case.graph_tlp.predicate_null,
+                &case.metamorphic.graph_isomorphism.query,
             ];
+            if let Some(direction_reversal) = &case.metamorphic.direction_reversal {
+                queries.push(&direction_reversal.query);
+            }
             for query in queries {
                 skein::cypher::parse(&query.cypher).unwrap_or_else(|error| {
                     panic!("generated query failed to parse: {}: {error}", query.cypher)
@@ -1335,6 +1652,11 @@ mod tests {
         assert_eq!(replay["optimizer_search_variants"][0], "memo");
         assert_eq!(replay["optimizer_search_variants"][1], "direct_fallback");
         assert_eq!(replay["query"]["parameters"]["ids"]["type"], "list");
+        assert!(replay["query_ast"]["node_count"].as_u64().unwrap() > 0);
+        assert_eq!(
+            replay["metamorphic"]["graph_isomorphism"]["name"],
+            "graph_isomorphism"
+        );
         assert!(replay["graph_tlp"]["predicate_true"]["cypher"]
             .as_str()
             .unwrap()
@@ -1362,6 +1684,49 @@ mod tests {
             failure.reduction.replay.mutations[0].cypher,
             "CREATE invalid"
         );
+        assert!(
+            failure.reduction.reduced_query_node_count
+                < failure.reduction.original_query_node_count
+        );
+    }
+
+    #[test]
+    fn metamorphic_oracle_has_independent_direction_failure_signature() {
+        let mut generator = StateAwareCaseGenerator::new(7);
+        let mut case = (0..QUERY_SHAPE_COUNT)
+            .map(|index| generator.case(index))
+            .find(|case| case.metamorphic.direction_reversal.is_some())
+            .unwrap();
+        case.metamorphic.direction_reversal.as_mut().unwrap().query = case.query.clone();
+
+        let MetamorphicOracleResult::Failure(failure) = GraphMetamorphicOracle.evaluate(&case)
+        else {
+            panic!("invalid direction transform must fail");
+        };
+        assert_eq!(failure.signature, "direction_reversal_result_mismatch");
+        assert_eq!(failure.relation, "direction_reversal");
+        assert!(PlanDifferentialOracle.evaluate(&case).is_equivalent());
+        assert!(GraphTlpOracle.evaluate(&case).is_equivalent());
+    }
+
+    #[test]
+    fn semantic_mismatch_signature_cannot_reduce_to_execution_error() {
+        let rows = ExecutionOutcome::Rows(vec![row([("id", Value::Int(1))])]);
+        let different_rows = ExecutionOutcome::Rows(vec![row([("id", Value::Int(2))])]);
+        let semantic = classify_plan_failure(&rows, &different_rows, ResultSemantics::Bag)
+            .unwrap()
+            .signature;
+        let execution_error = ExecutionOutcome::Error {
+            phase: "execute",
+            class: "semantic",
+            message: "invalid reduced query".to_string(),
+        };
+        let reduced = classify_plan_failure(&execution_error, &rows, ResultSemantics::Bag)
+            .unwrap()
+            .signature;
+
+        assert_eq!(semantic, FailureSignature::PlanResultMismatch);
+        assert_ne!(semantic, reduced);
     }
 
     #[test]

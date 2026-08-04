@@ -2337,21 +2337,21 @@ contract.
     expansion, and metadata-filtered search evidence without production CLI
     wrappers.
 
-- [ ] Expand the offline optimizer correctness fuzzing after the Graph TLP
+- [x] Expand the offline optimizer correctness fuzzing after the Graph TLP
    baseline.
-   - [ ] Replace the remaining 12 fixed DQP query shapes with schema-aware typed
+   - [x] Replace the remaining 12 fixed DQP query shapes with schema-aware typed
      Cypher AST generation while keeping generated queries inside supported
      production semantics.
-   - [ ] Add graph-isomorphism and direction-reversal metamorphic oracles with
+   - [x] Add graph-isomorphism and direction-reversal metamorphic oracles with
      explicit applicability guards and independent failure signatures.
-   - [ ] Extend oracle-specific reduction from graph mutations to query AST
+   - [x] Extend oracle-specific reduction from graph mutations to query AST
      nodes without accepting setup, parse, or execution errors as reproduction
      of a semantic mismatch.
-   - [ ] Add NoREC only after the supported Cypher subset can express the
-     general row-wise boolean-count relation without a fuzz-only executor.
 
 ## P2: Deferred Capabilities
 
+- [ ] Add NoREC only after the supported Cypher subset can express the general
+  row-wise boolean-count relation without a fuzz-only executor.
 - [x] Advanced graph algorithms beyond Nowledge's active routes.
 - [x] Broad openCypher compatibility not exercised by Nowledge Mem.
 - [x] Distributed storage, replication, or cloud-primary execution inside the
