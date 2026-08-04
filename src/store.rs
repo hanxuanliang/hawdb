@@ -14,6 +14,11 @@ use skein_core::RuntimeTaskContext;
 mod source_scan;
 #[path = "store/statistics_refresh.rs"]
 mod statistics_refresh;
+use skein_storage::{
+    durable_replace_file, sync_parent_directory, AdjacencyPostingList, CanonicalEndpointDirection,
+    CanonicalNodeIterator, CanonicalRelationshipIterator, CanonicalSegmentError,
+    DatabaseDirectoryLease,
+};
 pub use skein_storage::{
     AdjacencyDirection, AdjacencyGroupConsistencyMismatch, AdjacencyGroupKey, AdjacencyGroupStats,
     AdjacencyLayout, CanonicalAdjacencyBuildReport, CanonicalAdjacencyConfig,
@@ -43,10 +48,6 @@ pub use skein_storage::{
     StorageRecoveryReport, StorageResidencyMode, StorageRestoreReport, StoreId,
     StoreStableIdMapping, WalReplayConfig,
 };
-use skein_storage::{
-    AdjacencyPostingList, CanonicalEndpointDirection, CanonicalNodeIterator,
-    CanonicalRelationshipIterator, CanonicalSegmentError, DatabaseDirectoryLease,
-};
 pub use source_scan::SourceScanRow;
 pub use statistics_refresh::{OptimizerStatisticsRefreshOptions, OptimizerStatisticsRefreshReport};
 use std::collections::{BTreeMap, BTreeSet};
@@ -54,8 +55,6 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Cursor, Read, Write};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::ops::{Deref, DerefMut};
-#[cfg(windows)]
-use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -10997,8 +10996,7 @@ impl DurableStore {
             file.write_all(encoded.as_bytes())?;
             file.sync_all()?;
         }
-        fs::rename(&tmp_path, &manifest_path)?;
-        sync_parent_dir(&manifest_path)?;
+        durable_replace_file(&tmp_path, &manifest_path)?;
         let property_encoded = property_spill_manifest
             .encode()
             .map_err(|error| SkeinError::Storage(error.to_string()))?;
@@ -11011,8 +11009,7 @@ impl DurableStore {
             file.write_all(property_encoded.as_bytes())?;
             file.sync_all()?;
         }
-        fs::rename(&property_tmp_path, &property_manifest_path)?;
-        sync_parent_dir(&property_manifest_path)?;
+        durable_replace_file(&property_tmp_path, &property_manifest_path)?;
         Ok((
             DurableArtifactMetadata {
                 encoded_len,
@@ -11060,8 +11057,7 @@ impl DurableStore {
             file.write_all(encoded.as_bytes())?;
             file.sync_all()?;
         }
-        fs::rename(&tmp_path, &manifest_path)?;
-        sync_parent_dir(&manifest_path)?;
+        durable_replace_file(&tmp_path, &manifest_path)?;
         Ok(DurableArtifactMetadata {
             encoded_len,
             encoded_checksum,
@@ -11111,8 +11107,7 @@ impl DurableStore {
             file.write_all(encoded.as_bytes())?;
             file.sync_all()?;
         }
-        fs::rename(&tmp_path, &manifest_path)?;
-        sync_parent_dir(&manifest_path)?;
+        durable_replace_file(&tmp_path, &manifest_path)?;
         Ok(DurableArtifactMetadata {
             encoded_len,
             encoded_checksum,
@@ -11411,8 +11406,7 @@ impl DurableStore {
             file.write_all(&encoded)?;
             file.sync_all()?;
         }
-        fs::rename(tmp_path, &checkpoint_path)?;
-        sync_parent_dir(&checkpoint_path)?;
+        durable_replace_file(&tmp_path, &checkpoint_path)?;
         Ok(DurableArtifactMetadata {
             encoded_len,
             encoded_checksum,
@@ -11429,8 +11423,7 @@ impl DurableStore {
             file.write_all(&encoded)?;
             file.sync_all()?;
         }
-        fs::rename(tmp_path, &self.projected_graphs_path)?;
-        sync_parent_dir(&self.projected_graphs_path)?;
+        durable_replace_file(&tmp_path, &self.projected_graphs_path)?;
         Ok(())
     }
 
@@ -11480,8 +11473,7 @@ impl DurableStore {
             file.write_all(&encoded)?;
             file.sync_all()?;
         }
-        fs::rename(tmp_path, &self.stable_id_mapping_path)?;
-        sync_parent_dir(&self.stable_id_mapping_path)?;
+        durable_replace_file(&tmp_path, &self.stable_id_mapping_path)?;
         Ok(())
     }
 
@@ -11509,8 +11501,8 @@ impl DurableStore {
             writeln!(file, "{header}")?;
             file.sync_all()?;
         }
-        fs::rename(tmp_path, &wal_path)?;
-        sync_parent_dir(&wal_path)
+        durable_replace_file(&tmp_path, &wal_path)?;
+        Ok(())
     }
 
     fn publish_checkpoint_manifest(
@@ -12083,8 +12075,7 @@ impl DurableManifest {
             file.write_all(data.as_bytes())?;
             file.sync_all()?;
         }
-        fs::rename(tmp_path, path)?;
-        sync_parent_dir(path)?;
+        durable_replace_file(&tmp_path, path)?;
         Ok(())
     }
 }
@@ -12462,8 +12453,7 @@ impl BackupManifest {
             file.write_all(format!("{body}checksum\t{checksum}\n").as_bytes())?;
             file.sync_all()?;
         }
-        fs::rename(&tmp_path, path)?;
-        sync_parent_dir(path)?;
+        durable_replace_file(&tmp_path, path)?;
         Ok(Self {
             generation,
             checkpoint_commit_epoch,
@@ -12899,17 +12889,7 @@ fn remove_source_scan_artifacts(path: &Path) -> Result<()> {
 }
 
 pub(crate) fn sync_parent_dir(path: &Path) -> Result<()> {
-    let Some(parent) = path.parent() else {
-        return Ok(());
-    };
-    #[cfg(not(windows))]
-    let directory = File::open(parent)?;
-    #[cfg(windows)]
-    let directory = OpenOptions::new()
-        .read(true)
-        .custom_flags(0x0200_0000)
-        .open(parent)?;
-    directory.sync_all()?;
+    sync_parent_directory(path)?;
     Ok(())
 }
 

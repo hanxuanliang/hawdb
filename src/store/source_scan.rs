@@ -5,12 +5,12 @@
 
 use super::{
     checksum_bytes, decode_properties, decode_string, decode_value, encode_durable_text,
-    encode_properties, encode_string, encode_value, parse_i64, parse_u64, sync_parent_dir,
-    DurableCompression, Result, SkeinError, Value,
+    encode_properties, encode_string, encode_value, parse_i64, parse_u64, DurableCompression,
+    Result, SkeinError, Value,
 };
 use skein_storage::{
-    DateTimeMinMax, EnumDictionaryStats, FieldSummary, NodeRecord, PersistedScanSegment,
-    ScanSegmentManifest, SegmentPayloadRange, SegmentSummary,
+    durable_replace_file, DateTimeMinMax, EnumDictionaryStats, FieldSummary, NodeRecord,
+    PersistedScanSegment, ScanSegmentManifest, SegmentPayloadRange, SegmentSummary,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -119,8 +119,7 @@ pub(super) fn write(
         }
         file.sync_all()?;
     }
-    fs::rename(&payload_tmp_path, &payload_path)?;
-    sync_parent_dir(&payload_path)?;
+    durable_replace_file(&payload_tmp_path, &payload_path)?;
 
     let descriptor_path = path.join(SOURCE_SCAN_DESCRIPTOR_FILE);
     let descriptor_tmp_path = descriptor_path.with_extension("skein.tmp");
@@ -132,8 +131,7 @@ pub(super) fn write(
         file.write_all(data.as_bytes())?;
         file.sync_all()?;
     }
-    fs::rename(&descriptor_tmp_path, &descriptor_path)?;
-    sync_parent_dir(&descriptor_path)?;
+    durable_replace_file(&descriptor_tmp_path, &descriptor_path)?;
     Ok(SourceScanPublication {
         graph_epoch: projection.graph_epoch,
         descriptor_checksum,

@@ -48,6 +48,7 @@ use skein::{
     BackgroundMaintenanceOptions, CompatibilityFixture, LocalQosPolicy, LocalQosState, WorkClass,
     WORK_CLASS_COUNT,
 };
+use skein_storage::{durable_replace_file, sync_directory as sync_storage_directory};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::Write;
@@ -4664,10 +4665,7 @@ fn write_atomic_path(path: &Path, tmp_path: &Path, bytes: &[u8]) -> Result<()> {
         file.write_all(bytes)?;
         file.sync_all()?;
     }
-    fs::rename(tmp_path, path)?;
-    if let Some(parent) = path.parent() {
-        sync_directory(parent)?;
-    }
+    durable_replace_file(tmp_path, path)?;
     Ok(())
 }
 
@@ -4691,7 +4689,7 @@ fn checksum_bytes(bytes: &[u8]) -> u64 {
 }
 
 fn sync_directory(path: &Path) -> Result<()> {
-    File::open(path)?.sync_all()?;
+    sync_storage_directory(path)?;
     Ok(())
 }
 

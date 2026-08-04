@@ -2,8 +2,9 @@ use crate::canonical::{
     decode_standalone_value, encode_standalone_value, CanonicalScanControl, CanonicalSegmentError,
 };
 use crate::{
-    content_digest, ContentDigest, FileSegmentRangeReader, ManifestGeneration, NodeId, NodeRecord,
-    SegmentCache, SegmentRangeReader, SegmentReadError, SegmentReadRange, StoreId,
+    content_digest, durable_replace_file, ContentDigest, FileSegmentRangeReader,
+    ManifestGeneration, NodeId, NodeRecord, SegmentCache, SegmentRangeReader, SegmentReadError,
+    SegmentReadRange, StoreId,
 };
 use skein_core::{LabelId, Value};
 use std::cmp::Reverse;
@@ -13,8 +14,6 @@ use std::fmt::{self, Display, Formatter};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::num::{NonZeroU64, NonZeroUsize};
-#[cfg(windows)]
-use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -623,8 +622,7 @@ impl PersistentPropertyProjectionWriter {
                 return Err(error);
             }
         };
-        fs::rename(&tmp_path, path)?;
-        sync_parent(path)?;
+        durable_replace_file(&tmp_path, path)?;
         Ok(output)
     }
 
@@ -1792,21 +1790,6 @@ fn write_double_hashed(
     Ok(())
 }
 
-fn sync_parent(path: &Path) -> Result<(), PersistentPropertyProjectionError> {
-    let Some(parent) = path.parent() else {
-        return Ok(());
-    };
-    #[cfg(not(windows))]
-    let directory = File::open(parent)?;
-    #[cfg(windows)]
-    let directory = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(0x0200_0000)
-        .open(parent)?;
-    directory.sync_all()?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1825,10 +1808,13 @@ mod tests {
 
     #[test]
     fn external_projection_round_trips_range_and_full_text_candidates() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "skein-property-projection-{}-{:?}",
+            "skein-property-projection-{}-{nonce}",
             std::process::id(),
-            std::thread::current().id()
         ));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();

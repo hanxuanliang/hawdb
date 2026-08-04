@@ -2,6 +2,7 @@ use super::cjk_tokenizer::ANALYZER_FORMAT_VERSION;
 use super::{document_tokens, SearchAnalyzerLexicon, SearchDocument, BM25_B, BM25_K1};
 use crate::error::{Result, SkeinError};
 use serde::{Deserialize, Serialize};
+use skein_storage::durable_replace_file;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fs::{self, File};
@@ -983,9 +984,8 @@ impl LexicalProjectionWriter {
         runs.compact()?;
         artifact.merge_postings(&runs.paths, self.config)?;
         let (artifact_len, artifact_checksum, posting_count, blocks) = artifact.finish()?;
-        fs::rename(&tmp_path, &artifact_path)?;
+        durable_replace_file(&tmp_path, &artifact_path)?;
         artifact_guard.disarm();
-        super::sync_parent_dir(&artifact_path)?;
         let manifest = ManifestBody {
             format: "SKEIN_LEXICAL_MANIFEST_V1".to_string(),
             generation,
@@ -1008,9 +1008,8 @@ impl LexicalProjectionWriter {
             file.write_all(&manifest.encode()?)?;
             file.sync_all()?;
         }
-        fs::rename(&manifest_tmp, &manifest_path)?;
+        durable_replace_file(&manifest_tmp, &manifest_path)?;
         manifest_guard.disarm();
-        super::sync_parent_dir(&manifest_path)?;
         LexicalProjectionReader::load(
             root,
             source_graph_commit_epoch,

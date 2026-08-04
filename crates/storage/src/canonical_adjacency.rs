@@ -1,8 +1,8 @@
 use crate::canonical::{decode_relationship, encode_relationship, CanonicalScanControl};
 use crate::{
-    AdjacencyDirection, AdjacencyLayout, ContentDigest, FileSegmentRangeReader, ManifestGeneration,
-    NodeId, RelRecord, SegmentCache, SegmentRangeReader, SegmentReadError, SegmentReadRange,
-    StoreId,
+    durable_replace_file, AdjacencyDirection, AdjacencyLayout, ContentDigest,
+    FileSegmentRangeReader, ManifestGeneration, NodeId, RelRecord, SegmentCache,
+    SegmentRangeReader, SegmentReadError, SegmentReadRange, StoreId,
 };
 use skein_core::{RelTypeId, Value};
 use std::cmp::Reverse;
@@ -12,8 +12,6 @@ use std::fmt::{self, Display, Formatter};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::num::{NonZeroU64, NonZeroUsize};
-#[cfg(windows)]
-use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -499,8 +497,7 @@ impl CanonicalAdjacencyWriter {
                 return Err(error);
             }
         };
-        fs::rename(&tmp_path, path)?;
-        sync_parent(path)?;
+        durable_replace_file(&tmp_path, path)?;
         Ok(output)
     }
 
@@ -1587,21 +1584,6 @@ fn write_double_hashed(
     Ok(())
 }
 
-fn sync_parent(path: &Path) -> Result<(), CanonicalAdjacencyError> {
-    let Some(parent) = path.parent() else {
-        return Ok(());
-    };
-    #[cfg(not(windows))]
-    let directory = File::open(parent)?;
-    #[cfg(windows)]
-    let directory = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(0x02000000)
-        .open(parent)?;
-    directory.sync_all()?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1609,10 +1591,13 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn test_path(name: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         std::env::temp_dir().join(format!(
-            "skein-canonical-adjacency-{name}-{}-{}",
+            "skein-canonical-adjacency-{name}-{}-{nonce}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("unnamed")
         ))
     }
 

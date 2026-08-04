@@ -20,16 +20,14 @@ use skein_optimizer::{
 };
 use skein_plan::{VectorBackendSelectionReason, VectorCandidateSource};
 use skein_storage::{
-    EnumDictionaryStats, FieldSummary, RangeBound, ScanPredicate, SegmentPruner, SegmentReadRange,
-    SegmentSummary,
+    durable_replace_file, EnumDictionaryStats, FieldSummary, RangeBound, ScanPredicate,
+    SegmentPruner, SegmentReadRange, SegmentSummary,
 };
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{Cursor, Read, Write};
-#[cfg(windows)]
-use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -1882,8 +1880,7 @@ impl SearchIndex {
                 file.write_all(&encoded)?;
                 file.sync_all()?;
             }
-            fs::rename(tmp_path, &snapshot_path)?;
-            sync_parent_dir(&snapshot_path)?;
+            durable_replace_file(&tmp_path, &snapshot_path)?;
             self.write_segment_artifacts(path)?;
             self.write_lexical_projection(path)?;
             out_of_core::publish_out_of_core_projection(self, path)?;
@@ -4261,21 +4258,6 @@ fn format_embedding_manifest(manifest: &SearchEmbeddingManifest) -> String {
     }
 }
 
-fn sync_parent_dir(path: &Path) -> Result<()> {
-    let Some(parent) = path.parent() else {
-        return Ok(());
-    };
-    #[cfg(not(windows))]
-    let directory = File::open(parent)?;
-    #[cfg(windows)]
-    let directory = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(0x0200_0000)
-        .open(parent)?;
-    directory.sync_all()?;
-    Ok(())
-}
-
 pub(crate) struct SearchMetadataPredicatePushdown {
     pub predicates: SearchPredicateSet,
     pub report: SearchPredicatePushdownReport,
@@ -6134,8 +6116,8 @@ fn write_search_segment_payloads(
         }
         file.sync_all()?;
     }
-    fs::rename(tmp_path, &artifact_path)?;
-    sync_parent_dir(&artifact_path)
+    durable_replace_file(&tmp_path, &artifact_path)?;
+    Ok(())
 }
 
 fn write_search_segment_descriptor(
@@ -6152,8 +6134,7 @@ fn write_search_segment_descriptor(
         file.write_all(data.as_bytes())?;
         file.sync_all()?;
     }
-    fs::rename(tmp_path, &descriptor_path)?;
-    sync_parent_dir(&descriptor_path)?;
+    durable_replace_file(&tmp_path, &descriptor_path)?;
     Ok(())
 }
 

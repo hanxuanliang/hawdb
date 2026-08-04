@@ -4,6 +4,7 @@ pub mod cache;
 pub mod canonical;
 pub mod canonical_adjacency;
 pub mod config;
+pub mod durability;
 pub mod ids;
 pub mod mutation;
 mod ownership;
@@ -43,6 +44,7 @@ pub use config::{
     DEFAULT_MAX_WAL_BATCH_OPERATIONS, DEFAULT_MAX_WAL_RECORD_BYTES, DEFAULT_MAX_WAL_REPLAY_BYTES,
     DEFAULT_MAX_WAL_REPLAY_ENTRIES, DEFAULT_SEGMENT_CACHE_CAPACITY_BYTES,
 };
+pub use durability::{durable_replace_file, sync_directory, sync_parent_directory};
 pub use ids::{NodeId, NodeRecord, RelId, RelRecord};
 pub use mutation::{
     ConnectedNodesCreate, GraphMutation, MatchedRelationshipCopyMerge, MatchedRelationshipCreate,

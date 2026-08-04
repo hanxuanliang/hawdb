@@ -1,21 +1,17 @@
 use crate::{
-    content_digest, ContentDigest, FileSegmentRangeReader, ManifestGeneration, NodeId, NodeRecord,
-    PropertySpillConfig, PropertySpillError, PropertySpillManifest, PropertySpillReader,
-    PropertySpillWriter, RelId, RelRecord, SegmentCache, SegmentRangeReader, SegmentReadError,
-    SegmentReadRange, StoreId,
+    content_digest, durable_replace_file, ContentDigest, FileSegmentRangeReader,
+    ManifestGeneration, NodeId, NodeRecord, PropertySpillConfig, PropertySpillError,
+    PropertySpillManifest, PropertySpillReader, PropertySpillWriter, RelId, RelRecord,
+    SegmentCache, SegmentRangeReader, SegmentReadError, SegmentReadRange, StoreId,
 };
 use skein_core::{LabelId, RelTypeId, Value};
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
-#[cfg(windows)]
-use std::fs::OpenOptions;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::num::NonZeroU64;
-#[cfg(windows)]
-use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -636,8 +632,7 @@ impl CanonicalSegmentWriter {
                 return Err(error);
             }
         };
-        fs::rename(&tmp_path, path)?;
-        sync_parent(path)?;
+        durable_replace_file(&tmp_path, path)?;
         Ok(manifest)
     }
 
@@ -681,9 +676,8 @@ impl CanonicalSegmentWriter {
                 return Err(error.into());
             }
         };
-        fs::rename(&spill_tmp_path, property_spill_path)?;
-        fs::rename(&tmp_path, path)?;
-        sync_parent(path)?;
+        durable_replace_file(&spill_tmp_path, property_spill_path)?;
+        durable_replace_file(&tmp_path, path)?;
         Ok((canonical_manifest, spill_manifest))
     }
 
@@ -1979,21 +1973,6 @@ fn write_hashed(
 ) -> Result<(), CanonicalSegmentError> {
     file.write_all(bytes)?;
     digest.update(bytes);
-    Ok(())
-}
-
-fn sync_parent(path: &Path) -> Result<(), CanonicalSegmentError> {
-    let Some(parent) = path.parent() else {
-        return Ok(());
-    };
-    #[cfg(not(windows))]
-    let directory = File::open(parent)?;
-    #[cfg(windows)]
-    let directory = OpenOptions::new()
-        .read(true)
-        .custom_flags(0x0200_0000)
-        .open(parent)?;
-    directory.sync_all()?;
     Ok(())
 }
 

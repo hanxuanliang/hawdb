@@ -9,8 +9,8 @@ use super::{
     matched_query_spans_bounded, matched_query_terms, ranked_scores,
     read_search_segment_descriptor, retriever_candidate_set_report, rrf_child_score,
     search_document_matches_predicates, search_empty_reason_codes, search_empty_reasons,
-    search_metadata_predicate_pushdown, sync_parent_dir, tokenize, top_ranked_candidates,
-    top_ranked_ids, validate_search_segment_documents, weighted_rrf_score, window_ranks,
+    search_metadata_predicate_pushdown, tokenize, top_ranked_candidates, top_ranked_ids,
+    validate_search_segment_documents, weighted_rrf_score, window_ranks,
     SearchAccessControlContext, SearchAnalyzerLexicon, SearchCandidateSetReport, SearchDocument,
     SearchFallbackReasonCode, SearchFieldPruningAccumulator, SearchHit, SearchIndex, SearchMode,
     SearchPageWindow, SearchPredicatePushdownReport, SearchProjectionFreshness, SearchQueryOptions,
@@ -21,6 +21,7 @@ use super::{
 use crate::error::{Result, SkeinError};
 use crate::{RuntimeCapabilities, RuntimeCapability};
 use serde::{Deserialize, Serialize};
+use skein_storage::durable_replace_file;
 use std::cmp::{Ordering as CmpOrdering, Reverse};
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fs::{self, File, OpenOptions};
@@ -1564,8 +1565,7 @@ pub(super) fn publish_out_of_core_projection(index: &SearchIndex, root: &Path) -
         file.write_all(&manifest.encode()?)?;
         file.sync_all()?;
     }
-    fs::rename(&tmp_path, &manifest_path)?;
-    sync_parent_dir(&manifest_path)?;
+    durable_replace_file(&tmp_path, &manifest_path)?;
     cleanup_old_generations(root, generation);
     Ok(())
 }
@@ -1652,12 +1652,10 @@ fn write_out_of_core_sidecars(
     vector_file.sync_all()?;
     drop(metadata_file);
     drop(vector_file);
-    fs::rename(&metadata_tmp, metadata_path)?;
+    durable_replace_file(&metadata_tmp, metadata_path)?;
     metadata_guard.disarm();
-    sync_parent_dir(metadata_path)?;
-    fs::rename(&vector_tmp, vector_path)?;
+    durable_replace_file(&vector_tmp, vector_path)?;
     vector_guard.disarm();
-    sync_parent_dir(vector_path)?;
     Ok((
         SearchOutOfCoreLayoutBody {
             format: OUT_OF_CORE_LAYOUT_FORMAT.to_string(),
@@ -2305,9 +2303,9 @@ fn publish_generation_link(source: &Path, target: &Path) -> Result<()> {
             File::open(&tmp)?.sync_all()?;
         }
     }
-    fs::rename(&tmp, target)?;
+    durable_replace_file(&tmp, target)?;
     guard.disarm();
-    sync_parent_dir(target)
+    Ok(())
 }
 
 fn write_generation_artifact(target: &Path, bytes: &[u8]) -> Result<()> {
@@ -2318,9 +2316,9 @@ fn write_generation_artifact(target: &Path, bytes: &[u8]) -> Result<()> {
         file.write_all(bytes)?;
         file.sync_all()?;
     }
-    fs::rename(&tmp, target)?;
+    durable_replace_file(&tmp, target)?;
     guard.disarm();
-    sync_parent_dir(target)
+    Ok(())
 }
 
 fn temporary_artifact_path(target: &Path) -> PathBuf {
