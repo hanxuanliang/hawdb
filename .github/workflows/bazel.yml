@@ -105,7 +105,7 @@ jobs:
             //crates/executor:skein_executor_tests \
             //crates/fuzz:skein_fuzz_cli_tests \
             //crates/fuzz:skein_fuzz_tests \
-            //crates/linux-cgroup:skein_linux_cgroup_tests \
+            //crates/cgroup:skein_cgroup_tests \
             //crates/optimizer:planner_golden_test \
             //crates/optimizer:skein_optimizer_tests \
             //crates/plan-cache:skein_plan_cache_tests \

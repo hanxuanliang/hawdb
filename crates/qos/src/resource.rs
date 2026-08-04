@@ -1,8 +1,8 @@
 use crate::{StorageDeviceProfile, StorageMediaKind};
 #[cfg(target_os = "linux")]
-use skein_linux_cgroup::LinuxCgroupSnapshot;
+use skein_cgroup::LinuxCgroupSnapshot;
 #[cfg(any(target_os = "linux", test))]
-use skein_linux_cgroup::LinuxCgroupValue;
+use skein_cgroup::LinuxCgroupValue;
 use std::num::NonZeroUsize;
 use sysinfo::System;
 

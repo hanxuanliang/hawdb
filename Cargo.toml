@@ -57,7 +57,7 @@ members = [
   "crates/ddl",
   "crates/executor",
   "crates/fuzz",
-  "crates/linux-cgroup",
+  "crates/cgroup",
   "crates/optimizer",
   "crates/plan",
   "crates/plan-cache",

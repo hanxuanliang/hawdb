@@ -1594,6 +1594,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "skein-cgroup"
+version = "0.1.0"
+
+[[package]]
 name = "skein-core"
 version = "0.1.0"
 dependencies = [
@@ -1631,10 +1635,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "skein-linux-cgroup"
-version = "0.1.0"
-
-[[package]]
 name = "skein-optimizer"
 version = "0.1.0"
 dependencies = [
@@ -1670,8 +1670,8 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "loom",
+ "skein-cgroup",
  "skein-core",
- "skein-linux-cgroup",
  "sysinfo",
  "windows-sys",
 ]

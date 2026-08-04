@@ -12,7 +12,7 @@ rust_library(
     aliases = aliases(),
     deps = all_crate_deps(normal = True) + [
         "//crates/core:skein_core",
-        "//crates/linux-cgroup:skein_linux_cgroup",
+        "//crates/cgroup:skein_cgroup",
     ],
     proc_macro_deps = all_crate_deps(proc_macro = True),
 )

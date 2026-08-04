@@ -746,7 +746,7 @@ jobs:
         run: cargo test -p skein-qos resource::tests
 
       - name: Test cgroup v2 detection
-        run: cargo test -p skein-linux-cgroup
+        run: cargo test -p skein-cgroup
 
       - name: Test process memory metrics
         run: cargo test -p skein-qos process_memory::tests
