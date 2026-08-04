@@ -23,11 +23,12 @@ a crash at any modeled write stage.
 
 `SkeinSourceSegmentPublication.tla` models the future storage-facing Source
 scan sidecar. A Source segment is built from one graph epoch, made durable, and
-only then published through a manifest for that same epoch. Readers may use the
-sidecar only when their pinned graph epoch, the published manifest epoch, and
-the durable segment epoch are identical. A newer graph snapshot must use the
-authoritative graph path until a matching segment is published; it must never
-silently read a stale segment.
+only then published through a manifest for that same epoch. Durable segment
+generations are immutable: a reader may select the current manifest only when
+it matches the reader's pinned graph epoch, and that selected generation must
+remain available for the reader after a newer manifest is published. A newer
+graph snapshot must use the authoritative graph path until a matching segment
+is published; it must never silently select a stale segment.
 
 Run the model with:
 
