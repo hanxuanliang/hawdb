@@ -263,6 +263,21 @@ checks, a scheduled optimizer fuzz corpus, storage crash/soak campaigns, and
 artifact retention for production resource evidence. These checks MUST become
 required before their corresponding risk is accepted for production.
 
+The scheduled quality workflow MUST run the advisory and license policy,
+deterministic optimizer differential/metamorphic campaigns, and a mixed
+foreground/background runtime soak. Fuzz failures MUST retain their campaign
+report and minimized replay bundle before the job fails. The runtime soak MUST
+use an out-of-core fixture whose raw bytes exceed the admitted runtime memory
+and whose canonical artifact exceeds the segment cache. It MUST exercise the
+admitted Tokio facade, observe bounded external spill, complete a concurrent
+mutation and checkpoint, and retain latency, RSS, page-fault, cache, spill,
+checkpoint, and governor counters in a revision-bound typed report.
+
+Scheduled synthetic soak evidence MUST identify its controlled fixture setup
+path and carry `production_eligible=false`. It verifies regression behavior but
+MUST NOT satisfy the representative Mem replica, production-shaped search, or
+representative embedding qualification gates.
+
 No release report may claim production readiness while a required check is
 red, skipped without an approved qualification artifact, or evaluated for a
 different revision.

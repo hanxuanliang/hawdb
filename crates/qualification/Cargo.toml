@@ -1,0 +1,16 @@
+[package]
+name = "skein-qualification"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = { version = "0.10", default-features = false }
+skein = { path = "../..", default-features = false, features = ["tokio-runtime"] }
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+
+[[bin]]
+name = "skein-soak"
+path = "src/main.rs"

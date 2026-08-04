@@ -739,6 +739,9 @@ jobs:
       - name: Check Tokio facade
         run: cargo check -p skein --features tokio-runtime
 
+      - name: Check qualification workload
+        run: cargo check -p skein-qualification
+
       - name: Test resource detection
         run: cargo test -p skein-qos resource::tests
 

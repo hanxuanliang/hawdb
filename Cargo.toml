@@ -62,6 +62,7 @@ members = [
   "crates/plan",
   "crates/plan-cache",
   "crates/qos",
+  "crates/qualification",
   "crates/readiness",
   "crates/route-ownership",
   "crates/sql",

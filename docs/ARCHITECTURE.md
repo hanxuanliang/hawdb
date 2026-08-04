@@ -78,6 +78,7 @@ crates/
   storage/             embedded persistence, WAL, MVCC, indexes
   executor/            physical operators and query execution
   fuzz/                development-only differential oracles and replay bundles
+  qualification/       synthetic revision-bound CI qualification workloads
   api/                 stable embedded API facade
 ```
 
@@ -138,6 +139,16 @@ relation without maintaining a second Cypher or graph executor. Failures
 include exact typed replay data, a direct reproduction command, and an
 oracle-specific reduced mutation sequence; `src/nowledge_fuzz.rs` remains a
 readiness smoke rather than a semantic oracle.
+
+The `skein-qualification` package is also outside the production dependency
+graph. It owns synthetic, revision-bound CI workloads that exercise the public
+embedded facade without turning qualification orchestration into a production
+API. Its mixed-runtime soak creates a controlled larger-than-memory fixture,
+reopens it through `SkeinTokioEmbedded`, and runs admitted foreground streams,
+background external `DISTINCT`, mutation, and checkpoint work concurrently.
+The typed report retains latency, process-memory, page-fault, spill, cache,
+checkpoint, and runtime-governor measurements. Synthetic reports always carry
+`production_eligible=false`; they cannot satisfy production-copy qualification.
 
 The current Cypher crate uses:
 

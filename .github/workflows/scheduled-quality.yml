@@ -9,6 +9,14 @@ on:
         description: Cases per deterministic optimizer fuzz seed
         required: false
         default: "4096"
+      soak_node_count:
+        description: Synthetic nodes in the mixed runtime soak
+        required: false
+        default: "4096"
+      soak_payload_bytes:
+        description: Payload bytes per synthetic soak node
+        required: false
+        default: "4096"
 
 permissions:
   contents: read
@@ -118,3 +126,77 @@ jobs:
         if: always()
         shell: bash
         run: test "${{ steps.fuzz.outcome }}" = "success"
+
+  mixed-runtime-soak:
+    name: Larger Than Memory Mixed Runtime Soak
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      SKEIN_SOAK_NODE_COUNT: ${{ inputs.soak_node_count || '4096' }}
+      SKEIN_SOAK_PAYLOAD_BYTES: ${{ inputs.soak_payload_bytes || '4096' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - name: Run admitted mixed workload
+        id: soak
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p artifacts/soak
+          database_root="$(mktemp -d)"
+          soak_status=0
+          if ! cargo run --release -p skein-qualification --bin skein-soak --quiet -- \
+            --path "$database_root/database" \
+            --revision "$GITHUB_SHA" \
+            --dataset-id "scheduled-synthetic-v1" \
+            --node-count "$SKEIN_SOAK_NODE_COUNT" \
+            --payload-bytes "$SKEIN_SOAK_PAYLOAD_BYTES" \
+            > artifacts/soak/report.json \
+            2> artifacts/soak/run.log; then
+            soak_status=1
+          fi
+          if ! jq -e \
+            --arg revision "$GITHUB_SHA" \
+            '.protocol == "skein-mixed-runtime-soak-v1" and
+             .evidence_kind == "synthetic_scheduled_soak" and
+             .fixture_setup_path == "controlled_raw_fixture" and
+             .production_eligible == false and
+             .identity.source_revision == $revision and
+             .identity.dataset_id == "scheduled-synthetic-v1" and
+             (.identity.dataset_fingerprint | startswith("sha256:")) and
+             (.identity.configuration_digest | startswith("sha256:")) and
+             .identity.graph_commit_epoch > 0 and
+             .identity.workload == "foreground-point-read+background-distinct+background-checkpoint-v1" and
+             .ready == true and
+             .storage.out_of_core == true and
+             .storage.raw_dataset_exceeds_runtime_memory == true and
+             .storage.canonical_exceeds_cache == true and
+             .background.spilled_bytes > 0 and
+             .background.spill_run_count > 0 and
+             .checkpoint.completed == true and
+             .checkpoint.canonical_generation_advanced == true and
+             .runtime.final_admitted_memory_bytes == 0 and
+             .runtime.final_overcommitted == false' \
+            artifacts/soak/report.json > /dev/null; then
+            soak_status=1
+          fi
+          exit "$soak_status"
+
+      - name: Retain typed soak report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mixed-runtime-soak-${{ github.sha }}-${{ github.run_attempt }}
+          path: artifacts/soak
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Enforce soak result
+        if: always()
+        shell: bash
+        run: test "${{ steps.soak.outcome }}" = "success"
