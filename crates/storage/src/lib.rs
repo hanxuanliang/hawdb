@@ -49,9 +49,12 @@ pub use ids::{NodeId, NodeRecord, RelId, RelRecord};
 pub use mutation::{
     ConnectedNodesCreate, GraphMutation, MatchedRelationshipCopyMerge, MatchedRelationshipCreate,
     MatchedRelationshipMerge, MatchedRelationshipRetargetMerge,
-    MatchedRelationshipSourceRetargetMerge, NodeSetAssignment, NodeSetValue, PropertyFilter,
-    RelationshipDeleteRequest, RelationshipOnCreatePropertyValue, RelationshipPropertiesUpdate,
-    RelationshipPropertyUpdate, RelationshipSetAssignment, RelationshipTargetNodeDelete,
+    MatchedRelationshipSourceRetargetMerge, MutationLimits, NodeSetAssignment, NodeSetValue,
+    PropertyFilter, RelationshipDeleteRequest, RelationshipOnCreatePropertyValue,
+    RelationshipPropertiesUpdate, RelationshipPropertyUpdate, RelationshipSetAssignment,
+    RelationshipTargetNodeDelete, DEFAULT_MAX_MUTATION_AFFECTED_ROWS,
+    DEFAULT_MAX_MUTATION_OPERATIONS, DEFAULT_MAX_MUTATION_RESULT_PAYLOAD_BYTES,
+    DEFAULT_MAX_MUTATION_RESULT_ROWS,
 };
 pub use ownership::{
     DatabaseDirectoryLease, DatabaseDirectoryLeaseError, DATABASE_DIRECTORY_LOCK_FILE,

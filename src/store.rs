@@ -28,8 +28,8 @@ pub use skein_storage::{
     CanonicalSegmentWriter, ConnectedNodesCreate, DurabilityPolicy, DurableCompression,
     FileSegmentRangeReader, GraphMutation, ManifestGeneration, MatchedRelationshipCopyMerge,
     MatchedRelationshipCreate, MatchedRelationshipMerge, MatchedRelationshipRetargetMerge,
-    MatchedRelationshipSourceRetargetMerge, NodeId, NodeRecord, NodeSetAssignment, NodeSetValue,
-    OrderedAdjacencyEntry, PersistentPropertyProjectionConfig,
+    MatchedRelationshipSourceRetargetMerge, MutationLimits, NodeId, NodeRecord, NodeSetAssignment,
+    NodeSetValue, OrderedAdjacencyEntry, PersistentPropertyProjectionConfig,
     PersistentPropertyProjectionDefinition, PersistentPropertyProjectionError,
     PersistentPropertyProjectionKind, PersistentPropertyProjectionManifest,
     PersistentPropertyProjectionReader, PersistentPropertyProjectionWriter,
@@ -814,6 +814,88 @@ pub struct MutationSummary {
     pub rows: Vec<BTreeMap<String, Value>>,
 }
 
+fn ensure_mutation_commit_limits(
+    ops: &[WalOp],
+    rows: &[BTreeMap<String, Value>],
+    limits: MutationLimits,
+) -> Result<()> {
+    ensure_additional_mutation_limits(ops.len(), rows.len(), 0, 0, limits)?;
+    if rows.len() > limits.max_result_rows.get() {
+        return Err(SkeinError::Execution(format!(
+            "mutation would exceed max_mutation_result_rows {}",
+            limits.max_result_rows
+        )));
+    }
+    let payload_bytes = rows.iter().fold(0u64, |total, row| {
+        total.saturating_add(row.iter().fold(0u64, |row_total, (name, value)| {
+            row_total
+                .saturating_add(name.len() as u64)
+                .saturating_add(estimated_value_bytes(value))
+        }))
+    });
+    if payload_bytes > limits.max_result_payload_bytes.get() as u64 {
+        return Err(SkeinError::Execution(format!(
+            "mutation result payload would exceed max_mutation_result_payload_bytes {}",
+            limits.max_result_payload_bytes
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_additional_mutation_limits(
+    operation_count: usize,
+    affected_row_count: usize,
+    additional_operations: usize,
+    additional_affected_rows: usize,
+    limits: MutationLimits,
+) -> Result<()> {
+    let next_operations = operation_count
+        .checked_add(additional_operations)
+        .ok_or_else(|| SkeinError::Execution("mutation operation count overflow".to_string()))?;
+    if next_operations > limits.max_operations.get() {
+        return Err(SkeinError::Execution(format!(
+            "mutation would exceed max_mutation_operations {}",
+            limits.max_operations
+        )));
+    }
+    let next_affected_rows = affected_row_count
+        .checked_add(additional_affected_rows)
+        .ok_or_else(|| SkeinError::Execution("mutation affected-row count overflow".to_string()))?;
+    if next_affected_rows > limits.max_affected_rows.get() {
+        return Err(SkeinError::Execution(format!(
+            "mutation would exceed max_mutation_affected_rows {}",
+            limits.max_affected_rows
+        )));
+    }
+    Ok(())
+}
+
+fn remaining_mutation_affected_rows(current: usize, limits: MutationLimits) -> Result<usize> {
+    limits
+        .max_affected_rows
+        .get()
+        .checked_sub(current)
+        .ok_or_else(|| {
+            SkeinError::Execution(format!(
+                "mutation would exceed max_mutation_affected_rows {}",
+                limits.max_affected_rows
+            ))
+        })
+}
+
+fn remaining_mutation_operations(current: usize, limits: MutationLimits) -> Result<usize> {
+    limits
+        .max_operations
+        .get()
+        .checked_sub(current)
+        .ok_or_else(|| {
+            SkeinError::Execution(format!(
+                "mutation would exceed max_mutation_operations {}",
+                limits.max_operations
+            ))
+        })
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct ProjectedGraphArtifact {
     projection_epoch: u64,
@@ -1495,11 +1577,15 @@ impl GraphStore {
                 path.as_ref(),
                 durability,
                 replay_config.segment_cache_capacity_bytes,
+                replay_config.max_record_bytes,
+                replay_config.max_batch_operations,
             )?,
             DurableOpenMode::ExistingOnly => DurableStore::open_existing_only(
                 path.as_ref(),
                 durability,
                 replay_config.segment_cache_capacity_bytes,
+                replay_config.max_record_bytes,
+                replay_config.max_batch_operations,
             )?,
         };
         let mut store = Self {
@@ -3340,9 +3426,28 @@ impl GraphStore {
         ids: &[NodeId],
         assignments: &[NodeSetAssignment],
     ) -> Result<Vec<NodeId>> {
+        self.set_node_properties_by_ids_with_limits(
+            catalog,
+            ids,
+            assignments,
+            MutationLimits::default(),
+        )
+    }
+
+    pub fn set_node_properties_by_ids_with_limits(
+        &mut self,
+        catalog: &mut Catalog,
+        ids: &[NodeId],
+        assignments: &[NodeSetAssignment],
+        limits: MutationLimits,
+    ) -> Result<Vec<NodeId>> {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
+        let operation_count = ids.len().checked_mul(assignments.len()).ok_or_else(|| {
+            SkeinError::Execution("mutation operation count overflow".to_string())
+        })?;
+        ensure_additional_mutation_limits(0, 0, operation_count, ids.len(), limits)?;
         let ops = self.node_set_property_ops(ids, assignments)?;
         self.validate_constraints_for_ops(catalog, &ops)?;
         if let Some(durable) = &mut self.durable {
@@ -3416,10 +3521,21 @@ impl GraphStore {
         ids: &[NodeId],
         detach: bool,
     ) -> Result<Vec<NodeId>> {
+        self.delete_node_ids_with_limits(catalog, ids, detach, MutationLimits::default())
+    }
+
+    pub(crate) fn delete_node_ids_with_limits(
+        &mut self,
+        catalog: &mut Catalog,
+        ids: &[NodeId],
+        detach: bool,
+        limits: MutationLimits,
+    ) -> Result<Vec<NodeId>> {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
-        let ops = self.delete_node_ops(ids, detach)?;
+        ensure_additional_mutation_limits(0, 0, 0, ids.len(), limits)?;
+        let ops = self.delete_node_ops_bounded(ids, detach, limits.max_operations.get())?;
         self.ensure_out_of_core_delta_admission(&ops)?;
         if let Some(durable) = &mut self.durable {
             durable.append_batch(ops.clone())?;
@@ -3532,6 +3648,15 @@ impl GraphStore {
         catalog: &Catalog,
         request: &RelationshipTargetNodeDelete,
     ) -> Result<Vec<NodeId>> {
+        self.relationship_target_node_ids_bounded(catalog, request, usize::MAX)
+    }
+
+    fn relationship_target_node_ids_bounded(
+        &self,
+        catalog: &Catalog,
+        request: &RelationshipTargetNodeDelete,
+        max_ids: usize,
+    ) -> Result<Vec<NodeId>> {
         let Some(source_label_id) = optional_label_id(catalog, &request.source_label) else {
             return Ok(Vec::new());
         };
@@ -3542,7 +3667,12 @@ impl GraphStore {
             return Ok(Vec::new());
         };
         let source_ids = self
-            .matching_node_ids(Some(source_label_id), request.source_filter.as_ref())?
+            .matching_node_ids_bounded(
+                Some(source_label_id),
+                request.source_filter.as_ref(),
+                max_ids,
+                "max_mutation_affected_rows",
+            )?
             .into_iter()
             .collect::<BTreeSet<_>>();
         if source_ids.is_empty() {
@@ -3552,8 +3682,13 @@ impl GraphStore {
             .target_filter
             .as_ref()
             .map(|filter| {
-                self.matching_node_ids(Some(target_label_id), Some(filter))
-                    .map(|ids| ids.into_iter().collect::<BTreeSet<_>>())
+                self.matching_node_ids_bounded(
+                    Some(target_label_id),
+                    Some(filter),
+                    max_ids,
+                    "max_mutation_affected_rows",
+                )
+                .map(|ids| ids.into_iter().collect::<BTreeSet<_>>())
             })
             .transpose()?;
         if target_ids.as_ref().is_some_and(BTreeSet::is_empty) {
@@ -3575,6 +3710,12 @@ impl GraphStore {
             match self.node_owned(relationship.target) {
                 Ok(Some(target)) if target.labels.contains(&target_label_id) => {
                     ids.insert(relationship.target);
+                    if ids.len() > max_ids {
+                        callback_error = Some(SkeinError::Execution(format!(
+                            "mutation would exceed max_mutation_affected_rows {max_ids}"
+                        )));
+                        return GraphScanControl::Stop;
+                    }
                 }
                 Ok(_) => {}
                 Err(error) => {
@@ -3590,12 +3731,13 @@ impl GraphStore {
         Ok(ids.into_iter().collect())
     }
 
-    fn relationship_target_node_ids_with_pending(
+    fn relationship_target_node_ids_with_pending_bounded(
         &self,
         catalog: &Catalog,
         request: &RelationshipTargetNodeDelete,
         pending_nodes: &[PendingNode],
         pending_relationships: &[PendingRelationship],
+        max_ids: usize,
     ) -> Result<Vec<NodeId>> {
         let Some(source_label_id) = optional_label_id(catalog, &request.source_label) else {
             return Ok(Vec::new());
@@ -3607,10 +3749,12 @@ impl GraphStore {
             return Ok(Vec::new());
         };
         let source_ids = self
-            .matching_node_ids_with_pending(
+            .matching_node_ids_with_pending_bounded(
                 Some(source_label_id),
                 request.source_filter.as_ref(),
                 pending_nodes,
+                max_ids,
+                "max_mutation_affected_rows",
             )?
             .into_iter()
             .collect::<BTreeSet<_>>();
@@ -3621,10 +3765,12 @@ impl GraphStore {
             .target_filter
             .as_ref()
             .map(|filter| {
-                self.matching_node_ids_with_pending(
+                self.matching_node_ids_with_pending_bounded(
                     Some(target_label_id),
                     Some(filter),
                     pending_nodes,
+                    max_ids,
+                    "max_mutation_affected_rows",
                 )
                 .map(|ids| ids.into_iter().collect::<BTreeSet<_>>())
             })
@@ -3632,7 +3778,7 @@ impl GraphStore {
         if target_ids.as_ref().is_some_and(BTreeSet::is_empty) {
             return Ok(Vec::new());
         }
-        let mut ids = self.relationship_target_node_ids(catalog, request)?;
+        let mut ids = self.relationship_target_node_ids_bounded(catalog, request, max_ids)?;
         for (relationship_id, source, target, pending_rel_type_id, properties) in
             pending_relationships
         {
@@ -3653,6 +3799,11 @@ impl GraphStore {
                 continue;
             }
             ids.push(*target);
+            if ids.len() > max_ids {
+                return Err(SkeinError::Execution(format!(
+                    "mutation would exceed max_mutation_affected_rows {max_ids}"
+                )));
+            }
         }
         Ok(ids
             .into_iter()
@@ -3847,6 +3998,34 @@ impl GraphStore {
         &mut self,
         catalog: &mut Catalog,
         mutations: Vec<GraphMutation>,
+    ) -> Result<MutationSummary> {
+        self.commit_mutations_with_limits(catalog, mutations, MutationLimits::default())
+    }
+
+    pub fn commit_mutation_with_limits(
+        &mut self,
+        catalog: &mut Catalog,
+        mutation: GraphMutation,
+        limits: MutationLimits,
+    ) -> Result<MutationSummary> {
+        self.commit_mutations_internal(catalog, vec![mutation], limits, true)
+    }
+
+    pub fn commit_mutations_with_limits(
+        &mut self,
+        catalog: &mut Catalog,
+        mutations: Vec<GraphMutation>,
+        limits: MutationLimits,
+    ) -> Result<MutationSummary> {
+        self.commit_mutations_internal(catalog, mutations, limits, false)
+    }
+
+    fn commit_mutations_internal(
+        &mut self,
+        catalog: &mut Catalog,
+        mutations: Vec<GraphMutation>,
+        limits: MutationLimits,
+        preserve_single_create_wal: bool,
     ) -> Result<MutationSummary> {
         let mut next_node_id = self.next_node_id;
         let mut next_rel_id = self.next_rel_id;
@@ -4454,6 +4633,7 @@ impl GraphStore {
                             label_id,
                             filter.as_ref(),
                             &assignment,
+                            limits,
                         )?;
                     }
                 }
@@ -4476,6 +4656,7 @@ impl GraphStore {
                             label_id,
                             filter.as_ref(),
                             &assignment,
+                            limits,
                         )?;
                     }
                 }
@@ -4493,6 +4674,7 @@ impl GraphStore {
                             label_id,
                             filter.as_ref(),
                             &assignments,
+                            limits,
                         )?;
                     }
                 }
@@ -4523,6 +4705,7 @@ impl GraphStore {
                             rel_filter,
                             assignments,
                         },
+                        limits,
                     )?;
                 }
                 GraphMutation::SetRelationshipProperties {
@@ -4550,6 +4733,7 @@ impl GraphStore {
                             rel_filter,
                             assignments,
                         },
+                        limits,
                     )?;
                 }
                 GraphMutation::DeleteNode {
@@ -4559,7 +4743,12 @@ impl GraphStore {
                 } => {
                     let label_id = optional_label_id(&working_catalog, &label);
                     if label.is_empty() || label_id.is_some() {
-                        let committed_ids = self.matching_node_ids(label_id, filter.as_ref())?;
+                        let committed_ids = self.matching_node_ids_bounded(
+                            label_id,
+                            filter.as_ref(),
+                            remaining_mutation_affected_rows(rows.len(), limits)?,
+                            "max_mutation_affected_rows",
+                        )?;
                         let pending_ids = Self::pending_node_ids_matching(
                             label_id,
                             filter.as_ref(),
@@ -4576,7 +4765,18 @@ impl GraphStore {
                                 id.0
                             )));
                         }
-                        let delete_ops = self.delete_node_ops(&committed_ids, detach)?;
+                        ensure_additional_mutation_limits(
+                            ops.len(),
+                            rows.len(),
+                            0,
+                            delete_ids.len(),
+                            limits,
+                        )?;
+                        let delete_ops = self.delete_node_ops_bounded(
+                            &committed_ids,
+                            detach,
+                            remaining_mutation_operations(ops.len(), limits)?,
+                        )?;
                         if detach {
                             for relationship_id in incident_pending_relationship_ids {
                                 remove_pending_relationship(
@@ -4612,20 +4812,24 @@ impl GraphStore {
                         working_catalog.rel_type_id(&rel_type),
                     ) {
                         let source_ids = self
-                            .matching_node_ids_with_pending(
+                            .matching_node_ids_with_pending_bounded(
                                 Some(source_label_id),
                                 filter.as_ref(),
                                 &pending_nodes,
+                                remaining_mutation_affected_rows(rows.len(), limits)?,
+                                "max_mutation_affected_rows",
                             )?
                             .into_iter()
                             .collect::<BTreeSet<_>>();
                         let target_ids = target_filter
                             .as_ref()
                             .map(|filter| {
-                                self.matching_node_ids_with_pending(
+                                self.matching_node_ids_with_pending_bounded(
                                     Some(target_label_id),
                                     Some(filter),
                                     &pending_nodes,
+                                    remaining_mutation_affected_rows(rows.len(), limits)?,
+                                    "max_mutation_affected_rows",
                                 )
                                 .map(|ids| ids.into_iter().collect::<BTreeSet<_>>())
                             })
@@ -4664,6 +4868,13 @@ impl GraphStore {
                                 })
                                 .unwrap_or(false);
                             if target_matches {
+                                ensure_additional_mutation_limits(
+                                    ops.len(),
+                                    rows.len(),
+                                    1,
+                                    1,
+                                    limits,
+                                )?;
                                 ops.push(WalOp::DeleteRelationship {
                                     id: relationship.id,
                                 });
@@ -4695,6 +4906,7 @@ impl GraphStore {
                             pending_delete_ids.push(*relationship_id);
                         }
                         for relationship_id in pending_delete_ids {
+                            ensure_additional_mutation_limits(ops.len(), rows.len(), 0, 1, limits)?;
                             remove_pending_relationship(
                                 &mut ops,
                                 &mut pending_relationships,
@@ -4708,11 +4920,12 @@ impl GraphStore {
                     }
                 }
                 GraphMutation::DeleteRelationshipTargetNodes(request) => {
-                    let ids = self.relationship_target_node_ids_with_pending(
+                    let ids = self.relationship_target_node_ids_with_pending_bounded(
                         &working_catalog,
                         &request,
                         &pending_nodes,
                         &pending_relationships,
+                        remaining_mutation_affected_rows(rows.len(), limits)?,
                     )?;
                     let mut committed_ids = Vec::new();
                     for id in &ids {
@@ -4738,7 +4951,12 @@ impl GraphStore {
                             id.0
                         )));
                     }
-                    let delete_ops = self.delete_node_ops(&committed_ids, request.detach)?;
+                    ensure_additional_mutation_limits(ops.len(), rows.len(), 0, ids.len(), limits)?;
+                    let delete_ops = self.delete_node_ops_bounded(
+                        &committed_ids,
+                        request.detach,
+                        remaining_mutation_operations(ops.len(), limits)?,
+                    )?;
                     if request.detach {
                         for relationship_id in incident_pending_relationship_ids {
                             remove_pending_relationship(
@@ -4767,15 +4985,30 @@ impl GraphStore {
                         continue;
                     }
                     let rel_type_id = working_catalog.get_or_create_rel_type(&request.rel_type);
-                    let sources = self.matching_node_ids_with_pending(
+                    let remaining_rows = remaining_mutation_affected_rows(rows.len(), limits)?;
+                    let sources = self.matching_node_ids_with_pending_bounded(
                         source_label_id,
                         request.source_filter.as_ref(),
                         &pending_nodes,
+                        remaining_rows,
+                        "max_mutation_affected_rows",
                     )?;
-                    let targets = self.matching_node_ids_with_pending(
+                    let targets = self.matching_node_ids_with_pending_bounded(
                         target_label_id,
                         request.target_filter.as_ref(),
                         &pending_nodes,
+                        remaining_rows,
+                        "max_mutation_affected_rows",
+                    )?;
+                    let pair_count = sources.len().checked_mul(targets.len()).ok_or_else(|| {
+                        SkeinError::Execution("mutation Cartesian product overflow".to_string())
+                    })?;
+                    ensure_additional_mutation_limits(
+                        ops.len(),
+                        rows.len(),
+                        pair_count,
+                        pair_count,
+                        limits,
                     )?;
                     for source in sources {
                         for target in &targets {
@@ -4814,15 +5047,30 @@ impl GraphStore {
                         continue;
                     }
                     let rel_type_id = working_catalog.get_or_create_rel_type(&request.rel_type);
-                    let sources = self.matching_node_ids_with_pending(
+                    let remaining_rows = remaining_mutation_affected_rows(rows.len(), limits)?;
+                    let sources = self.matching_node_ids_with_pending_bounded(
                         source_label_id,
                         request.source_filter.as_ref(),
                         &pending_nodes,
+                        remaining_rows,
+                        "max_mutation_affected_rows",
                     )?;
-                    let targets = self.matching_node_ids_with_pending(
+                    let targets = self.matching_node_ids_with_pending_bounded(
                         target_label_id,
                         request.target_filter.as_ref(),
                         &pending_nodes,
+                        remaining_rows,
+                        "max_mutation_affected_rows",
+                    )?;
+                    let pair_count = sources.len().checked_mul(targets.len()).ok_or_else(|| {
+                        SkeinError::Execution("mutation Cartesian product overflow".to_string())
+                    })?;
+                    ensure_additional_mutation_limits(
+                        ops.len(),
+                        rows.len(),
+                        pair_count,
+                        pair_count,
+                        limits,
                     )?;
                     for source in sources {
                         for target in &targets {
@@ -4912,7 +5160,8 @@ impl GraphStore {
                     };
                     let new_rel_type_id =
                         working_catalog.get_or_create_rel_type(&request.new_rel_type);
-                    let source_ids = relationships_with_pending_matching(
+                    let remaining_rows = remaining_mutation_affected_rows(rows.len(), limits)?;
+                    let source_ids = relationships_with_pending_matching_bounded(
                         self,
                         &pending_nodes,
                         &pending_relationships,
@@ -4924,18 +5173,37 @@ impl GraphStore {
                             target_filter: request.old_target_filter.as_ref(),
                             rel_properties: &request.old_rel_filter,
                         },
+                        remaining_rows,
                     )?
                     .into_iter()
                     .map(|relationship| relationship.source)
                     .collect::<BTreeSet<_>>();
                     let target_ids = self
-                        .matching_node_ids_with_pending(
+                        .matching_node_ids_with_pending_bounded(
                             Some(new_target_label_id),
                             request.new_target_filter.as_ref(),
                             &pending_nodes,
+                            remaining_rows,
+                            "max_mutation_affected_rows",
                         )?
                         .into_iter()
                         .collect::<Vec<_>>();
+                    let pair_count =
+                        source_ids
+                            .len()
+                            .checked_mul(target_ids.len())
+                            .ok_or_else(|| {
+                                SkeinError::Execution(
+                                    "mutation Cartesian product overflow".to_string(),
+                                )
+                            })?;
+                    ensure_additional_mutation_limits(
+                        ops.len(),
+                        rows.len(),
+                        pair_count,
+                        pair_count,
+                        limits,
+                    )?;
                     for source in source_ids {
                         for target in &target_ids {
                             let current = self.find_relationship_by_property_subset(
@@ -5022,7 +5290,8 @@ impl GraphStore {
                     };
                     let new_rel_type_id =
                         working_catalog.get_or_create_rel_type(&request.new_rel_type);
-                    let target_ids = relationships_with_pending_matching(
+                    let remaining_rows = remaining_mutation_affected_rows(rows.len(), limits)?;
+                    let target_ids = relationships_with_pending_matching_bounded(
                         self,
                         &pending_nodes,
                         &pending_relationships,
@@ -5034,18 +5303,37 @@ impl GraphStore {
                             target_filter: request.old_target_filter.as_ref(),
                             rel_properties: &request.old_rel_filter,
                         },
+                        remaining_rows,
                     )?
                     .into_iter()
                     .map(|relationship| relationship.target)
                     .collect::<BTreeSet<_>>();
                     let source_ids = self
-                        .matching_node_ids_with_pending(
+                        .matching_node_ids_with_pending_bounded(
                             new_source_label_id,
                             request.new_source_filter.as_ref(),
                             &pending_nodes,
+                            remaining_rows,
+                            "max_mutation_affected_rows",
                         )?
                         .into_iter()
                         .collect::<Vec<_>>();
+                    let pair_count =
+                        source_ids
+                            .len()
+                            .checked_mul(target_ids.len())
+                            .ok_or_else(|| {
+                                SkeinError::Execution(
+                                    "mutation Cartesian product overflow".to_string(),
+                                )
+                            })?;
+                    ensure_additional_mutation_limits(
+                        ops.len(),
+                        rows.len(),
+                        pair_count,
+                        pair_count,
+                        limits,
+                    )?;
                     for source in source_ids {
                         for target in &target_ids {
                             let current = self.find_relationship_by_property_subset(
@@ -5126,7 +5414,7 @@ impl GraphStore {
                     };
                     let new_rel_type_id =
                         working_catalog.get_or_create_rel_type(&request.new_rel_type);
-                    let old_relationships = relationships_with_pending_matching(
+                    let old_relationships = relationships_with_pending_matching_bounded(
                         self,
                         &pending_nodes,
                         &pending_relationships,
@@ -5138,6 +5426,14 @@ impl GraphStore {
                             target_filter: request.target_filter.as_ref(),
                             rel_properties: &request.old_rel_filter,
                         },
+                        remaining_mutation_affected_rows(rows.len(), limits)?,
+                    )?;
+                    ensure_additional_mutation_limits(
+                        ops.len(),
+                        rows.len(),
+                        old_relationships.len(),
+                        old_relationships.len(),
+                        limits,
                     )?;
                     for old_relationship in old_relationships {
                         let current = self.find_relationship_by_property_subset(
@@ -5266,14 +5562,26 @@ impl GraphStore {
                     ]));
                 }
             }
+            ensure_mutation_commit_limits(&ops, &rows, limits)?;
         }
 
+        ensure_mutation_commit_limits(&ops, &rows, limits)?;
         if ops.is_empty() {
             return Ok(MutationSummary { rows });
         }
         self.validate_constraints_for_ops(&working_catalog, &ops)?;
         if let Some(durable) = &mut self.durable {
-            durable.append_batch(ops.clone())?;
+            if preserve_single_create_wal
+                && let [WalOp::CreateNode {
+                    id,
+                    label,
+                    properties,
+                }] = ops.as_slice()
+            {
+                durable.append_create_node(*id, label, properties)?;
+            } else {
+                durable.append_batch(ops.clone())?;
+            }
         }
         *catalog = working_catalog;
         self.record_search_projection_graph_changes_for_ops(catalog, self.commit_epoch + 1, &ops);
@@ -5315,6 +5623,7 @@ impl GraphStore {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn apply_set_node_properties_mutation(
         &self,
         ops: &mut Vec<WalOp>,
@@ -5323,10 +5632,24 @@ impl GraphStore {
         label_id: Option<LabelId>,
         filter: Option<&PropertyFilter>,
         assignments: &[NodeSetAssignment],
+        limits: MutationLimits,
     ) -> Result<()> {
-        let committed_ids = self.matching_node_ids(label_id, filter)?;
-        ops.extend(self.node_set_property_ops(&committed_ids, assignments)?);
+        let remaining_rows = remaining_mutation_affected_rows(rows.len(), limits)?;
+        let committed_ids = self.matching_node_ids_bounded(
+            label_id,
+            filter,
+            remaining_rows,
+            "max_mutation_affected_rows",
+        )?;
         let pending_ids = Self::pending_node_ids_matching(label_id, filter, pending_nodes);
+        ensure_additional_mutation_limits(
+            ops.len(),
+            rows.len(),
+            committed_ids.len().saturating_mul(assignments.len()),
+            committed_ids.len().saturating_add(pending_ids.len()),
+            limits,
+        )?;
+        ops.extend(self.node_set_property_ops(&committed_ids, assignments)?);
         for id in &pending_ids {
             Self::apply_pending_node_assignments(ops, pending_nodes, *id, assignments)?;
         }
@@ -8906,18 +9229,52 @@ impl GraphStore {
         Ok(ids)
     }
 
-    fn matching_node_ids_with_pending(
+    fn matching_node_ids_bounded(
+        &self,
+        label_id: Option<LabelId>,
+        filter: Option<&PropertyFilter>,
+        max_ids: usize,
+        limit_name: &str,
+    ) -> Result<Vec<NodeId>> {
+        let mut ids = Vec::with_capacity(max_ids.min(1024));
+        let mut exceeded = false;
+        self.visit_nodes_owned(label_id, |node| {
+            if filter
+                .is_none_or(|filter| property_filter_matches(filter, node.id.0, &node.properties))
+            {
+                if ids.len() == max_ids {
+                    exceeded = true;
+                    return GraphScanControl::Stop;
+                }
+                ids.push(node.id);
+            }
+            GraphScanControl::Continue
+        })?;
+        if exceeded {
+            return Err(SkeinError::Execution(format!(
+                "mutation would exceed {limit_name} {max_ids}"
+            )));
+        }
+        Ok(ids)
+    }
+
+    fn matching_node_ids_with_pending_bounded(
         &self,
         label_id: Option<LabelId>,
         filter: Option<&PropertyFilter>,
         pending_nodes: &[PendingNode],
+        max_ids: usize,
+        limit_name: &str,
     ) -> Result<Vec<NodeId>> {
-        let mut ids = self.matching_node_ids(label_id, filter)?;
-        ids.extend(Self::pending_node_ids_matching(
-            label_id,
-            filter,
-            pending_nodes,
-        ));
+        let mut ids = self.matching_node_ids_bounded(label_id, filter, max_ids, limit_name)?;
+        for id in Self::pending_node_ids_matching(label_id, filter, pending_nodes) {
+            if ids.len() == max_ids {
+                return Err(SkeinError::Execution(format!(
+                    "mutation would exceed {limit_name} {max_ids}"
+                )));
+            }
+            ids.push(id);
+        }
         Ok(ids)
     }
 
@@ -9395,6 +9752,15 @@ impl GraphStore {
     }
 
     fn delete_node_ops(&self, ids: &[NodeId], detach: bool) -> Result<Vec<WalOp>> {
+        self.delete_node_ops_bounded(ids, detach, usize::MAX)
+    }
+
+    fn delete_node_ops_bounded(
+        &self,
+        ids: &[NodeId],
+        detach: bool,
+        max_operations: usize,
+    ) -> Result<Vec<WalOp>> {
         let mut relationship_ids = BTreeSet::new();
         for id in ids {
             for relationship in self.relationship_records_owned() {
@@ -9407,8 +9773,18 @@ impl GraphStore {
                         )));
                     }
                     relationship_ids.insert(relationship.id);
+                    if relationship_ids.len().saturating_add(ids.len()) > max_operations {
+                        return Err(SkeinError::Execution(format!(
+                            "mutation would exceed max_mutation_operations {max_operations}"
+                        )));
+                    }
                 }
             }
+        }
+        if ids.len() > max_operations {
+            return Err(SkeinError::Execution(format!(
+                "mutation would exceed max_mutation_operations {max_operations}"
+            )));
         }
         let mut ops = relationship_ids
             .into_iter()
@@ -10572,6 +10948,8 @@ struct DurableStore {
     source_scan_reader: FileSegmentRangeReader,
     durability: DurabilityPolicy,
     read_only: bool,
+    max_record_bytes: Option<usize>,
+    max_batch_operations: Option<usize>,
     telemetry: Option<Arc<dyn TelemetrySink>>,
 }
 
@@ -10643,15 +11021,27 @@ impl DurableStore {
         path: &Path,
         durability: DurabilityPolicy,
         segment_cache_capacity_bytes: u64,
+        max_record_bytes: Option<usize>,
+        max_batch_operations: Option<usize>,
     ) -> Result<Self> {
         fs::create_dir_all(path)?;
-        Self::open_existing(path, durability, false, true, segment_cache_capacity_bytes)
+        Self::open_existing(
+            path,
+            durability,
+            false,
+            true,
+            segment_cache_capacity_bytes,
+            max_record_bytes,
+            max_batch_operations,
+        )
     }
 
     fn open_existing_only(
         path: &Path,
         durability: DurabilityPolicy,
         segment_cache_capacity_bytes: u64,
+        max_record_bytes: Option<usize>,
+        max_batch_operations: Option<usize>,
     ) -> Result<Self> {
         if !path.exists() {
             return Err(SkeinError::Storage(format!(
@@ -10665,7 +11055,15 @@ impl DurableStore {
                 path.display()
             )));
         }
-        Self::open_existing(path, durability, true, false, segment_cache_capacity_bytes)
+        Self::open_existing(
+            path,
+            durability,
+            true,
+            false,
+            segment_cache_capacity_bytes,
+            max_record_bytes,
+            max_batch_operations,
+        )
     }
 
     fn open_existing(
@@ -10674,6 +11072,8 @@ impl DurableStore {
         read_only: bool,
         initialize_if_empty: bool,
         segment_cache_capacity_bytes: u64,
+        max_record_bytes: Option<usize>,
+        max_batch_operations: Option<usize>,
     ) -> Result<Self> {
         let directory_lease = DatabaseDirectoryLease::acquire(path)
             .map_err(|error| SkeinError::Storage(error.to_string()))?;
@@ -10777,6 +11177,8 @@ impl DurableStore {
             source_scan_reader,
             durability,
             read_only,
+            max_record_bytes,
+            max_batch_operations,
             telemetry: None,
         })
     }
@@ -11001,6 +11403,15 @@ impl DurableStore {
 
     fn append_batch(&mut self, ops: Vec<WalOp>) -> Result<()> {
         let operation_count = ops.len();
+        if self
+            .max_batch_operations
+            .is_some_and(|limit| operation_count > limit)
+        {
+            return Err(SkeinError::Storage(format!(
+                "WAL batch operation limit exceeded before append: max_wal_batch_operations={}",
+                self.max_batch_operations.unwrap_or_default()
+            )));
+        }
         self.append_entry(WalOp::Batch(ops), operation_count)
     }
 
@@ -11025,6 +11436,15 @@ impl DurableStore {
             op,
         };
         let encoded_entry = entry.encode();
+        if self
+            .max_record_bytes
+            .is_some_and(|limit| encoded_entry.len().saturating_add(1) > limit)
+        {
+            return Err(SkeinError::Storage(format!(
+                "WAL record byte limit exceeded before append: max_wal_record_bytes={}",
+                self.max_record_bytes.unwrap_or_default()
+            )));
+        }
         let started = std::time::Instant::now();
         let mut byte_count = encoded_entry.len().saturating_add(1) as u64;
         process_crash_failpoint("before_wal_append");
@@ -15850,7 +16270,7 @@ fn generated_stable_id(kind: &str, physical_id: u64) -> Value {
     ]))
 }
 
-fn evaluate_node_set_value(
+pub(crate) fn evaluate_node_set_value(
     properties: &BTreeMap<String, Value>,
     assignment: &NodeSetAssignment,
 ) -> Result<Value> {
@@ -15935,6 +16355,7 @@ fn optional_label_id(catalog: &Catalog, label: &str) -> Option<LabelId> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_set_relationship_properties_mutation(
     store: &GraphStore,
     catalog: &Catalog,
@@ -15943,6 +16364,7 @@ fn apply_set_relationship_properties_mutation(
     pending_nodes: &[PendingNode],
     pending_relationships: &mut [PendingRelationship],
     update: RelationshipPropertiesUpdate,
+    limits: MutationLimits,
 ) -> Result<()> {
     let (Some(source_label_id), Some(target_label_id), Some(rel_type_id)) = (
         catalog.label_id(&update.source_label),
@@ -15952,10 +16374,12 @@ fn apply_set_relationship_properties_mutation(
         return Ok(());
     };
     let source_ids = store
-        .matching_node_ids_with_pending(
+        .matching_node_ids_with_pending_bounded(
             Some(source_label_id),
             update.filter.as_ref(),
             pending_nodes,
+            remaining_mutation_affected_rows(rows.len(), limits)?,
+            "max_mutation_affected_rows",
         )?
         .into_iter()
         .collect::<BTreeSet<_>>();
@@ -15990,6 +16414,13 @@ fn apply_set_relationship_properties_mutation(
         if !target_matches {
             continue;
         }
+        ensure_additional_mutation_limits(
+            ops.len(),
+            rows.len(),
+            update.assignments.len(),
+            1,
+            limits,
+        )?;
         for assignment in &update.assignments {
             ops.push(WalOp::SetRelationshipProperty {
                 id: relationship.id,
@@ -16024,6 +16455,7 @@ fn apply_set_relationship_properties_mutation(
         )? {
             continue;
         }
+        ensure_additional_mutation_limits(ops.len(), rows.len(), 0, 1, limits)?;
         for assignment in &update.assignments {
             properties.insert(assignment.property.clone(), assignment.value.clone());
             apply_pending_relationship_property(
@@ -16066,11 +16498,12 @@ fn node_matches_label_and_filter(
         .unwrap_or(false))
 }
 
-fn relationships_with_pending_matching(
+fn relationships_with_pending_matching_bounded(
     store: &GraphStore,
     pending_nodes: &[PendingNode],
     pending_relationships: &[PendingRelationship],
     request: RelationshipMatchRequest<'_>,
+    max_relationships: usize,
 ) -> Result<Vec<RelationshipCandidate>> {
     let mut relationships = Vec::new();
     for relationship in store.relationship_records_owned() {
@@ -16099,6 +16532,11 @@ fn relationships_with_pending_matching(
             target: relationship.target,
             properties: relationship.properties.clone(),
         });
+        if relationships.len() > max_relationships {
+            return Err(SkeinError::Execution(format!(
+                "mutation would exceed max_mutation_affected_rows {max_relationships}"
+            )));
+        }
     }
 
     for (_, source, target, pending_rel_type_id, properties) in pending_relationships {
@@ -16126,6 +16564,11 @@ fn relationships_with_pending_matching(
             target: *target,
             properties: properties.clone(),
         });
+        if relationships.len() > max_relationships {
+            return Err(SkeinError::Execution(format!(
+                "mutation would exceed max_mutation_affected_rows {max_relationships}"
+            )));
+        }
     }
     Ok(relationships)
 }

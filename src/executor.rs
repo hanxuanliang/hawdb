@@ -15,11 +15,12 @@ use crate::schema::Catalog;
 use crate::store::{
     AdjacencyDirection, ConnectedNodesCreate, GraphMutation, GraphScanControl, GraphStore,
     MatchedRelationshipCopyMerge, MatchedRelationshipCreate, MatchedRelationshipMerge,
-    MatchedRelationshipRetargetMerge, MatchedRelationshipSourceRetargetMerge, NodeId, NodeRecord,
-    NodeSetAssignment, NodeSetValue, ProjectedGraphDefinition, PropertyFilter, RelRecord,
-    RelationshipDeleteRequest, RelationshipOnCreatePropertyValue, RelationshipPropertiesUpdate,
-    RelationshipPropertyUpdate, RelationshipSetAssignment, RelationshipTargetNodeDelete,
-    ScanPredicate, ScanPruningReport, ScanPruningStrategy, SourceScanCandidateRead,
+    MatchedRelationshipRetargetMerge, MatchedRelationshipSourceRetargetMerge, MutationLimits,
+    NodeId, NodeRecord, NodeSetAssignment, NodeSetValue, ProjectedGraphDefinition, PropertyFilter,
+    RelRecord, RelationshipDeleteRequest, RelationshipOnCreatePropertyValue,
+    RelationshipPropertiesUpdate, RelationshipPropertyUpdate, RelationshipSetAssignment,
+    RelationshipTargetNodeDelete, ScanPredicate, ScanPruningReport, ScanPruningStrategy,
+    SourceScanCandidateRead,
 };
 use crate::value::Value;
 use skein_core::RuntimeTaskContext;
@@ -1112,6 +1113,328 @@ fn vector_plan_embedding_dimension(plan: &skein_plan::VectorPhysicalPlan) -> usi
     }
 }
 
+pub fn execute_mutation_with_limits(
+    plan: &PhysicalPlan,
+    catalog: &mut Catalog,
+    store: &mut GraphStore,
+    limits: MutationLimits,
+    task_context: Option<&RuntimeTaskContext>,
+) -> Result<Vec<Row>> {
+    runtime_checkpoint(task_context)?;
+    if let PhysicalPlan::SetNodePropertiesReturn {
+        variable,
+        label,
+        predicate,
+        assignments,
+        returns,
+    } = plan
+    {
+        return execute_set_node_properties_return_with_limits(
+            variable,
+            label,
+            predicate.as_ref(),
+            assignments,
+            returns,
+            catalog,
+            store,
+            limits,
+            task_context,
+        );
+    }
+    match mutation_command(plan) {
+        Ok(Some(mutation)) => store
+            .commit_mutation_with_limits(catalog, mutation, limits)
+            .map(|summary| summary.rows),
+        Ok(None) => Err(SkeinError::Execution(
+            "physical plan is not an executable mutation".to_string(),
+        )),
+        Err(error) => {
+            if let Some(rows) =
+                execute_node_mutation_with_limits(plan, catalog, store, limits, task_context)?
+            {
+                Ok(rows)
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+fn execute_node_mutation_with_limits(
+    plan: &PhysicalPlan,
+    catalog: &mut Catalog,
+    store: &mut GraphStore,
+    limits: MutationLimits,
+    task_context: Option<&RuntimeTaskContext>,
+) -> Result<Option<Vec<Row>>> {
+    let (variable, label, predicate, action) = match plan {
+        PhysicalPlan::SetNodeProperty {
+            variable,
+            label,
+            predicate,
+            property,
+            value,
+        } => (
+            variable,
+            label,
+            predicate.as_ref(),
+            NodeMutationPreflightAction::Set(vec![NodeSetAssignment {
+                property: property.clone(),
+                value: node_set_value(value),
+            }]),
+        ),
+        PhysicalPlan::SetNodeProperties {
+            variable,
+            label,
+            predicate,
+            assignments,
+        } => (
+            variable,
+            label,
+            predicate.as_ref(),
+            NodeMutationPreflightAction::Set(assignments.iter().map(node_set_assignment).collect()),
+        ),
+        PhysicalPlan::DeleteNode {
+            variable,
+            label,
+            predicate,
+            detach,
+        } => (
+            variable,
+            label,
+            predicate.as_ref(),
+            NodeMutationPreflightAction::Delete { detach: *detach },
+        ),
+        _ => return Ok(None),
+    };
+    let label_ids = label_ids_for_pattern(catalog, label);
+    let mut ids = Vec::with_capacity(limits.max_affected_rows.get().min(1024));
+    let mut visited = 0usize;
+    let mut callback_error = None;
+    store.visit_nodes_owned(None, |node| {
+        if callback_error.is_some() {
+            return GraphScanControl::Stop;
+        }
+        visited = visited.saturating_add(1);
+        if visited.is_multiple_of(DEFAULT_EXECUTION_BATCH_ROWS)
+            && let Err(error) = runtime_checkpoint(task_context)
+        {
+            callback_error = Some(error);
+            return GraphScanControl::Stop;
+        }
+        if !node_matches_label_pattern(&node, label_ids.as_deref()) {
+            return GraphScanControl::Continue;
+        }
+        let binding = Binding {
+            values: BTreeMap::new(),
+            nodes: BTreeMap::from([(variable.to_string(), node)]),
+            relationships: BTreeMap::new(),
+        };
+        if let Some(predicate) = predicate {
+            match evaluate_predicate(predicate, catalog, store, &binding) {
+                Ok(true) => {}
+                Ok(false) => return GraphScanControl::Continue,
+                Err(error) => {
+                    callback_error = Some(error);
+                    return GraphScanControl::Stop;
+                }
+            }
+        }
+        if ids.len() == limits.max_affected_rows.get() {
+            callback_error = Some(SkeinError::Execution(format!(
+                "mutation would exceed max_mutation_affected_rows {}",
+                limits.max_affected_rows
+            )));
+            return GraphScanControl::Stop;
+        }
+        ids.push(binding.nodes[variable].id);
+        GraphScanControl::Continue
+    })?;
+    if let Some(error) = callback_error {
+        return Err(error);
+    }
+    if ids.len() > limits.max_result_rows.get() {
+        return Err(SkeinError::Execution(format!(
+            "mutation would exceed max_mutation_result_rows {}",
+            limits.max_result_rows
+        )));
+    }
+    let output = ids
+        .iter()
+        .map(|id| BTreeMap::from([("node_id".to_string(), Value::Int(id.0 as i64))]))
+        .collect::<Vec<_>>();
+    let payload_bytes = output.iter().fold(0usize, |total, row| {
+        total.saturating_add(map_payload_bytes(row))
+    });
+    if payload_bytes > limits.max_result_payload_bytes.get() {
+        return Err(SkeinError::Execution(format!(
+            "mutation result payload would exceed max_mutation_result_payload_bytes {}",
+            limits.max_result_payload_bytes
+        )));
+    }
+    match action {
+        NodeMutationPreflightAction::Set(assignments) => {
+            store.set_node_properties_by_ids_with_limits(catalog, &ids, &assignments, limits)?;
+        }
+        NodeMutationPreflightAction::Delete { detach } => {
+            store.delete_node_ids_with_limits(catalog, &ids, detach, limits)?;
+        }
+    }
+    Ok(Some(output))
+}
+
+enum NodeMutationPreflightAction {
+    Set(Vec<NodeSetAssignment>),
+    Delete { detach: bool },
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_set_node_properties_return_with_limits(
+    variable: &str,
+    label: &str,
+    predicate: Option<&Predicate>,
+    assignments: &[crate::planner::SetAssignment],
+    returns: &SetNodePropertiesReturnMode,
+    catalog: &mut Catalog,
+    store: &mut GraphStore,
+    limits: MutationLimits,
+    task_context: Option<&RuntimeTaskContext>,
+) -> Result<Vec<Row>> {
+    let assignments = assignments
+        .iter()
+        .map(node_set_assignment)
+        .collect::<Vec<_>>();
+    let label_ids = label_ids_for_pattern(catalog, label);
+    let mut ids = Vec::with_capacity(limits.max_affected_rows.get().min(1024));
+    let mut projected_rows = Vec::new();
+    let mut projected_payload_bytes = 0usize;
+    let mut visited = 0usize;
+    let mut callback_error = None;
+    store.visit_nodes_owned(None, |node| {
+        if callback_error.is_some() {
+            return GraphScanControl::Stop;
+        }
+        visited = visited.saturating_add(1);
+        if visited.is_multiple_of(DEFAULT_EXECUTION_BATCH_ROWS)
+            && let Err(error) = runtime_checkpoint(task_context)
+        {
+            callback_error = Some(error);
+            return GraphScanControl::Stop;
+        }
+        if !node_matches_label_pattern(&node, label_ids.as_deref()) {
+            return GraphScanControl::Continue;
+        }
+        let original_binding = Binding {
+            values: BTreeMap::new(),
+            nodes: BTreeMap::from([(variable.to_string(), node.clone())]),
+            relationships: BTreeMap::new(),
+        };
+        if let Some(predicate) = predicate {
+            match evaluate_predicate(predicate, catalog, store, &original_binding) {
+                Ok(true) => {}
+                Ok(false) => return GraphScanControl::Continue,
+                Err(error) => {
+                    callback_error = Some(error);
+                    return GraphScanControl::Stop;
+                }
+            }
+        }
+        if ids.len() == limits.max_affected_rows.get() {
+            callback_error = Some(SkeinError::Execution(format!(
+                "mutation would exceed max_mutation_affected_rows {}",
+                limits.max_affected_rows
+            )));
+            return GraphScanControl::Stop;
+        }
+        let id = node.id;
+        ids.push(id);
+        if let SetNodePropertiesReturnMode::Project(returns) = returns {
+            if projected_rows.len() == limits.max_result_rows.get() {
+                callback_error = Some(SkeinError::Execution(format!(
+                    "mutation would exceed max_mutation_result_rows {}",
+                    limits.max_result_rows
+                )));
+                return GraphScanControl::Stop;
+            }
+            let mut projected_node = node;
+            for assignment in &assignments {
+                let value = match crate::store::evaluate_node_set_value(
+                    &projected_node.properties,
+                    assignment,
+                ) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        callback_error = Some(error);
+                        return GraphScanControl::Stop;
+                    }
+                };
+                projected_node
+                    .properties
+                    .insert(assignment.property.clone(), value);
+            }
+            let binding = Binding {
+                values: BTreeMap::new(),
+                nodes: BTreeMap::from([(variable.to_string(), projected_node)]),
+                relationships: BTreeMap::new(),
+            };
+            let values = match returns
+                .iter()
+                .map(|item| {
+                    project_value(item, catalog, &binding).map(|value| (item.name.clone(), value))
+                })
+                .collect::<Result<BTreeMap<_, _>>>()
+            {
+                Ok(values) => values,
+                Err(error) => {
+                    callback_error = Some(error);
+                    return GraphScanControl::Stop;
+                }
+            };
+            let next_payload = projected_payload_bytes.saturating_add(map_payload_bytes(&values));
+            if next_payload > limits.max_result_payload_bytes.get() {
+                callback_error = Some(SkeinError::Execution(format!(
+                    "mutation result payload would exceed max_mutation_result_payload_bytes {}",
+                    limits.max_result_payload_bytes
+                )));
+                return GraphScanControl::Stop;
+            }
+            projected_payload_bytes = next_payload;
+            projected_rows.push(values);
+        }
+        GraphScanControl::Continue
+    })?;
+    if let Some(error) = callback_error {
+        return Err(error);
+    }
+
+    let output = match returns {
+        SetNodePropertiesReturnMode::Project(_) => projected_rows,
+        SetNodePropertiesReturnMode::Count { name } => {
+            let row = BTreeMap::from([(name.clone(), Value::Int(ids.len() as i64))]);
+            if map_payload_bytes(&row) > limits.max_result_payload_bytes.get() {
+                return Err(SkeinError::Execution(format!(
+                    "mutation result payload would exceed max_mutation_result_payload_bytes {}",
+                    limits.max_result_payload_bytes
+                )));
+            }
+            vec![row]
+        }
+    };
+    let operation_count = ids
+        .len()
+        .checked_mul(assignments.len())
+        .ok_or_else(|| SkeinError::Execution("mutation operation count overflow".to_string()))?;
+    if operation_count > limits.max_operations.get() {
+        return Err(SkeinError::Execution(format!(
+            "mutation would exceed max_mutation_operations {}",
+            limits.max_operations
+        )));
+    }
+    runtime_checkpoint(task_context)?;
+    store.set_node_properties_by_ids_with_limits(catalog, &ids, &assignments, limits)?;
+    Ok(output)
+}
+
 pub fn mutation_command(plan: &PhysicalPlan) -> Result<Option<GraphMutation>> {
     match plan {
         PhysicalPlan::CreateNodeLabel { label } => Ok(Some(GraphMutation::CreateNodeLabel {
@@ -1610,19 +1933,23 @@ pub fn is_mutation_plan(plan: &PhysicalPlan) -> Result<bool> {
 fn node_set_assignment(assignment: &crate::planner::SetAssignment) -> NodeSetAssignment {
     NodeSetAssignment {
         property: assignment.property.clone(),
-        value: match &assignment.value {
-            SetValue::Value(value) => NodeSetValue::Value(value.clone()),
-            SetValue::Coalesce { default, .. } => NodeSetValue::Coalesce {
-                default: default.clone(),
-            },
-            SetValue::AddInt { amount, .. } => NodeSetValue::AddInt { amount: *amount },
-            SetValue::DecrementFloorZero { .. } => NodeSetValue::DecrementFloorZero,
-            SetValue::PreserveNewerExisting {
-                incoming, preserve, ..
-            } => NodeSetValue::PreserveNewerExisting {
-                incoming: incoming.clone(),
-                preserve: *preserve,
-            },
+        value: node_set_value(&assignment.value),
+    }
+}
+
+fn node_set_value(value: &SetValue) -> NodeSetValue {
+    match value {
+        SetValue::Value(value) => NodeSetValue::Value(value.clone()),
+        SetValue::Coalesce { default, .. } => NodeSetValue::Coalesce {
+            default: default.clone(),
+        },
+        SetValue::AddInt { amount, .. } => NodeSetValue::AddInt { amount: *amount },
+        SetValue::DecrementFloorZero { .. } => NodeSetValue::DecrementFloorZero,
+        SetValue::PreserveNewerExisting {
+            incoming, preserve, ..
+        } => NodeSetValue::PreserveNewerExisting {
+            incoming: incoming.clone(),
+            preserve: *preserve,
         },
     }
 }

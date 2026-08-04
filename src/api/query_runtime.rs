@@ -224,10 +224,12 @@ impl Database {
             let (rows, execution_profile) = if is_mutation {
                 query_runtime_checkpoint(task_context)?;
                 (
-                    executor::execute(
+                    executor::execute_mutation_with_limits(
                         &optimized.physical_plan,
                         &mut self.catalog,
                         &mut self.store,
+                        self.config.mutation_limits,
+                        task_context,
                     )?,
                     None,
                 )

@@ -109,6 +109,170 @@ fn match_set_return_counts_updated_nodes() {
 }
 
 #[test]
+fn mutation_affected_row_limit_rejects_set_return_atomically() {
+    let mut config = DatabaseConfig::default();
+    config.mutation_limits.max_affected_rows = std::num::NonZeroUsize::new(1).unwrap();
+    let mut db = Database::new_with_config(config);
+    db.query("CREATE (:Thread {id: 'one', state: 'ready'})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'two', state: 'ready'})")
+        .unwrap();
+    let epoch = db.statistics().computed_at_commit_epoch;
+
+    let error = db
+        .query("MATCH (t:Thread) SET t.state = 'changed' RETURN t.id AS id")
+        .unwrap_err();
+
+    assert!(error.to_string().contains("max_mutation_affected_rows 1"));
+    assert_eq!(db.statistics().computed_at_commit_epoch, epoch);
+    let rows = db
+        .query("MATCH (t:Thread) RETURN t.id AS id, t.state AS state ORDER BY id")
+        .unwrap();
+    assert!(rows
+        .rows
+        .iter()
+        .all(|row| { row.get("state") == Some(&Value::String("ready".to_string())) }));
+}
+
+#[test]
+fn mutation_payload_limit_rejects_set_return_before_commit() {
+    let mut config = DatabaseConfig::default();
+    config.mutation_limits.max_result_payload_bytes = std::num::NonZeroUsize::new(32).unwrap();
+    let mut db = Database::new_with_config(config);
+    db.query("CREATE (:Thread {id: 'payload', state: 'ready'})")
+        .unwrap();
+    let epoch = db.statistics().computed_at_commit_epoch;
+
+    let error = db
+        .query("MATCH (t:Thread) SET t.state = 'this-payload-is-larger-than-the-configured-limit' RETURN t.state AS state")
+        .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("max_mutation_result_payload_bytes 32"));
+    assert_eq!(db.statistics().computed_at_commit_epoch, epoch);
+    let rows = db
+        .query("MATCH (t:Thread {id: 'payload'}) RETURN t.state AS state")
+        .unwrap();
+    assert_eq!(
+        rows.rows[0].get("state"),
+        Some(&Value::String("ready".to_string()))
+    );
+}
+
+#[test]
+fn mutation_count_return_uses_result_limit_independently_of_affected_rows() {
+    let mut config = DatabaseConfig::default();
+    config.mutation_limits.max_result_rows = std::num::NonZeroUsize::new(1).unwrap();
+    let mut db = Database::new_with_config(config);
+    db.query("CREATE (:Thread {id: 'one', state: 'ready'})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'two', state: 'ready'})")
+        .unwrap();
+
+    let output = db
+        .query("MATCH (t:Thread) SET t.state = 'changed' RETURN count(t)")
+        .unwrap();
+
+    assert_eq!(
+        output.rows,
+        vec![BTreeMap::from([("count(t)".to_string(), Value::Int(2))])]
+    );
+}
+
+#[test]
+fn transaction_operation_limit_rejects_the_complete_batch() {
+    let mut config = DatabaseConfig::default();
+    config.mutation_limits.max_operations = std::num::NonZeroUsize::new(1).unwrap();
+    let mut db = Database::new_with_config(config);
+    let mut tx = db.begin_transaction();
+    tx.query("CREATE (:Memory {id: 'one'})").unwrap();
+    tx.query("CREATE (:Memory {id: 'two'})").unwrap();
+
+    let error = tx.commit().unwrap_err();
+
+    assert!(error.to_string().contains("max_mutation_operations 1"));
+    let rows = db.query("MATCH (m:Memory) RETURN m.id AS id").unwrap();
+    assert!(rows.rows.is_empty());
+}
+
+#[test]
+fn wal_batch_limit_rejects_transaction_before_append() {
+    let path = unique_test_dir("wal_batch_limit_rejects_transaction_before_append");
+    let config = DatabaseConfig {
+        max_wal_batch_operations: Some(1),
+        ..DatabaseConfig::default()
+    };
+    let epoch;
+    {
+        let mut db = Database::open_with_config(&path, config.clone()).unwrap();
+        epoch = db.statistics().computed_at_commit_epoch;
+        let mut tx = db.begin_transaction();
+        tx.query("CREATE (:Memory {id: 'one'})").unwrap();
+        tx.query("CREATE (:Memory {id: 'two'})").unwrap();
+
+        let error = tx.commit().unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("WAL batch operation limit exceeded before append"));
+        assert_eq!(db.statistics().computed_at_commit_epoch, epoch);
+        assert!(db
+            .query("MATCH (m:Memory) RETURN m.id AS id")
+            .unwrap()
+            .rows
+            .is_empty());
+    }
+    {
+        let mut db = Database::open_with_config(&path, config).unwrap();
+        assert_eq!(db.statistics().computed_at_commit_epoch, epoch);
+        assert!(db
+            .query("MATCH (m:Memory) RETURN m.id AS id")
+            .unwrap()
+            .rows
+            .is_empty());
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn wal_record_byte_limit_rejects_mutation_before_append() {
+    let path = unique_test_dir("wal_record_byte_limit_rejects_mutation_before_append");
+    let config = DatabaseConfig {
+        max_wal_record_bytes: Some(256),
+        ..DatabaseConfig::default()
+    };
+    let epoch;
+    {
+        let mut db = Database::open_with_config(&path, config.clone()).unwrap();
+        epoch = db.statistics().computed_at_commit_epoch;
+        let payload = "x".repeat(512);
+
+        let error = db
+            .query_with_params(
+                "CREATE (:Memory {id: 'oversized', content: $payload})",
+                &BTreeMap::from([("payload".to_string(), Value::String(payload))]),
+            )
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("WAL record byte limit exceeded before append"));
+        assert_eq!(db.statistics().computed_at_commit_epoch, epoch);
+    }
+    {
+        let mut db = Database::open_with_config(&path, config).unwrap();
+        assert_eq!(db.statistics().computed_at_commit_epoch, epoch);
+        assert!(db
+            .query("MATCH (m:Memory) RETURN m.id AS id")
+            .unwrap()
+            .rows
+            .is_empty());
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
 fn read_only_database_rejects_match_set_return() {
     let mut db = Database::new_with_config(DatabaseConfig {
         read_only: true,

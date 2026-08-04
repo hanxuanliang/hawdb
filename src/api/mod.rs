@@ -225,6 +225,7 @@ pub struct DatabaseConfig {
     pub max_read_result_rows: Option<usize>,
     pub max_read_result_payload_bytes: Option<usize>,
     pub execution_memory: executor::ExecutionMemoryConfig,
+    pub mutation_limits: skein_storage::MutationLimits,
     pub max_optimizer_groups: Option<usize>,
     pub recovery_mode: RecoveryMode,
     pub max_wal_replay_entries: Option<usize>,
@@ -266,6 +267,7 @@ impl Default for DatabaseConfig {
             max_read_result_rows: Some(DEFAULT_MAX_READ_RESULT_ROWS),
             max_read_result_payload_bytes: Some(DEFAULT_MAX_READ_RESULT_PAYLOAD_BYTES),
             execution_memory: executor::ExecutionMemoryConfig::default(),
+            mutation_limits: skein_storage::MutationLimits::default(),
             max_optimizer_groups: None,
             recovery_mode: RecoveryMode::default(),
             max_wal_replay_entries: Some(skein_storage::DEFAULT_MAX_WAL_REPLAY_ENTRIES),
@@ -36285,10 +36287,11 @@ impl DatabaseTransaction<'_> {
 
     pub fn commit(mut self) -> Result<QueryOutput> {
         self.db.ensure_writable()?;
-        let summary = self
-            .db
-            .store
-            .commit_mutations(&mut self.db.catalog, std::mem::take(&mut self.mutations))?;
+        let summary = self.db.store.commit_mutations_with_limits(
+            &mut self.db.catalog,
+            std::mem::take(&mut self.mutations),
+            self.db.config.mutation_limits,
+        )?;
         self.committed = true;
         Ok(QueryOutput { rows: summary.rows })
     }
@@ -36372,10 +36375,11 @@ impl DatabaseSession<'_> {
                     ));
                 };
                 self.db.ensure_writable()?;
-                let summary = self
-                    .db
-                    .store
-                    .commit_mutations(&mut self.db.catalog, std::mem::take(&mut mutations))?;
+                let summary = self.db.store.commit_mutations_with_limits(
+                    &mut self.db.catalog,
+                    std::mem::take(&mut mutations),
+                    self.db.config.mutation_limits,
+                )?;
                 Ok(QueryOutput { rows: summary.rows })
             }
             cypher::Statement::Rollback => {

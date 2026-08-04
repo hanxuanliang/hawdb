@@ -1,5 +1,38 @@
 use skein_core::{PropertyType, SchemaObjectState, TableKind, ValidatedRegex, Value};
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
+
+pub const DEFAULT_MAX_MUTATION_AFFECTED_ROWS: usize = 100_000;
+pub const DEFAULT_MAX_MUTATION_OPERATIONS: usize = 100_000;
+pub const DEFAULT_MAX_MUTATION_RESULT_ROWS: usize = 100_000;
+pub const DEFAULT_MAX_MUTATION_RESULT_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
+
+/// Hard limits applied before a mutation is appended to the WAL.
+///
+/// Mutation execution is atomic: exceeding a limit must reject the complete
+/// mutation before durable or in-memory state changes become visible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MutationLimits {
+    pub max_affected_rows: NonZeroUsize,
+    pub max_operations: NonZeroUsize,
+    pub max_result_rows: NonZeroUsize,
+    pub max_result_payload_bytes: NonZeroUsize,
+}
+
+impl Default for MutationLimits {
+    fn default() -> Self {
+        Self {
+            max_affected_rows: NonZeroUsize::new(DEFAULT_MAX_MUTATION_AFFECTED_ROWS)
+                .expect("default mutation affected-row limit is non-zero"),
+            max_operations: NonZeroUsize::new(DEFAULT_MAX_MUTATION_OPERATIONS)
+                .expect("default mutation operation limit is non-zero"),
+            max_result_rows: NonZeroUsize::new(DEFAULT_MAX_MUTATION_RESULT_ROWS)
+                .expect("default mutation result-row limit is non-zero"),
+            max_result_payload_bytes: NonZeroUsize::new(DEFAULT_MAX_MUTATION_RESULT_PAYLOAD_BYTES)
+                .expect("default mutation result payload limit is non-zero"),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectedNodesCreate {
