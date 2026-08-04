@@ -23,7 +23,7 @@ const SKEIN_NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-search-projection-shadow-evidence";
 const SKEIN_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE: &str = "skein-rust-library";
 const SKEIN_NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL: &str =
-    "skein-nowledge-mem-bounded-read-evidence-v1";
+    "skein-nowledge-mem-bounded-read-evidence-v2";
 const SKEIN_NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL: &str =
     "skein-nowledge-query-runtime-preflight-v1";
 const SEARCH_PROJECTION_SHADOW_PUSHDOWN_NOT_READY: &str =
@@ -335,6 +335,9 @@ pub fn nowledge_replacement_summary_json_with_options(
             "operator_row_cap_enabled": bounded_read_evidence.operator_row_cap_enabled,
             "streaming": bounded_read_evidence.streaming,
             "blocking_operator_count": bounded_read_evidence.blocking_operator_count,
+            "blocking_operator_memory_reports_complete": bounded_read_evidence.blocking_operator_memory_reports_complete,
+            "blocking_operator_memory_within_budget": bounded_read_evidence.blocking_operator_memory_within_budget,
+            "spill_within_budget": bounded_read_evidence.spill_within_budget,
             "covered_routes": bounded_read_evidence.covered_routes,
             "required_covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
             "missing_covered_routes": bounded_read_evidence.missing_covered_routes,
@@ -929,6 +932,9 @@ struct BoundedReadEvidenceSummary<'a> {
     operator_row_cap_enabled: Option<bool>,
     streaming: Option<bool>,
     blocking_operator_count: Option<u64>,
+    blocking_operator_memory_reports_complete: Option<bool>,
+    blocking_operator_memory_within_budget: Option<bool>,
+    spill_within_budget: Option<bool>,
     covered_routes: Vec<String>,
     missing_covered_routes: Vec<&'static str>,
     route_primary_ready: Option<bool>,
@@ -2266,6 +2272,11 @@ fn bounded_read_evidence_summary(bundle: &serde_json::Value) -> BoundedReadEvide
     let streaming = json_get_bool_path_from_dynamic(bundle, path, "streaming");
     let blocking_operator_count =
         json_get_u64_path_from_dynamic(bundle, path, "blocking_operator_count");
+    let blocking_operator_memory_reports_complete =
+        json_get_bool_path_from_dynamic(bundle, path, "blocking_operator_memory_reports_complete");
+    let blocking_operator_memory_within_budget =
+        json_get_bool_path_from_dynamic(bundle, path, "blocking_operator_memory_within_budget");
+    let spill_within_budget = json_get_bool_path_from_dynamic(bundle, path, "spill_within_budget");
     let covered_routes = json_get_string_array_path_from_dynamic(bundle, path, "covered_routes");
     let primary_ready_routes =
         json_get_string_array_path_from_dynamic(bundle, path, "primary_ready_routes");
@@ -2316,6 +2327,10 @@ fn bounded_read_evidence_summary(bundle: &serde_json::Value) -> BoundedReadEvide
         && payload_budget_exceeded == Some(false)
         && row_limit_enforced_before_output == Some(true)
         && operator_row_cap_enabled == Some(true)
+        && streaming.is_some()
+        && blocking_operator_memory_reports_complete == Some(true)
+        && blocking_operator_memory_within_budget == Some(true)
+        && spill_within_budget == Some(true)
         && missing_covered_routes.is_empty()
         && route_primary_ready == Some(true)
         && primary_ready_routes_cover_required
@@ -2339,6 +2354,9 @@ fn bounded_read_evidence_summary(bundle: &serde_json::Value) -> BoundedReadEvide
         operator_row_cap_enabled,
         streaming,
         blocking_operator_count,
+        blocking_operator_memory_reports_complete,
+        blocking_operator_memory_within_budget,
+        spill_within_budget,
         covered_routes,
         missing_covered_routes,
         route_primary_ready,
@@ -3282,6 +3300,9 @@ fn nowledge_replacement_next_actions(
                 "bounded_read_evidence.row_limit_enforced_before_output",
                 "bounded_read_evidence.operator_row_cap_enabled",
                 "bounded_read_evidence.blocking_operator_count",
+                "bounded_read_evidence.blocking_operator_memory_reports_complete",
+                "bounded_read_evidence.blocking_operator_memory_within_budget",
+                "bounded_read_evidence.spill_within_budget",
                 "bounded_read_evidence.covered_routes",
                 "bounded_read_evidence.route_primary_ready",
                 "bounded_read_evidence.primary_ready_routes",
@@ -7254,7 +7275,7 @@ mod tests {
             ),
             "active_search_route_readiness": ready_active_search_route_readiness_json(),
             "bounded_read_evidence": {
-                "protocol": "skein-nowledge-mem-bounded-read-evidence-v1",
+                "protocol": "skein-nowledge-mem-bounded-read-evidence-v2",
                 "mode": "shadow_read_only",
                 "max_rows": 512,
                 "execution_row_cap": 513,
@@ -7313,6 +7334,11 @@ mod tests {
                 }
             ]
         });
+        bundle["bounded_read_evidence"]["blocking_operator_memory_reports_complete"] =
+            serde_json::json!(true);
+        bundle["bounded_read_evidence"]["blocking_operator_memory_within_budget"] =
+            serde_json::json!(true);
+        bundle["bounded_read_evidence"]["spill_within_budget"] = serde_json::json!(true);
         bundle["search_projection_shadow_evidence"]["pushdown_evidence"]
             ["shadow_segment_document_pruning_ready"] = serde_json::json!(true);
         bundle["cutover_evidence"]["background_maintenance_foreground_admission_probe_ready"] =

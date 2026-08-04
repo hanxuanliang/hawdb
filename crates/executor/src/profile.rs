@@ -9,6 +9,9 @@ pub struct BlockingOperatorMemoryReport {
     pub budget_bytes: usize,
     pub peak_tracked_bytes: usize,
     pub input_rows: usize,
+    pub max_spill_bytes: u64,
+    pub max_spill_runs: usize,
+    pub spilled_bytes: u64,
     pub spill_run_count: usize,
     pub spilled_rows: usize,
 }

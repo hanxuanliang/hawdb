@@ -530,7 +530,7 @@ mod tests {
         std::fs::write(
             &bounded_evidence_path,
             serde_json::json!({
-                "protocol": "skein-nowledge-mem-bounded-read-evidence-v1",
+                "protocol": "skein-nowledge-mem-bounded-read-evidence-v2",
                 "present": true,
                 "ready": true,
                 "blocker_codes": []

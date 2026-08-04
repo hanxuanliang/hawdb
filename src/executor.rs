@@ -2334,6 +2334,9 @@ fn execute_binding_batches_inner(
                     budget_bytes: tracker.budget_bytes,
                     peak_tracked_bytes: tracker.peak_bytes,
                     input_rows: ordinal as usize,
+                    max_spill_bytes: spill_budget.max_bytes,
+                    max_spill_runs: spill_budget.max_runs,
+                    spilled_bytes: spill_budget.used_bytes,
                     spill_run_count: spill_budget.run_count,
                     spilled_rows,
                 });
@@ -2354,6 +2357,9 @@ fn execute_binding_batches_inner(
                 budget_bytes: tracker.budget_bytes,
                 peak_tracked_bytes: tracker.peak_bytes,
                 input_rows: ordinal as usize,
+                max_spill_bytes: memory.max_spill_bytes.get(),
+                max_spill_runs: memory.max_spill_runs.get(),
+                spilled_bytes: 0,
                 spill_run_count: 0,
                 spilled_rows: 0,
             });
@@ -2411,6 +2417,9 @@ fn stream_cartesian_product_batches(
         budget_bytes: tracker.budget_bytes,
         peak_tracked_bytes: tracker.peak_bytes,
         input_rows: right_bindings.len(),
+        max_spill_bytes: context.memory.max_spill_bytes.get(),
+        max_spill_runs: context.memory.max_spill_runs.get(),
+        spilled_bytes: 0,
         spill_run_count: 0,
         spilled_rows: 0,
     });
@@ -2494,6 +2503,9 @@ fn stream_distinct_batches(
         budget_bytes: tracker.budget_bytes,
         peak_tracked_bytes: tracker.peak_bytes,
         input_rows: ordinal as usize,
+        max_spill_bytes: context.memory.max_spill_bytes.get(),
+        max_spill_runs: context.memory.max_spill_runs.get(),
+        spilled_bytes: 0,
         spill_run_count: 0,
         spilled_rows: 0,
     });
@@ -2796,6 +2808,9 @@ fn stream_sort_batches(
             budget_bytes: tracker.budget_bytes,
             peak_tracked_bytes: tracker.peak_bytes,
             input_rows: ordinal as usize,
+            max_spill_bytes: memory.max_spill_bytes.get(),
+            max_spill_runs: memory.max_spill_runs.get(),
+            spilled_bytes: 0,
             spill_run_count: 0,
             spilled_rows: 0,
         });
@@ -2829,6 +2844,9 @@ fn stream_sort_batches(
         budget_bytes: tracker.budget_bytes,
         peak_tracked_bytes: tracker.peak_bytes,
         input_rows: ordinal as usize,
+        max_spill_bytes: spill_budget.max_bytes,
+        max_spill_runs: spill_budget.max_runs,
+        spilled_bytes: spill_budget.used_bytes,
         spill_run_count: spill_budget.run_count,
         spilled_rows: ordinal as usize,
     });
@@ -3452,6 +3470,9 @@ fn stream_aggregate_batches(
             budget_bytes: tracker.budget_bytes,
             peak_tracked_bytes: tracker.peak_bytes,
             input_rows,
+            max_spill_bytes: memory.max_spill_bytes.get(),
+            max_spill_runs: memory.max_spill_runs.get(),
+            spilled_bytes: 0,
             spill_run_count: 0,
             spilled_rows: 0,
         });
@@ -3502,6 +3523,9 @@ fn stream_aggregate_batches(
             budget_bytes: tracker.budget_bytes,
             peak_tracked_bytes: tracker.peak_bytes,
             input_rows: ordinal as usize,
+            max_spill_bytes: memory.max_spill_bytes.get(),
+            max_spill_runs: memory.max_spill_runs.get(),
+            spilled_bytes: 0,
             spill_run_count: 0,
             spilled_rows: 0,
         });
@@ -3538,6 +3562,9 @@ fn stream_aggregate_batches(
         budget_bytes: tracker.budget_bytes,
         peak_tracked_bytes: tracker.peak_bytes,
         input_rows: ordinal as usize,
+        max_spill_bytes: spill_budget.max_bytes,
+        max_spill_runs: spill_budget.max_runs,
+        spilled_bytes: spill_budget.used_bytes,
         spill_run_count: spill_budget.run_count,
         spilled_rows: ordinal as usize,
     });
@@ -7725,6 +7752,9 @@ fn execute_shortest_path(
         budget_bytes: memory.blocking_operator_bytes.get(),
         peak_tracked_bytes: search_peak_bytes.max(output_tracker.peak_bytes),
         input_rows: visited_paths,
+        max_spill_bytes: memory.max_spill_bytes.get(),
+        max_spill_runs: memory.max_spill_runs.get(),
+        spilled_bytes: 0,
         spill_run_count: 0,
         spilled_rows: 0,
     });
@@ -9459,6 +9489,9 @@ mod tests {
         assert_eq!(report.input_rows, 12);
         assert!(report.spill_run_count > 1);
         assert_eq!(report.spilled_rows, 12);
+        assert!(report.spilled_bytes > 0);
+        assert!(report.spilled_bytes <= report.max_spill_bytes);
+        assert!(report.spill_run_count <= report.max_spill_runs);
         let pipeline = &output.profile.pipeline_memory_report;
         assert_eq!(pipeline.intermediate_rows, 36);
         assert!(pipeline.intermediate_payload_bytes >= pipeline.output_payload_bytes);
@@ -9543,6 +9576,9 @@ mod tests {
         assert_eq!(report.input_rows, 20);
         assert!(report.spill_run_count > 1);
         assert_eq!(report.spilled_rows, 20);
+        assert!(report.spilled_bytes > 0);
+        assert!(report.spilled_bytes <= report.max_spill_bytes);
+        assert!(report.spill_run_count <= report.max_spill_runs);
         assert!(std::fs::read_dir(&memory.spill_directory)
             .unwrap()
             .next()
@@ -9617,6 +9653,9 @@ mod tests {
         assert!(report.spill_run_count > 1);
         assert!(report.spilled_rows > 0);
         assert!(report.spilled_rows <= report.input_rows);
+        assert!(report.spilled_bytes > 0);
+        assert!(report.spilled_bytes <= report.max_spill_bytes);
+        assert!(report.spill_run_count <= report.max_spill_runs);
         assert!(std::fs::read_dir(&memory.spill_directory)
             .unwrap()
             .next()

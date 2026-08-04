@@ -1866,6 +1866,36 @@ fn previous_wrapper_preflight_release_summary(
     );
     insert_json_value(
         &mut summary,
+        "bounded_read_blocking_operator_memory_reports_complete",
+        bool_path(
+            replacement_summary,
+            &[
+                "bounded_read_evidence",
+                "blocking_operator_memory_reports_complete",
+            ],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "bounded_read_blocking_operator_memory_within_budget",
+        bool_path(
+            replacement_summary,
+            &[
+                "bounded_read_evidence",
+                "blocking_operator_memory_within_budget",
+            ],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "bounded_read_spill_within_budget",
+        bool_path(
+            replacement_summary,
+            &["bounded_read_evidence", "spill_within_budget"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
         "bounded_read_route_catalog_version",
         str_path(
             replacement_summary,
@@ -3493,6 +3523,17 @@ mod tests {
         assert_release_summary_field(summary, "bounded_read_operator_row_cap_enabled", true);
         assert_release_summary_field(summary, "bounded_read_streaming", false);
         assert_release_summary_field(summary, "bounded_read_blocking_operator_count", 0);
+        assert_release_summary_field(
+            summary,
+            "bounded_read_blocking_operator_memory_reports_complete",
+            true,
+        );
+        assert_release_summary_field(
+            summary,
+            "bounded_read_blocking_operator_memory_within_budget",
+            true,
+        );
+        assert_release_summary_field(summary, "bounded_read_spill_within_budget", true);
         assert_release_summary_field(
             summary,
             "bounded_read_route_catalog_version",
@@ -5812,6 +5853,9 @@ mod tests {
             "streaming": false,
             "blocking_operator_count": 0,
             "blocking_operator_kinds": [],
+            "blocking_operator_memory_reports_complete": true,
+            "blocking_operator_memory_within_budget": true,
+            "spill_within_budget": true,
             "covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
             "required_covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
             "missing_covered_routes": [],

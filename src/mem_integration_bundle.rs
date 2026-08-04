@@ -2507,7 +2507,7 @@ mod tests {
 
     fn ready_bounded_read_evidence() -> serde_json::Value {
         serde_json::json!({
-            "protocol": "skein-nowledge-mem-bounded-read-evidence-v1",
+            "protocol": "skein-nowledge-mem-bounded-read-evidence-v2",
             "present": true,
             "ready": true,
             "route_primary_ready": true,
@@ -2526,6 +2526,9 @@ mod tests {
             "row_limit_enforced_before_output": true,
             "operator_row_cap_enabled": true,
             "blocking_operator_count": 0,
+            "blocking_operator_memory_reports_complete": true,
+            "blocking_operator_memory_within_budget": true,
+            "spill_within_budget": true,
             "streaming": false,
             "covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
             "missing_covered_routes": [],

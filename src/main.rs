@@ -4868,6 +4868,9 @@ fn read_execution_profile_json(
             "budget_bytes": report.budget_bytes,
             "peak_tracked_bytes": report.peak_tracked_bytes,
             "input_rows": report.input_rows,
+            "max_spill_bytes": report.max_spill_bytes,
+            "max_spill_runs": report.max_spill_runs,
+            "spilled_bytes": report.spilled_bytes,
             "spill_run_count": report.spill_run_count,
             "spilled_rows": report.spilled_rows,
         })).collect::<Vec<_>>(),
@@ -5308,7 +5311,7 @@ mod tests {
         std::fs::write(
             &bounded_path,
             serde_json::json!({
-                "protocol": "skein-nowledge-mem-bounded-read-evidence-v1",
+                "protocol": "skein-nowledge-mem-bounded-read-evidence-v2",
                 "ready": true
             })
             .to_string(),

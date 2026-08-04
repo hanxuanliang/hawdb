@@ -94,6 +94,7 @@ pub fn parse_read_report_json(value: &serde_json::Value) -> Result<NowledgeMemRe
         operator_row_cap_enabled: required_bool(value, "operator_row_cap_enabled")?,
         blocking_operator_count: required_usize(value, "blocking_operator_count")?,
         blocking_operator_kinds: required_string_array(value, "blocking_operator_kinds")?,
+        blocking_operator_memory_reports: required_blocking_operator_memory_reports(value)?,
         intermediate_rows: optional_usize(value, "intermediate_rows")?.unwrap_or_default(),
         intermediate_payload_bytes: optional_usize(value, "intermediate_payload_bytes")?
             .unwrap_or_default(),
@@ -104,6 +105,30 @@ pub fn parse_read_report_json(value: &serde_json::Value) -> Result<NowledgeMemRe
         major_page_faults: optional_u64(value, "major_page_faults")?,
         streaming: required_bool(value, "streaming")?,
     })
+}
+
+fn required_blocking_operator_memory_reports(
+    value: &serde_json::Value,
+) -> Result<Vec<skein_executor::BlockingOperatorMemoryReport>> {
+    value
+        .get("blocking_operator_memory_reports")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| invalid_field("blocking_operator_memory_reports", "array"))?
+        .iter()
+        .map(|report| {
+            Ok(skein_executor::BlockingOperatorMemoryReport {
+                operator: required_string(report, "operator")?.to_string(),
+                budget_bytes: required_usize(report, "budget_bytes")?,
+                peak_tracked_bytes: required_usize(report, "peak_tracked_bytes")?,
+                input_rows: required_usize(report, "input_rows")?,
+                max_spill_bytes: required_u64(report, "max_spill_bytes")?,
+                max_spill_runs: required_usize(report, "max_spill_runs")?,
+                spilled_bytes: required_u64(report, "spilled_bytes")?,
+                spill_run_count: required_usize(report, "spill_run_count")?,
+                spilled_rows: required_usize(report, "spilled_rows")?,
+            })
+        })
+        .collect()
 }
 
 pub fn parse_graph_route_readiness_json(
@@ -275,7 +300,7 @@ mod tests {
         assert!(require_ready);
         assert_eq!(
             evidence["protocol"],
-            "skein-nowledge-mem-bounded-read-evidence-v1"
+            "skein-nowledge-mem-bounded-read-evidence-v2"
         );
         assert_eq!(evidence["ready"], true);
         assert_eq!(evidence["mode"], "shadow_read_only");
@@ -474,6 +499,7 @@ mod tests {
             "operator_row_cap_enabled": true,
             "blocking_operator_count": 0,
             "blocking_operator_kinds": [],
+            "blocking_operator_memory_reports": [],
             "streaming": false
         })
     }

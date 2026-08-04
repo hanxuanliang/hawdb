@@ -1072,7 +1072,7 @@ pub const NOWLEDGE_MEM_STORAGE_LIFECYCLE_DECISION_PROTOCOL: &str =
 pub const NOWLEDGE_MEM_READINESS_DASHBOARD_PROTOCOL: &str =
     "skein-nowledge-mem-readiness-dashboard-v1";
 pub const NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL: &str =
-    "skein-nowledge-mem-bounded-read-evidence-v1";
+    "skein-nowledge-mem-bounded-read-evidence-v2";
 pub const NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL: &str = "skein-nowledge-mem-library-readiness-v1";
 pub const NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL: &str =
     "skein-nowledge-query-runtime-preflight-v1";
@@ -1865,6 +1865,7 @@ pub struct NowledgeMemReadReport {
     pub operator_row_cap_enabled: bool,
     pub blocking_operator_count: usize,
     pub blocking_operator_kinds: Vec<String>,
+    pub blocking_operator_memory_reports: Vec<skein_executor::BlockingOperatorMemoryReport>,
     pub intermediate_rows: usize,
     pub intermediate_payload_bytes: usize,
     pub output_payload_bytes: usize,
@@ -1891,6 +1892,7 @@ impl NowledgeMemReadReport {
             "operator_row_cap_enabled": self.operator_row_cap_enabled,
             "blocking_operator_count": self.blocking_operator_count,
             "blocking_operator_kinds": self.blocking_operator_kinds,
+            "blocking_operator_memory_reports": self.blocking_operator_memory_reports.iter().map(blocking_operator_memory_report_json).collect::<Vec<_>>(),
             "intermediate_rows": self.intermediate_rows,
             "intermediate_payload_bytes": self.intermediate_payload_bytes,
             "output_payload_bytes": self.output_payload_bytes,
@@ -1972,6 +1974,10 @@ pub fn nowledge_mem_bounded_read_evidence_json_with_route_readiness(
         route_readiness.map(|summary| summary.relationship_property_pruning_report_count);
     let route_relationship_property_pruning_evidence_ready =
         route_readiness.map(|summary| summary.route_relationship_property_pruning_evidence_ready);
+    let blocking_operator_memory_reports_complete =
+        blocking_operator_memory_reports_complete(report);
+    let blocking_operator_memory_within_budget = blocking_operator_memory_within_budget(report);
+    let spill_within_budget = blocking_operator_spill_within_budget(report);
 
     serde_json::json!({
         "protocol": NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL,
@@ -1987,6 +1993,10 @@ pub fn nowledge_mem_bounded_read_evidence_json_with_route_readiness(
         "streaming": report.streaming,
         "blocking_operator_count": report.blocking_operator_count,
         "blocking_operator_kinds": report.blocking_operator_kinds,
+        "blocking_operator_memory_reports": report.blocking_operator_memory_reports.iter().map(blocking_operator_memory_report_json).collect::<Vec<_>>(),
+        "blocking_operator_memory_reports_complete": blocking_operator_memory_reports_complete,
+        "blocking_operator_memory_within_budget": blocking_operator_memory_within_budget,
+        "spill_within_budget": spill_within_budget,
         "row_budget_exceeded": report.row_budget_exceeded,
         "payload_budget_exceeded": report.payload_budget_exceeded,
         "covered_routes": covered_routes,
@@ -2041,7 +2051,67 @@ fn nowledge_mem_bounded_read_blocker_codes(report: &NowledgeMemReadReport) -> Ve
     if report.payload_budget_exceeded {
         blockers.push("payload_budget_exceeded");
     }
+    if !blocking_operator_memory_reports_complete(report) {
+        blockers.push("blocking_operator_memory_report_incomplete");
+    }
+    if !blocking_operator_memory_within_budget(report) {
+        blockers.push("blocking_operator_memory_budget_exceeded");
+    }
+    if !blocking_operator_spill_within_budget(report) {
+        blockers.push("blocking_operator_spill_budget_exceeded");
+    }
     blockers
+}
+
+fn blocking_operator_memory_reports_complete(report: &NowledgeMemReadReport) -> bool {
+    let expected = report
+        .blocking_operator_kinds
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let actual = report
+        .blocking_operator_memory_reports
+        .iter()
+        .map(|report| report.operator.as_str())
+        .collect::<BTreeSet<_>>();
+    report.blocking_operator_count == expected.len() && actual == expected
+}
+
+fn blocking_operator_memory_within_budget(report: &NowledgeMemReadReport) -> bool {
+    report
+        .blocking_operator_memory_reports
+        .iter()
+        .all(|report| report.budget_bytes > 0 && report.peak_tracked_bytes <= report.budget_bytes)
+}
+
+fn blocking_operator_spill_within_budget(report: &NowledgeMemReadReport) -> bool {
+    report
+        .blocking_operator_memory_reports
+        .iter()
+        .all(|report| {
+            report.max_spill_bytes > 0
+                && report.max_spill_runs > 0
+                && report.spilled_bytes <= report.max_spill_bytes
+                && report.spill_run_count <= report.max_spill_runs
+                && ((report.spill_run_count == 0 && report.spilled_bytes == 0)
+                    || (report.spill_run_count > 0 && report.spilled_bytes > 0))
+        })
+}
+
+fn blocking_operator_memory_report_json(
+    report: &skein_executor::BlockingOperatorMemoryReport,
+) -> serde_json::Value {
+    serde_json::json!({
+        "operator": report.operator,
+        "budget_bytes": report.budget_bytes,
+        "peak_tracked_bytes": report.peak_tracked_bytes,
+        "input_rows": report.input_rows,
+        "max_spill_bytes": report.max_spill_bytes,
+        "max_spill_runs": report.max_spill_runs,
+        "spilled_bytes": report.spilled_bytes,
+        "spill_run_count": report.spill_run_count,
+        "spilled_rows": report.spilled_rows,
+    })
 }
 
 fn missing_nowledge_mem_bounded_read_routes(covered_routes: &[String]) -> Vec<&'static str> {
@@ -9951,11 +10021,17 @@ fn bounded_read_readiness_blocker_codes(evidence: &serde_json::Value) -> Vec<Str
     if evidence_bool(evidence, "row_budget_exceeded") == Some(true) {
         blockers.insert("bounded_read_row_budget_exceeded".to_string());
     }
-    if evidence_bool(evidence, "streaming") != Some(false) {
-        blockers.insert("bounded_read_streaming_enabled".to_string());
+    if evidence_bool(evidence, "streaming").is_none() {
+        blockers.insert("bounded_read_streaming_evidence_missing".to_string());
     }
-    if evidence_u64(evidence, "blocking_operator_count") != Some(0) {
-        blockers.insert("bounded_read_blocking_operator_present".to_string());
+    if evidence_bool(evidence, "blocking_operator_memory_reports_complete") != Some(true) {
+        blockers.insert("bounded_read_blocking_operator_memory_report_incomplete".to_string());
+    }
+    if evidence_bool(evidence, "blocking_operator_memory_within_budget") != Some(true) {
+        blockers.insert("bounded_read_blocking_operator_memory_budget_exceeded".to_string());
+    }
+    if evidence_bool(evidence, "spill_within_budget") != Some(true) {
+        blockers.insert("bounded_read_blocking_operator_spill_budget_exceeded".to_string());
     }
     if !string_array_at(evidence, &["missing_covered_routes"])
         .is_some_and(|routes| routes.is_empty())
@@ -10966,6 +11042,9 @@ fn nowledge_mem_read_report(
         operator_row_cap_enabled: execution_profile.operator_row_cap_enabled,
         blocking_operator_count: execution_profile.blocking_operator_count(),
         blocking_operator_kinds: execution_profile.blocking_operator_kinds.clone(),
+        blocking_operator_memory_reports: execution_profile
+            .blocking_operator_memory_reports
+            .clone(),
         intermediate_rows: execution_profile.pipeline_memory_report.intermediate_rows,
         intermediate_payload_bytes: execution_profile
             .pipeline_memory_report
@@ -13092,6 +13171,7 @@ mod tests {
             operator_row_cap_enabled: false,
             blocking_operator_count: 1,
             blocking_operator_kinds: vec!["Sort".to_string()],
+            blocking_operator_memory_reports: Vec::new(),
             intermediate_rows: 0,
             intermediate_payload_bytes: 0,
             output_payload_bytes: 0,
@@ -13118,6 +13198,7 @@ mod tests {
                 "missing_execution_row_cap",
                 "row_limit_not_enforced_before_output",
                 "operator_row_cap_disabled",
+                "blocking_operator_memory_report_incomplete",
                 "missing_covered_routes",
                 "graph_route_readiness_missing"
             ])
@@ -13140,6 +13221,7 @@ mod tests {
             operator_row_cap_enabled: true,
             blocking_operator_count: 0,
             blocking_operator_kinds: Vec::new(),
+            blocking_operator_memory_reports: Vec::new(),
             intermediate_rows: 0,
             intermediate_payload_bytes: 0,
             output_payload_bytes: 0,
@@ -13162,6 +13244,74 @@ mod tests {
                 "graph_route_readiness_missing"
             ])
         );
+    }
+
+    #[test]
+    fn bounded_read_evidence_accepts_streaming_with_budgeted_blocking_operator() {
+        let report = NowledgeMemReadReport {
+            protocol: NOWLEDGE_MEM_READ_REPORT_PROTOCOL.to_string(),
+            mode: NowledgeMemGraphMode::ShadowReadOnly,
+            row_count: 2,
+            max_rows: Some(512),
+            execution_row_cap: Some(513),
+            estimated_payload_bytes: 128,
+            max_estimated_payload_bytes: Some(4 * 1024 * 1024),
+            row_budget_exceeded: false,
+            payload_budget_exceeded: false,
+            row_limit_enforced_before_output: true,
+            operator_row_cap_enabled: true,
+            blocking_operator_count: 1,
+            blocking_operator_kinds: vec!["TopNExec".to_string()],
+            blocking_operator_memory_reports: vec![skein_executor::BlockingOperatorMemoryReport {
+                operator: "TopNExec".to_string(),
+                budget_bytes: 4096,
+                peak_tracked_bytes: 2048,
+                input_rows: 100,
+                max_spill_bytes: 8192,
+                max_spill_runs: 4,
+                spilled_bytes: 4096,
+                spill_run_count: 2,
+                spilled_rows: 64,
+            }],
+            intermediate_rows: 100,
+            intermediate_payload_bytes: 2048,
+            output_payload_bytes: 128,
+            steady_resident_bytes: Some(1024),
+            peak_resident_bytes: Some(2048),
+            minor_page_faults: Some(1),
+            major_page_faults: Some(0),
+            streaming: true,
+        };
+        let route_readiness = NowledgeMemRouteReadinessSummary {
+            route_primary_ready: true,
+            primary_ready_routes: REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+                .iter()
+                .map(|route| (*route).to_string())
+                .collect(),
+            route_query_plan_evidence_ready: true,
+            route_query_profile_evidence_ready: true,
+            route_query_api_behavior_evidence_ready: true,
+            relationship_property_pruning_required_count: 0,
+            relationship_property_pruning_report_count: 0,
+            route_relationship_property_pruning_evidence_ready: true,
+        };
+        let covered_routes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+            .iter()
+            .map(|route| (*route).to_string())
+            .collect::<Vec<_>>();
+
+        let evidence = nowledge_mem_bounded_read_evidence_json_with_route_readiness(
+            &report,
+            &covered_routes,
+            Some(&route_readiness),
+        );
+
+        assert_eq!(evidence["ready"], true);
+        assert_eq!(evidence["streaming"], true);
+        assert_eq!(evidence["blocking_operator_memory_reports_complete"], true);
+        assert_eq!(evidence["blocking_operator_memory_within_budget"], true);
+        assert_eq!(evidence["spill_within_budget"], true);
+        assert_eq!(evidence["blocker_codes"], serde_json::json!([]));
     }
 
     #[test]

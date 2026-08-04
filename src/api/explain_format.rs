@@ -90,8 +90,12 @@ impl Display for ExplainAnalyzeOutput {
                 disk: blocking.and_then(|report| {
                     (report.spill_run_count > 0).then(|| {
                         format!(
-                            "runs={}, rows={}",
-                            report.spill_run_count, report.spilled_rows
+                            "runs={}/{}, rows={}, bytes={}/{}",
+                            report.spill_run_count,
+                            report.max_spill_runs,
+                            report.spilled_rows,
+                            format_bytes(report.spilled_bytes),
+                            format_bytes(report.max_spill_bytes),
                         )
                     })
                 }),

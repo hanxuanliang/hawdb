@@ -176,6 +176,15 @@ fn blocking_operator_memory_report_value(
         ),
         ("input_rows".to_string(), usize_value(report.input_rows)),
         (
+            "max_spill_bytes".to_string(),
+            u64_value(report.max_spill_bytes),
+        ),
+        (
+            "max_spill_runs".to_string(),
+            usize_value(report.max_spill_runs),
+        ),
+        ("spilled_bytes".to_string(), u64_value(report.spilled_bytes)),
+        (
             "spill_run_count".to_string(),
             usize_value(report.spill_run_count),
         ),

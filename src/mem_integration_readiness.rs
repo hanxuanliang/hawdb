@@ -28,7 +28,7 @@ const SKEIN_NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-search-projection-shadow-evidence";
 const SKEIN_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE: &str = "skein-rust-library";
 const SKEIN_NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL: &str =
-    "skein-nowledge-mem-bounded-read-evidence-v1";
+    "skein-nowledge-mem-bounded-read-evidence-v2";
 const SKEIN_NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL: &str =
     "skein-nowledge-query-runtime-preflight-v1";
 const SKEIN_NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL: &str = "skein-nowledge-mem-query-report-v1";
@@ -450,8 +450,10 @@ pub struct BoundedReadCutoverReadiness {
     pub payload_budget_not_exceeded: bool,
     pub row_limit_enforced_before_output: bool,
     pub operator_row_cap_enabled: bool,
-    pub blocking_operator_count_zero: bool,
-    pub streaming_disabled: bool,
+    pub blocking_operator_memory_reports_complete: bool,
+    pub blocking_operator_memory_within_budget: bool,
+    pub spill_within_budget: bool,
+    pub streaming_evidence_present: bool,
     pub route_catalog_version_matches: bool,
     pub route_catalog_digest_present: bool,
     pub route_coverage_ready: bool,
@@ -881,8 +883,10 @@ impl BoundedReadCutoverReadiness {
             && self.payload_budget_not_exceeded
             && self.row_limit_enforced_before_output
             && self.operator_row_cap_enabled
-            && self.blocking_operator_count_zero
-            && self.streaming_disabled
+            && self.blocking_operator_memory_reports_complete
+            && self.blocking_operator_memory_within_budget
+            && self.spill_within_budget
+            && self.streaming_evidence_present
             && self.route_catalog_version_matches
             && self.route_catalog_digest_present
             && self.route_coverage_ready
@@ -4009,18 +4013,35 @@ pub fn bounded_read_cutover_readiness(bundle: &serde_json::Value) -> BoundedRead
                 "operator_row_cap_enabled",
             ],
         ) == Some(true),
-        blocking_operator_count_zero: u64_path(
+        blocking_operator_memory_reports_complete: bool_path(
             bundle,
             &[
                 "replacement_summary",
                 "bounded_read_evidence",
-                "blocking_operator_count",
+                "blocking_operator_memory_reports_complete",
             ],
-        ) == Some(0),
-        streaming_disabled: bool_path(
+        ) == Some(true),
+        blocking_operator_memory_within_budget: bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "bounded_read_evidence",
+                "blocking_operator_memory_within_budget",
+            ],
+        ) == Some(true),
+        spill_within_budget: bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "bounded_read_evidence",
+                "spill_within_budget",
+            ],
+        ) == Some(true),
+        streaming_evidence_present: bool_path(
             bundle,
             &["replacement_summary", "bounded_read_evidence", "streaming"],
-        ) == Some(false),
+        )
+        .is_some(),
         route_catalog_version_matches: str_path(
             bundle,
             &[
@@ -4099,12 +4120,20 @@ fn bounded_read_cutover_conditions(
             readiness.operator_row_cap_enabled,
         ),
         (
-            "replacement_summary.bounded_read_evidence.blocking_operator_count",
-            readiness.blocking_operator_count_zero,
+            "replacement_summary.bounded_read_evidence.blocking_operator_memory_reports_complete",
+            readiness.blocking_operator_memory_reports_complete,
+        ),
+        (
+            "replacement_summary.bounded_read_evidence.blocking_operator_memory_within_budget",
+            readiness.blocking_operator_memory_within_budget,
+        ),
+        (
+            "replacement_summary.bounded_read_evidence.spill_within_budget",
+            readiness.spill_within_budget,
         ),
         (
             "replacement_summary.bounded_read_evidence.streaming",
-            readiness.streaming_disabled,
+            readiness.streaming_evidence_present,
         ),
         (
             "replacement_summary.bounded_read_evidence.route_catalog_version",
@@ -8520,8 +8549,10 @@ mod tests {
         assert!(typed.payload_budget_not_exceeded);
         assert!(typed.row_limit_enforced_before_output);
         assert!(typed.operator_row_cap_enabled);
-        assert!(typed.blocking_operator_count_zero);
-        assert!(typed.streaming_disabled);
+        assert!(typed.blocking_operator_memory_reports_complete);
+        assert!(typed.blocking_operator_memory_within_budget);
+        assert!(typed.spill_within_budget);
+        assert!(typed.streaming_evidence_present);
         assert!(typed.route_catalog_version_matches);
         assert!(typed.route_catalog_digest_present);
         assert!(typed.route_coverage_ready);
@@ -8785,6 +8816,12 @@ mod tests {
             serde_json::json!(1);
         bundle["replacement_summary"]["bounded_read_evidence"]["streaming"] =
             serde_json::json!(true);
+        bundle["replacement_summary"]["bounded_read_evidence"]
+            ["blocking_operator_memory_reports_complete"] = serde_json::json!(false);
+        bundle["replacement_summary"]["bounded_read_evidence"]
+            ["blocking_operator_memory_within_budget"] = serde_json::json!(false);
+        bundle["replacement_summary"]["bounded_read_evidence"]["spill_within_budget"] =
+            serde_json::json!(false);
 
         let report = nowledge_mem_integration_readiness_json(&bundle);
 
@@ -8804,8 +8841,9 @@ mod tests {
             serde_json::json!([
                 "replacement_summary.bounded_read_evidence.mode",
                 "replacement_summary.bounded_read_evidence.execution_row_cap",
-                "replacement_summary.bounded_read_evidence.blocking_operator_count",
-                "replacement_summary.bounded_read_evidence.streaming"
+                "replacement_summary.bounded_read_evidence.blocking_operator_memory_reports_complete",
+                "replacement_summary.bounded_read_evidence.blocking_operator_memory_within_budget",
+                "replacement_summary.bounded_read_evidence.spill_within_budget"
             ])
         );
         assert!(report["next_actions"]
@@ -11140,7 +11178,7 @@ mod tests {
                 "failed_checks": []
             },
             "bounded_read_evidence": {
-                "protocol": "skein-nowledge-mem-bounded-read-evidence-v1",
+                "protocol": "skein-nowledge-mem-bounded-read-evidence-v2",
                 "ready": true,
                 "mode": "shadow_read_only",
                 "max_rows": 512,
@@ -11151,6 +11189,9 @@ mod tests {
                 "row_limit_enforced_before_output": true,
                 "operator_row_cap_enabled": true,
                 "blocking_operator_count": 0,
+                "blocking_operator_memory_reports_complete": true,
+                "blocking_operator_memory_within_budget": true,
+                "spill_within_budget": true,
                 "streaming": false,
                 "covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
                 "route_catalog_version": NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
@@ -11246,7 +11287,7 @@ mod tests {
                     "blocker_codes": []
                 },
                 "bounded_read_evidence": {
-                    "protocol": "skein-nowledge-mem-bounded-read-evidence-v1",
+                    "protocol": "skein-nowledge-mem-bounded-read-evidence-v2",
                     "present": true,
                     "ready": true,
                     "mode": "shadow_read_only",
@@ -11258,6 +11299,9 @@ mod tests {
                     "row_limit_enforced_before_output": true,
                     "operator_row_cap_enabled": true,
                     "blocking_operator_count": 0,
+                    "blocking_operator_memory_reports_complete": true,
+                    "blocking_operator_memory_within_budget": true,
+                    "spill_within_budget": true,
                     "streaming": false,
                     "covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
                     "missing_covered_routes": [],
