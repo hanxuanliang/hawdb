@@ -50,6 +50,7 @@ impl Database {
                 output_payload_bytes: pipeline.map_or(0, |report| report.output_payload_bytes),
                 steady_resident_bytes: pipeline.and_then(|report| report.steady_resident_bytes),
                 peak_resident_bytes: pipeline.and_then(|report| report.peak_resident_bytes),
+                total_page_faults: pipeline.and_then(|report| report.total_page_faults),
                 minor_page_faults: pipeline.and_then(|report| report.minor_page_faults),
                 major_page_faults: pipeline.and_then(|report| report.major_page_faults),
             });

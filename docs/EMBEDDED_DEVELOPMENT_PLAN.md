@@ -1,5 +1,9 @@
 # Embedded Graph Database Development Plan
 
+> This document is a historical implementation plan. Current normative
+> contracts are indexed by `docs/specs/README.md`, and current incomplete work
+> is tracked only in `TODO.md`.
+
 ## Objective
 
 Replace the Nowledge local Ladybug/Kuzu graph data plane with Skein without

@@ -5,6 +5,7 @@ pub mod blackbox;
 pub mod bounded_read_evidence;
 pub mod compat;
 mod compiled_capabilities;
+pub mod crash_recovery_evidence;
 pub mod cypher;
 pub mod embedded;
 #[cfg(feature = "tokio-runtime")]
@@ -21,6 +22,7 @@ pub mod nowledge_mem;
 pub mod optimizer;
 pub mod planner;
 pub mod previous_wrapper_preflight;
+pub mod production_evidence;
 pub mod qos;
 pub mod query_family_evidence;
 pub mod query_runtime_preflight;
@@ -172,6 +174,10 @@ pub use compat::{
     REQUIRED_EXTERNAL_SHADOW_CAPABILITIES,
 };
 pub use compiled_capabilities::compiled_runtime_capabilities;
+pub use crash_recovery_evidence::{
+    StorageCrashCaseEvidence, StorageCrashPoint, StorageCrashRecoveryEvidence,
+    STORAGE_CRASH_RECOVERY_EVIDENCE_PROTOCOL,
+};
 pub use cypher::RelationshipDirection;
 pub use embedded::{
     EmbeddedDeploymentProfile, EmbeddedRuntimeResources, SkeinEmbedded, SkeinEmbeddedOpenOptions,
@@ -363,6 +369,10 @@ pub use previous_wrapper_preflight::{
     NowledgePreviousWrapperPreflightInputs, NowledgePreviousWrapperPreflightReport,
     NOWLEDGE_PREVIOUS_WRAPPER_PREFLIGHT_PROTOCOL,
 };
+pub use production_evidence::{
+    ProductionEvidenceBinding, ProductionQualificationIdentity,
+    PRODUCTION_QUALIFICATION_POLICY_VERSION,
+};
 pub use qos::{
     BackgroundWorkDecision, BackgroundWorkHint, BackgroundWorkPlan, BackgroundWorkReasonCode,
     LocalQosClassSnapshot, LocalQosPermit, LocalQosPolicy, LocalQosScheduler, LocalQosSnapshot,
@@ -402,9 +412,10 @@ pub use search::{
     SearchOutOfCoreHydrationOutput, SearchOutOfCoreMetrics, SearchOutOfCoreOutput,
     SearchOutOfCoreReader, SearchPredicateFieldPruningReport, SearchPredicatePushdownReport,
     SearchProjectionDelta, SearchProjectionDeltaReport, SearchProjectionFreshness,
-    SearchProjectionKind, SearchProjectionProbeOptions, SearchProjectionRow, SearchQueryOptions,
-    SearchRangeReadConfig, SearchRebuildOptions, SearchRebuildSummary, SearchResultSet,
-    SearchRetrieverCandidateSetReport, SearchTruncationReasonCode, VectorRecallValidationBlocker,
+    SearchProjectionKind, SearchProjectionProbeOptions, SearchProjectionQualificationIdentity,
+    SearchProjectionRow, SearchQueryOptions, SearchRangeReadConfig, SearchRebuildOptions,
+    SearchRebuildSummary, SearchResultSet, SearchRetrieverCandidateSetReport,
+    SearchTopKScoreParity, SearchTruncationReasonCode, VectorRecallValidationBlocker,
     VectorRecallValidationOptions, VectorRecallValidationReport,
     MAX_VECTOR_RECALL_VALIDATION_SAMPLES, MAX_VECTOR_RECALL_VALIDATION_TOP_K,
     NOWLEDGE_MEMORY_MATERIALIZED_METADATA_PATHS, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
@@ -460,12 +471,12 @@ pub use skein_optimizer::{
     MemoGroup as OptimizerMemoGroup, PhysicalProperties, RequiredProperties,
 };
 pub use skein_qos::{
-    IoConcurrencyBudget, ProcessMemoryProfile, ProcessMemorySnapshot, RuntimeAdmissionCode,
-    RuntimeAdmissionError, RuntimeGovernor, RuntimeGovernorConfig, RuntimeGovernorLimits,
-    RuntimeGovernorSnapshot, RuntimeMemoryPressure, RuntimeMemorySnapshot, RuntimeResourceBudget,
-    RuntimeResourceSnapshot, RuntimeTelemetryEvent, RuntimeTelemetryEventKind,
-    RuntimeTelemetrySink, RuntimeWorkKind, RuntimeWorkPriority, RuntimeWorkRequest,
-    StorageDeviceDiscoverySource, StorageDeviceProfile, StorageMediaKind,
+    IoConcurrencyBudget, ProcessMemoryCapabilities, ProcessMemoryProfile, ProcessMemorySnapshot,
+    RuntimeAdmissionCode, RuntimeAdmissionError, RuntimeGovernor, RuntimeGovernorConfig,
+    RuntimeGovernorLimits, RuntimeGovernorSnapshot, RuntimeMemoryPressure, RuntimeMemorySnapshot,
+    RuntimeResourceBudget, RuntimeResourceSnapshot, RuntimeTelemetryEvent,
+    RuntimeTelemetryEventKind, RuntimeTelemetrySink, RuntimeWorkKind, RuntimeWorkPriority,
+    RuntimeWorkRequest, StorageDeviceDiscoverySource, StorageDeviceProfile, StorageMediaKind,
 };
 #[cfg(feature = "tokio-runtime")]
 pub use skein_runtime_tokio::{

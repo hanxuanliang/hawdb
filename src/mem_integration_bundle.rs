@@ -2955,14 +2955,23 @@ mod tests {
     fn ready_production_resource_profile() -> serde_json::Value {
         serde_json::json!({
             "protocol": crate::STORAGE_RESOURCE_PROFILE_PROTOCOL,
-            "protocol_version": 1,
+            "protocol_version": 2,
             "present": true,
+            "resource_ready": true,
             "ready": true,
             "blocker_codes": [],
+            "evidence_binding": {
+                "identity": production_identity(),
+                "generated_at_unix_seconds": 1
+            },
+            "expected_identity": production_identity(),
+            "canonical_graph_commit_epoch": 42,
+            "identity_matches_expected": true,
             "limits": {
                 "min_canonical_artifact_bytes": 536870912u64,
                 "max_steady_resident_bytes": 536870912u64,
                 "max_peak_resident_bytes": 805306368u64,
+                "max_total_page_faults": 1010,
                 "max_minor_page_faults": 1000,
                 "max_major_page_faults": 10,
                 "max_intermediate_rows": 1000,
@@ -2988,13 +2997,36 @@ mod tests {
                 "peak_resident_bytes": 402653184,
                 "steady_resident_growth_bytes": 16777216,
                 "lifetime_peak_resident_growth_bytes": 25165824,
+                "total_page_faults": 100,
                 "minor_page_faults": 100,
                 "major_page_faults": 0,
+                "metric_capabilities": {
+                    "resident_memory": true,
+                    "total_page_faults": true,
+                    "split_page_faults": true
+                },
                 "intermediate_rows": 200,
                 "intermediate_payload_bytes": 524288,
                 "output_rows": 100,
                 "output_payload_bytes": 262144
             }
+        })
+    }
+
+    fn production_identity() -> serde_json::Value {
+        serde_json::json!({
+            "source_revision": "test-revision",
+            "rust_toolchain": "test-toolchain",
+            "target_os": "linux",
+            "target_arch": "x86_64",
+            "enabled_features": ["full-text-search", "vector-search"],
+            "durable_format_version": 1,
+            "schema_version": 1,
+            "configuration_digest": "test-config",
+            "deployment_profile": "production-replica",
+            "dataset_fingerprint": "test-dataset",
+            "canonical_graph_commit_epoch": 42,
+            "policy_version": crate::PRODUCTION_QUALIFICATION_POLICY_VERSION
         })
     }
 

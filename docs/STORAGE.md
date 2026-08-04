@@ -162,9 +162,10 @@ counters.
 The ignored
 `larger_than_cache_query_reports_process_and_storage_resource_evidence` test is
 the reproducible synthetic gate for canonical bytes larger than cache capacity.
-It records process RSS, page-fault deltas, intermediate rows, payload bytes,
-cache residency, evictions, and rejected cache admissions. Production cutover
-still requires the same report from a representative Mem replica.
+It records process RSS, total page-fault deltas, target-specific split fault
+counters, intermediate rows, payload bytes, cache residency, evictions, and
+rejected cache admissions. Production cutover still requires the same report
+from a representative Mem replica through the release-bound typed API.
 
 A first checkpoint that publishes directly into out-of-core mode persists exact
 basic counts but does not construct unbounded distinct sets or path maps.
@@ -754,11 +755,14 @@ result only by explicitly setting both database limits to `None`. The store
 must not be described as a general multi-writer page store. Individual spilled
 values remain subject to the configured value-size admission limit.
 
-## Next Storage Tasks
+## Deferred Storage Extensions
 
-1. Add richer index statistics beyond bounded path source/target coverage and
-   text analyzer parity.
-2. Move production Search routes to `NowledgeMemOutOfCoreSearchProjection` only
-   after differential parity and production resource gates pass.
-3. Add richer caller-owned blob/content parser integration at the boundary
-   outside the graph kernel.
+The active production backlog is maintained in `TODO.md`. Richer optimizer
+statistics and caller-owned blob/content parser integrations are optional
+extensions until an active route and measured workload require them; they are
+not implicit storage-completion tasks.
+
+Production Search activation is governed by
+`specs/PRODUCTION_READINESS_SPEC.md`. Routes may move to
+`NowledgeMemOutOfCoreSearchProjection` only after generation-bound differential
+parity and representative resource qualification pass.

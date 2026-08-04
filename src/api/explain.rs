@@ -240,6 +240,10 @@ fn pipeline_memory_report_value(report: &skein_executor::PipelineMemoryReport) -
             optional_u64_value(report.lifetime_peak_resident_growth_bytes),
         ),
         (
+            "total_page_faults".to_string(),
+            optional_u64_value(report.total_page_faults),
+        ),
+        (
             "minor_page_faults".to_string(),
             optional_u64_value(report.minor_page_faults),
         ),

@@ -1608,6 +1608,7 @@ dependencies = [
  "loom",
  "skein-core",
  "sysinfo",
+ "windows-sys",
 ]
 
 [[package]]

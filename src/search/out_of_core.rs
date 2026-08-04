@@ -534,6 +534,21 @@ impl SearchOutOfCoreReader {
         self.manifest.source_graph_commit_epoch
     }
 
+    pub fn production_qualification_identity(
+        &self,
+    ) -> super::SearchProjectionQualificationIdentity {
+        super::SearchProjectionQualificationIdentity {
+            projection_generation: self.manifest.generation,
+            source_graph_commit_epoch: self.manifest.source_graph_commit_epoch,
+            document_count: self.manifest.document_count,
+            documents_digest: self.manifest.documents_digest,
+            analyzer_digest: lexical_analyzer_digest(&self.analyzer_lexicon),
+            embedding_model: self.manifest.embedding_model.clone(),
+            embedding_version: self.manifest.embedding_version.clone(),
+            embedding_dimension: self.manifest.embedding_dimension,
+        }
+    }
+
     pub fn resident_document_count(&self) -> usize {
         0
     }

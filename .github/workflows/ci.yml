@@ -711,6 +711,9 @@ jobs:
       - name: Test resource detection
         run: cargo test -p skein-qos resource::tests
 
+      - name: Test process memory metrics
+        run: cargo test -p skein-qos process_memory::tests
+
       - name: Test Tokio adapter
         run: cargo test -p skein-runtime-tokio
 
@@ -755,3 +758,94 @@ jobs:
 
       - name: Loom slow query ring model
         run: cargo test -p skein --features loom-tests api::system_sql::loom_tests
+
+  storage-crash-recovery:
+    name: Storage Crash Recovery (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - name: Run subprocess crash matrix
+        shell: bash
+        env:
+          SKEIN_TEST_RUST_TOOLCHAIN: "1.97.1"
+          SKEIN_TEST_STORAGE_CRASH_EVIDENCE_PATH: storage-crash-results/report.json
+        run: |
+          set -o pipefail
+          mkdir -p storage-crash-results
+          set +e
+          cargo test -p skein --features acl --lib \
+            api::tests::storage_recovery::subprocess_crash_matrix_recovers_whole_batches_and_artifact_generations \
+            -- --nocapture 2>&1 | tee storage-crash-results/test-output.txt
+          test_status=${PIPESTATUS[0]}
+          set -e
+          printf '{"source_revision":"%s","runner_os":"%s","test_status":%s}\n' \
+            "$GITHUB_SHA" "$RUNNER_OS" "$test_status" \
+            > storage-crash-results/manifest.json
+          exit "$test_status"
+
+      - name: Upload crash recovery evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: storage-crash-recovery-${{ matrix.os }}-${{ github.sha }}
+          path: storage-crash-results
+          if-no-files-found: error
+
+  tla-model-check:
+    name: TLA Model Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Download pinned TLA tools
+        run: |
+          set -euo pipefail
+          mkdir -p tla-results
+          curl --fail --location --retry 3 \
+            https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar \
+            --output tla-results/tla2tools.jar
+          echo "bee4a54f3ee3d4afc347c3240ec2d9e93b075104  tla-results/tla2tools.jar" \
+            | sha1sum --check -
+
+      - name: Check durable publication models
+        run: |
+          set -euo pipefail
+          java -version 2> tla-results/java-version.txt
+          java -XX:+UseParallelGC -cp tla-results/tla2tools.jar tlc2.TLC \
+            -config docs/tla/SkeinConcurrentSnapshots.cfg \
+            docs/tla/SkeinConcurrentSnapshots.tla \
+            | tee tla-results/SkeinConcurrentSnapshots.txt
+          java -XX:+UseParallelGC -cp tla-results/tla2tools.jar tlc2.TLC \
+            -config docs/tla/SkeinSourceSegmentPublication.cfg \
+            docs/tla/SkeinSourceSegmentPublication.tla \
+            | tee tla-results/SkeinSourceSegmentPublication.txt
+          printf '{"source_revision":"%s","tla_tools_version":"1.7.4","models":["SkeinConcurrentSnapshots","SkeinSourceSegmentPublication"]}\n' \
+            "$GITHUB_SHA" > tla-results/manifest.json
+
+      - name: Remove downloaded tool from evidence
+        if: always()
+        run: rm -f tla-results/tla2tools.jar
+
+      - name: Upload model-check evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tla-model-check-${{ github.sha }}
+          path: tla-results
+          if-no-files-found: error

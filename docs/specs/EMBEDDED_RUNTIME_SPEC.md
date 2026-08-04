@@ -309,8 +309,9 @@ MUST be bounded so observability cannot exhaust memory.
 
 ## Access Control Extension
 
-ACL is a planned optional extension and is not part of the current production
-capability surface. Its design MUST:
+ACL is an optional, non-default production capability. A build or deployment
+that does not enable ACL does not claim an authorization boundary. When ACL is
+compiled and enabled, its graph and search entrypoints MUST:
 
 - remain disabled by default for `MobileEmbedded`;
 - support compile-time exclusion for applications that do not need it;
@@ -325,6 +326,11 @@ capability surface. Its design MUST:
 Storage-level visibility enforcement is required before ACL can be declared
 complete. Parser-only or result-filtering implementations are insufficient.
 
+Production readiness for an ACL-enabled deployment MUST prove policy freshness,
+plan-cache isolation by policy epoch and predicate shape, execution-time value
+rebinding on cache hits, pre-materialization visibility enforcement, and
+redacted telemetry. Missing or stale policy state MUST fail closed.
+
 ## Verification
 
 Release validation MUST include:
@@ -337,3 +343,6 @@ Release validation MUST include:
 - cgroup quota and cpuset parser tests;
 - incremental index catch-up and stale-watermark tests;
 - OpenTelemetry disabled, bounded-export, redaction, and exporter-failure tests.
+
+The complete production evidence and cross-platform release contract is defined
+by `PRODUCTION_READINESS_SPEC.md`.

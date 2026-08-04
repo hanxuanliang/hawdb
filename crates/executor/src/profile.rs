@@ -38,7 +38,9 @@ pub struct PipelineMemoryReport {
     pub steady_resident_growth_bytes: Option<u64>,
     /// Positive process high-water delta observed during execution.
     pub lifetime_peak_resident_growth_bytes: Option<u64>,
-    /// Page-fault deltas observed during execution and output materialization.
+    /// Aggregate page-fault delta when the platform exposes it.
+    pub total_page_faults: Option<u64>,
+    /// Split page-fault deltas only on platforms that expose this distinction.
     pub minor_page_faults: Option<u64>,
     pub major_page_faults: Option<u64>,
 }

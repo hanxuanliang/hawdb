@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 pub use device::{StorageDeviceDiscoverySource, StorageDeviceProfile, StorageMediaKind};
-pub use process_memory::{ProcessMemoryProfile, ProcessMemorySnapshot};
+pub use process_memory::{ProcessMemoryCapabilities, ProcessMemoryProfile, ProcessMemorySnapshot};
 pub use resource::{
     IoConcurrencyBudget, RuntimeMemoryPressure, RuntimeMemorySnapshot, RuntimeResourceBudget,
     RuntimeResourceSnapshot,

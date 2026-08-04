@@ -946,7 +946,10 @@ its pinned catalog and graph snapshot, but new application integration should
 prefer parameterized Cypher and query-runtime reports. This keeps snapshot
 semantics available without making typed APIs the primary extension point.
 
-## Milestones
+## Implemented Milestones
+
+The milestones below describe the implemented architecture sequence. They are
+not an active backlog; current incomplete work is tracked only in `TODO.md`.
 
 1. Parser and AST for the Cypher subset used by Nowledge.
 2. In-memory graph store with transactions for semantic and planner tests.

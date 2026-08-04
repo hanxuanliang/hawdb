@@ -96,6 +96,17 @@ enum CheckpointPublishStage {
 }
 
 #[cfg(test)]
+const PROCESS_CRASH_POINT_ENV: &str = "SKEIN_TEST_PROCESS_CRASH_POINT";
+
+fn process_crash_failpoint(point: &str) {
+    #[cfg(test)]
+    if std::env::var(PROCESS_CRASH_POINT_ENV).as_deref() == Ok(point) {
+        std::process::exit(86);
+    }
+    let _ = point;
+}
+
+#[cfg(test)]
 thread_local! {
     static CHECKPOINT_FAILPOINT: std::cell::Cell<Option<CheckpointPublishStage>> = const {
         std::cell::Cell::new(None)
@@ -103,6 +114,15 @@ thread_local! {
 }
 
 fn checkpoint_publish_failpoint(stage: CheckpointPublishStage) -> Result<()> {
+    match stage {
+        CheckpointPublishStage::CheckpointPersisted => {
+            process_crash_failpoint("during_checkpoint_publication");
+        }
+        CheckpointPublishStage::ManifestPublished => {
+            process_crash_failpoint("after_manifest_publication");
+        }
+        CheckpointPublishStage::WalPrepared => {}
+    }
     #[cfg(test)]
     if CHECKPOINT_FAILPOINT.with(|failpoint| failpoint.get()) == Some(stage) {
         return Err(SkeinError::Storage(format!(
@@ -10963,6 +10983,7 @@ impl DurableStore {
         let encoded_entry = entry.encode();
         let started = std::time::Instant::now();
         let mut byte_count = encoded_entry.len().saturating_add(1) as u64;
+        process_crash_failpoint("before_wal_append");
         let result = (|| {
             let (mut file, created) = self.open_wal_append()?;
             if created && self.format == DurableFormat::GenerationalV2 {
@@ -10971,7 +10992,10 @@ impl DurableStore {
                 writeln!(file, "{header}")?;
             }
             writeln!(file, "{encoded_entry}")?;
-            self.finish_wal_append(&mut file, created)
+            process_crash_failpoint("after_wal_append");
+            let fsync_micros = self.finish_wal_append(&mut file, created)?;
+            process_crash_failpoint("after_wal_sync");
+            Ok(fsync_micros)
         })();
         if let Some(telemetry) = &self.telemetry {
             telemetry.record_kernel(KernelTelemetry {

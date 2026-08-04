@@ -1872,6 +1872,7 @@ pub struct NowledgeMemReadReport {
     pub output_payload_bytes: usize,
     pub steady_resident_bytes: Option<u64>,
     pub peak_resident_bytes: Option<u64>,
+    pub total_page_faults: Option<u64>,
     pub minor_page_faults: Option<u64>,
     pub major_page_faults: Option<u64>,
     pub streaming: bool,
@@ -1899,6 +1900,7 @@ impl NowledgeMemReadReport {
             "output_payload_bytes": self.output_payload_bytes,
             "steady_resident_bytes": self.steady_resident_bytes,
             "peak_resident_bytes": self.peak_resident_bytes,
+            "total_page_faults": self.total_page_faults,
             "minor_page_faults": self.minor_page_faults,
             "major_page_faults": self.major_page_faults,
             "streaming": self.streaming,
@@ -6968,11 +6970,7 @@ impl NowledgeMemOutOfCoreSearchProjection {
         &self,
         qualification: &SearchLexicalProductionQualificationReport,
     ) -> Result<()> {
-        qualification.validate_for_projection(
-            self.reader.generation(),
-            self.reader.source_graph_commit_epoch(),
-            self.reader.document_count(),
-        )
+        qualification.validate_for_projection(&self.reader.production_qualification_identity())
     }
 
     pub fn reader(&self) -> &SearchOutOfCoreReader {
@@ -7822,9 +7820,15 @@ impl NowledgeMemEmbeddedStoreHandle {
         &self,
         statement: &NowledgeGraphStatement,
         limits: StorageResourceProfileLimits,
+        evidence_binding: crate::ProductionEvidenceBinding,
+        expected_identity: crate::ProductionQualificationIdentity,
     ) -> Result<StorageResourceProfileReport> {
-        self.read_store()?
-            .production_resource_profile(statement, limits)
+        self.read_store()?.production_resource_profile(
+            statement,
+            limits,
+            evidence_binding,
+            expected_identity,
+        )
     }
 
     pub fn production_status(
@@ -8121,12 +8125,18 @@ impl NowledgeMemEmbeddedStore {
         &self,
         statement: &NowledgeGraphStatement,
         limits: StorageResourceProfileLimits,
+        evidence_binding: crate::ProductionEvidenceBinding,
+        expected_identity: crate::ProductionQualificationIdentity,
     ) -> Result<StorageResourceProfileReport> {
-        self.graph.database().storage_resource_profile(
-            &statement.cypher,
-            &statement.parameters,
-            limits,
-        )
+        self.graph
+            .database()
+            .storage_resource_profile_for_production(
+                &statement.cypher,
+                &statement.parameters,
+                limits,
+                evidence_binding,
+                expected_identity,
+            )
     }
 
     pub fn storage_lifecycle_decision(&self) -> NowledgeMemStorageLifecycleDecision {
@@ -9042,6 +9052,7 @@ fn pipeline_memory_report_json(report: &skein_executor::PipelineMemoryReport) ->
         "peak_resident_bytes": report.peak_resident_bytes,
         "steady_resident_growth_bytes": report.steady_resident_growth_bytes,
         "lifetime_peak_resident_growth_bytes": report.lifetime_peak_resident_growth_bytes,
+        "total_page_faults": report.total_page_faults,
         "minor_page_faults": report.minor_page_faults,
         "major_page_faults": report.major_page_faults,
     })
@@ -9623,8 +9634,9 @@ fn missing_workload_fixture_evidence_json() -> serde_json::Value {
 fn missing_production_resource_profile_json() -> serde_json::Value {
     serde_json::json!({
         "protocol": STORAGE_RESOURCE_PROFILE_PROTOCOL,
-        "protocol_version": 1,
+        "protocol_version": 2,
         "present": false,
+        "resource_ready": false,
         "ready": false,
         "blocker_codes": ["production_resource_profile_missing"],
     })
@@ -10021,7 +10033,7 @@ pub(crate) fn production_resource_profile_ready(evidence: &serde_json::Value) ->
 fn production_resource_profile_blocker_codes(evidence: &serde_json::Value) -> Vec<String> {
     let mut blockers = BTreeSet::new();
     if evidence_string(evidence, "protocol") != Some(STORAGE_RESOURCE_PROFILE_PROTOCOL)
-        || evidence_u64(evidence, "protocol_version") != Some(1)
+        || evidence_u64(evidence, "protocol_version") != Some(2)
     {
         blockers.insert("production_resource_profile_protocol_mismatch".to_string());
     }
@@ -10031,8 +10043,58 @@ fn production_resource_profile_blocker_codes(evidence: &serde_json::Value) -> Ve
     if evidence_bool(evidence, "ready") != Some(true) {
         blockers.insert("production_resource_profile_not_ready".to_string());
     }
+    if evidence_bool(evidence, "resource_ready") != Some(true) {
+        blockers.insert("production_resource_profile_resource_not_ready".to_string());
+    }
     if !string_array_at(evidence, &["blocker_codes"]).is_some_and(|codes| codes.is_empty()) {
         blockers.insert("production_resource_profile_has_blockers".to_string());
+    }
+
+    let binding_identity = nested_value(evidence, &["evidence_binding", "identity"]);
+    let expected_identity = evidence.get("expected_identity");
+    let canonical_graph_commit_epoch = evidence_u64(evidence, "canonical_graph_commit_epoch");
+    let identity_valid = evidence_bool(evidence, "identity_matches_expected") == Some(true)
+        && nested_u64(evidence, &["evidence_binding", "generated_at_unix_seconds"])
+            .is_some_and(|generated_at| generated_at > 0)
+        && binding_identity == expected_identity
+        && binding_identity.is_some_and(|identity| {
+            [
+                "source_revision",
+                "rust_toolchain",
+                "target_os",
+                "target_arch",
+                "configuration_digest",
+                "deployment_profile",
+                "dataset_fingerprint",
+            ]
+            .into_iter()
+            .all(|field| {
+                identity
+                    .get(field)
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty())
+            }) && identity
+                .get("enabled_features")
+                .is_some_and(serde_json::Value::is_array)
+                && identity
+                    .get("durable_format_version")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some_and(|version| version > 0)
+                && identity
+                    .get("schema_version")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some_and(|version| version > 0)
+                && identity
+                    .get("policy_version")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(crate::PRODUCTION_QUALIFICATION_POLICY_VERSION)
+                && identity
+                    .get("canonical_graph_commit_epoch")
+                    .and_then(serde_json::Value::as_u64)
+                    == canonical_graph_commit_epoch
+        });
+    if !identity_valid {
+        blockers.insert("production_resource_profile_identity_invalid".to_string());
     }
 
     let canonical_bytes = nested_u64(evidence, &["storage", "canonical_artifact_bytes"]);
@@ -10081,8 +10143,6 @@ fn production_resource_profile_blocker_codes(evidence: &serde_json::Value) -> Ve
     for (metric, limit) in [
         ("steady_resident_bytes", "max_steady_resident_bytes"),
         ("peak_resident_bytes", "max_peak_resident_bytes"),
-        ("minor_page_faults", "max_minor_page_faults"),
-        ("major_page_faults", "max_major_page_faults"),
         ("intermediate_rows", "max_intermediate_rows"),
         (
             "intermediate_payload_bytes",
@@ -10094,6 +10154,49 @@ fn production_resource_profile_blocker_codes(evidence: &serde_json::Value) -> Ve
         let measured = nested_u64(evidence, &["execution", metric]);
         let admitted = nested_u64(evidence, &["limits", limit]);
         if measured.is_none() || admitted.is_none() || measured > admitted {
+            blockers.insert(format!("production_resource_profile_{metric}_invalid"));
+        }
+    }
+
+    let resident_memory_supported = nested_bool(
+        evidence,
+        &["execution", "metric_capabilities", "resident_memory"],
+    );
+    let total_page_faults_supported = nested_bool(
+        evidence,
+        &["execution", "metric_capabilities", "total_page_faults"],
+    );
+    let split_page_faults_supported = nested_bool(
+        evidence,
+        &["execution", "metric_capabilities", "split_page_faults"],
+    );
+    if resident_memory_supported != Some(true)
+        || total_page_faults_supported != Some(true)
+        || split_page_faults_supported.is_none()
+    {
+        blockers.insert("production_resource_profile_metric_capabilities_invalid".to_string());
+    }
+
+    let total_page_faults = nested_u64(evidence, &["execution", "total_page_faults"]);
+    let max_total_page_faults = nested_u64(evidence, &["limits", "max_total_page_faults"]);
+    if total_page_faults.is_none()
+        || max_total_page_faults.is_none()
+        || total_page_faults > max_total_page_faults
+    {
+        blockers.insert("production_resource_profile_total_page_faults_invalid".to_string());
+    }
+
+    for (metric, limit) in [
+        ("minor_page_faults", "max_minor_page_faults"),
+        ("major_page_faults", "max_major_page_faults"),
+    ] {
+        let measured = nested_u64(evidence, &["execution", metric]);
+        let admitted = nested_u64(evidence, &["limits", limit]);
+        if admitted.is_some()
+            && (split_page_faults_supported != Some(true)
+                || measured.is_none()
+                || measured > admitted)
+        {
             blockers.insert(format!("production_resource_profile_{metric}_invalid"));
         }
     }
@@ -11238,6 +11341,7 @@ fn nowledge_mem_read_report(
             .pipeline_memory_report
             .steady_resident_bytes,
         peak_resident_bytes: execution_profile.pipeline_memory_report.peak_resident_bytes,
+        total_page_faults: execution_profile.pipeline_memory_report.total_page_faults,
         minor_page_faults: execution_profile.pipeline_memory_report.minor_page_faults,
         major_page_faults: execution_profile.pipeline_memory_report.major_page_faults,
         streaming: false,
@@ -13252,8 +13356,9 @@ mod tests {
         assert!(read.report.output_payload_bytes > 0);
         assert!(read.report.steady_resident_bytes.is_some());
         assert!(read.report.peak_resident_bytes.is_some());
-        assert!(read.report.minor_page_faults.is_some());
-        assert!(read.report.major_page_faults.is_some());
+        assert!(read.report.total_page_faults.is_some());
+        assert_eq!(read.report.minor_page_faults.is_some(), cfg!(unix));
+        assert_eq!(read.report.major_page_faults.is_some(), cfg!(unix));
         assert!(!read.report.streaming);
         assert_eq!(read.report.json()["execution_row_cap"], 5);
         assert_eq!(read.report.json()["row_limit_enforced_before_output"], true);
@@ -13359,6 +13464,7 @@ mod tests {
             output_payload_bytes: 0,
             steady_resident_bytes: None,
             peak_resident_bytes: None,
+            total_page_faults: None,
             minor_page_faults: None,
             major_page_faults: None,
             streaming: false,
@@ -13409,6 +13515,7 @@ mod tests {
             output_payload_bytes: 0,
             steady_resident_bytes: None,
             peak_resident_bytes: None,
+            total_page_faults: None,
             minor_page_faults: None,
             major_page_faults: None,
             streaming: false,
@@ -13460,6 +13567,7 @@ mod tests {
             output_payload_bytes: 128,
             steady_resident_bytes: Some(1024),
             peak_resident_bytes: Some(2048),
+            total_page_faults: Some(1),
             minor_page_faults: Some(1),
             major_page_faults: Some(0),
             streaming: true,
@@ -14069,6 +14177,20 @@ mod tests {
             cypher: "MATCH (m:Memory) RETURN m.id AS memory_id".to_string(),
             parameters: BTreeMap::new(),
         };
+        let identity = crate::ProductionQualificationIdentity {
+            source_revision: "test-revision".to_string(),
+            rust_toolchain: "test-toolchain".to_string(),
+            target_os: std::env::consts::OS.to_string(),
+            target_arch: std::env::consts::ARCH.to_string(),
+            enabled_features: Vec::new(),
+            durable_format_version: 1,
+            schema_version: 1,
+            configuration_digest: "test-config".to_string(),
+            deployment_profile: "test-production-replica".to_string(),
+            dataset_fingerprint: "test-dataset".to_string(),
+            canonical_graph_commit_epoch: store.graph.database().commit_epoch(),
+            policy_version: crate::PRODUCTION_QUALIFICATION_POLICY_VERSION,
+        };
         let profile = store
             .production_resource_profile(
                 &statement,
@@ -14076,22 +14198,29 @@ mod tests {
                     min_canonical_artifact_bytes: 4096,
                     max_steady_resident_bytes: u64::MAX,
                     max_peak_resident_bytes: u64::MAX,
-                    max_minor_page_faults: Some(u64::MAX),
-                    max_major_page_faults: Some(u64::MAX),
+                    max_total_page_faults: Some(u64::MAX),
+                    max_minor_page_faults: cfg!(unix).then_some(u64::MAX),
+                    max_major_page_faults: cfg!(unix).then_some(u64::MAX),
                     max_intermediate_rows: 1024,
                     max_intermediate_payload_bytes: 1024 * 1024,
                     max_output_rows: 64,
                     max_output_payload_bytes: 1024 * 1024,
                     require_fully_streamed: true,
                 },
+                crate::ProductionEvidenceBinding {
+                    identity: identity.clone(),
+                    generated_at_unix_seconds: 1,
+                },
+                identity,
             )
             .unwrap();
 
         assert!(
-            profile.ready,
+            profile.resource_ready,
             "unexpected blockers: {:?}",
             profile.blocker_codes
         );
+        assert!(profile.production_ready());
         assert!(profile.after.canonical_artifact_bytes > cache_capacity);
         let readiness = store.library_readiness(&NowledgeMemReadinessOptions {
             production_resource_profile: Some(profile),
@@ -14567,19 +14696,21 @@ mod tests {
             vec![
                 "storage_recovery_not_ready".to_string(),
                 "production_resource_profile_has_blockers".to_string(),
+                "production_resource_profile_identity_invalid".to_string(),
                 "production_resource_profile_intermediate_payload_bytes_invalid".to_string(),
                 "production_resource_profile_intermediate_rows_invalid".to_string(),
-                "production_resource_profile_major_page_faults_invalid".to_string(),
-                "production_resource_profile_minor_page_faults_invalid".to_string(),
+                "production_resource_profile_metric_capabilities_invalid".to_string(),
                 "production_resource_profile_missing".to_string(),
                 "production_resource_profile_not_ready".to_string(),
                 "production_resource_profile_output_payload_bytes_invalid".to_string(),
                 "production_resource_profile_output_rows_invalid".to_string(),
                 "production_resource_profile_peak_resident_bytes_invalid".to_string(),
                 "production_resource_profile_resident_growth_missing".to_string(),
+                "production_resource_profile_resource_not_ready".to_string(),
                 "production_resource_profile_steady_resident_bytes_invalid".to_string(),
                 "production_resource_profile_storage_budget_invalid".to_string(),
-                "production_resource_profile_streaming_invalid".to_string()
+                "production_resource_profile_streaming_invalid".to_string(),
+                "production_resource_profile_total_page_faults_invalid".to_string()
             ]
         );
         assert_eq!(

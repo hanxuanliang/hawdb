@@ -162,14 +162,14 @@ SKEIN_ENABLE_COMPATIBILITY_TOOLS=1 cargo run --quiet --bin skein -- \
   "$BOUNDED_ROUTE_QUERY"
 ```
 
-The report records `steady_resident_bytes`, `peak_resident_bytes`, minor and
-major page-fault deltas, cumulative operator-output `intermediate_rows` and
-`intermediate_payload_bytes`, and final `output_payload_bytes`. Intermediate
-counts intentionally include a row once per physical operator boundary; they
-measure pipeline work rather than distinct result rows. Compare these measured
-values with the previous wrapper under the same process isolation, query,
-parameters, and copied snapshot. Configured buffer-pool sizes are not accepted
-as memory evidence.
+The report records `steady_resident_bytes`, `peak_resident_bytes`, total
+page-fault deltas, Unix-only minor and major page-fault deltas, cumulative
+operator-output `intermediate_rows` and `intermediate_payload_bytes`, and final
+`output_payload_bytes`. Intermediate counts intentionally include a row once
+per physical operator boundary; they measure pipeline work rather than distinct
+result rows. Compare these measured values with the previous wrapper under the
+same process isolation, query, parameters, target, and copied snapshot.
+Configured buffer-pool sizes are not accepted as memory evidence.
 
 ## 1. Export The Contract
 

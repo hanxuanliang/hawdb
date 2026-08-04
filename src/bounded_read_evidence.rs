@@ -101,6 +101,7 @@ pub fn parse_read_report_json(value: &serde_json::Value) -> Result<NowledgeMemRe
         output_payload_bytes: optional_usize(value, "output_payload_bytes")?.unwrap_or_default(),
         steady_resident_bytes: optional_u64(value, "steady_resident_bytes")?,
         peak_resident_bytes: optional_u64(value, "peak_resident_bytes")?,
+        total_page_faults: optional_u64(value, "total_page_faults")?,
         minor_page_faults: optional_u64(value, "minor_page_faults")?,
         major_page_faults: optional_u64(value, "major_page_faults")?,
         streaming: required_bool(value, "streaming")?,

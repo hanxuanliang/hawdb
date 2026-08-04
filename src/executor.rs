@@ -832,8 +832,9 @@ fn execute_with_row_consumer_profile_internal(
                 Some(process_memory.steady_resident_growth_bytes);
             pipeline_memory_report.lifetime_peak_resident_growth_bytes =
                 Some(process_memory.lifetime_peak_resident_growth_bytes);
-            pipeline_memory_report.minor_page_faults = Some(process_memory.minor_page_faults);
-            pipeline_memory_report.major_page_faults = Some(process_memory.major_page_faults);
+            pipeline_memory_report.total_page_faults = process_memory.total_page_faults;
+            pipeline_memory_report.minor_page_faults = process_memory.minor_page_faults;
+            pipeline_memory_report.major_page_faults = process_memory.major_page_faults;
         }
     }
     profile.pipeline_memory_report = pipeline_memory_report;
@@ -9507,8 +9508,9 @@ mod tests {
         assert!(pipeline.start_resident_bytes.is_some());
         assert!(pipeline.steady_resident_bytes.is_some());
         assert!(pipeline.peak_resident_bytes.is_some());
-        assert!(pipeline.minor_page_faults.is_some());
-        assert!(pipeline.major_page_faults.is_some());
+        assert!(pipeline.total_page_faults.is_some());
+        assert_eq!(pipeline.minor_page_faults.is_some(), cfg!(unix));
+        assert_eq!(pipeline.major_page_faults.is_some(), cfg!(unix));
         assert!(std::fs::read_dir(&memory.spill_directory)
             .unwrap()
             .next()

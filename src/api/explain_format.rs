@@ -295,6 +295,9 @@ fn root_execution_info(profile: &ReadExecutionProfile) -> String {
             format_bytes(peak_growth_bytes)
         ));
     }
+    if let Some(total_page_faults) = pipeline.total_page_faults {
+        fields.push(format!("total_faults={total_page_faults}"));
+    }
     if let Some(minor_page_faults) = pipeline.minor_page_faults {
         fields.push(format!("minor_faults={minor_page_faults}"));
     }

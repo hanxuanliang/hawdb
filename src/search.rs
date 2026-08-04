@@ -51,7 +51,8 @@ use lexical_projection::{
 };
 pub use lexical_readiness::{
     SearchLexicalFeasibilityCoverage, SearchLexicalFeasibilityMetrics,
-    SearchLexicalProductionQualificationReport, SEARCH_LEXICAL_QUALIFICATION_PROTOCOL,
+    SearchLexicalProductionQualificationReport, SearchProjectionQualificationIdentity,
+    SearchTopKScoreParity, SEARCH_LEXICAL_QUALIFICATION_PROTOCOL,
     SEARCH_LEXICAL_QUALIFICATION_PROTOCOL_VERSION,
 };
 pub use out_of_core::{

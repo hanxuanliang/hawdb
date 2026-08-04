@@ -863,24 +863,20 @@ Resource-constrained embedded deployments should consume background maintenance
 summaries through typed QoS hint fields, not by parsing human-readable ranking
 reasons.
 
-## Next Implementation Slices
+## Deferred Extensions And Release Use
 
-1. Add page-level MVCC reader isolation and physical page/segment reclamation
-   once the physical page/segment format exists.
-2. Add richer cross-pattern statistics and cross-pattern workload-shaped
-   optimizer benchmark suites.
-3. Add larger text analyzer parity beyond the current identifier, suffix,
-   stopword, and knowledge-retrieval alias set.
-4. Add richer caller-owned blob/content parser runtime integrations on top of
-   the current graph-kernel-external derived job boundary.
-5. Use `ExternalShadowCommand` with the previous local graph wrapper only when
-   compatibility evidence is needed for a specific migration gate.
-6. Use `nowledge-replacement-summary --require-production-ready` as the final
-   reporting guard for production replacement notes after the migration-gate
-   bundle has been generated with previous-wrapper, storage recovery, and
-   background-maintenance evidence.
-7. Continue the chryso-style crate split beyond the current `core`, `cypher`,
-   `optimizer`, `plan-cache`, `qos`, and `api-types` crates. `api-types`
-   should keep DTO-only contracts that depend on `skein-core`, including the
-   scheduler Memory and Memory evolution/crystal contracts; execution logic
-   should move only when the dependency direction is acyclic and stable.
+The active backlog is maintained in `TODO.md`. Page-level MVCC, broader
+cross-pattern statistics, additional analyzer families, and caller-owned
+content parser integrations are not implicit replacement tasks. They require a
+new active route, measured workload, or explicit product boundary before they
+enter the backlog.
+
+Further crate splits require a clear ownership boundary, dependency-direction
+benefit, compile-time isolation benefit, or stable reuse contract. Crate count
+is not itself an implementation goal.
+
+Use `ExternalShadowCommand` with the previous local graph wrapper only when a
+specific migration gate requires compatibility evidence. Use
+`nowledge-replacement-summary --require-production-ready` as the final reporting
+guard after the migration bundle includes previous-wrapper, storage recovery,
+resource, and background-maintenance evidence.

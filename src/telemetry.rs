@@ -14,6 +14,7 @@ pub struct QueryTelemetry<'a> {
     pub output_payload_bytes: usize,
     pub steady_resident_bytes: Option<u64>,
     pub peak_resident_bytes: Option<u64>,
+    pub total_page_faults: Option<u64>,
     pub minor_page_faults: Option<u64>,
     pub major_page_faults: Option<u64>,
 }
@@ -125,6 +126,7 @@ pub struct OpenTelemetryMetrics {
     query_output_bytes: opentelemetry::metrics::Histogram<u64>,
     query_steady_resident_bytes: opentelemetry::metrics::Histogram<u64>,
     query_peak_resident_bytes: opentelemetry::metrics::Histogram<u64>,
+    query_total_page_faults: opentelemetry::metrics::Histogram<u64>,
     query_minor_page_faults: opentelemetry::metrics::Histogram<u64>,
     query_major_page_faults: opentelemetry::metrics::Histogram<u64>,
     kernel_operation_count: opentelemetry::metrics::Counter<u64>,
@@ -151,6 +153,7 @@ impl OpenTelemetryMetrics {
             query_output_bytes: meter.u64_histogram("skein.query.output.bytes").build(),
             query_steady_resident_bytes: meter.u64_histogram("skein.query.resident.steady").build(),
             query_peak_resident_bytes: meter.u64_histogram("skein.query.resident.peak").build(),
+            query_total_page_faults: meter.u64_histogram("skein.query.page_faults.total").build(),
             query_minor_page_faults: meter.u64_histogram("skein.query.page_faults.minor").build(),
             query_major_page_faults: meter.u64_histogram("skein.query.page_faults.major").build(),
             kernel_operation_count: meter.u64_counter("skein.kernel.operation.count").build(),
@@ -194,6 +197,9 @@ impl TelemetrySink for OpenTelemetryMetrics {
         }
         if let Some(bytes) = event.peak_resident_bytes {
             self.query_peak_resident_bytes.record(bytes, &attributes);
+        }
+        if let Some(faults) = event.total_page_faults {
+            self.query_total_page_faults.record(faults, &attributes);
         }
         if let Some(faults) = event.minor_page_faults {
             self.query_minor_page_faults.record(faults, &attributes);
@@ -305,6 +311,7 @@ mod tests {
             output_payload_bytes: 64,
             steady_resident_bytes: Some(1024),
             peak_resident_bytes: Some(2048),
+            total_page_faults: Some(4),
             minor_page_faults: Some(3),
             major_page_faults: Some(1),
         });

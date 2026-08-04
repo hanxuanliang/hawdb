@@ -2,7 +2,7 @@ use crate::error::{Result, SkeinError};
 
 pub const SEARCH_LEXICAL_QUALIFICATION_PROTOCOL: &str =
     "skein-search-lexical-production-qualification";
-pub const SEARCH_LEXICAL_QUALIFICATION_PROTOCOL_VERSION: u64 = 1;
+pub const SEARCH_LEXICAL_QUALIFICATION_PROTOCOL_VERSION: u64 = 2;
 const MINIMUM_DOCUMENT_COUNT: usize = 100_000;
 const MAX_RSS_BUDGET_PER_MILLION: u64 = 1_100_000;
 const MAX_WRITE_REGRESSION_PER_MILLION: u64 = 1_100_000;
@@ -78,8 +78,19 @@ pub struct SearchLexicalFeasibilityMetrics {
     pub selective_posting_bytes_read: u64,
     pub selective_candidate_postings_visited: u64,
     pub selective_matching_document_count: usize,
-    pub minor_page_faults: u64,
-    pub major_page_faults: u64,
+    pub process_memory_capabilities: skein_qos::ProcessMemoryCapabilities,
+    pub total_page_faults: Option<u64>,
+    pub minor_page_faults: Option<u64>,
+    pub major_page_faults: Option<u64>,
+    pub metadata_sidecar_bytes_read: u64,
+    pub vector_sidecar_bytes_read: u64,
+    pub hydration_bytes: u64,
+    pub segmented_vector_p50_micros: u64,
+    pub segmented_vector_p95_micros: u64,
+    pub segmented_vector_p99_micros: u64,
+    pub segmented_hybrid_p50_micros: u64,
+    pub segmented_hybrid_p95_micros: u64,
+    pub segmented_hybrid_p99_micros: u64,
     pub baseline_update_p95_micros: u64,
     pub segmented_update_p95_micros: u64,
     pub baseline_checkpoint_p95_micros: u64,
@@ -106,14 +117,96 @@ impl SearchLexicalFeasibilityMetrics {
             "selective_posting_bytes_read": self.selective_posting_bytes_read,
             "selective_candidate_postings_visited": self.selective_candidate_postings_visited,
             "selective_matching_document_count": self.selective_matching_document_count,
+            "process_memory_capabilities": {
+                "resident_memory": self.process_memory_capabilities.resident_memory,
+                "total_page_faults": self.process_memory_capabilities.total_page_faults,
+                "split_page_faults": self.process_memory_capabilities.split_page_faults,
+            },
+            "total_page_faults": self.total_page_faults,
             "minor_page_faults": self.minor_page_faults,
             "major_page_faults": self.major_page_faults,
+            "metadata_sidecar_bytes_read": self.metadata_sidecar_bytes_read,
+            "vector_sidecar_bytes_read": self.vector_sidecar_bytes_read,
+            "hydration_bytes": self.hydration_bytes,
+            "segmented_vector_p50_micros": self.segmented_vector_p50_micros,
+            "segmented_vector_p95_micros": self.segmented_vector_p95_micros,
+            "segmented_vector_p99_micros": self.segmented_vector_p99_micros,
+            "segmented_hybrid_p50_micros": self.segmented_hybrid_p50_micros,
+            "segmented_hybrid_p95_micros": self.segmented_hybrid_p95_micros,
+            "segmented_hybrid_p99_micros": self.segmented_hybrid_p99_micros,
             "baseline_update_p95_micros": self.baseline_update_p95_micros,
             "segmented_update_p95_micros": self.segmented_update_p95_micros,
             "baseline_checkpoint_p95_micros": self.baseline_checkpoint_p95_micros,
             "segmented_checkpoint_p95_micros": self.segmented_checkpoint_p95_micros,
             "consolidation_write_amplification_per_million": self.consolidation_write_amplification_per_million,
             "recovery_p95_micros": self.recovery_p95_micros,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SearchProjectionQualificationIdentity {
+    pub projection_generation: u64,
+    pub source_graph_commit_epoch: Option<u64>,
+    pub document_count: usize,
+    pub documents_digest: u64,
+    pub analyzer_digest: u64,
+    pub embedding_model: Option<String>,
+    pub embedding_version: Option<String>,
+    pub embedding_dimension: Option<usize>,
+}
+
+impl SearchProjectionQualificationIdentity {
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "projection_generation": self.projection_generation,
+            "source_graph_commit_epoch": self.source_graph_commit_epoch,
+            "document_count": self.document_count,
+            "documents_digest": self.documents_digest,
+            "analyzer_digest": self.analyzer_digest,
+            "embedding_model": self.embedding_model,
+            "embedding_version": self.embedding_version,
+            "embedding_dimension": self.embedding_dimension,
+        })
+    }
+
+    fn complete(&self) -> bool {
+        self.projection_generation > 0
+            && self.source_graph_commit_epoch.is_some()
+            && self.document_count > 0
+            && self.documents_digest > 0
+            && self.analyzer_digest > 0
+            && self
+                .embedding_model
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            && self
+                .embedding_version
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            && self
+                .embedding_dimension
+                .is_some_and(|dimension| dimension > 0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SearchTopKScoreParity {
+    pub text: bool,
+    pub vector: bool,
+    pub hybrid: bool,
+}
+
+impl SearchTopKScoreParity {
+    fn complete(self) -> bool {
+        self.text && self.vector && self.hybrid
+    }
+
+    fn json(self) -> serde_json::Value {
+        serde_json::json!({
+            "text": self.text,
+            "vector": self.vector,
+            "hybrid": self.hybrid,
         })
     }
 }
@@ -125,6 +218,10 @@ pub struct SearchLexicalProductionQualificationReport {
     pub projection_generation: u64,
     pub source_graph_commit_epoch: Option<u64>,
     pub document_count: usize,
+    pub projection_identity: SearchProjectionQualificationIdentity,
+    pub evidence_binding: Option<crate::ProductionEvidenceBinding>,
+    pub expected_identity: Option<crate::ProductionQualificationIdentity>,
+    pub topk_score_parity: SearchTopKScoreParity,
     pub exact_topk_score_parity: bool,
     pub coverage: SearchLexicalFeasibilityCoverage,
     pub metrics: SearchLexicalFeasibilityMetrics,
@@ -141,38 +238,81 @@ impl SearchLexicalProductionQualificationReport {
         coverage: SearchLexicalFeasibilityCoverage,
         metrics: SearchLexicalFeasibilityMetrics,
     ) -> Self {
+        let projection_identity = SearchProjectionQualificationIdentity {
+            projection_generation,
+            source_graph_commit_epoch,
+            document_count,
+            ..SearchProjectionQualificationIdentity::default()
+        };
+        Self::evaluate_internal(
+            projection_identity,
+            None,
+            None,
+            SearchTopKScoreParity {
+                text: exact_topk_score_parity,
+                vector: exact_topk_score_parity,
+                hybrid: exact_topk_score_parity,
+            },
+            coverage,
+            metrics,
+        )
+    }
+
+    pub fn evaluate_for_production(
+        projection_identity: SearchProjectionQualificationIdentity,
+        evidence_binding: crate::ProductionEvidenceBinding,
+        expected_identity: crate::ProductionQualificationIdentity,
+        topk_score_parity: SearchTopKScoreParity,
+        coverage: SearchLexicalFeasibilityCoverage,
+        metrics: SearchLexicalFeasibilityMetrics,
+    ) -> Self {
+        Self::evaluate_internal(
+            projection_identity,
+            Some(evidence_binding),
+            Some(expected_identity),
+            topk_score_parity,
+            coverage,
+            metrics,
+        )
+    }
+
+    fn evaluate_internal(
+        projection_identity: SearchProjectionQualificationIdentity,
+        evidence_binding: Option<crate::ProductionEvidenceBinding>,
+        expected_identity: Option<crate::ProductionQualificationIdentity>,
+        topk_score_parity: SearchTopKScoreParity,
+        coverage: SearchLexicalFeasibilityCoverage,
+        metrics: SearchLexicalFeasibilityMetrics,
+    ) -> Self {
+        let projection_generation = projection_identity.projection_generation;
+        let source_graph_commit_epoch = projection_identity.source_graph_commit_epoch;
+        let document_count = projection_identity.document_count;
         let mut report = Self {
             protocol: SEARCH_LEXICAL_QUALIFICATION_PROTOCOL.to_string(),
             protocol_version: SEARCH_LEXICAL_QUALIFICATION_PROTOCOL_VERSION,
             projection_generation,
             source_graph_commit_epoch,
             document_count,
-            exact_topk_score_parity,
+            projection_identity: projection_identity.clone(),
+            evidence_binding,
+            expected_identity,
+            topk_score_parity,
+            exact_topk_score_parity: topk_score_parity.complete(),
             coverage,
             metrics,
             blocker_codes: Vec::new(),
             ready: false,
         };
-        report.blocker_codes = report.recompute_blocker_codes(
-            projection_generation,
-            source_graph_commit_epoch,
-            document_count,
-        );
+        report.blocker_codes = report.recompute_blocker_codes(&projection_identity);
         report.ready = report.blocker_codes.is_empty();
         report
     }
 
     pub fn validate_for_projection(
         &self,
-        projection_generation: u64,
-        source_graph_commit_epoch: Option<u64>,
-        document_count: usize,
+        projection_identity: &SearchProjectionQualificationIdentity,
     ) -> Result<()> {
-        let blockers = self.recompute_blocker_codes(
-            projection_generation,
-            source_graph_commit_epoch,
-            document_count,
-        );
+        let blockers = self.recompute_blocker_codes(projection_identity);
         if blockers.is_empty() {
             Ok(())
         } else {
@@ -184,17 +324,17 @@ impl SearchLexicalProductionQualificationReport {
     }
 
     pub fn json(&self) -> serde_json::Value {
-        let recomputed_blockers = self.recompute_blocker_codes(
-            self.projection_generation,
-            self.source_graph_commit_epoch,
-            self.document_count,
-        );
+        let recomputed_blockers = self.recompute_blocker_codes(&self.projection_identity);
         serde_json::json!({
             "protocol": self.protocol,
             "protocol_version": self.protocol_version,
             "projection_generation": self.projection_generation,
             "source_graph_commit_epoch": self.source_graph_commit_epoch,
             "document_count": self.document_count,
+            "projection_identity": self.projection_identity.json(),
+            "evidence_binding": self.evidence_binding.as_ref().map(crate::ProductionEvidenceBinding::json),
+            "expected_identity": self.expected_identity.as_ref().map(crate::ProductionQualificationIdentity::json),
+            "topk_score_parity": self.topk_score_parity.json(),
             "exact_topk_score_parity": self.exact_topk_score_parity,
             "coverage": self.coverage.json(),
             "metrics": self.metrics.json(),
@@ -211,27 +351,39 @@ impl SearchLexicalProductionQualificationReport {
 
     fn recompute_blocker_codes(
         &self,
-        projection_generation: u64,
-        source_graph_commit_epoch: Option<u64>,
-        document_count: usize,
+        projection_identity: &SearchProjectionQualificationIdentity,
     ) -> Vec<String> {
         let mut blockers = Vec::new();
+        let document_count = projection_identity.document_count;
         if self.protocol != SEARCH_LEXICAL_QUALIFICATION_PROTOCOL
             || self.protocol_version != SEARCH_LEXICAL_QUALIFICATION_PROTOCOL_VERSION
         {
             blockers.push("protocol_mismatch".to_string());
         }
-        if self.projection_generation == 0
-            || self.projection_generation != projection_generation
-            || self.source_graph_commit_epoch != source_graph_commit_epoch
-            || self.document_count != document_count
+        if !self.projection_identity.complete()
+            || self.projection_identity != *projection_identity
+            || self.projection_generation != projection_identity.projection_generation
+            || self.source_graph_commit_epoch != projection_identity.source_graph_commit_epoch
+            || self.document_count != projection_identity.document_count
         {
             blockers.push("projection_identity_mismatch".to_string());
+        }
+        match (&self.evidence_binding, &self.expected_identity) {
+            (Some(binding), Some(expected)) => {
+                blockers.extend(binding.blocker_codes_for(expected));
+                if self.projection_identity.source_graph_commit_epoch
+                    != Some(expected.canonical_graph_commit_epoch)
+                {
+                    blockers.push("source_graph_epoch_release_identity_mismatch".to_string());
+                }
+            }
+            (None, _) => blockers.push("production_evidence_binding_missing".to_string()),
+            (_, None) => blockers.push("production_expected_identity_missing".to_string()),
         }
         if document_count < MINIMUM_DOCUMENT_COUNT {
             blockers.push("dataset_too_small".to_string());
         }
-        if !self.exact_topk_score_parity {
+        if !self.exact_topk_score_parity || !self.topk_score_parity.complete() {
             blockers.push("topk_score_parity_failed".to_string());
         }
         if !self.coverage.complete() {
@@ -270,6 +422,36 @@ impl SearchLexicalProductionQualificationReport {
         {
             blockers.push("selective_work_not_posting_proportional".to_string());
         }
+        if !self.metrics.process_memory_capabilities.resident_memory
+            || !self.metrics.process_memory_capabilities.total_page_faults
+            || self.metrics.total_page_faults.is_none()
+            || (self.metrics.process_memory_capabilities.split_page_faults
+                && (self.metrics.minor_page_faults.is_none()
+                    || self.metrics.major_page_faults.is_none()))
+            || (!self.metrics.process_memory_capabilities.split_page_faults
+                && (self.metrics.minor_page_faults.is_some()
+                    || self.metrics.major_page_faults.is_some()))
+        {
+            blockers.push("process_memory_metrics_invalid".to_string());
+        }
+        if self.metrics.metadata_sidecar_bytes_read == 0
+            || self.metrics.vector_sidecar_bytes_read == 0
+            || self.metrics.hydration_bytes == 0
+        {
+            blockers.push("out_of_core_io_metrics_missing".to_string());
+        }
+        if [
+            self.metrics.segmented_vector_p50_micros,
+            self.metrics.segmented_vector_p95_micros,
+            self.metrics.segmented_vector_p99_micros,
+            self.metrics.segmented_hybrid_p50_micros,
+            self.metrics.segmented_hybrid_p95_micros,
+            self.metrics.segmented_hybrid_p99_micros,
+        ]
+        .contains(&0)
+        {
+            blockers.push("vector_hybrid_latency_metrics_missing".to_string());
+        }
         if !regression_within(
             self.metrics.segmented_update_p95_micros,
             self.metrics.baseline_update_p95_micros,
@@ -282,6 +464,8 @@ impl SearchLexicalProductionQualificationReport {
         ) {
             blockers.push("checkpoint_p95_regression_exceeded".to_string());
         }
+        blockers.sort();
+        blockers.dedup();
         blockers
     }
 }
@@ -337,8 +521,23 @@ mod tests {
             selective_posting_bytes_read: 4096,
             selective_candidate_postings_visited: 32,
             selective_matching_document_count: 16,
-            minor_page_faults: 20,
-            major_page_faults: 0,
+            process_memory_capabilities: skein_qos::ProcessMemoryCapabilities {
+                resident_memory: true,
+                total_page_faults: true,
+                split_page_faults: true,
+            },
+            total_page_faults: Some(20),
+            minor_page_faults: Some(20),
+            major_page_faults: Some(0),
+            metadata_sidecar_bytes_read: 2048,
+            vector_sidecar_bytes_read: 4096,
+            hydration_bytes: 1024,
+            segmented_vector_p50_micros: 50,
+            segmented_vector_p95_micros: 110,
+            segmented_vector_p99_micros: 160,
+            segmented_hybrid_p50_micros: 60,
+            segmented_hybrid_p95_micros: 120,
+            segmented_hybrid_p99_micros: 180,
             baseline_update_p95_micros: 100,
             segmented_update_p95_micros: 110,
             baseline_checkpoint_p95_micros: 1_000,
@@ -348,13 +547,60 @@ mod tests {
         }
     }
 
+    fn projection_identity(
+        projection_generation: u64,
+        source_graph_commit_epoch: Option<u64>,
+        document_count: usize,
+    ) -> SearchProjectionQualificationIdentity {
+        SearchProjectionQualificationIdentity {
+            projection_generation,
+            source_graph_commit_epoch,
+            document_count,
+            documents_digest: 11,
+            analyzer_digest: 12,
+            embedding_model: Some("test-embedding".to_string()),
+            embedding_version: Some("1".to_string()),
+            embedding_dimension: Some(3),
+        }
+    }
+
+    fn production_identity() -> crate::ProductionQualificationIdentity {
+        crate::ProductionQualificationIdentity {
+            source_revision: "test-revision".to_string(),
+            rust_toolchain: "test-toolchain".to_string(),
+            target_os: "linux".to_string(),
+            target_arch: "x86_64".to_string(),
+            enabled_features: vec!["full-text-search".to_string(), "vector-search".to_string()],
+            durable_format_version: 1,
+            schema_version: 1,
+            configuration_digest: "test-config".to_string(),
+            deployment_profile: "production-replica".to_string(),
+            dataset_fingerprint: "test-dataset".to_string(),
+            canonical_graph_commit_epoch: 42,
+            policy_version: crate::PRODUCTION_QUALIFICATION_POLICY_VERSION,
+        }
+    }
+
+    fn complete_parity() -> SearchTopKScoreParity {
+        SearchTopKScoreParity {
+            text: true,
+            vector: true,
+            hybrid: true,
+        }
+    }
+
     #[test]
     fn accepts_complete_generation_bound_production_evidence() {
-        let report = SearchLexicalProductionQualificationReport::evaluate(
-            7,
-            Some(42),
-            100_000,
-            true,
+        let identity = production_identity();
+        let projection_identity = projection_identity(7, Some(42), 100_000);
+        let report = SearchLexicalProductionQualificationReport::evaluate_for_production(
+            projection_identity.clone(),
+            crate::ProductionEvidenceBinding {
+                identity: identity.clone(),
+                generated_at_unix_seconds: 1,
+            },
+            identity,
+            complete_parity(),
             complete_coverage(),
             passing_metrics(),
         );
@@ -365,7 +611,7 @@ mod tests {
             report.blocker_codes
         );
         report
-            .validate_for_projection(7, Some(42), 100_000)
+            .validate_for_projection(&projection_identity)
             .unwrap();
         assert_eq!(report.json()["ready"], true);
     }
@@ -374,11 +620,15 @@ mod tests {
     fn rejects_forged_ready_flag_and_stale_projection_identity() {
         let mut metrics = passing_metrics();
         metrics.segmented_selective_text_p95_micros = 101;
-        let mut report = SearchLexicalProductionQualificationReport::evaluate(
-            7,
-            Some(42),
-            100_000,
-            true,
+        let identity = production_identity();
+        let mut report = SearchLexicalProductionQualificationReport::evaluate_for_production(
+            projection_identity(7, Some(42), 100_000),
+            crate::ProductionEvidenceBinding {
+                identity: identity.clone(),
+                generated_at_unix_seconds: 1,
+            },
+            identity,
+            complete_parity(),
             complete_coverage(),
             metrics,
         );
@@ -386,7 +636,7 @@ mod tests {
         report.blocker_codes.clear();
 
         let error = report
-            .validate_for_projection(8, Some(43), 100_000)
+            .validate_for_projection(&projection_identity(8, Some(43), 100_000))
             .unwrap_err();
         assert!(error.to_string().contains("projection_identity_mismatch"));
         assert!(error

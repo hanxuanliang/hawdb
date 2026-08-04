@@ -403,8 +403,9 @@ fn production_sized_resource_profile_stays_within_admission_budgets() {
                 min_canonical_artifact_bytes: 256 * 1024 * 1024,
                 max_steady_resident_bytes: 2 * 1024 * 1024 * 1024,
                 max_peak_resident_bytes: 4 * 1024 * 1024 * 1024,
-                max_minor_page_faults: Some(10_000_000),
-                max_major_page_faults: Some(100_000),
+                max_total_page_faults: Some(10_100_000),
+                max_minor_page_faults: cfg!(unix).then_some(10_000_000),
+                max_major_page_faults: cfg!(unix).then_some(100_000),
                 max_intermediate_rows: node_count * 4,
                 max_intermediate_payload_bytes: 1536 * 1024 * 1024,
                 max_output_rows: node_count,
@@ -415,7 +416,7 @@ fn production_sized_resource_profile_stays_within_admission_budgets() {
         .unwrap();
 
     assert!(
-        report.ready,
+        report.resource_ready,
         "unexpected blockers: {:?}; profile: {}",
         report.blocker_codes,
         report.json()
@@ -437,8 +438,9 @@ fn production_sized_resource_profile_stays_within_admission_budgets() {
     assert!(pipeline
         .lifetime_peak_resident_growth_bytes
         .is_some_and(|bytes| bytes <= 128 * 1024 * 1024));
-    assert!(pipeline.minor_page_faults.is_some());
-    assert!(pipeline.major_page_faults.is_some());
+    assert!(pipeline.total_page_faults.is_some());
+    assert_eq!(pipeline.minor_page_faults.is_some(), cfg!(unix));
+    assert_eq!(pipeline.major_page_faults.is_some(), cfg!(unix));
 
     assert!(
         report.after.segment_cache_eviction_count > report.before.segment_cache_eviction_count
@@ -484,6 +486,7 @@ fn typed_storage_resource_profile_gates_larger_than_cache_reads() {
                 min_canonical_artifact_bytes: 4096,
                 max_steady_resident_bytes: u64::MAX,
                 max_peak_resident_bytes: u64::MAX,
+                max_total_page_faults: None,
                 max_minor_page_faults: None,
                 max_major_page_faults: None,
                 max_intermediate_rows: 1024,
@@ -496,7 +499,7 @@ fn typed_storage_resource_profile_gates_larger_than_cache_reads() {
         .unwrap();
 
     assert!(
-        report.ready,
+        report.resource_ready,
         "unexpected blockers: {:?}",
         report.blocker_codes
     );
@@ -508,7 +511,13 @@ fn typed_storage_resource_profile_gates_larger_than_cache_reads() {
         report.json()["protocol"],
         crate::STORAGE_RESOURCE_PROFILE_PROTOCOL
     );
-    assert_eq!(report.json()["ready"], true);
+    assert!(report.json()["execution"]["total_page_faults"].is_u64());
+    assert_eq!(
+        report.json()["execution"]["metric_capabilities"]["split_page_faults"],
+        cfg!(unix)
+    );
+    assert_eq!(report.json()["resource_ready"], true);
+    assert_eq!(report.json()["ready"], false);
 
     drop(db);
     std::fs::remove_dir_all(path).unwrap();
@@ -1224,4 +1233,222 @@ fn checkpoint_query_invokes_storage_checkpoint() {
     assert_eq!(read_test_wal(&path).unwrap(), "");
 
     std::fs::remove_dir_all(path).unwrap();
+}
+
+const STORAGE_CRASH_CHILD_ENV: &str = "SKEIN_TEST_STORAGE_CRASH_CHILD";
+const STORAGE_CRASH_PATH_ENV: &str = "SKEIN_TEST_STORAGE_CRASH_PATH";
+const STORAGE_CRASH_EVIDENCE_PATH_ENV: &str = "SKEIN_TEST_STORAGE_CRASH_EVIDENCE_PATH";
+
+#[test]
+fn storage_crash_recovery_child() {
+    if std::env::var_os(STORAGE_CRASH_CHILD_ENV).is_none() {
+        return;
+    }
+    let path = std::path::PathBuf::from(
+        std::env::var_os(STORAGE_CRASH_PATH_ENV).expect("crash test database path"),
+    );
+    let point = std::env::var("SKEIN_TEST_PROCESS_CRASH_POINT").expect("crash point");
+    let mut db = Database::open_with_config(&path, storage_crash_test_config()).unwrap();
+    let mut transaction = db.begin_transaction();
+    transaction
+        .query(
+            "CREATE (:Memory {id: 'crash-a'})-[:RELATED_TO {id: 'crash-rel'}]->(:Memory {id: 'crash-b'})",
+        )
+        .unwrap();
+    transaction.commit().unwrap();
+    if matches!(
+        point.as_str(),
+        "during_checkpoint_publication" | "after_manifest_publication"
+    ) {
+        db.checkpoint().unwrap();
+    }
+    panic!("crash failpoint {point} did not terminate the child process");
+}
+
+#[test]
+fn subprocess_crash_matrix_recovers_whole_batches_and_artifact_generations() {
+    let stages = [
+        ("before_wal_append", false, false),
+        ("after_wal_append", false, true),
+        ("after_wal_sync", true, true),
+        ("during_checkpoint_publication", true, true),
+        ("after_manifest_publication", true, true),
+    ];
+
+    let mut cases = Vec::new();
+    for repetition in 0..2 {
+        for (stage, must_be_present, may_be_present) in stages {
+            let path = unique_test_dir(&format!("subprocess_crash_{stage}_{repetition}"));
+            let baseline_epoch = {
+                let mut db =
+                    Database::open_with_config(&path, storage_crash_test_config()).unwrap();
+                db.query(
+                    "CREATE (:Memory {id: 'baseline-a'})-[:RELATED_TO]->(:Memory {id: 'baseline-b'})",
+                )
+                .unwrap();
+                db.checkpoint().unwrap();
+                db.commit_epoch()
+            };
+
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("api::tests::storage_recovery::storage_crash_recovery_child")
+                .arg("--nocapture")
+                .env(STORAGE_CRASH_CHILD_ENV, "1")
+                .env(STORAGE_CRASH_PATH_ENV, &path)
+                .env("SKEIN_TEST_PROCESS_CRASH_POINT", stage)
+                .status()
+                .unwrap();
+            assert_eq!(
+                status.code(),
+                Some(86),
+                "child did not terminate at {stage}"
+            );
+
+            let mut reopened =
+                Database::open_with_config(&path, storage_crash_test_config()).unwrap();
+            let node_a = count_query(
+                &mut reopened,
+                "MATCH (m:Memory {id: 'crash-a'}) RETURN count(m) AS count",
+            );
+            let node_b = count_query(
+                &mut reopened,
+                "MATCH (m:Memory {id: 'crash-b'}) RETURN count(m) AS count",
+            );
+            let relationship = count_query(
+                &mut reopened,
+                "MATCH (:Memory {id: 'crash-a'})-[r:RELATED_TO]->(:Memory {id: 'crash-b'}) RETURN count(r) AS count",
+            );
+            assert_eq!(node_a, node_b, "partial node batch after {stage}");
+            assert_eq!(
+                node_a, relationship,
+                "partial relationship batch after {stage}"
+            );
+            assert!(node_a <= 1, "duplicate recovered batch after {stage}");
+            if must_be_present {
+                assert_eq!(node_a, 1, "durable batch missing after {stage}");
+            }
+            if !may_be_present {
+                assert_eq!(node_a, 0, "unappended batch visible after {stage}");
+            }
+
+            let expected_epoch = baseline_epoch + node_a;
+            assert_eq!(reopened.commit_epoch(), expected_epoch);
+            let recovery = reopened.storage_recovery_report();
+            assert_eq!(recovery.recovered_commit_epoch, expected_epoch);
+            assert!(recovery.next_lsn_after_replay.is_some());
+            assert!(recovery.wal_replay_start_lsn.is_some());
+            assert!(recovery
+                .checkpoint_commit_epoch
+                .is_some_and(|epoch| epoch <= expected_epoch));
+
+            let residency = reopened.storage_residency_report();
+            let artifact_generation_valid =
+                recovery.checkpoint_epoch == residency.canonical_generation;
+            assert!(artifact_generation_valid);
+            assert_eq!(residency.segment_cache_digest_mismatch_count, 0);
+            let changefeed = reopened.search_projection_changefeed_status();
+            let projection_watermark_valid = changefeed.graph_commit_epoch == expected_epoch;
+            assert!(projection_watermark_valid);
+            assert!(changefeed.restart_recoverable);
+            if node_a == 1 {
+                assert_eq!(
+                    changefeed
+                        .newest_retained_mutation_id
+                        .map(|mutation| mutation.commit_epoch()),
+                    Some(expected_epoch)
+                );
+            }
+            cases.push(crate::StorageCrashCaseEvidence {
+                point: storage_crash_point(stage),
+                repetition,
+                process_terminated: status.code() == Some(86),
+                recovered_batch_present: node_a == 1,
+                whole_batch_recovered: node_a == node_b && node_a == relationship,
+                commit_epoch: reopened.commit_epoch(),
+                recovered_commit_epoch: recovery.recovered_commit_epoch,
+                replay_lsn_present: recovery.next_lsn_after_replay.is_some()
+                    && recovery.wal_replay_start_lsn.is_some(),
+                relationship_endpoints_valid: node_a == relationship,
+                projection_watermark_valid,
+                artifact_generation_valid,
+            });
+
+            drop(reopened);
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    }
+
+    let source_revision =
+        std::env::var("GITHUB_SHA").unwrap_or_else(|_| "local-test-revision".to_string());
+    let identity = crate::ProductionQualificationIdentity {
+        source_revision,
+        rust_toolchain: std::env::var("SKEIN_TEST_RUST_TOOLCHAIN")
+            .unwrap_or_else(|_| "local-test-toolchain".to_string()),
+        target_os: std::env::consts::OS.to_string(),
+        target_arch: std::env::consts::ARCH.to_string(),
+        enabled_features: vec![
+            "acl".to_string(),
+            "background-maintenance".to_string(),
+            "full-text-search".to_string(),
+            "graph-analytics".to_string(),
+            "vector-search".to_string(),
+        ],
+        durable_format_version: 2,
+        schema_version: 1,
+        configuration_digest: "storage-crash-out-of-core-1m-cache-v1".to_string(),
+        deployment_profile: "storage-crash-recovery-ci".to_string(),
+        dataset_fingerprint: "storage-crash-matrix-v1".to_string(),
+        canonical_graph_commit_epoch: 1,
+        policy_version: crate::PRODUCTION_QUALIFICATION_POLICY_VERSION,
+    };
+    let evidence = crate::StorageCrashRecoveryEvidence::evaluate(
+        crate::ProductionEvidenceBinding {
+            identity: identity.clone(),
+            generated_at_unix_seconds: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        },
+        identity,
+        2,
+        cases,
+    );
+    assert!(
+        evidence.ready,
+        "unexpected crash evidence blockers: {:?}",
+        evidence.blocker_codes
+    );
+    let evidence_json = evidence.json().to_string();
+    println!("storage_crash_recovery_evidence_json {evidence_json}");
+    if let Some(path) = std::env::var_os(STORAGE_CRASH_EVIDENCE_PATH_ENV) {
+        std::fs::write(path, evidence_json).unwrap();
+    }
+}
+
+fn storage_crash_point(point: &str) -> crate::StorageCrashPoint {
+    match point {
+        "before_wal_append" => crate::StorageCrashPoint::BeforeWalAppend,
+        "after_wal_append" => crate::StorageCrashPoint::AfterWalAppend,
+        "after_wal_sync" => crate::StorageCrashPoint::AfterWalSync,
+        "during_checkpoint_publication" => crate::StorageCrashPoint::DuringCheckpointPublication,
+        "after_manifest_publication" => crate::StorageCrashPoint::AfterManifestPublication,
+        point => panic!("unknown storage crash point {point}"),
+    }
+}
+
+fn count_query(db: &mut Database, statement: &str) -> u64 {
+    let output = db.query(statement).unwrap();
+    match output.rows[0].get("count") {
+        Some(Value::Int(value)) if *value >= 0 => *value as u64,
+        value => panic!("expected non-negative count, got {value:?}"),
+    }
+}
+
+fn storage_crash_test_config() -> DatabaseConfig {
+    DatabaseConfig {
+        storage_residency_mode: StorageResidencyMode::OutOfCore,
+        segment_cache_capacity_bytes: 1024 * 1024,
+        ..DatabaseConfig::default()
+    }
 }

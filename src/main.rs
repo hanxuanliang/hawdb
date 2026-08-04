@@ -912,6 +912,7 @@ fn main() -> Result<()> {
             let mut min_canonical_artifact_bytes = None;
             let mut max_steady_resident_bytes = None;
             let mut max_peak_resident_bytes = None;
+            let mut max_total_page_faults = None;
             let mut max_minor_page_faults = None;
             let mut max_major_page_faults = None;
             let mut max_intermediate_rows = None;
@@ -950,6 +951,10 @@ fn main() -> Result<()> {
                     "--max-peak-rss-bytes" => {
                         max_peak_resident_bytes =
                             Some(parse_next_u64_flag(&mut args, "--max-peak-rss-bytes")?);
+                    }
+                    "--max-total-page-faults" => {
+                        max_total_page_faults =
+                            Some(parse_next_u64_flag(&mut args, "--max-total-page-faults")?);
                     }
                     "--max-minor-page-faults" => {
                         max_minor_page_faults =
@@ -1008,6 +1013,7 @@ fn main() -> Result<()> {
                     max_peak_resident_bytes,
                     "--max-peak-rss-bytes",
                 )?,
+                max_total_page_faults,
                 max_minor_page_faults,
                 max_major_page_faults,
                 max_intermediate_rows: required_profile_usize(
@@ -1038,7 +1044,7 @@ fn main() -> Result<()> {
             )?;
             let report = db.storage_resource_profile(&cypher, &parameters, limits)?;
             println!("{}", serde_json::to_string_pretty(&report.json()).unwrap());
-            if require_ready && !report.ready {
+            if require_ready && !report.production_ready() {
                 return Err(SkeinError::Execution(format!(
                     "storage resource profile is not ready: {}",
                     report.blocker_codes.join(",")
@@ -1505,7 +1511,7 @@ fn storage_recovery_report_usage() -> String {
 }
 
 fn storage_resource_profile_usage() -> String {
-    "storage-resource-profile requires [--require-ready] [--require-fully-streamed] [--params-json <json-object>] --segment-cache-bytes <n> --min-canonical-bytes <n> --max-steady-rss-bytes <n> --max-peak-rss-bytes <n> [--max-minor-page-faults <n>] [--max-major-page-faults <n>] --max-intermediate-rows <n> --max-intermediate-payload-bytes <n> --max-output-rows <n> --max-output-payload-bytes <n> <database-path> <cypher>"
+    "storage-resource-profile requires [--require-ready] [--require-fully-streamed] [--params-json <json-object>] --segment-cache-bytes <n> --min-canonical-bytes <n> --max-steady-rss-bytes <n> --max-peak-rss-bytes <n> [--max-total-page-faults <n>] [--max-minor-page-faults <n>] [--max-major-page-faults <n>] --max-intermediate-rows <n> --max-intermediate-payload-bytes <n> --max-output-rows <n> --max-output-payload-bytes <n> <database-path> <cypher>"
         .to_string()
 }
 
@@ -4887,6 +4893,7 @@ fn read_execution_profile_json(
             "peak_resident_bytes": profile.pipeline_memory_report.peak_resident_bytes,
             "steady_resident_growth_bytes": profile.pipeline_memory_report.steady_resident_growth_bytes,
             "lifetime_peak_resident_growth_bytes": profile.pipeline_memory_report.lifetime_peak_resident_growth_bytes,
+            "total_page_faults": profile.pipeline_memory_report.total_page_faults,
             "minor_page_faults": profile.pipeline_memory_report.minor_page_faults,
             "major_page_faults": profile.pipeline_memory_report.major_page_faults,
         },
@@ -5261,8 +5268,9 @@ mod tests {
         assert!(report["output_payload_bytes"].as_u64().unwrap() > 0);
         assert!(report["steady_resident_bytes"].as_u64().unwrap() > 0);
         assert!(report["peak_resident_bytes"].as_u64().unwrap() > 0);
-        assert!(report["minor_page_faults"].is_u64());
-        assert!(report["major_page_faults"].is_u64());
+        assert!(report["total_page_faults"].is_u64());
+        assert_eq!(report["minor_page_faults"].is_u64(), cfg!(unix));
+        assert_eq!(report["major_page_faults"].is_u64(), cfg!(unix));
         assert!(report.get("rows").is_none());
         std::fs::remove_dir_all(db_path).unwrap();
     }
