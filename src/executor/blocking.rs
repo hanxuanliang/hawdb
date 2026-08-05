@@ -4,7 +4,6 @@ use super::*;
 use skein_executor::blocking::{
     self as executor_blocking, BindingBatchSource, BlockingExecutionContext,
 };
-use skein_executor::observer::ExecutionObserver;
 
 pub(super) use executor_blocking::spill_binding_run;
 

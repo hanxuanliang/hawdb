@@ -133,6 +133,11 @@ memory:
 ordered spill. `DistinctExec` uses ordered spill runs followed by bounded merge
 deduplication. `NodeCartesianProductExec` partitions an oversized build side
 into bounded spill runs and replays those runs for each streamed probe row.
+`GraphAlgorithm` admits the direction-specific projection together with a
+conservative algorithm scratch and result estimate before PageRank or Louvain
+allocates that state. It fails with a stable resource error rather than spilling,
+checks cancellation within node and edge loops, and reports its combined
+projection, scratch, and materialized-result peak as blocking-operator memory.
 All of these paths MUST report tracked peak memory, input rows, spill bytes,
 spill runs, and spilled rows, and MUST remove query-scoped runs on success,
 error, cancellation, and consumer stop.

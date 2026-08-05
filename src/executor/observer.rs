@@ -34,6 +34,13 @@ impl QueryExecutionObserver {
         self.reports.borrow_mut().graph_expansion.push(report);
     }
 
+    pub(super) fn record_blocking_memory_report(
+        &self,
+        report: skein_executor::BlockingOperatorMemoryReport,
+    ) {
+        self.reports.borrow_mut().blocking_memory.push(report);
+    }
+
     pub(super) fn record_pipeline_batch(&self, batch: &[Binding]) {
         let payload_bytes = batch.iter().fold(0usize, |total, binding| {
             total.saturating_add(skein_executor::binding::binding_payload_bytes(binding))
@@ -79,7 +86,7 @@ impl ExecutionObserver for QueryExecutionObserver {
     }
 
     fn record_blocking_memory_report(&self, report: skein_executor::BlockingOperatorMemoryReport) {
-        self.reports.borrow_mut().blocking_memory.push(report);
+        QueryExecutionObserver::record_blocking_memory_report(self, report);
     }
 }
 

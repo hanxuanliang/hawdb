@@ -1,9 +1,15 @@
 use crate::schema::RelTypeId;
 use crate::store::{GraphStore, NodeId, NodeRecord};
+use crate::{Result, SkeinError};
+use skein_core::RuntimeTaskContext;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Display, Formatter};
 use std::num::NonZeroUsize;
+
+const ALGORITHM_CHECKPOINT_INTERVAL: usize = 1024;
+const LOUVAIN_NODE_STATE_BYTES: usize = 384;
+const BTREE_ENTRY_ESTIMATED_BYTES: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectionLayout {
@@ -63,6 +69,14 @@ pub struct ProjectionMemoryEstimate {
     pub relationship_count: usize,
     pub projected_edge_count: usize,
     pub estimated_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GraphAlgorithmMemoryEstimate {
+    pub projection_bytes: usize,
+    pub algorithm_peak_bytes: usize,
+    pub result_bytes: usize,
+    pub total_peak_bytes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -544,24 +558,87 @@ impl ProjectedGraph {
         )
     }
 
+    pub fn page_rank_memory_estimate(&self) -> GraphAlgorithmMemoryEstimate {
+        let node_count = self.nodes.len();
+        let rank_bytes = node_count.saturating_mul(std::mem::size_of::<f64>());
+        let result_bytes = estimated_vec_bytes::<PageRankScore>(node_count);
+        let algorithm_peak_bytes = rank_bytes.saturating_add(result_bytes);
+        GraphAlgorithmMemoryEstimate {
+            projection_bytes: self.memory_estimate.estimated_bytes,
+            algorithm_peak_bytes,
+            result_bytes,
+            total_peak_bytes: self
+                .memory_estimate
+                .estimated_bytes
+                .saturating_add(algorithm_peak_bytes),
+        }
+    }
+
+    pub fn louvain_memory_estimate(&self, options: LouvainOptions) -> GraphAlgorithmMemoryEstimate {
+        let node_count = self.nodes.len();
+        let max_levels = options.max_levels.max(1);
+        let result_count = node_count.saturating_mul(max_levels);
+        let result_bytes = estimated_vec_bytes::<HierarchicalCommunityAssignment>(result_count);
+        let contracted_graph_bytes = self.memory_estimate.estimated_bytes.saturating_mul(2);
+        let node_state_bytes = node_count.saturating_mul(LOUVAIN_NODE_STATE_BYTES);
+        let candidate_count =
+            node_count.min(self.memory_estimate.projected_edge_count.saturating_add(1));
+        let candidate_bytes = candidate_count.saturating_mul(BTREE_ENTRY_ESTIMATED_BYTES);
+        let materialized_undirected_bytes = if self.layout != ProjectionLayout::Undirected {
+            self.memory_estimate
+                .projected_edge_count
+                .saturating_mul(2)
+                .saturating_mul(BTREE_ENTRY_ESTIMATED_BYTES)
+                .saturating_add(node_count.saturating_mul(std::mem::size_of::<BTreeSet<usize>>()))
+        } else {
+            0
+        };
+        let algorithm_peak_bytes = contracted_graph_bytes
+            .saturating_add(node_state_bytes)
+            .saturating_add(candidate_bytes)
+            .saturating_add(materialized_undirected_bytes)
+            .saturating_add(result_bytes);
+        GraphAlgorithmMemoryEstimate {
+            projection_bytes: self.memory_estimate.estimated_bytes,
+            algorithm_peak_bytes,
+            result_bytes,
+            total_peak_bytes: self
+                .memory_estimate
+                .estimated_bytes
+                .saturating_add(algorithm_peak_bytes),
+        }
+    }
+
     pub fn page_rank(&self, options: PageRankOptions) -> Vec<PageRankScore> {
+        self.page_rank_with_context(options, None)
+            .expect("page rank without runtime cancellation cannot fail")
+    }
+
+    pub(crate) fn page_rank_with_context(
+        &self,
+        options: PageRankOptions,
+        task_context: Option<&RuntimeTaskContext>,
+    ) -> Result<Vec<PageRankScore>> {
+        algorithm_checkpoint(task_context)?;
         if !self.layout.stores_outgoing() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let node_count = self.nodes.len();
         if node_count == 0 {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         let damping = options.damping.clamp(0.0, 1.0);
         let mut ranks = vec![1.0 / node_count as f64; node_count];
         for _ in 0..options.iterations {
-            let dangling = ranks
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| self.out_degree(*index) == 0)
-                .map(|(_, rank)| rank)
-                .sum::<f64>();
+            algorithm_checkpoint(task_context)?;
+            let mut dangling = 0.0;
+            for (index, rank) in ranks.iter().enumerate() {
+                algorithm_checkpoint_periodically(task_context, index)?;
+                if self.out_degree(index) == 0 {
+                    dangling += rank;
+                }
+            }
             let mut next = vec![(1.0 - damping) / node_count as f64; node_count];
             let dangling_share = damping * dangling / node_count as f64;
             for score in &mut next {
@@ -569,12 +646,14 @@ impl ProjectedGraph {
             }
 
             for (source, rank) in ranks.iter().enumerate() {
+                algorithm_checkpoint_periodically(task_context, source)?;
                 let out_degree = self.out_degree(source);
                 if out_degree == 0 {
                     continue;
                 }
                 let contribution = damping * rank / out_degree as f64;
-                for target in self.outgoing_target_indexes(source) {
+                for (edge_ordinal, target) in self.outgoing_target_indexes(source).enumerate() {
+                    algorithm_checkpoint_periodically(task_context, edge_ordinal)?;
                     next[target] += contribution;
                 }
             }
@@ -588,37 +667,54 @@ impl ProjectedGraph {
             .zip(ranks)
             .map(|(node, score)| PageRankScore { node, score })
             .collect::<Vec<_>>();
-        scores.sort_by(|left, right| {
+        scores.sort_unstable_by(|left, right| {
             right
                 .score
                 .total_cmp(&left.score)
                 .then_with(|| left.node.cmp(&right.node))
         });
-        scores
+        algorithm_checkpoint(task_context)?;
+        Ok(scores)
     }
 
     pub fn louvain_communities(&self, options: LouvainOptions) -> Vec<CommunityAssignment> {
-        self.single_level_louvain(options)
+        self.single_level_louvain(options, None)
+            .expect("Louvain without runtime cancellation cannot fail")
     }
 
     pub fn hierarchical_louvain_communities(
         &self,
         options: LouvainOptions,
     ) -> Vec<HierarchicalCommunityAssignment> {
+        self.hierarchical_louvain_communities_with_context(options, None)
+            .expect("Louvain without runtime cancellation cannot fail")
+    }
+
+    pub(crate) fn hierarchical_louvain_communities_with_context(
+        &self,
+        options: LouvainOptions,
+        task_context: Option<&RuntimeTaskContext>,
+    ) -> Result<Vec<HierarchicalCommunityAssignment>> {
+        algorithm_checkpoint(task_context)?;
         let max_levels = options.max_levels.max(1);
         let mut graph = self.clone();
         let mut original_to_current = (0..self.nodes.len()).collect::<Vec<_>>();
         let mut output = Vec::new();
 
         for level in 0..max_levels {
-            let assignments = graph.single_level_louvain(LouvainOptions {
-                max_levels: 1,
-                ..options
-            });
+            algorithm_checkpoint(task_context)?;
+            let assignments = graph.single_level_louvain(
+                LouvainOptions {
+                    max_levels: 1,
+                    ..options
+                },
+                task_context,
+            )?;
             if assignments.is_empty() {
                 break;
             }
             for (original_index, current_index) in original_to_current.iter().copied().enumerate() {
+                algorithm_checkpoint_periodically(task_context, original_index)?;
                 let community = assignments[current_index].community;
                 output.push(HierarchicalCommunityAssignment {
                     level,
@@ -629,7 +725,7 @@ impl ProjectedGraph {
             if level + 1 == max_levels {
                 break;
             }
-            let contracted = graph.contract_by_communities(&assignments);
+            let contracted = graph.contract_by_communities(&assignments, task_context)?;
             if contracted.nodes.len() == graph.nodes.len() {
                 break;
             }
@@ -639,36 +735,52 @@ impl ProjectedGraph {
                 .enumerate()
                 .map(|(index, node)| (*node, index))
                 .collect::<BTreeMap<_, _>>();
-            original_to_current = original_to_current
-                .into_iter()
-                .map(|current_index| {
-                    let community = assignments[current_index].community;
-                    contracted_positions[&community]
-                })
-                .collect();
+            let mut next_original_to_current = Vec::with_capacity(original_to_current.len());
+            for (ordinal, current_index) in original_to_current.into_iter().enumerate() {
+                algorithm_checkpoint_periodically(task_context, ordinal)?;
+                let community = assignments[current_index].community;
+                next_original_to_current.push(contracted_positions[&community]);
+            }
+            original_to_current = next_original_to_current;
             graph = contracted;
         }
 
-        output
+        algorithm_checkpoint(task_context)?;
+        Ok(output)
     }
 
-    fn single_level_louvain(&self, options: LouvainOptions) -> Vec<CommunityAssignment> {
+    fn single_level_louvain(
+        &self,
+        options: LouvainOptions,
+        task_context: Option<&RuntimeTaskContext>,
+    ) -> Result<Vec<CommunityAssignment>> {
+        algorithm_checkpoint(task_context)?;
         let node_count = self.nodes.len();
         if node_count == 0 {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
-        let materialized_adjacency =
-            (self.layout != ProjectionLayout::Undirected).then(|| self.undirected_adjacency());
-        let degrees = (0..node_count)
-            .map(|node| {
-                self.undirected_neighbor_indexes(node, materialized_adjacency.as_deref())
-                    .count() as f64
-            })
-            .collect::<Vec<_>>();
+        let materialized_adjacency = if self.layout != ProjectionLayout::Undirected {
+            Some(self.undirected_adjacency(task_context)?)
+        } else {
+            None
+        };
+        let mut degrees = Vec::with_capacity(node_count);
+        for node in 0..node_count {
+            algorithm_checkpoint_periodically(task_context, node)?;
+            let mut degree = 0usize;
+            for (edge_ordinal, _) in self
+                .undirected_neighbor_indexes(node, materialized_adjacency.as_deref())
+                .enumerate()
+            {
+                algorithm_checkpoint_periodically(task_context, edge_ordinal)?;
+                degree = degree.saturating_add(1);
+            }
+            degrees.push(degree as f64);
+        }
         let total_degree = degrees.iter().sum::<f64>();
         if total_degree == 0.0 {
-            return self
+            return Ok(self
                 .nodes
                 .iter()
                 .copied()
@@ -676,32 +788,43 @@ impl ProjectedGraph {
                     node,
                     community: node,
                 })
-                .collect();
+                .collect());
         }
 
         let mut communities = (0..node_count).collect::<Vec<_>>();
         let mut community_degrees = degrees.clone();
         for _ in 0..options.max_iterations {
+            algorithm_checkpoint(task_context)?;
             let mut changed = false;
             for node in 0..node_count {
+                algorithm_checkpoint_periodically(task_context, node)?;
                 let current = communities[node];
                 let node_degree = degrees[node];
                 community_degrees[current] -= node_degree;
 
                 let mut candidates = BTreeSet::from([current]);
-                for neighbor in
-                    self.undirected_neighbor_indexes(node, materialized_adjacency.as_deref())
+                for (edge_ordinal, neighbor) in self
+                    .undirected_neighbor_indexes(node, materialized_adjacency.as_deref())
+                    .enumerate()
                 {
+                    algorithm_checkpoint_periodically(task_context, edge_ordinal)?;
                     candidates.insert(communities[neighbor]);
                 }
 
                 let mut best = current;
                 let mut best_gain = 0.0;
-                for candidate in candidates {
-                    let links_to_candidate = self
+                for (candidate_ordinal, candidate) in candidates.into_iter().enumerate() {
+                    algorithm_checkpoint_periodically(task_context, candidate_ordinal)?;
+                    let mut links_to_candidate = 0usize;
+                    for (edge_ordinal, neighbor) in self
                         .undirected_neighbor_indexes(node, materialized_adjacency.as_deref())
-                        .filter(|neighbor| communities[*neighbor] == candidate)
-                        .count() as f64;
+                        .enumerate()
+                    {
+                        algorithm_checkpoint_periodically(task_context, edge_ordinal)?;
+                        links_to_candidate = links_to_candidate
+                            .saturating_add(usize::from(communities[neighbor] == candidate));
+                    }
+                    let links_to_candidate = links_to_candidate as f64;
                     let gain = links_to_candidate
                         - (node_degree * community_degrees[candidate] / total_degree);
                     match gain.total_cmp(&best_gain) {
@@ -709,12 +832,23 @@ impl ProjectedGraph {
                             best = candidate;
                             best_gain = gain;
                         }
-                        Ordering::Equal
-                            if community_representative(candidate, &communities, &self.nodes)
-                                < community_representative(best, &communities, &self.nodes) =>
-                        {
-                            best = candidate;
-                            best_gain = gain;
+                        Ordering::Equal => {
+                            let candidate_representative = community_representative(
+                                candidate,
+                                &communities,
+                                &self.nodes,
+                                task_context,
+                            )?;
+                            let best_representative = community_representative(
+                                best,
+                                &communities,
+                                &self.nodes,
+                                task_context,
+                            )?;
+                            if candidate_representative < best_representative {
+                                best = candidate;
+                                best_gain = gain;
+                            }
                         }
                         _ => {}
                     }
@@ -733,13 +867,15 @@ impl ProjectedGraph {
 
         let mut representatives = BTreeMap::<usize, NodeId>::new();
         for (index, community) in communities.iter().copied().enumerate() {
+            algorithm_checkpoint_periodically(task_context, index)?;
             representatives
                 .entry(community)
                 .and_modify(|node| *node = (*node).min(self.nodes[index]))
                 .or_insert(self.nodes[index]);
         }
 
-        self.nodes
+        let output = self
+            .nodes
             .iter()
             .copied()
             .enumerate()
@@ -747,10 +883,17 @@ impl ProjectedGraph {
                 node,
                 community: representatives[&communities[index]],
             })
-            .collect()
+            .collect();
+        algorithm_checkpoint(task_context)?;
+        Ok(output)
     }
 
-    fn contract_by_communities(&self, assignments: &[CommunityAssignment]) -> Self {
+    fn contract_by_communities(
+        &self,
+        assignments: &[CommunityAssignment],
+        task_context: Option<&RuntimeTaskContext>,
+    ) -> Result<Self> {
+        algorithm_checkpoint(task_context)?;
         let nodes = assignments
             .iter()
             .map(|assignment| assignment.community)
@@ -789,13 +932,17 @@ impl ProjectedGraph {
         };
         if self.layout == ProjectionLayout::Incoming {
             for target in 0..self.nodes.len() {
-                for source in self.incoming_source_indexes(target) {
+                algorithm_checkpoint_periodically(task_context, target)?;
+                for (edge_ordinal, source) in self.incoming_source_indexes(target).enumerate() {
+                    algorithm_checkpoint_periodically(task_context, edge_ordinal)?;
                     add_edge(source, target);
                 }
             }
         } else {
             for source in 0..self.nodes.len() {
-                for target in self.outgoing_target_indexes(source) {
+                algorithm_checkpoint_periodically(task_context, source)?;
+                for (edge_ordinal, target) in self.outgoing_target_indexes(source).enumerate() {
+                    algorithm_checkpoint_periodically(task_context, edge_ordinal)?;
                     add_edge(source, target);
                 }
             }
@@ -809,19 +956,24 @@ impl ProjectedGraph {
             .map(|(offsets, sources)| (Some(offsets), Some(sources)))
             .unwrap_or((None, None));
         let edge_count = if self.layout == ProjectionLayout::Undirected {
-            (0..nodes.len())
-                .map(|source| {
-                    targets[offsets[source]..offsets[source + 1]]
-                        .iter()
-                        .filter(|target| source <= **target)
-                        .count()
-                })
-                .sum()
+            let mut edge_count = 0usize;
+            for source in 0..nodes.len() {
+                algorithm_checkpoint_periodically(task_context, source)?;
+                for (edge_ordinal, target) in targets[offsets[source]..offsets[source + 1]]
+                    .iter()
+                    .enumerate()
+                {
+                    algorithm_checkpoint_periodically(task_context, edge_ordinal)?;
+                    edge_count = edge_count.saturating_add(usize::from(source <= *target));
+                }
+            }
+            edge_count
         } else {
             targets.len()
         };
         let memory_estimate = projection_memory_estimate(self.layout, nodes.len(), edge_count);
-        Self {
+        algorithm_checkpoint(task_context)?;
+        Ok(Self {
             nodes,
             offsets,
             targets,
@@ -830,7 +982,7 @@ impl ProjectedGraph {
             layout: self.layout,
             edge_count,
             memory_estimate,
-        }
+        })
     }
 
     fn out_degree(&self, index: usize) -> usize {
@@ -856,11 +1008,16 @@ impl ProjectedGraph {
             .copied()
     }
 
-    fn undirected_adjacency(&self) -> Vec<BTreeSet<usize>> {
+    fn undirected_adjacency(
+        &self,
+        task_context: Option<&RuntimeTaskContext>,
+    ) -> Result<Vec<BTreeSet<usize>>> {
         let mut adjacency = vec![BTreeSet::new(); self.nodes.len()];
         if self.layout == ProjectionLayout::Incoming {
             for target in 0..self.nodes.len() {
-                for source in self.incoming_source_indexes(target) {
+                algorithm_checkpoint_periodically(task_context, target)?;
+                for (edge_ordinal, source) in self.incoming_source_indexes(target).enumerate() {
+                    algorithm_checkpoint_periodically(task_context, edge_ordinal)?;
                     if source == target {
                         continue;
                     }
@@ -868,10 +1025,12 @@ impl ProjectedGraph {
                     adjacency[target].insert(source);
                 }
             }
-            return adjacency;
+            return Ok(adjacency);
         }
         for source in 0..self.nodes.len() {
-            for target in self.outgoing_target_indexes(source) {
+            algorithm_checkpoint_periodically(task_context, source)?;
+            for (edge_ordinal, target) in self.outgoing_target_indexes(source).enumerate() {
+                algorithm_checkpoint_periodically(task_context, edge_ordinal)?;
                 if source == target {
                     continue;
                 }
@@ -879,7 +1038,7 @@ impl ProjectedGraph {
                 adjacency[target].insert(source);
             }
         }
-        adjacency
+        Ok(adjacency)
     }
 
     fn undirected_neighbor_indexes<'a>(
@@ -902,13 +1061,51 @@ impl ProjectedGraph {
     }
 }
 
-fn community_representative(community: usize, assignments: &[usize], nodes: &[NodeId]) -> NodeId {
-    assignments
-        .iter()
-        .enumerate()
-        .filter_map(|(index, assigned)| (*assigned == community).then_some(nodes[index]))
-        .min()
-        .unwrap_or(nodes[community])
+fn community_representative(
+    community: usize,
+    assignments: &[usize],
+    nodes: &[NodeId],
+    task_context: Option<&RuntimeTaskContext>,
+) -> Result<NodeId> {
+    let mut representative = None;
+    for (index, assigned) in assignments.iter().enumerate() {
+        algorithm_checkpoint_periodically(task_context, index)?;
+        if *assigned == community {
+            representative =
+                Some(representative.map_or(nodes[index], |node: NodeId| node.min(nodes[index])));
+        }
+    }
+    Ok(representative.unwrap_or(nodes[community]))
+}
+
+fn estimated_vec_bytes<T>(item_count: usize) -> usize {
+    item_count
+        .saturating_mul(std::mem::size_of::<T>())
+        .saturating_mul(2)
+}
+
+fn algorithm_checkpoint(task_context: Option<&RuntimeTaskContext>) -> Result<()> {
+    match task_context {
+        Some(task_context) => task_context
+            .checkpoint()
+            .map_err(|reason| SkeinError::Execution(format!("runtime task stopped: {reason}"))),
+        None => Ok(()),
+    }
+}
+
+#[inline]
+fn algorithm_checkpoint_periodically(
+    task_context: Option<&RuntimeTaskContext>,
+    ordinal: usize,
+) -> Result<()> {
+    if let Some(task_context) = task_context
+        && ordinal.is_multiple_of(ALGORITHM_CHECKPOINT_INTERVAL)
+    {
+        task_context
+            .checkpoint()
+            .map_err(|reason| SkeinError::Execution(format!("runtime task stopped: {reason}")))?;
+    }
+    Ok(())
 }
 
 fn collect_projected_node_ids(
@@ -1358,6 +1555,75 @@ mod tests {
         assert!(assignments.iter().any(|assignment| assignment.level == 1
             && assignment.node == d
             && assignment.community == c));
+    }
+
+    #[test]
+    fn graph_algorithm_memory_estimates_include_projection_scratch_and_results() {
+        let graph = ProjectedGraph::from_parts(
+            vec![NodeId(1), NodeId(2)],
+            vec![0, 1, 1],
+            vec![1],
+            vec![0, 0, 1],
+            vec![0],
+        )
+        .unwrap();
+
+        let page_rank = graph.page_rank_memory_estimate();
+        let louvain_one_level = graph.louvain_memory_estimate(LouvainOptions {
+            max_iterations: 2,
+            max_levels: 1,
+        });
+        let louvain_two_levels = graph.louvain_memory_estimate(LouvainOptions {
+            max_iterations: 2,
+            max_levels: 2,
+        });
+
+        assert_eq!(
+            page_rank.projection_bytes,
+            graph.memory_estimate().estimated_bytes
+        );
+        assert!(page_rank.result_bytes > 0);
+        assert_eq!(
+            page_rank.total_peak_bytes,
+            page_rank
+                .projection_bytes
+                .saturating_add(page_rank.algorithm_peak_bytes)
+        );
+        assert!(louvain_one_level.algorithm_peak_bytes > page_rank.algorithm_peak_bytes);
+        assert!(louvain_two_levels.result_bytes > louvain_one_level.result_bytes);
+        assert!(louvain_two_levels.total_peak_bytes > louvain_one_level.total_peak_bytes);
+    }
+
+    #[test]
+    fn graph_algorithms_observe_runtime_cancellation() {
+        let graph = ProjectedGraph::from_parts(
+            vec![NodeId(1)],
+            vec![0, 0],
+            Vec::new(),
+            vec![0, 0],
+            Vec::new(),
+        )
+        .unwrap();
+        let cancellation = skein_core::RuntimeCancellationToken::new();
+        cancellation.cancel();
+        let context = skein_core::RuntimeTaskContext::without_deadline(cancellation);
+
+        let page_rank_error = graph
+            .page_rank_with_context(PageRankOptions::default(), Some(&context))
+            .unwrap_err();
+        let louvain_error = graph
+            .hierarchical_louvain_communities_with_context(
+                LouvainOptions::default(),
+                Some(&context),
+            )
+            .unwrap_err();
+
+        assert!(page_rank_error
+            .to_string()
+            .contains("runtime task stopped: cancelled"));
+        assert!(louvain_error
+            .to_string()
+            .contains("runtime task stopped: cancelled"));
     }
 
     fn properties(values: &[(&str, i64)]) -> BTreeMap<String, Value> {

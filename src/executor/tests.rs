@@ -572,8 +572,7 @@ fn sort_rejects_spill_bytes_over_budget_and_removes_partial_run() {
     std::fs::remove_dir(memory.spill_directory).unwrap();
 }
 
-#[test]
-fn graph_algorithms_admit_direction_specific_projections() {
+fn graph_algorithm_fixture() -> (Catalog, GraphStore) {
     let mut catalog = Catalog::default();
     let mut store = GraphStore::in_memory();
     let source = store
@@ -594,23 +593,33 @@ fn graph_algorithms_admit_direction_specific_projections() {
             },
         )
         .unwrap();
+    (catalog, store)
+}
+
+fn graph_algorithm_plan(algorithm: GraphAlgorithmKind) -> PhysicalPlan {
+    PhysicalPlan::GraphAlgorithm {
+        algorithm,
+        graph_name: "MemoryGraph".to_string(),
+        options: crate::planner::GraphAlgorithmOptions {
+            damping: None,
+            max_iterations: Some(2),
+            max_levels: Some(1),
+        },
+        score_column: "score".to_string(),
+        node_visibility_predicate: None,
+    }
+}
+
+#[test]
+fn graph_algorithms_admit_direction_specific_projections() {
+    let (mut catalog, mut store) = graph_algorithm_fixture();
     let memory = ExecutionMemoryConfig {
-        blocking_operator_bytes: NonZeroUsize::new(1024).unwrap(),
+        blocking_operator_bytes: NonZeroUsize::new(4096).unwrap(),
         ..spill_test_config("algorithm-admission")
     };
 
     for algorithm in [GraphAlgorithmKind::PageRank, GraphAlgorithmKind::Louvain] {
-        let plan = PhysicalPlan::GraphAlgorithm {
-            algorithm,
-            graph_name: "MemoryGraph".to_string(),
-            options: crate::planner::GraphAlgorithmOptions {
-                damping: None,
-                max_iterations: Some(2),
-                max_levels: Some(1),
-            },
-            score_column: "score".to_string(),
-            node_visibility_predicate: None,
-        };
+        let plan = graph_algorithm_plan(algorithm);
         assert!(BatchPlanRef::try_new(&plan).is_some());
         let mut external = NoExternalReadOperator;
         let output = execute_with_row_limit_profile_and_external_and_memory(
@@ -624,7 +633,47 @@ fn graph_algorithms_admit_direction_specific_projections() {
         )
         .unwrap();
         assert_eq!(output.rows.len(), 2);
+        let report = output
+            .profile
+            .blocking_operator_memory_reports
+            .iter()
+            .find(|report| report.operator == "GraphAlgorithm")
+            .unwrap();
+        assert_eq!(report.budget_bytes, 4096);
+        assert_eq!(report.input_rows, 2);
+        assert!(report.peak_tracked_bytes > 0);
+        assert!(report.peak_tracked_bytes <= report.budget_bytes);
+        assert_eq!(report.spilled_bytes, 0);
     }
+}
+
+#[test]
+fn graph_algorithm_rejects_scratch_before_allocation() {
+    let (mut catalog, mut store) = graph_algorithm_fixture();
+    let plan = graph_algorithm_plan(GraphAlgorithmKind::PageRank);
+    let memory = ExecutionMemoryConfig {
+        blocking_operator_bytes: NonZeroUsize::new(150).unwrap(),
+        ..spill_test_config("algorithm-scratch-rejection")
+    };
+    let mut external = NoExternalReadOperator;
+
+    let error = execute_with_row_limit_profile_and_external_and_memory(
+        &plan,
+        &mut catalog,
+        &mut store,
+        &BTreeMap::new(),
+        &mut external,
+        None,
+        &memory,
+    )
+    .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("GraphAlgorithm PageRank scratch and result state"));
+    assert!(error
+        .to_string()
+        .contains("exceeding blocking_operator_bytes 150"));
 }
 
 #[test]
