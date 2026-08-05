@@ -85,14 +85,6 @@ and algorithms outside active routes are not implied backlog items.
     resource error in readiness evidence.
   - Do not weaken the existing blocking-operator memory limit.
 
-- [ ] Bind the real Mem serving path to the admitted Skein facade.
-  - Use the shared-governor `NowledgeMemEmbeddedStoreHandle` entrypoints for
-    foreground parameterized Cypher and bounded streaming reads.
-  - Prove the host uses equivalent admission for typed mutation, analytics, and
-    maintenance work that cannot be expressed as one Cypher statement.
-  - Keep direct `Database` access limited to tests and controlled hosts; it must
-    not satisfy production-path readiness evidence.
-
 ## P2: Deferred Delivery Governance
 
 - [ ] Adopt `main` branch protection when Skein enters a release-candidate or
