@@ -2,6 +2,7 @@
 name = "skein"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.97.1"
 license = "Apache-2.0"
 
 [dependencies]
@@ -80,7 +81,50 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.97.1"
 license = "Apache-2.0"
+
+[profile.dev]
+opt-level = 0
+debug = 0
+codegen-units = 256
+lto = false
+incremental = true
+panic = "unwind"
+debug-assertions = true
+overflow-checks = false
+rpath = false
+
+[profile.release]
+opt-level = 3
+debug = false
+codegen-units = 1
+lto = "thin"
+incremental = false
+panic = "unwind"
+debug-assertions = false
+overflow-checks = false
+rpath = false
+
+[profile.test]
+opt-level = 0
+debug = 0
+codegen-units = 16
+lto = false
+incremental = true
+debug-assertions = true
+overflow-checks = true
+rpath = false
+
+[profile.bench]
+opt-level = 3
+debug = false
+codegen-units = 1
+lto = "thin"
+incremental = false
+debug-assertions = false
+overflow-checks = false
+rpath = false
 
 [[bench]]
 name = "optimizer_smoke"
