@@ -797,6 +797,13 @@ jobs:
       - name: Test embedded TurboQuant facade
         run: cargo test -p skein --lib search::turboquant_projection::tests
 
+      - name: Test vector qualification protocol
+        run: cargo test -p skein-qualification production_vector
+
+      - name: Test upstream differential oracle
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test -p skein-qualification production_vector --features turbovec-oracle
+
   vector-projection-aarch64:
     name: Vector Projection (Linux AArch64 Compile)
     runs-on: ubuntu-latest

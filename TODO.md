@@ -40,8 +40,10 @@ and algorithms outside active routes are not implied backlog items.
 
 - [ ] Qualify the default TurboQuant candidate projection on representative
   Mem embeddings.
-  - Compare 4-bit candidate recall against canonical raw-vector TopK and use
-    the optional `turbovec` feature as a differential oracle, not as truth.
+  - Run `run_production_vector_qualification` on representative embeddings,
+    compare 4-bit candidate recall against canonical raw-vector TopK, and use
+    `skein-qualification/turbovec-oracle` as a differential oracle, not as
+    truth.
   - Cover unfiltered, metadata-filtered, incremental, checkpoint, reopen,
     stale-generation, corruption, cancellation, and mixed-load cases. Include
     ACL-filtered cases only when the release feature set enables `acl`.

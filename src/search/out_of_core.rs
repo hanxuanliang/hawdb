@@ -701,7 +701,7 @@ impl SearchOutOfCoreReader {
                         access_control.policy_epoch
                     )));
                 }
-                access_control.apply_to_filters(&options.metadata_filters)?
+                access_control.effective_metadata_filters(&options.metadata_filters)?
             }
             None => options.metadata_filters.clone(),
         };

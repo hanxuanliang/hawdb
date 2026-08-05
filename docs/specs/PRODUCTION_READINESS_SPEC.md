@@ -364,17 +364,40 @@ projection. Synthetic fixtures can test this protocol but remain blocked by
 the representative document-count, larger-than-memory, identity, and resource
 thresholds.
 
-TurboQuant recall probes are development evidence until wrapped by
-`skein-vector-recall-production-qualification-v1`. The production report MUST
-bind the recall result to the current release identity and the opened file
-projection's generation, source graph epoch, raw-vector source digest, payload
-identity, format, algorithm, bit width, dimension, transform seed, embedding
-model/version, and document count. In-memory generation zero projections and
+`run_production_vector_qualification` is the typed TurboQuant production
+collector. Its `skein-production-vector-qualification-v1` report wraps the
+bounded `skein-vector-recall-production-qualification-v1` probes and binds
+them to the current release identity and the opened file projection's
+generation, source graph epoch, raw-vector source digest, payload identity,
+format, algorithm, bit width, dimension, transform seed, embedding
+model/version, and document count. In-memory generation-zero projections and
 corpora below 100,000 vector documents MUST NOT qualify production.
-The probe MUST report quantized candidate-window recall and final raw-reranked
-TopK recall separately. Candidate identifiers MAY be retained transiently by
-the validation execution path, but production evidence MUST contain only
-aggregate counts and per-million recall values.
+
+The collector MUST include separate quantized candidate-window and final raw-
+reranked TopK recall, scalar-versus-dispatched candidate parity, P50/P95/P99
+latency, process RSS and page-fault capability evidence, projection and raw-
+vector bytes, build memory and amplification, block pruning, admitted workers,
+and selected kernels. Candidate identifiers MAY be retained transiently by a
+validation-only execution control, but serialized production evidence MUST
+contain only digests, aggregate counts, and per-million values.
+
+Lifecycle probes MUST use explicit disposable copies and cover incremental
+projection invalidation with safe scalar serving, checkpoint publication,
+reopen, pinned stale-generation isolation, current-artifact corruption,
+cancellation propagation, and foreground reads overlapping checkpoint work.
+The optional `skein-qualification/turbovec-oracle` feature MAY build the
+upstream implementation as a development differential oracle. The report MUST
+label it as an oracle rather than truth, record candidate overlap and final
+result comparisons, and MUST NOT require oracle agreement as a correctness
+condition. A qualification configured to require this oracle MUST fail closed
+when it was not compiled or could not run.
+
+`skein-production-vector-qualification-matrix-v1` combines independently
+generated reports and requires matching release and projection identities for
+Linux x86_64, Linux AArch64, macOS AArch64, and Windows x86_64. Every target
+MUST also pass its portable scalar reference comparison. Unit and synthetic
+fixtures validate this protocol but cannot satisfy its representative-data or
+target-matrix requirements.
 
 ## Route And Cutover Qualification
 

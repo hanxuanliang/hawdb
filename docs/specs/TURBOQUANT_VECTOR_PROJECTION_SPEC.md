@@ -121,3 +121,19 @@ TopK: recall of the quantized candidate window before raw reranking, and recall
 of the final raw-reranked TopK. Candidate capture is enabled only inside this
 probe, is capped independently from TopK, and document identifiers are never
 serialized into the qualification report.
+
+The full release collector is `run_production_vector_qualification`, which
+emits `skein-production-vector-qualification-v1`. It adds named unfiltered,
+metadata-filtered, and feature-conditional ACL cases; dispatched-versus-scalar
+candidate parity; execution and process resource metrics; and disposable-copy
+lifecycle probes for incremental updates, checkpoint/reopen, stale readers,
+corruption, cancellation, and mixed foreground/background work. The companion
+`skein-production-vector-qualification-matrix-v1` evaluator requires Linux
+x86_64, Linux AArch64, macOS AArch64, and Windows x86_64 reports bound to the
+same corpus and release identity.
+
+When `skein-qualification/turbovec-oracle` is enabled, the collector builds the
+upstream `turbovec` implementation only as an offline differential oracle. It
+records candidate-set overlap and final-result comparisons without treating
+oracle agreement as correctness truth or enabling `turbovec` in the production
+serving feature set.

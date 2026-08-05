@@ -13,6 +13,10 @@ skein = { path = "../..", default-features = false, features = ["full-text-searc
 skein-query = { path = "../query" }
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 
+[features]
+default = []
+turbovec-oracle = ["skein/turbovec"]
+
 [[bin]]
 name = "skein-soak"
 path = "src/main.rs"

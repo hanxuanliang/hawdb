@@ -29,6 +29,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{Cursor, Read, Write};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -67,8 +68,9 @@ pub use out_of_core::{
 pub use range_io::SearchRangeReadConfig;
 use recall_validation::{sample_positions, VectorRecallValidationAccumulator};
 pub use recall_validation::{
-    VectorProjectionQualificationIdentity, VectorRecallProductionQualificationReport,
-    VectorRecallValidationBlocker, VectorRecallValidationOptions, VectorRecallValidationReport,
+    VectorProjectionQualificationIdentity, VectorProjectionResourceEvidence,
+    VectorRecallProductionQualificationReport, VectorRecallValidationBlocker,
+    VectorRecallValidationOptions, VectorRecallValidationReport,
     MAX_VECTOR_RECALL_VALIDATION_CANDIDATE_LIMIT, MAX_VECTOR_RECALL_VALIDATION_SAMPLES,
     MAX_VECTOR_RECALL_VALIDATION_TOP_K, MINIMUM_VECTOR_QUALIFICATION_DOCUMENT_COUNT,
     VECTOR_RECALL_PRODUCTION_QUALIFICATION_PROTOCOL, VECTOR_RECALL_VALIDATION_PROTOCOL,
@@ -597,7 +599,7 @@ impl SearchAccessControlContext {
         Ok(())
     }
 
-    fn apply_to_filters(
+    pub fn effective_metadata_filters(
         &self,
         metadata_filters: &BTreeMap<String, String>,
     ) -> Result<BTreeMap<String, String>> {
@@ -646,6 +648,84 @@ impl CompressedVectorSearchMode {
             Self::Disabled => "disabled",
             Self::Preferred => "preferred",
             Self::Required => "required",
+        }
+    }
+}
+
+pub const DEFAULT_VECTOR_SEARCH_WORKING_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VectorSearchKernelPreference {
+    #[default]
+    Auto,
+    Scalar,
+    Avx2,
+    Neon,
+}
+
+impl VectorSearchKernelPreference {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Scalar => "scalar",
+            Self::Avx2 => "avx2",
+            Self::Neon => "neon",
+        }
+    }
+
+    #[cfg(feature = "vector-search")]
+    pub(super) fn projection_preference(self) -> skein_vector_projection::KernelPreference {
+        match self {
+            Self::Auto => skein_vector_projection::KernelPreference::Auto,
+            Self::Scalar => skein_vector_projection::KernelPreference::Scalar,
+            Self::Avx2 => skein_vector_projection::KernelPreference::Avx2,
+            Self::Neon => skein_vector_projection::KernelPreference::Neon,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct VectorSearchExecutionOptions<'a> {
+    pub max_parallelism: NonZeroUsize,
+    pub max_working_bytes: usize,
+    pub kernel: VectorSearchKernelPreference,
+    pub task_context: Option<&'a skein_core::RuntimeTaskContext>,
+    capture_candidate_ids: bool,
+}
+
+impl<'a> VectorSearchExecutionOptions<'a> {
+    pub fn admitted(
+        max_working_bytes: usize,
+        task_context: &'a skein_core::RuntimeTaskContext,
+    ) -> Self {
+        Self {
+            max_parallelism: task_context.admitted_parallelism(),
+            max_working_bytes,
+            kernel: VectorSearchKernelPreference::Auto,
+            task_context: Some(task_context),
+            capture_candidate_ids: false,
+        }
+    }
+
+    pub fn with_kernel(mut self, kernel: VectorSearchKernelPreference) -> Self {
+        self.kernel = kernel;
+        self
+    }
+
+    pub fn capture_candidates_for_validation(mut self) -> Self {
+        self.capture_candidate_ids = true;
+        self
+    }
+}
+
+impl Default for VectorSearchExecutionOptions<'_> {
+    fn default() -> Self {
+        Self {
+            max_parallelism: NonZeroUsize::MIN,
+            max_working_bytes: DEFAULT_VECTOR_SEARCH_WORKING_BYTES,
+            kernel: VectorSearchKernelPreference::Auto,
+            task_context: None,
+            capture_candidate_ids: false,
         }
     }
 }
@@ -760,27 +840,58 @@ struct SearchExecutionStrategy<'a> {
     vector_backend_fallback_reason: Option<String>,
     payload_access: SearchPayloadAccess,
     capture_candidate_ids: bool,
+    vector_execution_options: VectorSearchExecutionOptions<'a>,
 }
 
 #[derive(Clone, Copy)]
-struct AdaptiveVectorExecutionControls {
+struct AdaptiveVectorExecutionControls<'a> {
     use_physical_range_reads: bool,
     capture_candidate_ids: bool,
+    vector_execution_options: VectorSearchExecutionOptions<'a>,
 }
 
-impl AdaptiveVectorExecutionControls {
+impl<'a> AdaptiveVectorExecutionControls<'a> {
     const IN_MEMORY: Self = Self {
         use_physical_range_reads: false,
         capture_candidate_ids: false,
+        vector_execution_options: VectorSearchExecutionOptions {
+            max_parallelism: NonZeroUsize::MIN,
+            max_working_bytes: DEFAULT_VECTOR_SEARCH_WORKING_BYTES,
+            kernel: VectorSearchKernelPreference::Auto,
+            task_context: None,
+            capture_candidate_ids: false,
+        },
     };
     const PERSISTED: Self = Self {
         use_physical_range_reads: true,
         capture_candidate_ids: false,
+        vector_execution_options: VectorSearchExecutionOptions {
+            max_parallelism: NonZeroUsize::MIN,
+            max_working_bytes: DEFAULT_VECTOR_SEARCH_WORKING_BYTES,
+            kernel: VectorSearchKernelPreference::Auto,
+            task_context: None,
+            capture_candidate_ids: false,
+        },
     };
     const RECALL_CANDIDATES: Self = Self {
         use_physical_range_reads: false,
         capture_candidate_ids: true,
+        vector_execution_options: VectorSearchExecutionOptions {
+            max_parallelism: NonZeroUsize::MIN,
+            max_working_bytes: DEFAULT_VECTOR_SEARCH_WORKING_BYTES,
+            kernel: VectorSearchKernelPreference::Auto,
+            task_context: None,
+            capture_candidate_ids: true,
+        },
     };
+
+    fn persisted(vector_execution_options: VectorSearchExecutionOptions<'a>) -> Self {
+        Self {
+            use_physical_range_reads: true,
+            capture_candidate_ids: vector_execution_options.capture_candidate_ids,
+            vector_execution_options,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -818,6 +929,7 @@ impl<'a> SearchExecutionStrategy<'a> {
                 SearchPayloadAccess::InMemory
             },
             capture_candidate_ids: false,
+            vector_execution_options: VectorSearchExecutionOptions::default(),
         }
     }
 
@@ -825,8 +937,7 @@ impl<'a> SearchExecutionStrategy<'a> {
         compression_preference: VectorCompressionPreference,
         policy: AdaptiveVectorBackendPolicy,
         recall_validation_probe: bool,
-        use_physical_range_reads: bool,
-        capture_candidate_ids: bool,
+        controls: AdaptiveVectorExecutionControls<'a>,
     ) -> Self {
         Self {
             vector_backend: VectorSearchBackendRequest::Adaptive(AdaptiveVectorSearchRequest {
@@ -835,12 +946,13 @@ impl<'a> SearchExecutionStrategy<'a> {
                 recall_validation_probe,
             }),
             vector_backend_fallback_reason: None,
-            payload_access: if use_physical_range_reads {
+            payload_access: if controls.use_physical_range_reads {
                 SearchPayloadAccess::PrunedRanges
             } else {
                 SearchPayloadAccess::InMemory
             },
-            capture_candidate_ids,
+            capture_candidate_ids: controls.capture_candidate_ids,
+            vector_execution_options: controls.vector_execution_options,
         }
     }
 }
@@ -2364,6 +2476,36 @@ impl SearchIndex {
         )
     }
 
+    pub fn try_search_with_options_adaptive_vector_projection_context(
+        &self,
+        query_text: &str,
+        query_embedding: Option<&[f32]>,
+        mode: SearchMode,
+        options: SearchQueryOptions,
+        adaptive_options: AdaptiveVectorSearchOptions,
+        vector_execution_options: VectorSearchExecutionOptions<'_>,
+    ) -> Result<SearchResultSet> {
+        if let Some(task_context) = vector_execution_options.task_context {
+            task_context
+                .checkpoint()
+                .map_err(|reason| SkeinError::Execution(format!("vector search task {reason}")))?;
+        }
+        let result = self.try_search_with_options_compressed_vector_projection_mode_internal(
+            query_text,
+            query_embedding,
+            mode,
+            options,
+            adaptive_options,
+            AdaptiveVectorExecutionControls::persisted(vector_execution_options),
+        )?;
+        if let Some(task_context) = vector_execution_options.task_context {
+            task_context
+                .checkpoint()
+                .map_err(|reason| SkeinError::Execution(format!("vector search task {reason}")))?;
+        }
+        Ok(result)
+    }
+
     pub fn search_with_options_adaptive_vector_projection(
         &self,
         query_text: &str,
@@ -2478,6 +2620,22 @@ impl SearchIndex {
         accumulator.finish()
     }
 
+    pub fn validate_sampled_vector_recall_access_control(
+        &self,
+        mut options: VectorRecallValidationOptions,
+        access_control: &SearchAccessControlContext,
+    ) -> VectorRecallValidationReport {
+        match access_control.effective_metadata_filters(&options.metadata_filters) {
+            Ok(filters) => options.metadata_filters = filters,
+            Err(_) => {
+                let mut accumulator = VectorRecallValidationAccumulator::new(0, &options);
+                accumulator.mark_metadata_filter_invalid();
+                return accumulator.finish();
+            }
+        }
+        self.validate_sampled_vector_recall(options)
+    }
+
     pub fn vector_projection_qualification_identity(
         &self,
     ) -> Option<VectorProjectionQualificationIdentity> {
@@ -2500,6 +2658,41 @@ impl SearchIndex {
                 embedding_model: manifest.identity.embedding_model.clone(),
                 embedding_version: manifest.identity.embedding_version.clone(),
                 file_backed: projection.is_file_backed(),
+            })
+        }
+        #[cfg(not(feature = "vector-search"))]
+        {
+            None
+        }
+    }
+
+    pub fn vector_projection_resource_evidence(&self) -> Option<VectorProjectionResourceEvidence> {
+        #[cfg(feature = "vector-search")]
+        {
+            let projection = self.turboquant_projection()?;
+            let manifest = projection.manifest();
+            let raw_vector_bytes = u64::try_from(manifest.document_count)
+                .unwrap_or(u64::MAX)
+                .saturating_mul(u64::try_from(manifest.dimension).unwrap_or(u64::MAX))
+                .saturating_mul(std::mem::size_of::<f32>() as u64);
+            let build_write_amplification_per_million = if raw_vector_bytes == 0 {
+                0
+            } else {
+                manifest
+                    .payload_bytes
+                    .saturating_mul(1_000_000)
+                    .checked_div(raw_vector_bytes)
+                    .unwrap_or(u64::MAX)
+            };
+            Some(VectorProjectionResourceEvidence {
+                segment_count: manifest.segments.len(),
+                requested_segment_rows: manifest.requested_segment_rows,
+                admitted_segment_rows: manifest.admitted_segment_rows,
+                configured_build_working_bytes: manifest.configured_build_working_bytes,
+                peak_build_working_bytes: manifest.peak_build_working_bytes,
+                raw_vector_bytes,
+                projection_payload_bytes: manifest.payload_bytes,
+                build_write_amplification_per_million,
             })
         }
         #[cfg(not(feature = "vector-search"))]
@@ -2542,8 +2735,7 @@ impl SearchIndex {
                 vector_compression_preference(adaptive_options.compression_mode),
                 adaptive_options.backend_policy,
                 adaptive_options.recall_validation_probe,
-                controls.use_physical_range_reads,
-                controls.capture_candidate_ids,
+                controls,
             ),
             None,
         )
@@ -2653,6 +2845,29 @@ impl SearchIndex {
         .expect("in-memory search path does not perform fallible range I/O")
     }
 
+    #[cfg(feature = "turbovec")]
+    pub fn search_with_turbovec_projection_for_validation(
+        &self,
+        projection: &turbovec_projection::TurbovecSearchProjection,
+        query_text: &str,
+        query_embedding: Option<&[f32]>,
+        mode: SearchMode,
+        options: SearchQueryOptions,
+    ) -> SearchResultSet {
+        let mut strategy =
+            SearchExecutionStrategy::fixed(VectorSearchBackend::Turbovec(projection), None, false);
+        strategy.capture_candidate_ids = true;
+        self.try_search_with_options_using_vector_backend(
+            query_text,
+            query_embedding,
+            mode,
+            options,
+            strategy,
+            None,
+        )
+        .expect("in-memory validation path does not perform fallible range I/O")
+    }
+
     fn try_search_with_options_using_vector_backend(
         &self,
         query_text: &str,
@@ -2672,6 +2887,7 @@ impl SearchIndex {
             vector_backend_fallback_reason,
             payload_access,
             capture_candidate_ids,
+            vector_execution_options,
         } = strategy;
         let query_terms = tokenize(query_text, &self.analyzer_lexicon);
         let mut vector_fallback_reason_codes = Vec::new();
@@ -2693,7 +2909,7 @@ impl SearchIndex {
                         access_control.policy_epoch
                     )));
                 }
-                access_control.apply_to_filters(&options.metadata_filters)?
+                access_control.effective_metadata_filters(&options.metadata_filters)?
             }
             None => options.metadata_filters.clone(),
         };
@@ -2859,6 +3075,7 @@ impl SearchIndex {
                 limit,
                 rank_window: options.rank_window,
                 capture_candidate_ids,
+                vector_execution_options,
                 fallback_reason_codes: &mut vector_fallback_reason_codes,
                 fallback_reasons: &mut vector_fallback_reasons,
             })?)

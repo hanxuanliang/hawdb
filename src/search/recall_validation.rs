@@ -152,6 +152,33 @@ pub struct VectorProjectionQualificationIdentity {
     pub file_backed: bool,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VectorProjectionResourceEvidence {
+    pub segment_count: usize,
+    pub requested_segment_rows: usize,
+    pub admitted_segment_rows: usize,
+    pub configured_build_working_bytes: usize,
+    pub peak_build_working_bytes: usize,
+    pub raw_vector_bytes: u64,
+    pub projection_payload_bytes: u64,
+    pub build_write_amplification_per_million: u64,
+}
+
+impl VectorProjectionResourceEvidence {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "segment_count": self.segment_count,
+            "requested_segment_rows": self.requested_segment_rows,
+            "admitted_segment_rows": self.admitted_segment_rows,
+            "configured_build_working_bytes": self.configured_build_working_bytes,
+            "peak_build_working_bytes": self.peak_build_working_bytes,
+            "raw_vector_bytes": self.raw_vector_bytes,
+            "projection_payload_bytes": self.projection_payload_bytes,
+            "build_write_amplification_per_million": self.build_write_amplification_per_million,
+        })
+    }
+}
+
 impl VectorProjectionQualificationIdentity {
     pub fn json(&self) -> serde_json::Value {
         serde_json::json!({

@@ -1,4 +1,7 @@
-use super::{cosine_similarity, SearchDocument, SearchFallbackReasonCode, VectorSearchBackend};
+use super::{
+    cosine_similarity, SearchDocument, SearchFallbackReasonCode, VectorSearchBackend,
+    VectorSearchExecutionOptions,
+};
 use crate::error::{Result, SkeinError};
 use skein_executor::{
     execute_vector_plan, VectorCandidate, VectorCandidateBatch, VectorCandidateScanMetrics,
@@ -27,6 +30,7 @@ pub(super) struct SearchVectorExecutionRequest<'a, 'b> {
     pub limit: usize,
     pub rank_window: Option<usize>,
     pub capture_candidate_ids: bool,
+    pub vector_execution_options: VectorSearchExecutionOptions<'a>,
     pub fallback_reason_codes: &'b mut Vec<SearchFallbackReasonCode>,
     pub fallback_reasons: &'b mut Vec<String>,
 }
@@ -42,6 +46,7 @@ pub(super) fn execute_search_vector_plan(
         limit,
         rank_window,
         capture_candidate_ids,
+        vector_execution_options,
         fallback_reason_codes,
         fallback_reasons,
     } = request;
@@ -78,6 +83,7 @@ pub(super) fn execute_search_vector_plan(
         raw_vector_bytes_read: 0,
         candidate_scan_metrics: None,
         capture_candidate_ids,
+        vector_execution_options,
     };
     let output = execute_vector_plan(&planned.plan, &mut source).map_err(|error| {
         SkeinError::Storage(format!("vector physical execution failed: {error}"))
@@ -103,6 +109,8 @@ struct SearchVectorSource<'a, 'b> {
     raw_vector_bytes_read: u64,
     candidate_scan_metrics: Option<VectorCandidateScanMetrics>,
     capture_candidate_ids: bool,
+    #[cfg_attr(not(feature = "vector-search"), allow(dead_code))]
+    vector_execution_options: VectorSearchExecutionOptions<'a>,
 }
 
 impl VectorExecutionSource for SearchVectorSource<'_, '_> {
@@ -148,7 +156,12 @@ impl VectorExecutionSource for SearchVectorSource<'_, '_> {
                     self.query_embedding,
                     request.candidate_limit,
                     allowlist,
-                    super::turboquant_projection::TurboQuantCandidateScanOptions::default(),
+                    super::turboquant_projection::TurboQuantCandidateScanOptions {
+                        max_parallelism: self.vector_execution_options.max_parallelism,
+                        max_working_bytes: self.vector_execution_options.max_working_bytes,
+                        kernel: self.vector_execution_options.kernel.projection_preference(),
+                        task_context: self.vector_execution_options.task_context,
+                    },
                 ) {
                     Ok(output) => {
                         self.record_candidate_scan_metrics(&output.report);
