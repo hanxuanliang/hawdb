@@ -888,6 +888,7 @@ impl SearchOutOfCoreReader {
                 ),
                 fallback_reason_codes: vector_fallback_reason_codes,
                 fallback_reasons: vector_fallback_reasons,
+                candidate_top_ids: Vec::new(),
                 top_hit_ids: top_ranked_ids(&vector_window_ranks, options.limit),
                 top_candidates: top_ranked_candidates(
                     &vector_window_ranks,
@@ -953,6 +954,7 @@ impl SearchOutOfCoreReader {
                 ),
                 fallback_reason_codes: text_fallback_reason_codes,
                 fallback_reasons: text_fallback_reasons,
+                candidate_top_ids: Vec::new(),
                 top_hit_ids: top_ranked_ids(&text_window_ranks, options.limit),
                 top_candidates: top_ranked_candidates(
                     &text_window_ranks,

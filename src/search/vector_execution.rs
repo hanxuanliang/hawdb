@@ -15,6 +15,7 @@ use std::collections::BTreeSet;
 
 pub(super) struct SearchVectorExecution {
     pub scores: BTreeMap<String, f64>,
+    pub candidate_ids: Vec<String>,
     pub report: VectorExecutionReport,
 }
 
@@ -25,6 +26,7 @@ pub(super) struct SearchVectorExecutionRequest<'a, 'b> {
     pub filter_fields: Vec<String>,
     pub limit: usize,
     pub rank_window: Option<usize>,
+    pub capture_candidate_ids: bool,
     pub fallback_reason_codes: &'b mut Vec<SearchFallbackReasonCode>,
     pub fallback_reasons: &'b mut Vec<String>,
 }
@@ -39,6 +41,7 @@ pub(super) fn execute_search_vector_plan(
         filter_fields,
         limit,
         rank_window,
+        capture_candidate_ids,
         fallback_reason_codes,
         fallback_reasons,
     } = request;
@@ -74,11 +77,13 @@ pub(super) fn execute_search_vector_plan(
         fallback_reasons,
         raw_vector_bytes_read: 0,
         candidate_scan_metrics: None,
+        capture_candidate_ids,
     };
     let output = execute_vector_plan(&planned.plan, &mut source).map_err(|error| {
         SkeinError::Storage(format!("vector physical execution failed: {error}"))
     })?;
     Ok(SearchVectorExecution {
+        candidate_ids: output.candidate_ids,
         scores: output
             .scores
             .into_iter()
@@ -97,6 +102,7 @@ struct SearchVectorSource<'a, 'b> {
     fallback_reasons: &'b mut Vec<String>,
     raw_vector_bytes_read: u64,
     candidate_scan_metrics: Option<VectorCandidateScanMetrics>,
+    capture_candidate_ids: bool,
 }
 
 impl VectorExecutionSource for SearchVectorSource<'_, '_> {
@@ -265,6 +271,10 @@ impl VectorExecutionSource for SearchVectorSource<'_, '_> {
 
     fn candidate_scan_metrics(&self) -> Option<VectorCandidateScanMetrics> {
         self.candidate_scan_metrics.clone()
+    }
+
+    fn capture_candidate_ids(&self) -> bool {
+        self.capture_candidate_ids
     }
 }
 

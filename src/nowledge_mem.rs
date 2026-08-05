@@ -12630,8 +12630,12 @@ mod tests {
             requested_sample_count: 2,
             executed_sample_count: 2,
             top_k: 1,
+            candidate_limit: 1,
             minimum_recall_per_million: 950_000,
             exact_hit_count: 2,
+            candidate_hit_count: 2,
+            candidate_overlap_count: 2,
+            candidate_recall_at_k_per_million: 1_000_000,
             approximate_hit_count: 2,
             overlap_count: 2,
             recall_at_k_per_million: 1_000_000,
@@ -16607,6 +16611,7 @@ mod tests {
             .validate_sampled_vector_recall(VectorRecallValidationOptions {
                 max_samples: 2,
                 top_k: 1,
+                candidate_limit: 1,
                 minimum_recall_per_million: 0,
                 metadata_filters: BTreeMap::new(),
             })
@@ -19844,6 +19849,7 @@ mod tests {
             .validate_sampled_vector_recall(VectorRecallValidationOptions {
                 max_samples: 2,
                 top_k: 1,
+                candidate_limit: 1,
                 minimum_recall_per_million: 1_000_000,
                 metadata_filters: BTreeMap::new(),
             });

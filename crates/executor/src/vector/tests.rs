@@ -8,6 +8,7 @@ struct TestSource {
     residual_ids: BTreeSet<String>,
     residual_adds_candidate: bool,
     scan_limits: Vec<usize>,
+    capture_candidate_ids: bool,
 }
 
 impl VectorExecutionSource for TestSource {
@@ -48,6 +49,10 @@ impl VectorExecutionSource for TestSource {
         _request: VectorRawRerankRequest<'_>,
     ) -> Result<Vec<VectorRawScore>, Self::Error> {
         Ok(self.raw_scores.clone())
+    }
+
+    fn capture_candidate_ids(&self) -> bool {
+        self.capture_candidate_ids
     }
 }
 
@@ -106,6 +111,7 @@ fn executes_filter_candidate_rerank_top_k_in_order() {
         residual_ids: BTreeSet::new(),
         residual_adds_candidate: false,
         scan_limits: Vec::new(),
+        capture_candidate_ids: true,
     };
 
     let output = execute_vector_plan(&quantized_plan(), &mut source).unwrap();
@@ -141,6 +147,7 @@ fn executes_filter_candidate_rerank_top_k_in_order() {
     assert_eq!(output.report.index_coverage_complete, None);
     assert!(output.report.fallback_reason_codes.is_empty());
     assert_eq!(output.report.reranked_candidate_count, 3);
+    assert_eq!(output.candidate_ids, vec!["a", "b", "c"]);
 }
 
 #[test]
@@ -175,6 +182,7 @@ fn rejects_raw_scores_outside_candidate_set() {
         residual_ids: BTreeSet::new(),
         residual_adds_candidate: false,
         scan_limits: Vec::new(),
+        capture_candidate_ids: false,
     };
 
     assert_eq!(
@@ -237,6 +245,7 @@ fn expands_candidate_window_for_residual_filters_within_budget() {
         residual_ids: BTreeSet::from(["b".to_string(), "d".to_string()]),
         residual_adds_candidate: false,
         scan_limits: Vec::new(),
+        capture_candidate_ids: true,
     };
 
     let output = execute_vector_plan(&plan, &mut source).unwrap();
@@ -245,6 +254,7 @@ fn expands_candidate_window_for_residual_filters_within_budget() {
     assert_eq!(output.report.candidate_scan_rounds, 2);
     assert_eq!(output.report.generated_candidate_count, 4);
     assert_eq!(output.report.residual_filtered_count, 2);
+    assert_eq!(output.candidate_ids, vec!["b", "d"]);
     assert_eq!(
         output
             .scores
@@ -286,6 +296,7 @@ fn rejects_residual_filter_candidate_injection() {
         residual_ids: BTreeSet::new(),
         residual_adds_candidate: true,
         scan_limits: Vec::new(),
+        capture_candidate_ids: false,
     };
 
     assert_eq!(

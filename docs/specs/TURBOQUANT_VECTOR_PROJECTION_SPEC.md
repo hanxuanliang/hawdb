@@ -116,3 +116,8 @@ identity; a stale revision, feature set, configuration, dataset fingerprint,
 canonical graph epoch, projection generation, source digest, or embedding
 identity fails closed. A generation-zero in-memory projection remains useful
 for development differential tests but cannot satisfy production admission.
+The bounded probe measures two distinct values against canonical raw-vector
+TopK: recall of the quantized candidate window before raw reranking, and recall
+of the final raw-reranked TopK. Candidate capture is enabled only inside this
+probe, is capped independently from TopK, and document identifiers are never
+serialized into the qualification report.

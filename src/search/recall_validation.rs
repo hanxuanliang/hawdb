@@ -7,6 +7,7 @@ pub const VECTOR_RECALL_PRODUCTION_QUALIFICATION_PROTOCOL: &str =
     "skein-vector-recall-production-qualification-v1";
 pub const MAX_VECTOR_RECALL_VALIDATION_SAMPLES: usize = 128;
 pub const MAX_VECTOR_RECALL_VALIDATION_TOP_K: usize = 100;
+pub const MAX_VECTOR_RECALL_VALIDATION_CANDIDATE_LIMIT: usize = 1_000;
 pub const MINIMUM_VECTOR_QUALIFICATION_DOCUMENT_COUNT: usize = 100_000;
 const PER_MILLION: u64 = 1_000_000;
 
@@ -14,6 +15,7 @@ const PER_MILLION: u64 = 1_000_000;
 pub struct VectorRecallValidationOptions {
     pub max_samples: usize,
     pub top_k: usize,
+    pub candidate_limit: usize,
     pub minimum_recall_per_million: u32,
     pub metadata_filters: std::collections::BTreeMap<String, String>,
 }
@@ -23,6 +25,7 @@ impl Default for VectorRecallValidationOptions {
         Self {
             max_samples: 32,
             top_k: 10,
+            candidate_limit: 40,
             minimum_recall_per_million: 950_000,
             metadata_filters: std::collections::BTreeMap::new(),
         }
@@ -33,12 +36,14 @@ impl Default for VectorRecallValidationOptions {
 pub enum VectorRecallValidationBlocker {
     NoSamplesRequested,
     TopKZero,
+    CandidateLimitBelowTopK,
     MetadataFilterInvalid,
     NoEligibleVectors,
     GroundTruthEmpty,
     ApproximateBackendUnavailable,
     ApproximateFallbackObserved,
     IndexCoverageIncomplete,
+    CandidateRecallBelowThreshold,
     RecallBelowThreshold,
 }
 
@@ -47,12 +52,14 @@ impl VectorRecallValidationBlocker {
         match self {
             Self::NoSamplesRequested => "no_samples_requested",
             Self::TopKZero => "top_k_zero",
+            Self::CandidateLimitBelowTopK => "candidate_limit_below_top_k",
             Self::MetadataFilterInvalid => "metadata_filter_invalid",
             Self::NoEligibleVectors => "no_eligible_vectors",
             Self::GroundTruthEmpty => "ground_truth_empty",
             Self::ApproximateBackendUnavailable => "approximate_backend_unavailable",
             Self::ApproximateFallbackObserved => "approximate_fallback_observed",
             Self::IndexCoverageIncomplete => "index_coverage_incomplete",
+            Self::CandidateRecallBelowThreshold => "candidate_recall_below_threshold",
             Self::RecallBelowThreshold => "recall_below_threshold",
         }
     }
@@ -67,8 +74,12 @@ pub struct VectorRecallValidationReport {
     pub requested_sample_count: usize,
     pub executed_sample_count: usize,
     pub top_k: usize,
+    pub candidate_limit: usize,
     pub minimum_recall_per_million: u32,
     pub exact_hit_count: usize,
+    pub candidate_hit_count: usize,
+    pub candidate_overlap_count: usize,
+    pub candidate_recall_at_k_per_million: u32,
     pub approximate_hit_count: usize,
     pub overlap_count: usize,
     pub recall_at_k_per_million: u32,
@@ -88,6 +99,7 @@ impl VectorRecallValidationReport {
             && self.requested_sample_count > 0
             && self.executed_sample_count == self.requested_sample_count
             && self.exact_hit_count > 0
+            && self.candidate_recall_at_k_per_million >= self.minimum_recall_per_million
             && self.fallback_count == 0
             && self.index_coverage_incomplete_count == 0
             && self.recall_at_k_per_million >= self.minimum_recall_per_million
@@ -103,8 +115,12 @@ impl VectorRecallValidationReport {
             "requested_sample_count": self.requested_sample_count,
             "executed_sample_count": self.executed_sample_count,
             "top_k": self.top_k,
+            "candidate_limit": self.candidate_limit,
             "minimum_recall_per_million": self.minimum_recall_per_million,
             "exact_hit_count": self.exact_hit_count,
+            "candidate_hit_count": self.candidate_hit_count,
+            "candidate_overlap_count": self.candidate_overlap_count,
+            "candidate_recall_at_k_per_million": self.candidate_recall_at_k_per_million,
             "approximate_hit_count": self.approximate_hit_count,
             "overlap_count": self.overlap_count,
             "recall_at_k_per_million": self.recall_at_k_per_million,
@@ -280,9 +296,12 @@ pub(super) struct VectorRecallValidationAccumulator {
     sample_candidate_count: usize,
     requested_sample_count: usize,
     top_k: usize,
+    candidate_limit: usize,
     minimum_recall_per_million: u32,
     executed_sample_count: usize,
     exact_hit_count: usize,
+    candidate_hit_count: usize,
+    candidate_overlap_count: usize,
     approximate_hit_count: usize,
     overlap_count: usize,
     fallback_count: usize,
@@ -305,9 +324,14 @@ impl VectorRecallValidationAccumulator {
                 .min(MAX_VECTOR_RECALL_VALIDATION_SAMPLES)
                 .min(sample_candidate_count),
             top_k: options.top_k.min(MAX_VECTOR_RECALL_VALIDATION_TOP_K),
+            candidate_limit: options
+                .candidate_limit
+                .min(MAX_VECTOR_RECALL_VALIDATION_CANDIDATE_LIMIT),
             minimum_recall_per_million: options.minimum_recall_per_million.min(PER_MILLION as u32),
             executed_sample_count: 0,
             exact_hit_count: 0,
+            candidate_hit_count: 0,
+            candidate_overlap_count: 0,
             approximate_hit_count: 0,
             overlap_count: 0,
             fallback_count: 0,
@@ -327,6 +351,10 @@ impl VectorRecallValidationAccumulator {
         self.top_k
     }
 
+    pub(super) fn candidate_limit(&self) -> usize {
+        self.candidate_limit.max(self.top_k)
+    }
+
     pub(super) fn mark_metadata_filter_invalid(&mut self) {
         self.metadata_filter_valid = false;
     }
@@ -334,11 +362,13 @@ impl VectorRecallValidationAccumulator {
     pub(super) fn record(
         &mut self,
         exact_ids: &[String],
+        candidate_ids: &[String],
         approximate_ids: &[String],
         approximate_retriever: &SearchRetrieverReport,
     ) {
         self.executed_sample_count = self.executed_sample_count.saturating_add(1);
         self.exact_hit_count = self.exact_hit_count.saturating_add(exact_ids.len());
+        self.candidate_hit_count = self.candidate_hit_count.saturating_add(candidate_ids.len());
         self.approximate_hit_count = self
             .approximate_hit_count
             .saturating_add(approximate_ids.len());
@@ -346,6 +376,12 @@ impl VectorRecallValidationAccumulator {
             .iter()
             .map(String::as_str)
             .collect::<BTreeSet<_>>();
+        self.candidate_overlap_count = self.candidate_overlap_count.saturating_add(
+            candidate_ids
+                .iter()
+                .filter(|id| exact_ids.contains(id.as_str()))
+                .count(),
+        );
         self.overlap_count = self.overlap_count.saturating_add(
             approximate_ids
                 .iter()
@@ -374,6 +410,8 @@ impl VectorRecallValidationAccumulator {
 
     pub(super) fn finish(self) -> VectorRecallValidationReport {
         let recall_at_k_per_million = ratio_per_million(self.overlap_count, self.exact_hit_count);
+        let candidate_recall_at_k_per_million =
+            ratio_per_million(self.candidate_overlap_count, self.exact_hit_count);
         let overlap_denominator = self.executed_sample_count.saturating_mul(self.top_k);
         let overlap_at_k_per_million = ratio_per_million(self.overlap_count, overlap_denominator);
         let average_filter_selectivity_per_million =
@@ -384,6 +422,9 @@ impl VectorRecallValidationAccumulator {
         }
         if self.top_k == 0 {
             blocker_codes.insert(VectorRecallValidationBlocker::TopKZero);
+        }
+        if self.candidate_limit < self.top_k {
+            blocker_codes.insert(VectorRecallValidationBlocker::CandidateLimitBelowTopK);
         }
         if !self.metadata_filter_valid {
             blocker_codes.insert(VectorRecallValidationBlocker::MetadataFilterInvalid);
@@ -403,6 +444,11 @@ impl VectorRecallValidationAccumulator {
         if self.index_coverage_incomplete_count > 0 {
             blocker_codes.insert(VectorRecallValidationBlocker::IndexCoverageIncomplete);
         }
+        if self.exact_hit_count > 0
+            && candidate_recall_at_k_per_million < self.minimum_recall_per_million
+        {
+            blocker_codes.insert(VectorRecallValidationBlocker::CandidateRecallBelowThreshold);
+        }
         if self.exact_hit_count > 0 && recall_at_k_per_million < self.minimum_recall_per_million {
             blocker_codes.insert(VectorRecallValidationBlocker::RecallBelowThreshold);
         }
@@ -415,8 +461,12 @@ impl VectorRecallValidationAccumulator {
             requested_sample_count: self.requested_sample_count,
             executed_sample_count: self.executed_sample_count,
             top_k: self.top_k,
+            candidate_limit: self.candidate_limit,
             minimum_recall_per_million: self.minimum_recall_per_million,
             exact_hit_count: self.exact_hit_count,
+            candidate_hit_count: self.candidate_hit_count,
+            candidate_overlap_count: self.candidate_overlap_count,
+            candidate_recall_at_k_per_million,
             approximate_hit_count: self.approximate_hit_count,
             overlap_count: self.overlap_count,
             recall_at_k_per_million,
@@ -528,6 +578,7 @@ mod tests {
             },
             fallback_reason_codes: Vec::new(),
             fallback_reasons: Vec::new(),
+            candidate_top_ids: Vec::new(),
             top_hit_ids: Vec::new(),
             top_candidates: Vec::new(),
         }
@@ -537,11 +588,13 @@ mod tests {
         let options = VectorRecallValidationOptions {
             max_samples: 1,
             top_k: 1,
+            candidate_limit: 1,
             minimum_recall_per_million: 1_000_000,
             metadata_filters: Default::default(),
         };
         let mut accumulator = VectorRecallValidationAccumulator::new(1, &options);
         accumulator.record(
+            &["a".to_string()],
             &["a".to_string()],
             &["a".to_string()],
             &retriever(TURBOQUANT_CANDIDATE_BACKEND),
@@ -590,6 +643,7 @@ mod tests {
         let options = VectorRecallValidationOptions {
             max_samples: 2,
             top_k: 2,
+            candidate_limit: 2,
             minimum_recall_per_million: 500_000,
             metadata_filters: Default::default(),
         };
@@ -597,9 +651,11 @@ mod tests {
         accumulator.record(
             &["a".to_string(), "b".to_string()],
             &["a".to_string(), "x".to_string()],
+            &["a".to_string(), "x".to_string()],
             &retriever(TURBOQUANT_CANDIDATE_BACKEND),
         );
         accumulator.record(
+            &["c".to_string(), "d".to_string()],
             &["c".to_string(), "d".to_string()],
             &["c".to_string(), "d".to_string()],
             &retriever(TURBOQUANT_CANDIDATE_BACKEND),
@@ -609,6 +665,9 @@ mod tests {
 
         assert!(report.ready);
         assert!(report.validates_required_approximate_backend());
+        assert_eq!(report.candidate_hit_count, 4);
+        assert_eq!(report.candidate_overlap_count, 3);
+        assert_eq!(report.candidate_recall_at_k_per_million, 750_000);
         assert_eq!(report.recall_at_k_per_million, 750_000);
         assert_eq!(report.overlap_at_k_per_million, 750_000);
         assert_eq!(report.average_filter_selectivity_per_million, 500_000);
@@ -622,12 +681,14 @@ mod tests {
         let options = VectorRecallValidationOptions {
             max_samples: 1,
             top_k: 1,
+            candidate_limit: 1,
             minimum_recall_per_million: 1_000_000,
             metadata_filters: Default::default(),
         };
         let mut accumulator = VectorRecallValidationAccumulator::new(1, &options);
         accumulator.record(
             &["a".to_string()],
+            &[],
             &[],
             &retriever("compressed_vector_projection_required"),
         );
@@ -642,6 +703,26 @@ mod tests {
         assert!(report
             .blocker_codes
             .contains(&VectorRecallValidationBlocker::RecallBelowThreshold));
+        assert!(report
+            .blocker_codes
+            .contains(&VectorRecallValidationBlocker::CandidateRecallBelowThreshold));
+    }
+
+    #[test]
+    fn candidate_limit_below_top_k_fails_closed() {
+        let options = VectorRecallValidationOptions {
+            max_samples: 1,
+            top_k: 2,
+            candidate_limit: 1,
+            minimum_recall_per_million: 0,
+            metadata_filters: Default::default(),
+        };
+        let report = VectorRecallValidationAccumulator::new(1, &options).finish();
+
+        assert!(!report.ready);
+        assert!(report
+            .blocker_codes
+            .contains(&VectorRecallValidationBlocker::CandidateLimitBelowTopK));
     }
 
     #[test]

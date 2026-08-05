@@ -69,9 +69,9 @@ use recall_validation::{sample_positions, VectorRecallValidationAccumulator};
 pub use recall_validation::{
     VectorProjectionQualificationIdentity, VectorRecallProductionQualificationReport,
     VectorRecallValidationBlocker, VectorRecallValidationOptions, VectorRecallValidationReport,
-    MAX_VECTOR_RECALL_VALIDATION_SAMPLES, MAX_VECTOR_RECALL_VALIDATION_TOP_K,
-    MINIMUM_VECTOR_QUALIFICATION_DOCUMENT_COUNT, VECTOR_RECALL_PRODUCTION_QUALIFICATION_PROTOCOL,
-    VECTOR_RECALL_VALIDATION_PROTOCOL,
+    MAX_VECTOR_RECALL_VALIDATION_CANDIDATE_LIMIT, MAX_VECTOR_RECALL_VALIDATION_SAMPLES,
+    MAX_VECTOR_RECALL_VALIDATION_TOP_K, MINIMUM_VECTOR_QUALIFICATION_DOCUMENT_COUNT,
+    VECTOR_RECALL_PRODUCTION_QUALIFICATION_PROTOCOL, VECTOR_RECALL_VALIDATION_PROTOCOL,
 };
 use vector_execution::{execute_search_vector_plan, SearchVectorExecutionRequest};
 
@@ -499,6 +499,7 @@ pub struct SearchRetrieverReport {
     pub candidate_set: SearchRetrieverCandidateSetReport,
     pub fallback_reason_codes: Vec<SearchFallbackReasonCode>,
     pub fallback_reasons: Vec<String>,
+    pub candidate_top_ids: Vec<String>,
     pub top_hit_ids: Vec<String>,
     pub top_candidates: Vec<SearchRetrieverCandidate>,
 }
@@ -720,6 +721,19 @@ fn recall_validation_hit_ids(
         .collect()
 }
 
+fn recall_validation_candidate_ids(
+    candidate_ids: &[String],
+    sampled_document_id: &str,
+    candidate_limit: usize,
+) -> Vec<String> {
+    candidate_ids
+        .iter()
+        .filter(|id| id.as_str() != sampled_document_id)
+        .take(candidate_limit)
+        .cloned()
+        .collect()
+}
+
 #[derive(Clone, Copy)]
 enum VectorSearchBackend<'a> {
     Scalar,
@@ -745,6 +759,28 @@ struct SearchExecutionStrategy<'a> {
     vector_backend: VectorSearchBackendRequest<'a>,
     vector_backend_fallback_reason: Option<String>,
     payload_access: SearchPayloadAccess,
+    capture_candidate_ids: bool,
+}
+
+#[derive(Clone, Copy)]
+struct AdaptiveVectorExecutionControls {
+    use_physical_range_reads: bool,
+    capture_candidate_ids: bool,
+}
+
+impl AdaptiveVectorExecutionControls {
+    const IN_MEMORY: Self = Self {
+        use_physical_range_reads: false,
+        capture_candidate_ids: false,
+    };
+    const PERSISTED: Self = Self {
+        use_physical_range_reads: true,
+        capture_candidate_ids: false,
+    };
+    const RECALL_CANDIDATES: Self = Self {
+        use_physical_range_reads: false,
+        capture_candidate_ids: true,
+    };
 }
 
 #[derive(Clone, Copy)]
@@ -781,6 +817,7 @@ impl<'a> SearchExecutionStrategy<'a> {
             } else {
                 SearchPayloadAccess::InMemory
             },
+            capture_candidate_ids: false,
         }
     }
 
@@ -789,6 +826,7 @@ impl<'a> SearchExecutionStrategy<'a> {
         policy: AdaptiveVectorBackendPolicy,
         recall_validation_probe: bool,
         use_physical_range_reads: bool,
+        capture_candidate_ids: bool,
     ) -> Self {
         Self {
             vector_backend: VectorSearchBackendRequest::Adaptive(AdaptiveVectorSearchRequest {
@@ -802,6 +840,7 @@ impl<'a> SearchExecutionStrategy<'a> {
             } else {
                 SearchPayloadAccess::InMemory
             },
+            capture_candidate_ids,
         }
     }
 }
@@ -2284,7 +2323,7 @@ impl SearchIndex {
             mode,
             options,
             AdaptiveVectorSearchOptions::new(compressed_vector_search_mode),
-            false,
+            AdaptiveVectorExecutionControls::IN_MEMORY,
         )
         .expect("in-memory search path does not perform fallible range I/O")
     }
@@ -2303,7 +2342,7 @@ impl SearchIndex {
             mode,
             options,
             AdaptiveVectorSearchOptions::new(compressed_vector_search_mode),
-            true,
+            AdaptiveVectorExecutionControls::PERSISTED,
         )
     }
 
@@ -2321,7 +2360,7 @@ impl SearchIndex {
             mode,
             options,
             adaptive_options,
-            true,
+            AdaptiveVectorExecutionControls::PERSISTED,
         )
     }
 
@@ -2339,7 +2378,7 @@ impl SearchIndex {
             mode,
             options,
             adaptive_options,
-            false,
+            AdaptiveVectorExecutionControls::IN_MEMORY,
         )
         .expect("in-memory search path does not perform fallible range I/O")
     }
@@ -2381,7 +2420,7 @@ impl SearchIndex {
                 .embedding
                 .as_deref()
                 .expect("sampled vector document has an embedding");
-            let query_options = SearchQueryOptions {
+            let exact_query_options = SearchQueryOptions {
                 limit: query_limit,
                 offset: 0,
                 rank_window: None,
@@ -2389,21 +2428,31 @@ impl SearchIndex {
                 metadata_filters: options.metadata_filters.clone(),
                 policy_epoch: None,
             };
-            let exact = self.search_with_options_adaptive_vector_projection(
-                "",
-                Some(embedding),
-                SearchMode::Vector,
-                query_options.clone(),
-                AdaptiveVectorSearchOptions::new(CompressedVectorSearchMode::Disabled)
-                    .as_recall_validation_probe(),
-            );
-            let approximate = self.search_with_options_adaptive_vector_projection(
-                "",
-                Some(embedding),
-                SearchMode::Vector,
-                query_options,
-                AdaptiveVectorSearchOptions::new(CompressedVectorSearchMode::Required),
-            );
+            let exact = self
+                .try_search_with_options_compressed_vector_projection_mode_internal(
+                    "",
+                    Some(embedding),
+                    SearchMode::Vector,
+                    exact_query_options.clone(),
+                    AdaptiveVectorSearchOptions::new(CompressedVectorSearchMode::Disabled)
+                        .as_recall_validation_probe(),
+                    AdaptiveVectorExecutionControls::IN_MEMORY,
+                )
+                .expect("in-memory recall validation does not perform fallible range I/O");
+            let approximate_query_options = SearchQueryOptions {
+                rank_window: Some(accumulator.candidate_limit().saturating_add(1)),
+                ..exact_query_options
+            };
+            let approximate = self
+                .try_search_with_options_compressed_vector_projection_mode_internal(
+                    "",
+                    Some(embedding),
+                    SearchMode::Vector,
+                    approximate_query_options,
+                    AdaptiveVectorSearchOptions::new(CompressedVectorSearchMode::Required),
+                    AdaptiveVectorExecutionControls::RECALL_CANDIDATES,
+                )
+                .expect("in-memory recall validation does not perform fallible range I/O");
             let exact_ids =
                 recall_validation_hit_ids(&exact, document.id.as_str(), accumulator.top_k());
             let approximate_ids =
@@ -2413,7 +2462,17 @@ impl SearchIndex {
                 .iter()
                 .find(|retriever| retriever.name == "vector")
                 .expect("vector search always reports the vector retriever");
-            accumulator.record(&exact_ids, &approximate_ids, approximate_retriever);
+            let candidate_ids = recall_validation_candidate_ids(
+                &approximate_retriever.candidate_top_ids,
+                document.id.as_str(),
+                accumulator.candidate_limit(),
+            );
+            accumulator.record(
+                &exact_ids,
+                &candidate_ids,
+                &approximate_ids,
+                approximate_retriever,
+            );
         }
 
         accumulator.finish()
@@ -2472,7 +2531,7 @@ impl SearchIndex {
         mode: SearchMode,
         options: SearchQueryOptions,
         adaptive_options: AdaptiveVectorSearchOptions,
-        use_physical_range_reads: bool,
+        controls: AdaptiveVectorExecutionControls,
     ) -> Result<SearchResultSet> {
         self.try_search_with_options_using_vector_backend(
             query_text,
@@ -2483,7 +2542,8 @@ impl SearchIndex {
                 vector_compression_preference(adaptive_options.compression_mode),
                 adaptive_options.backend_policy,
                 adaptive_options.recall_validation_probe,
-                use_physical_range_reads,
+                controls.use_physical_range_reads,
+                controls.capture_candidate_ids,
             ),
             None,
         )
@@ -2611,6 +2671,7 @@ impl SearchIndex {
             vector_backend: vector_backend_request,
             vector_backend_fallback_reason,
             payload_access,
+            capture_candidate_ids,
         } = strategy;
         let query_terms = tokenize(query_text, &self.analyzer_lexicon);
         let mut vector_fallback_reason_codes = Vec::new();
@@ -2788,7 +2849,7 @@ impl SearchIndex {
         let (vector_index_covered_document_count, vector_index_candidate_document_count) =
             vector_backend.index_coverage(&filtered_documents);
 
-        let vector_execution = if vector_available && mode != SearchMode::Text {
+        let mut vector_execution = if vector_available && mode != SearchMode::Text {
             Some(execute_search_vector_plan(SearchVectorExecutionRequest {
                 query_embedding: query_embedding
                     .expect("vector_available requires query embedding"),
@@ -2797,6 +2858,7 @@ impl SearchIndex {
                 filter_fields: vector_filter_fields,
                 limit,
                 rank_window: options.rank_window,
+                capture_candidate_ids,
                 fallback_reason_codes: &mut vector_fallback_reason_codes,
                 fallback_reasons: &mut vector_fallback_reasons,
             })?)
@@ -3005,6 +3067,10 @@ impl SearchIndex {
                 ),
                 fallback_reason_codes: vector_fallback_reason_codes,
                 fallback_reasons: vector_fallback_reasons,
+                candidate_top_ids: vector_execution
+                    .as_mut()
+                    .map(|execution| std::mem::take(&mut execution.candidate_ids))
+                    .unwrap_or_default(),
                 top_hit_ids: top_ranked_ids(&vector_window_ranks, limit),
                 top_candidates: top_ranked_candidates(&vector_window_ranks, &vector_scores, limit),
             },
@@ -3079,6 +3145,7 @@ impl SearchIndex {
                 ),
                 fallback_reason_codes: text_fallback_reason_codes,
                 fallback_reasons: text_fallback_reasons,
+                candidate_top_ids: Vec::new(),
                 top_hit_ids: top_ranked_ids(&text_window_ranks, limit),
                 top_candidates: top_ranked_candidates(&text_window_ranks, &text_scores, limit),
             },
@@ -9990,6 +10057,7 @@ mod tests {
         let report = index.validate_sampled_vector_recall(VectorRecallValidationOptions {
             max_samples: 2,
             top_k: 1,
+            candidate_limit: 1,
             minimum_recall_per_million: 1_000_000,
             metadata_filters: BTreeMap::from([("space_id".to_string(), "selected".to_string())]),
         });
@@ -9999,6 +10067,9 @@ mod tests {
         assert_eq!(report.sample_candidate_count, 2);
         assert_eq!(report.executed_sample_count, 2);
         assert_eq!(report.exact_hit_count, 2);
+        assert_eq!(report.candidate_hit_count, 2);
+        assert_eq!(report.candidate_overlap_count, 2);
+        assert_eq!(report.candidate_recall_at_k_per_million, 1_000_000);
         assert_eq!(report.approximate_hit_count, 2);
         assert_eq!(report.recall_at_k_per_million, 1_000_000);
         assert_eq!(report.overlap_at_k_per_million, 1_000_000);
@@ -10035,6 +10106,7 @@ mod tests {
         let report = index.validate_sampled_vector_recall(VectorRecallValidationOptions {
             max_samples: 2,
             top_k: 1,
+            candidate_limit: 1,
             minimum_recall_per_million: 1_000_000,
             metadata_filters: BTreeMap::new(),
         });
@@ -10042,6 +10114,8 @@ mod tests {
         assert!(report.ready, "{:?}", report.blocker_codes);
         assert_eq!(report.executed_sample_count, 2);
         assert_eq!(report.exact_hit_count, 2);
+        assert_eq!(report.candidate_hit_count, 2);
+        assert_eq!(report.candidate_recall_at_k_per_million, 1_000_000);
         assert_eq!(report.approximate_hit_count, 2);
         assert_eq!(report.fallback_count, 0);
         assert!(report.blocker_codes.is_empty());
@@ -10115,6 +10189,7 @@ mod tests {
             VectorRecallValidationOptions {
                 max_samples: 2,
                 top_k: 1,
+                candidate_limit: 1,
                 minimum_recall_per_million: 1_000_000,
                 metadata_filters: BTreeMap::new(),
             },

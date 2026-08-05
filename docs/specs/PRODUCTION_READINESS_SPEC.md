@@ -371,6 +371,10 @@ projection's generation, source graph epoch, raw-vector source digest, payload
 identity, format, algorithm, bit width, dimension, transform seed, embedding
 model/version, and document count. In-memory generation zero projections and
 corpora below 100,000 vector documents MUST NOT qualify production.
+The probe MUST report quantized candidate-window recall and final raw-reranked
+TopK recall separately. Candidate identifiers MAY be retained transiently by
+the validation execution path, but production evidence MUST contain only
+aggregate counts and per-million recall values.
 
 ## Route And Cutover Qualification
 

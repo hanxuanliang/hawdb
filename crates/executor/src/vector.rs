@@ -152,6 +152,10 @@ pub trait VectorExecutionSource {
     fn candidate_scan_metrics(&self) -> Option<VectorCandidateScanMetrics> {
         None
     }
+
+    fn capture_candidate_ids(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,6 +200,7 @@ pub struct VectorExecutionReport {
 #[derive(Debug, Clone, PartialEq)]
 pub struct VectorExecutionOutput {
     pub scores: Vec<VectorRawScore>,
+    pub candidate_ids: Vec<String>,
     pub report: VectorExecutionReport,
 }
 
@@ -348,6 +353,15 @@ pub fn execute_vector_plan<S: VectorExecutionSource>(
         scan_limit = scan_limit.saturating_mul(2).min(*candidate_limit);
     };
     let residual_filtered_count = generated_candidate_count.saturating_sub(batch.candidates.len());
+    let candidate_ids = if source.capture_candidate_ids() {
+        batch
+            .candidates
+            .iter()
+            .map(|candidate| candidate.id.clone())
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     let mut raw_scores = source
         .rerank_raw(VectorRawRerankRequest {
@@ -366,6 +380,7 @@ pub fn execute_vector_plan<S: VectorExecutionSource>(
         VectorScoreSource::RawVector
     };
     Ok(VectorExecutionOutput {
+        candidate_ids,
         report: VectorExecutionReport {
             backend: VectorExecutionBackend::from_candidate_source(*candidate_source),
             compression_mode: VectorCompressionMode::Unspecified,
