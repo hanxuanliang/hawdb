@@ -72,11 +72,13 @@ The sequential scheduler remains the deterministic differential oracle. On an
 admitted embedded query path, the eligible immutable in-memory fragment uses
 parallel morsel execution by default when at least two workers fit. Parallel
 execution MUST use the shared, runtime-governed pool and MUST NOT create a
-thread set per query or per morsel wave. The default worker ceiling is four and
-is further bounded by admitted CPU slots, the shared pool, morsel count, and
-per-worker memory. Automatic parallel activation requires at least four
-morsels per worker so scheduler and merge overhead do not dominate small
-scans. Ungoverned low-level executor calls remain serial.
+thread set per query or per morsel wave. The default per-query soft ceiling is
+one quarter of effective CPU capacity, rounded up, with a four-worker floor on
+machines that provide at least four slots and a sixteen-worker hard ceiling.
+It is further bounded by admitted CPU slots, current capacity, the shared pool,
+morsel count, and per-worker memory. Automatic parallel activation requires at
+least four morsels per worker so scheduler and merge overhead do not dominate
+small scans. Ungoverned low-level executor calls remain serial.
 
 Input references and worker output are retained for at most one worker wave.
 Workers MUST NOT call the host row consumer or mutate the query observer.

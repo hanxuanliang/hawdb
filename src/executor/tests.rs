@@ -765,12 +765,11 @@ fn columnar_numeric_fragment_matches_row_pipeline_and_reports_morsels() {
     let expected_workers = std::thread::available_parallelism()
         .unwrap_or(NonZeroUsize::MIN)
         .get()
-        .min(DEFAULT_MORSEL_MAX_PARALLELISM)
+        .min(MAX_MORSEL_PARALLELISM)
         .min(morsel_count / 4)
         .max(1);
     let task_context = RuntimeTaskContext::default().with_admitted_parallelism(
-        NonZeroUsize::new(DEFAULT_MORSEL_MAX_PARALLELISM)
-            .expect("default morsel parallelism is non-zero"),
+        NonZeroUsize::new(MAX_MORSEL_PARALLELISM).expect("default morsel parallelism is non-zero"),
     );
     let mut external = NoExternalReadOperator;
     let columnar = execute_with_output_limits_profile_and_external_and_context_and_memory(

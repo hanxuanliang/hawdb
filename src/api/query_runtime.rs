@@ -95,11 +95,10 @@ impl RuntimeAdmissionPlan {
         if !self.parallel_morsel_eligible {
             return 1;
         }
-        let cpu_slots = limits
-            .effective_cpu_slots
-            .get()
-            .min(self.morsel_parallelism)
-            .min(available_cpu_slots);
+        let cpu_slots =
+            crate::executor::default_morsel_cpu_ceiling(limits.effective_cpu_slots.get())
+                .min(self.morsel_parallelism)
+                .min(available_cpu_slots);
         if self.estimated_memory_bytes == 0 {
             return cpu_slots.max(1);
         }
@@ -552,7 +551,7 @@ pub(super) fn query_runtime_checkpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::executor::DEFAULT_MORSEL_MAX_PARALLELISM;
+    use crate::executor::{default_morsel_cpu_ceiling, MAX_MORSEL_PARALLELISM};
     use std::num::NonZeroUsize;
 
     fn limits(cpu_slots: usize, memory_budget_bytes: u64) -> skein_qos::RuntimeGovernorLimits {
@@ -578,7 +577,11 @@ mod tests {
             streaming_eligible: true,
             required_io_slots: 0,
             parallel_morsel_eligible,
-            morsel_parallelism: if parallel_morsel_eligible { 4 } else { 1 },
+            morsel_parallelism: if parallel_morsel_eligible {
+                MAX_MORSEL_PARALLELISM
+            } else {
+                1
+            },
         }
     }
 
@@ -586,8 +589,29 @@ mod tests {
     fn default_morsel_request_uses_governed_cpu_and_memory_slots() {
         let request = admission(true).runtime_work_request(1024, limits(8, 64 * 1024));
 
-        assert_eq!(request.cpu_slots, DEFAULT_MORSEL_MAX_PARALLELISM);
+        assert_eq!(request.cpu_slots, 4);
         assert_eq!(request.memory_bytes, 4 * 1024);
+    }
+
+    #[test]
+    fn default_morsel_cpu_ceiling_scales_with_effective_cpu_capacity() {
+        assert_eq!(default_morsel_cpu_ceiling(1), 1);
+        assert_eq!(default_morsel_cpu_ceiling(2), 2);
+        assert_eq!(default_morsel_cpu_ceiling(4), 4);
+        assert_eq!(default_morsel_cpu_ceiling(8), 4);
+        assert_eq!(default_morsel_cpu_ceiling(16), 4);
+        assert_eq!(default_morsel_cpu_ceiling(17), 5);
+        assert_eq!(default_morsel_cpu_ceiling(32), 8);
+        assert_eq!(default_morsel_cpu_ceiling(64), 16);
+        assert_eq!(default_morsel_cpu_ceiling(128), 16);
+
+        let request = admission(true).runtime_work_request(1024, limits(32, 1024 * 1024));
+        assert_eq!(request.cpu_slots, 8);
+        assert_eq!(request.memory_bytes, 8 * 1024);
+
+        let request = admission(true).runtime_work_request(1024, limits(64, 1024 * 1024));
+        assert_eq!(request.cpu_slots, 16);
+        assert_eq!(request.memory_bytes, 16 * 1024);
     }
 
     #[test]

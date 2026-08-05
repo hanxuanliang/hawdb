@@ -63,11 +63,13 @@ and algorithms outside active routes are not implied backlog items.
   - Default policy is adaptive: cap workers by runtime CPU admission, per-worker
     memory, input morsels, and the process-shared pool; retain serial execution
     for small or early-limit fragments. Require at least four morsels per
-    worker before parallel activation.
+    worker before parallel activation. Use one quarter of effective CPU
+    capacity as the per-query soft ceiling and stop scaling at 16 workers for
+    64-core and larger machines.
 
 - [ ] Qualify default parallel morsel execution on production-shaped workloads.
   - Require higher throughput without a p99, peak RSS, cancellation-latency, or
-    foreground-admission regression before raising the default worker cap.
+    foreground-admission regression across 4, 8, and 16 workers.
 
 - [ ] Close the remaining blocking-operator availability gaps for active
   workloads.

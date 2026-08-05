@@ -88,9 +88,20 @@ pub type Row = skein_executor::Row;
 pub type ReadExecutionProfile = skein_executor::ReadExecutionProfile<ScanPruningReport>;
 pub type ProfiledQueryRows = skein_executor::ProfiledQueryRows<ScanPruningReport>;
 pub type ProfiledQueryStream = skein_executor::ProfiledQueryStream<ScanPruningReport>;
-pub(crate) const DEFAULT_MORSEL_MAX_PARALLELISM: usize = 4;
+pub(crate) const MAX_MORSEL_PARALLELISM: usize = 16;
+const DEFAULT_MORSEL_CPU_SHARE_DIVISOR: usize = 4;
+const DEFAULT_MORSEL_MIN_PARALLELISM: usize = 4;
 pub(crate) const SOURCE_SEGMENT_SCAN_IO_DEPTH: usize = 2;
 const SOURCE_SEGMENT_SCAN_MAX_COALESCED_BYTES: u64 = 512 * 1024;
+
+pub(crate) fn default_morsel_cpu_ceiling(effective_cpu_slots: usize) -> usize {
+    let effective_cpu_slots = effective_cpu_slots.max(1);
+    effective_cpu_slots
+        .div_ceil(DEFAULT_MORSEL_CPU_SHARE_DIVISOR)
+        .max(DEFAULT_MORSEL_MIN_PARALLELISM)
+        .min(effective_cpu_slots)
+        .min(MAX_MORSEL_PARALLELISM)
+}
 
 pub(crate) fn supports_default_morsel_parallelism(plan: &PhysicalPlan, catalog: &Catalog) -> bool {
     columnar::supports_parallel_morsel_execution(plan, catalog)

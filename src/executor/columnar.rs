@@ -194,7 +194,7 @@ impl<'a> NumericFragment<'a> {
         let morsel_count = store
             .node_count_for_label(Some(label_id))
             .div_ceil(morsel_rows.max(1));
-        default_morsel_worker_count(morsel_count, DEFAULT_MORSEL_MAX_PARALLELISM)
+        default_morsel_worker_count(morsel_count, MAX_MORSEL_PARALLELISM)
     }
 
     fn stream(
@@ -244,7 +244,7 @@ impl<'a> NumericFragment<'a> {
         let pool_parallelism = pool
             .as_ref()
             .map_or(1, SharedExecutorPool::worker_count)
-            .min(DEFAULT_MORSEL_MAX_PARALLELISM);
+            .min(MAX_MORSEL_PARALLELISM);
         let admitted_parallelism = context
             .task_context
             .map(|task_context| task_context.admitted_parallelism().get())
@@ -935,6 +935,9 @@ mod tests {
         assert_eq!(default_morsel_worker_count(8, 4), 2);
         assert_eq!(default_morsel_worker_count(15, 4), 3);
         assert_eq!(default_morsel_worker_count(16, 4), 4);
+        assert_eq!(default_morsel_worker_count(32, 16), 8);
+        assert_eq!(default_morsel_worker_count(64, 16), 16);
+        assert_eq!(default_morsel_worker_count(128, 16), 16);
         assert_eq!(default_morsel_worker_count(64, 2), 2);
     }
 }
