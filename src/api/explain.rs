@@ -219,6 +219,27 @@ fn pipeline_memory_report_value(report: &skein_executor::PipelineMemoryReport) -
             "peak_batch_payload_bytes".to_string(),
             usize_value(report.peak_batch_payload_bytes),
         ),
+        (
+            "columnar_batches".to_string(),
+            usize_value(report.columnar_batches),
+        ),
+        (
+            "columnar_input_rows".to_string(),
+            usize_value(report.columnar_input_rows),
+        ),
+        (
+            "columnar_selected_rows".to_string(),
+            usize_value(report.columnar_selected_rows),
+        ),
+        ("morsel_count".to_string(), usize_value(report.morsel_count)),
+        (
+            "morsel_max_admitted_workers".to_string(),
+            usize_value(report.morsel_max_admitted_workers),
+        ),
+        (
+            "morsel_peak_active_workers".to_string(),
+            usize_value(report.morsel_peak_active_workers),
+        ),
         ("output_rows".to_string(), usize_value(report.output_rows)),
         (
             "output_payload_bytes".to_string(),

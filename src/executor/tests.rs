@@ -628,6 +628,107 @@ fn graph_algorithms_admit_direction_specific_projections() {
 }
 
 #[test]
+fn columnar_numeric_fragment_matches_row_pipeline_and_reports_morsels() {
+    let mut catalog = Catalog::default();
+    let table = catalog.get_or_create_table(crate::schema::TableKind::Node, "Item");
+    catalog.get_or_create_property(table, "score", crate::schema::PropertyType::Int, true);
+    let mut store = GraphStore::in_memory();
+    for row in 0..513i64 {
+        let values = if row % 10 == 0 {
+            properties([("name", Value::String(format!("item-{row}")))])
+        } else {
+            properties([
+                ("score", Value::Int(row)),
+                ("name", Value::String(format!("item-{row}"))),
+            ])
+        };
+        store.create_node(&mut catalog, "Item", values).unwrap();
+    }
+    let compare = Predicate::PropertyCompare {
+        variable: "n".to_string(),
+        property: "score".to_string(),
+        op: crate::planner::ComparisonOp::Gte,
+        value: Value::Float(480.0),
+    };
+    let items = vec![
+        Projection {
+            expression: ProjectionExpression::Id {
+                variable: "n".to_string(),
+            },
+            name: "node_id".to_string(),
+        },
+        Projection {
+            expression: ProjectionExpression::Property {
+                variable: "n".to_string(),
+                property: "name".to_string(),
+            },
+            name: "name".to_string(),
+        },
+    ];
+    let scan = PhysicalPlan::SeqNodeScan {
+        variable: "n".to_string(),
+        label: "Item".to_string(),
+    };
+    let columnar_plan = PhysicalPlan::LimitExec {
+        offset: 3,
+        limit: Some(17),
+        input: Box::new(PhysicalPlan::ProjectExec {
+            items: items.clone(),
+            input: Box::new(PhysicalPlan::FilterExec {
+                predicate: compare.clone(),
+                input: Box::new(scan.clone()),
+            }),
+        }),
+    };
+    let row_plan = PhysicalPlan::LimitExec {
+        offset: 3,
+        limit: Some(17),
+        input: Box::new(PhysicalPlan::ProjectExec {
+            items,
+            input: Box::new(PhysicalPlan::FilterExec {
+                predicate: Predicate::And(vec![compare]),
+                input: Box::new(scan),
+            }),
+        }),
+    };
+    let memory = ExecutionMemoryConfig {
+        batch_rows: NonZeroUsize::new(32).unwrap(),
+        ..ExecutionMemoryConfig::default()
+    };
+    let mut external = NoExternalReadOperator;
+    let columnar = execute_with_row_limit_profile_and_external_and_memory(
+        &columnar_plan,
+        &mut catalog,
+        &mut store,
+        &BTreeMap::new(),
+        &mut external,
+        None,
+        &memory,
+    )
+    .unwrap();
+    let row = execute_with_row_limit_profile_and_external_and_memory(
+        &row_plan,
+        &mut catalog,
+        &mut store,
+        &BTreeMap::new(),
+        &mut external,
+        None,
+        &memory,
+    )
+    .unwrap();
+
+    assert_eq!(columnar.rows, row.rows);
+    assert_eq!(columnar.rows.len(), 17);
+    let report = &columnar.profile.pipeline_memory_report;
+    assert!(report.columnar_batches > 0);
+    assert!(report.columnar_input_rows >= report.columnar_selected_rows);
+    assert_eq!(report.columnar_batches, report.morsel_count);
+    assert_eq!(report.morsel_max_admitted_workers, 1);
+    assert_eq!(report.morsel_peak_active_workers, 1);
+    assert_eq!(row.profile.pipeline_memory_report.columnar_batches, 0);
+}
+
+#[test]
 fn node_column_lookup_uses_property_index_pruning_for_exact_label() {
     let mut catalog = Catalog::default();
     let mut store = GraphStore::in_memory();

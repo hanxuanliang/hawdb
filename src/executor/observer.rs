@@ -114,6 +114,30 @@ pub(super) fn record_pipeline_batch(batch: &[Binding]) {
     });
 }
 
+pub(super) fn record_columnar_batch(input_rows: usize, selected_rows: usize) {
+    PIPELINE_MEMORY_REPORT_CAPTURE.with(|capture| {
+        let mut capture = capture.borrow_mut();
+        let Some(report) = capture.as_mut() else {
+            return;
+        };
+        report.columnar_batches = report.columnar_batches.saturating_add(1);
+        report.columnar_input_rows = report.columnar_input_rows.saturating_add(input_rows);
+        report.columnar_selected_rows = report.columnar_selected_rows.saturating_add(selected_rows);
+        report.morsel_count = report.morsel_count.saturating_add(1);
+    });
+}
+
+pub(super) fn record_morsel_admission(max_workers: usize, active_workers: usize) {
+    PIPELINE_MEMORY_REPORT_CAPTURE.with(|capture| {
+        let mut capture = capture.borrow_mut();
+        let Some(report) = capture.as_mut() else {
+            return;
+        };
+        report.morsel_max_admitted_workers = report.morsel_max_admitted_workers.max(max_workers);
+        report.morsel_peak_active_workers = report.morsel_peak_active_workers.max(active_workers);
+    });
+}
+
 pub(super) fn capture_blocking_memory_reports<T>(
     f: impl FnOnce() -> Result<T>,
 ) -> Result<(T, Vec<skein_executor::BlockingOperatorMemoryReport>)> {

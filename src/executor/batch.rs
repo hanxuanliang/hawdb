@@ -745,6 +745,11 @@ fn execute_binding_batches_inner(
             })
         }
         PhysicalPlan::ProjectExec { items, input } => {
+            if let Some(result) =
+                try_stream_columnar_projection_batches(items, input, context, execution_limit, emit)
+            {
+                return result;
+            }
             let mut emitted = 0usize;
             execute_binding_batches(input, context, execution_limit, &mut |batch| {
                 let mut projected = Vec::with_capacity(batch.len());

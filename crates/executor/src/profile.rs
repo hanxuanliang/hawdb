@@ -24,6 +24,18 @@ pub struct PipelineMemoryReport {
     pub intermediate_payload_bytes: usize,
     pub peak_batch_rows: usize,
     pub peak_batch_payload_bytes: usize,
+    /// Number of typed columnar batches evaluated by eligible pipeline fragments.
+    pub columnar_batches: usize,
+    /// Rows loaded into typed columns before selection.
+    pub columnar_input_rows: usize,
+    /// Rows retained by columnar selections.
+    pub columnar_selected_rows: usize,
+    /// Morsels consumed by columnar fragments.
+    pub morsel_count: usize,
+    /// Highest resource-admitted worker count across morsel pipelines.
+    pub morsel_max_admitted_workers: usize,
+    /// Highest worker count actually used by a morsel scheduler.
+    pub morsel_peak_active_workers: usize,
     pub output_rows: usize,
     pub output_payload_bytes: usize,
     /// Resident memory before execution, when process sampling is supported.

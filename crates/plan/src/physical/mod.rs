@@ -27,6 +27,10 @@ pub struct GraphExpansionBudget {
     pub payload_byte_limit: usize,
 }
 
+/// Compatibility plan exchanged by the public planner and executor facades.
+///
+/// New storage-independent analysis should target the decomposed internal plan
+/// representation instead of adding more cross-domain behavior to this enum.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PhysicalPlan {
     CreateNodeLabel {

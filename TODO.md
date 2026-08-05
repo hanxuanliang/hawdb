@@ -51,6 +51,18 @@ and algorithms outside active routes are not implied backlog items.
 
 ## P1: Runtime And Availability Hardening
 
+- [ ] Activate shared-pool parallel morsel execution for immutable read
+  fragments.
+  - Keep the sequential ordinal scheduler as the differential oracle.
+  - Use a host-shared runtime-governed pool; never create worker threads per
+    query or morsel wave.
+  - Admit CPU slots, per-worker memory, result bytes, cancellation, and storage
+    I/O depth independently, and keep all morsels on one pinned snapshot.
+  - Start with independent read-only scan fragments and deterministic ordinal
+    merge. Mutations and graph traversal level barriers remain serial.
+  - Acceptance: production-shaped benchmarks show higher throughput without a
+    p99, peak RSS, cancellation-latency, or foreground-admission regression.
+
 - [ ] Close the remaining blocking-operator availability gaps for active
   workloads.
   - Capture route evidence for high-cardinality `DISTINCT` and Cartesian build

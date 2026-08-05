@@ -113,7 +113,51 @@ impl PhysicalPlan {
             | PhysicalPlan::SortExec { input, .. }
             | PhysicalPlan::TopNExec { input, .. }
             | PhysicalPlan::LimitExec { input, .. } => PlanChildren::Unary(input),
-            _ => PlanChildren::None,
+            PhysicalPlan::CreateNodeLabel { .. }
+            | PhysicalPlan::CreateRelationshipType { .. }
+            | PhysicalPlan::CreateNodeTable { .. }
+            | PhysicalPlan::CreateRelationshipTable { .. }
+            | PhysicalPlan::CreateProperty { .. }
+            | PhysicalPlan::AlterTableState { .. }
+            | PhysicalPlan::AlterPropertyState { .. }
+            | PhysicalPlan::CreateIndex { .. }
+            | PhysicalPlan::CreateCompositeIndex { .. }
+            | PhysicalPlan::CreateRangeIndex { .. }
+            | PhysicalPlan::CreateFullTextIndex { .. }
+            | PhysicalPlan::CreateUniqueConstraint { .. }
+            | PhysicalPlan::CreateNodePropertyExistsConstraint { .. }
+            | PhysicalPlan::CreateRelationshipUniqueConstraint { .. }
+            | PhysicalPlan::CreateRelationshipPropertyExistsConstraint { .. }
+            | PhysicalPlan::ProjectGraph { .. }
+            | PhysicalPlan::GraphAlgorithm { .. }
+            | PhysicalPlan::VectorSeedScan { .. }
+            | PhysicalPlan::CreateNode { .. }
+            | PhysicalPlan::MergeNode { .. }
+            | PhysicalPlan::MergeRelationship { .. }
+            | PhysicalPlan::MergeMatchedRelationship { .. }
+            | PhysicalPlan::MergeRelationshipFromMatchedRelationship { .. }
+            | PhysicalPlan::MergeRelationshipToMatchedTarget { .. }
+            | PhysicalPlan::MergeRelationshipFromMatchedTarget { .. }
+            | PhysicalPlan::CreateMatchedRelationship { .. }
+            | PhysicalPlan::SetNodeProperty { .. }
+            | PhysicalPlan::SetNodeProperties { .. }
+            | PhysicalPlan::SetNodePropertiesReturn { .. }
+            | PhysicalPlan::SetRelationshipProperty { .. }
+            | PhysicalPlan::SetRelationshipProperties { .. }
+            | PhysicalPlan::DeleteNode { .. }
+            | PhysicalPlan::DeleteRelationship { .. }
+            | PhysicalPlan::DeleteRelationshipTargetNodes { .. }
+            | PhysicalPlan::CreateRelationship { .. }
+            | PhysicalPlan::SeqNodeScan { .. }
+            | PhysicalPlan::SourceSegmentScan { .. }
+            | PhysicalPlan::IndexNodeSeek { .. }
+            | PhysicalPlan::IndexNodeMultiSeek { .. }
+            | PhysicalPlan::IndexNodeCompositeSeek { .. }
+            | PhysicalPlan::IndexNodeRangeSeek { .. }
+            | PhysicalPlan::IndexNodeTextSeek { .. }
+            | PhysicalPlan::OptionalRelationshipCountSumExec { .. }
+            | PhysicalPlan::ThreadRepairStatsExec { .. }
+            | PhysicalPlan::ShortestPathExec { .. } => PlanChildren::None,
         }
     }
 }

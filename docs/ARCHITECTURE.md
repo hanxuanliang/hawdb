@@ -389,18 +389,21 @@ between optimizer and executor. That shape is intentionally compatibility-first:
 it keeps execution, explain output, and deterministic fingerprints stable while
 the Nowledge replacement surface is still growing.
 
-The long-term direction is closer to RisingWave's plan-node organization:
-operator-specific structs own their private fields, every node exposes stable
-metadata, and common optimizer code works through plan-node references plus
-properties instead of matching one large enum everywhere. Skein should migrate
-in that direction incrementally:
+The flat enum is a compatibility surface, not the long-term internal ownership
+boundary. Skein should migrate incrementally toward a statement root that
+separates schema, mutation, query, and procedure plans. Query plans should use a
+framework-owned node shape with operator payload, inputs, and physical
+properties kept as separate contracts:
 
 - keep `PhysicalPlan` as the public compatibility facade until executor
   contracts are stable
-- use `PhysicalPlanDomainRef` and its schema, mutation, access, traversal,
-  relational, and procedure wrappers as the zero-copy typed boundary for
-  domain-specific behavior; callers cannot construct a wrapper for the wrong
-  operator domain
+- keep `PhysicalPlanDomainRef` only as a zero-copy compatibility and diagnostic
+  view; it classifies the flat facade but does not provide type-level isolation
+- lower the facade once into an internal `PlannedStatement` root before moving
+  costing, cardinality, properties, memory estimation, and traversal onto the
+  decomposed representation
+- keep query operators as a smaller closed enum with named payload structs;
+  keep child topology owned by the query-node representation
 - keep `PhysicalPlanKind`, `PhysicalPlanClass`, `PlanChildren`, `PlanNode`, and
   plan histogram helpers beside the IR in `skein-plan`
 - keep `OptimizationSearchReport`, `SelectedPlanTrace`, memo/rule primitives,
@@ -410,8 +413,8 @@ in that direction incrementally:
   separate from rule execution
 - split optimizer tests by plan structure, search costing, aggregate costing,
   and traversal costing so failures retain a clear ownership boundary
-- migrate domain behavior behind the typed wrappers before introducing
-  per-node structs behind the facade
+- migrate executor dispatch, explain, fingerprinting, and plan-cache identity
+  only after the storage-independent analysis paths use the decomposed form
 - do not add another graph-optimizer crate unless the graph module develops an
   independently reusable contract and the dependency direction remains acyclic
 

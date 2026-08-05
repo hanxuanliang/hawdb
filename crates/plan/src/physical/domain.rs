@@ -34,6 +34,9 @@ define_domain_plan_ref!(TraversalPhysicalPlanRef);
 define_domain_plan_ref!(RelationalPhysicalPlanRef);
 define_domain_plan_ref!(ProcedurePhysicalPlanRef);
 
+/// Zero-copy diagnostic classification of the compatibility plan facade.
+///
+/// These references do not provide a decomposed, type-isolated plan model.
 #[derive(Debug, Clone, Copy)]
 pub enum PhysicalPlanDomainRef<'a> {
     Schema(SchemaPhysicalPlanRef<'a>),

@@ -89,3 +89,7 @@ harness = false
 [[bench]]
 name = "store_cow_feasibility"
 harness = false
+
+[[bench]]
+name = "executor_vectorization"
+harness = false

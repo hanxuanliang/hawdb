@@ -5,8 +5,9 @@ use crate::cypher::RelationshipDirection;
 use crate::error::{Result, SkeinError};
 use crate::optimizer::PhysicalPlan;
 use crate::planner::{
-    Aggregation, GraphAlgorithmKind, Predicate, Projection, RelationshipCountLeg,
-    RelationshipOnCreateValue, SetNodePropertiesReturnMode, SetValue, SortItem,
+    Aggregation, GraphAlgorithmKind, Predicate, Projection, ProjectionExpression,
+    RelationshipCountLeg, RelationshipOnCreateValue, SetNodePropertiesReturnMode, SetValue,
+    SortItem,
 };
 use crate::schema::Catalog;
 use crate::store::{
@@ -27,6 +28,7 @@ use std::num::{NonZeroU64, NonZeroUsize};
 
 mod batch;
 mod blocking;
+mod columnar;
 mod expression;
 mod mutation;
 mod observer;
@@ -38,6 +40,7 @@ mod vector;
 
 use batch::*;
 use blocking::*;
+use columnar::*;
 use expression::*;
 pub use mutation::{execute_mutation_with_limits, is_mutation_plan, mutation_command};
 use mutation::{
