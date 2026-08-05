@@ -5,7 +5,7 @@ use super::*;
 pub(super) use skein_executor::expression::{
     exact_relationship_scan_filter_from_predicate, insert_projected_value,
     node_scan_filter_from_predicate, predicate_references_only_variable, project_value,
-    property_filter_from_predicate, relationship_filter_from_properties_and_predicate, sort_value,
+    property_filter_from_predicate, relationship_filter_from_properties_and_predicate,
 };
 
 pub(super) fn evaluate_predicate(

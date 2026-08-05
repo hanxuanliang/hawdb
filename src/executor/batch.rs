@@ -819,133 +819,15 @@ fn execute_binding_batches_inner(
             offset,
             limit,
             input,
-        } => {
-            let retained = offset.saturating_add(*limit);
-            if retained == 0 {
-                return Ok(BatchControl::Continue);
-            }
-            let mut tracker = OperatorMemoryTracker::new(memory.blocking_operator_bytes);
-            let mut spill_budget = SpillBudgetTracker::new("TopNExec", memory);
-            let mut runs = Vec::<spill::SpillRun>::new();
-            let mut heap = BinaryHeap::new();
-            let mut ordinal = 0u64;
-            let mut spilled_rows = 0usize;
-            execute_binding_batches(input, context, ExecutionLimit::unlimited(), &mut |batch| {
-                for binding in batch {
-                    let sort_values = items
-                        .iter()
-                        .map(|item| (sort_value(catalog, &binding, &item.key), item.direction))
-                        .collect();
-                    let candidate = TopNBinding {
-                        sort_values,
-                        ordinal,
-                        binding,
-                    };
-                    ordinal = ordinal.saturating_add(1);
-                    let bytes = candidate.memory_bytes();
-                    ensure_operator_item_fits("TopNExec", bytes, &tracker)?;
-                    if heap.len() < retained {
-                        if tracker.would_exceed(bytes) {
-                            spilled_rows = spilled_rows.saturating_add(heap.len());
-                            runs.push(spill_top_n_run(
-                                &mut heap,
-                                &memory.spill_directory,
-                                &mut spill_budget,
-                                context.task_context,
-                            )?);
-                            tracker.reset();
-                        }
-                        tracker.charge(bytes);
-                        heap.push(candidate);
-                    } else if heap.peek().is_some_and(|worst| candidate < *worst) {
-                        let worst_bytes = heap.peek().map(TopNBinding::memory_bytes).unwrap_or(0);
-                        if tracker
-                            .used_bytes
-                            .saturating_sub(worst_bytes)
-                            .saturating_add(bytes)
-                            > tracker.budget_bytes
-                        {
-                            spilled_rows = spilled_rows.saturating_add(heap.len());
-                            runs.push(spill_top_n_run(
-                                &mut heap,
-                                &memory.spill_directory,
-                                &mut spill_budget,
-                                context.task_context,
-                            )?);
-                            tracker.reset();
-                        } else {
-                            heap.pop();
-                            tracker.release(worst_bytes);
-                        }
-                        tracker.charge(bytes);
-                        heap.push(candidate);
-                    }
-                }
-                Ok(BatchControl::Continue)
-            })?;
-
-            if !runs.is_empty() {
-                if !heap.is_empty() {
-                    spilled_rows = spilled_rows.saturating_add(heap.len());
-                    runs.push(spill_top_n_run(
-                        &mut heap,
-                        &memory.spill_directory,
-                        &mut spill_budget,
-                        context.task_context,
-                    )?);
-                }
-                runs = compact_sort_runs(
-                    runs,
-                    items,
-                    catalog,
-                    memory,
-                    &mut spill_budget,
-                    context.task_context,
-                )?;
-                record_blocking_memory_report(skein_executor::BlockingOperatorMemoryReport {
-                    operator: "TopNExec".to_string(),
-                    budget_bytes: tracker.budget_bytes,
-                    peak_tracked_bytes: tracker.peak_bytes,
-                    input_rows: ordinal as usize,
-                    max_spill_bytes: spill_budget.max_bytes,
-                    max_spill_runs: spill_budget.max_runs,
-                    spilled_bytes: spill_budget.used_bytes,
-                    spill_run_count: spill_budget.run_count,
-                    spilled_rows,
-                });
-                return merge_sort_runs(
-                    &runs,
-                    items,
-                    catalog,
-                    memory.blocking_operator_bytes,
-                    memory.batch_rows.get(),
-                    *offset,
-                    (*limit).min(execution_limit.output_rows.unwrap_or(usize::MAX)),
-                    context.task_context,
-                    emit,
-                );
-            }
-            record_blocking_memory_report(skein_executor::BlockingOperatorMemoryReport {
-                operator: "TopNExec".to_string(),
-                budget_bytes: tracker.budget_bytes,
-                peak_tracked_bytes: tracker.peak_bytes,
-                input_rows: ordinal as usize,
-                max_spill_bytes: memory.max_spill_bytes.get(),
-                max_spill_runs: memory.max_spill_runs.get(),
-                spilled_bytes: 0,
-                spill_run_count: 0,
-                spilled_rows: 0,
-            });
-            let mut selected = heap.into_vec();
-            selected.sort();
-            let bindings = selected
-                .into_iter()
-                .skip(*offset)
-                .take(*limit)
-                .take(execution_limit.output_rows.unwrap_or(usize::MAX))
-                .map(|entry| entry.binding);
-            emit_binding_iterator(bindings, memory.batch_rows.get(), emit)
-        }
+        } => stream_top_n_batches(
+            input,
+            items,
+            *offset,
+            *limit,
+            context,
+            execution_limit,
+            emit,
+        ),
         PhysicalPlan::SortExec { items, input } => {
             stream_sort_batches(input, items, context, execution_limit, emit)
         }

@@ -5,9 +5,7 @@ use skein_executor::blocking::{
     self as executor_blocking, BindingBatchSource, BlockingExecutionContext,
 };
 
-pub(super) use executor_blocking::{
-    compact_sort_runs, merge_sort_runs, spill_binding_run, spill_top_n_run,
-};
+pub(super) use executor_blocking::spill_binding_run;
 
 struct RootBindingBatchSource<'a> {
     context: BatchReadContext<'a>,
@@ -56,6 +54,34 @@ pub(super) fn stream_sort_batches(
     executor_blocking::stream_sort_batches(
         input,
         items,
+        &mut source,
+        BlockingExecutionContext {
+            catalog: context.catalog,
+            memory: context.memory,
+            task_context: context.task_context,
+            observer: &mut RootExecutionObserver,
+        },
+        execution_limit,
+        emit,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn stream_top_n_batches(
+    input: &PhysicalPlan,
+    items: &[SortItem],
+    offset: usize,
+    limit: usize,
+    context: BatchReadContext<'_>,
+    execution_limit: ExecutionLimit,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    let mut source = RootBindingBatchSource { context };
+    executor_blocking::stream_top_n_batches(
+        input,
+        items,
+        offset,
+        limit,
         &mut source,
         BlockingExecutionContext {
             catalog: context.catalog,

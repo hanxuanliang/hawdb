@@ -131,4 +131,52 @@ mod tests {
 
         assert_eq!(output, vec![value_binding(1), value_binding(2)]);
     }
+
+    #[test]
+    fn top_n_operator_applies_offset_limit_and_parent_cap() {
+        let input = PhysicalPlan::SeqNodeScan {
+            variable: "node".to_string(),
+            label: String::new(),
+        };
+        let mut source = FixedBatchSource {
+            batches: vec![vec![
+                value_binding(5),
+                value_binding(1),
+                value_binding(3),
+                value_binding(2),
+                value_binding(4),
+            ]],
+        };
+        let catalog = Catalog::default();
+        let memory = ExecutionMemoryConfig::default();
+        let mut observer = NoopExecutionObserver;
+        let mut output = Vec::new();
+
+        stream_top_n_batches(
+            &input,
+            &[SortItem {
+                key: skein_plan::SortKey::Column("value".to_string()),
+                direction: SortDirection::Asc,
+            }],
+            1,
+            3,
+            &mut source,
+            BlockingExecutionContext {
+                catalog: &catalog,
+                memory: &memory,
+                task_context: None,
+                observer: &mut observer,
+            },
+            ExecutionLimit {
+                output_rows: Some(2),
+            },
+            &mut |batch| {
+                output.extend(batch);
+                Ok(BatchControl::Continue)
+            },
+        )
+        .expect("top-n execution");
+
+        assert_eq!(output, vec![value_binding(2), value_binding(3)]);
+    }
 }

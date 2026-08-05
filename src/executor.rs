@@ -22,7 +22,7 @@ use crate::value::Value;
 use skein_core::RuntimeTaskContext;
 use skein_ddl::{object_state_to_core, property_type_to_core, table_kind_to_core};
 use skein_executor::ExecutionLimit;
-use std::collections::{BTreeMap, BinaryHeap};
+use std::collections::BTreeMap;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 mod batch;
@@ -50,7 +50,7 @@ use scan::*;
 #[cfg(feature = "tokio-runtime")]
 pub(crate) use skein_executor::binding::map_memory_bytes;
 pub(crate) use skein_executor::binding::map_payload_bytes;
-use skein_executor::binding::{binding_memory_bytes, Binding, TopNBinding};
+use skein_executor::binding::{binding_memory_bytes, Binding};
 pub(crate) use skein_executor::external::NoExternalReadOperator;
 use skein_executor::graph::GraphExpansionExecutionState;
 use skein_executor::kernel::{
@@ -62,8 +62,7 @@ pub(crate) use skein_executor::memory::{
 };
 use skein_executor::memory::{DEFAULT_EXECUTION_BATCH_ROWS, SOURCE_SEGMENT_SCAN_MAX_WAVE_BYTES};
 use skein_executor::pipeline::{
-    emit_binding_iterator, emit_owned_binding_batches, runtime_checkpoint, BatchControl,
-    BindingBatch,
+    emit_owned_binding_batches, runtime_checkpoint, BatchControl, BindingBatch,
 };
 use skein_executor::predicate::{
     label_ids_for_pattern, node_matches_label_pattern, node_matches_property_filter,
@@ -74,7 +73,6 @@ use skein_executor::scan::{
     source_storage_scan_predicate, AdjacencyExpandFilters, AdjacencyExpandSpec,
     NodeColumnLookupSpec, NodeScanContext, NodeScanSpec,
 };
-use skein_executor::spill;
 pub use skein_executor::ExecutionMemoryConfig;
 pub use skein_executor::{
     ExternalReadOperator, VectorSeedExecutionOutput, VectorSeedExecutionRequest,
