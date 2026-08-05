@@ -742,6 +742,94 @@ fn columnar_numeric_fragment_matches_row_pipeline_and_reports_morsels() {
 }
 
 #[test]
+fn columnar_lending_fragment_matches_row_for_narrow_numeric_projection() {
+    let mut catalog = Catalog::default();
+    let table = catalog.get_or_create_table(crate::schema::TableKind::Node, "Item");
+    catalog.get_or_create_property(table, "score", crate::schema::PropertyType::Float, true);
+    let mut store = GraphStore::in_memory();
+    for row in 0..65i64 {
+        let values = if row % 9 == 0 {
+            BTreeMap::new()
+        } else {
+            properties([("score", Value::Float(row as f64 + 0.5))])
+        };
+        store.create_node(&mut catalog, "Item", values).unwrap();
+    }
+    let compare = Predicate::PropertyCompare {
+        variable: "n".to_string(),
+        property: "score".to_string(),
+        op: crate::planner::ComparisonOp::Gte,
+        value: Value::Float(48.5),
+    };
+    let items = vec![
+        Projection {
+            expression: ProjectionExpression::Id {
+                variable: "n".to_string(),
+            },
+            name: "node_id".to_string(),
+        },
+        Projection {
+            expression: ProjectionExpression::Property {
+                variable: "n".to_string(),
+                property: "score".to_string(),
+            },
+            name: "score".to_string(),
+        },
+        Projection {
+            expression: ProjectionExpression::Literal(Value::String("item".to_string())),
+            name: "kind".to_string(),
+        },
+    ];
+    let scan = PhysicalPlan::SeqNodeScan {
+        variable: "n".to_string(),
+        label: "Item".to_string(),
+    };
+    let columnar_plan = PhysicalPlan::ProjectExec {
+        items: items.clone(),
+        input: Box::new(PhysicalPlan::FilterExec {
+            predicate: compare.clone(),
+            input: Box::new(scan.clone()),
+        }),
+    };
+    let row_plan = PhysicalPlan::ProjectExec {
+        items,
+        input: Box::new(PhysicalPlan::FilterExec {
+            predicate: Predicate::And(vec![compare]),
+            input: Box::new(scan),
+        }),
+    };
+    let memory = ExecutionMemoryConfig {
+        batch_rows: NonZeroUsize::new(8).unwrap(),
+        ..ExecutionMemoryConfig::default()
+    };
+    let mut external = NoExternalReadOperator;
+    let columnar = execute_with_row_limit_profile_and_external_and_memory(
+        &columnar_plan,
+        &mut catalog,
+        &mut store,
+        &BTreeMap::new(),
+        &mut external,
+        None,
+        &memory,
+    )
+    .unwrap();
+    let row = execute_with_row_limit_profile_and_external_and_memory(
+        &row_plan,
+        &mut catalog,
+        &mut store,
+        &BTreeMap::new(),
+        &mut external,
+        None,
+        &memory,
+    )
+    .unwrap();
+
+    assert_eq!(columnar.rows, row.rows);
+    assert!(columnar.profile.pipeline_memory_report.columnar_batches > 1);
+    assert_eq!(row.profile.pipeline_memory_report.columnar_batches, 0);
+}
+
+#[test]
 fn node_column_lookup_uses_property_index_pruning_for_exact_label() {
     let mut catalog = Catalog::default();
     let mut store = GraphStore::in_memory();

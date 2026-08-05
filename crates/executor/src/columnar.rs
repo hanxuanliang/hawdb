@@ -581,7 +581,7 @@ pub fn filter_int64_values(
     expected: NumericLiteral,
 ) -> Result<Selection> {
     filter_numeric_values(values, validity, input, |actual| {
-        compare_int(actual, op, expected)
+        int64_value_matches(actual, op, expected)
     })
 }
 
@@ -593,7 +593,7 @@ pub fn filter_float64_values(
     expected: NumericLiteral,
 ) -> Result<Selection> {
     filter_numeric_values(values, validity, input, |actual| {
-        compare_float(actual, op, expected)
+        float64_value_matches(actual, op, expected)
     })
 }
 
@@ -620,7 +620,8 @@ fn filter_numeric_values<T: Copy>(
     Ok(output.finish())
 }
 
-fn compare_int(actual: i64, op: ComparisonOp, expected: NumericLiteral) -> bool {
+#[inline]
+pub fn int64_value_matches(actual: i64, op: ComparisonOp, expected: NumericLiteral) -> bool {
     match expected {
         NumericLiteral::Int(expected) => compare_ordering(actual.cmp(&expected), op),
         NumericLiteral::Float(expected) => {
@@ -629,7 +630,8 @@ fn compare_int(actual: i64, op: ComparisonOp, expected: NumericLiteral) -> bool 
     }
 }
 
-fn compare_float(actual: f64, op: ComparisonOp, expected: NumericLiteral) -> bool {
+#[inline]
+pub fn float64_value_matches(actual: f64, op: ComparisonOp, expected: NumericLiteral) -> bool {
     let expected = match expected {
         NumericLiteral::Int(expected) => expected as f64,
         NumericLiteral::Float(expected) => expected,

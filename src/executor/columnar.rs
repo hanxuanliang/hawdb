@@ -1,6 +1,11 @@
 //! Root storage adapter for eligible vectorized read fragments.
 
+mod lending;
+
 use super::*;
+use lending::{
+    admitted_numeric_batch_rows, LendingBatchCursor, NumericNodeBatch, NumericNodeBatchCursor,
+};
 use skein_executor::columnar::{
     filter_float64_values, filter_int64_values, NumericLiteral, Selection, ValidityBuilder,
 };
@@ -15,6 +20,12 @@ struct NumericFragment<'a> {
     property_type: crate::schema::PropertyType,
     op: skein_plan::ComparisonOp,
     expected: NumericLiteral,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LendingNumericScan {
+    batch_rows: usize,
+    needs_node_ids: bool,
 }
 
 struct NumericBatchEmitter<'plan, 'task, 'observer, 'emit> {
@@ -97,6 +108,14 @@ impl<'a> NumericFragment<'a> {
         })
     }
 
+    fn supports_lending_projection(self, items: &[Projection]) -> bool {
+        items.iter().all(|item| match &item.expression {
+            ProjectionExpression::Id { .. } | ProjectionExpression::Literal(_) => true,
+            ProjectionExpression::Property { property, .. } => property == self.property,
+            _ => false,
+        })
+    }
+
     fn stream(
         self,
         items: &[Projection],
@@ -107,11 +126,36 @@ impl<'a> NumericFragment<'a> {
         let Some(label_id) = context.catalog.label_id(self.label) else {
             return Ok(BatchControl::Continue);
         };
+        let use_lending =
+            !context.store.is_out_of_core() && self.supports_lending_projection(items);
+        let needs_node_ids = items
+            .iter()
+            .any(|item| matches!(item.expression, ProjectionExpression::Id { .. }));
+        let target_rows = if use_lending {
+            let admitted = admitted_numeric_batch_rows(
+                context.memory.batch_rows.get(),
+                context.memory.batch_payload_bytes.get(),
+                needs_node_ids,
+            )
+            .ok_or_else(|| {
+                SkeinError::Execution(format!(
+                    "numeric lending scan scratch requires more than batch_payload_bytes {}",
+                    context.memory.batch_payload_bytes
+                ))
+            })?;
+            NonZeroUsize::new(admitted).expect("admitted batch rows are non-zero")
+        } else {
+            context.memory.batch_rows
+        };
+        let lending_scan = LendingNumericScan {
+            batch_rows: target_rows.get(),
+            needs_node_ids,
+        };
         let candidate_count = context.store.node_count_for_label(Some(label_id));
         let admission = MorselAdmission::try_new(MorselAdmissionRequest {
             pipeline_id: PipelineId(0),
             input_rows: candidate_count,
-            target_rows: context.memory.batch_rows,
+            target_rows,
             requested_parallelism: NonZeroUsize::MIN,
             bytes_per_worker: context.memory.batch_payload_bytes,
             memory_budget_bytes: context.memory.batch_payload_bytes,
@@ -123,6 +167,16 @@ impl<'a> NumericFragment<'a> {
 
         let (emitted, stopped) = if context.store.is_out_of_core() {
             stream_owned_numeric_nodes(self, items, label_id, context, execution_limit, emit)?
+        } else if use_lending {
+            stream_lending_numeric_nodes(
+                self,
+                items,
+                label_id,
+                lending_scan,
+                context,
+                execution_limit,
+                emit,
+            )?
         } else {
             stream_borrowed_numeric_nodes(self, items, label_id, context, execution_limit, emit)?
         };
@@ -147,6 +201,40 @@ impl<'a> NumericFragment<'a> {
             BatchControl::Continue
         })
     }
+}
+
+fn stream_lending_numeric_nodes(
+    fragment: NumericFragment<'_>,
+    items: &[Projection],
+    label_id: crate::schema::LabelId,
+    scan: LendingNumericScan,
+    context: BatchReadContext<'_>,
+    execution_limit: ExecutionLimit,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<(usize, bool)> {
+    let mut cursor = NumericNodeBatchCursor::new(
+        context.store.scan_nodes(Some(label_id)),
+        fragment,
+        scan.batch_rows,
+        scan.needs_node_ids,
+    );
+    let mut batch_emitter = NumericBatchEmitter::new(
+        fragment,
+        items,
+        execution_limit,
+        context.task_context,
+        context.observer,
+        emit,
+    );
+    let mut stopped = false;
+    while let Some(batch) = cursor.next_batch()? {
+        stopped = batch_emitter.emit_lending(batch)? == BatchControl::Stop;
+        if stopped || batch_emitter.limit_reached() {
+            stopped = true;
+            break;
+        }
+    }
+    Ok((batch_emitter.emitted, stopped))
 }
 
 fn stream_borrowed_numeric_nodes(
@@ -295,6 +383,42 @@ impl<'plan, 'task, 'observer, 'emit> NumericBatchEmitter<'plan, 'task, 'observer
         Ok(control)
     }
 
+    fn emit_lending(&mut self, input: NumericNodeBatch<'_>) -> Result<BatchControl> {
+        runtime_checkpoint(self.task_context)?;
+        self.observer
+            .record_columnar_batch(input.input_rows, input.values.len());
+        let remaining = self
+            .execution_limit
+            .output_rows
+            .unwrap_or(usize::MAX)
+            .saturating_sub(self.emitted);
+        let output_rows = input.values.len().min(remaining);
+        let mut output = Vec::with_capacity(output_rows);
+        for row in 0..output_rows {
+            let mut values = BTreeMap::new();
+            for item in self.items {
+                let value = match &item.expression {
+                    ProjectionExpression::Id { .. } => Value::Int(
+                        input
+                            .node_ids
+                            .expect("lending cursor retains requested node ids")[row]
+                            as i64,
+                    ),
+                    ProjectionExpression::Property { .. } => input.values.value(row),
+                    ProjectionExpression::Literal(value) => value.clone(),
+                    _ => unreachable!("lending projection eligibility checks expressions"),
+                };
+                insert_projected_value(&mut values, &item.name, value);
+            }
+            output.push(Binding {
+                values,
+                nodes: BTreeMap::new(),
+                relationships: BTreeMap::new(),
+            });
+        }
+        self.emit_output(output)
+    }
+
     fn emit_nodes<N: Borrow<NodeRecord>>(&mut self, input: &[N]) -> Result<BatchControl> {
         runtime_checkpoint(self.task_context)?;
         let mut validity = ValidityBuilder::with_capacity(input.len());
@@ -384,6 +508,10 @@ impl<'plan, 'task, 'observer, 'emit> NumericBatchEmitter<'plan, 'task, 'observer
                 relationships: BTreeMap::new(),
             });
         }
+        self.emit_output(output)
+    }
+
+    fn emit_output(&mut self, output: BindingBatch) -> Result<BatchControl> {
         self.emitted = self.emitted.saturating_add(output.len());
         runtime_checkpoint(self.task_context)?;
         if !output.is_empty() && (self.emit)(output)? == BatchControl::Stop {

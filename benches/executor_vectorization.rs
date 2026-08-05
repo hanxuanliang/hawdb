@@ -14,6 +14,7 @@ const MICRO_ROWS: usize = 131_072;
 const MICRO_ITERATIONS: usize = 64;
 const END_TO_END_ROWS: usize = 16_384;
 const END_TO_END_ITERATIONS: usize = 64;
+const END_TO_END_PAYLOAD_BYTES: usize = 256;
 const SAMPLES: usize = 11;
 
 fn main() {
@@ -27,6 +28,7 @@ fn main() {
         json!({
             "micro": micro.json(),
             "end_to_end": end_to_end.json(),
+            "end_to_end_payload_bytes_per_row": END_TO_END_PAYLOAD_BYTES,
         })
     );
 }
@@ -97,7 +99,7 @@ fn end_to_end_benchmark() -> ComparisonReport {
     let mut catalog = Catalog::default();
     let table = catalog.get_or_create_table(TableKind::Node, "Item");
     catalog.get_or_create_property(table, "score", PropertyType::Int, false);
-    catalog.get_or_create_property(table, "payload", PropertyType::Int, false);
+    catalog.get_or_create_property(table, "payload", PropertyType::String, false);
     let mut store = GraphStore::in_memory();
     for row in 0..END_TO_END_ROWS {
         store
@@ -106,7 +108,10 @@ fn end_to_end_benchmark() -> ComparisonReport {
                 "Item",
                 BTreeMap::from([
                     ("score".to_string(), Value::Int(row as i64)),
-                    ("payload".to_string(), Value::Int((row % 17) as i64)),
+                    (
+                        "payload".to_string(),
+                        Value::String("x".repeat(END_TO_END_PAYLOAD_BYTES)),
+                    ),
                 ]),
             )
             .expect("benchmark node creation must succeed");
