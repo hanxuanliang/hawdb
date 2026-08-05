@@ -111,8 +111,38 @@ impl LinuxCgroupSnapshot {
 
 #[derive(Debug)]
 struct Membership {
-    unified_path: Option<PathBuf>,
+    unified_path: Option<CgroupPath>,
     has_v1_resource_controller: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CgroupPath {
+    components: Vec<String>,
+}
+
+impl CgroupPath {
+    fn parse_absolute(value: &str) -> Option<Self> {
+        if !value.starts_with('/') {
+            return None;
+        }
+        let mut components = Vec::new();
+        for component in value.split('/') {
+            match component {
+                "" | "." => {}
+                ".." => return None,
+                component => components.push(component.to_string()),
+            }
+        }
+        Some(Self { components })
+    }
+
+    fn relative_to<'a>(&'a self, root: &Self) -> Option<&'a [String]> {
+        self.components.strip_prefix(root.components.as_slice())
+    }
+
+    fn depth(&self) -> usize {
+        self.components.len()
+    }
 }
 
 #[derive(Debug)]
@@ -135,7 +165,7 @@ fn parse_membership(input: &str) -> Result<Membership, ()> {
             if unified_path.is_some() {
                 return Err(());
             }
-            unified_path = Some(normalized_absolute_path(raw_path).ok_or(())?);
+            unified_path = Some(CgroupPath::parse_absolute(raw_path).ok_or(())?);
             continue;
         }
         has_v1_resource_controller |= controllers
@@ -151,25 +181,22 @@ fn parse_membership(input: &str) -> Result<Membership, ()> {
     })
 }
 
-fn resolve_v2_directory(process_path: &Path, mountinfo: &str) -> Option<V2Directory> {
+fn resolve_v2_directory(process_path: &CgroupPath, mountinfo: &str) -> Option<V2Directory> {
     mountinfo
         .lines()
         .filter_map(parse_v2_mount)
         .filter_map(|(root, mount_point)| {
-            let relative = process_path.strip_prefix(&root).ok()?;
-            Some((
-                root.components().count(),
-                V2Directory {
-                    path: mount_point.join(relative),
-                    mount_point,
-                },
-            ))
+            let relative = process_path.relative_to(&root)?;
+            let path = relative
+                .iter()
+                .fold(mount_point.clone(), |path, component| path.join(component));
+            Some((root.depth(), V2Directory { path, mount_point }))
         })
         .max_by_key(|(specificity, _)| *specificity)
         .map(|(_, directory)| directory)
 }
 
-fn parse_v2_mount(line: &str) -> Option<(PathBuf, PathBuf)> {
+fn parse_v2_mount(line: &str) -> Option<(CgroupPath, PathBuf)> {
     let (mount_fields, file_system_fields) = line.split_once(" - ")?;
     let mount_fields = mount_fields.split_whitespace().collect::<Vec<_>>();
     let file_system_fields = file_system_fields.split_whitespace().collect::<Vec<_>>();
@@ -177,8 +204,8 @@ fn parse_v2_mount(line: &str) -> Option<(PathBuf, PathBuf)> {
         return None;
     }
     Some((
-        normalized_absolute_path(&unescape_mountinfo_field(mount_fields[3]))?,
-        normalized_absolute_path(&unescape_mountinfo_field(mount_fields[4]))?,
+        CgroupPath::parse_absolute(&unescape_mountinfo_field(mount_fields[3]))?,
+        validated_absolute_host_path(&unescape_mountinfo_field(mount_fields[4]))?,
     ))
 }
 
@@ -336,20 +363,16 @@ fn parse_memory_current(value: &str) -> LinuxCgroupValue<u64> {
     }
 }
 
-fn normalized_absolute_path(value: &str) -> Option<PathBuf> {
+fn validated_absolute_host_path(value: &str) -> Option<PathBuf> {
     let path = Path::new(value);
-    if !path.is_absolute() {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+    {
         return None;
     }
-    let mut normalized = PathBuf::from("/");
-    for component in path.components() {
-        match component {
-            Component::RootDir | Component::CurDir => {}
-            Component::Normal(component) => normalized.push(component),
-            Component::ParentDir | Component::Prefix(_) => return None,
-        }
-    }
-    Some(normalized)
+    Some(path.to_path_buf())
 }
 
 fn unescape_mountinfo_field(value: &str) -> String {

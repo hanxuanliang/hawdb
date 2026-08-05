@@ -4,8 +4,9 @@ use skein::optimizer::{
     OptimizerConfig, PlanCost,
 };
 use skein::planner::{
-    AggregateFunction, AggregateTarget, Aggregation, ComparisonOp, LogicalPlan, Predicate,
-    Projection, ProjectionExpression, RelationshipCountLeg, SortDirection, SortItem, SortKey,
+    AggregateFunction, AggregateTarget, Aggregation, ComparisonOp, LogicalPlan, PhysicalPlan,
+    Predicate, Projection, ProjectionExpression, RelationshipCountLeg, SortDirection, SortItem,
+    SortKey,
 };
 use skein::RelationshipDirection;
 use skein::Value;
@@ -21,8 +22,8 @@ fn main() {
     let expected = cases
         .iter()
         .map(|case| {
-            let (_, trace) = optimizer.optimize_with_catalog(&case.logical, &case.catalog);
-            assert_trace(case, &trace);
+            let (plan, trace) = optimizer.optimize_with_catalog(&case.logical, &case.catalog);
+            assert_trace(case, &plan, &trace);
             trace.selected_plan_fingerprint
         })
         .collect::<Vec<_>>();
@@ -30,8 +31,8 @@ fn main() {
         .iter()
         .zip(expected.iter())
         .map(|(case, expected_fingerprint)| {
-            let (_, trace) = optimizer.optimize_with_catalog(&case.logical, &case.catalog);
-            assert_trace(case, &trace);
+            let (plan, trace) = optimizer.optimize_with_catalog(&case.logical, &case.catalog);
+            assert_trace(case, &plan, &trace);
             assert_eq!(&trace.selected_plan_fingerprint, expected_fingerprint);
             OptimizerSmokeCaseReport::new(case, &trace)
         })
@@ -40,8 +41,8 @@ fn main() {
     let start = Instant::now();
     for _ in 0..ITERATIONS {
         for (case, expected_fingerprint) in cases.iter().zip(expected.iter()) {
-            let (_, trace) = optimizer.optimize_with_catalog(&case.logical, &case.catalog);
-            assert_trace(case, &trace);
+            let (plan, trace) = optimizer.optimize_with_catalog(&case.logical, &case.catalog);
+            assert_trace(case, &plan, &trace);
             assert_eq!(&trace.selected_plan_fingerprint, expected_fingerprint);
         }
     }
@@ -150,11 +151,15 @@ struct OptimizerSmokeCase {
     logical: LogicalPlan,
     catalog: OptimizerCatalog,
     expected_cost: PlanCost,
-    fingerprint_contains: &'static str,
+    instance_fingerprint_contains: &'static str,
     decision_contains: &'static [&'static str],
 }
 
-fn assert_trace(case: &OptimizerSmokeCase, trace: &skein::optimizer::OptimizerTrace) {
+fn assert_trace(
+    case: &OptimizerSmokeCase,
+    plan: &PhysicalPlan,
+    trace: &skein::optimizer::OptimizerTrace,
+) {
     assert!(
         trace.warnings.is_empty(),
         "{} unexpectedly warned: {:?}",
@@ -166,14 +171,19 @@ fn assert_trace(case: &OptimizerSmokeCase, trace: &skein::optimizer::OptimizerTr
         "{} selected cost changed",
         case.name
     );
+    assert_eq!(
+        trace.selected_plan_fingerprint,
+        plan.fingerprint(),
+        "{} trace fingerprint diverged from the physical plan shape",
+        case.name
+    );
+    let instance_fingerprint = plan.instance_fingerprint();
     assert!(
-        trace
-            .selected_plan_fingerprint
-            .contains(case.fingerprint_contains),
-        "{} fingerprint did not contain {}: {}",
+        instance_fingerprint.contains(case.instance_fingerprint_contains),
+        "{} instance fingerprint did not contain {}: {}",
         case.name,
-        case.fingerprint_contains,
-        trace.selected_plan_fingerprint
+        case.instance_fingerprint_contains,
+        instance_fingerprint
     );
     for expected in case.decision_contains {
         assert!(
@@ -199,7 +209,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 estimated_rows: 7,
                 cost: 366,
             },
-            fingerprint_contains: "IndexNodeRangeSeek",
+            instance_fingerprint_contains: "IndexNodeRangeSeek",
             decision_contains: &[
                 "choose IndexNodeRangeSeek",
                 "estimate AdjacencyExpand",
@@ -215,7 +225,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 estimated_rows: 1,
                 cost: 6,
             },
-            fingerprint_contains: "IndexNodeCompositeSeek",
+            instance_fingerprint_contains: "IndexNodeCompositeSeek",
             decision_contains: &[
                 "choose IndexNodeCompositeSeek",
                 "selected physical plan cost: estimated_rows=1 cost=6",
@@ -229,7 +239,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 estimated_rows: 250,
                 cost: 1003,
             },
-            fingerprint_contains: "IndexNodeTextSeek",
+            instance_fingerprint_contains: "IndexNodeTextSeek",
             decision_contains: &[
                 "choose IndexNodeTextSeek",
                 "selected physical plan cost: estimated_rows=250 cost=1003",
@@ -243,7 +253,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 estimated_rows: 250,
                 cost: 2254,
             },
-            fingerprint_contains: "PropertyContains",
+            instance_fingerprint_contains: "PropertyContains",
             decision_contains: &["selected physical plan cost: estimated_rows=250 cost=2254"],
         },
         OptimizerSmokeCase {
@@ -254,7 +264,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 estimated_rows: 1000,
                 cost: 3004,
             },
-            fingerprint_contains: "SeqNodeScan",
+            instance_fingerprint_contains: "SeqNodeScan",
             decision_contains: &[
                 "choose SeqNodeScan",
                 "selected physical plan cost: estimated_rows=1000 cost=3004",
@@ -268,7 +278,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 estimated_rows: 1,
                 cost: 18,
             },
-            fingerprint_contains: "IndexNodeSeek",
+            instance_fingerprint_contains: "IndexNodeSeek",
             decision_contains: &[
                 "choose IndexNodeSeek for Memory.id",
                 "estimate AdjacencyExpand",
@@ -284,7 +294,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 estimated_rows: 1,
                 cost: 6,
             },
-            fingerprint_contains: "AdjacencyExpandExec",
+            instance_fingerprint_contains: "AdjacencyExpandExec",
             decision_contains: &[
                 "choose IndexNodeSeek for Memory.id",
                 "rel_property_distinct_product=10",
@@ -299,7 +309,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 estimated_rows: 1,
                 cost: 9,
             },
-            fingerprint_contains: "FilterExec",
+            instance_fingerprint_contains: "FilterExec",
             decision_contains: &[
                 "choose IndexNodeSeek for Memory.id",
                 "rel_property_distinct_product=2",
@@ -314,7 +324,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 estimated_rows: 1_200,
                 cost: 10_004,
             },
-            fingerprint_contains: "PropertyIn",
+            instance_fingerprint_contains: "PropertyIn",
             decision_contains: &[
                 "estimate AdjacencyExpand for Memory-[:MENTIONS*1..1]->Entity",
                 "selected physical plan cost: estimated_rows=1200 cost=10004",
@@ -328,7 +338,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 estimated_rows: 2,
                 cost: 10_004,
             },
-            fingerprint_contains: "IdIn",
+            instance_fingerprint_contains: "IdIn",
             decision_contains: &[
                 "estimate AdjacencyExpand for Memory-[:MENTIONS*1..1]->Entity",
                 "selected physical plan cost: estimated_rows=2 cost=10004",
@@ -342,7 +352,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 estimated_rows: 10,
                 cost: 1884,
             },
-            fingerprint_contains: "AdjacencyExpandExec",
+            instance_fingerprint_contains: "AdjacencyExpandExec",
             decision_contains: &[
                 "choose IndexNodeSeek for Source.id",
                 "estimate AdjacencyExpand for Source-[:SOURCED_FROM*1..1]->Memory",
@@ -359,7 +369,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 estimated_rows: 25,
                 cost: 3088,
             },
-            fingerprint_contains: "TopNExec",
+            instance_fingerprint_contains: "TopNExec",
             decision_contains: &[
                 "choose IndexNodeSeek for Source.id",
                 "estimate AdjacencyExpand for Source-[:SOURCED_FROM*1..1]->Memory",
@@ -377,7 +387,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 estimated_rows: 10,
                 cost: 986,
             },
-            fingerprint_contains: "TopNExec",
+            instance_fingerprint_contains: "TopNExec",
             decision_contains: &[
                 "choose IndexNodeSeek for Source.id",
                 "estimate AdjacencyExpand for Source-[:SOURCED_FROM*1..1]->Memory",
@@ -394,7 +404,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 estimated_rows: 1,
                 cost: 24,
             },
-            fingerprint_contains: "AggregateExec",
+            instance_fingerprint_contains: "AggregateExec",
             decision_contains: &[
                 "choose IndexNodeSeek for Community.id",
                 "estimate AdjacencyExpand for Community-[:SYNTHESIZED_FROM*1..1]->Source",
@@ -409,7 +419,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 estimated_rows: 1,
                 cost: 32,
             },
-            fingerprint_contains: "ExpressionEq(column(7:covered)=int:3)",
+            instance_fingerprint_contains: "ExpressionEq(column(7:covered)=int:3)",
             decision_contains: &[
                 "choose IndexNodeSeek for Community.id",
                 "estimate AdjacencyExpand for Community-[:SYNTHESIZED_FROM*1..1]->Source",
@@ -424,7 +434,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 estimated_rows: 1,
                 cost: 11,
             },
-            fingerprint_contains: "collect(distinct 1:s.2:id)",
+            instance_fingerprint_contains: "collect(distinct 1:s.2:id)",
             decision_contains: &[
                 "choose IndexNodeMultiSeek for Memory.id",
                 "estimate AdjacencyExpand for Memory-[:SYNTHESIZED_FROM*1..1]->Memory",
@@ -439,7 +449,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 estimated_rows: 2,
                 cost: 42,
             },
-            fingerprint_contains: "COMPACTS_TO",
+            instance_fingerprint_contains: "COMPACTS_TO",
             decision_contains: &[
                 "choose IndexNodeSeek for Skill.id",
                 "estimate AdjacencyExpand for Skill-[:SYNTHESIZED_FROM*1..1]->Memory",
@@ -456,7 +466,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 estimated_rows: 1,
                 cost: 11,
             },
-            fingerprint_contains: "BELONGS_TO",
+            instance_fingerprint_contains: "BELONGS_TO",
             decision_contains: &[
                 "choose IndexNodeSeek for Community.id",
                 "estimate AdjacencyExpand for Community-[:BELONGS_TO*1..1]->Entity",
@@ -473,7 +483,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 estimated_rows: 10,
                 cost: 143_734,
             },
-            fingerprint_contains: "count(distinct 2:e2.12:community_id)",
+            instance_fingerprint_contains: "count(distinct 2:e2.12:community_id)",
             decision_contains: &[
                 "estimate AdjacencyExpand for Entity-[:RELATES_TO*1..1]->Entity",
                 "choose TopN for bounded sort",
@@ -488,7 +498,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 estimated_rows: 5,
                 cost: 5_044,
             },
-            fingerprint_contains: "count(distinct 1:e)",
+            instance_fingerprint_contains: "count(distinct 1:e)",
             decision_contains: &[
                 "estimate AdjacencyExpand for Memory-[:RELATES_TO*2..2]->Entity",
                 "selected physical plan cost: estimated_rows=5 cost=5044",
@@ -502,7 +512,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 estimated_rows: 1,
                 cost: 11,
             },
-            fingerprint_contains: "OptionalRelationshipCountSumExec",
+            instance_fingerprint_contains: "OptionalRelationshipCountSumExec",
             decision_contains: &[
                 "estimate OptionalRelationshipCountSum for Thread: seed_rows=1 leg_rows=[CONTAINS:out:5] estimated_rows=1 cost=11",
                 "selected physical plan cost: estimated_rows=1 cost=11",
@@ -516,7 +526,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 estimated_rows: 1,
                 cost: 16,
             },
-            fingerprint_contains: "OptionalRelationshipCountSumExec",
+            instance_fingerprint_contains: "OptionalRelationshipCountSumExec",
             decision_contains: &[
                 "estimate OptionalRelationshipCountSum for Entity: seed_rows=1 leg_rows=[MENTIONS:in:10] estimated_rows=1 cost=16",
                 "selected physical plan cost: estimated_rows=1 cost=16",
@@ -530,7 +540,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 estimated_rows: 1_000,
                 cost: 12_004,
             },
-            fingerprint_contains: "OptionalDegreeExec",
+            instance_fingerprint_contains: "OptionalDegreeExec",
             decision_contains: &["selected physical plan cost: estimated_rows=1000 cost=12004"],
         },
         OptimizerSmokeCase {
@@ -541,7 +551,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 estimated_rows: 1,
                 cost: 8,
             },
-            fingerprint_contains: "NodeCartesianProductExec",
+            instance_fingerprint_contains: "NodeCartesianProductExec",
             decision_contains: &[
                 "choose IndexNodeSeek for Memory.id",
                 "choose IndexNodeSeek for Source.id",
@@ -557,7 +567,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 estimated_rows: 1,
                 cost: 14,
             },
-            fingerprint_contains: "NodeCartesianProductExec(IndexNodeSeek(1:e:6:Entity",
+            instance_fingerprint_contains: "NodeCartesianProductExec(IndexNodeSeek(1:e:6:Entity",
             decision_contains: &[
                 "order NodeCartesianProduct single-row inputs: inputs=3",
                 "estimate NodeCartesianProduct: left_rows=1 right_rows=1 output_rows=1 left_cost=3 right_cost=9 cost=13",
@@ -572,7 +582,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 estimated_rows: 100,
                 cost: 3007,
             },
-            fingerprint_contains: "FilterExec",
+            instance_fingerprint_contains: "FilterExec",
             decision_contains: &[
                 "choose IndexNodeSeek for Source.id",
                 "keep NodeCartesianProduct input order: left_rows=1000 right_rows=1 reason=non_single_row_input",
@@ -587,7 +597,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 estimated_rows: 30,
                 cost: 2004,
             },
-            fingerprint_contains: "PropertyIn",
+            instance_fingerprint_contains: "PropertyIn",
             decision_contains: &["selected physical plan cost: estimated_rows=30 cost=2004"],
         },
         OptimizerSmokeCase {
@@ -598,7 +608,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 estimated_rows: 100,
                 cost: 2004,
             },
-            fingerprint_contains: "Or(False,PropertyEq",
+            instance_fingerprint_contains: "Or(False,PropertyEq",
             decision_contains: &["selected physical plan cost: estimated_rows=100 cost=2004"],
         },
         OptimizerSmokeCase {
@@ -609,7 +619,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 estimated_rows: 900,
                 cost: 2004,
             },
-            fingerprint_contains: "PropertyIsNotNull",
+            instance_fingerprint_contains: "PropertyIsNotNull",
             decision_contains: &["selected physical plan cost: estimated_rows=900 cost=2004"],
         },
         OptimizerSmokeCase {
@@ -620,7 +630,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 estimated_rows: 900,
                 cost: 2004,
             },
-            fingerprint_contains: "PropertyNotEq",
+            instance_fingerprint_contains: "PropertyNotEq",
             decision_contains: &["selected physical plan cost: estimated_rows=900 cost=2004"],
         },
         OptimizerSmokeCase {
@@ -631,7 +641,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 estimated_rows: 1,
                 cost: 12,
             },
-            fingerprint_contains: "IndexNodeMultiSeek",
+            instance_fingerprint_contains: "IndexNodeMultiSeek",
             decision_contains: &[
                 "choose IndexNodeMultiSeek for Thread.thread_id",
                 "selected physical plan cost: estimated_rows=1 cost=12",
