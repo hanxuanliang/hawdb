@@ -3,8 +3,10 @@
 #![forbid(unsafe_code)]
 
 mod production_graph;
+mod production_morsel;
 
 pub use production_graph::*;
+pub use production_morsel::*;
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};

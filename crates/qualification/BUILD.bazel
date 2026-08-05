@@ -10,6 +10,7 @@ rust_library(
     srcs = [
         "src/lib.rs",
         "src/production_graph.rs",
+        "src/production_morsel.rs",
     ],
     edition = "2024",
     aliases = aliases(),

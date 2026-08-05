@@ -208,6 +208,20 @@ evidence. Hosts MAY inject one shared governor into the Nowledge facade so all
 store handles participate in the same process-level CPU, memory, result, and
 I/O limits.
 
+Parallel morsel qualification uses `run_production_morsel_profile` and
+`evaluate_production_morsel_matrix`. Each profile MUST run through the
+read-only `NowledgeMemEmbeddedStoreHandle`, contain at least 100 measured
+samples after at least three warmups, observe the requested 4, 8, or 16 active
+workers, and prove bounded
+in-flight cancellation plus zero admission rejection, permit leakage, and
+overcommit. The three profiles MUST come from independent processes and bind
+the same release, dataset, graph epoch, query digest, and parameter digest.
+`skein-production-morsel-matrix-v1` accepts the matrix only when throughput
+improves at every step and caller-declared P99, peak-RSS, and cancellation
+regression budgets hold. A materialized read-only profile is required because
+out-of-core source scans deliberately remain serial until ordered parallel
+range reads have their own correctness contract.
+
 An asynchronous facade that returns a materialized result remains subject to
 the result budget. A streaming asynchronous API MUST propagate consumer
 backpressure and cancellation without retaining the complete result.

@@ -53,26 +53,10 @@ impl ProductionGraphStorageQualificationConfig {
                 "production graph qualification measurement_runs must be greater than zero",
             ));
         }
-        self.expected_identity
-            .validate()
-            .map_err(ProductionGraphQualificationError::from_error)?;
-        self.evidence_binding
-            .validate_for(&self.expected_identity)
-            .map_err(ProductionGraphQualificationError::from_error)?;
-        if self.expected_identity.target_os != std::env::consts::OS {
-            return Err(ProductionGraphQualificationError::new(format!(
-                "qualification target_os {} does not match current target {}",
-                self.expected_identity.target_os,
-                std::env::consts::OS
-            )));
-        }
-        if self.expected_identity.target_arch != std::env::consts::ARCH {
-            return Err(ProductionGraphQualificationError::new(format!(
-                "qualification target_arch {} does not match current target {}",
-                self.expected_identity.target_arch,
-                std::env::consts::ARCH
-            )));
-        }
+        validate_production_identity_for_current_target(
+            &self.evidence_binding,
+            &self.expected_identity,
+        )?;
         Ok(())
     }
 }
@@ -89,7 +73,7 @@ impl ProductionGraphQualificationError {
         }
     }
 
-    fn from_error(error: impl Display) -> Self {
+    pub(crate) fn from_error(error: impl Display) -> Self {
         Self::new(error.to_string())
     }
 }
@@ -290,7 +274,34 @@ fn execution_summary(
     summary
 }
 
-fn parameter_digest(parameters: &std::collections::BTreeMap<String, Value>) -> String {
+pub(crate) fn validate_production_identity_for_current_target(
+    evidence_binding: &ProductionEvidenceBinding,
+    expected_identity: &ProductionQualificationIdentity,
+) -> Result<(), ProductionGraphQualificationError> {
+    expected_identity
+        .validate()
+        .map_err(ProductionGraphQualificationError::from_error)?;
+    evidence_binding
+        .validate_for(expected_identity)
+        .map_err(ProductionGraphQualificationError::from_error)?;
+    if expected_identity.target_os != std::env::consts::OS {
+        return Err(ProductionGraphQualificationError::new(format!(
+            "qualification target_os {} does not match current target {}",
+            expected_identity.target_os,
+            std::env::consts::OS
+        )));
+    }
+    if expected_identity.target_arch != std::env::consts::ARCH {
+        return Err(ProductionGraphQualificationError::new(format!(
+            "qualification target_arch {} does not match current target {}",
+            expected_identity.target_arch,
+            std::env::consts::ARCH
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn parameter_digest(parameters: &std::collections::BTreeMap<String, Value>) -> String {
     let mut hasher = Sha256::new();
     hash_field(&mut hasher, b"skein-production-query-parameters-v1");
     for (name, value) in parameters {
