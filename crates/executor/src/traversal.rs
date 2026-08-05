@@ -48,7 +48,7 @@ pub fn execute_shortest_path(
     memory: &ExecutionMemoryConfig,
     execution_limit: ExecutionLimit,
     task_context: Option<&RuntimeTaskContext>,
-    observer: &mut dyn ExecutionObserver,
+    observer: &dyn ExecutionObserver,
 ) -> Result<Vec<Binding>> {
     runtime_checkpoint(task_context)?;
     let Some(source) =
@@ -169,7 +169,7 @@ pub fn all_shortest_paths(
     memory_budget: NonZeroUsize,
     result_limit: usize,
     task_context: Option<&RuntimeTaskContext>,
-    observer: &mut dyn ExecutionObserver,
+    observer: &dyn ExecutionObserver,
 ) -> Result<(Vec<Vec<NodeId>>, usize, usize)> {
     let initial_path = vec![search.source];
     let mut tracker = OperatorMemoryTracker::new(memory_budget);
@@ -285,7 +285,7 @@ pub fn one_hop_relationships(
     rel_properties: &BTreeMap<String, Value>,
     relationship_scan_filter: Option<&PropertyFilter>,
     direction: RelationshipDirection,
-    observer: &mut dyn ExecutionObserver,
+    observer: &dyn ExecutionObserver,
 ) -> Result<Vec<(RelRecord, NodeRecord)>> {
     one_hop_relationships_with_budget(
         store,
@@ -310,7 +310,7 @@ pub fn one_hop_relationships_with_budget(
     relationship_scan_filter: Option<&PropertyFilter>,
     direction: RelationshipDirection,
     memory_budget_bytes: usize,
-    observer: &mut dyn ExecutionObserver,
+    observer: &dyn ExecutionObserver,
 ) -> Result<Vec<(RelRecord, NodeRecord)>> {
     let mut matches = Vec::new();
     let mut seen = BTreeSet::new();
@@ -490,7 +490,7 @@ pub fn relationship_count_sum_leg(
     store: &dyn GraphExecutionRead,
     source: NodeId,
     leg: &RelationshipCountLeg,
-    observer: &mut dyn ExecutionObserver,
+    observer: &dyn ExecutionObserver,
 ) -> Result<usize> {
     let rel_type_id = if leg.rel_type.is_empty() {
         None
@@ -546,7 +546,7 @@ pub fn thread_repair_stats_rows(
     memory_rel_type: &str,
     memory_label: &str,
     memory_budget: NonZeroUsize,
-    observer: &mut dyn ExecutionObserver,
+    observer: &dyn ExecutionObserver,
 ) -> Result<Vec<Binding>> {
     let thread_label_ids = label_ids_for_pattern(catalog, label);
     let identity_label_ids = label_ids_for_pattern(catalog, identity_label);

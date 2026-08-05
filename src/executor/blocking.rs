@@ -4,6 +4,7 @@ use super::*;
 use skein_executor::blocking::{
     self as executor_blocking, BindingBatchSource, BlockingExecutionContext,
 };
+use skein_executor::observer::ExecutionObserver;
 
 pub(super) use executor_blocking::spill_binding_run;
 
@@ -36,7 +37,7 @@ pub(super) fn stream_distinct_batches(
             catalog: context.catalog,
             memory: context.memory,
             task_context: context.task_context,
-            observer: &mut RootExecutionObserver,
+            observer: context.observer,
         },
         execution_limit,
         emit,
@@ -59,7 +60,7 @@ pub(super) fn stream_sort_batches(
             catalog: context.catalog,
             memory: context.memory,
             task_context: context.task_context,
-            observer: &mut RootExecutionObserver,
+            observer: context.observer,
         },
         execution_limit,
         emit,
@@ -87,7 +88,7 @@ pub(super) fn stream_top_n_batches(
             catalog: context.catalog,
             memory: context.memory,
             task_context: context.task_context,
-            observer: &mut RootExecutionObserver,
+            observer: context.observer,
         },
         execution_limit,
         emit,
@@ -112,7 +113,7 @@ pub(super) fn stream_aggregate_batches(
             catalog: context.catalog,
             memory: context.memory,
             task_context: context.task_context,
-            observer: &mut RootExecutionObserver,
+            observer: context.observer,
         },
         execution_limit,
         emit,
@@ -161,21 +162,23 @@ pub(super) fn stream_cartesian_product_batches(
         )?);
         tracker.reset();
     }
-    record_blocking_memory_report(skein_executor::BlockingOperatorMemoryReport {
-        operator: "NodeCartesianProductExec".to_string(),
-        budget_bytes: tracker.budget_bytes,
-        peak_tracked_bytes: tracker.peak_bytes,
-        input_rows: right_ordinal as usize,
-        max_spill_bytes: spill_budget.max_bytes,
-        max_spill_runs: spill_budget.max_runs,
-        spilled_bytes: spill_budget.used_bytes,
-        spill_run_count: spill_budget.run_count,
-        spilled_rows: if runs.is_empty() {
-            0
-        } else {
-            right_ordinal as usize
-        },
-    });
+    context
+        .observer
+        .record_blocking_memory_report(skein_executor::BlockingOperatorMemoryReport {
+            operator: "NodeCartesianProductExec".to_string(),
+            budget_bytes: tracker.budget_bytes,
+            peak_tracked_bytes: tracker.peak_bytes,
+            input_rows: right_ordinal as usize,
+            max_spill_bytes: spill_budget.max_bytes,
+            max_spill_runs: spill_budget.max_runs,
+            spilled_bytes: spill_budget.used_bytes,
+            spill_run_count: spill_budget.run_count,
+            spilled_rows: if runs.is_empty() {
+                0
+            } else {
+                right_ordinal as usize
+            },
+        });
     if right_bindings.is_empty() && runs.is_empty() {
         return Ok(BatchControl::Continue);
     }

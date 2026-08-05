@@ -38,6 +38,43 @@ pub struct MorselAdmission {
 }
 
 impl MorselAdmission {
+    pub fn try_new(request: MorselAdmissionRequest) -> Result<Self> {
+        if request.input_rows == 0 {
+            return Ok(Self {
+                pipeline_id: request.pipeline_id,
+                input_rows: 0,
+                target_rows: request.target_rows,
+                morsel_count: 0,
+                max_workers: 0,
+                reserved_bytes: 0,
+            });
+        }
+
+        let memory_workers = request.memory_budget_bytes.get() / request.bytes_per_worker.get();
+        if memory_workers == 0 {
+            return Err(SkeinError::Execution(format!(
+                "morsel pipeline {} requires {} bytes for one worker, exceeding memory budget {}",
+                request.pipeline_id.0, request.bytes_per_worker, request.memory_budget_bytes
+            )));
+        }
+
+        let morsel_count = request.input_rows.div_ceil(request.target_rows.get());
+        let max_workers = request
+            .requested_parallelism
+            .get()
+            .min(memory_workers)
+            .min(morsel_count);
+        let reserved_bytes = max_workers.saturating_mul(request.bytes_per_worker.get());
+        Ok(Self {
+            pipeline_id: request.pipeline_id,
+            input_rows: request.input_rows,
+            target_rows: request.target_rows,
+            morsel_count,
+            max_workers,
+            reserved_bytes,
+        })
+    }
+
     pub fn morsels(&self) -> MorselIter {
         MorselIter {
             pipeline_id: self.pipeline_id,
@@ -100,40 +137,24 @@ impl Iterator for MorselIter {
 impl ExactSizeIterator for MorselIter {}
 
 pub fn admit_morsels(request: MorselAdmissionRequest) -> Result<MorselAdmission> {
-    if request.input_rows == 0 {
-        return Ok(MorselAdmission {
-            pipeline_id: request.pipeline_id,
-            input_rows: 0,
-            target_rows: request.target_rows,
-            morsel_count: 0,
-            max_workers: 0,
-            reserved_bytes: 0,
-        });
-    }
+    MorselAdmission::try_new(request)
+}
 
-    let memory_workers = request.memory_budget_bytes.get() / request.bytes_per_worker.get();
-    if memory_workers == 0 {
-        return Err(SkeinError::Execution(format!(
-            "morsel pipeline {} requires {} bytes for one worker, exceeding memory budget {}",
-            request.pipeline_id.0, request.bytes_per_worker, request.memory_budget_bytes
-        )));
-    }
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SequentialMorselScheduler;
 
-    let morsel_count = request.input_rows.div_ceil(request.target_rows.get());
-    let max_workers = request
-        .requested_parallelism
-        .get()
-        .min(memory_workers)
-        .min(morsel_count);
-    let reserved_bytes = max_workers.saturating_mul(request.bytes_per_worker.get());
-    Ok(MorselAdmission {
-        pipeline_id: request.pipeline_id,
-        input_rows: request.input_rows,
-        target_rows: request.target_rows,
-        morsel_count,
-        max_workers,
-        reserved_bytes,
-    })
+impl SequentialMorselScheduler {
+    pub fn execute<T>(
+        self,
+        admission: &MorselAdmission,
+        mut execute: impl FnMut(Morsel) -> Result<T>,
+    ) -> Result<Vec<T>> {
+        let mut output = Vec::with_capacity(admission.morsel_count);
+        for morsel in admission.morsels() {
+            output.push(execute(morsel)?);
+        }
+        Ok(output)
+    }
 }
 
 /// Executes morsels in ordinal order. This is the deterministic baseline and
@@ -142,11 +163,7 @@ pub fn execute_morsels_ordered<T>(
     admission: &MorselAdmission,
     mut execute: impl FnMut(Morsel) -> Result<T>,
 ) -> Result<Vec<T>> {
-    let mut output = Vec::with_capacity(admission.morsel_count);
-    for morsel in admission.morsels() {
-        output.push(execute(morsel)?);
-    }
-    Ok(output)
+    SequentialMorselScheduler.execute(admission, &mut execute)
 }
 
 #[cfg(test)]
@@ -189,8 +206,10 @@ mod tests {
 
     #[test]
     fn ordered_executor_preserves_morsel_ordinals() {
-        let admission = admit_morsels(request(130)).unwrap();
-        let ordinals = execute_morsels_ordered(&admission, |morsel| Ok(morsel.ordinal.0)).unwrap();
+        let admission = MorselAdmission::try_new(request(130)).unwrap();
+        let ordinals = SequentialMorselScheduler
+            .execute(&admission, |morsel| Ok(morsel.ordinal.0))
+            .unwrap();
 
         assert_eq!(ordinals, vec![0, 1, 2]);
     }

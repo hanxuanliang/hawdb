@@ -14,11 +14,21 @@ pub(super) fn evaluate_predicate(
     store: &GraphStore,
     binding: &Binding,
 ) -> Result<bool> {
-    skein_executor::expression::evaluate_predicate(
+    evaluate_predicate_observed(
         predicate,
         catalog,
         store,
         binding,
-        &mut RootExecutionObserver,
+        &skein_executor::observer::NoopExecutionObserver,
     )
+}
+
+pub(super) fn evaluate_predicate_observed(
+    predicate: &Predicate,
+    catalog: &Catalog,
+    store: &GraphStore,
+    binding: &Binding,
+    observer: &dyn skein_executor::observer::ExecutionObserver,
+) -> Result<bool> {
+    skein_executor::expression::evaluate_predicate(predicate, catalog, store, binding, observer)
 }

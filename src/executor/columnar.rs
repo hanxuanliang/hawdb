@@ -4,7 +4,8 @@ use super::*;
 use skein_executor::columnar::{
     filter_float64_values, filter_int64_values, NumericLiteral, Selection, ValidityBuilder,
 };
-use skein_executor::morsel::{admit_morsels, MorselAdmissionRequest, PipelineId};
+use skein_executor::morsel::{MorselAdmission, MorselAdmissionRequest, PipelineId};
+use skein_executor::observer::ExecutionObserver;
 use std::borrow::Borrow;
 
 #[derive(Debug, Clone, Copy)]
@@ -16,12 +17,13 @@ struct NumericFragment<'a> {
     expected: NumericLiteral,
 }
 
-struct NumericBatchEmitter<'plan, 'task, 'emit> {
+struct NumericBatchEmitter<'plan, 'task, 'observer, 'emit> {
     fragment: NumericFragment<'plan>,
     items: &'plan [Projection],
     emitted: usize,
     execution_limit: ExecutionLimit,
     task_context: Option<&'task RuntimeTaskContext>,
+    observer: &'observer QueryExecutionObserver,
     emit: &'emit mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 }
 
@@ -32,121 +34,119 @@ pub(super) fn try_stream_columnar_projection_batches(
     execution_limit: ExecutionLimit,
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Option<Result<BatchControl>> {
-    let fragment = eligible_numeric_fragment(items, input, context.catalog)?;
-    Some(stream_numeric_fragment(
-        fragment,
-        items,
-        context,
-        execution_limit,
-        emit,
-    ))
+    let fragment = NumericFragment::try_prepare(items, input, context.catalog)?;
+    Some(fragment.stream(items, context, execution_limit, emit))
 }
 
-fn eligible_numeric_fragment<'a>(
-    items: &[Projection],
-    input: &'a PhysicalPlan,
-    catalog: &Catalog,
-) -> Option<NumericFragment<'a>> {
-    let PhysicalPlan::FilterExec { predicate, input } = input else {
-        return None;
-    };
-    let Predicate::PropertyCompare {
-        variable,
-        property,
-        op,
-        value,
-    } = predicate
-    else {
-        return None;
-    };
-    let PhysicalPlan::SeqNodeScan {
-        variable: scan_variable,
-        label,
-    } = input.as_ref()
-    else {
-        return None;
-    };
-    if variable != scan_variable || label.is_empty() || label.contains('|') {
-        return None;
+impl<'a> NumericFragment<'a> {
+    fn try_prepare(
+        items: &[Projection],
+        input: &'a PhysicalPlan,
+        catalog: &Catalog,
+    ) -> Option<Self> {
+        let PhysicalPlan::FilterExec { predicate, input } = input else {
+            return None;
+        };
+        let Predicate::PropertyCompare {
+            variable,
+            property,
+            op,
+            value,
+        } = predicate
+        else {
+            return None;
+        };
+        let PhysicalPlan::SeqNodeScan {
+            variable: scan_variable,
+            label,
+        } = input.as_ref()
+        else {
+            return None;
+        };
+        if variable != scan_variable || label.is_empty() || label.contains('|') {
+            return None;
+        }
+        if !items.iter().all(|item| {
+            matches!(
+                &item.expression,
+                ProjectionExpression::Id { variable }
+                    | ProjectionExpression::Property { variable, .. }
+                    if variable == scan_variable
+            ) || matches!(&item.expression, ProjectionExpression::Literal(_))
+        }) {
+            return None;
+        }
+        let expected = NumericLiteral::from_value(value)?;
+        let table_id = catalog.table_id(crate::schema::TableKind::Node, label)?;
+        let descriptor_id = catalog.property_descriptor_id(table_id, property)?;
+        let descriptor = catalog.property_descriptor(descriptor_id)?;
+        if descriptor.state != crate::schema::SchemaObjectState::Public
+            || !matches!(
+                descriptor.value_type,
+                crate::schema::PropertyType::Int | crate::schema::PropertyType::Float
+            )
+        {
+            return None;
+        }
+        Some(Self {
+            label,
+            property,
+            property_type: descriptor.value_type,
+            op: *op,
+            expected,
+        })
     }
-    if !items.iter().all(|item| {
-        matches!(
-            &item.expression,
-            ProjectionExpression::Id { variable }
-                | ProjectionExpression::Property { variable, .. }
-                if variable == scan_variable
-        ) || matches!(&item.expression, ProjectionExpression::Literal(_))
-    }) {
-        return None;
-    }
-    let expected = NumericLiteral::from_value(value)?;
-    let table_id = catalog.table_id(crate::schema::TableKind::Node, label)?;
-    let descriptor_id = catalog.property_descriptor_id(table_id, property)?;
-    let descriptor = catalog.property_descriptor(descriptor_id)?;
-    if descriptor.state != crate::schema::SchemaObjectState::Public
-        || !matches!(
-            descriptor.value_type,
-            crate::schema::PropertyType::Int | crate::schema::PropertyType::Float
-        )
-    {
-        return None;
-    }
-    Some(NumericFragment {
-        label,
-        property,
-        property_type: descriptor.value_type,
-        op: *op,
-        expected,
-    })
-}
 
-fn stream_numeric_fragment(
-    fragment: NumericFragment<'_>,
-    items: &[Projection],
-    context: BatchReadContext<'_>,
-    execution_limit: ExecutionLimit,
-    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
-) -> Result<BatchControl> {
-    let Some(label_id) = context.catalog.label_id(fragment.label) else {
-        return Ok(BatchControl::Continue);
-    };
-    let candidate_count = context.store.node_count_for_label(Some(label_id));
-    let admission = admit_morsels(MorselAdmissionRequest {
-        pipeline_id: PipelineId(0),
-        input_rows: candidate_count,
-        target_rows: context.memory.batch_rows,
-        requested_parallelism: NonZeroUsize::MIN,
-        bytes_per_worker: context.memory.batch_payload_bytes,
-        memory_budget_bytes: context.memory.batch_payload_bytes,
-    })?;
-    record_morsel_admission(
-        admission.max_workers(),
-        usize::from(admission.morsel_count() > 0),
-    );
+    fn stream(
+        self,
+        items: &[Projection],
+        context: BatchReadContext<'_>,
+        execution_limit: ExecutionLimit,
+        emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+    ) -> Result<BatchControl> {
+        let Some(label_id) = context.catalog.label_id(self.label) else {
+            return Ok(BatchControl::Continue);
+        };
+        let candidate_count = context.store.node_count_for_label(Some(label_id));
+        let admission = MorselAdmission::try_new(MorselAdmissionRequest {
+            pipeline_id: PipelineId(0),
+            input_rows: candidate_count,
+            target_rows: context.memory.batch_rows,
+            requested_parallelism: NonZeroUsize::MIN,
+            bytes_per_worker: context.memory.batch_payload_bytes,
+            memory_budget_bytes: context.memory.batch_payload_bytes,
+        })?;
+        context.observer.record_morsel_admission(
+            admission.max_workers(),
+            usize::from(admission.morsel_count() > 0),
+        );
 
-    let (emitted, stopped) = if context.store.is_out_of_core() {
-        stream_owned_numeric_nodes(fragment, items, label_id, context, execution_limit, emit)?
-    } else {
-        stream_borrowed_numeric_nodes(fragment, items, label_id, context, execution_limit, emit)?
-    };
-    record_scan_pruning_report(ScanPruningReport {
-        target_kind: crate::store::ScanPruningTargetKind::Node,
-        label_id: Some(label_id),
-        rel_type_id: None,
-        strategy: crate::store::ScanPruningStrategy::FullLabelScan,
-        pruned: false,
-        exact_empty: candidate_count == 0,
-        candidate_count_before_pruning: candidate_count,
-        pruned_candidate_count: 0,
-        candidate_count_before_filter: candidate_count,
-        output_count: emitted,
-        filtered_out_count: candidate_count.saturating_sub(emitted),
-    });
-    Ok(if stopped {
-        BatchControl::Stop
-    } else {
-        BatchControl::Continue
-    })
+        let (emitted, stopped) = if context.store.is_out_of_core() {
+            stream_owned_numeric_nodes(self, items, label_id, context, execution_limit, emit)?
+        } else {
+            stream_borrowed_numeric_nodes(self, items, label_id, context, execution_limit, emit)?
+        };
+        context
+            .observer
+            .record_scan_pruning_report(ScanPruningReport {
+                target_kind: crate::store::ScanPruningTargetKind::Node,
+                label_id: Some(label_id),
+                rel_type_id: None,
+                strategy: crate::store::ScanPruningStrategy::FullLabelScan,
+                pruned: false,
+                exact_empty: candidate_count == 0,
+                candidate_count_before_pruning: candidate_count,
+                pruned_candidate_count: 0,
+                candidate_count_before_filter: candidate_count,
+                output_count: emitted,
+                filtered_out_count: candidate_count.saturating_sub(emitted),
+            });
+        Ok(if stopped {
+            BatchControl::Stop
+        } else {
+            BatchControl::Continue
+        })
+    }
 }
 
 fn stream_borrowed_numeric_nodes(
@@ -158,8 +158,14 @@ fn stream_borrowed_numeric_nodes(
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<(usize, bool)> {
     let mut nodes = Vec::with_capacity(context.memory.batch_rows.get());
-    let mut batch_emitter =
-        NumericBatchEmitter::new(fragment, items, execution_limit, context.task_context, emit);
+    let mut batch_emitter = NumericBatchEmitter::new(
+        fragment,
+        items,
+        execution_limit,
+        context.task_context,
+        context.observer,
+        emit,
+    );
     let mut stopped = false;
     for node in context.store.scan_nodes(Some(label_id)) {
         nodes.push(node);
@@ -188,8 +194,14 @@ fn stream_owned_numeric_nodes(
 ) -> Result<(usize, bool)> {
     let mut nodes = Vec::with_capacity(context.memory.batch_rows.get());
     let mut buffered_bytes = 0usize;
-    let mut batch_emitter =
-        NumericBatchEmitter::new(fragment, items, execution_limit, context.task_context, emit);
+    let mut batch_emitter = NumericBatchEmitter::new(
+        fragment,
+        items,
+        execution_limit,
+        context.task_context,
+        context.observer,
+        emit,
+    );
     let mut callback_error = None;
     let mut stopped = false;
     {
@@ -253,12 +265,13 @@ fn stream_owned_numeric_nodes(
     Ok((batch_emitter.emitted, stopped))
 }
 
-impl<'plan, 'task, 'emit> NumericBatchEmitter<'plan, 'task, 'emit> {
+impl<'plan, 'task, 'observer, 'emit> NumericBatchEmitter<'plan, 'task, 'observer, 'emit> {
     fn new(
         fragment: NumericFragment<'plan>,
         items: &'plan [Projection],
         execution_limit: ExecutionLimit,
         task_context: Option<&'task RuntimeTaskContext>,
+        observer: &'observer QueryExecutionObserver,
         emit: &'emit mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
     ) -> Self {
         Self {
@@ -267,6 +280,7 @@ impl<'plan, 'task, 'emit> NumericBatchEmitter<'plan, 'task, 'emit> {
             emitted: 0,
             execution_limit,
             task_context,
+            observer,
             emit,
         }
     }
@@ -339,7 +353,8 @@ impl<'plan, 'task, 'emit> NumericBatchEmitter<'plan, 'task, 'emit> {
             }
             _ => unreachable!("numeric fragment eligibility checks the property type"),
         };
-        record_columnar_batch(input.len(), selection.selected_count());
+        self.observer
+            .record_columnar_batch(input.len(), selection.selected_count());
 
         let remaining = self
             .execution_limit

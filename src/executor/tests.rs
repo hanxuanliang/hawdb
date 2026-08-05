@@ -898,11 +898,13 @@ fn source_segment_scan_uses_checkpoint_sidecar_and_keeps_filter_semantics() {
     let parameters = BTreeMap::new();
     let mut external = NoExternalReadOperator;
     let memory = ExecutionMemoryConfig::default();
+    let observer = QueryExecutionObserver::default();
     let mut context = ExecutionContext {
         parameters: &parameters,
         external: &mut external,
         memory: &memory,
         task_context: None,
+        observer: &observer,
     };
     let bindings = execute_bindings_with_limit(
         &plan,

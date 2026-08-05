@@ -1,5 +1,16 @@
 use super::*;
 
+struct DistinctOperator<'a> {
+    memory: &'a ExecutionMemoryConfig,
+    task_context: Option<&'a RuntimeTaskContext>,
+    observer: &'a dyn ExecutionObserver,
+    tracker: OperatorMemoryTracker,
+    spill_budget: SpillBudgetTracker,
+    distinct: BTreeMap<Vec<(String, Value)>, (u64, Binding)>,
+    runs: Vec<spill::SpillRun>,
+    input_rows: u64,
+}
+
 pub fn stream_distinct_batches(
     input: &PhysicalPlan,
     source: &mut dyn BindingBatchSource,
@@ -7,99 +18,125 @@ pub fn stream_distinct_batches(
     execution_limit: ExecutionLimit,
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
-    let BlockingExecutionContext {
-        memory,
-        task_context,
-        observer,
-        ..
-    } = context;
-    let mut tracker = OperatorMemoryTracker::new(memory.blocking_operator_bytes);
-    let mut spill_budget = SpillBudgetTracker::new("DistinctExec", memory);
-    let mut distinct = BTreeMap::<Vec<(String, Value)>, (u64, Binding)>::new();
-    let mut runs = Vec::new();
-    let mut ordinal = 0u64;
+    let mut operator = DistinctOperator::new(context);
     source.execute(input, ExecutionLimit::unlimited(), &mut |batch| {
         for binding in batch {
-            let key = distinct_binding_key(&binding);
-            let entry_bytes =
-                binding_memory_bytes(&binding).saturating_add(distinct_key_memory_bytes(&key));
-            ensure_operator_item_fits("DistinctExec", entry_bytes, &tracker)?;
-            if !distinct.contains_key(&key) {
-                if tracker.would_exceed(entry_bytes) {
-                    runs.push(spill_distinct_run(
-                        &mut distinct,
-                        &memory.spill_directory,
-                        &mut spill_budget,
-                        task_context,
-                    )?);
-                    tracker.reset();
-                }
-                tracker.charge(entry_bytes);
-                distinct.insert(key, (ordinal, binding));
-            }
-            ordinal = ordinal.saturating_add(1);
+            operator.push(binding)?;
         }
         Ok(BatchControl::Continue)
     })?;
-    if runs.is_empty() {
-        observer.record_blocking_memory_report(BlockingOperatorMemoryReport {
-            operator: "DistinctExec".to_string(),
-            budget_bytes: tracker.budget_bytes,
-            peak_tracked_bytes: tracker.peak_bytes,
-            input_rows: ordinal as usize,
-            max_spill_bytes: memory.max_spill_bytes.get(),
-            max_spill_runs: memory.max_spill_runs.get(),
-            spilled_bytes: 0,
-            spill_run_count: 0,
-            spilled_rows: 0,
-        });
-        let mut selected = distinct.into_values().collect::<Vec<_>>();
-        selected.sort_by_key(|(ordinal, _)| *ordinal);
-        return emit_binding_iterator(
-            selected
-                .into_iter()
-                .take(execution_limit.output_rows.unwrap_or(usize::MAX))
-                .map(|(_, binding)| binding),
-            memory.batch_rows.get(),
-            emit,
+    operator.finish(execution_limit, emit)
+}
+
+impl<'a> DistinctOperator<'a> {
+    fn new(context: BlockingExecutionContext<'a>) -> Self {
+        Self {
+            memory: context.memory,
+            task_context: context.task_context,
+            observer: context.observer,
+            tracker: OperatorMemoryTracker::new(context.memory.blocking_operator_bytes),
+            spill_budget: SpillBudgetTracker::new("DistinctExec", context.memory),
+            distinct: BTreeMap::new(),
+            runs: Vec::new(),
+            input_rows: 0,
+        }
+    }
+
+    fn push(&mut self, binding: Binding) -> Result<()> {
+        let key = distinct_binding_key(&binding);
+        let entry_bytes =
+            binding_memory_bytes(&binding).saturating_add(distinct_key_memory_bytes(&key));
+        ensure_operator_item_fits("DistinctExec", entry_bytes, &self.tracker)?;
+        if !self.distinct.contains_key(&key) {
+            if self.tracker.would_exceed(entry_bytes) {
+                self.runs.push(spill_distinct_run(
+                    &mut self.distinct,
+                    &self.memory.spill_directory,
+                    &mut self.spill_budget,
+                    self.task_context,
+                )?);
+                self.tracker.reset();
+            }
+            self.tracker.charge(entry_bytes);
+            self.distinct.insert(key, (self.input_rows, binding));
+        }
+        self.input_rows = self.input_rows.saturating_add(1);
+        Ok(())
+    }
+
+    fn finish(
+        mut self,
+        execution_limit: ExecutionLimit,
+        emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+    ) -> Result<BatchControl> {
+        if self.runs.is_empty() {
+            self.record_memory_report(0, 0, 0, self.tracker.peak_bytes);
+            let mut selected = self.distinct.into_values().collect::<Vec<_>>();
+            selected.sort_by_key(|(ordinal, _)| *ordinal);
+            return emit_binding_iterator(
+                selected
+                    .into_iter()
+                    .take(execution_limit.output_rows.unwrap_or(usize::MAX))
+                    .map(|(_, binding)| binding),
+                self.memory.batch_rows.get(),
+                emit,
+            );
+        }
+        if !self.distinct.is_empty() {
+            self.runs.push(spill_distinct_run(
+                &mut self.distinct,
+                &self.memory.spill_directory,
+                &mut self.spill_budget,
+                self.task_context,
+            )?);
+            self.tracker.reset();
+        }
+        let mut peak_tracked_bytes = self.tracker.peak_bytes;
+        self.runs = compact_distinct_runs(
+            self.runs,
+            self.memory,
+            &mut self.spill_budget,
+            self.task_context,
+            &mut peak_tracked_bytes,
+        )?;
+        self.record_memory_report(
+            self.spill_budget.used_bytes,
+            self.spill_budget.run_count,
+            self.input_rows as usize,
+            peak_tracked_bytes,
         );
+        emit_distinct_run(
+            self.runs
+                .first()
+                .expect("compaction retains one distinct run"),
+            self.memory.blocking_operator_bytes,
+            self.memory.batch_rows.get(),
+            execution_limit,
+            self.task_context,
+            emit,
+        )
     }
-    if !distinct.is_empty() {
-        runs.push(spill_distinct_run(
-            &mut distinct,
-            &memory.spill_directory,
-            &mut spill_budget,
-            task_context,
-        )?);
-        tracker.reset();
+
+    fn record_memory_report(
+        &self,
+        spilled_bytes: u64,
+        spill_run_count: usize,
+        spilled_rows: usize,
+        peak_tracked_bytes: usize,
+    ) {
+        self.observer
+            .record_blocking_memory_report(BlockingOperatorMemoryReport {
+                operator: "DistinctExec".to_string(),
+                budget_bytes: self.tracker.budget_bytes,
+                peak_tracked_bytes,
+                input_rows: self.input_rows as usize,
+                max_spill_bytes: self.spill_budget.max_bytes,
+                max_spill_runs: self.spill_budget.max_runs,
+                spilled_bytes,
+                spill_run_count,
+                spilled_rows,
+            });
     }
-    let mut peak_tracked_bytes = tracker.peak_bytes;
-    runs = compact_distinct_runs(
-        runs,
-        memory,
-        &mut spill_budget,
-        task_context,
-        &mut peak_tracked_bytes,
-    )?;
-    observer.record_blocking_memory_report(BlockingOperatorMemoryReport {
-        operator: "DistinctExec".to_string(),
-        budget_bytes: tracker.budget_bytes,
-        peak_tracked_bytes,
-        input_rows: ordinal as usize,
-        max_spill_bytes: spill_budget.max_bytes,
-        max_spill_runs: spill_budget.max_runs,
-        spilled_bytes: spill_budget.used_bytes,
-        spill_run_count: spill_budget.run_count,
-        spilled_rows: ordinal as usize,
-    });
-    emit_distinct_run(
-        runs.first().expect("compaction retains one distinct run"),
-        memory.blocking_operator_bytes,
-        memory.batch_rows.get(),
-        execution_limit,
-        task_context,
-        emit,
-    )
 }
 
 fn distinct_binding_key(binding: &Binding) -> Vec<(String, Value)> {

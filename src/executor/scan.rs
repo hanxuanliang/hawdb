@@ -1,6 +1,7 @@
 //! Node, index, source-segment, and adjacency scan execution.
 
 use super::*;
+use skein_executor::observer::ExecutionObserver;
 
 pub(super) fn stream_node_scan_batches(
     variable: &str,
@@ -11,9 +12,13 @@ pub(super) fn stream_node_scan_batches(
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
     let mut predicate = |binding: &Binding| match filter {
-        Some((predicate, _)) => {
-            evaluate_predicate(predicate, context.catalog, context.store, binding)
-        }
+        Some((predicate, _)) => evaluate_predicate_observed(
+            predicate,
+            context.catalog,
+            context.store,
+            binding,
+            context.observer,
+        ),
         None => Ok(true),
     };
     skein_executor::scan::stream_node_scan_batches(
@@ -31,7 +36,7 @@ pub(super) fn stream_node_scan_batches(
             task_context: context.task_context,
         },
         &mut predicate,
-        &mut RootExecutionObserver,
+        context.observer,
         emit,
     )
 }
@@ -58,7 +63,7 @@ pub(super) fn stream_index_node_seek_batches(
             batch_rows: context.memory.batch_rows.get(),
             task_context: context.task_context,
         },
-        &mut RootExecutionObserver,
+        context.observer,
         emit,
     )
 }
@@ -113,13 +118,17 @@ pub(super) fn execute_node_scan_with_optional_filter(
     variable: &str,
     label: &str,
     filter: Option<(&Predicate, &PropertyFilter)>,
-    catalog: &Catalog,
-    store: &GraphStore,
+    context: BatchReadContext<'_>,
     execution_limit: ExecutionLimit,
-    memory_budget: NonZeroUsize,
 ) -> Result<Vec<Binding>> {
     let mut predicate = |binding: &Binding| match filter {
-        Some((predicate, _)) => evaluate_predicate(predicate, catalog, store, binding),
+        Some((predicate, _)) => evaluate_predicate_observed(
+            predicate,
+            context.catalog,
+            context.store,
+            binding,
+            context.observer,
+        ),
         None => Ok(true),
     };
     skein_executor::scan::execute_node_scan(
@@ -129,37 +138,40 @@ pub(super) fn execute_node_scan_with_optional_filter(
             property_filter: filter.map(|(_, filter)| filter),
         },
         NodeScanContext {
-            catalog,
-            store,
+            catalog: context.catalog,
+            store: context.store,
             execution_limit,
-            memory_budget,
+            memory_budget: context.memory.blocking_operator_bytes,
             batch_rows: 1,
-            task_context: None,
+            task_context: context.task_context,
         },
         &mut predicate,
-        &mut RootExecutionObserver,
+        context.observer,
     )
 }
 
 pub(super) fn execute_source_segment_scan(
     variable: &str,
     predicate: &Predicate,
-    catalog: &Catalog,
-    store: &GraphStore,
+    context: BatchReadContext<'_>,
     execution_limit: ExecutionLimit,
-    memory: &ExecutionMemoryConfig,
-    task_context: Option<&RuntimeTaskContext>,
 ) -> Result<Vec<Binding>> {
+    let BatchReadContext {
+        catalog,
+        store,
+        memory,
+        task_context,
+        observer,
+        ..
+    } = context;
     runtime_checkpoint(task_context)?;
     let Some(storage_predicate) = source_storage_scan_predicate(predicate, variable) else {
         return execute_node_scan_with_optional_filter(
             variable,
             "Source",
             None,
-            catalog,
-            store,
+            context,
             execution_limit,
-            memory.blocking_operator_bytes,
         );
     };
     let io_depth = NonZeroUsize::new(SOURCE_SEGMENT_SCAN_IO_DEPTH)
@@ -187,7 +199,7 @@ pub(super) fn execute_source_segment_scan(
                 .label_id("Source")
                 .map(|label_id| store.node_count_for_label(Some(label_id)))
                 .unwrap_or_default();
-            record_scan_pruning_report(ScanPruningReport {
+            observer.record_scan_pruning_report(ScanPruningReport {
                 target_kind: crate::store::ScanPruningTargetKind::Node,
                 label_id: catalog.label_id("Source"),
                 rel_type_id: None,
@@ -210,10 +222,8 @@ pub(super) fn execute_source_segment_scan(
                 variable,
                 "Source",
                 None,
-                catalog,
-                store,
+                context,
                 execution_limit,
-                memory.blocking_operator_bytes,
             );
         }
     };
@@ -226,10 +236,8 @@ pub(super) fn execute_source_segment_scan(
                 variable,
                 "Source",
                 None,
-                catalog,
-                store,
+                context,
                 execution_limit,
-                memory.blocking_operator_bytes,
             );
         };
         if source_label_id.is_none_or(|label_id| !node.labels.contains(&label_id))
@@ -239,10 +247,8 @@ pub(super) fn execute_source_segment_scan(
                 variable,
                 "Source",
                 None,
-                catalog,
-                store,
+                context,
                 execution_limit,
-                memory.blocking_operator_bytes,
             );
         }
         let binding = Binding {
@@ -265,6 +271,7 @@ pub(super) fn execute_node_column_lookup(
     store: &GraphStore,
     execution_limit: ExecutionLimit,
     memory_budget: NonZeroUsize,
+    observer: &dyn skein_executor::observer::ExecutionObserver,
 ) -> Result<Vec<Binding>> {
     skein_executor::scan::execute_node_column_lookup(
         spec,
@@ -277,7 +284,7 @@ pub(super) fn execute_node_column_lookup(
             batch_rows: 1,
             task_context: None,
         },
-        &mut RootExecutionObserver,
+        observer,
     )
 }
 
@@ -308,7 +315,13 @@ pub(super) fn stream_filtered_adjacency_expand_batches(
             }
             let mut filtered = Vec::with_capacity(batch.len().min(remaining));
             for binding in batch {
-                if evaluate_predicate(predicate, catalog, store, &binding)? {
+                if evaluate_predicate_observed(
+                    predicate,
+                    catalog,
+                    store,
+                    &binding,
+                    context.observer,
+                )? {
                     filtered.push(binding);
                     if filtered.len() == remaining {
                         break;
@@ -362,13 +375,23 @@ pub(super) fn stream_adjacency_expand_batches(
             "expected adjacency expand plan".to_string(),
         ));
     };
-    let mut graph_expansion =
-        GraphExpansionExecutionState::new(*graph_budget, 0, current_vector_rerank_count());
+    let mut graph_expansion = GraphExpansionExecutionState::new(
+        *graph_budget,
+        0,
+        context.observer.current_vector_rerank_count(),
+    );
     let rel_type_id = if rel_type.is_empty() {
         None
     } else {
         let Some(rel_type_id) = catalog.rel_type_id(rel_type) else {
-            record_graph_expansion_state(&graph_expansion, rel_type, *min_hops, *max_hops, 0);
+            record_graph_expansion_state(
+                context.observer,
+                &graph_expansion,
+                rel_type,
+                *min_hops,
+                *max_hops,
+                0,
+            );
             return Ok(BatchControl::Continue);
         };
         Some(rel_type_id)
@@ -400,7 +423,7 @@ pub(super) fn stream_adjacency_expand_batches(
                     store,
                     memory.blocking_operator_bytes.get(),
                     context.task_context,
-                    &mut RootExecutionObserver,
+                    context.observer,
                 )? {
                     runtime_checkpoint(context.task_context)?;
                     if !graph_expansion.try_push(
@@ -426,9 +449,10 @@ pub(super) fn stream_adjacency_expand_batches(
             }
             Ok(BatchControl::Continue)
         })?;
-    graph_expansion.set_reranked_seed_count(current_vector_rerank_count());
+    graph_expansion.set_reranked_seed_count(context.observer.current_vector_rerank_count());
     if !output.is_empty() && emit(output)? == BatchControl::Stop {
         record_graph_expansion_state(
+            context.observer,
             &graph_expansion,
             rel_type,
             *min_hops,
@@ -438,6 +462,7 @@ pub(super) fn stream_adjacency_expand_batches(
         return Ok(BatchControl::Stop);
     }
     record_graph_expansion_state(
+        context.observer,
         &graph_expansion,
         rel_type,
         *min_hops,
@@ -448,6 +473,7 @@ pub(super) fn stream_adjacency_expand_batches(
 }
 
 fn record_graph_expansion_state(
+    observer: &QueryExecutionObserver,
     state: &GraphExpansionExecutionState,
     rel_type: &str,
     min_hops: usize,
@@ -455,6 +481,6 @@ fn record_graph_expansion_state(
     returned_count: usize,
 ) {
     if let Some(report) = state.report(rel_type, min_hops, max_hops, returned_count) {
-        record_graph_expansion_report(report);
+        observer.record_graph_expansion(report);
     }
 }

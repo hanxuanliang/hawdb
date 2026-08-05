@@ -5,167 +5,82 @@ use skein_executor::observer::ExecutionObserver;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 
-thread_local! {
-    static SCAN_PRUNING_REPORT_CAPTURE: RefCell<Option<Vec<ScanPruningReport>>> = const { RefCell::new(None) };
-    static VECTOR_EXECUTION_REPORT_CAPTURE: RefCell<Option<Vec<skein_executor::VectorExecutionReport>>> = const { RefCell::new(None) };
-    static GRAPH_EXPANSION_REPORT_CAPTURE: RefCell<Option<Vec<skein_executor::GraphExpansionExecutionReport>>> = const { RefCell::new(None) };
-    static BLOCKING_MEMORY_REPORT_CAPTURE: RefCell<Option<Vec<skein_executor::BlockingOperatorMemoryReport>>> = const { RefCell::new(None) };
-    static PIPELINE_MEMORY_REPORT_CAPTURE: RefCell<Option<skein_executor::PipelineMemoryReport>> = const { RefCell::new(None) };
+#[derive(Default)]
+pub(super) struct QueryExecutionReports {
+    pub(super) scan_pruning: Vec<ScanPruningReport>,
+    pub(super) vector_execution: Vec<skein_executor::VectorExecutionReport>,
+    pub(super) graph_expansion: Vec<skein_executor::GraphExpansionExecutionReport>,
+    pub(super) blocking_memory: Vec<skein_executor::BlockingOperatorMemoryReport>,
+    pub(super) pipeline_memory: skein_executor::PipelineMemoryReport,
 }
 
-pub(super) struct RootExecutionObserver;
+#[derive(Default)]
+pub(super) struct QueryExecutionObserver {
+    reports: RefCell<QueryExecutionReports>,
+}
 
-impl ExecutionObserver for RootExecutionObserver {
-    fn record_scan_pruning_report(&mut self, report: ScanPruningReport) {
-        self::record_scan_pruning_report(report);
+impl QueryExecutionObserver {
+    pub(super) fn into_reports(self) -> QueryExecutionReports {
+        self.reports.into_inner()
     }
 
-    fn record_blocking_memory_report(
-        &mut self,
-        report: skein_executor::BlockingOperatorMemoryReport,
+    pub(super) fn record_vector_execution(&self, report: skein_executor::VectorExecutionReport) {
+        self.reports.borrow_mut().vector_execution.push(report);
+    }
+    pub(super) fn record_graph_expansion(
+        &self,
+        report: skein_executor::GraphExpansionExecutionReport,
     ) {
-        self::record_blocking_memory_report(report);
+        self.reports.borrow_mut().graph_expansion.push(report);
     }
-}
 
-pub(super) fn capture_scan_pruning_reports<T>(
-    f: impl FnOnce() -> Result<T>,
-) -> Result<(T, Vec<ScanPruningReport>)> {
-    SCAN_PRUNING_REPORT_CAPTURE.with(|capture| {
-        let previous = capture.replace(Some(Vec::new()));
-        let result = f();
-        let captured = capture.replace(previous).unwrap_or_default();
-        result.map(|value| (value, captured))
-    })
-}
-
-pub(super) fn record_scan_pruning_report(report: ScanPruningReport) {
-    SCAN_PRUNING_REPORT_CAPTURE.with(|capture| {
-        if let Some(reports) = capture.borrow_mut().as_mut() {
-            reports.push(report);
-        }
-    });
-}
-
-pub(super) fn capture_vector_execution_reports<T>(
-    f: impl FnOnce() -> Result<T>,
-) -> Result<(T, Vec<skein_executor::VectorExecutionReport>)> {
-    VECTOR_EXECUTION_REPORT_CAPTURE.with(|capture| {
-        let previous = capture.replace(Some(Vec::new()));
-        let result = f();
-        let captured = capture.replace(previous).unwrap_or_default();
-        result.map(|value| (value, captured))
-    })
-}
-
-pub(super) fn record_vector_execution_report(report: skein_executor::VectorExecutionReport) {
-    VECTOR_EXECUTION_REPORT_CAPTURE.with(|capture| {
-        if let Some(reports) = capture.borrow_mut().as_mut() {
-            reports.push(report);
-        }
-    });
-}
-
-pub(super) fn capture_graph_expansion_reports<T>(
-    f: impl FnOnce() -> Result<T>,
-) -> Result<(T, Vec<skein_executor::GraphExpansionExecutionReport>)> {
-    GRAPH_EXPANSION_REPORT_CAPTURE.with(|capture| {
-        let previous = capture.replace(Some(Vec::new()));
-        let result = f();
-        let captured = capture.replace(previous).unwrap_or_default();
-        result.map(|value| (value, captured))
-    })
-}
-
-pub(super) fn record_graph_expansion_report(report: skein_executor::GraphExpansionExecutionReport) {
-    GRAPH_EXPANSION_REPORT_CAPTURE.with(|capture| {
-        if let Some(reports) = capture.borrow_mut().as_mut() {
-            reports.push(report);
-        }
-    });
-}
-
-pub(super) fn capture_pipeline_memory_report<T>(
-    f: impl FnOnce() -> Result<T>,
-) -> Result<(T, skein_executor::PipelineMemoryReport)> {
-    PIPELINE_MEMORY_REPORT_CAPTURE.with(|capture| {
-        let previous = capture.replace(Some(skein_executor::PipelineMemoryReport::default()));
-        let result = f();
-        let captured = capture.replace(previous).unwrap_or_default();
-        result.map(|value| (value, captured))
-    })
-}
-
-pub(super) fn record_pipeline_batch(batch: &[Binding]) {
-    PIPELINE_MEMORY_REPORT_CAPTURE.with(|capture| {
-        let mut capture = capture.borrow_mut();
-        let Some(report) = capture.as_mut() else {
-            return;
-        };
+    pub(super) fn record_pipeline_batch(&self, batch: &[Binding]) {
         let payload_bytes = batch.iter().fold(0usize, |total, binding| {
             total.saturating_add(skein_executor::binding::binding_payload_bytes(binding))
         });
+        let mut reports = self.reports.borrow_mut();
+        let report = &mut reports.pipeline_memory;
         report.intermediate_rows = report.intermediate_rows.saturating_add(batch.len());
         report.intermediate_payload_bytes = report
             .intermediate_payload_bytes
             .saturating_add(payload_bytes);
         report.peak_batch_rows = report.peak_batch_rows.max(batch.len());
         report.peak_batch_payload_bytes = report.peak_batch_payload_bytes.max(payload_bytes);
-    });
-}
+    }
 
-pub(super) fn record_columnar_batch(input_rows: usize, selected_rows: usize) {
-    PIPELINE_MEMORY_REPORT_CAPTURE.with(|capture| {
-        let mut capture = capture.borrow_mut();
-        let Some(report) = capture.as_mut() else {
-            return;
-        };
+    pub(super) fn record_columnar_batch(&self, input_rows: usize, selected_rows: usize) {
+        let mut reports = self.reports.borrow_mut();
+        let report = &mut reports.pipeline_memory;
         report.columnar_batches = report.columnar_batches.saturating_add(1);
         report.columnar_input_rows = report.columnar_input_rows.saturating_add(input_rows);
         report.columnar_selected_rows = report.columnar_selected_rows.saturating_add(selected_rows);
         report.morsel_count = report.morsel_count.saturating_add(1);
-    });
-}
+    }
 
-pub(super) fn record_morsel_admission(max_workers: usize, active_workers: usize) {
-    PIPELINE_MEMORY_REPORT_CAPTURE.with(|capture| {
-        let mut capture = capture.borrow_mut();
-        let Some(report) = capture.as_mut() else {
-            return;
-        };
+    pub(super) fn record_morsel_admission(&self, max_workers: usize, active_workers: usize) {
+        let mut reports = self.reports.borrow_mut();
+        let report = &mut reports.pipeline_memory;
         report.morsel_max_admitted_workers = report.morsel_max_admitted_workers.max(max_workers);
         report.morsel_peak_active_workers = report.morsel_peak_active_workers.max(active_workers);
-    });
-}
+    }
 
-pub(super) fn capture_blocking_memory_reports<T>(
-    f: impl FnOnce() -> Result<T>,
-) -> Result<(T, Vec<skein_executor::BlockingOperatorMemoryReport>)> {
-    BLOCKING_MEMORY_REPORT_CAPTURE.with(|capture| {
-        let previous = capture.replace(Some(Vec::new()));
-        let result = f();
-        let captured = capture.replace(previous).unwrap_or_default();
-        result.map(|value| (value, captured))
-    })
-}
-
-pub(super) fn record_blocking_memory_report(report: skein_executor::BlockingOperatorMemoryReport) {
-    BLOCKING_MEMORY_REPORT_CAPTURE.with(|capture| {
-        if let Some(reports) = capture.borrow_mut().as_mut() {
-            reports.push(report);
-        }
-    });
-}
-
-pub(super) fn current_vector_rerank_count() -> usize {
-    VECTOR_EXECUTION_REPORT_CAPTURE.with(|capture| {
-        capture
+    pub(super) fn current_vector_rerank_count(&self) -> usize {
+        self.reports
             .borrow()
-            .as_ref()
-            .and_then(|reports| reports.last())
-            .map(|report| report.reranked_candidate_count)
-            .unwrap_or_default()
-    })
+            .vector_execution
+            .last()
+            .map_or(0, |report| report.reranked_candidate_count)
+    }
+}
+
+impl ExecutionObserver for QueryExecutionObserver {
+    fn record_scan_pruning_report(&self, report: ScanPruningReport) {
+        self.reports.borrow_mut().scan_pruning.push(report);
+    }
+
+    fn record_blocking_memory_report(&self, report: skein_executor::BlockingOperatorMemoryReport) {
+        self.reports.borrow_mut().blocking_memory.push(report);
+    }
 }
 
 pub(super) fn blocking_operator_kinds(plan: &PhysicalPlan) -> Vec<String> {
@@ -212,5 +127,33 @@ fn collect_blocking_operator_kinds(plan: &PhysicalPlan, output: &mut BTreeSet<St
             collect_blocking_operator_kinds(input, output);
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_observers_keep_reports_isolated() {
+        let first = QueryExecutionObserver::default();
+        let second = QueryExecutionObserver::default();
+        first.record_morsel_admission(2, 1);
+        second.record_morsel_admission(4, 3);
+
+        assert_eq!(
+            first
+                .into_reports()
+                .pipeline_memory
+                .morsel_max_admitted_workers,
+            2
+        );
+        assert_eq!(
+            second
+                .into_reports()
+                .pipeline_memory
+                .morsel_max_admitted_workers,
+            4
+        );
     }
 }

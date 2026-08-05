@@ -6,20 +6,20 @@ pub fn evaluate_predicate(
     catalog: &Catalog,
     store: &dyn GraphExecutionRead,
     binding: &Binding,
-    observer: &mut dyn ExecutionObserver,
+    observer: &dyn ExecutionObserver,
 ) -> Result<bool> {
-    let mut context = PredicateEvaluationContext {
+    let context = PredicateEvaluationContext {
         catalog,
         store,
         observer,
     };
-    Ok(evaluate_predicate_truth(predicate, binding, &mut context)?.is_true())
+    Ok(evaluate_predicate_truth(predicate, binding, &context)?.is_true())
 }
 
 struct PredicateEvaluationContext<'a> {
     catalog: &'a Catalog,
     store: &'a dyn GraphExecutionRead,
-    observer: &'a mut dyn ExecutionObserver,
+    observer: &'a dyn ExecutionObserver,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,7 +99,7 @@ fn predicate_in_truth(actual: Option<&Value>, values: &[Value]) -> PredicateTrut
 fn evaluate_predicate_truth(
     predicate: &Predicate,
     binding: &Binding,
-    context: &mut PredicateEvaluationContext<'_>,
+    context: &PredicateEvaluationContext<'_>,
 ) -> Result<PredicateTruth> {
     let catalog = context.catalog;
     Ok(match predicate {
@@ -330,7 +330,7 @@ fn evaluate_predicate_truth(
 }
 
 fn relationship_exists(
-    context: &mut PredicateEvaluationContext<'_>,
+    context: &PredicateEvaluationContext<'_>,
     binding: &Binding,
     variable: &str,
     rel_type: &str,
@@ -359,13 +359,13 @@ fn relationship_exists(
         &BTreeMap::new(),
         None,
         direction,
-        &mut *context.observer,
+        context.observer,
     )
     .map(|relationships| !relationships.is_empty())
 }
 
 fn bound_relationship_exists(
-    context: &mut PredicateEvaluationContext<'_>,
+    context: &PredicateEvaluationContext<'_>,
     binding: &Binding,
     source_variable: &str,
     rel_type: &str,
@@ -391,7 +391,7 @@ fn bound_relationship_exists(
         &BTreeMap::new(),
         None,
         direction,
-        &mut *context.observer,
+        context.observer,
     )
     .map(|relationships| {
         relationships

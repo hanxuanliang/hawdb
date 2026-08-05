@@ -28,6 +28,7 @@ fn stream_node_column_lookup_batches(
                 output_rows: Some(remaining),
             },
             context.memory.blocking_operator_bytes,
+            context.observer,
         )?;
         for binding in bindings {
             output.push(binding);
@@ -52,67 +53,84 @@ fn stream_node_column_lookup_batches(
     Ok(BatchControl::Continue)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn stream_optional_degree_batches(
-    source_variable: &str,
-    rel_type: &str,
-    rel_properties: &BTreeMap<String, Value>,
+#[derive(Clone, Copy)]
+struct OptionalDegreeSpec<'a> {
+    source_variable: &'a str,
+    rel_type: &'a str,
+    rel_properties: &'a BTreeMap<String, Value>,
     direction: RelationshipDirection,
-    target_label: &str,
-    target_properties: &BTreeMap<String, Value>,
-    alias: &str,
-    input: &PhysicalPlan,
-    context: BatchReadContext<'_>,
-    execution_limit: ExecutionLimit,
-    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
-) -> Result<BatchControl> {
-    let rel_type_id = if rel_type.is_empty() {
-        None
-    } else {
-        context.catalog.rel_type_id(rel_type)
-    };
-    let target_label_ids = label_ids_for_pattern(context.catalog, target_label);
-    let mut emitted = 0usize;
-    execute_binding_batches(input, context, execution_limit, &mut |batch| {
-        let mut output = Vec::with_capacity(batch.len());
-        for mut binding in batch {
-            let degree = if !rel_type.is_empty() && rel_type_id.is_none() {
-                0
-            } else {
-                let source = binding.nodes.get(source_variable).ok_or_else(|| {
-                    SkeinError::Execution(format!(
-                        "missing variable '{source_variable}' during optional degree"
-                    ))
-                })?;
-                one_hop_relationships_with_budget(
-                    context.store,
-                    source.id,
-                    rel_type_id,
-                    target_label_ids.as_deref(),
-                    rel_properties,
-                    None,
-                    direction,
-                    context.memory.blocking_operator_bytes.get(),
-                )?
-                .into_iter()
-                .filter(|(_, target)| node_properties_match(target, target_properties))
-                .count()
-            };
-            binding
-                .values
-                .insert(alias.to_string(), Value::Int(degree as i64));
-            output.push(binding);
-        }
-        emitted = emitted.saturating_add(output.len());
-        if !output.is_empty() && emit(output)? == BatchControl::Stop {
-            return Ok(BatchControl::Stop);
-        }
-        Ok(if execution_limit.is_reached(emitted) {
-            BatchControl::Stop
+    target_label: &'a str,
+    target_properties: &'a BTreeMap<String, Value>,
+    alias: &'a str,
+    input: &'a PhysicalPlan,
+}
+
+impl OptionalDegreeSpec<'_> {
+    fn stream(
+        self,
+        context: BatchReadContext<'_>,
+        execution_limit: ExecutionLimit,
+        emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+    ) -> Result<BatchControl> {
+        let Self {
+            source_variable,
+            rel_type,
+            rel_properties,
+            direction,
+            target_label,
+            target_properties,
+            alias,
+            input,
+        } = self;
+        let rel_type_id = if rel_type.is_empty() {
+            None
         } else {
-            BatchControl::Continue
+            context.catalog.rel_type_id(rel_type)
+        };
+        let target_label_ids = label_ids_for_pattern(context.catalog, target_label);
+        let mut emitted = 0usize;
+        execute_binding_batches(input, context, execution_limit, &mut |batch| {
+            let mut output = Vec::with_capacity(batch.len());
+            for mut binding in batch {
+                let degree = if !rel_type.is_empty() && rel_type_id.is_none() {
+                    0
+                } else {
+                    let source = binding.nodes.get(source_variable).ok_or_else(|| {
+                        SkeinError::Execution(format!(
+                            "missing variable '{source_variable}' during optional degree"
+                        ))
+                    })?;
+                    one_hop_relationships_with_budget(
+                        context.store,
+                        source.id,
+                        rel_type_id,
+                        target_label_ids.as_deref(),
+                        rel_properties,
+                        None,
+                        direction,
+                        context.memory.blocking_operator_bytes.get(),
+                        context.observer,
+                    )?
+                    .into_iter()
+                    .filter(|(_, target)| node_properties_match(target, target_properties))
+                    .count()
+                };
+                binding
+                    .values
+                    .insert(alias.to_string(), Value::Int(degree as i64));
+                output.push(binding);
+            }
+            emitted = emitted.saturating_add(output.len());
+            if !output.is_empty() && emit(output)? == BatchControl::Stop {
+                return Ok(BatchControl::Stop);
+            }
+            Ok(if execution_limit.is_reached(emitted) {
+                BatchControl::Stop
+            } else {
+                BatchControl::Continue
+            })
         })
-    })
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -123,6 +141,7 @@ pub(super) struct BatchReadContext<'a> {
     pub(super) external: &'a dyn BatchExternalRead,
     pub(super) memory: &'a ExecutionMemoryConfig,
     pub(super) task_context: Option<&'a RuntimeTaskContext>,
+    pub(super) observer: &'a QueryExecutionObserver,
 }
 
 pub(super) fn batch_pipeline_capable(plan: &PhysicalPlan) -> bool {
@@ -175,6 +194,7 @@ pub(super) fn collect_batch_pipeline(
         external: &external,
         memory,
         task_context,
+        observer: execution_context.observer,
     };
     execute_binding_batches(plan, context, execution_limit, &mut |batch| {
         for binding in batch {
@@ -202,8 +222,12 @@ pub(super) fn execute_binding_batches(
     runtime_checkpoint(context.task_context)?;
     let mut measured_emit = |batch: BindingBatch| {
         runtime_checkpoint(context.task_context)?;
-        let control =
-            emit_byte_bounded_batches(batch, context.memory.batch_payload_bytes.get(), emit)?;
+        let control = emit_byte_bounded_batches(
+            batch,
+            context.memory.batch_payload_bytes.get(),
+            context.observer,
+            emit,
+        )?;
         runtime_checkpoint(context.task_context)?;
         Ok(control)
     };
@@ -213,8 +237,29 @@ pub(super) fn execute_binding_batches(
 fn emit_byte_bounded_batches(
     batch: BindingBatch,
     max_payload_bytes: usize,
+    observer: &QueryExecutionObserver,
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
+    let mut batch_bytes = 0usize;
+    let mut requires_split = false;
+    for binding in &batch {
+        let binding_bytes = binding_memory_bytes(binding);
+        if binding_bytes > max_payload_bytes {
+            return Err(SkeinError::Execution(format!(
+                "intermediate row uses {binding_bytes} bytes, exceeding batch_payload_bytes {max_payload_bytes}"
+            )));
+        }
+        batch_bytes = batch_bytes.saturating_add(binding_bytes);
+        requires_split |= batch_bytes > max_payload_bytes;
+    }
+    if !requires_split {
+        if !batch.is_empty() {
+            observer.record_pipeline_batch(&batch);
+            return emit(batch);
+        }
+        return Ok(BatchControl::Continue);
+    }
+
     let mut bounded = Vec::with_capacity(batch.len());
     let mut bounded_bytes = 0usize;
     for binding in batch {
@@ -225,7 +270,7 @@ fn emit_byte_bounded_batches(
             )));
         }
         if !bounded.is_empty() && bounded_bytes.saturating_add(binding_bytes) > max_payload_bytes {
-            record_pipeline_batch(&bounded);
+            observer.record_pipeline_batch(&bounded);
             if emit(std::mem::take(&mut bounded))? == BatchControl::Stop {
                 return Ok(BatchControl::Stop);
             }
@@ -235,7 +280,7 @@ fn emit_byte_bounded_batches(
         bounded.push(binding);
     }
     if !bounded.is_empty() {
-        record_pipeline_batch(&bounded);
+        observer.record_pipeline_batch(&bounded);
         if emit(bounded)? == BatchControl::Stop {
             return Ok(BatchControl::Stop);
         }
@@ -265,15 +310,8 @@ fn execute_binding_batches_inner(
             variable,
             predicate,
         } => {
-            let bindings = execute_source_segment_scan(
-                variable,
-                predicate,
-                catalog,
-                store,
-                execution_limit,
-                memory,
-                context.task_context,
-            )?;
+            let bindings =
+                execute_source_segment_scan(variable, predicate, context, execution_limit)?;
             emit_owned_binding_batches(bindings, memory.batch_rows.get(), emit)
         }
         PhysicalPlan::IndexNodeSeek {
@@ -411,6 +449,7 @@ fn execute_binding_batches_inner(
                 context.memory,
                 execution_limit,
                 context.task_context,
+                context.observer,
             )?;
             emit_owned_binding_batches(bindings, memory.batch_rows.get(), emit)
         }
@@ -436,6 +475,7 @@ fn execute_binding_batches_inner(
                 memory_rel_type,
                 memory_label,
                 memory.blocking_operator_bytes,
+                context.observer,
             )?;
             emit_owned_binding_batches(bindings, memory.batch_rows.get(), emit)
         }
@@ -549,7 +589,7 @@ fn execute_binding_batches_inner(
                     metadata_filters,
                     vector_plan,
                 })?;
-            record_vector_execution_report(output.report);
+            context.observer.record_vector_execution(output.report);
             let mut bindings = collect_bounded_operator_bindings(
                 "VectorSeedScan",
                 output.rows.into_iter().map(|row| {
@@ -600,19 +640,17 @@ fn execute_binding_batches_inner(
             target_properties,
             alias,
             input,
-        } => stream_optional_degree_batches(
+        } => OptionalDegreeSpec {
             source_variable,
             rel_type,
             rel_properties,
-            *direction,
+            direction: *direction,
             target_label,
             target_properties,
             alias,
             input,
-            context,
-            execution_limit,
-            emit,
-        ),
+        }
+        .stream(context, execution_limit, emit),
         PhysicalPlan::OptionalRelationshipCountSumExec {
             label,
             properties,
@@ -630,7 +668,8 @@ fn execute_binding_batches_inner(
                     return GraphScanControl::Continue;
                 }
                 for leg in legs {
-                    match relationship_count_sum_leg(catalog, store, node.id, leg) {
+                    match relationship_count_sum_leg(catalog, store, node.id, leg, context.observer)
+                    {
                         Ok(count) => total = total.saturating_add(count),
                         Err(error) => {
                             callback_error = Some(error);
@@ -726,7 +765,13 @@ fn execute_binding_batches_inner(
                 }
                 let mut filtered = Vec::with_capacity(batch.len().min(remaining));
                 for binding in batch {
-                    if evaluate_predicate(predicate, catalog, store, &binding)? {
+                    if evaluate_predicate_observed(
+                        predicate,
+                        catalog,
+                        store,
+                        &binding,
+                        context.observer,
+                    )? {
                         filtered.push(binding);
                         if filtered.len() == remaining {
                             break;
@@ -845,5 +890,32 @@ fn execute_binding_batches_inner(
             stream_distinct_batches(input, context, execution_limit, emit)
         }
         _ => unreachable!("batch pipeline capability check rejected this operator"),
+    }
+}
+
+#[cfg(test)]
+mod byte_bounded_batch_tests {
+    use super::*;
+
+    #[test]
+    fn within_budget_batch_keeps_its_allocation() {
+        let batch = vec![Binding {
+            values: BTreeMap::from([("value".to_string(), Value::Int(1))]),
+            nodes: BTreeMap::new(),
+            relationships: BTreeMap::new(),
+        }];
+        let allocation = batch.as_ptr();
+        let observer = QueryExecutionObserver::default();
+        let mut emitted_allocation = None;
+
+        let control = emit_byte_bounded_batches(batch, usize::MAX, &observer, &mut |emitted| {
+            emitted_allocation = Some(emitted.as_ptr());
+            Ok(BatchControl::Continue)
+        })
+        .unwrap();
+
+        assert_eq!(control, BatchControl::Continue);
+        assert_eq!(emitted_allocation, Some(allocation));
+        assert_eq!(observer.into_reports().pipeline_memory.intermediate_rows, 1);
     }
 }

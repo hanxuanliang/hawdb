@@ -14,6 +14,7 @@ pub(super) fn execute_shortest_path(
     memory: &ExecutionMemoryConfig,
     execution_limit: ExecutionLimit,
     task_context: Option<&RuntimeTaskContext>,
+    observer: &dyn skein_executor::observer::ExecutionObserver,
 ) -> Result<Vec<Binding>> {
     executor_traversal::execute_shortest_path(
         catalog,
@@ -22,7 +23,7 @@ pub(super) fn execute_shortest_path(
         memory,
         execution_limit,
         task_context,
-        &mut RootExecutionObserver,
+        observer,
     )
 }
 
@@ -40,7 +41,7 @@ pub(super) fn all_shortest_paths(
         memory_budget,
         result_limit,
         task_context,
-        &mut RootExecutionObserver,
+        &skein_executor::observer::NoopExecutionObserver,
     )
 }
 
@@ -54,6 +55,7 @@ pub(super) fn one_hop_relationships_with_budget(
     relationship_scan_filter: Option<&PropertyFilter>,
     direction: RelationshipDirection,
     memory_budget_bytes: usize,
+    observer: &dyn skein_executor::observer::ExecutionObserver,
 ) -> Result<Vec<(RelRecord, NodeRecord)>> {
     executor_traversal::one_hop_relationships_with_budget(
         store,
@@ -64,7 +66,7 @@ pub(super) fn one_hop_relationships_with_budget(
         relationship_scan_filter,
         direction,
         memory_budget_bytes,
-        &mut RootExecutionObserver,
+        observer,
     )
 }
 
@@ -73,14 +75,9 @@ pub(super) fn relationship_count_sum_leg(
     store: &GraphStore,
     source: NodeId,
     leg: &RelationshipCountLeg,
+    observer: &dyn skein_executor::observer::ExecutionObserver,
 ) -> Result<usize> {
-    executor_traversal::relationship_count_sum_leg(
-        catalog,
-        store,
-        source,
-        leg,
-        &mut RootExecutionObserver,
-    )
+    executor_traversal::relationship_count_sum_leg(catalog, store, source, leg, observer)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -96,6 +93,7 @@ pub(super) fn thread_repair_stats_rows(
     memory_rel_type: &str,
     memory_label: &str,
     memory_budget: NonZeroUsize,
+    observer: &dyn skein_executor::observer::ExecutionObserver,
 ) -> Result<Vec<Binding>> {
     executor_traversal::thread_repair_stats_rows(
         catalog,
@@ -109,6 +107,6 @@ pub(super) fn thread_repair_stats_rows(
         memory_rel_type,
         memory_label,
         memory_budget,
-        &mut RootExecutionObserver,
+        observer,
     )
 }

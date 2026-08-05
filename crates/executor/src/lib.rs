@@ -46,7 +46,7 @@ pub use limit::ExecutionLimit;
 pub use memory::ExecutionMemoryConfig;
 pub use morsel::{
     admit_morsels, execute_morsels_ordered, Morsel, MorselAdmission, MorselAdmissionRequest,
-    MorselIter, MorselOrdinal, PipelineId,
+    MorselIter, MorselOrdinal, PipelineId, SequentialMorselScheduler,
 };
 pub use profile::{
     BlockingOperatorMemoryReport, PipelineMemoryReport, ProfiledQueryRows, ProfiledQueryStream,

@@ -6,6 +6,19 @@ struct SortRunRow {
     binding: Binding,
 }
 
+struct SortOperator<'plan, 'runtime> {
+    items: &'plan [SortItem],
+    catalog: &'runtime Catalog,
+    memory: &'runtime ExecutionMemoryConfig,
+    task_context: Option<&'runtime RuntimeTaskContext>,
+    observer: &'runtime dyn ExecutionObserver,
+    tracker: OperatorMemoryTracker,
+    spill_budget: SpillBudgetTracker,
+    rows: Vec<SortRunRow>,
+    runs: Vec<spill::SpillRun>,
+    input_rows: u64,
+}
+
 impl SortRunRow {
     fn new(catalog: &Catalog, items: &[SortItem], ordinal: u64, binding: Binding) -> Self {
         let sort_values = items
@@ -85,100 +98,115 @@ pub fn stream_sort_batches(
     execution_limit: ExecutionLimit,
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
-    let BlockingExecutionContext {
-        catalog,
-        memory,
-        task_context,
-        observer,
-    } = context;
-    runtime_checkpoint(task_context)?;
-    let mut tracker = OperatorMemoryTracker::new(memory.blocking_operator_bytes);
-    let mut spill_budget = SpillBudgetTracker::new("SortExec", memory);
-    let mut rows = Vec::<SortRunRow>::new();
-    let mut runs = Vec::<spill::SpillRun>::new();
-    let mut ordinal = 0u64;
+    let mut operator = SortOperator::new(items, context);
+    runtime_checkpoint(operator.task_context)?;
     source.execute(input, ExecutionLimit::unlimited(), &mut |batch| {
-        runtime_checkpoint(task_context)?;
+        runtime_checkpoint(operator.task_context)?;
         for binding in batch {
-            let row = SortRunRow::new(catalog, items, ordinal, binding);
-            let bytes = row.memory_bytes();
-            ensure_operator_item_fits("SortExec", bytes, &tracker)?;
-            if tracker.would_exceed(bytes) {
-                runs.push(spill_sort_run(
-                    &mut rows,
-                    &memory.spill_directory,
-                    &mut spill_budget,
-                    task_context,
-                )?);
-                tracker.reset();
-            }
-            tracker.charge(bytes);
-            rows.push(row);
-            ordinal = ordinal.saturating_add(1);
+            operator.push(binding)?;
         }
         Ok(BatchControl::Continue)
     })?;
+    operator.finish(execution_limit, emit)
+}
 
-    if runs.is_empty() {
-        runtime_checkpoint(task_context)?;
-        observer.record_blocking_memory_report(BlockingOperatorMemoryReport {
-            operator: "SortExec".to_string(),
-            budget_bytes: tracker.budget_bytes,
-            peak_tracked_bytes: tracker.peak_bytes,
-            input_rows: ordinal as usize,
-            max_spill_bytes: memory.max_spill_bytes.get(),
-            max_spill_runs: memory.max_spill_runs.get(),
-            spilled_bytes: 0,
-            spill_run_count: 0,
-            spilled_rows: 0,
-        });
-        rows.sort_by(SortRunRow::cmp_key);
-        return emit_binding_iterator(
-            rows.into_iter()
-                .take(execution_limit.output_rows.unwrap_or(usize::MAX))
-                .map(|row| row.binding),
-            memory.batch_rows.get(),
+impl<'plan, 'runtime> SortOperator<'plan, 'runtime> {
+    fn new(items: &'plan [SortItem], context: BlockingExecutionContext<'runtime>) -> Self {
+        Self {
+            items,
+            catalog: context.catalog,
+            memory: context.memory,
+            task_context: context.task_context,
+            observer: context.observer,
+            tracker: OperatorMemoryTracker::new(context.memory.blocking_operator_bytes),
+            spill_budget: SpillBudgetTracker::new("SortExec", context.memory),
+            rows: Vec::new(),
+            runs: Vec::new(),
+            input_rows: 0,
+        }
+    }
+
+    fn push(&mut self, binding: Binding) -> Result<()> {
+        let row = SortRunRow::new(self.catalog, self.items, self.input_rows, binding);
+        let bytes = row.memory_bytes();
+        ensure_operator_item_fits("SortExec", bytes, &self.tracker)?;
+        if self.tracker.would_exceed(bytes) {
+            self.runs.push(spill_sort_run(
+                &mut self.rows,
+                &self.memory.spill_directory,
+                &mut self.spill_budget,
+                self.task_context,
+            )?);
+            self.tracker.reset();
+        }
+        self.tracker.charge(bytes);
+        self.rows.push(row);
+        self.input_rows = self.input_rows.saturating_add(1);
+        Ok(())
+    }
+
+    fn finish(
+        mut self,
+        execution_limit: ExecutionLimit,
+        emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+    ) -> Result<BatchControl> {
+        if self.runs.is_empty() {
+            runtime_checkpoint(self.task_context)?;
+            self.record_memory_report(0);
+            self.rows.sort_by(SortRunRow::cmp_key);
+            return emit_binding_iterator(
+                self.rows
+                    .into_iter()
+                    .take(execution_limit.output_rows.unwrap_or(usize::MAX))
+                    .map(|row| row.binding),
+                self.memory.batch_rows.get(),
+                emit,
+            );
+        }
+        if !self.rows.is_empty() {
+            self.runs.push(spill_sort_run(
+                &mut self.rows,
+                &self.memory.spill_directory,
+                &mut self.spill_budget,
+                self.task_context,
+            )?);
+        }
+        self.runs = compact_sort_runs(
+            self.runs,
+            self.items,
+            self.catalog,
+            self.memory,
+            &mut self.spill_budget,
+            self.task_context,
+        )?;
+        self.record_memory_report(self.input_rows as usize);
+        merge_sort_runs(
+            &self.runs,
+            self.items,
+            self.catalog,
+            self.memory.blocking_operator_bytes,
+            self.memory.batch_rows.get(),
+            0,
+            execution_limit.output_rows.unwrap_or(usize::MAX),
+            self.task_context,
             emit,
-        );
+        )
     }
-    if !rows.is_empty() {
-        runs.push(spill_sort_run(
-            &mut rows,
-            &memory.spill_directory,
-            &mut spill_budget,
-            task_context,
-        )?);
+
+    fn record_memory_report(&self, spilled_rows: usize) {
+        self.observer
+            .record_blocking_memory_report(BlockingOperatorMemoryReport {
+                operator: "SortExec".to_string(),
+                budget_bytes: self.tracker.budget_bytes,
+                peak_tracked_bytes: self.tracker.peak_bytes,
+                input_rows: self.input_rows as usize,
+                max_spill_bytes: self.spill_budget.max_bytes,
+                max_spill_runs: self.spill_budget.max_runs,
+                spilled_bytes: self.spill_budget.used_bytes,
+                spill_run_count: self.spill_budget.run_count,
+                spilled_rows,
+            });
     }
-    runs = compact_sort_runs(
-        runs,
-        items,
-        catalog,
-        memory,
-        &mut spill_budget,
-        task_context,
-    )?;
-    observer.record_blocking_memory_report(BlockingOperatorMemoryReport {
-        operator: "SortExec".to_string(),
-        budget_bytes: tracker.budget_bytes,
-        peak_tracked_bytes: tracker.peak_bytes,
-        input_rows: ordinal as usize,
-        max_spill_bytes: spill_budget.max_bytes,
-        max_spill_runs: spill_budget.max_runs,
-        spilled_bytes: spill_budget.used_bytes,
-        spill_run_count: spill_budget.run_count,
-        spilled_rows: ordinal as usize,
-    });
-    merge_sort_runs(
-        &runs,
-        items,
-        catalog,
-        memory.blocking_operator_bytes,
-        memory.batch_rows.get(),
-        0,
-        execution_limit.output_rows.unwrap_or(usize::MAX),
-        task_context,
-        emit,
-    )
 }
 
 #[allow(clippy::too_many_arguments)]

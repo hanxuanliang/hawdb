@@ -32,7 +32,7 @@ pub struct BlockingExecutionContext<'a> {
     pub catalog: &'a Catalog,
     pub memory: &'a ExecutionMemoryConfig,
     pub task_context: Option<&'a RuntimeTaskContext>,
-    pub observer: &'a mut dyn ExecutionObserver,
+    pub observer: &'a dyn ExecutionObserver,
 }
 
 pub fn spill_binding_run(
@@ -109,7 +109,7 @@ mod tests {
         };
         let catalog = Catalog::default();
         let memory = ExecutionMemoryConfig::default();
-        let mut observer = NoopExecutionObserver;
+        let observer = NoopExecutionObserver;
         let mut output = Vec::new();
 
         stream_distinct_batches(
@@ -119,7 +119,7 @@ mod tests {
                 catalog: &catalog,
                 memory: &memory,
                 task_context: None,
-                observer: &mut observer,
+                observer: &observer,
             },
             ExecutionLimit::unlimited(),
             &mut |batch| {
@@ -149,7 +149,7 @@ mod tests {
         };
         let catalog = Catalog::default();
         let memory = ExecutionMemoryConfig::default();
-        let mut observer = NoopExecutionObserver;
+        let observer = NoopExecutionObserver;
         let mut output = Vec::new();
 
         stream_top_n_batches(
@@ -165,7 +165,7 @@ mod tests {
                 catalog: &catalog,
                 memory: &memory,
                 task_context: None,
-                observer: &mut observer,
+                observer: &observer,
             },
             ExecutionLimit {
                 output_rows: Some(2),

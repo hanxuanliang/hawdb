@@ -73,7 +73,7 @@ pub fn expand_binding(
     store: &dyn GraphExecutionRead,
     memory_budget_bytes: usize,
     task_context: Option<&RuntimeTaskContext>,
-    observer: &mut dyn ExecutionObserver,
+    observer: &dyn ExecutionObserver,
 ) -> Result<Vec<ExpandedBinding>> {
     runtime_checkpoint(task_context)?;
     let source = binding.nodes.get(spec.source_variable).ok_or_else(|| {
@@ -197,7 +197,7 @@ pub fn stream_node_scan_batches(
     spec: NodeScanSpec<'_>,
     context: NodeScanContext<'_>,
     predicate: &mut dyn FnMut(&Binding) -> Result<bool>,
-    observer: &mut dyn ExecutionObserver,
+    observer: &dyn ExecutionObserver,
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
     let exact_label = exact_scan_label_id(context.catalog, spec.label);
@@ -317,7 +317,7 @@ pub fn execute_node_scan(
     spec: NodeScanSpec<'_>,
     context: NodeScanContext<'_>,
     predicate: &mut dyn FnMut(&Binding) -> Result<bool>,
-    observer: &mut dyn ExecutionObserver,
+    observer: &dyn ExecutionObserver,
 ) -> Result<Vec<Binding>> {
     let exact_label = exact_scan_label_id(context.catalog, spec.label);
     let exact_label_id = exact_label.flatten();
@@ -399,7 +399,7 @@ pub fn stream_index_node_seek_batches(
     property: &str,
     values: &[Value],
     context: NodeScanContext<'_>,
-    observer: &mut dyn ExecutionObserver,
+    observer: &dyn ExecutionObserver,
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
     let Some(label_id) = context.catalog.label_id(label) else {
@@ -479,7 +479,7 @@ pub fn execute_node_column_lookup(
     spec: NodeColumnLookupSpec<'_>,
     input: Vec<Binding>,
     context: NodeScanContext<'_>,
-    observer: &mut dyn ExecutionObserver,
+    observer: &dyn ExecutionObserver,
 ) -> Result<Vec<Binding>> {
     if let Some(Some(label_id)) = exact_scan_label_id(context.catalog, spec.label) {
         return execute_indexed_node_column_lookup(spec, input, label_id, context, observer);
@@ -537,7 +537,7 @@ fn execute_indexed_node_column_lookup(
     input: Vec<Binding>,
     label_id: LabelId,
     context: NodeScanContext<'_>,
-    observer: &mut dyn ExecutionObserver,
+    observer: &dyn ExecutionObserver,
 ) -> Result<Vec<Binding>> {
     let mut lookup_values = BTreeSet::new();
     for binding in &input {
@@ -629,7 +629,7 @@ fn record_node_column_lookup_report(
     candidate_count_before_filter: usize,
     output_count: usize,
     store: &dyn GraphExecutionRead,
-    observer: &mut dyn ExecutionObserver,
+    observer: &dyn ExecutionObserver,
 ) {
     let candidate_count_before_pruning = store.node_count_for_label(Some(label_id));
     observer.record_scan_pruning_report(ScanPruningReport {

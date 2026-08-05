@@ -96,6 +96,7 @@ struct ExecutionContext<'a> {
     external: &'a mut dyn ExternalReadOperator,
     memory: &'a ExecutionMemoryConfig,
     task_context: Option<&'a RuntimeTaskContext>,
+    observer: &'a QueryExecutionObserver,
 }
 
 #[derive(Clone, Copy)]
@@ -539,66 +540,50 @@ fn execute_with_row_consumer_profile_internal(
         output_payload_bytes = next_payload_bytes;
         Ok(())
     };
+    let observer = QueryExecutionObserver::default();
     let mut context = ExecutionContext {
         parameters,
         external,
         memory,
         task_context,
+        observer: &observer,
     };
-    let (
-        (
-            ((((), scan_pruning_reports), vector_execution_reports), graph_expansion_reports),
-            blocking_operator_memory_reports,
-        ),
-        mut pipeline_memory_report,
-    ) = capture_pipeline_memory_report(|| {
-        capture_blocking_memory_reports(|| {
-            capture_graph_expansion_reports(|| {
-                capture_vector_execution_reports(|| {
-                    capture_scan_pruning_reports(|| {
-                        if fully_streamed {
-                            let external = BatchExternalReadAdapter::new(&mut *context.external);
-                            let batch_context = BatchReadContext {
-                                catalog,
-                                store,
-                                parameters: context.parameters,
-                                external: &external,
-                                memory,
-                                task_context,
-                            };
-                            execute_binding_batches(
-                                plan,
-                                batch_context,
-                                execution_limit,
-                                &mut |batch| {
-                                    for binding in batch {
-                                        emit_binding(binding)?;
-                                    }
-                                    Ok(BatchControl::Continue)
-                                },
-                            )?;
-                        } else {
-                            let bindings = execute_bindings_with_limit(
-                                plan,
-                                catalog,
-                                store,
-                                &mut context,
-                                execution_limit,
-                            )?;
-                            for binding in bindings {
-                                emit_binding(binding)?;
-                            }
-                        }
-                        Ok(())
-                    })
-                })
-            })
-        })
-    })?;
-    profile.scan_pruning_reports = scan_pruning_reports;
-    profile.vector_execution_reports = vector_execution_reports;
-    profile.graph_expansion_reports = graph_expansion_reports;
-    profile.blocking_operator_memory_reports = blocking_operator_memory_reports;
+    if fully_streamed {
+        let external = BatchExternalReadAdapter::new(&mut *context.external);
+        let batch_context = BatchReadContext {
+            catalog,
+            store,
+            parameters: context.parameters,
+            external: &external,
+            memory,
+            task_context,
+            observer: context.observer,
+        };
+        execute_binding_batches(plan, batch_context, execution_limit, &mut |batch| {
+            for binding in batch {
+                emit_binding(binding)?;
+            }
+            Ok(BatchControl::Continue)
+        })?;
+    } else {
+        let bindings =
+            execute_bindings_with_limit(plan, catalog, store, &mut context, execution_limit)?;
+        for binding in bindings {
+            emit_binding(binding)?;
+        }
+    }
+    let QueryExecutionReports {
+        scan_pruning,
+        vector_execution,
+        graph_expansion,
+        blocking_memory,
+        mut pipeline_memory,
+    } = observer.into_reports();
+    profile.scan_pruning_reports = scan_pruning;
+    profile.vector_execution_reports = vector_execution;
+    profile.graph_expansion_reports = graph_expansion;
+    profile.blocking_operator_memory_reports = blocking_memory;
+    let pipeline_memory_report = &mut pipeline_memory;
     pipeline_memory_report.output_rows = output_rows;
     pipeline_memory_report.output_payload_bytes = output_payload_bytes;
     if let Ok(process_memory_end) = skein_qos::ProcessMemorySnapshot::capture() {
@@ -619,7 +604,7 @@ fn execute_with_row_consumer_profile_internal(
             pipeline_memory_report.major_page_faults = process_memory.major_page_faults;
         }
     }
-    profile.pipeline_memory_report = pipeline_memory_report;
+    profile.pipeline_memory_report = pipeline_memory;
     Ok(ProfiledQueryStream {
         fully_streamed,
         profile,
