@@ -2,9 +2,11 @@
 
 #![forbid(unsafe_code)]
 
+mod production_blocking;
 mod production_graph;
 mod production_morsel;
 
+pub use production_blocking::*;
 pub use production_graph::*;
 pub use production_morsel::*;
 

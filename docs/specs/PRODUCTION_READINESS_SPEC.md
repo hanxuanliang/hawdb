@@ -159,6 +159,15 @@ All of these paths MUST report tracked peak memory, input rows, spill bytes,
 spill runs, and spilled rows, and MUST remove query-scoped runs on success,
 error, cancellation, and consumer stop.
 
+Active-route evidence for high-cardinality distinct and Cartesian build sides
+uses `run_production_blocking_qualification`. The bound report requires one
+unambiguous `DistinctExec` or `NodeCartesianProductExec` memory report per route,
+checks the route-declared minimum input cardinality, and records either
+`external_spill_observed` or `in_memory_within_admission`. Both are acceptable
+only while tracked memory and cumulative spill limits hold. Final readiness
+also requires zero live or pending spill-pool capacity, zero cleanup failures,
+and governor admission/completion for every route.
+
 Spill admission has two levels. Each blocking operator retains its cumulative
 byte and run limits, while all queries whose `ExecutionMemoryConfig` resolves
 to the same spill directory share one process-wide live-byte and live-run
