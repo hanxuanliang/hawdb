@@ -2,6 +2,10 @@
 
 #![forbid(unsafe_code)]
 
+mod production_graph;
+
+pub use production_graph::*;
+
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use skein::executor::ExecutionMemoryConfig;
@@ -718,7 +722,7 @@ fn aggregate_execution(
     aggregate
 }
 
-fn latency_percentiles(samples: &[u64]) -> LatencyPercentiles {
+pub(crate) fn latency_percentiles(samples: &[u64]) -> LatencyPercentiles {
     if samples.is_empty() {
         return LatencyPercentiles::default();
     }
@@ -755,7 +759,7 @@ fn process_report(profile: ProcessMemoryProfile) -> MixedSoakProcessReport {
     }
 }
 
-fn runtime_report(
+pub(crate) fn runtime_report(
     before: skein::RuntimeGovernorSnapshot,
     after: skein::RuntimeGovernorSnapshot,
 ) -> MixedSoakRuntimeReport {

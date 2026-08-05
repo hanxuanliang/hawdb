@@ -7,10 +7,16 @@ rust_library(
     name = "skein_qualification",
     crate_name = "skein_qualification",
     crate_root = "src/lib.rs",
-    srcs = ["src/lib.rs"],
+    srcs = [
+        "src/lib.rs",
+        "src/production_graph.rs",
+    ],
     edition = "2024",
     aliases = aliases(),
-    deps = all_crate_deps(normal = True) + ["//:skein"],
+    deps = all_crate_deps(normal = True) + [
+        "//:skein",
+        "//crates/query:skein_query",
+    ],
     proc_macro_deps = all_crate_deps(proc_macro = True),
 )
 

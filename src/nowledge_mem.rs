@@ -192,6 +192,7 @@ pub struct NowledgeMemOpenOptions {
     pub graph_path: PathBuf,
     pub search_projection_path: Option<PathBuf>,
     pub mode: NowledgeMemGraphMode,
+    pub database_config: Option<DatabaseConfig>,
     pub compressed_vector_search_mode: CompressedVectorSearchMode,
     pub adaptive_vector_backend_policy: AdaptiveVectorBackendPolicy,
     pub retrieval_projection_advisor: NowledgeMemRetrievalProjectionAdvisor,
@@ -209,6 +210,7 @@ impl NowledgeMemOpenOptions {
             graph_path: graph_path.into(),
             search_projection_path: None,
             mode,
+            database_config: None,
             compressed_vector_search_mode: CompressedVectorSearchMode::Disabled,
             adaptive_vector_backend_policy: AdaptiveVectorBackendPolicy::default(),
             retrieval_projection_advisor: NowledgeMemRetrievalProjectionAdvisor::default(),
@@ -225,6 +227,7 @@ impl NowledgeMemOpenOptions {
             graph_path: graph_path.into(),
             search_projection_path: Some(search_projection_path.into()),
             mode,
+            database_config: None,
             compressed_vector_search_mode: CompressedVectorSearchMode::Disabled,
             adaptive_vector_backend_policy: AdaptiveVectorBackendPolicy::default(),
             retrieval_projection_advisor: NowledgeMemRetrievalProjectionAdvisor::default(),
@@ -234,6 +237,13 @@ impl NowledgeMemOpenOptions {
 
     pub fn with_compressed_vector_search_mode(mut self, mode: CompressedVectorSearchMode) -> Self {
         self.compressed_vector_search_mode = mode;
+        self
+    }
+
+    /// Overrides resource and storage policy while retaining facade-owned mode
+    /// and vector-backend settings.
+    pub fn with_database_config(mut self, config: DatabaseConfig) -> Self {
+        self.database_config = Some(config);
         self
     }
 
@@ -263,6 +273,14 @@ impl NowledgeMemOpenOptions {
             self.compressed_vector_search_mode,
             &self.retrieval_projection_advisor,
         )
+    }
+
+    fn effective_database_config(&self) -> DatabaseConfig {
+        let mut config = self.database_config.clone().unwrap_or_default();
+        config.read_only = matches!(self.mode, NowledgeMemGraphMode::ShadowReadOnly);
+        config.compressed_vector_search_mode = self.effective_compressed_vector_search_mode();
+        config.adaptive_vector_backend_policy = self.adaptive_vector_backend_policy;
+        config
     }
 
     pub fn sanitized_report(&self) -> NowledgeMemOpenReport {
@@ -8214,12 +8232,26 @@ impl NowledgeMemEmbeddedStoreHandle {
         evidence_binding: crate::ProductionEvidenceBinding,
         expected_identity: crate::ProductionQualificationIdentity,
     ) -> Result<StorageResourceProfileReport> {
-        self.read_store()?.production_resource_profile(
-            statement,
-            limits,
-            evidence_binding,
-            expected_identity,
-        )
+        let store = self.read_store()?;
+        let permit = store.graph.admit_streaming_query(
+            &statement.cypher,
+            &statement.parameters,
+            limits.max_output_payload_bytes,
+        )?;
+        let task_context = RuntimeTaskContext::default().with_admitted_parallelism(
+            NonZeroUsize::new(permit.request().cpu_slots).unwrap_or(NonZeroUsize::MIN),
+        );
+        store
+            .graph
+            .database()
+            .storage_resource_profile_for_production_with_context(
+                &statement.cypher,
+                &statement.parameters,
+                limits,
+                evidence_binding,
+                expected_identity,
+                &task_context,
+            )
     }
 
     pub fn production_status(
@@ -8608,10 +8640,7 @@ impl NowledgeMemEmbeddedStore {
     pub fn open_with_options(
         options: NowledgeMemOpenOptions,
     ) -> Result<(Self, NowledgeMemOpenReport)> {
-        let graph_config = nowledge_mem_graph_config_with_search_mode(
-            options.mode,
-            options.effective_compressed_vector_search_mode(),
-        );
+        let graph_config = options.effective_database_config();
         let runtime_governor =
             default_nowledge_mem_runtime_governor(&options.graph_path, &graph_config);
         Self::open_with_options_and_runtime_governor(options, runtime_governor)
@@ -8622,11 +8651,7 @@ impl NowledgeMemEmbeddedStore {
         runtime_governor: RuntimeGovernor,
     ) -> Result<(Self, NowledgeMemOpenReport)> {
         let mut report = options.sanitized_report();
-        let mut graph_config = nowledge_mem_graph_config_with_search_mode(
-            options.mode,
-            options.effective_compressed_vector_search_mode(),
-        );
-        graph_config.adaptive_vector_backend_policy = options.adaptive_vector_backend_policy;
+        let graph_config = options.effective_database_config();
         let graph = NowledgeMemGraph::open_with_config_and_runtime_governor(
             &options.graph_path,
             graph_config,

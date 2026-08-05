@@ -1740,6 +1740,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "skein",
+ "skein-query",
  "tokio",
 ]
 

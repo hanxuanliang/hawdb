@@ -67,6 +67,16 @@ Storage production qualification MUST use
 `storage_resource_profile` entrypoint may measure resources but MUST serialize
 as production-unready because it has no release binding.
 
+The preferred executable contract is
+`run_production_graph_storage_qualification`. It opens the representative copy
+through `NowledgeMemEmbeddedStoreHandle`, applies an explicit out-of-core
+`DatabaseConfig`, acquires a runtime-governor permit for every measurement,
+and emits `skein-production-graph-storage-qualification-v1`. The report stores
+only query and parameter digests, retains the bound raw storage profile, and
+fails readiness on admission rejection, permit leakage, overcommit, stale
+identity, or any resource-profile blocker. A CLI may transport this report,
+but it MUST NOT replace the typed function in the production host.
+
 Default reports MUST redact local paths, query text, parameters, row payloads,
 embeddings, credentials, and raw parser or I/O payload fragments. Debug-only
 diagnostics MAY expose local detail through an explicit host decision, but
