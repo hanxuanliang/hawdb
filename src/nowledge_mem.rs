@@ -7895,6 +7895,17 @@ impl NowledgeMemEmbeddedStoreHandle {
         Ok(self.read_store()?.refresh_runtime_resources())
     }
 
+    /// Persist the current graph generation through the admitted embedded
+    /// maintenance path.
+    ///
+    /// Import and qualification hosts use this typed boundary instead of
+    /// issuing a textual `CHECKPOINT` statement or reaching through the
+    /// facade to the storage engine.
+    pub fn checkpoint(&self) -> Result<()> {
+        let _permit = self.admit_typed_maintenance(0, 1)?;
+        self.write_store()?.graph_mut().database_mut().checkpoint()
+    }
+
     pub fn query_with_report(&self, cypher: &str) -> Result<NowledgeMemQueryOutput> {
         self.write_store()?.query_with_report(cypher)
     }
@@ -14596,6 +14607,41 @@ mod tests {
             .query("MATCH (m:Memory) RETURN m.id AS id")
             .unwrap();
         assert!(output.rows.is_empty());
+    }
+
+    #[test]
+    fn embedded_handle_checkpoints_through_admitted_maintenance() {
+        let root = unique_nowledge_mem_test_dir("embedded_handle_checkpoint");
+        let graph_path = root.join("graph");
+        let options =
+            NowledgeMemOpenOptions::graph_only(&graph_path, NowledgeMemGraphMode::WritableCutover);
+        let (handle, _) = NowledgeMemEmbeddedStoreHandle::open_with_options(options).unwrap();
+
+        handle
+            .query_with_report("CREATE (:Memory {id: 'checkpointed'})")
+            .unwrap();
+        let before = handle.runtime_governor_snapshot().unwrap();
+        handle.checkpoint().unwrap();
+        let after = handle.runtime_governor_snapshot().unwrap();
+
+        assert_eq!(after.admissions, before.admissions + 1);
+        assert_eq!(after.completions, before.completions + 1);
+        assert_eq!(after.active_background_tasks, 0);
+        assert_eq!(after.active_blocking_tasks, 0);
+        assert_eq!(after.active_cpu_slots, 0);
+        assert_eq!(after.active_background_io_slots, 0);
+        assert_eq!(after.admitted_memory_bytes, 0);
+        drop(handle);
+
+        let options =
+            NowledgeMemOpenOptions::graph_only(&graph_path, NowledgeMemGraphMode::ShadowReadOnly);
+        let (handle, _) = NowledgeMemEmbeddedStoreHandle::open_with_options(options).unwrap();
+        let output = handle
+            .query_with_report("MATCH (m:Memory {id: 'checkpointed'}) RETURN m.id AS id")
+            .unwrap();
+        assert_eq!(output.output.rows.len(), 1);
+        drop(handle);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
