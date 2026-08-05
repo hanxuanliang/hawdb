@@ -1,6 +1,7 @@
 //! Streaming batch orchestration and pipeline dispatch.
 
 use super::*;
+use std::cell::RefCell;
 
 fn stream_node_column_lookup_batches(
     spec: NodeColumnLookupSpec<'_>,
