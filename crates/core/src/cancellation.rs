@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -58,6 +59,7 @@ impl RuntimeCancellationToken {
 pub struct RuntimeTaskContext {
     cancellation: RuntimeCancellationToken,
     deadline: Option<Instant>,
+    admitted_parallelism: NonZeroUsize,
 }
 
 impl RuntimeTaskContext {
@@ -65,6 +67,7 @@ impl RuntimeTaskContext {
         Self {
             cancellation,
             deadline,
+            admitted_parallelism: NonZeroUsize::MIN,
         }
     }
 
@@ -84,7 +87,24 @@ impl RuntimeTaskContext {
     }
 
     pub fn child(&self) -> Self {
-        Self::new(self.cancellation.child(), self.deadline)
+        Self {
+            cancellation: self.cancellation.child(),
+            deadline: self.deadline,
+            admitted_parallelism: self.admitted_parallelism,
+        }
+    }
+
+    /// Carries the CPU parallelism already reserved by the runtime governor.
+    ///
+    /// This is an execution ceiling, not a request to create worker threads.
+    /// Executors must still apply their operator memory and input-size limits.
+    pub fn with_admitted_parallelism(mut self, admitted_parallelism: NonZeroUsize) -> Self {
+        self.admitted_parallelism = admitted_parallelism;
+        self
+    }
+
+    pub fn admitted_parallelism(&self) -> NonZeroUsize {
+        self.admitted_parallelism
     }
 
     pub fn deadline(&self) -> Option<Instant> {
@@ -182,5 +202,14 @@ mod tests {
         assert!(parent_token.cancel());
         assert!(parent.checkpoint().is_err());
         assert!(sibling.checkpoint().is_err());
+    }
+
+    #[test]
+    fn child_preserves_admitted_parallelism() {
+        let context = RuntimeTaskContext::default()
+            .with_admitted_parallelism(NonZeroUsize::new(4).expect("test parallelism is non-zero"));
+
+        assert_eq!(context.admitted_parallelism().get(), 4);
+        assert_eq!(context.child().admitted_parallelism().get(), 4);
     }
 }

@@ -88,8 +88,22 @@ pub type Row = skein_executor::Row;
 pub type ReadExecutionProfile = skein_executor::ReadExecutionProfile<ScanPruningReport>;
 pub type ProfiledQueryRows = skein_executor::ProfiledQueryRows<ScanPruningReport>;
 pub type ProfiledQueryStream = skein_executor::ProfiledQueryStream<ScanPruningReport>;
-const SOURCE_SEGMENT_SCAN_IO_DEPTH: usize = 2;
+pub(crate) const DEFAULT_MORSEL_MAX_PARALLELISM: usize = 4;
+pub(crate) const SOURCE_SEGMENT_SCAN_IO_DEPTH: usize = 2;
 const SOURCE_SEGMENT_SCAN_MAX_COALESCED_BYTES: u64 = 512 * 1024;
+
+pub(crate) fn supports_default_morsel_parallelism(plan: &PhysicalPlan, catalog: &Catalog) -> bool {
+    columnar::supports_parallel_morsel_execution(plan, catalog)
+}
+
+pub(crate) fn default_morsel_parallelism(
+    plan: &PhysicalPlan,
+    catalog: &Catalog,
+    store: &GraphStore,
+    memory: &ExecutionMemoryConfig,
+) -> usize {
+    columnar::default_morsel_parallelism(plan, catalog, store, memory)
+}
 
 struct ExecutionContext<'a> {
     parameters: &'a BTreeMap<String, Value>,

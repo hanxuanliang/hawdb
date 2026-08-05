@@ -1,7 +1,9 @@
 //! Storage-neutral morsel partitioning and resource admission.
 
-use skein_core::{Result, SkeinError};
+use crate::{BoundedExecutor, SharedExecutorPool};
+use skein_core::{Result, RuntimeTaskContext, SkeinError};
 use std::num::NonZeroUsize;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PipelineId(pub u32);
@@ -157,6 +159,76 @@ impl SequentialMorselScheduler {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct SharedPoolMorselScheduler {
+    pool: SharedExecutorPool,
+}
+
+impl SharedPoolMorselScheduler {
+    pub fn new(pool: SharedExecutorPool) -> Self {
+        Self { pool }
+    }
+
+    pub fn execute<T, F>(&self, admission: &MorselAdmission, execute: F) -> Result<Vec<T>>
+    where
+        T: Send,
+        F: Fn(Morsel) -> Result<T> + Sync,
+    {
+        if admission.morsel_count() == 0 {
+            return Ok(Vec::new());
+        }
+        let max_workers = NonZeroUsize::new(admission.max_workers()).ok_or_else(|| {
+            SkeinError::Execution("non-empty morsel admission reserved no workers".to_string())
+        })?;
+        let morsels = admission.morsels().collect::<Vec<_>>();
+        BoundedExecutor::with_pool(max_workers, self.pool.clone())
+            .map_ordered(&morsels, |morsel| execute_catching_panic(&execute, *morsel))
+            .into_iter()
+            .collect()
+    }
+
+    pub fn execute_with_context<T, F>(
+        &self,
+        admission: &MorselAdmission,
+        context: &RuntimeTaskContext,
+        execute: F,
+    ) -> Result<Vec<T>>
+    where
+        T: Send,
+        F: Fn(Morsel) -> Result<T> + Sync,
+    {
+        if admission.morsel_count() == 0 {
+            context.checkpoint().map_err(|reason| {
+                SkeinError::Execution(format!("runtime task stopped: {reason}"))
+            })?;
+            return Ok(Vec::new());
+        }
+        let max_workers = NonZeroUsize::new(admission.max_workers()).ok_or_else(|| {
+            SkeinError::Execution("non-empty morsel admission reserved no workers".to_string())
+        })?;
+        let morsels = admission.morsels().collect::<Vec<_>>();
+        BoundedExecutor::with_pool(max_workers, self.pool.clone())
+            .map_ordered_with_context(&morsels, context, |morsel| {
+                execute_catching_panic(&execute, *morsel)
+            })
+            .map_err(|reason| SkeinError::Execution(format!("runtime task stopped: {reason}")))?
+            .into_iter()
+            .collect()
+    }
+}
+
+fn execute_catching_panic<T>(
+    execute: &(impl Fn(Morsel) -> Result<T> + Sync),
+    morsel: Morsel,
+) -> Result<T> {
+    catch_unwind(AssertUnwindSafe(|| execute(morsel))).unwrap_or_else(|_| {
+        Err(SkeinError::Execution(format!(
+            "morsel pipeline {} worker panicked at ordinal {}",
+            morsel.pipeline_id.0, morsel.ordinal.0
+        )))
+    })
+}
+
 /// Executes morsels in ordinal order. This is the deterministic baseline and
 /// differential oracle for future shared-pool parallel schedulers.
 pub fn execute_morsels_ordered<T>(
@@ -221,5 +293,55 @@ mod tests {
         assert_eq!(admission.morsel_count(), 0);
         assert_eq!(admission.max_workers(), 0);
         assert_eq!(admission.reserved_bytes(), 0);
+    }
+
+    #[test]
+    fn shared_pool_scheduler_matches_sequential_ordinal_order() {
+        let admission = admit_morsels(request(1025)).unwrap();
+        let sequential = execute_morsels_ordered(&admission, |morsel| {
+            Ok((morsel.ordinal.0, morsel.start_row, morsel.row_count))
+        })
+        .unwrap();
+        let pool = SharedExecutorPool::new(NonZeroUsize::new(3).unwrap()).unwrap();
+        let parallel = SharedPoolMorselScheduler::new(pool)
+            .execute(&admission, |morsel| {
+                std::thread::yield_now();
+                Ok((morsel.ordinal.0, morsel.start_row, morsel.row_count))
+            })
+            .unwrap();
+
+        assert_eq!(parallel, sequential);
+    }
+
+    #[test]
+    fn shared_pool_scheduler_converts_worker_panics_to_stable_errors() {
+        let admission = admit_morsels(request(130)).unwrap();
+        let pool = SharedExecutorPool::new(NonZeroUsize::new(2).unwrap()).unwrap();
+        let error = SharedPoolMorselScheduler::new(pool)
+            .execute(&admission, |morsel| -> Result<u64> {
+                assert_ne!(morsel.ordinal.0, 1, "injected worker panic");
+                Ok(morsel.ordinal.0)
+            })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("ordinal 1"));
+    }
+
+    #[test]
+    fn shared_pool_scheduler_observes_cancellation_between_morsels() {
+        let admission = admit_morsels(request(1025)).unwrap();
+        let pool = SharedExecutorPool::new(NonZeroUsize::MIN).unwrap();
+        let token = skein_core::RuntimeCancellationToken::new();
+        let context = RuntimeTaskContext::without_deadline(token.clone());
+        let error = SharedPoolMorselScheduler::new(pool)
+            .execute_with_context(&admission, &context, |morsel| {
+                if morsel.ordinal.0 == 0 {
+                    token.cancel();
+                }
+                Ok(morsel.ordinal.0)
+            })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("cancelled"));
     }
 }

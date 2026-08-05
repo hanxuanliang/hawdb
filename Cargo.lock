@@ -1635,6 +1635,7 @@ name = "skein-executor"
 version = "0.1.0"
 dependencies = [
  "fs2",
+ "rayon",
  "skein-core",
  "skein-plan",
  "skein-storage",

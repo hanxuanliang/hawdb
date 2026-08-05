@@ -1,6 +1,24 @@
 use super::*;
 
 #[test]
+fn numeric_scan_filter_project_is_default_morsel_eligible() {
+    let mut db = Database::new();
+    db.query("CREATE NODE TABLE Item").unwrap();
+    db.query("CREATE PROPERTY ON NODE TABLE Item(score) TYPE INT")
+        .unwrap();
+
+    let admission = db
+        .runtime_admission_plan(
+            "MATCH (n:Item) WHERE n.score >= 10 RETURN n.score AS score",
+            &BTreeMap::new(),
+        )
+        .unwrap();
+
+    assert!(admission.parallel_morsel_eligible);
+    assert_eq!(admission.morsel_parallelism, 1);
+}
+
+#[test]
 fn parameterized_create_and_index_seek_execute_end_to_end() {
     let mut db = Database::new();
     db.query_with_params(
@@ -68,6 +86,8 @@ fn durable_source_filter_uses_segment_scan_through_query_runtime() {
         .decisions
         .iter()
         .any(|decision| decision.contains("choose SourceSegmentScan")));
+    let admission = db.runtime_admission_plan(query, &parameters).unwrap();
+    assert_eq!(admission.required_io_slots, 2);
 
     let output = db.query_with_params(query, &parameters).unwrap();
     assert_eq!(output.rows.len(), 1);

@@ -254,7 +254,10 @@ impl SkeinTokioEmbedded {
                 .runtime_admission_plan(&cypher_text, &parameters)
         })?;
         let result_budget_bytes = self.with_embedded(SkeinEmbedded::admitted_result_budget_bytes);
-        let request = admission.clone().runtime_work_request(result_budget_bytes);
+        let snapshot = self.with_embedded(|embedded| embedded.runtime_governor().snapshot());
+        let request = admission
+            .clone()
+            .runtime_work_request_for_snapshot(result_budget_bytes, snapshot);
         self.execute_query_with_request(
             cypher_text,
             parameters,
@@ -290,6 +293,9 @@ impl SkeinTokioEmbedded {
         } else {
             request.with_memory_bytes(request.memory_bytes.max(admission.estimated_memory_bytes))
         };
+        let limits = self.with_embedded(|embedded| embedded.runtime_governor().snapshot().limits);
+        let minimum_io_slots = admission.clone().runtime_work_request(0, limits).io_slots;
+        let request = request.with_io_slots(request.io_slots.max(minimum_io_slots));
         let result_budget_bytes = self.with_embedded(SkeinEmbedded::admitted_result_budget_bytes);
         let request = if admission.is_mutation {
             request
@@ -386,12 +392,14 @@ impl SkeinTokioEmbedded {
             .saturating_mul(
                 u64::try_from(options.channel_capacity.get().saturating_add(1)).unwrap_or(u64::MAX),
             );
-        let estimated_memory_bytes = admission.estimated_memory_bytes;
-        let request = admission
-            .runtime_work_request(result_budget_bytes)
-            .with_memory_bytes(estimated_memory_bytes.saturating_add(buffered_payload_bytes));
+        let snapshot = self.with_embedded(|embedded| embedded.runtime_governor().snapshot());
+        let request = admission.runtime_work_request_for_snapshot(result_budget_bytes, snapshot);
+        let request =
+            request.with_memory_bytes(request.memory_bytes.saturating_add(buffered_payload_bytes));
         let max_payload_bytes = usize::try_from(request.result_bytes).unwrap_or(usize::MAX);
-        let producer_context = task_context.child();
+        let producer_context = task_context.child().with_admitted_parallelism(
+            NonZeroUsize::new(request.cpu_slots).unwrap_or(NonZeroUsize::MIN),
+        );
         let cancellation = producer_context.cancellation().clone();
         let (terminal_sender, receiver) = tokio_bounded_channel(options.channel_capacity);
         let batch_sender = terminal_sender.clone();
@@ -468,6 +476,9 @@ impl SkeinTokioEmbedded {
         task_context: RuntimeTaskContext,
     ) -> Result<QueryOutput, SkeinTokioEmbeddedError> {
         let embedded = Arc::clone(&self.embedded);
+        let task_context = task_context.with_admitted_parallelism(
+            NonZeroUsize::new(request.cpu_slots).unwrap_or(NonZeroUsize::MIN),
+        );
         if request.kind == RuntimeWorkKind::Mutation {
             self.runtime
                 .execute_blocking(request, task_context, move |task_context| {

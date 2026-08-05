@@ -68,11 +68,23 @@ Positive work MUST fail before execution when one worker cannot fit. Empty work
 reserves no workers or memory. Morsel output MUST merge by ordinal unless an
 operator defines an explicit order.
 
-The current scheduler executes morsels sequentially and is the deterministic
-oracle for future parallel execution. Parallel activation MUST use a
-host-shared, runtime-governed pool. It MUST NOT create a thread set per query or
-per morsel wave. CPU slots, memory, cancellation, result bytes, and storage I/O
-depth remain separate admission dimensions.
+The sequential scheduler remains the deterministic differential oracle. On an
+admitted embedded query path, the eligible immutable in-memory fragment uses
+parallel morsel execution by default when at least two workers fit. Parallel
+execution MUST use the shared, runtime-governed pool and MUST NOT create a
+thread set per query or per morsel wave. The default worker ceiling is four and
+is further bounded by admitted CPU slots, the shared pool, morsel count, and
+per-worker memory. Automatic parallel activation requires at least four
+morsels per worker so scheduler and merge overhead do not dominate small
+scans. Ungoverned low-level executor calls remain serial.
+
+Input references and worker output are retained for at most one worker wave.
+Workers MUST NOT call the host row consumer or mutate the query observer.
+Prepared batches merge by stable morsel ordinal on the coordinator before
+crossing the consumer boundary. A fragment with an early output limit no larger
+than one morsel, an out-of-core source, one admitted CPU slot, or insufficient
+worker memory MUST execute serially. CPU slots, memory, cancellation, result
+bytes, and storage I/O depth remain separate admission dimensions.
 
 ## Observability
 
@@ -92,7 +104,9 @@ printable explain-analyze root summary.
 `cargo bench --bench executor_vectorization` compares:
 
 1. row `BTreeMap` predicate evaluation against the typed selection kernel;
-2. equivalent row and columnar physical plans over an in-memory graph.
+2. equivalent row and columnar physical plans over an in-memory graph;
+3. serial and default parallel morsel execution over the production columnar
+   fragment, in addition to the isolated scheduler comparison.
 
 Both comparisons MUST verify identical checksums before reporting timings. The
 report includes median duration, per-iteration duration, rows per second, and

@@ -61,7 +61,12 @@ impl QueryExecutionObserver {
         report.columnar_batches = report.columnar_batches.saturating_add(1);
         report.columnar_input_rows = report.columnar_input_rows.saturating_add(input_rows);
         report.columnar_selected_rows = report.columnar_selected_rows.saturating_add(selected_rows);
-        report.morsel_count = report.morsel_count.saturating_add(1);
+    }
+
+    pub(super) fn record_morsels(&self, count: usize) {
+        let mut reports = self.reports.borrow_mut();
+        let report = &mut reports.pipeline_memory;
+        report.morsel_count = report.morsel_count.saturating_add(count);
     }
 
     pub(super) fn record_morsel_admission(&self, max_workers: usize, active_workers: usize) {

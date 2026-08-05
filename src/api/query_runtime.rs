@@ -7,12 +7,52 @@ pub(crate) struct RuntimeAdmissionPlan {
     pub is_mutation: bool,
     pub estimated_memory_bytes: u64,
     pub streaming_eligible: bool,
+    pub required_io_slots: usize,
+    pub parallel_morsel_eligible: bool,
+    pub morsel_parallelism: usize,
 }
 
 impl RuntimeAdmissionPlan {
     pub(crate) fn runtime_work_request(
         self,
         result_budget_bytes: u64,
+        limits: skein_qos::RuntimeGovernorLimits,
+    ) -> skein_qos::RuntimeWorkRequest {
+        self.runtime_work_request_with_capacity(
+            result_budget_bytes,
+            limits,
+            limits.effective_cpu_slots.get(),
+            limits.memory_budget_bytes,
+        )
+    }
+
+    pub(crate) fn runtime_work_request_for_snapshot(
+        self,
+        result_budget_bytes: u64,
+        snapshot: skein_qos::RuntimeGovernorSnapshot,
+    ) -> skein_qos::RuntimeWorkRequest {
+        self.runtime_work_request_with_capacity(
+            result_budget_bytes,
+            snapshot.limits,
+            snapshot
+                .limits
+                .effective_cpu_slots
+                .get()
+                .saturating_sub(snapshot.active_cpu_slots)
+                .max(1),
+            snapshot
+                .limits
+                .memory_budget_bytes
+                .saturating_sub(snapshot.admitted_memory_bytes),
+        )
+    }
+
+    fn runtime_work_request_with_capacity(
+        self,
+        result_budget_bytes: u64,
+        limits: skein_qos::RuntimeGovernorLimits,
+        available_cpu_slots: usize,
+        available_memory_bytes: u64,
     ) -> skein_qos::RuntimeWorkRequest {
         let priority = match self.work_request.priority {
             WorkPriority::Foreground => skein_qos::RuntimeWorkPriority::Foreground,
@@ -28,12 +68,47 @@ impl RuntimeAdmissionPlan {
             WorkClass::Projection | WorkClass::Import => skein_qos::RuntimeWorkKind::Maintenance,
             WorkClass::Shadow => skein_qos::RuntimeWorkKind::Control,
         };
+        let cpu_slots = self.admitted_cpu_slots(
+            result_budget_bytes,
+            limits,
+            available_cpu_slots,
+            available_memory_bytes,
+        );
         skein_qos::RuntimeWorkRequest::query(
             priority,
-            self.estimated_memory_bytes,
+            self.estimated_memory_bytes
+                .saturating_mul(u64::try_from(cpu_slots).unwrap_or(u64::MAX)),
             result_budget_bytes,
         )
+        .with_cpu_slots(cpu_slots)
         .with_kind(kind)
+        .with_io_slots(self.required_io_slots)
+    }
+
+    fn admitted_cpu_slots(
+        &self,
+        result_budget_bytes: u64,
+        limits: skein_qos::RuntimeGovernorLimits,
+        available_cpu_slots: usize,
+        available_memory_bytes: u64,
+    ) -> usize {
+        if !self.parallel_morsel_eligible {
+            return 1;
+        }
+        let cpu_slots = limits
+            .effective_cpu_slots
+            .get()
+            .min(self.morsel_parallelism)
+            .min(available_cpu_slots);
+        if self.estimated_memory_bytes == 0 {
+            return cpu_slots.max(1);
+        }
+        let memory_slots = available_memory_bytes
+            .saturating_sub(result_budget_bytes)
+            .checked_div(self.estimated_memory_bytes)
+            .and_then(|slots| usize::try_from(slots).ok())
+            .unwrap_or_default();
+        cpu_slots.min(memory_slots.max(1)).max(1)
     }
 }
 
@@ -61,13 +136,19 @@ impl Database {
         let work_request = query_work_request_for_statement(&self.system_variables, &statement)?;
         let body = statement_body(&statement);
         let streaming_eligible = !matches!(body, cypher::Statement::Explain(_));
-        let (is_mutation, estimated_memory_bytes) = match body {
-            cypher::Statement::Explain(_) => (false, CONTROL_STATEMENT_MEMORY_BYTES),
+        let (
+            is_mutation,
+            estimated_memory_bytes,
+            required_io_slots,
+            parallel_morsel_eligible,
+            morsel_parallelism,
+        ) = match body {
+            cypher::Statement::Explain(_) => (false, CONTROL_STATEMENT_MEMORY_BYTES, 0, false, 1),
             cypher::Statement::SetSystemVariable(_)
             | cypher::Statement::Checkpoint
             | cypher::Statement::BeginTransaction
             | cypher::Statement::Commit
-            | cypher::Statement::Rollback => (true, CONTROL_STATEMENT_MEMORY_BYTES),
+            | cypher::Statement::Rollback => (true, CONTROL_STATEMENT_MEMORY_BYTES, 0, false, 1),
             _ => {
                 let optimized = self.optimized_query_plan_for_runtime_admission(
                     cypher_text,
@@ -87,7 +168,35 @@ impl Database {
                     )
                     .total_bytes
                 };
-                (is_mutation, estimated_memory_bytes)
+                let mut required_io_slots = 0;
+                skein_plan::visit_plan(&optimized.physical_plan, &mut |node| {
+                    if node.kind() == skein_plan::PhysicalPlanKind::SourceSegmentScan {
+                        required_io_slots =
+                            required_io_slots.max(crate::executor::SOURCE_SEGMENT_SCAN_IO_DEPTH);
+                    }
+                });
+                let parallel_morsel_eligible = !is_mutation
+                    && executor::supports_default_morsel_parallelism(
+                        &optimized.physical_plan,
+                        &self.catalog,
+                    );
+                let morsel_parallelism = if parallel_morsel_eligible {
+                    executor::default_morsel_parallelism(
+                        &optimized.physical_plan,
+                        &self.catalog,
+                        &self.store,
+                        &self.config.execution_memory,
+                    )
+                } else {
+                    1
+                };
+                (
+                    is_mutation,
+                    estimated_memory_bytes,
+                    required_io_slots,
+                    parallel_morsel_eligible,
+                    morsel_parallelism,
+                )
             }
         };
         Ok(RuntimeAdmissionPlan {
@@ -95,6 +204,9 @@ impl Database {
             is_mutation,
             estimated_memory_bytes,
             streaming_eligible,
+            required_io_slots,
+            parallel_morsel_eligible,
+            morsel_parallelism,
         })
     }
 
@@ -434,5 +546,64 @@ pub(super) fn query_runtime_checkpoint(
             .checkpoint()
             .map_err(|reason| SkeinError::Execution(format!("runtime task stopped: {reason}"))),
         None => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::executor::DEFAULT_MORSEL_MAX_PARALLELISM;
+    use std::num::NonZeroUsize;
+
+    fn limits(cpu_slots: usize, memory_budget_bytes: u64) -> skein_qos::RuntimeGovernorLimits {
+        let cpu_slots = NonZeroUsize::new(cpu_slots).expect("test CPU slots are non-zero");
+        skein_qos::RuntimeGovernorLimits {
+            configured_cpu_slots: cpu_slots,
+            effective_cpu_slots: cpu_slots,
+            foreground_task_limit: cpu_slots,
+            background_task_limit: cpu_slots,
+            blocking_task_limit: cpu_slots,
+            foreground_io_depth: NonZeroUsize::MIN,
+            background_io_depth: NonZeroUsize::MIN,
+            memory_budget_bytes,
+            result_budget_bytes: memory_budget_bytes,
+        }
+    }
+
+    fn admission(parallel_morsel_eligible: bool) -> RuntimeAdmissionPlan {
+        RuntimeAdmissionPlan {
+            work_request: WorkRequest::foreground(WorkClass::Query, 1),
+            is_mutation: false,
+            estimated_memory_bytes: 1024,
+            streaming_eligible: true,
+            required_io_slots: 0,
+            parallel_morsel_eligible,
+            morsel_parallelism: if parallel_morsel_eligible { 4 } else { 1 },
+        }
+    }
+
+    #[test]
+    fn default_morsel_request_uses_governed_cpu_and_memory_slots() {
+        let request = admission(true).runtime_work_request(1024, limits(8, 64 * 1024));
+
+        assert_eq!(request.cpu_slots, DEFAULT_MORSEL_MAX_PARALLELISM);
+        assert_eq!(request.memory_bytes, 4 * 1024);
+    }
+
+    #[test]
+    fn default_morsel_request_falls_back_for_ineligible_or_tight_memory_work() {
+        let serial = admission(false).runtime_work_request(1024, limits(8, 64 * 1024));
+        let memory_limited = admission(true).runtime_work_request(2048, limits(8, 3072));
+        let load_limited = admission(true).runtime_work_request_with_capacity(
+            1024,
+            limits(8, 64 * 1024),
+            2,
+            64 * 1024,
+        );
+
+        assert_eq!(serial.cpu_slots, 1);
+        assert_eq!(memory_limited.cpu_slots, 1);
+        assert_eq!(load_limited.cpu_slots, 2);
+        assert_eq!(load_limited.memory_bytes, 2 * 1024);
     }
 }

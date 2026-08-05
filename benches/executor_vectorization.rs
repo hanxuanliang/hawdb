@@ -1,25 +1,35 @@
 use serde_json::json;
-use skein::executor::execute_with_row_limit_profile;
+use skein::executor::{execute_with_row_limit_and_context, execute_with_row_limit_profile};
 use skein::optimizer::PhysicalPlan;
 use skein::planner::{ComparisonOp, Predicate, Projection, ProjectionExpression};
 use skein::schema::{Catalog, PropertyType, TableKind};
 use skein::store::GraphStore;
 use skein::Value;
-use skein_executor::{filter_numeric_column, ColumnVector, NumericLiteral, Selection, Validity};
+use skein_core::RuntimeTaskContext;
+use skein_executor::{
+    execute_morsels_ordered, filter_numeric_column, ColumnVector, MorselAdmission,
+    MorselAdmissionRequest, NumericLiteral, PipelineId, Selection, SharedExecutorPool,
+    SharedPoolMorselScheduler, Validity,
+};
 use std::collections::BTreeMap;
 use std::hint::black_box;
+use std::num::NonZeroUsize;
 use std::time::Instant;
 
 const MICRO_ROWS: usize = 131_072;
 const MICRO_ITERATIONS: usize = 64;
-const END_TO_END_ROWS: usize = 16_384;
-const END_TO_END_ITERATIONS: usize = 64;
+const END_TO_END_ROWS: usize = 65_536;
+const END_TO_END_ITERATIONS: usize = 16;
 const END_TO_END_PAYLOAD_BYTES: usize = 256;
 const SAMPLES: usize = 11;
+const MORSEL_ROWS: usize = 1_048_576;
+const MORSEL_TARGET_ROWS: usize = 16_384;
+const MORSEL_ITERATIONS: usize = 8;
 
 fn main() {
     let micro = micro_benchmark();
-    let end_to_end = end_to_end_benchmark();
+    let (end_to_end, production_morsel) = end_to_end_benchmark();
+    let morsel = morsel_benchmark();
     assert_eq!(micro.row_checksum, micro.columnar_checksum);
     assert_eq!(end_to_end.row_checksum, end_to_end.columnar_checksum);
 
@@ -28,9 +38,101 @@ fn main() {
         json!({
             "micro": micro.json(),
             "end_to_end": end_to_end.json(),
+            "morsel": morsel,
+            "production_morsel": production_morsel,
             "end_to_end_payload_bytes_per_row": END_TO_END_PAYLOAD_BYTES,
         })
     );
+}
+
+fn morsel_benchmark() -> serde_json::Value {
+    let requested_workers = std::thread::available_parallelism()
+        .unwrap_or(NonZeroUsize::MIN)
+        .min(NonZeroUsize::new(4).unwrap());
+    let bytes_per_worker = NonZeroUsize::new(64 * 1024).unwrap();
+    let admission = MorselAdmission::try_new(MorselAdmissionRequest {
+        pipeline_id: PipelineId(1),
+        input_rows: MORSEL_ROWS,
+        target_rows: NonZeroUsize::new(MORSEL_TARGET_ROWS).unwrap(),
+        requested_parallelism: requested_workers,
+        bytes_per_worker,
+        memory_budget_bytes: NonZeroUsize::new(
+            bytes_per_worker
+                .get()
+                .saturating_mul(requested_workers.get()),
+        )
+        .unwrap(),
+    })
+    .unwrap();
+    let input = (0..MORSEL_ROWS)
+        .map(|row| (row as u64).wrapping_mul(0x9e37_79b9))
+        .collect::<Vec<_>>();
+    let pool = SharedExecutorPool::new(requested_workers).unwrap();
+    let scheduler = SharedPoolMorselScheduler::new(pool);
+    let mut sequential_checksum = 0u64;
+    let mut parallel_checksum = 0u64;
+    let mut sequential_samples = Vec::with_capacity(SAMPLES);
+    let mut parallel_samples = Vec::with_capacity(SAMPLES);
+    for sample in 0..SAMPLES {
+        let parallel_first = sample % 2 == 1;
+        for parallel in [parallel_first, !parallel_first] {
+            let started = Instant::now();
+            for _ in 0..MORSEL_ITERATIONS {
+                let outputs = if parallel {
+                    scheduler
+                        .execute(&admission, |morsel| {
+                            Ok(morsel_checksum(
+                                &input[morsel.start_row..morsel.start_row + morsel.row_count],
+                            ))
+                        })
+                        .unwrap()
+                } else {
+                    execute_morsels_ordered(&admission, |morsel| {
+                        Ok(morsel_checksum(
+                            &input[morsel.start_row..morsel.start_row + morsel.row_count],
+                        ))
+                    })
+                    .unwrap()
+                };
+                let checksum = outputs
+                    .into_iter()
+                    .fold(0u64, |total, value| total.wrapping_add(value));
+                if parallel {
+                    parallel_checksum = black_box(checksum);
+                } else {
+                    sequential_checksum = black_box(checksum);
+                }
+            }
+            if parallel {
+                parallel_samples.push(started.elapsed().as_nanos());
+            } else {
+                sequential_samples.push(started.elapsed().as_nanos());
+            }
+        }
+    }
+    assert_eq!(parallel_checksum, sequential_checksum);
+    sequential_samples.sort_unstable();
+    parallel_samples.sort_unstable();
+    let sequential_ns = sequential_samples[SAMPLES / 2];
+    let parallel_ns = parallel_samples[SAMPLES / 2];
+    json!({
+        "rows": MORSEL_ROWS,
+        "target_rows": MORSEL_TARGET_ROWS,
+        "morsel_count": admission.morsel_count(),
+        "admitted_workers": admission.max_workers(),
+        "iterations_per_sample": MORSEL_ITERATIONS,
+        "samples": SAMPLES,
+        "sequential_median_ns": sequential_ns,
+        "shared_pool_median_ns": parallel_ns,
+        "speedup": sequential_ns as f64 / parallel_ns.max(1) as f64,
+        "checksum": parallel_checksum,
+    })
+}
+
+fn morsel_checksum(input: &[u64]) -> u64 {
+    input.iter().fold(0u64, |total, value| {
+        total.wrapping_add(value.rotate_left(17).wrapping_mul(0xbf58_476d_1ce4_e5b9))
+    })
 }
 
 fn micro_benchmark() -> ComparisonReport {
@@ -95,7 +197,7 @@ fn micro_benchmark() -> ComparisonReport {
     }
 }
 
-fn end_to_end_benchmark() -> ComparisonReport {
+fn end_to_end_benchmark() -> (ComparisonReport, serde_json::Value) {
     let mut catalog = Catalog::default();
     let table = catalog.get_or_create_table(TableKind::Node, "Item");
     catalog.get_or_create_property(table, "score", PropertyType::Int, false);
@@ -153,14 +255,73 @@ fn end_to_end_benchmark() -> ComparisonReport {
             black_box(output_checksum(&output.rows))
         });
 
-    ComparisonReport {
+    let comparison = ComparisonReport {
         rows: END_TO_END_ROWS,
         iterations: END_TO_END_ITERATIONS,
         row_ns,
         columnar_ns,
         row_checksum,
         columnar_checksum,
+    };
+    let requested_workers = std::thread::available_parallelism()
+        .unwrap_or(NonZeroUsize::MIN)
+        .min(NonZeroUsize::new(4).unwrap());
+    let serial_context = RuntimeTaskContext::default();
+    let parallel_context =
+        RuntimeTaskContext::default().with_admitted_parallelism(requested_workers);
+    let mut serial_samples = Vec::with_capacity(SAMPLES);
+    let mut parallel_samples = Vec::with_capacity(SAMPLES);
+    let mut serial_checksum = 0u64;
+    let mut parallel_checksum = 0u64;
+    for sample in 0..SAMPLES {
+        let parallel_first = sample % 2 == 1;
+        for parallel in [parallel_first, !parallel_first] {
+            let context = if parallel {
+                &parallel_context
+            } else {
+                &serial_context
+            };
+            let started = Instant::now();
+            for _ in 0..END_TO_END_ITERATIONS {
+                let rows = execute_with_row_limit_and_context(
+                    black_box(&columnar_plan),
+                    &mut catalog,
+                    &mut store,
+                    None,
+                    context,
+                )
+                .expect("morsel production benchmark execution must succeed");
+                let checksum = black_box(output_checksum(&rows));
+                if parallel {
+                    parallel_checksum = checksum;
+                } else {
+                    serial_checksum = checksum;
+                }
+            }
+            if parallel {
+                parallel_samples.push(started.elapsed().as_nanos());
+            } else {
+                serial_samples.push(started.elapsed().as_nanos());
+            }
+        }
     }
+    assert_eq!(serial_checksum, parallel_checksum);
+    serial_samples.sort_unstable();
+    parallel_samples.sort_unstable();
+    let serial_ns = serial_samples[SAMPLES / 2];
+    let parallel_ns = parallel_samples[SAMPLES / 2];
+    let production_morsel = json!({
+        "rows": END_TO_END_ROWS,
+        "admitted_workers": requested_workers,
+        "iterations_per_sample": END_TO_END_ITERATIONS,
+        "samples": SAMPLES,
+        "serial_median_ns": serial_ns,
+        "parallel_median_ns": parallel_ns,
+        "speedup": serial_ns as f64 / parallel_ns.max(1) as f64,
+        "improved": parallel_ns < serial_ns,
+        "checksum": parallel_checksum,
+    });
+    (comparison, production_morsel)
 }
 
 fn projection_plan(predicate: Predicate) -> PhysicalPlan {

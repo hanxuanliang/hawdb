@@ -758,17 +758,30 @@ fn columnar_numeric_fragment_matches_row_pipeline_and_reports_morsels() {
         }),
     };
     let memory = ExecutionMemoryConfig {
-        batch_rows: NonZeroUsize::new(32).unwrap(),
+        batch_rows: NonZeroUsize::new(4).unwrap(),
         ..ExecutionMemoryConfig::default()
     };
+    let morsel_count = 513usize.div_ceil(4 * 16);
+    let expected_workers = std::thread::available_parallelism()
+        .unwrap_or(NonZeroUsize::MIN)
+        .get()
+        .min(DEFAULT_MORSEL_MAX_PARALLELISM)
+        .min(morsel_count / 4)
+        .max(1);
+    let task_context = RuntimeTaskContext::default().with_admitted_parallelism(
+        NonZeroUsize::new(DEFAULT_MORSEL_MAX_PARALLELISM)
+            .expect("default morsel parallelism is non-zero"),
+    );
     let mut external = NoExternalReadOperator;
-    let columnar = execute_with_row_limit_profile_and_external_and_memory(
+    let columnar = execute_with_output_limits_profile_and_external_and_context_and_memory(
         &columnar_plan,
         &mut catalog,
         &mut store,
         &BTreeMap::new(),
         &mut external,
         None,
+        None,
+        &task_context,
         &memory,
     )
     .unwrap();
@@ -789,9 +802,56 @@ fn columnar_numeric_fragment_matches_row_pipeline_and_reports_morsels() {
     assert!(report.columnar_batches > 0);
     assert!(report.columnar_input_rows >= report.columnar_selected_rows);
     assert_eq!(report.columnar_batches, report.morsel_count);
-    assert_eq!(report.morsel_max_admitted_workers, 1);
+    assert_eq!(report.morsel_max_admitted_workers, expected_workers);
     assert_eq!(report.morsel_peak_active_workers, 1);
     assert_eq!(row.profile.pipeline_memory_report.columnar_batches, 0);
+
+    let columnar_scan_plan = match &columnar_plan {
+        PhysicalPlan::LimitExec { input, .. } => input.as_ref(),
+        _ => unreachable!("test plan has a limit root"),
+    };
+    let row_scan_plan = match &row_plan {
+        PhysicalPlan::LimitExec { input, .. } => input.as_ref(),
+        _ => unreachable!("test plan has a limit root"),
+    };
+    let parallel = execute_with_output_limits_profile_and_external_and_context_and_memory(
+        columnar_scan_plan,
+        &mut catalog,
+        &mut store,
+        &BTreeMap::new(),
+        &mut external,
+        None,
+        None,
+        &task_context,
+        &memory,
+    )
+    .unwrap();
+    let sequential = execute_with_row_limit_profile_and_external_and_memory(
+        row_scan_plan,
+        &mut catalog,
+        &mut store,
+        &BTreeMap::new(),
+        &mut external,
+        None,
+        &memory,
+    )
+    .unwrap();
+
+    assert_eq!(parallel.rows, sequential.rows);
+    assert_eq!(
+        parallel
+            .profile
+            .pipeline_memory_report
+            .morsel_max_admitted_workers,
+        expected_workers
+    );
+    assert_eq!(
+        parallel
+            .profile
+            .pipeline_memory_report
+            .morsel_peak_active_workers,
+        expected_workers
+    );
 }
 
 #[test]

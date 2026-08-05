@@ -36,7 +36,7 @@ pub use columnar::{
     ColumnarBatch, LogicalType, NumericLiteral, Selection, SlotDescriptor, SlotId, Validity,
     ValidityBuilder,
 };
-pub use concurrent::BoundedExecutor;
+pub use concurrent::{BoundedExecutor, SharedExecutorPool, SharedExecutorPoolError};
 pub use external::{
     ExternalReadOperator, VectorSeedExecutionOutput, VectorSeedExecutionRequest,
     VectorSeedExecutionRow,
@@ -46,7 +46,7 @@ pub use limit::ExecutionLimit;
 pub use memory::ExecutionMemoryConfig;
 pub use morsel::{
     admit_morsels, execute_morsels_ordered, Morsel, MorselAdmission, MorselAdmissionRequest,
-    MorselIter, MorselOrdinal, PipelineId, SequentialMorselScheduler,
+    MorselIter, MorselOrdinal, PipelineId, SequentialMorselScheduler, SharedPoolMorselScheduler,
 };
 pub use profile::{
     BlockingOperatorMemoryReport, PipelineMemoryReport, ProfiledQueryRows, ProfiledQueryStream,

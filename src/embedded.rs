@@ -16,7 +16,7 @@ use skein_storage::SegmentReadScheduler;
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
-use std::num::NonZeroU64;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -358,9 +358,15 @@ impl SkeinEmbedded {
             .database
             .runtime_admission_plan(cypher_text, parameters)?;
         let result_budget_bytes = self.admitted_result_budget_bytes();
-        let request = admission.clone().runtime_work_request(result_budget_bytes);
+        let request = admission.clone().runtime_work_request_for_snapshot(
+            result_budget_bytes,
+            self.runtime_governor.snapshot(),
+        );
         let is_mutation = admission.is_mutation;
         let streaming_eligible = admission.streaming_eligible;
+        let execution_task_context = task_context.clone().with_admitted_parallelism(
+            NonZeroUsize::new(request.cpu_slots).unwrap_or(NonZeroUsize::MIN),
+        );
         let _permit = match self.runtime_governor.try_admit(request) {
             Ok(permit) => permit,
             Err(error) => {
@@ -372,8 +378,11 @@ impl SkeinEmbedded {
             }
         };
         let result = if is_mutation || !streaming_eligible {
-            self.database
-                .query_with_params_context(cypher_text, parameters, task_context)
+            self.database.query_with_params_context(
+                cypher_text,
+                parameters,
+                &execution_task_context,
+            )
         } else {
             let max_rows = self.database.config().max_read_result_rows;
             let max_payload_bytes = usize::try_from(request.result_bytes).unwrap_or(usize::MAX);
@@ -387,7 +396,7 @@ impl SkeinEmbedded {
                         max_rows,
                         max_payload_bytes: Some(max_payload_bytes),
                     },
-                    task_context,
+                    &execution_task_context,
                     |row| {
                         rows.push(row);
                         Ok(())

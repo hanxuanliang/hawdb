@@ -65,6 +65,7 @@ use skein_qos::{
 };
 pub use skein_readiness::{NowledgeMemReadinessAreaMap, NowledgeMemReadinessAreaSummary};
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Instant;
@@ -5604,7 +5605,10 @@ impl NowledgeMemGraph {
         task_context: &RuntimeTaskContext,
     ) -> Result<NowledgeMemQueryOutput> {
         self.check_runtime_context(task_context)?;
-        let (_permit, is_mutation) = self.admit_materialized_query(cypher, parameters)?;
+        let (permit, is_mutation) = self.admit_materialized_query(cypher, parameters)?;
+        let execution_task_context = task_context.clone().with_admitted_parallelism(
+            NonZeroUsize::new(permit.request().cpu_slots).unwrap_or(NonZeroUsize::MIN),
+        );
         let started = Instant::now();
         let result = self.db.query_with_params_trace_and_external_with_context(
             cypher,
@@ -5612,7 +5616,7 @@ impl NowledgeMemGraph {
             options.capture_physical_plan,
             external,
             None,
-            Some(task_context),
+            Some(&execution_task_context),
         );
         self.record_runtime_cancellation(result.as_ref().err(), task_context);
         let (output, execution_trace) = result?;
@@ -5662,8 +5666,11 @@ impl NowledgeMemGraph {
             }
             configured
         };
-        self.try_admit_runtime(admission.runtime_work_request(result_budget))
-            .map(|permit| (permit, is_mutation))
+        self.try_admit_runtime(
+            admission
+                .runtime_work_request_for_snapshot(result_budget, self.runtime_governor.snapshot()),
+        )
+        .map(|permit| (permit, is_mutation))
     }
 
     fn admit_streaming_query(
@@ -5678,9 +5685,10 @@ impl NowledgeMemGraph {
                 "admitted streaming query must be read-only".to_string(),
             ));
         }
-        self.try_admit_runtime(
-            admission.runtime_work_request(u64::try_from(result_budget_bytes).unwrap_or(u64::MAX)),
-        )
+        self.try_admit_runtime(admission.runtime_work_request_for_snapshot(
+            u64::try_from(result_budget_bytes).unwrap_or(u64::MAX),
+            self.runtime_governor.snapshot(),
+        ))
     }
 
     fn try_admit_runtime(&self, request: skein_qos::RuntimeWorkRequest) -> Result<RuntimePermit> {
@@ -5798,7 +5806,10 @@ impl NowledgeMemGraph {
     ) -> Result<QueryStreamReport> {
         self.check_runtime_context(task_context)?;
         let max_payload_bytes = self.admitted_streaming_result_bytes(options)?;
-        let _permit = self.admit_streaming_query(cypher, parameters, max_payload_bytes)?;
+        let permit = self.admit_streaming_query(cypher, parameters, max_payload_bytes)?;
+        let execution_task_context = task_context.clone().with_admitted_parallelism(
+            NonZeroUsize::new(permit.request().cpu_slots).unwrap_or(NonZeroUsize::MIN),
+        );
         let result = self
             .db
             .begin_read_transaction()
@@ -5809,7 +5820,7 @@ impl NowledgeMemGraph {
                     max_rows: options.max_rows,
                     max_payload_bytes: Some(max_payload_bytes),
                 },
-                task_context,
+                &execution_task_context,
                 consumer,
             );
         self.record_runtime_cancellation(result.as_ref().err(), task_context);

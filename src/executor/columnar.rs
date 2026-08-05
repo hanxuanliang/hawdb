@@ -9,9 +9,15 @@ use lending::{
 use skein_executor::columnar::{
     filter_float64_values, filter_int64_values, NumericLiteral, Selection, ValidityBuilder,
 };
-use skein_executor::morsel::{MorselAdmission, MorselAdmissionRequest, PipelineId};
+use skein_executor::morsel::{
+    MorselAdmission, MorselAdmissionRequest, PipelineId, SharedPoolMorselScheduler,
+};
 use skein_executor::observer::ExecutionObserver;
+use skein_executor::SharedExecutorPool;
 use std::borrow::Borrow;
+
+const DEFAULT_BATCHES_PER_MORSEL: usize = 16;
+const DEFAULT_MIN_MORSELS_PER_WORKER: usize = 4;
 
 #[derive(Debug, Clone, Copy)]
 struct NumericFragment<'a> {
@@ -36,6 +42,48 @@ struct NumericBatchEmitter<'plan, 'task, 'observer, 'emit> {
     task_context: Option<&'task RuntimeTaskContext>,
     observer: &'observer QueryExecutionObserver,
     emit: &'emit mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+}
+
+pub(super) fn supports_parallel_morsel_execution(plan: &PhysicalPlan, catalog: &Catalog) -> bool {
+    match plan {
+        PhysicalPlan::ProjectExec { items, input }
+            if NumericFragment::try_prepare(items, input, catalog).is_some() =>
+        {
+            true
+        }
+        _ => match plan.children() {
+            PlanChildren::None => false,
+            PlanChildren::Unary(input) => supports_parallel_morsel_execution(input, catalog),
+            PlanChildren::Binary(left, right) => {
+                supports_parallel_morsel_execution(left, catalog)
+                    || supports_parallel_morsel_execution(right, catalog)
+            }
+        },
+    }
+}
+
+pub(super) fn default_morsel_parallelism(
+    plan: &PhysicalPlan,
+    catalog: &Catalog,
+    store: &GraphStore,
+    memory: &ExecutionMemoryConfig,
+) -> usize {
+    match plan {
+        PhysicalPlan::ProjectExec { items, input } => {
+            if let Some(fragment) = NumericFragment::try_prepare(items, input, catalog) {
+                return fragment.default_parallelism(items, catalog, store, memory);
+            }
+            default_morsel_parallelism(input, catalog, store, memory)
+        }
+        _ => match plan.children() {
+            PlanChildren::None => 1,
+            PlanChildren::Unary(input) => default_morsel_parallelism(input, catalog, store, memory),
+            PlanChildren::Binary(left, right) => {
+                default_morsel_parallelism(left, catalog, store, memory)
+                    .max(default_morsel_parallelism(right, catalog, store, memory))
+            }
+        },
+    }
 }
 
 pub(super) fn try_stream_columnar_projection_batches(
@@ -116,6 +164,39 @@ impl<'a> NumericFragment<'a> {
         })
     }
 
+    fn default_parallelism(
+        self,
+        items: &[Projection],
+        catalog: &Catalog,
+        store: &GraphStore,
+        memory: &ExecutionMemoryConfig,
+    ) -> usize {
+        if store.is_out_of_core() {
+            return 1;
+        }
+        let Some(label_id) = catalog.label_id(self.label) else {
+            return 1;
+        };
+        let needs_node_ids = items
+            .iter()
+            .any(|item| matches!(item.expression, ProjectionExpression::Id { .. }));
+        let batch_rows = if self.supports_lending_projection(items) {
+            admitted_numeric_batch_rows(
+                memory.batch_rows.get(),
+                memory.batch_payload_bytes.get(),
+                needs_node_ids,
+            )
+            .unwrap_or(1)
+        } else {
+            memory.batch_rows.get()
+        };
+        let morsel_rows = batch_rows.saturating_mul(DEFAULT_BATCHES_PER_MORSEL);
+        let morsel_count = store
+            .node_count_for_label(Some(label_id))
+            .div_ceil(morsel_rows.max(1));
+        default_morsel_worker_count(morsel_count, DEFAULT_MORSEL_MAX_PARALLELISM)
+    }
+
     fn stream(
         self,
         items: &[Projection],
@@ -152,21 +233,83 @@ impl<'a> NumericFragment<'a> {
             needs_node_ids,
         };
         let candidate_count = context.store.node_count_for_label(Some(label_id));
+        let morsel_rows =
+            NonZeroUsize::new(target_rows.get().saturating_mul(DEFAULT_BATCHES_PER_MORSEL))
+                .expect("morsel row target is non-zero");
+        let pool = (!context.store.is_out_of_core())
+            .then(SharedExecutorPool::shared_default)
+            .transpose()
+            .ok()
+            .flatten();
+        let pool_parallelism = pool
+            .as_ref()
+            .map_or(1, SharedExecutorPool::worker_count)
+            .min(DEFAULT_MORSEL_MAX_PARALLELISM);
+        let admitted_parallelism = context
+            .task_context
+            .map(|task_context| task_context.admitted_parallelism().get())
+            .unwrap_or(1);
+        let morsel_count = candidate_count.div_ceil(morsel_rows.get());
+        let requested_parallelism = NonZeroUsize::new(
+            default_morsel_worker_count(morsel_count, pool_parallelism.min(admitted_parallelism))
+                .max(1),
+        )
+        .expect("morsel parallelism is non-zero");
+        let input_reference_bytes = morsel_rows
+            .get()
+            .saturating_mul(std::mem::size_of::<&NodeRecord>());
+        let bytes_per_worker = NonZeroUsize::new(
+            context
+                .memory
+                .batch_payload_bytes
+                .get()
+                .saturating_add(input_reference_bytes),
+        )
+        .expect("batch payload budget is non-zero");
+        let memory_budget_bytes = NonZeroUsize::new(
+            bytes_per_worker
+                .get()
+                .saturating_mul(requested_parallelism.get()),
+        )
+        .expect("morsel memory budget is non-zero");
         let admission = MorselAdmission::try_new(MorselAdmissionRequest {
             pipeline_id: PipelineId(0),
             input_rows: candidate_count,
-            target_rows,
-            requested_parallelism: NonZeroUsize::MIN,
-            bytes_per_worker: context.memory.batch_payload_bytes,
-            memory_budget_bytes: context.memory.batch_payload_bytes,
+            target_rows: morsel_rows,
+            requested_parallelism,
+            bytes_per_worker,
+            memory_budget_bytes,
         })?;
+        let parallel = admission.max_workers() > 1
+            && execution_limit
+                .output_rows
+                .is_none_or(|limit| limit > morsel_rows.get())
+            && pool.is_some();
         context.observer.record_morsel_admission(
             admission.max_workers(),
-            usize::from(admission.morsel_count() > 0),
+            if parallel {
+                admission.max_workers()
+            } else {
+                usize::from(admission.morsel_count() > 0)
+            },
         );
 
         let (emitted, stopped) = if context.store.is_out_of_core() {
             stream_owned_numeric_nodes(self, items, label_id, context, execution_limit, emit)?
+        } else if parallel {
+            stream_parallel_borrowed_numeric_nodes(
+                self,
+                items,
+                label_id,
+                target_rows,
+                morsel_rows,
+                use_lending.then_some(lending_scan),
+                admission.max_workers(),
+                pool.expect("parallel morsel execution requires a shared pool"),
+                context,
+                execution_limit,
+                emit,
+            )?
         } else if use_lending {
             stream_lending_numeric_nodes(
                 self,
@@ -201,6 +344,139 @@ impl<'a> NumericFragment<'a> {
             BatchControl::Continue
         })
     }
+}
+
+fn default_morsel_worker_count(morsel_count: usize, worker_ceiling: usize) -> usize {
+    worker_ceiling
+        .min(morsel_count / DEFAULT_MIN_MORSELS_PER_WORKER)
+        .max(1)
+}
+
+struct PreparedNumericBatch {
+    input_rows: usize,
+    selected_rows: usize,
+    output: BindingBatch,
+}
+
+enum PreparedNumericMorsel {
+    Parallel(Vec<PreparedNumericBatch>),
+    Serial,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stream_parallel_borrowed_numeric_nodes(
+    fragment: NumericFragment<'_>,
+    items: &[Projection],
+    label_id: crate::schema::LabelId,
+    batch_rows: NonZeroUsize,
+    morsel_rows: NonZeroUsize,
+    lending_scan: Option<LendingNumericScan>,
+    max_workers: usize,
+    pool: SharedExecutorPool,
+    context: BatchReadContext<'_>,
+    execution_limit: ExecutionLimit,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<(usize, bool)> {
+    let requested_parallelism =
+        NonZeroUsize::new(max_workers).expect("parallel execution has at least one worker");
+    let bytes_per_worker = NonZeroUsize::new(
+        context.memory.batch_payload_bytes.get().saturating_add(
+            morsel_rows
+                .get()
+                .saturating_mul(std::mem::size_of::<&NodeRecord>()),
+        ),
+    )
+    .expect("batch payload budget is non-zero");
+    let memory_budget_bytes = NonZeroUsize::new(
+        bytes_per_worker
+            .get()
+            .saturating_mul(requested_parallelism.get()),
+    )
+    .expect("parallel morsel memory budget is non-zero");
+    let scheduler = SharedPoolMorselScheduler::new(pool);
+    let mut nodes = context.store.scan_nodes(Some(label_id));
+    let mut wave = Vec::with_capacity(morsel_rows.get().saturating_mul(max_workers));
+    let mut batch_emitter = NumericBatchEmitter::new(
+        fragment,
+        items,
+        execution_limit,
+        context.task_context,
+        context.observer,
+        emit,
+    );
+    let mut stopped = false;
+    loop {
+        wave.clear();
+        wave.extend(nodes.by_ref().take(wave.capacity()));
+        if wave.is_empty() {
+            break;
+        }
+        let admission = MorselAdmission::try_new(MorselAdmissionRequest {
+            pipeline_id: PipelineId(0),
+            input_rows: wave.len(),
+            target_rows: morsel_rows,
+            requested_parallelism,
+            bytes_per_worker,
+            memory_budget_bytes,
+        })?;
+        let outputs = if let Some(task_context) = context.task_context {
+            scheduler.execute_with_context(&admission, task_context, |morsel| {
+                prepare_parallel_numeric_morsel(
+                    fragment,
+                    items,
+                    &wave[morsel.start_row..morsel.start_row + morsel.row_count],
+                    batch_rows.get(),
+                    context.memory.batch_payload_bytes.get(),
+                    lending_scan,
+                    Some(task_context),
+                )
+            })?
+        } else {
+            scheduler.execute(&admission, |morsel| {
+                prepare_parallel_numeric_morsel(
+                    fragment,
+                    items,
+                    &wave[morsel.start_row..morsel.start_row + morsel.row_count],
+                    batch_rows.get(),
+                    context.memory.batch_payload_bytes.get(),
+                    lending_scan,
+                    None,
+                )
+            })?
+        };
+        for (morsel, output) in admission.morsels().zip(outputs) {
+            context.observer.record_morsels(1);
+            match output {
+                PreparedNumericMorsel::Parallel(batches) => {
+                    for batch in batches {
+                        stopped = batch_emitter.emit_prepared(batch)? == BatchControl::Stop;
+                        if stopped || batch_emitter.limit_reached() {
+                            stopped = true;
+                            break;
+                        }
+                    }
+                }
+                PreparedNumericMorsel::Serial => {
+                    let rows = &wave[morsel.start_row..morsel.start_row + morsel.row_count];
+                    for batch in rows.chunks(batch_rows.get()) {
+                        stopped =
+                            batch_emitter.emit_nodes_without_morsel(batch)? == BatchControl::Stop;
+                        if stopped || batch_emitter.limit_reached() {
+                            stopped = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if stopped {
+                break;
+            }
+        }
+        if stopped || wave.len() < wave.capacity() {
+            break;
+        }
+    }
+    Ok((batch_emitter.emitted, stopped))
 }
 
 fn stream_lending_numeric_nodes(
@@ -385,130 +661,36 @@ impl<'plan, 'task, 'observer, 'emit> NumericBatchEmitter<'plan, 'task, 'observer
 
     fn emit_lending(&mut self, input: NumericNodeBatch<'_>) -> Result<BatchControl> {
         runtime_checkpoint(self.task_context)?;
-        self.observer
-            .record_columnar_batch(input.input_rows, input.values.len());
-        let remaining = self
-            .execution_limit
-            .output_rows
-            .unwrap_or(usize::MAX)
-            .saturating_sub(self.emitted);
-        let output_rows = input.values.len().min(remaining);
-        let mut output = Vec::with_capacity(output_rows);
-        for row in 0..output_rows {
-            let mut values = BTreeMap::new();
-            for item in self.items {
-                let value = match &item.expression {
-                    ProjectionExpression::Id { .. } => Value::Int(
-                        input
-                            .node_ids
-                            .expect("lending cursor retains requested node ids")[row]
-                            as i64,
-                    ),
-                    ProjectionExpression::Property { .. } => input.values.value(row),
-                    ProjectionExpression::Literal(value) => value.clone(),
-                    _ => unreachable!("lending projection eligibility checks expressions"),
-                };
-                insert_projected_value(&mut values, &item.name, value);
-            }
-            output.push(Binding {
-                values,
-                nodes: BTreeMap::new(),
-                relationships: BTreeMap::new(),
-            });
-        }
-        self.emit_output(output)
+        self.observer.record_morsels(1);
+        let prepared = prepare_lending_batch(self.items, input);
+        self.emit_prepared(prepared)
     }
 
     fn emit_nodes<N: Borrow<NodeRecord>>(&mut self, input: &[N]) -> Result<BatchControl> {
-        runtime_checkpoint(self.task_context)?;
-        let mut validity = ValidityBuilder::with_capacity(input.len());
-        let selection = match self.fragment.property_type {
-            crate::schema::PropertyType::Int => {
-                let mut values = Vec::with_capacity(input.len());
-                for node in input {
-                    let node = node.borrow();
-                    match node.properties.get(self.fragment.property) {
-                        Some(Value::Int(value)) => {
-                            values.push(*value);
-                            validity.push(true);
-                        }
-                        Some(Value::Null) | None => {
-                            values.push(0);
-                            validity.push(false);
-                        }
-                        Some(value) => {
-                            return Err(schema_value_mismatch(self.fragment, value));
-                        }
-                    }
-                }
-                filter_int64_values(
-                    &values,
-                    &validity.finish(),
-                    &Selection::all(input.len()),
-                    self.fragment.op,
-                    self.fragment.expected,
-                )?
-            }
-            crate::schema::PropertyType::Float => {
-                let mut values = Vec::with_capacity(input.len());
-                for node in input {
-                    let node = node.borrow();
-                    match node.properties.get(self.fragment.property) {
-                        Some(Value::Float(value)) => {
-                            values.push(*value);
-                            validity.push(true);
-                        }
-                        Some(Value::Null) | None => {
-                            values.push(0.0);
-                            validity.push(false);
-                        }
-                        Some(value) => {
-                            return Err(schema_value_mismatch(self.fragment, value));
-                        }
-                    }
-                }
-                filter_float64_values(
-                    &values,
-                    &validity.finish(),
-                    &Selection::all(input.len()),
-                    self.fragment.op,
-                    self.fragment.expected,
-                )?
-            }
-            _ => unreachable!("numeric fragment eligibility checks the property type"),
-        };
-        self.observer
-            .record_columnar_batch(input.len(), selection.selected_count());
+        self.observer.record_morsels(1);
+        self.emit_nodes_without_morsel(input)
+    }
 
+    fn emit_nodes_without_morsel<N: Borrow<NodeRecord>>(
+        &mut self,
+        input: &[N],
+    ) -> Result<BatchControl> {
+        let prepared = prepare_numeric_batch(self.fragment, self.items, input, self.task_context)?;
+        self.emit_prepared(prepared)
+    }
+
+    fn emit_prepared(&mut self, mut prepared: PreparedNumericBatch) -> Result<BatchControl> {
+        self.observer
+            .record_columnar_batch(prepared.input_rows, prepared.selected_rows);
         let remaining = self
             .execution_limit
             .output_rows
             .unwrap_or(usize::MAX)
             .saturating_sub(self.emitted);
-        let mut output = Vec::with_capacity(selection.selected_count().min(remaining));
-        for row in selection.iter().take(remaining) {
-            let node = input[row].borrow();
-            let mut values = BTreeMap::new();
-            for item in self.items {
-                let value = match &item.expression {
-                    ProjectionExpression::Id { .. } => Value::Int(node.id.0 as i64),
-                    ProjectionExpression::Property { property, .. } => node
-                        .properties
-                        .get(property)
-                        .cloned()
-                        .unwrap_or(Value::Null),
-                    ProjectionExpression::Literal(value) => value.clone(),
-                    _ => unreachable!("columnar projection eligibility checks expressions"),
-                };
-                insert_projected_value(&mut values, &item.name, value);
-            }
-            output.push(Binding {
-                values,
-                nodes: BTreeMap::new(),
-                relationships: BTreeMap::new(),
-            });
+        if prepared.output.len() > remaining {
+            prepared.output.truncate(remaining);
         }
-        self.emit_output(output)
+        self.emit_output(prepared.output)
     }
 
     fn emit_output(&mut self, output: BindingBatch) -> Result<BatchControl> {
@@ -525,9 +707,234 @@ impl<'plan, 'task, 'observer, 'emit> NumericBatchEmitter<'plan, 'task, 'observer
     }
 }
 
+fn prepare_lending_batch(
+    items: &[Projection],
+    input: NumericNodeBatch<'_>,
+) -> PreparedNumericBatch {
+    let selected_rows = input.values.len();
+    let mut output = Vec::with_capacity(selected_rows);
+    for row in 0..selected_rows {
+        let mut values = BTreeMap::new();
+        for item in items {
+            let value = match &item.expression {
+                ProjectionExpression::Id { .. } => Value::Int(
+                    input
+                        .node_ids
+                        .expect("lending cursor retains requested node ids")[row]
+                        as i64,
+                ),
+                ProjectionExpression::Property { .. } => input.values.value(row),
+                ProjectionExpression::Literal(value) => value.clone(),
+                _ => unreachable!("lending projection eligibility checks expressions"),
+            };
+            insert_projected_value(&mut values, &item.name, value);
+        }
+        output.push(Binding {
+            values,
+            nodes: BTreeMap::new(),
+            relationships: BTreeMap::new(),
+        });
+    }
+    PreparedNumericBatch {
+        input_rows: input.input_rows,
+        selected_rows,
+        output,
+    }
+}
+
+fn prepare_numeric_batch<N: Borrow<NodeRecord>>(
+    fragment: NumericFragment<'_>,
+    items: &[Projection],
+    input: &[N],
+    task_context: Option<&RuntimeTaskContext>,
+) -> Result<PreparedNumericBatch> {
+    runtime_checkpoint(task_context)?;
+    let mut validity = ValidityBuilder::with_capacity(input.len());
+    let selection = match fragment.property_type {
+        crate::schema::PropertyType::Int => {
+            let mut values = Vec::with_capacity(input.len());
+            for node in input {
+                let node = node.borrow();
+                match node.properties.get(fragment.property) {
+                    Some(Value::Int(value)) => {
+                        values.push(*value);
+                        validity.push(true);
+                    }
+                    Some(Value::Null) | None => {
+                        values.push(0);
+                        validity.push(false);
+                    }
+                    Some(value) => return Err(schema_value_mismatch(fragment, value)),
+                }
+            }
+            filter_int64_values(
+                &values,
+                &validity.finish(),
+                &Selection::all(input.len()),
+                fragment.op,
+                fragment.expected,
+            )?
+        }
+        crate::schema::PropertyType::Float => {
+            let mut values = Vec::with_capacity(input.len());
+            for node in input {
+                let node = node.borrow();
+                match node.properties.get(fragment.property) {
+                    Some(Value::Float(value)) => {
+                        values.push(*value);
+                        validity.push(true);
+                    }
+                    Some(Value::Null) | None => {
+                        values.push(0.0);
+                        validity.push(false);
+                    }
+                    Some(value) => return Err(schema_value_mismatch(fragment, value)),
+                }
+            }
+            filter_float64_values(
+                &values,
+                &validity.finish(),
+                &Selection::all(input.len()),
+                fragment.op,
+                fragment.expected,
+            )?
+        }
+        _ => unreachable!("numeric fragment eligibility checks the property type"),
+    };
+    runtime_checkpoint(task_context)?;
+    let selected_rows = selection.selected_count();
+    let mut output = Vec::with_capacity(selected_rows);
+    for row in selection.iter() {
+        let node = input[row].borrow();
+        let mut values = BTreeMap::new();
+        for item in items {
+            let value = match &item.expression {
+                ProjectionExpression::Id { .. } => Value::Int(node.id.0 as i64),
+                ProjectionExpression::Property { property, .. } => node
+                    .properties
+                    .get(property)
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                ProjectionExpression::Literal(value) => value.clone(),
+                _ => unreachable!("columnar projection eligibility checks expressions"),
+            };
+            insert_projected_value(&mut values, &item.name, value);
+        }
+        output.push(Binding {
+            values,
+            nodes: BTreeMap::new(),
+            relationships: BTreeMap::new(),
+        });
+    }
+    Ok(PreparedNumericBatch {
+        input_rows: input.len(),
+        selected_rows,
+        output,
+    })
+}
+
+fn prepare_parallel_numeric_morsel(
+    fragment: NumericFragment<'_>,
+    items: &[Projection],
+    input: &[&NodeRecord],
+    batch_rows: usize,
+    output_budget_bytes: usize,
+    lending_scan: Option<LendingNumericScan>,
+    task_context: Option<&RuntimeTaskContext>,
+) -> Result<PreparedNumericMorsel> {
+    if let Some(scan) = lending_scan {
+        return prepare_lending_numeric_morsel(
+            fragment,
+            items,
+            input,
+            scan,
+            output_budget_bytes,
+            task_context,
+        );
+    }
+    prepare_numeric_morsel(
+        fragment,
+        items,
+        input,
+        batch_rows,
+        output_budget_bytes,
+        task_context,
+    )
+}
+
+fn prepare_lending_numeric_morsel(
+    fragment: NumericFragment<'_>,
+    items: &[Projection],
+    input: &[&NodeRecord],
+    scan: LendingNumericScan,
+    output_budget_bytes: usize,
+    task_context: Option<&RuntimeTaskContext>,
+) -> Result<PreparedNumericMorsel> {
+    let mut cursor = NumericNodeBatchCursor::new(
+        input.iter().copied(),
+        fragment,
+        scan.batch_rows,
+        scan.needs_node_ids,
+    );
+    let mut output_bytes = 0usize;
+    let mut batches = Vec::with_capacity(input.len().div_ceil(scan.batch_rows));
+    while let Some(input) = cursor.next_batch()? {
+        runtime_checkpoint(task_context)?;
+        let batch = prepare_lending_batch(items, input);
+        let batch_bytes = batch.output.iter().fold(0usize, |total, binding| {
+            total.saturating_add(binding_memory_bytes(binding))
+        });
+        output_bytes = output_bytes.saturating_add(batch_bytes);
+        if output_bytes > output_budget_bytes {
+            return Ok(PreparedNumericMorsel::Serial);
+        }
+        batches.push(batch);
+    }
+    Ok(PreparedNumericMorsel::Parallel(batches))
+}
+
+fn prepare_numeric_morsel<N: Borrow<NodeRecord>>(
+    fragment: NumericFragment<'_>,
+    items: &[Projection],
+    input: &[N],
+    batch_rows: usize,
+    output_budget_bytes: usize,
+    task_context: Option<&RuntimeTaskContext>,
+) -> Result<PreparedNumericMorsel> {
+    let mut output_bytes = 0usize;
+    let mut batches = Vec::with_capacity(input.len().div_ceil(batch_rows));
+    for rows in input.chunks(batch_rows) {
+        let batch = prepare_numeric_batch(fragment, items, rows, task_context)?;
+        let batch_bytes = batch.output.iter().fold(0usize, |total, binding| {
+            total.saturating_add(binding_memory_bytes(binding))
+        });
+        output_bytes = output_bytes.saturating_add(batch_bytes);
+        if output_bytes > output_budget_bytes {
+            return Ok(PreparedNumericMorsel::Serial);
+        }
+        batches.push(batch);
+    }
+    Ok(PreparedNumericMorsel::Parallel(batches))
+}
+
 fn schema_value_mismatch(fragment: NumericFragment<'_>, value: &Value) -> SkeinError {
     SkeinError::Execution(format!(
         "columnar scan found value {value:?} that violates {:?} schema for {}.{}",
         fragment.property_type, fragment.label, fragment.property
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_morsel_worker_count;
+
+    #[test]
+    fn default_worker_count_requires_enough_work_per_worker() {
+        assert_eq!(default_morsel_worker_count(0, 4), 1);
+        assert_eq!(default_morsel_worker_count(4, 4), 1);
+        assert_eq!(default_morsel_worker_count(8, 4), 2);
+        assert_eq!(default_morsel_worker_count(15, 4), 3);
+        assert_eq!(default_morsel_worker_count(16, 4), 4);
+        assert_eq!(default_morsel_worker_count(64, 2), 2);
+    }
 }

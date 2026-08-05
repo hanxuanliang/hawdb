@@ -1,19 +1,93 @@
 use skein_core::{RuntimeCancellationReason, RuntimeTaskContext};
+use std::error::Error;
+use std::fmt::{self, Display, Formatter};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone)]
+pub struct SharedExecutorPool {
+    inner: Arc<rayon::ThreadPool>,
+    worker_count: NonZeroUsize,
+}
+
+impl fmt::Debug for SharedExecutorPool {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SharedExecutorPool")
+            .field("worker_count", &self.worker_count)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SharedExecutorPool {
+    pub fn new(worker_count: NonZeroUsize) -> Result<Self, SharedExecutorPoolError> {
+        let inner = rayon::ThreadPoolBuilder::new()
+            .num_threads(worker_count.get())
+            .thread_name(|index| format!("skein-executor-{index}"))
+            .build()
+            .map_err(|error| SharedExecutorPoolError(error.to_string()))?;
+        Ok(Self {
+            inner: Arc::new(inner),
+            worker_count,
+        })
+    }
+
+    pub fn shared_default() -> Result<Self, SharedExecutorPoolError> {
+        static SHARED: OnceLock<Result<SharedExecutorPool, SharedExecutorPoolError>> =
+            OnceLock::new();
+        SHARED
+            .get_or_init(|| {
+                let worker_count = std::thread::available_parallelism()
+                    .unwrap_or(NonZeroUsize::MIN)
+                    .min(NonZeroUsize::new(16).expect("shared worker limit is non-zero"));
+                Self::new(worker_count)
+            })
+            .clone()
+    }
+
+    pub fn worker_count(&self) -> usize {
+        self.worker_count.get()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedExecutorPoolError(String);
+
+impl Display for SharedExecutorPoolError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "failed to build shared executor pool: {}",
+            self.0
+        )
+    }
+}
+
+impl Error for SharedExecutorPoolError {}
+
+#[derive(Debug, Clone)]
 pub struct BoundedExecutor {
     max_parallelism: NonZeroUsize,
+    pool: Option<SharedExecutorPool>,
 }
 
 impl BoundedExecutor {
     pub fn new(max_parallelism: NonZeroUsize) -> Self {
-        Self { max_parallelism }
+        Self {
+            max_parallelism,
+            pool: SharedExecutorPool::shared_default().ok(),
+        }
     }
 
-    pub fn max_parallelism(self) -> usize {
+    pub fn with_pool(max_parallelism: NonZeroUsize, pool: SharedExecutorPool) -> Self {
+        Self {
+            max_parallelism,
+            pool: Some(pool),
+        }
+    }
+
+    pub fn max_parallelism(&self) -> usize {
         self.max_parallelism.get()
     }
 
@@ -26,6 +100,9 @@ impl BoundedExecutor {
         if inputs.is_empty() {
             return Vec::new();
         }
+        let Some(pool) = &self.pool else {
+            return inputs.iter().map(operation).collect();
+        };
 
         let worker_count = self.max_parallelism().min(inputs.len());
         let next = AtomicUsize::new(0);
@@ -35,21 +112,24 @@ impl BoundedExecutor {
                 .collect::<Vec<Option<R>>>(),
         );
 
-        std::thread::scope(|scope| {
-            for _ in 0..worker_count {
-                scope.spawn(|| loop {
-                    let index = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(input) = inputs.get(index) else {
-                        break;
-                    };
-                    let output = operation(input);
-                    outputs
-                        .lock()
-                        .expect("bounded executor output lock should not be poisoned")[index] =
-                        Some(output);
-                });
-            }
-        });
+        let run = || {
+            rayon::scope(|scope| {
+                for _ in 0..worker_count {
+                    scope.spawn(|_| loop {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(input) = inputs.get(index) else {
+                            break;
+                        };
+                        let output = operation(input);
+                        outputs
+                            .lock()
+                            .expect("bounded executor output lock should not be poisoned")[index] =
+                            Some(output);
+                    });
+                }
+            });
+        };
+        pool.inner.install(run);
 
         outputs
             .into_inner()
@@ -74,6 +154,17 @@ impl BoundedExecutor {
         if inputs.is_empty() {
             return Ok(Vec::new());
         }
+        let Some(pool) = &self.pool else {
+            let output = inputs
+                .iter()
+                .map(|input| {
+                    context.checkpoint()?;
+                    Ok(operation(input))
+                })
+                .collect::<Result<Vec<_>, RuntimeCancellationReason>>()?;
+            context.checkpoint()?;
+            return Ok(output);
+        };
 
         let worker_count = self.max_parallelism().min(inputs.len());
         let next = AtomicUsize::new(0);
@@ -84,28 +175,31 @@ impl BoundedExecutor {
                 .collect::<Vec<Option<R>>>(),
         );
 
-        std::thread::scope(|scope| {
-            for _ in 0..worker_count {
-                scope.spawn(|| loop {
-                    if let Err(reason) = context.checkpoint() {
-                        let mut stopped = stopped
+        let run = || {
+            rayon::scope(|scope| {
+                for _ in 0..worker_count {
+                    scope.spawn(|_| loop {
+                        if let Err(reason) = context.checkpoint() {
+                            let mut stopped = stopped.lock().expect(
+                                "bounded executor cancellation lock should not be poisoned",
+                            );
+                            stopped.get_or_insert(reason);
+                            break;
+                        }
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(input) = inputs.get(index) else {
+                            break;
+                        };
+                        let output = operation(input);
+                        outputs
                             .lock()
-                            .expect("bounded executor cancellation lock should not be poisoned");
-                        stopped.get_or_insert(reason);
-                        break;
-                    }
-                    let index = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(input) = inputs.get(index) else {
-                        break;
-                    };
-                    let output = operation(input);
-                    outputs
-                        .lock()
-                        .expect("bounded executor output lock should not be poisoned")[index] =
-                        Some(output);
-                });
-            }
-        });
+                            .expect("bounded executor output lock should not be poisoned")[index] =
+                            Some(output);
+                    });
+                }
+            });
+        };
+        pool.inner.install(run);
 
         if let Some(reason) = *stopped
             .lock()
