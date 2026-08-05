@@ -37,9 +37,11 @@ Recovery:
 5. Reject unsupported checkpoint storage versions before importing records.
 6. Replay valid WAL entries in order. When configured, the WAL replay entry
    limit is checked after a record is decoded and before applying it.
-7. Reject ordinary open on a torn WAL tail or checksum mismatch without
-   modifying the WAL. `DoctorRepairTornTail` is the only mode that may discard
-   an incomplete final frame.
+7. Reject every database open on a torn WAL tail or checksum mismatch without
+   modifying the WAL. `DatabaseDoctor::plan_wal_tail_repair` is a read-only
+   dry run for an incomplete final frame. The exact generation-bound plan must
+   be acknowledged and passed to `DatabaseDoctor::apply_wal_tail_repair`
+   before any bytes are discarded.
 8. In materialized mode, rebuild in-memory adjacency and property indexes. In
    out-of-core mode, retain the immutable canonical reader and keep only the
    bounded mutation delta resident.
@@ -80,7 +82,16 @@ Doctor torn-tail repair applies only to the final physical record when it is not
 newline-terminated. A newline-terminated record is a complete frame: malformed
 UTF-8, a missing or invalid checksum, or a checksum mismatch is corruption even
 at the end of the WAL, so recovery fails closed instead of truncating a
-potentially acknowledged commit.
+potentially acknowledged commit. Doctor is a separate typed operation, not a
+database-open mode. Planning holds the exclusive database lease, validates the
+manifest identity, WAL generation, framing, checksums, LSN continuity, and
+configured scan bounds, and reports the exact retained LSN plus discarded byte
+range without modifying files. Applying requires an acknowledgement bound to
+that plan, revalidates the manifest and WAL CRC32C/SHA-256 identities, persists
+an original-WAL quarantine copy and a prepared audit record, truncates and
+syncs the WAL, then publishes an applied audit record. A pending audit record
+blocks ordinary open. An interrupted apply can be finalized idempotently only
+when the manifest, retained WAL, and quarantine identities still match.
 
 Integrity checks are layered for throughput. WAL records, immutable segment
 blocks, cache admission, manifests, and projection envelopes use CRC32C; the
@@ -125,14 +136,15 @@ immediately previous generations and reclaims older files.
 structured form: current commit epoch, optional checkpoint epoch and checkpoint commit epoch, active
 oldest reader epoch, computed safe reclaim commit epoch, and whether the store
 is durable.
-`Database::storage_recovery_report` exposes the open-time recovery boundary in
-structured form: recovery mode, checkpoint epoch, checkpoint-covered commit
-epoch, WAL presence, replay start LSN, next LSN after replay, replayed WAL
-record count, configured WAL replay entry bound when present, explicit doctor
-repair detail when one was requested, recovered commit epoch, and whether the
-store is durable. Ordinary open is strict: a torn tail or checksum mismatch
-fails startup without changing the WAL. Doctor repair requires a writable,
-exclusive open and may discard the incomplete final record.
+`Database::storage_recovery_report` exposes the strict open-time recovery
+boundary in structured form: recovery mode, checkpoint epoch,
+checkpoint-covered commit epoch, WAL presence, replay start LSN, next LSN after
+replay, replayed WAL record count, configured WAL replay entry bound when
+present, recovered commit epoch, and whether the store is durable. Ordinary
+open is strict: a torn tail or checksum mismatch fails startup without changing
+the WAL. `WalTailRepairPlan` and `WalTailRepairReport` are the separate typed
+doctor evidence. The historical `DoctorRepairTornTail` recovery enum value is
+retained for report compatibility but database open rejects it.
 The CLI command `skein storage-recovery-report [--strict]
 [--max-wal-replay-entries <n>] [--require-durable]
 [--require-checkpoint-boundary] [--require-bounded-wal-replay]

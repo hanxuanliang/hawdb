@@ -224,9 +224,13 @@ Each crash point MUST reopen the database in a fresh process and verify that a
 mutation batch is either entirely absent or entirely recovered. The harness
 MUST verify commit epoch, replay LSN, endpoint integrity, projection watermark,
 and the absence of partially published artifacts. Ordinary startup MUST reject
-a torn WAL tail without changing it. Explicit doctor repair MUST preserve a
-structured repair record and report discarded bytes before normal serving can
-resume.
+a torn WAL tail without changing it. Explicit doctor repair MUST preserve
+structured prepared and applied repair records, retain a verified copy of the
+original WAL, and report discarded bytes before normal serving can resume. The
+repair MUST use a separate typed API: a read-only generation-bound dry run,
+followed by explicit acknowledgement and state revalidation. A pending repair
+record MUST block ordinary open, and an interrupted repair may be finalized
+only when the manifest, retained WAL, and quarantine identities still match.
 
 Durable-before-publish and pinned-reader invariants MUST be model checked for
 the released storage protocol. Model-check configuration and results MUST be

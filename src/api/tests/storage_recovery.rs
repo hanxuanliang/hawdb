@@ -952,27 +952,50 @@ fn default_recovery_rejects_torn_wal_tail_until_explicit_doctor_repair() {
         .to_string()
         .contains("strict WAL recovery rejected torn tail"));
 
-    let read_only_doctor_error = Database::open_with_config(
+    let legacy_open_repair_error = Database::open_with_config(
         &path,
         DatabaseConfig {
-            read_only: true,
             recovery_mode: RecoveryMode::DoctorRepairTornTail,
             ..DatabaseConfig::default()
         },
     )
     .unwrap_err();
-    assert!(read_only_doctor_error
+    assert!(legacy_open_repair_error
         .to_string()
-        .contains("requires a writable exclusive open"));
+        .contains("repair is not available through database open"));
 
-    let mut repaired = Database::open_with_config(
+    let wal_before_repair = read_test_wal(&path).unwrap();
+    let plan = DatabaseDoctor::plan_wal_tail_repair(&path, WalDoctorOptions::default()).unwrap();
+    assert!(plan.data_loss_possible);
+    assert_eq!(
+        plan.discarded_wal_tail_bytes,
+        b"torn-entry-without-checksum".len() as u64
+    );
+    assert_eq!(read_test_wal(&path).unwrap(), wal_before_repair);
+
+    let repair = DatabaseDoctor::apply_wal_tail_repair(
         &path,
-        DatabaseConfig {
-            recovery_mode: RecoveryMode::DoctorRepairTornTail,
-            ..DatabaseConfig::default()
-        },
+        &plan,
+        plan.acknowledge_potential_data_loss(),
+        WalDoctorOptions::default(),
     )
     .unwrap();
+    assert_eq!(
+        repair.discarded_wal_tail_bytes,
+        plan.discarded_wal_tail_bytes
+    );
+    assert!(!repair.resumed_interrupted_repair);
+    assert!(path
+        .join("doctor/quarantine")
+        .join(&repair.quarantine_file)
+        .exists());
+    let repair_record = path.join("doctor").join(&repair.repair_record_file);
+    assert!(repair_record.exists());
+    assert!(std::fs::read_to_string(repair_record)
+        .unwrap()
+        .contains("\"state\": \"applied\""));
+
+    let mut repaired = Database::open(&path).unwrap();
     let output = repaired
         .query("MATCH (m:Memory) WHERE m.id = 1 RETURN m.title AS title")
         .unwrap();
@@ -981,12 +1004,17 @@ fn default_recovery_rejects_torn_wal_tail_until_explicit_doctor_repair() {
         Some(&Value::String("Graph foundations".to_string()))
     );
     let recovery = repaired.storage_recovery_report();
-    assert!(recovery.torn_tail_ignored);
-    assert!(recovery.torn_tail_repaired);
-    assert!(recovery.discarded_wal_tail_bytes > 0);
+    assert!(!recovery.torn_tail_ignored);
+    assert!(!recovery.torn_tail_repaired);
+    assert_eq!(recovery.discarded_wal_tail_bytes, 0);
     assert!(!read_test_wal(&path)
         .unwrap()
         .contains("torn-entry-without-checksum"));
+    assert!(
+        std::fs::read_to_string(path.join("doctor/quarantine").join(repair.quarantine_file))
+            .unwrap()
+            .contains("torn-entry-without-checksum")
+    );
     std::fs::remove_dir_all(path).unwrap();
 }
 
@@ -1209,11 +1237,21 @@ fn mem_shaped_post_checkpoint_batch_replays_before_torn_tail() {
         .write_all(b"torn-entry-without-checksum")
         .unwrap();
 
+    let repair_plan =
+        DatabaseDoctor::plan_wal_tail_repair(&path, WalDoctorOptions::default()).unwrap();
+    let repair = DatabaseDoctor::apply_wal_tail_repair(
+        &path,
+        &repair_plan,
+        repair_plan.acknowledge_potential_data_loss(),
+        WalDoctorOptions::default(),
+    )
+    .unwrap();
+    assert!(repair.discarded_wal_tail_bytes > 0);
+
     {
         let db = Database::open_with_config(
             &path,
             DatabaseConfig {
-                recovery_mode: RecoveryMode::DoctorRepairTornTail,
                 max_wal_replay_entries: Some(8),
                 ..DatabaseConfig::default()
             },
@@ -1229,10 +1267,10 @@ fn mem_shaped_post_checkpoint_batch_replays_before_torn_tail() {
         assert_eq!(recovery.replayed_wal_entries, 1);
         assert_eq!(recovery.max_wal_replay_entries, Some(8));
         assert_eq!(recovery.recovered_commit_epoch, 4);
-        assert!(recovery.torn_tail_ignored);
-        assert!(recovery.torn_tail_repaired);
-        assert!(recovery.discarded_wal_tail_bytes > 0);
-        assert!(recovery.torn_tail_reason.is_some());
+        assert!(!recovery.torn_tail_ignored);
+        assert!(!recovery.torn_tail_repaired);
+        assert_eq!(recovery.discarded_wal_tail_bytes, 0);
+        assert!(recovery.torn_tail_reason.is_none());
 
         let mem_recovery = NowledgeMemStorageRecoveryReport::from_storage_report(&recovery);
         assert!(mem_recovery.ready);

@@ -127,7 +127,7 @@ use crate::search::{
     SearchIndex, SearchMode, SearchProjectionDelta, SearchProjectionKind, SearchProjectionRow,
     SearchRebuildOptions, SearchTruncationReasonCode,
 };
-use crate::store::{NodeId, DENSE_ADJACENCY_DEGREE_THRESHOLD};
+use crate::store::{DatabaseDoctor, NodeId, WalDoctorOptions, DENSE_ADJACENCY_DEGREE_THRESHOLD};
 use crate::NowledgeMemStorageRecoveryReport;
 use crate::Value;
 use std::collections::{BTreeMap, BTreeSet};

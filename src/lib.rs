@@ -511,7 +511,7 @@ pub use store::{
     restore_storage_backup, AdjacencyConsistencyReport, AdjacencyConsolidationPlan,
     AdjacencyConsolidationReport, AdjacencyDirection, AdjacencyGroupConsistencyMismatch,
     AdjacencyGroupKey, AdjacencyGroupStats, AdjacencyLayout, BasicStatisticsConsistencyReport,
-    DegreeStatisticsConsistencyReport, DegreeStatisticsEntry, DegreeStatisticsKey,
+    DatabaseDoctor, DegreeStatisticsConsistencyReport, DegreeStatisticsEntry, DegreeStatisticsKey,
     DistinctValueStatisticsConsistencyReport, DurabilityPolicy, FileSegmentRangeReader,
     OptimizerStatisticsRefreshOptions, OptimizerStatisticsRefreshReport, OrderedAdjacencyEntry,
     PropertyIndexConsistencyReport, RecoveryMode, SearchProjectionChangefeedReadiness,
@@ -520,7 +520,9 @@ pub use store::{
     SegmentReadExecutor, SegmentReadPayload, SegmentReadRange, SegmentReadSchedule,
     SegmentReadScheduler, SegmentReadWave, StorageBackupReport, StorageReclamationWatermark,
     StorageRecoveryReport, StorageResidencyMode, StorageResidencyReport, StorageRestoreReport,
-    StorageScrubReport, WalReplayConfig, DENSE_ADJACENCY_DEGREE_THRESHOLD,
+    StorageScrubReport, WalDoctorOptions, WalRepairAcknowledgement, WalReplayConfig,
+    WalTailRepairPlan, WalTailRepairReason, WalTailRepairReport, DENSE_ADJACENCY_DEGREE_THRESHOLD,
+    WAL_DOCTOR_REPAIR_PROTOCOL,
 };
 #[cfg(feature = "opentelemetry")]
 pub use telemetry::OpenTelemetryMetrics;

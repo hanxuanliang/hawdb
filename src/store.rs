@@ -11,10 +11,16 @@ use crate::telemetry::{KernelTelemetry, KernelTelemetryOperation, TelemetrySink}
 use crate::value::Value;
 use skein_core::RuntimeTaskContext;
 use skein_integrity::{checksum_u64, integrity_digest, IntegrityHasher, Sha256Digest};
+#[path = "store/doctor.rs"]
+mod doctor;
 #[path = "store/source_scan.rs"]
 mod source_scan;
 #[path = "store/statistics_refresh.rs"]
 mod statistics_refresh;
+pub use doctor::{
+    DatabaseDoctor, WalDoctorOptions, WalRepairAcknowledgement, WalTailRepairPlan,
+    WalTailRepairReason, WalTailRepairReport, WAL_DOCTOR_REPAIR_PROTOCOL,
+};
 use skein_storage::{
     durable_replace_file, sync_parent_directory, AdjacencyPostingList, CanonicalEndpointDirection,
     CanonicalNodeIterator, CanonicalRelationshipIterator, CanonicalSegmentError,
@@ -1576,6 +1582,12 @@ impl GraphStore {
         mode: DurableOpenMode,
         replay_config: WalReplayConfig,
     ) -> Result<Self> {
+        if replay_config.recovery_mode != RecoveryMode::Strict {
+            return Err(SkeinError::Storage(
+                "WAL repair is not available through database open; use DatabaseDoctor to plan and explicitly apply repair before opening in strict mode"
+                    .to_string(),
+            ));
+        }
         let durable = match mode {
             DurableOpenMode::CreateIfMissing => DurableStore::open(
                 path.as_ref(),
@@ -10427,9 +10439,6 @@ impl GraphStore {
         let checkpoint_present = durable.checkpoint_path.exists();
         let mut replayed_entries = 0_usize;
         let mut replayed_bytes = 0u64;
-        let mut torn_tail_reason = None;
-        let mut torn_tail_repaired = false;
-        let mut discarded_wal_tail_bytes = 0u64;
         let wal_present = wal_path.exists();
         if !wal_path.exists() {
             if checkpoint_epoch > 0 {
@@ -10454,7 +10463,7 @@ impl GraphStore {
                 torn_tail_ignored: false,
                 torn_tail_repaired: false,
                 discarded_wal_tail_bytes: 0,
-                torn_tail_reason,
+                torn_tail_reason: None,
                 recovered_commit_epoch: self.commit_epoch,
             });
         }
@@ -10469,7 +10478,6 @@ impl GraphStore {
         let mut reader = BufReader::new(file);
         let mut expected_lsn = wal_replay_start_lsn;
         let mut byte_offset = 0u64;
-        let mut last_valid_offset = 0u64;
         let mut saw_wal_header = false;
         while let Some(record) = read_bounded_wal_record(&mut reader, config.max_record_bytes)? {
             let record_start = byte_offset;
@@ -10481,28 +10489,9 @@ impl GraphStore {
                     ));
                 }
                 let reason = "WAL tail record is not newline-terminated";
-                match config.recovery_mode {
-                    RecoveryMode::DoctorRepairTornTail => {
-                        if read_only {
-                            return Err(SkeinError::Storage(format!(
-                                "WAL doctor repair requires a writable exclusive open and may discard {} tail bytes",
-                                wal_len.saturating_sub(last_valid_offset)
-                            )));
-                        }
-                        torn_tail_reason = Some(reason.to_string());
-                        discarded_wal_tail_bytes = wal_len.saturating_sub(last_valid_offset);
-                        let file = OpenOptions::new().write(true).open(&wal_path)?;
-                        file.set_len(last_valid_offset)?;
-                        file.sync_all()?;
-                        torn_tail_repaired = true;
-                        break;
-                    }
-                    RecoveryMode::Strict => {
-                        return Err(SkeinError::Storage(format!(
-                            "strict WAL recovery rejected torn tail: {reason}"
-                        )));
-                    }
-                }
+                return Err(SkeinError::Storage(format!(
+                    "strict WAL recovery rejected torn tail: {reason}; use DatabaseDoctor to inspect and explicitly repair the incomplete final record"
+                )));
             }
             let line = match std::str::from_utf8(&record.bytes) {
                 Ok(line) => line,
@@ -10535,7 +10524,6 @@ impl GraphStore {
                     )));
                 }
                 saw_wal_header = true;
-                last_valid_offset = byte_offset;
                 continue;
             }
             if line.is_empty() {
@@ -10623,7 +10611,6 @@ impl GraphStore {
                     self.commit_epoch += 1;
                 }
             }
-            last_valid_offset = byte_offset;
         }
         if !saw_wal_header {
             return Err(SkeinError::Storage(format!(
@@ -10647,10 +10634,10 @@ impl GraphStore {
             next_lsn_after_replay: Some(expected_lsn),
             replayed_wal_entries: replayed_entries,
             replayed_wal_bytes: replayed_bytes,
-            torn_tail_ignored: torn_tail_reason.is_some(),
-            torn_tail_repaired,
-            discarded_wal_tail_bytes,
-            torn_tail_reason,
+            torn_tail_ignored: false,
+            torn_tail_repaired: false,
+            discarded_wal_tail_bytes: 0,
+            torn_tail_reason: None,
             recovered_commit_epoch: self.commit_epoch,
         })
     }
@@ -11075,6 +11062,7 @@ impl DurableStore {
     ) -> Result<Self> {
         let directory_lease = DatabaseDirectoryLease::acquire(path)
             .map_err(|error| SkeinError::Storage(error.to_string()))?;
+        doctor::reject_pending_wal_doctor_repair(path)?;
         let manifest_path = path.join(MANIFEST_FILE);
         let manifest = if manifest_path.exists() {
             DurableManifest::load(&manifest_path)?
@@ -17870,19 +17858,20 @@ mod tests {
         property_projection_artifact_generation_file, property_spill_artifact_generation_file,
         read_durable_text, restore_storage_backup, set_checkpoint_failpoint, source_scan,
         AdjacencyConsolidationPlan, AdjacencyDirection, AdjacencyGroupStats, AdjacencyLayout,
-        CheckpointPublishStage, ConnectedNodesCreate, CowSegmentedMap, DegreeStatisticsEntry,
-        DegreeStatisticsKey, DurableCompression, GraphScanControl, GraphStore, NodeId, NodeRecord,
-        NodeSetAssignment, NodeSetValue, OrderedAdjacencyEntry, ProjectedGraphDefinition,
-        PropertyFilter, RelId, RelRecord, RelTypeId, RelationshipDeleteRequest,
-        ScanPruningStrategy, ScanPruningTargetKind, SearchProjectionGraphChange,
-        SourceScanCandidateRead, COW_MAP_TARGET_SEGMENT_BYTES, DENSE_ADJACENCY_DEGREE_THRESHOLD,
-        DURABLE_COMPRESSION_HEADER, MANIFEST_FILE,
+        CheckpointPublishStage, ConnectedNodesCreate, CowSegmentedMap, DatabaseDoctor,
+        DegreeStatisticsEntry, DegreeStatisticsKey, DurableCompression, GraphScanControl,
+        GraphStore, NodeId, NodeRecord, NodeSetAssignment, NodeSetValue, OrderedAdjacencyEntry,
+        ProjectedGraphDefinition, PropertyFilter, RelId, RelRecord, RelTypeId,
+        RelationshipDeleteRequest, ScanPruningStrategy, ScanPruningTargetKind,
+        SearchProjectionGraphChange, SourceScanCandidateRead, WalDoctorOptions,
+        COW_MAP_TARGET_SEGMENT_BYTES, DENSE_ADJACENCY_DEGREE_THRESHOLD, DURABLE_COMPRESSION_HEADER,
+        MANIFEST_FILE,
     };
     use crate::schema::{Catalog, LabelId};
     use crate::value::Value;
     use skein_integrity::integrity_digest;
     use skein_storage::{
-        DurabilityPolicy, RecoveryMode, ScanPredicate, ScanSegmentAccessPlan, ScanSegmentFallback,
+        DurabilityPolicy, ScanPredicate, ScanSegmentAccessPlan, ScanSegmentFallback,
         ScanSegmentManifest, StorageResidencyMode, WalReplayConfig,
     };
     use std::collections::{BTreeMap, BTreeSet};
@@ -20842,13 +20831,20 @@ mod tests {
         assert!(error
             .to_string()
             .contains("strict WAL recovery rejected torn tail"));
-        let store = GraphStore::open_with_durability_and_recovery(
+        let plan =
+            DatabaseDoctor::plan_wal_tail_repair(&path, WalDoctorOptions::default()).unwrap();
+        assert_eq!(
+            plan.discarded_wal_tail_bytes,
+            b"torn-entry-without-checksum".len() as u64
+        );
+        DatabaseDoctor::apply_wal_tail_repair(
             &path,
-            &mut catalog,
-            DurabilityPolicy::default(),
-            RecoveryMode::DoctorRepairTornTail,
+            &plan,
+            plan.acknowledge_potential_data_loss(),
+            WalDoctorOptions::default(),
         )
         .unwrap();
+        let store = GraphStore::open(&path, &mut catalog).unwrap();
         let label = catalog.label_id("Memory").unwrap();
         let nodes = store.scan_nodes(Some(label)).collect::<Vec<_>>();
         assert_eq!(nodes.len(), 1);
@@ -20880,14 +20876,17 @@ mod tests {
         let torn = wal.rsplit_once('\t').unwrap().0;
         std::fs::write(&wal_path, torn).unwrap();
 
-        let mut catalog = Catalog::default();
-        let store = GraphStore::open_with_durability_and_recovery(
+        let plan =
+            DatabaseDoctor::plan_wal_tail_repair(&path, WalDoctorOptions::default()).unwrap();
+        DatabaseDoctor::apply_wal_tail_repair(
             &path,
-            &mut catalog,
-            DurabilityPolicy::default(),
-            RecoveryMode::DoctorRepairTornTail,
+            &plan,
+            plan.acknowledge_potential_data_loss(),
+            WalDoctorOptions::default(),
         )
         .unwrap();
+        let mut catalog = Catalog::default();
+        let store = GraphStore::open(&path, &mut catalog).unwrap();
         assert!(store.scan_nodes(None).next().is_none());
         assert!(catalog.rel_type_id("MENTIONS").is_none());
         std::fs::remove_dir_all(path).unwrap();
@@ -21106,22 +21105,28 @@ mod tests {
         let torn = wal.rsplit_once('\t').unwrap().0;
         std::fs::write(&wal_path, torn).unwrap();
 
-        let mut catalog = Catalog::default();
-        let store = GraphStore::open_with_durability_and_recovery(
+        let plan =
+            DatabaseDoctor::plan_wal_tail_repair(&path, WalDoctorOptions::default()).unwrap();
+        let repair = DatabaseDoctor::apply_wal_tail_repair(
             &path,
-            &mut catalog,
-            DurabilityPolicy::default(),
-            RecoveryMode::DoctorRepairTornTail,
+            &plan,
+            plan.acknowledge_potential_data_loss(),
+            WalDoctorOptions::default(),
         )
         .unwrap();
+        assert_eq!(repair.next_lsn_after_repair, 4);
+        assert!(repair.discarded_wal_tail_bytes > 0);
+
+        let mut catalog = Catalog::default();
+        let store = GraphStore::open(&path, &mut catalog).unwrap();
         let report = store.storage_recovery_report();
         assert!(report.durable);
         assert_eq!(report.checkpoint_commit_epoch, Some(1));
         assert_eq!(report.wal_replay_start_lsn, Some(2));
         assert_eq!(report.next_lsn_after_replay, Some(4));
         assert_eq!(report.replayed_wal_entries, 2);
-        assert!(report.torn_tail_ignored);
-        assert!(report.torn_tail_reason.is_some());
+        assert!(!report.torn_tail_ignored);
+        assert!(report.torn_tail_reason.is_none());
         assert_eq!(report.recovered_commit_epoch, 3);
 
         let memory_label = catalog.label_id("Memory").unwrap();
