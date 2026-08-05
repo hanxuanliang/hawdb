@@ -105,6 +105,10 @@ impl GraphExpansionExecutionState {
         self.seed_count = self.seed_count.saturating_add(1);
     }
 
+    pub fn set_reranked_seed_count(&mut self, reranked_seed_count: usize) {
+        self.reranked_seed_count = reranked_seed_count;
+    }
+
     pub fn returned_count(&self) -> usize {
         self.returned_count
     }
@@ -152,6 +156,23 @@ mod tests {
             GraphExpansionTruncationReason::PayloadByteLimit.as_str(),
             "payload_byte_limit"
         );
+    }
+
+    #[test]
+    fn reranked_seed_count_can_be_recorded_after_streaming_input() {
+        let mut state = GraphExpansionExecutionState::new(
+            Some(GraphExpansionBudget {
+                candidate_limit: 8,
+                payload_byte_limit: 1_024,
+            }),
+            0,
+            0,
+        );
+
+        state.set_reranked_seed_count(3);
+
+        let report = state.report("related", 1, 1, 0).expect("budgeted report");
+        assert_eq!(report.reranked_seed_count, 3);
     }
 
     #[test]

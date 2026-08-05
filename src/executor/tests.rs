@@ -4,6 +4,7 @@ use super::*;
 use crate::planner::{
     AggregateFunction, AggregateTarget, ProjectionExpression, SortDirection, SortKey,
 };
+use crate::store::ScanPruningStrategy;
 
 fn spill_test_config(name: &str) -> ExecutionMemoryConfig {
     let nonce = std::time::SystemTime::now()
@@ -610,6 +611,7 @@ fn graph_algorithms_admit_direction_specific_projections() {
             score_column: "score".to_string(),
             node_visibility_predicate: None,
         };
+        assert!(batch_pipeline_capable(&plan));
         let mut external = NoExternalReadOperator;
         let output = execute_with_row_limit_profile_and_external_and_memory(
             &plan,

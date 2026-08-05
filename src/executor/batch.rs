@@ -119,8 +119,38 @@ fn stream_optional_degree_batches(
 pub(super) struct BatchReadContext<'a> {
     pub(super) catalog: &'a Catalog,
     pub(super) store: &'a GraphStore,
+    pub(super) parameters: &'a BTreeMap<String, Value>,
+    pub(super) external: &'a dyn BatchExternalRead,
     pub(super) memory: &'a ExecutionMemoryConfig,
     pub(super) task_context: Option<&'a RuntimeTaskContext>,
+}
+
+pub(super) trait BatchExternalRead {
+    fn execute_vector_seed(
+        &self,
+        request: VectorSeedExecutionRequest<'_>,
+    ) -> Result<VectorSeedExecutionOutput>;
+}
+
+pub(super) struct BatchExternalReadAdapter<'a> {
+    external: RefCell<&'a mut dyn ExternalReadOperator>,
+}
+
+impl<'a> BatchExternalReadAdapter<'a> {
+    pub(super) fn new(external: &'a mut dyn ExternalReadOperator) -> Self {
+        Self {
+            external: RefCell::new(external),
+        }
+    }
+}
+
+impl BatchExternalRead for BatchExternalReadAdapter<'_> {
+    fn execute_vector_seed(
+        &self,
+        request: VectorSeedExecutionRequest<'_>,
+    ) -> Result<VectorSeedExecutionOutput> {
+        self.external.borrow_mut().execute_vector_seed(request)
+    }
 }
 
 pub(super) fn batch_pipeline_capable(plan: &PhysicalPlan) -> bool {
@@ -133,7 +163,10 @@ pub(super) fn batch_pipeline_capable(plan: &PhysicalPlan) -> bool {
         | PhysicalPlan::IndexNodeRangeSeek { .. }
         | PhysicalPlan::IndexNodeTextSeek { .. }
         | PhysicalPlan::ThreadRepairStatsExec { .. }
-        | PhysicalPlan::ShortestPathExec { .. } => true,
+        | PhysicalPlan::ShortestPathExec { .. }
+        | PhysicalPlan::OptionalRelationshipCountSumExec { .. }
+        | PhysicalPlan::GraphAlgorithm { .. }
+        | PhysicalPlan::VectorSeedScan { .. } => true,
         PhysicalPlan::FilterExec { input, .. }
         | PhysicalPlan::ProjectExec { input, .. }
         | PhysicalPlan::LimitExec { input, .. }
@@ -155,15 +188,19 @@ pub(super) fn collect_batch_pipeline(
     plan: &PhysicalPlan,
     catalog: &Catalog,
     store: &GraphStore,
-    memory: &ExecutionMemoryConfig,
-    task_context: Option<&RuntimeTaskContext>,
+    execution_context: &mut ExecutionContext<'_>,
     execution_limit: ExecutionLimit,
 ) -> Result<Vec<Binding>> {
+    let memory = execution_context.memory;
+    let task_context = execution_context.task_context;
     let mut output = Vec::new();
     let mut tracker = OperatorMemoryTracker::new(memory.blocking_operator_bytes);
+    let external = BatchExternalReadAdapter::new(&mut *execution_context.external);
     let context = BatchReadContext {
         catalog,
         store,
+        parameters: execution_context.parameters,
+        external: &external,
         memory,
         task_context,
     };
@@ -246,7 +283,7 @@ fn execute_binding_batches_inner(
         catalog,
         store,
         memory,
-        task_context: _,
+        ..
     } = context;
     match plan {
         PhysicalPlan::SeqNodeScan { variable, label } => {
@@ -430,6 +467,138 @@ fn execute_binding_batches_inner(
             )?;
             emit_owned_binding_batches(bindings, memory.batch_rows.get(), emit)
         }
+        PhysicalPlan::GraphAlgorithm {
+            algorithm,
+            graph_name,
+            options,
+            score_column,
+            node_visibility_predicate,
+        } => {
+            let Some(definition) = store.projected_graph_definition(graph_name) else {
+                return Err(SkeinError::Execution(format!(
+                    "projected graph '{graph_name}' does not exist"
+                )));
+            };
+            let node_visibility_filter = node_visibility_predicate
+                .as_ref()
+                .map(property_filter_from_predicate)
+                .transpose()?;
+            let layout = match algorithm {
+                GraphAlgorithmKind::PageRank => ProjectionLayout::Outgoing,
+                GraphAlgorithmKind::Louvain => ProjectionLayout::Undirected,
+            };
+            let budget = ProjectionMemoryBudget::new(memory.blocking_operator_bytes);
+            let graph = if let Some(filter) = node_visibility_filter.as_ref() {
+                try_projected_graph_with_node_filter(
+                    catalog,
+                    store,
+                    &definition.node_labels,
+                    &definition.rel_types,
+                    |node| node_matches_property_filter(node, filter),
+                    layout,
+                    budget,
+                )
+            } else {
+                try_projected_graph_with_node_filter(
+                    catalog,
+                    store,
+                    &definition.node_labels,
+                    &definition.rel_types,
+                    |_| true,
+                    layout,
+                    budget,
+                )
+            }?;
+            let mut bindings = match algorithm {
+                GraphAlgorithmKind::PageRank => collect_bounded_operator_bindings(
+                    "GraphAlgorithm",
+                    graph
+                        .page_rank(PageRankOptions {
+                            iterations: options
+                                .max_iterations
+                                .unwrap_or_else(|| PageRankOptions::default().iterations),
+                            damping: options
+                                .damping
+                                .unwrap_or_else(|| PageRankOptions::default().damping),
+                        })
+                        .into_iter()
+                        .map(|score| Binding {
+                            values: BTreeMap::from([
+                                ("node".to_string(), Value::Int(score.node.0 as i64)),
+                                (score_column.clone(), Value::Float(score.score)),
+                            ]),
+                            nodes: BTreeMap::new(),
+                            relationships: BTreeMap::new(),
+                        }),
+                    memory.blocking_operator_bytes,
+                ),
+                GraphAlgorithmKind::Louvain => collect_bounded_operator_bindings(
+                    "GraphAlgorithm",
+                    graph
+                        .hierarchical_louvain_communities(LouvainOptions {
+                            max_iterations: options
+                                .max_iterations
+                                .unwrap_or_else(|| LouvainOptions::default().max_iterations),
+                            max_levels: options
+                                .max_levels
+                                .unwrap_or_else(|| LouvainOptions::default().max_levels),
+                        })
+                        .into_iter()
+                        .map(|assignment| Binding {
+                            values: BTreeMap::from([
+                                ("node".to_string(), Value::Int(assignment.node.0 as i64)),
+                                ("level".to_string(), Value::Int(assignment.level as i64)),
+                                (
+                                    "louvain_id".to_string(),
+                                    Value::Int(assignment.community.0 as i64),
+                                ),
+                            ]),
+                            nodes: BTreeMap::new(),
+                            relationships: BTreeMap::new(),
+                        }),
+                    memory.blocking_operator_bytes,
+                ),
+            }?;
+            bindings.truncate(execution_limit.output_rows.unwrap_or(usize::MAX));
+            emit_owned_binding_batches(bindings, memory.batch_rows.get(), emit)
+        }
+        PhysicalPlan::VectorSeedScan {
+            embedding_parameter,
+            output_external_id,
+            metadata_filters,
+            vector_plan,
+        } => {
+            let embedding =
+                vector_embedding_parameter(context.parameters, embedding_parameter, vector_plan)?;
+            let output = context
+                .external
+                .execute_vector_seed(VectorSeedExecutionRequest {
+                    embedding: &embedding,
+                    metadata_filters,
+                    vector_plan,
+                })?;
+            record_vector_execution_report(output.report);
+            let mut bindings = collect_bounded_operator_bindings(
+                "VectorSeedScan",
+                output.rows.into_iter().map(|row| {
+                    let mut values = BTreeMap::from([
+                        ("id".to_string(), Value::String(row.id)),
+                        ("score".to_string(), Value::Float(row.score)),
+                    ]);
+                    if *output_external_id && let Some(external_id) = row.external_id {
+                        values.insert("external_id".to_string(), Value::String(external_id));
+                    }
+                    Binding {
+                        values,
+                        nodes: BTreeMap::new(),
+                        relationships: BTreeMap::new(),
+                    }
+                }),
+                memory.blocking_operator_bytes,
+            )?;
+            bindings.truncate(execution_limit.output_rows.unwrap_or(usize::MAX));
+            emit_owned_binding_batches(bindings, memory.batch_rows.get(), emit)
+        }
         PhysicalPlan::NodeColumnLookupExec {
             variable,
             label,
@@ -472,6 +641,42 @@ fn execute_binding_batches_inner(
             execution_limit,
             emit,
         ),
+        PhysicalPlan::OptionalRelationshipCountSumExec {
+            label,
+            properties,
+            legs,
+            output,
+            ..
+        } => {
+            let label_ids = label_ids_for_pattern(catalog, label);
+            let mut total = 0usize;
+            let mut callback_error = None;
+            store.visit_nodes_owned(None, |node| {
+                if !node_matches_label_pattern(&node, label_ids.as_deref())
+                    || !node_properties_match(&node, properties)
+                {
+                    return GraphScanControl::Continue;
+                }
+                for leg in legs {
+                    match relationship_count_sum_leg(catalog, store, node.id, leg) {
+                        Ok(count) => total = total.saturating_add(count),
+                        Err(error) => {
+                            callback_error = Some(error);
+                            return GraphScanControl::Stop;
+                        }
+                    }
+                }
+                GraphScanControl::Continue
+            })?;
+            if let Some(error) = callback_error {
+                return Err(error);
+            }
+            emit(vec![Binding {
+                values: BTreeMap::from([(output.clone(), Value::Int(total as i64))]),
+                nodes: BTreeMap::new(),
+                relationships: BTreeMap::new(),
+            }])
+        }
         PhysicalPlan::AdjacencyExpandExec { input, .. } => stream_adjacency_expand_batches(
             plan,
             input,

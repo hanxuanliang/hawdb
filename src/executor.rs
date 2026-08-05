@@ -16,7 +16,7 @@ use crate::store::{
     NodeId, NodeRecord, NodeSetAssignment, NodeSetValue, ProjectedGraphDefinition, PropertyFilter,
     RelRecord, RelationshipDeleteRequest, RelationshipOnCreatePropertyValue,
     RelationshipPropertiesUpdate, RelationshipPropertyUpdate, RelationshipSetAssignment,
-    RelationshipTargetNodeDelete, ScanPruningReport, ScanPruningStrategy, SourceScanCandidateRead,
+    RelationshipTargetNodeDelete, ScanPruningReport, SourceScanCandidateRead,
 };
 use crate::value::Value;
 use skein_core::RuntimeTaskContext;
@@ -562,9 +562,12 @@ fn execute_with_row_consumer_profile_internal(
                 capture_vector_execution_reports(|| {
                     capture_scan_pruning_reports(|| {
                         if fully_streamed {
+                            let external = BatchExternalReadAdapter::new(&mut *context.external);
                             let batch_context = BatchReadContext {
                                 catalog,
                                 store,
+                                parameters: context.parameters,
+                                external: &external,
                                 memory,
                                 task_context,
                             };

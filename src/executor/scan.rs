@@ -426,6 +426,7 @@ pub(super) fn stream_adjacency_expand_batches(
             }
             Ok(BatchControl::Continue)
         })?;
+    graph_expansion.set_reranked_seed_count(current_vector_rerank_count());
     if !output.is_empty() && emit(output)? == BatchControl::Stop {
         record_graph_expansion_state(
             &graph_expansion,
@@ -444,105 +445,6 @@ pub(super) fn stream_adjacency_expand_batches(
         graph_expansion.returned_count(),
     );
     Ok(control)
-}
-
-pub(super) fn execute_adjacency_expand(
-    plan: &PhysicalPlan,
-    input: &PhysicalPlan,
-    catalog: &mut Catalog,
-    store: &mut GraphStore,
-    context: &mut ExecutionContext<'_>,
-    execution_limit: ExecutionLimit,
-    filters: AdjacencyExpandFilters<'_>,
-) -> Result<Vec<Binding>> {
-    let PhysicalPlan::AdjacencyExpandExec {
-        source_variable,
-        source_label: _,
-        rel_variable,
-        rel_type,
-        rel_properties,
-        direction,
-        target_variable,
-        target_label,
-        min_hops,
-        max_hops,
-        optional,
-        graph_budget,
-        ..
-    } = plan
-    else {
-        return Err(SkeinError::Execution(
-            "expected adjacency expand plan".to_string(),
-        ));
-    };
-
-    let input = execute_child_bindings(input, catalog, store, context)?;
-    runtime_checkpoint(context.task_context)?;
-    let mut graph_expansion = GraphExpansionExecutionState::new(
-        *graph_budget,
-        input.len(),
-        current_vector_rerank_count(),
-    );
-    let rel_type_id = if rel_type.is_empty() {
-        None
-    } else {
-        let Some(rel_type_id) = catalog.rel_type_id(rel_type) else {
-            record_graph_expansion_state(&graph_expansion, rel_type, *min_hops, *max_hops, 0);
-            return Ok(Vec::new());
-        };
-        Some(rel_type_id)
-    };
-    let target_label_ids = label_ids_for_pattern(catalog, target_label);
-    let mut output = Vec::new();
-    for binding in input {
-        runtime_checkpoint(context.task_context)?;
-        for candidate in expand_binding(
-            binding,
-            AdjacencyExpandSpec {
-                source_variable,
-                rel_variable: rel_variable.as_deref(),
-                rel_properties,
-                direction: *direction,
-                target_variable,
-                min_hops: *min_hops,
-                max_hops: *max_hops,
-                optional: *optional,
-            },
-            rel_type_id,
-            target_label_ids.as_deref(),
-            &filters,
-            store,
-            context.memory.blocking_operator_bytes.get(),
-            context.task_context,
-            &mut RootExecutionObserver,
-        )? {
-            runtime_checkpoint(context.task_context)?;
-            if !graph_expansion.try_push(
-                &mut output,
-                candidate.binding,
-                candidate.target_id,
-                candidate.hop,
-            ) || execution_limit.is_reached(output.len())
-            {
-                record_graph_expansion_state(
-                    &graph_expansion,
-                    rel_type,
-                    *min_hops,
-                    *max_hops,
-                    output.len(),
-                );
-                return Ok(output);
-            }
-        }
-    }
-    record_graph_expansion_state(
-        &graph_expansion,
-        rel_type,
-        *min_hops,
-        *max_hops,
-        output.len(),
-    );
-    Ok(output)
 }
 
 fn record_graph_expansion_state(
