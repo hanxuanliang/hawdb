@@ -11,12 +11,19 @@ use crate::telemetry::{KernelTelemetry, KernelTelemetryOperation, TelemetrySink}
 use crate::value::Value;
 use skein_core::RuntimeTaskContext;
 use skein_integrity::{checksum_u64, integrity_digest, IntegrityHasher, Sha256Digest};
+#[path = "store/derived_repair.rs"]
+mod derived_repair;
 #[path = "store/doctor.rs"]
 mod doctor;
 #[path = "store/source_scan.rs"]
 mod source_scan;
 #[path = "store/statistics_refresh.rs"]
 mod statistics_refresh;
+pub use derived_repair::{
+    DerivedArtifactHealth, DerivedArtifactHealthReport, DerivedArtifactHealthState,
+    DerivedArtifactKind, DerivedArtifactRebuildOptions, DerivedArtifactRepairPlan,
+    DerivedArtifactRepairReport, DERIVED_ARTIFACT_REPAIR_PROTOCOL,
+};
 pub use doctor::{
     DatabaseDoctor, WalDoctorOptions, WalRepairAcknowledgement, WalTailRepairPlan,
     WalTailRepairReason, WalTailRepairReport, WAL_DOCTOR_REPAIR_PROTOCOL,
@@ -1604,6 +1611,14 @@ impl GraphStore {
                 replay_config.max_batch_operations,
             )?,
         };
+        Self::finish_open(durable, catalog, replay_config).map(|(store, _)| store)
+    }
+
+    fn finish_open(
+        durable: DurableStore,
+        catalog: &mut Catalog,
+        replay_config: WalReplayConfig,
+    ) -> Result<(Self, Catalog)> {
         let mut store = Self {
             next_node_id: 0,
             next_rel_id: 0,
@@ -1641,13 +1656,44 @@ impl GraphStore {
             durable: Some(durable),
         };
         store.load_checkpoint(catalog, replay_config)?;
+        let checkpoint_catalog = catalog.clone();
         store.storage_recovery_report = store.replay_wal(catalog, replay_config)?;
         store.validate_relationship_endpoints()?;
         store.refresh_basic_statistics_epoch();
         store.load_projected_graph_artifacts()?;
         store.load_stable_id_mapping()?;
         store.load_source_scan_manifest()?;
-        Ok(store)
+        Ok((store, checkpoint_catalog))
+    }
+
+    fn open_for_derived_repair(
+        path: &Path,
+        replay_config: WalReplayConfig,
+    ) -> Result<(Self, Catalog, Catalog)> {
+        if replay_config.recovery_mode != RecoveryMode::Strict {
+            return Err(SkeinError::Storage(
+                "derived repair requires strict WAL replay".to_string(),
+            ));
+        }
+        let durable = DurableStore::open_for_derived_repair(
+            path,
+            DurabilityPolicy::default(),
+            replay_config.segment_cache_capacity_bytes,
+            replay_config.max_record_bytes,
+            replay_config.max_batch_operations,
+        )?;
+        let mut recovered_catalog = Catalog::default();
+        let (store, checkpoint_catalog) =
+            Self::finish_open(durable, &mut recovered_catalog, replay_config)?;
+        Ok((store, recovered_catalog, checkpoint_catalog))
+    }
+
+    fn enable_derived_repair_writes(&mut self) -> Result<()> {
+        let durable = self.durable.as_mut().ok_or_else(|| {
+            SkeinError::Storage("derived repair requires durable storage".to_string())
+        })?;
+        durable.read_only = false;
+        Ok(())
     }
 
     pub fn create_node(
@@ -5717,6 +5763,19 @@ impl GraphStore {
         catalog: &Catalog,
         oldest_reader_commit_epoch: Option<u64>,
     ) -> Result<()> {
+        self.checkpoint_with_reader_epoch_and_build_config(
+            catalog,
+            oldest_reader_commit_epoch,
+            DerivedArtifactBuildConfig::default(),
+        )
+    }
+
+    fn checkpoint_with_reader_epoch_and_build_config(
+        &mut self,
+        catalog: &Catalog,
+        oldest_reader_commit_epoch: Option<u64>,
+        build_config: DerivedArtifactBuildConfig,
+    ) -> Result<()> {
         if self.durable.is_none() {
             return Ok(());
         }
@@ -5824,12 +5883,15 @@ impl GraphStore {
                     _ => unreachable!("canonical base iterators are created together"),
                 };
             let canonical_adjacency_manifest_artifact = match adjacency_relationships {
-                Some(relationships) => {
-                    durable.write_canonical_adjacency(relationships, generation)?
-                }
+                Some(relationships) => durable.write_canonical_adjacency(
+                    relationships,
+                    generation,
+                    build_config.adjacency,
+                )?,
                 None => durable.write_canonical_adjacency(
                     self.relationships.values().cloned().map(Ok),
                     generation,
+                    build_config.adjacency,
                 )?,
             };
             let property_projection_manifest_artifact = match property_projection_nodes {
@@ -5838,12 +5900,14 @@ impl GraphStore {
                     nodes,
                     generation,
                     commit_epoch,
+                    build_config.property_projection,
                 )?,
                 None => durable.write_persistent_property_projection(
                     property_projection_definitions,
                     self.nodes.values().cloned().map(Ok),
                     generation,
                     commit_epoch,
+                    build_config.property_projection,
                 )?,
             };
             let checkpoint_artifact = durable.write_checkpoint(
@@ -10952,6 +11016,22 @@ struct CheckpointImage<'a> {
     initial_import_source_fingerprint: Option<&'a str>,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct DerivedArtifactBuildConfig {
+    adjacency: CanonicalAdjacencyConfig,
+    property_projection: PersistentPropertyProjectionConfig,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DurableStoreOpenOptions {
+    read_only: bool,
+    initialize_if_empty: bool,
+    load_rebuildable_artifacts: bool,
+    segment_cache_capacity_bytes: u64,
+    max_record_bytes: Option<usize>,
+    max_batch_operations: Option<usize>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DurableArtifactMetadata {
     encoded_len: u64,
@@ -11013,11 +11093,14 @@ impl DurableStore {
         Self::open_existing(
             path,
             durability,
-            false,
-            true,
-            segment_cache_capacity_bytes,
-            max_record_bytes,
-            max_batch_operations,
+            DurableStoreOpenOptions {
+                read_only: false,
+                initialize_if_empty: true,
+                load_rebuildable_artifacts: true,
+                segment_cache_capacity_bytes,
+                max_record_bytes,
+                max_batch_operations,
+            },
         )
     }
 
@@ -11043,26 +11126,63 @@ impl DurableStore {
         Self::open_existing(
             path,
             durability,
-            true,
-            false,
-            segment_cache_capacity_bytes,
-            max_record_bytes,
-            max_batch_operations,
+            DurableStoreOpenOptions {
+                read_only: true,
+                initialize_if_empty: false,
+                load_rebuildable_artifacts: true,
+                segment_cache_capacity_bytes,
+                max_record_bytes,
+                max_batch_operations,
+            },
+        )
+    }
+
+    fn open_for_derived_repair(
+        path: &Path,
+        durability: DurabilityPolicy,
+        segment_cache_capacity_bytes: u64,
+        max_record_bytes: Option<usize>,
+        max_batch_operations: Option<usize>,
+    ) -> Result<Self> {
+        if !path.is_dir() {
+            return Err(SkeinError::Storage(format!(
+                "derived repair database path is not a directory: {}",
+                path.display()
+            )));
+        }
+        Self::open_existing(
+            path,
+            durability,
+            DurableStoreOpenOptions {
+                read_only: true,
+                initialize_if_empty: false,
+                load_rebuildable_artifacts: false,
+                segment_cache_capacity_bytes,
+                max_record_bytes,
+                max_batch_operations,
+            },
         )
     }
 
     fn open_existing(
         path: &Path,
         durability: DurabilityPolicy,
-        read_only: bool,
-        initialize_if_empty: bool,
-        segment_cache_capacity_bytes: u64,
-        max_record_bytes: Option<usize>,
-        max_batch_operations: Option<usize>,
+        options: DurableStoreOpenOptions,
     ) -> Result<Self> {
+        let DurableStoreOpenOptions {
+            read_only,
+            initialize_if_empty,
+            load_rebuildable_artifacts,
+            segment_cache_capacity_bytes,
+            max_record_bytes,
+            max_batch_operations,
+        } = options;
         let directory_lease = DatabaseDirectoryLease::acquire(path)
             .map_err(|error| SkeinError::Storage(error.to_string()))?;
         doctor::reject_pending_wal_doctor_repair(path)?;
+        if load_rebuildable_artifacts {
+            derived_repair::reject_pending_derived_artifact_repair(path)?;
+        }
         let manifest_path = path.join(MANIFEST_FILE);
         let manifest = if manifest_path.exists() {
             DurableManifest::load(&manifest_path)?
@@ -11090,18 +11210,28 @@ impl DurableStore {
             Arc::clone(&segment_cache),
             store_id,
         )?;
-        let canonical_adjacency = load_published_canonical_adjacency(
-            path,
-            manifest,
-            Arc::clone(&segment_cache),
-            store_id,
-        )?;
-        let persistent_property_projection = load_published_property_projection(
-            path,
-            manifest,
-            Arc::clone(&segment_cache),
-            store_id,
-        )?;
+        let canonical_adjacency = load_rebuildable_artifacts
+            .then(|| {
+                load_published_canonical_adjacency(
+                    path,
+                    manifest,
+                    Arc::clone(&segment_cache),
+                    store_id,
+                )
+            })
+            .transpose()?
+            .flatten();
+        let persistent_property_projection = load_rebuildable_artifacts
+            .then(|| {
+                load_published_property_projection(
+                    path,
+                    manifest,
+                    Arc::clone(&segment_cache),
+                    store_id,
+                )
+            })
+            .transpose()?
+            .flatten();
         if let (Some(canonical), Some(adjacency)) = (&canonical_segments, &canonical_adjacency)
             && canonical.manifest().relationship_count != adjacency.manifest().relationship_count
         {
@@ -11803,6 +11933,7 @@ impl DurableStore {
         &self,
         relationships: R,
         generation: u64,
+        config: CanonicalAdjacencyConfig,
     ) -> Result<DurableArtifactMetadata>
     where
         R: IntoIterator<
@@ -11812,7 +11943,7 @@ impl DurableStore {
         let artifact_path = self
             .root_path
             .join(canonical_adjacency_artifact_generation_file(generation));
-        let output = CanonicalAdjacencyWriter::new(CanonicalAdjacencyConfig::default())
+        let output = CanonicalAdjacencyWriter::new(config)
             .write_fallible(
                 &artifact_path,
                 ManifestGeneration(generation),
@@ -11843,6 +11974,7 @@ impl DurableStore {
         nodes: N,
         generation: u64,
         source_commit_epoch: u64,
+        config: PersistentPropertyProjectionConfig,
     ) -> Result<DurableArtifactMetadata>
     where
         N: IntoIterator<
@@ -11855,16 +11987,15 @@ impl DurableStore {
         let artifact_path = self
             .root_path
             .join(property_projection_artifact_generation_file(generation));
-        let output =
-            PersistentPropertyProjectionWriter::new(PersistentPropertyProjectionConfig::default())
-                .write_fallible(
-                    &artifact_path,
-                    ManifestGeneration(generation),
-                    source_commit_epoch,
-                    definitions,
-                    nodes,
-                )
-                .map_err(|error| SkeinError::Storage(error.to_string()))?;
+        let output = PersistentPropertyProjectionWriter::new(config)
+            .write_fallible(
+                &artifact_path,
+                ManifestGeneration(generation),
+                source_commit_epoch,
+                definitions,
+                nodes,
+            )
+            .map_err(|error| SkeinError::Storage(error.to_string()))?;
         let encoded = output
             .manifest
             .encode()

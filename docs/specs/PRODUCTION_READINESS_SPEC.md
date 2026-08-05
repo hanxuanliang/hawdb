@@ -232,6 +232,21 @@ followed by explicit acknowledgement and state revalidation. A pending repair
 record MUST block ordinary open, and an interrupted repair may be finalized
 only when the manifest, retained WAL, and quarantine identities still match.
 
+Generation-bound canonical adjacency and persistent property projection files
+are rebuildable derived storage. Corruption in either MUST fail closed during
+open or block access, while the explicit full-file health check MUST surface a
+typed repair-required state before serving readiness succeeds. Repair MUST be
+an explicit two-phase `DatabaseDoctor` operation: a read-only plan MUST validate
+the canonical source and admit source rows, logical bytes, WAL replay,
+temporary bytes, memory, generated entries, and spill runs; apply MUST
+revalidate the source identity, retain checksummed quarantine copies, persist a
+prepared audit record, and publish a new full checkpoint generation with the
+manifest last. A pending record MUST block ordinary open. Interrupted
+completion MUST verify the new generation and all quarantine identities before
+publishing an applied record. Canonical segments, checkpoint state, property
+spill, manifest, and WAL remain non-rebuildable source state and MUST fail
+closed.
+
 Durable-before-publish and pinned-reader invariants MUST be model checked for
 the released storage protocol. Model-check configuration and results MUST be
 part of the release CI artifact set, not only documented as a local command.

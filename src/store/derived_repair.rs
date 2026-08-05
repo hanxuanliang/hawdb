@@ -1,0 +1,552 @@
+use super::doctor::DatabaseDoctor;
+use super::{
+    file_checksum, load_published_canonical_adjacency, load_published_property_projection,
+    store_id_for_path, CanonicalAdjacencyConfig, DerivedArtifactBuildConfig, DurableManifest,
+    GraphStore, PersistentPropertyProjectionConfig, RecoveryMode, SegmentCache,
+    StorageResidencyMode, WalReplayConfig, MANIFEST_FILE,
+};
+use crate::error::{Result, SkeinError};
+use serde::{Deserialize, Serialize};
+use skein_storage::DEFAULT_MAX_WAL_REPLAY_BYTES;
+use std::num::{NonZeroU64, NonZeroUsize};
+use std::path::Path;
+use std::sync::Arc;
+
+#[path = "derived_repair/audit.rs"]
+mod audit;
+#[cfg(test)]
+use audit::quarantine_directory;
+use audit::{
+    finalize_repair, load_matching_pending_record, load_single_pending_record,
+    pending_record_paths, prepare_repair, validate_pending_record,
+};
+
+pub const DERIVED_ARTIFACT_REPAIR_PROTOCOL: &str = "skein-derived-artifact-repair-v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DerivedArtifactKind {
+    CanonicalAdjacency,
+    PersistentPropertyProjection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DerivedArtifactHealthState {
+    Healthy,
+    RepairRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DerivedArtifactHealth {
+    pub kind: DerivedArtifactKind,
+    pub state: DerivedArtifactHealthState,
+    pub reason_code: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DerivedArtifactHealthReport {
+    pub protocol: String,
+    pub checkpoint_generation: u64,
+    pub checkpoint_commit_epoch: u64,
+    pub canonical_source_validated: bool,
+    pub source_node_count: u64,
+    pub source_relationship_count: u64,
+    pub source_logical_bytes: u64,
+    pub artifacts: Vec<DerivedArtifactHealth>,
+    pub repair_required: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DerivedArtifactRebuildOptions {
+    pub max_source_records: u64,
+    pub max_source_logical_bytes: u64,
+    pub max_temporary_bytes: u64,
+    pub build_memory_bytes: u64,
+    pub max_spill_runs: usize,
+    pub max_generated_property_entries: u64,
+    pub segment_cache_capacity_bytes: u64,
+    pub max_wal_replay_bytes: u64,
+    pub max_wal_replay_entries: usize,
+}
+
+impl Default for DerivedArtifactRebuildOptions {
+    fn default() -> Self {
+        Self {
+            max_source_records: 100_000_000,
+            max_source_logical_bytes: 1024 * 1024 * 1024 * 1024,
+            max_temporary_bytes: 1024 * 1024 * 1024 * 1024,
+            build_memory_bytes: 64 * 1024 * 1024,
+            max_spill_runs: 4_096,
+            max_generated_property_entries: 100_000_000,
+            segment_cache_capacity_bytes: 64 * 1024 * 1024,
+            max_wal_replay_bytes: DEFAULT_MAX_WAL_REPLAY_BYTES,
+            max_wal_replay_entries: skein_storage::DEFAULT_MAX_WAL_REPLAY_ENTRIES,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DerivedArtifactRepairPlan {
+    pub protocol: String,
+    pub plan_id: String,
+    pub source_generation: u64,
+    pub target_generation: u64,
+    pub source_commit_epoch: u64,
+    pub manifest_len: u64,
+    pub manifest_crc32c: u64,
+    pub manifest_sha256: String,
+    pub wal_len: u64,
+    pub wal_crc32c: u64,
+    pub wal_sha256: String,
+    pub source_node_count: u64,
+    pub source_relationship_count: u64,
+    pub source_logical_bytes: u64,
+    pub estimated_temporary_bytes: u64,
+    pub targets: Vec<DerivedArtifactKind>,
+    pub options: DerivedArtifactRebuildOptions,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DerivedArtifactRepairReport {
+    pub protocol: String,
+    pub plan_id: String,
+    pub source_generation: u64,
+    pub published_generation: u64,
+    pub source_commit_epoch: u64,
+    pub targets: Vec<DerivedArtifactKind>,
+    pub quarantined_files: Vec<String>,
+    pub repair_record_file: String,
+    pub resumed_interrupted_repair: bool,
+}
+
+struct DerivedInspection {
+    store: GraphStore,
+    recovered_catalog: crate::schema::Catalog,
+    health: DerivedArtifactHealthReport,
+    manifest: DurableManifest,
+}
+
+impl DatabaseDoctor {
+    pub fn derived_artifact_health(
+        path: impl AsRef<Path>,
+        options: DerivedArtifactRebuildOptions,
+    ) -> Result<DerivedArtifactHealthReport> {
+        validate_options(options)?;
+        let path = path.as_ref();
+        if let Some(record) = load_single_pending_record(path)? {
+            let inspection = inspect(path, record.plan.options)?;
+            return Ok(inspection.health);
+        }
+        Ok(inspect(path, options)?.health)
+    }
+
+    pub fn plan_derived_artifact_rebuild(
+        path: impl AsRef<Path>,
+        options: DerivedArtifactRebuildOptions,
+    ) -> Result<DerivedArtifactRepairPlan> {
+        validate_options(options)?;
+        let path = path.as_ref();
+        if let Some(record) = load_single_pending_record(path)? {
+            validate_pending_record(path, &record)?;
+            return Ok(record.plan);
+        }
+        let inspection = inspect(path, options)?;
+        plan_from_inspection(path, &inspection, options)
+    }
+
+    pub fn apply_derived_artifact_rebuild(
+        path: impl AsRef<Path>,
+        plan: &DerivedArtifactRepairPlan,
+    ) -> Result<DerivedArtifactRepairReport> {
+        validate_plan(plan)?;
+        let path = path.as_ref();
+        if let Some(record) = load_matching_pending_record(path, &plan.plan_id)? {
+            let inspection = inspect(path, record.plan.options)?;
+            if inspection.manifest.checkpoint_epoch == record.plan.target_generation
+                && !inspection.health.repair_required
+            {
+                return finalize_repair(path, record, true);
+            }
+        }
+
+        let mut inspection = inspect(path, plan.options)?;
+        let current_plan = plan_from_inspection(path, &inspection, plan.options)?;
+        if current_plan != *plan {
+            return Err(SkeinError::Storage(
+                "derived artifact repair plan no longer matches the current database state"
+                    .to_string(),
+            ));
+        }
+        let prepared = match load_matching_pending_record(path, &plan.plan_id)? {
+            Some(record) => record,
+            None => prepare_repair(path, plan)?,
+        };
+        validate_pending_record(path, &prepared)?;
+        validate_source_identity(path, plan)?;
+        inspection.store.enable_derived_repair_writes()?;
+        let build_config = build_config(plan.options)?;
+        inspection
+            .store
+            .checkpoint_with_reader_epoch_and_build_config(
+                &inspection.recovered_catalog,
+                None,
+                build_config,
+            )?;
+        drop(inspection.store);
+
+        let published = inspect(path, plan.options)?;
+        if published.manifest.checkpoint_epoch != plan.target_generation
+            || published.manifest.checkpoint_commit_epoch != plan.source_commit_epoch
+            || published.health.repair_required
+        {
+            return Err(SkeinError::Storage(
+                "derived artifact rebuild did not publish one healthy target generation; pending audit was retained"
+                    .to_string(),
+            ));
+        }
+        drop(published.store);
+        finalize_repair(path, prepared, false)
+    }
+}
+
+pub(super) fn reject_pending_derived_artifact_repair(path: &Path) -> Result<()> {
+    let pending = pending_record_paths(path)?;
+    if pending.is_empty() {
+        return Ok(());
+    }
+    Err(SkeinError::Storage(format!(
+        "database has {} interrupted derived artifact repair record(s); finish the repair with DatabaseDoctor before opening the database",
+        pending.len()
+    )))
+}
+
+fn inspect(path: &Path, options: DerivedArtifactRebuildOptions) -> Result<DerivedInspection> {
+    let replay = WalReplayConfig {
+        recovery_mode: RecoveryMode::Strict,
+        max_entries: Some(options.max_wal_replay_entries),
+        max_bytes: Some(options.max_wal_replay_bytes),
+        segment_cache_capacity_bytes: options.segment_cache_capacity_bytes,
+        residency_mode: StorageResidencyMode::OutOfCore,
+        max_out_of_core_delta_bytes: Some(options.max_source_logical_bytes),
+        ..WalReplayConfig::default()
+    };
+    let (store, recovered_catalog, _) = GraphStore::open_for_derived_repair(path, replay)?;
+    let manifest = DurableManifest::load(&path.join(MANIFEST_FILE))?;
+    manifest.validate()?;
+    let (node_count, relationship_count, logical_bytes) =
+        validate_canonical_source(&store, options)?;
+    let artifacts = assess_artifacts(path, &store, manifest, options.segment_cache_capacity_bytes);
+    let repair_required = artifacts
+        .iter()
+        .any(|artifact| artifact.state == DerivedArtifactHealthState::RepairRequired);
+    Ok(DerivedInspection {
+        store,
+        recovered_catalog,
+        health: DerivedArtifactHealthReport {
+            protocol: DERIVED_ARTIFACT_REPAIR_PROTOCOL.to_string(),
+            checkpoint_generation: manifest.checkpoint_epoch,
+            checkpoint_commit_epoch: manifest.checkpoint_commit_epoch,
+            canonical_source_validated: true,
+            source_node_count: node_count,
+            source_relationship_count: relationship_count,
+            source_logical_bytes: logical_bytes,
+            artifacts,
+            repair_required,
+        },
+        manifest,
+    })
+}
+
+fn validate_canonical_source(
+    store: &GraphStore,
+    options: DerivedArtifactRebuildOptions,
+) -> Result<(u64, u64, u64)> {
+    let logical_bytes = store.estimated_logical_record_bytes();
+    if logical_bytes > options.max_source_logical_bytes {
+        return Err(SkeinError::Storage(format!(
+            "derived repair source byte admission rejected {logical_bytes} bytes under the {} byte limit",
+            options.max_source_logical_bytes
+        )));
+    }
+    let mut node_count = 0u64;
+    for node in store.node_records_owned() {
+        node.map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+        node_count = node_count.saturating_add(1);
+        if node_count > options.max_source_records {
+            return Err(SkeinError::Storage(format!(
+                "derived repair source record admission exceeded {} records",
+                options.max_source_records
+            )));
+        }
+    }
+    let mut relationship_count = 0u64;
+    for relationship in store.relationship_records_owned() {
+        relationship.map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
+        relationship_count = relationship_count.saturating_add(1);
+        if node_count.saturating_add(relationship_count) > options.max_source_records {
+            return Err(SkeinError::Storage(format!(
+                "derived repair source record admission exceeded {} records",
+                options.max_source_records
+            )));
+        }
+    }
+    Ok((node_count, relationship_count, logical_bytes))
+}
+
+fn assess_artifacts(
+    path: &Path,
+    store: &GraphStore,
+    manifest: DurableManifest,
+    cache_bytes: u64,
+) -> Vec<DerivedArtifactHealth> {
+    if manifest.checkpoint_generation.is_none() {
+        return Vec::new();
+    }
+    let canonical_relationship_count = store
+        .canonical_base
+        .as_ref()
+        .map(|reader| reader.manifest().relationship_count)
+        .unwrap_or_default();
+    vec![
+        assess_one(DerivedArtifactKind::CanonicalAdjacency, || {
+            let cache = Arc::new(SegmentCache::new(cache_bytes));
+            let reader = load_published_canonical_adjacency(
+                path,
+                manifest,
+                cache,
+                store_id_for_path(path)?,
+            )?
+            .ok_or_else(|| {
+                SkeinError::Storage("canonical adjacency publication is missing".to_string())
+            })?;
+            let published = reader.manifest();
+            if published.relationship_count != canonical_relationship_count {
+                return Err(SkeinError::Storage(
+                    "canonical adjacency relationship count mismatch".to_string(),
+                ));
+            }
+            validate_artifact_file_identity(
+                reader.path(),
+                published.artifact_len,
+                published.artifact_digest.0,
+                &published.artifact_sha256.to_string(),
+            )
+        }),
+        assess_one(DerivedArtifactKind::PersistentPropertyProjection, || {
+            let cache = Arc::new(SegmentCache::new(cache_bytes));
+            let reader = load_published_property_projection(
+                path,
+                manifest,
+                cache,
+                store_id_for_path(path)?,
+            )?
+            .ok_or_else(|| {
+                SkeinError::Storage(
+                    "persistent property projection publication is missing".to_string(),
+                )
+            })?;
+            let published = reader.manifest();
+            validate_artifact_file_identity(
+                reader.path(),
+                published.artifact_len,
+                published.artifact_digest.0,
+                &published.artifact_sha256.to_string(),
+            )
+        }),
+    ]
+}
+
+fn assess_one(
+    kind: DerivedArtifactKind,
+    check: impl FnOnce() -> Result<()>,
+) -> DerivedArtifactHealth {
+    match check() {
+        Ok(()) => DerivedArtifactHealth {
+            kind,
+            state: DerivedArtifactHealthState::Healthy,
+            reason_code: None,
+        },
+        Err(_) => DerivedArtifactHealth {
+            kind,
+            state: DerivedArtifactHealthState::RepairRequired,
+            reason_code: Some("artifact_missing_corrupt_or_inconsistent".to_string()),
+        },
+    }
+}
+
+fn validate_artifact_file_identity(
+    path: &Path,
+    expected_len: u64,
+    expected_crc32c: u64,
+    expected_sha256: &str,
+) -> Result<()> {
+    let (len, crc32c, sha256) = file_checksum(path)?;
+    if len != expected_len || crc32c != expected_crc32c || sha256.to_string() != expected_sha256 {
+        return Err(SkeinError::Storage(
+            "derived artifact identity mismatch".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn plan_from_inspection(
+    path: &Path,
+    inspection: &DerivedInspection,
+    options: DerivedArtifactRebuildOptions,
+) -> Result<DerivedArtifactRepairPlan> {
+    let targets = inspection
+        .health
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.state == DerivedArtifactHealthState::RepairRequired)
+        .map(|artifact| artifact.kind)
+        .collect::<Vec<_>>();
+    if targets.is_empty() {
+        return Err(SkeinError::Storage(
+            "derived artifact doctor found no repair-required artifact".to_string(),
+        ));
+    }
+    let estimated_temporary_bytes = inspection
+        .health
+        .source_logical_bytes
+        .saturating_mul(8)
+        .max(64 * 1024 * 1024);
+    if estimated_temporary_bytes > options.max_temporary_bytes {
+        return Err(SkeinError::Storage(format!(
+            "derived repair temporary byte admission rejected {estimated_temporary_bytes} estimated bytes under the {} byte limit",
+            options.max_temporary_bytes
+        )));
+    }
+    let manifest_identity = file_checksum(&path.join(MANIFEST_FILE))?;
+    let wal_identity = file_checksum(&inspection.manifest.wal_path(path))?;
+    let mut plan = DerivedArtifactRepairPlan {
+        protocol: DERIVED_ARTIFACT_REPAIR_PROTOCOL.to_string(),
+        plan_id: String::new(),
+        source_generation: inspection.manifest.checkpoint_epoch,
+        target_generation: inspection.manifest.checkpoint_epoch.saturating_add(1),
+        source_commit_epoch: inspection.store.commit_epoch,
+        manifest_len: manifest_identity.0,
+        manifest_crc32c: manifest_identity.1,
+        manifest_sha256: manifest_identity.2.to_string(),
+        wal_len: wal_identity.0,
+        wal_crc32c: wal_identity.1,
+        wal_sha256: wal_identity.2.to_string(),
+        source_node_count: inspection.health.source_node_count,
+        source_relationship_count: inspection.health.source_relationship_count,
+        source_logical_bytes: inspection.health.source_logical_bytes,
+        estimated_temporary_bytes,
+        targets,
+        options,
+    };
+    plan.plan_id = plan_identity(&plan);
+    Ok(plan)
+}
+
+fn validate_options(options: DerivedArtifactRebuildOptions) -> Result<()> {
+    if options.max_source_records == 0
+        || options.max_source_logical_bytes == 0
+        || options.max_temporary_bytes == 0
+        || options.build_memory_bytes == 0
+        || options.max_spill_runs == 0
+        || options.max_generated_property_entries == 0
+        || options.segment_cache_capacity_bytes == 0
+        || options.max_wal_replay_bytes == 0
+        || options.max_wal_replay_entries == 0
+    {
+        return Err(SkeinError::Storage(
+            "derived artifact rebuild limits must all be non-zero".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_plan(plan: &DerivedArtifactRepairPlan) -> Result<()> {
+    validate_options(plan.options)?;
+    if plan.protocol != DERIVED_ARTIFACT_REPAIR_PROTOCOL
+        || plan.plan_id != plan_identity(plan)
+        || plan.targets.is_empty()
+        || plan.target_generation != plan.source_generation.saturating_add(1)
+    {
+        return Err(SkeinError::Storage(
+            "derived artifact repair plan identity is invalid".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn plan_identity(plan: &DerivedArtifactRepairPlan) -> String {
+    let encoded = serde_json::to_vec(&(
+        &plan.protocol,
+        plan.source_generation,
+        plan.target_generation,
+        plan.source_commit_epoch,
+        plan.manifest_len,
+        plan.manifest_crc32c,
+        &plan.manifest_sha256,
+        plan.wal_len,
+        plan.wal_crc32c,
+        &plan.wal_sha256,
+        plan.source_node_count,
+        plan.source_relationship_count,
+        plan.source_logical_bytes,
+        plan.estimated_temporary_bytes,
+        &plan.targets,
+        plan.options,
+    ))
+    .expect("derived repair plan identity fields are serializable");
+    skein_integrity::integrity_digest(&encoded)
+        .sha256
+        .to_string()
+}
+
+fn build_config(options: DerivedArtifactRebuildOptions) -> Result<DerivedArtifactBuildConfig> {
+    let memory = NonZeroU64::new(options.build_memory_bytes)
+        .ok_or_else(|| SkeinError::Storage("derived repair memory limit is zero".to_string()))?;
+    let spill = NonZeroU64::new(options.max_temporary_bytes)
+        .ok_or_else(|| SkeinError::Storage("derived repair spill limit is zero".to_string()))?;
+    let spill_runs = NonZeroUsize::new(options.max_spill_runs)
+        .ok_or_else(|| SkeinError::Storage("derived repair spill run limit is zero".to_string()))?;
+    let generated = NonZeroU64::new(options.max_generated_property_entries).ok_or_else(|| {
+        SkeinError::Storage("derived repair generated entry limit is zero".to_string())
+    })?;
+    let adjacency = CanonicalAdjacencyConfig {
+        memory_budget_bytes: memory,
+        max_spill_bytes: spill,
+        max_spill_runs: spill_runs,
+        ..CanonicalAdjacencyConfig::default()
+    };
+    let property_projection = PersistentPropertyProjectionConfig {
+        memory_budget_bytes: memory,
+        max_spill_bytes: spill,
+        max_spill_runs: spill_runs,
+        max_generated_entries: generated,
+        ..PersistentPropertyProjectionConfig::default()
+    };
+    Ok(DerivedArtifactBuildConfig {
+        adjacency,
+        property_projection,
+    })
+}
+
+fn validate_source_identity(path: &Path, plan: &DerivedArtifactRepairPlan) -> Result<()> {
+    let manifest = file_checksum(&path.join(MANIFEST_FILE))?;
+    let durable_manifest = DurableManifest::load(&path.join(MANIFEST_FILE))?;
+    let wal = file_checksum(&durable_manifest.wal_path(path))?;
+    if manifest.0 != plan.manifest_len
+        || manifest.1 != plan.manifest_crc32c
+        || manifest.2.to_string() != plan.manifest_sha256
+        || wal.0 != plan.wal_len
+        || wal.1 != plan.wal_crc32c
+        || wal.2.to_string() != plan.wal_sha256
+    {
+        return Err(SkeinError::Storage(
+            "derived artifact repair source identity changed after planning".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "derived_repair/tests.rs"]
+mod tests;

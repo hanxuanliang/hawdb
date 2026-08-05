@@ -19,6 +19,13 @@ Files:
   `canonical.<generation>.manifest.skein`: immutable ordered node and
   relationship segments with per-segment digests, record bounds, adaptive
   endpoint Bloom filters, and exact-property Bloom summaries.
+- `adjacency.<generation>.skein` and
+  `adjacency.<generation>.manifest.skein`: rebuildable, generation-bound
+  canonical adjacency used by out-of-core traversal.
+- `property-index.<generation>.skein` and
+  `property-index.<generation>.manifest.skein`: rebuildable, generation-bound
+  persistent property projection. The property spill artifact remains part of
+  canonical checkpoint input and is not eligible for derived repair.
 - `wal.<generation>.skein`: append-only committed mutation records beginning at
   the replay LSN published by the manifest.
 - `projected_graphs.skein`: checksummed, checkpoint-generated CSR/CSC
@@ -170,6 +177,26 @@ relationship rows to avoid random canonical row lookups. The external merge
 uses key-only heap entries, bounded fan-in, and streaming block digests. A
 missing or invalid adjacency metadata fails the V1 open rather than falling
 back to partial traversal behavior.
+
+`DatabaseDoctor::derived_artifact_health` verifies the full-file CRC32C and
+SHA-256 identity of the active adjacency and persistent property projection
+against their manifests. `plan_derived_artifact_rebuild` then validates the
+canonical segment stream and WAL replay under explicit source-record,
+source-byte, replay, temporary-byte, memory, generated-entry, and spill-run
+limits. It returns a generation- and source-identity-bound dry-run plan without
+changing the database. Canonical segment, checkpoint, property spill, manifest,
+or WAL corruption fails closed and is never converted into a derived rebuild.
+
+`apply_derived_artifact_rebuild` revalidates that plan, copies the published
+manifest and affected derived files into a checksummed quarantine directory,
+and writes a prepared audit record before doing any publication work. It
+rebuilds from the verified canonical stream through the bounded external
+builders and publishes one new full checkpoint generation with the manifest
+last. Ordinary open rejects a pending repair record. If publication is
+interrupted after the new manifest becomes durable, applying the same plan
+validates the target generation and every quarantined file identity before
+writing the applied audit record and unblocking service. It never overwrites a
+published derived artifact in place and never silently repairs during open.
 
 The cache has a hard byte capacity, stable generation/digest keys, CLOCK
 eviction, pin accounting, and fail-closed oversized-entry admission. Endpoint
