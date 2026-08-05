@@ -52,6 +52,7 @@ pub use profile::{
     BlockingOperatorMemoryReport, PipelineMemoryReport, ProfiledQueryRows, ProfiledQueryStream,
     ReadExecutionProfile, Row,
 };
+pub use spill::SpillPoolSnapshot;
 pub use vector::{
     execute_vector_plan, VectorCandidate, VectorCandidateBatch, VectorCandidateScanMetrics,
     VectorCandidateScanRequest, VectorCompressionMode, VectorExecutionBackend,

@@ -142,6 +142,26 @@ All of these paths MUST report tracked peak memory, input rows, spill bytes,
 spill runs, and spilled rows, and MUST remove query-scoped runs on success,
 error, cancellation, and consumer stop.
 
+Spill admission has two levels. Each blocking operator retains its cumulative
+byte and run limits, while all queries whose `ExecutionMemoryConfig` resolves
+to the same spill directory share one process-wide live-byte and live-run
+pool. A record MUST reserve both levels before it enters the writer buffer.
+The pool MUST account for unflushed reservations when preserving
+`min_spill_free_bytes`, release live capacity only after its run is removed,
+and fail closed when filesystem capacity cannot be inspected. If multiple
+configurations use one directory, the process retains the strictest limits it
+has observed for that directory. `ExecutionMemoryConfig::spill_pool_snapshot`
+exposes active and peak bytes and runs, pending writer bytes, orphan cleanup,
+and deletion failures for readiness and monitoring.
+
+Spill filenames are owned by a versioned Skein namespace. On first use of a
+spill directory in a process, Skein MUST remove only namespace-matching files
+from earlier process identities whose age reaches
+`spill_orphan_grace_period`; unrelated files and current-process runs MUST
+remain untouched. The default grace period is 24 hours. A failed live-run
+deletion remains charged to the shared pool and observable rather than making
+unreclaimed disk capacity available to new queries.
+
 Production query entrypoints MUST pass through the runtime governor or an
 equivalent host-owned admission boundary. Raw database access MAY remain a
 low-level library capability, but its use MUST be reported as non-production

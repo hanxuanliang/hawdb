@@ -4,6 +4,7 @@ use skein_plan::{PhysicalPlan, PlanChildren};
 use skein_storage::MutationLimits;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
+use std::time::Duration;
 
 #[doc(hidden)]
 pub const DEFAULT_EXECUTION_BATCH_ROWS: usize = 256;
@@ -12,6 +13,10 @@ const DEFAULT_EXECUTION_BATCH_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 pub const DEFAULT_BLOCKING_OPERATOR_MEMORY_BYTES: usize = 64 * 1024 * 1024;
 const DEFAULT_EXECUTION_MAX_SPILL_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const DEFAULT_EXECUTION_MAX_SPILL_RUNS: usize = 128;
+const DEFAULT_EXECUTION_MAX_TOTAL_SPILL_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+const DEFAULT_EXECUTION_MAX_TOTAL_SPILL_RUNS: usize = 512;
+const DEFAULT_EXECUTION_MIN_SPILL_FREE_BYTES: u64 = 1024 * 1024 * 1024;
+const DEFAULT_SPILL_ORPHAN_GRACE_PERIOD: Duration = Duration::from_secs(24 * 60 * 60);
 const MUTATION_OPERATION_BOOKKEEPING_BYTES: u64 = 64;
 const MUTATION_AFFECTED_ROW_BOOKKEEPING_BYTES: u64 = 16;
 const MUTATION_RESULT_ROW_BOOKKEEPING_BYTES: u64 = 64;
@@ -30,7 +35,15 @@ pub struct ExecutionMemoryConfig {
     pub max_spill_bytes: NonZeroU64,
     /// Maximum cumulative spill runs created, including merge passes.
     pub max_spill_runs: NonZeroUsize,
-    /// Directory for query-scoped spill runs removed when execution finishes.
+    /// Maximum live spill bytes shared by all queries using the spill directory.
+    pub max_total_spill_bytes: NonZeroU64,
+    /// Maximum live spill runs shared by all queries using the spill directory.
+    pub max_total_spill_runs: NonZeroUsize,
+    /// Free space preserved on the filesystem containing the spill directory.
+    pub min_spill_free_bytes: NonZeroU64,
+    /// Minimum age before a spill file from an earlier process is removed.
+    pub spill_orphan_grace_period: Duration,
+    /// Directory governed as one shared spill pool.
     pub spill_directory: PathBuf,
 }
 
@@ -47,8 +60,22 @@ impl Default for ExecutionMemoryConfig {
                 .expect("default spill byte budget is non-zero"),
             max_spill_runs: NonZeroUsize::new(DEFAULT_EXECUTION_MAX_SPILL_RUNS)
                 .expect("default spill run budget is non-zero"),
-            spill_directory: std::env::temp_dir(),
+            max_total_spill_bytes: NonZeroU64::new(DEFAULT_EXECUTION_MAX_TOTAL_SPILL_BYTES)
+                .expect("default total spill byte budget is non-zero"),
+            max_total_spill_runs: NonZeroUsize::new(DEFAULT_EXECUTION_MAX_TOTAL_SPILL_RUNS)
+                .expect("default total spill run budget is non-zero"),
+            min_spill_free_bytes: NonZeroU64::new(DEFAULT_EXECUTION_MIN_SPILL_FREE_BYTES)
+                .expect("default spill free-space reserve is non-zero"),
+            spill_orphan_grace_period: DEFAULT_SPILL_ORPHAN_GRACE_PERIOD,
+            spill_directory: std::env::temp_dir().join("skein-spill"),
         }
+    }
+}
+
+impl ExecutionMemoryConfig {
+    /// Returns process-wide spill usage for this configured directory.
+    pub fn spill_pool_snapshot(&self) -> skein_core::Result<crate::SpillPoolSnapshot> {
+        crate::spill::spill_pool_snapshot(self)
     }
 }
 
@@ -201,6 +228,10 @@ mod tests {
             blocking_operator_bytes: NonZeroUsize::new(4096).unwrap(),
             max_spill_bytes: NonZeroU64::new(1024 * 1024).unwrap(),
             max_spill_runs: NonZeroUsize::new(8).unwrap(),
+            max_total_spill_bytes: NonZeroU64::new(4 * 1024 * 1024).unwrap(),
+            max_total_spill_runs: NonZeroUsize::new(32).unwrap(),
+            min_spill_free_bytes: NonZeroU64::new(1).unwrap(),
+            spill_orphan_grace_period: Duration::from_secs(60),
             spill_directory: std::env::temp_dir(),
         }
     }

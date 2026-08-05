@@ -51,7 +51,6 @@ impl<'a> DistinctOperator<'a> {
             if self.tracker.would_exceed(entry_bytes) {
                 self.runs.push(spill_distinct_run(
                     &mut self.distinct,
-                    &self.memory.spill_directory,
                     &mut self.spill_budget,
                     self.task_context,
                 )?);
@@ -85,7 +84,6 @@ impl<'a> DistinctOperator<'a> {
         if !self.distinct.is_empty() {
             self.runs.push(spill_distinct_run(
                 &mut self.distinct,
-                &self.memory.spill_directory,
                 &mut self.spill_budget,
                 self.task_context,
             )?);
@@ -135,17 +133,14 @@ fn distinct_binding_key(binding: &Binding) -> Vec<(String, Value)> {
 
 fn spill_distinct_run(
     distinct: &mut BTreeMap<Vec<(String, Value)>, (u64, Binding)>,
-    directory: &std::path::Path,
     spill_budget: &mut SpillBudgetTracker,
     task_context: Option<&RuntimeTaskContext>,
 ) -> Result<spill::SpillRun> {
     runtime_checkpoint(task_context)?;
-    spill_budget.begin_run()?;
-    let (run, mut writer) = spill::SpillRun::create(directory, "distinct")?;
+    let (run, mut writer) = spill_budget.create_run("distinct")?;
     for (_, (ordinal, binding)) in std::mem::take(distinct) {
         runtime_checkpoint(task_context)?;
-        let bytes = writer.write(ordinal, &binding, spill_budget.remaining_bytes())?;
-        spill_budget.charge(bytes)?;
+        writer.write(ordinal, &binding, spill_budget)?;
     }
     writer.finish()?;
     Ok(run)
@@ -230,8 +225,7 @@ fn merge_distinct_run_pair(
     let mut right_reader = right.reader()?;
     let mut left_row = read_distinct_run_row(&mut left_reader, per_row_memory)?;
     let mut right_row = read_distinct_run_row(&mut right_reader, per_row_memory)?;
-    spill_budget.begin_run()?;
-    let (run, mut writer) = spill::SpillRun::create(&memory.spill_directory, "distinct-merge")?;
+    let (run, mut writer) = spill_budget.create_run("distinct-merge")?;
     loop {
         runtime_checkpoint(task_context)?;
         *peak_tracked_bytes = (*peak_tracked_bytes).max(
@@ -259,12 +253,7 @@ fn merge_distinct_run_pair(
             },
         };
         let selected = selected.expect("distinct merge selected one row");
-        let bytes = writer.write(
-            selected.ordinal,
-            &selected.binding,
-            spill_budget.remaining_bytes(),
-        )?;
-        spill_budget.charge(bytes)?;
+        writer.write(selected.ordinal, &selected.binding, spill_budget)?;
         if left_row.is_none() {
             left_row = read_distinct_run_row(&mut left_reader, per_row_memory)?;
         }

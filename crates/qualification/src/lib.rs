@@ -615,6 +615,7 @@ fn embedded_options(config: &MixedSoakConfig) -> SkeinEmbeddedOpenOptions {
             .unwrap(),
             max_spill_runs: NonZeroUsize::new(max_spill_runs).unwrap(),
             spill_directory: config.database_path.with_extension("spill"),
+            ..ExecutionMemoryConfig::default()
         },
         mutation_limits: MutationLimits {
             max_affected_rows: NonZeroUsize::new(1_024).unwrap(),

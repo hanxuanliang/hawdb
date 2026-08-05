@@ -1,45 +1,62 @@
 use crate::binding::{binding_payload_bytes, Binding};
+use crate::kernel::SpillBudgetTracker;
+use pool::{process_marker, RunLease, SPILL_FILE_PREFIX, SPILL_FILE_SUFFIX};
 use skein_core::{LabelId, RelTypeId, Result, SkeinError, Value};
 use skein_storage::{NodeId, NodeRecord, RelId, RelRecord};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Cursor, ErrorKind, Read, Write};
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+mod pool;
+
+pub use pool::SpillPoolSnapshot;
+pub(crate) use pool::{spill_pool_snapshot, SpillPool, SpillWriteReservation};
 
 const MAX_SPILL_RECORD_BYTES: usize = 1024 * 1024 * 1024;
 const MAX_VALUE_DEPTH: usize = 64;
 static NEXT_SPILL_ID: AtomicU64 = AtomicU64::new(0);
 
 pub struct SpillRun {
-    path: PathBuf,
+    lease: Arc<RunLease>,
 }
 
 impl SpillRun {
-    pub fn create(directory: &Path, operator: &str) -> Result<(Self, SpillWriter)> {
-        std::fs::create_dir_all(directory).map_err(|error| {
-            SkeinError::Execution(format!(
-                "failed to create spill directory '{}': {error}",
-                directory.display()
-            ))
-        })?;
+    pub(crate) fn create(pool: SpillPool, operator: &str) -> Result<(Self, SpillWriter)> {
+        pool.begin_run(operator)?;
+        let safe_operator: String = operator
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() || character == '-' {
+                    character
+                } else {
+                    '-'
+                }
+            })
+            .collect();
         for _ in 0..32 {
             let id = NEXT_SPILL_ID.fetch_add(1, Ordering::Relaxed);
-            let path = directory.join(format!(
-                "skein-{operator}-{}-{id}.spill",
-                std::process::id()
+            let path = pool.directory().join(format!(
+                "{SPILL_FILE_PREFIX}{}-{safe_operator}-{id}{SPILL_FILE_SUFFIX}",
+                process_marker()
             ));
             match OpenOptions::new().create_new(true).write(true).open(&path) {
                 Ok(file) => {
+                    let lease = Arc::new(RunLease::new(path, pool));
                     return Ok((
-                        Self { path },
+                        Self {
+                            lease: Arc::clone(&lease),
+                        },
                         SpillWriter {
                             writer: BufWriter::new(file),
+                            lease,
                         },
                     ));
                 }
                 Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
                 Err(error) => {
+                    pool.cancel_run();
                     return Err(SkeinError::Execution(format!(
                         "failed to create spill run '{}': {error}",
                         path.display()
@@ -47,16 +64,17 @@ impl SpillRun {
                 }
             }
         }
+        pool.cancel_run();
         Err(SkeinError::Execution(
             "failed to allocate a unique spill run path".to_string(),
         ))
     }
 
     pub fn reader(&self) -> Result<SpillReader> {
-        let file = File::open(&self.path).map_err(|error| {
+        let file = File::open(self.lease.path()).map_err(|error| {
             SkeinError::Execution(format!(
                 "failed to open spill run '{}': {error}",
-                self.path.display()
+                self.lease.path().display()
             ))
         })?;
         Ok(SpillReader {
@@ -65,18 +83,18 @@ impl SpillRun {
     }
 }
 
-impl Drop for SpillRun {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
 pub struct SpillWriter {
     writer: BufWriter<File>,
+    lease: Arc<RunLease>,
 }
 
 impl SpillWriter {
-    pub fn write(&mut self, ordinal: u64, binding: &Binding, max_record_bytes: u64) -> Result<u64> {
+    pub fn write(
+        &mut self,
+        ordinal: u64,
+        binding: &Binding,
+        spill_budget: &mut SpillBudgetTracker,
+    ) -> Result<u64> {
         let mut payload = Vec::with_capacity(binding_payload_bytes(binding));
         write_u64(&mut payload, ordinal)?;
         write_binding(&mut payload, binding)?;
@@ -84,24 +102,24 @@ impl SpillWriter {
             SkeinError::Execution("spill record exceeds the supported size".to_string())
         })?;
         let record_bytes = payload_len.saturating_add(8);
-        if record_bytes > max_record_bytes {
-            return Err(SkeinError::Execution(format!(
-                "spill record uses {record_bytes} bytes, exceeding the remaining spill budget {max_record_bytes}"
-            )));
-        }
+        let reservation = spill_budget.reserve_write(record_bytes)?;
         self.writer
             .write_all(&payload_len.to_le_bytes())
             .and_then(|_| self.writer.write_all(&payload))
             .map_err(|error| {
                 SkeinError::Execution(format!("failed to write spill run: {error}"))
             })?;
+        reservation.commit(&self.lease);
+        spill_budget.commit_write(record_bytes);
         Ok(record_bytes)
     }
 
     pub fn finish(mut self) -> Result<()> {
-        self.writer
-            .flush()
-            .map_err(|error| SkeinError::Execution(format!("failed to flush spill run: {error}")))
+        self.writer.flush().map_err(|error| {
+            SkeinError::Execution(format!("failed to flush spill run: {error}"))
+        })?;
+        self.lease.mark_flushed();
+        Ok(())
     }
 }
 
@@ -391,6 +409,34 @@ fn read_i64(input: &mut Cursor<&[u8]>) -> Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ExecutionMemoryConfig;
+    use std::num::{NonZeroU64, NonZeroUsize};
+    use std::time::Duration;
+
+    fn test_memory(name: &str) -> ExecutionMemoryConfig {
+        let nonce = NEXT_SPILL_ID.fetch_add(1, Ordering::Relaxed);
+        ExecutionMemoryConfig {
+            max_spill_bytes: NonZeroU64::new(1024 * 1024).unwrap(),
+            max_spill_runs: NonZeroUsize::new(16).unwrap(),
+            max_total_spill_bytes: NonZeroU64::new(4 * 1024 * 1024).unwrap(),
+            max_total_spill_runs: NonZeroUsize::new(64).unwrap(),
+            min_spill_free_bytes: NonZeroU64::new(1).unwrap(),
+            spill_orphan_grace_period: Duration::ZERO,
+            spill_directory: std::env::temp_dir().join(format!(
+                "skein-spill-test-{}-{name}-{nonce}",
+                std::process::id()
+            )),
+            ..ExecutionMemoryConfig::default()
+        }
+    }
+
+    fn empty_binding() -> Binding {
+        Binding {
+            values: BTreeMap::new(),
+            nodes: BTreeMap::new(),
+            relationships: BTreeMap::new(),
+        }
+    }
 
     #[test]
     fn spill_round_trip_preserves_bindings() {
@@ -421,12 +467,110 @@ mod tests {
                 },
             )]),
         };
-        let directory = std::env::temp_dir();
-        let (run, mut writer) = SpillRun::create(&directory, "codec-test").unwrap();
-        writer.write(42, &binding, u64::MAX).unwrap();
+        let memory = test_memory("codec");
+        let mut spill_budget = SpillBudgetTracker::new("CodecTest", &memory);
+        let (run, mut writer) = spill_budget.create_run("codec-test").unwrap();
+        writer.write(42, &binding, &mut spill_budget).unwrap();
         writer.finish().unwrap();
         let mut reader = run.reader().unwrap();
         assert_eq!(reader.read(usize::MAX).unwrap(), Some((42, binding)));
         assert_eq!(reader.read(usize::MAX).unwrap(), None);
+        drop(reader);
+        drop(run);
+        assert_eq!(memory.spill_pool_snapshot().unwrap().active_bytes, 0);
+        std::fs::remove_dir(&memory.spill_directory).unwrap();
+    }
+
+    #[test]
+    fn shared_pool_rejects_concurrent_bytes_above_global_budget() {
+        let mut memory = test_memory("global-bytes");
+        memory.max_total_spill_bytes = NonZeroU64::new(80).unwrap();
+        let mut first_budget = SpillBudgetTracker::new("First", &memory);
+        let (first_run, mut first_writer) = first_budget.create_run("first").unwrap();
+        first_writer
+            .write(0, &empty_binding(), &mut first_budget)
+            .unwrap();
+        first_writer.finish().unwrap();
+
+        let mut second_budget = SpillBudgetTracker::new("Second", &memory);
+        let (second_run, mut second_writer) = second_budget.create_run("second").unwrap();
+        second_writer
+            .write(0, &empty_binding(), &mut second_budget)
+            .unwrap();
+        let error = second_writer
+            .write(1, &empty_binding(), &mut second_budget)
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("shared max_total_spill_bytes 80"));
+        second_writer.finish().unwrap();
+
+        let snapshot = memory.spill_pool_snapshot().unwrap();
+        assert_eq!(snapshot.active_bytes, 80);
+        assert_eq!(snapshot.active_runs, 2);
+        assert_eq!(snapshot.pending_write_bytes, 0);
+        drop(second_run);
+        drop(first_run);
+        let snapshot = memory.spill_pool_snapshot().unwrap();
+        assert_eq!(snapshot.active_bytes, 0);
+        assert_eq!(snapshot.active_runs, 0);
+        std::fs::remove_dir(&memory.spill_directory).unwrap();
+    }
+
+    #[test]
+    fn shared_pool_releases_run_quota_when_run_is_removed() {
+        let mut memory = test_memory("global-runs");
+        memory.max_total_spill_runs = NonZeroUsize::new(1).unwrap();
+        let mut first_budget = SpillBudgetTracker::new("First", &memory);
+        let (first_run, first_writer) = first_budget.create_run("first").unwrap();
+        first_writer.finish().unwrap();
+
+        let mut second_budget = SpillBudgetTracker::new("Second", &memory);
+        let error = match second_budget.create_run("second") {
+            Ok(_) => panic!("shared run budget should reject a second live run"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("shared max_total_spill_runs 1"));
+        drop(first_run);
+        let (second_run, second_writer) = second_budget.create_run("second").unwrap();
+        second_writer.finish().unwrap();
+        drop(second_run);
+        std::fs::remove_dir(&memory.spill_directory).unwrap();
+    }
+
+    #[test]
+    fn shared_pool_preserves_configured_free_space() {
+        let mut memory = test_memory("free-space");
+        memory.min_spill_free_bytes = NonZeroU64::new(u64::MAX).unwrap();
+        let mut spill_budget = SpillBudgetTracker::new("FreeSpace", &memory);
+        let (run, mut writer) = spill_budget.create_run("free-space").unwrap();
+        let error = writer
+            .write(0, &empty_binding(), &mut spill_budget)
+            .unwrap_err();
+        assert!(error.to_string().contains("min_spill_free_bytes"));
+        drop(writer);
+        drop(run);
+        std::fs::remove_dir(&memory.spill_directory).unwrap();
+    }
+
+    #[test]
+    fn pool_startup_removes_only_eligible_skein_orphans() {
+        let memory = test_memory("orphan-cleanup");
+        std::fs::create_dir_all(&memory.spill_directory).unwrap();
+        let orphan = memory
+            .spill_directory
+            .join("skein-spill-v1-stale-process-sort-1.spill");
+        let unrelated = memory.spill_directory.join("application.data");
+        std::fs::write(&orphan, b"orphan").unwrap();
+        std::fs::write(&unrelated, b"keep").unwrap();
+
+        let snapshot = memory.spill_pool_snapshot().unwrap();
+
+        assert!(!orphan.exists());
+        assert!(unrelated.exists());
+        assert_eq!(snapshot.orphan_files_removed, 1);
+        assert_eq!(snapshot.orphan_bytes_removed, 6);
+        std::fs::remove_file(unrelated).unwrap();
+        std::fs::remove_dir(&memory.spill_directory).unwrap();
     }
 }

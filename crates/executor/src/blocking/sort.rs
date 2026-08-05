@@ -133,7 +133,6 @@ impl<'plan, 'runtime> SortOperator<'plan, 'runtime> {
         if self.tracker.would_exceed(bytes) {
             self.runs.push(spill_sort_run(
                 &mut self.rows,
-                &self.memory.spill_directory,
                 &mut self.spill_budget,
                 self.task_context,
             )?);
@@ -166,7 +165,6 @@ impl<'plan, 'runtime> SortOperator<'plan, 'runtime> {
         if !self.rows.is_empty() {
             self.runs.push(spill_sort_run(
                 &mut self.rows,
-                &self.memory.spill_directory,
                 &mut self.spill_budget,
                 self.task_context,
             )?);
@@ -324,7 +322,6 @@ impl<'plan, 'runtime> TopNOperator<'plan, 'runtime> {
         self.spilled_rows = self.spilled_rows.saturating_add(self.heap.len());
         self.runs.push(spill_top_n_run(
             &mut self.heap,
-            &self.memory.spill_directory,
             &mut self.spill_budget,
             self.task_context,
         )?);
@@ -390,18 +387,15 @@ impl<'plan, 'runtime> TopNOperator<'plan, 'runtime> {
 
 fn spill_sort_run(
     rows: &mut Vec<SortRunRow>,
-    directory: &std::path::Path,
     spill_budget: &mut SpillBudgetTracker,
     task_context: Option<&RuntimeTaskContext>,
 ) -> Result<spill::SpillRun> {
     runtime_checkpoint(task_context)?;
     rows.sort_by(SortRunRow::cmp_key);
-    spill_budget.begin_run()?;
-    let (run, mut writer) = spill::SpillRun::create(directory, "sort")?;
+    let (run, mut writer) = spill_budget.create_run("sort")?;
     for row in rows.drain(..) {
         runtime_checkpoint(task_context)?;
-        let bytes = writer.write(row.ordinal, &row.binding, spill_budget.remaining_bytes())?;
-        spill_budget.charge(bytes)?;
+        writer.write(row.ordinal, &row.binding, spill_budget)?;
     }
     runtime_checkpoint(task_context)?;
     writer.finish()?;
@@ -410,19 +404,16 @@ fn spill_sort_run(
 
 pub fn spill_top_n_run(
     heap: &mut BinaryHeap<TopNBinding>,
-    directory: &std::path::Path,
     spill_budget: &mut SpillBudgetTracker,
     task_context: Option<&RuntimeTaskContext>,
 ) -> Result<spill::SpillRun> {
     runtime_checkpoint(task_context)?;
     let mut rows = std::mem::take(heap).into_vec();
     rows.sort();
-    spill_budget.begin_run()?;
-    let (run, mut writer) = spill::SpillRun::create(directory, "topn")?;
+    let (run, mut writer) = spill_budget.create_run("topn")?;
     for row in rows {
         runtime_checkpoint(task_context)?;
-        let bytes = writer.write(row.ordinal, &row.binding, spill_budget.remaining_bytes())?;
-        spill_budget.charge(bytes)?;
+        writer.write(row.ordinal, &row.binding, spill_budget)?;
     }
     runtime_checkpoint(task_context)?;
     writer.finish()?;
@@ -493,18 +484,12 @@ fn merge_sort_run_pair(
             heap.push(entry);
         }
     }
-    spill_budget.begin_run()?;
-    let (run, mut writer) = spill::SpillRun::create(&memory.spill_directory, "sort-merge")?;
+    let (run, mut writer) = spill_budget.create_run("sort-merge")?;
     while let Some(entry) = heap.pop() {
         runtime_checkpoint(task_context)?;
         tracker.release(entry.row.memory_bytes());
         let run_index = entry.run_index;
-        let bytes = writer.write(
-            entry.row.ordinal,
-            &entry.row.binding,
-            spill_budget.remaining_bytes(),
-        )?;
-        spill_budget.charge(bytes)?;
+        writer.write(entry.row.ordinal, &entry.row.binding, spill_budget)?;
         if let Some((ordinal, binding)) =
             readers[run_index].read(memory.blocking_operator_bytes.get())?
         {

@@ -76,7 +76,7 @@ use skein_executor::scan::{
     source_storage_scan_predicate, AdjacencyExpandFilters, AdjacencyExpandSpec,
     NodeColumnLookupSpec, NodeScanContext, NodeScanSpec,
 };
-pub use skein_executor::ExecutionMemoryConfig;
+pub use skein_executor::{ExecutionMemoryConfig, SpillPoolSnapshot};
 pub use skein_executor::{
     ExternalReadOperator, VectorSeedExecutionOutput, VectorSeedExecutionRequest,
     VectorSeedExecutionRow,

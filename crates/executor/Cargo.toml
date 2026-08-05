@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+fs2 = "0.4.3"
 skein-core = { path = "../core" }
 skein-plan = { path = "../plan" }
 skein-storage = { path = "../storage" }

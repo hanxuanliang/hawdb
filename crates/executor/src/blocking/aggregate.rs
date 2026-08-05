@@ -407,12 +407,7 @@ pub fn stream_aggregate_batches(
             );
             ensure_operator_item_fits("AggregateExec", bytes, &tracker)?;
             if tracker.would_exceed(bytes) {
-                runs.push(spill_group_run(
-                    &mut rows,
-                    &memory.spill_directory,
-                    &mut spill_budget,
-                    task_context,
-                )?);
+                runs.push(spill_group_run(&mut rows, &mut spill_budget, task_context)?);
                 tracker.reset();
             }
             tracker.charge(bytes);
@@ -447,12 +442,7 @@ pub fn stream_aggregate_batches(
         return aggregate_sorted_group_rows(rows, aggregate_context, emit);
     }
     if !rows.is_empty() {
-        runs.push(spill_group_run(
-            &mut rows,
-            &memory.spill_directory,
-            &mut spill_budget,
-            task_context,
-        )?);
+        runs.push(spill_group_run(&mut rows, &mut spill_budget, task_context)?);
     }
     runs = compact_group_runs(
         runs,
@@ -484,18 +474,15 @@ pub fn stream_aggregate_batches(
 
 fn spill_group_run(
     rows: &mut Vec<GroupRunRow>,
-    directory: &std::path::Path,
     spill_budget: &mut SpillBudgetTracker,
     task_context: Option<&RuntimeTaskContext>,
 ) -> Result<spill::SpillRun> {
     runtime_checkpoint(task_context)?;
     rows.sort_by(GroupRunRow::cmp_key);
-    spill_budget.begin_run()?;
-    let (run, mut writer) = spill::SpillRun::create(directory, "aggregate")?;
+    let (run, mut writer) = spill_budget.create_run("aggregate")?;
     for row in rows.drain(..) {
         runtime_checkpoint(task_context)?;
-        let bytes = writer.write(row.ordinal, &row.binding, spill_budget.remaining_bytes())?;
-        spill_budget.charge(bytes)?;
+        writer.write(row.ordinal, &row.binding, spill_budget)?;
     }
     runtime_checkpoint(task_context)?;
     writer.finish()?;
@@ -574,18 +561,12 @@ fn merge_group_run_pair(
             heap.push(entry);
         }
     }
-    spill_budget.begin_run()?;
-    let (run, mut writer) = spill::SpillRun::create(&memory.spill_directory, "aggregate-merge")?;
+    let (run, mut writer) = spill_budget.create_run("aggregate-merge")?;
     while let Some(entry) = heap.pop() {
         runtime_checkpoint(task_context)?;
         tracker.release(entry.row.memory_bytes());
         let run_index = entry.run_index;
-        let bytes = writer.write(
-            entry.row.ordinal,
-            &entry.row.binding,
-            spill_budget.remaining_bytes(),
-        )?;
-        spill_budget.charge(bytes)?;
+        writer.write(entry.row.ordinal, &entry.row.binding, spill_budget)?;
         if let Some((ordinal, binding)) =
             readers[run_index].read(memory.blocking_operator_bytes.get())?
         {

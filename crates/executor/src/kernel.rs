@@ -1,6 +1,7 @@
 //! Internal memory and spill-budget primitives shared by physical operators.
 
 use crate::binding::{binding_memory_bytes, Binding};
+use crate::spill::{SpillPool, SpillRun, SpillWriteReservation, SpillWriter};
 use crate::ExecutionMemoryConfig;
 use skein_core::{Result, SkeinError};
 use std::num::NonZeroUsize;
@@ -40,6 +41,7 @@ impl OperatorMemoryTracker {
 
 pub struct SpillBudgetTracker {
     operator: &'static str,
+    pool: std::result::Result<SpillPool, String>,
     pub max_bytes: u64,
     pub max_runs: usize,
     pub used_bytes: u64,
@@ -50,6 +52,7 @@ impl SpillBudgetTracker {
     pub fn new(operator: &'static str, memory: &ExecutionMemoryConfig) -> Self {
         Self {
             operator,
+            pool: SpillPool::open(memory).map_err(|error| error.to_string()),
             max_bytes: memory.max_spill_bytes.get(),
             max_runs: memory.max_spill_runs.get(),
             used_bytes: 0,
@@ -57,22 +60,22 @@ impl SpillBudgetTracker {
         }
     }
 
-    pub fn begin_run(&mut self) -> Result<()> {
-        if self.run_count == self.max_runs {
+    pub fn create_run(&mut self, file_operator: &str) -> Result<(SpillRun, SpillWriter)> {
+        if self.run_count >= self.max_runs {
             return Err(SkeinError::Execution(format!(
                 "{} exceeded max_spill_runs {}",
                 self.operator, self.max_runs
             )));
         }
+        let pool = self.pool.as_ref().map_err(|error| {
+            SkeinError::Execution(format!("{} spill pool unavailable: {error}", self.operator))
+        })?;
+        let run = SpillRun::create(pool.clone(), file_operator)?;
         self.run_count = self.run_count.saturating_add(1);
-        Ok(())
+        Ok(run)
     }
 
-    pub fn remaining_bytes(&self) -> u64 {
-        self.max_bytes.saturating_sub(self.used_bytes)
-    }
-
-    pub fn charge(&mut self, bytes: u64) -> Result<()> {
+    pub(crate) fn reserve_write(&self, bytes: u64) -> Result<SpillWriteReservation> {
         let next = self.used_bytes.saturating_add(bytes);
         if next > self.max_bytes {
             return Err(SkeinError::Execution(format!(
@@ -80,8 +83,16 @@ impl SpillBudgetTracker {
                 self.operator, self.max_bytes, next
             )));
         }
-        self.used_bytes = next;
-        Ok(())
+        self.pool
+            .as_ref()
+            .map_err(|error| {
+                SkeinError::Execution(format!("{} spill pool unavailable: {error}", self.operator))
+            })?
+            .reserve_bytes(self.operator, bytes)
+    }
+
+    pub(crate) fn commit_write(&mut self, bytes: u64) {
+        self.used_bytes = self.used_bytes.saturating_add(bytes);
     }
 }
 

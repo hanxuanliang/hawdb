@@ -79,17 +79,14 @@ pub fn spill_backed_report(
 pub fn spill_binding_run(
     operator: &str,
     bindings: &mut Vec<Binding>,
-    directory: &std::path::Path,
     spill_budget: &mut SpillBudgetTracker,
     task_context: Option<&RuntimeTaskContext>,
 ) -> Result<spill::SpillRun> {
     runtime_checkpoint(task_context)?;
-    spill_budget.begin_run()?;
-    let (run, mut writer) = spill::SpillRun::create(directory, operator)?;
+    let (run, mut writer) = spill_budget.create_run(operator)?;
     for binding in bindings.drain(..) {
         runtime_checkpoint(task_context)?;
-        let bytes = writer.write(0, &binding, spill_budget.remaining_bytes())?;
-        spill_budget.charge(bytes)?;
+        writer.write(0, &binding, spill_budget)?;
     }
     writer.finish()?;
     Ok(run)
@@ -142,8 +139,8 @@ mod tests {
         let mut tracker = OperatorMemoryTracker::new(memory.blocking_operator_bytes);
         tracker.charge(64);
         let mut spill = SpillBudgetTracker::new("SortExec", &memory);
-        spill.begin_run().unwrap();
-        spill.charge(128).unwrap();
+        spill.used_bytes = 128;
+        spill.run_count = 1;
 
         let report = spill_backed_report("SortExec", &tracker, 96, 10, &spill, 8);
 

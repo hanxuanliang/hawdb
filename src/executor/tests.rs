@@ -17,6 +17,10 @@ fn spill_test_config(name: &str) -> ExecutionMemoryConfig {
         blocking_operator_bytes: NonZeroUsize::new(1024).unwrap(),
         max_spill_bytes: NonZeroU64::new(64 * 1024 * 1024).unwrap(),
         max_spill_runs: NonZeroUsize::new(64).unwrap(),
+        max_total_spill_bytes: NonZeroU64::new(256 * 1024 * 1024).unwrap(),
+        max_total_spill_runs: NonZeroUsize::new(256).unwrap(),
+        min_spill_free_bytes: NonZeroU64::new(1).unwrap(),
+        spill_orphan_grace_period: std::time::Duration::ZERO,
         spill_directory: std::env::temp_dir().join(format!("skein-{name}-{nonce}")),
     }
 }
@@ -564,7 +568,7 @@ fn sort_rejects_spill_bytes_over_budget_and_removes_partial_run() {
         &memory,
     )
     .unwrap_err();
-    assert!(error.to_string().contains("remaining spill budget 32"));
+    assert!(error.to_string().contains("exceeded max_spill_bytes 32"));
     assert!(std::fs::read_dir(&memory.spill_directory)
         .unwrap()
         .next()

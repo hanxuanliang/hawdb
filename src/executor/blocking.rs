@@ -130,7 +130,6 @@ pub(super) fn stream_cartesian_product_batches(
                 runs.push(spill_binding_run(
                     "cartesian",
                     &mut right_bindings,
-                    &context.memory.spill_directory,
                     &mut spill_budget,
                     context.task_context,
                 )?);
@@ -146,7 +145,6 @@ pub(super) fn stream_cartesian_product_batches(
         runs.push(spill_binding_run(
             "cartesian",
             &mut right_bindings,
-            &context.memory.spill_directory,
             &mut spill_budget,
             context.task_context,
         )?);
