@@ -318,6 +318,15 @@ charge the configured decoded-segment, candidate-block, hydration, and matched-
 span buffers in addition to blocking score state and the result budget; a bound
 larger than the shared governor can admit MUST reject before search I/O.
 
+Immutable lexical, out-of-core, and TurboQuant generation cleanup MUST retain
+the active and immediately previous generations. `SearchIndex` MUST run a
+cleanup cycle with bounded deletion attempts and a bounded pending queue after
+open and checkpoint and expose the latest `SearchProjectionCleanupReport`.
+Windows sharing violations and other delete failures MUST be retained without
+failing an already durable checkpoint. A later cycle MUST revalidate generation
+eligibility before retrying, and production search evidence MUST fail closed
+while cleanup or published-generation discovery remains pending.
+
 Search traffic readiness MUST recompute qualification from raw evidence and
 require:
 

@@ -198,6 +198,16 @@ validates the target generation and every quarantined file identity before
 writing the applied audit record and unblocking service. It never overwrites a
 published derived artifact in place and never silently repairs during open.
 
+Search projection GC is separate from canonical recovery. Lexical, out-of-core,
+and TurboQuant artifacts retain the active and immediately previous immutable
+generations. `SearchIndex::projection_cleanup_report` exposes attempted,
+deleted, deferred, and failed file counts without returning file names, while
+`retry_projection_cleanup` runs an explicit retry cycle with bounded deletion
+attempts and a bounded pending queue. Open and checkpoint also run the same
+cycle. A failed delete, including a Windows sharing violation from a pinned
+reader, does not invalidate an already published checkpoint; it remains visible
+and retryable, and readiness stays blocked until the backlog is gone.
+
 The cache has a hard byte capacity, stable generation/digest keys, CLOCK
 eviction, pin accounting, and fail-closed oversized-entry admission. Endpoint
 and property Bloom summaries scale with segment cardinality instead of using a

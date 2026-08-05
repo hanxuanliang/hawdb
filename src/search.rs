@@ -37,6 +37,7 @@ use std::sync::{Arc, Mutex};
 
 mod analyzer_lexicon;
 mod cjk_tokenizer;
+mod generation_cleanup;
 mod lexical_projection;
 mod lexical_readiness;
 #[cfg(feature = "vector-search")]
@@ -51,6 +52,11 @@ pub mod turbovec_projection;
 mod vector_execution;
 use analyzer_lexicon::{CORE_SEMANTIC_ALIAS_RULES, NOWLEDGE_MEMORY_SEMANTIC_ALIAS_RULES};
 use cjk_tokenizer::{chinese_search_tokens, is_cjk_search_char};
+pub use generation_cleanup::{
+    SearchProjectionCleanupOptions, SearchProjectionCleanupReport,
+    SEARCH_PROJECTION_CLEANUP_PROTOCOL,
+};
+use generation_cleanup::{SearchProjectionCleanupState, SearchProjectionGenerations};
 use lexical_projection::{
     analyzer_digest as lexical_analyzer_digest, documents_digest as lexical_documents_digest,
     LexicalMiniDelta, LexicalProjectionConfig, LexicalProjectionReader, LexicalProjectionWriter,
@@ -1254,6 +1260,7 @@ pub struct SearchIndex {
     turboquant_build_options: TurboQuantCandidateProjectionBuildOptions,
     segment_descriptor: Option<SearchSegmentDescriptor>,
     range_read_config: SearchRangeReadConfig,
+    cleanup_state: Mutex<SearchProjectionCleanupState>,
     runtime_capabilities: RuntimeCapabilities,
     telemetry: Option<Arc<dyn TelemetrySink>>,
 }
@@ -1278,6 +1285,7 @@ impl SearchIndex {
         index.load_lexical_projection()?;
         #[cfg(feature = "vector-search")]
         index.load_turboquant_projection();
+        index.retry_projection_cleanup(SearchProjectionCleanupOptions::default());
         Ok(index)
     }
 
@@ -1766,6 +1774,20 @@ impl SearchIndex {
             search_projection_probe_production_filter_pruning_report(self);
         let compressed_vector_projection =
             search_projection_probe_compressed_vector_projection_report(self);
+        let generation_cleanup = self.projection_cleanup_report();
+        let mut blocker_codes = search_projection_probe_blocker_codes(
+            has_documents,
+            has_text,
+            has_vector,
+            manifest.is_some(),
+            model_matches,
+            dimension_matches,
+            &freshness,
+        );
+        if generation_cleanup.retry_required {
+            blocker_codes.push("projection_generation_cleanup_pending".to_string());
+            blocker_codes.sort();
+        }
 
         serde_json::json!({
             "protocol": "skein-nowledge-search-projection-probe",
@@ -1790,12 +1812,14 @@ impl SearchIndex {
             "lifecycle": {
                 "rebuild_marker_ready": !freshness.full_reindex_needed,
                 "metadata_repair_marker_ready": !freshness.metadata_repair_needed,
+                "generation_cleanup_ready": !generation_cleanup.retry_required,
                 "full_reindex_needed": freshness.full_reindex_needed,
                 "full_reindex_reasons": freshness.full_reindex_reasons,
                 "metadata_repair_needed": freshness.metadata_repair_needed,
                 "metadata_repair_reasons": freshness.metadata_repair_reasons,
                 "source_graph_commit_epoch": freshness.source_graph_commit_epoch,
             },
+            "generation_cleanup": generation_cleanup.json(),
             "incremental_update": {
                 "ready": has_documents && freshness.durable_source_graph_commit_epoch.is_some(),
                 "upsert_ready": has_documents,
@@ -1808,15 +1832,7 @@ impl SearchIndex {
             "compressed_vector_projection": compressed_vector_projection,
             "predicate_pushdown": predicate_pushdown,
             "production_filter_pruning": production_filter_pruning,
-            "blocker_codes": search_projection_probe_blocker_codes(
-                has_documents,
-                has_text,
-                has_vector,
-                manifest.is_some(),
-                model_matches,
-                dimension_matches,
-                &freshness,
-            ),
+            "blocker_codes": blocker_codes,
         })
     }
 
@@ -2157,6 +2173,51 @@ impl SearchIndex {
         (store.basic_statistics().node_count as usize).max(self.documents.len())
     }
 
+    pub fn projection_cleanup_report(&self) -> SearchProjectionCleanupReport {
+        self.cleanup_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .report()
+    }
+
+    pub fn retry_projection_cleanup(
+        &self,
+        options: SearchProjectionCleanupOptions,
+    ) -> SearchProjectionCleanupReport {
+        let Some(path) = &self.path else {
+            return self.projection_cleanup_report();
+        };
+        let (out_of_core_generation, out_of_core_discovery_failed) =
+            match out_of_core::published_generation(path, &self.analyzer_lexicon) {
+                Ok(generation) => (generation, false),
+                Err(_) => (None, true),
+            };
+        let generations = SearchProjectionGenerations {
+            lexical: self
+                .lexical_projection
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_ref()
+                .map(|projection| projection.generation()),
+            out_of_core: out_of_core_generation,
+            #[cfg(feature = "vector-search")]
+            turboquant: self
+                .turboquant_projection()
+                .map(|projection| projection.manifest().identity.generation),
+            #[cfg(not(feature = "vector-search"))]
+            turboquant: None,
+            turboquant_remove_all: self
+                .documents
+                .values()
+                .all(|document| document.embedding.is_none()),
+            out_of_core_discovery_failed,
+        };
+        self.cleanup_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .run(path, generations, options)
+    }
+
     pub fn checkpoint(&self) -> Result<()> {
         let Some(path) = &self.path else {
             return Ok(());
@@ -2207,6 +2268,7 @@ impl SearchIndex {
                 .durable_source_graph_commit_epoch
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = self.source_graph_commit_epoch;
+            self.retry_projection_cleanup(SearchProjectionCleanupOptions::default());
             Ok(())
         })();
         if let Some(telemetry) = &self.telemetry {
@@ -2260,22 +2322,6 @@ impl SearchIndex {
             .lexical_delta
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = LexicalMiniDelta::default();
-        for entry in fs::read_dir(path)? {
-            let entry = entry?;
-            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
-                continue;
-            };
-            let Some(stale_generation) = name
-                .strip_prefix("search_lexical.")
-                .and_then(|value| value.strip_suffix(".skein"))
-                .and_then(|value| value.parse::<u64>().ok())
-            else {
-                continue;
-            };
-            if stale_generation.saturating_add(1) < generation {
-                let _ = fs::remove_file(entry.path());
-            }
-        }
         Ok(())
     }
 
@@ -2287,7 +2333,6 @@ impl SearchIndex {
             .all(|document| document.embedding.is_none())
         {
             self.invalidate_turboquant_projection();
-            remove_turboquant_artifacts(path);
             return Ok(());
         }
         let loaded_generation = self
@@ -2315,7 +2360,6 @@ impl SearchIndex {
             .turboquant_projection
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(projection));
-        cleanup_turboquant_artifacts(path, generation);
         Ok(())
     }
 
@@ -3823,6 +3867,7 @@ impl Default for SearchIndex {
             turboquant_build_options: TurboQuantCandidateProjectionBuildOptions::default(),
             segment_descriptor: None,
             range_read_config: SearchRangeReadConfig::default(),
+            cleanup_state: Mutex::new(SearchProjectionCleanupState::default()),
             runtime_capabilities: crate::compiled_runtime_capabilities(),
             telemetry: None,
         }
@@ -3875,43 +3920,6 @@ fn turboquant_artifacts_descending(path: &Path) -> Vec<(u64, PathBuf)> {
         .collect::<Vec<_>>();
     artifacts.sort_unstable_by_key(|(generation, _)| std::cmp::Reverse(*generation));
     artifacts
-}
-
-#[cfg(feature = "vector-search")]
-fn cleanup_turboquant_artifacts(path: &Path, current_generation: u64) {
-    let retain_from = current_generation.saturating_sub(1);
-    let Ok(entries) = fs::read_dir(path) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let Some(generation) = entry
-            .file_name()
-            .to_str()
-            .and_then(turboquant_artifact_generation)
-        else {
-            continue;
-        };
-        if generation < retain_from {
-            let _ = fs::remove_file(entry.path());
-        }
-    }
-}
-
-#[cfg(feature = "vector-search")]
-fn remove_turboquant_artifacts(path: &Path) {
-    let Ok(entries) = fs::read_dir(path) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        if entry
-            .file_name()
-            .to_str()
-            .and_then(turboquant_artifact_generation)
-            .is_some()
-        {
-            let _ = fs::remove_file(entry.path());
-        }
-    }
 }
 
 const NOWLEDGE_SEARCH_PROJECTION_TABLES: &[(&str, &str, bool)] = &[
@@ -11727,6 +11735,12 @@ mod tests {
 
         assert_eq!(probe["derived_projection"], true);
         assert_eq!(probe["document_count"], 6);
+        assert_eq!(probe["lifecycle"]["generation_cleanup_ready"], true);
+        assert_eq!(
+            probe["generation_cleanup"]["protocol"],
+            SEARCH_PROJECTION_CLEANUP_PROTOCOL
+        );
+        assert_eq!(probe["generation_cleanup"]["retry_required"], false);
         assert_eq!(probe["document_identity"]["ready"], true);
         assert_eq!(
             probe["document_identity"]["id_space"],
@@ -11778,6 +11792,67 @@ mod tests {
             true
         );
         assert_eq!(probe["blocker_codes"], serde_json::json!([]));
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn search_projection_probe_blocks_on_invalid_cleanup_generation_identity() {
+        let path = unique_test_dir("search_projection_cleanup_invalid_manifest");
+        {
+            let mut index = SearchIndex::open(&path).unwrap();
+            index
+                .apply_embedding_manifest(SearchEmbeddingManifest {
+                    model: "bge-m3".to_string(),
+                    version: Some("local".to_string()),
+                    dimension: 2,
+                })
+                .unwrap();
+            index
+                .apply_projection_delta(SearchProjectionDelta {
+                    upserts: nowledge_probe_rows(),
+                    deletes: Vec::new(),
+                    max_operations: None,
+                    source_graph_commit_epoch: Some(7),
+                })
+                .unwrap();
+            index.checkpoint().unwrap();
+            index.checkpoint().unwrap();
+            index.checkpoint().unwrap();
+        }
+        let stale_artifact = path.join("search_projection_segments.1.skein");
+        std::fs::write(&stale_artifact, b"stale generation").unwrap();
+        std::fs::write(
+            path.join("search_projection.out_of_core.manifest.skein"),
+            b"invalid manifest",
+        )
+        .unwrap();
+
+        let index = SearchIndex::open(&path).unwrap();
+        let report = index.projection_cleanup_report();
+        let probe = index.nowledge_search_projection_probe_json(SearchProjectionProbeOptions {
+            active_embedding_model: Some("bge-m3".to_string()),
+            active_embedding_dimension: Some(2),
+        });
+        let evidence =
+            crate::search_projection_evidence::nowledge_search_projection_evidence_json(&probe);
+
+        assert_eq!(report.generation_discovery_failures, 1);
+        assert!(report.retry_required);
+        assert!(stale_artifact.exists());
+        assert_eq!(probe["lifecycle"]["generation_cleanup_ready"], false);
+        assert!(probe["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("projection_generation_cleanup_pending")));
+        assert_eq!(evidence["ready"], false);
+        assert!(evidence["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("projection_generation_cleanup_pending")));
+
+        index.checkpoint().unwrap();
+        assert!(!index.projection_cleanup_report().retry_required);
+        assert!(!stale_artifact.exists());
         std::fs::remove_dir_all(path).unwrap();
     }
 

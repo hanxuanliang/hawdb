@@ -1544,6 +1544,22 @@ impl SearchOutOfCoreReader {
     }
 }
 
+pub(super) fn published_generation(
+    root: &Path,
+    analyzer_lexicon: &SearchAnalyzerLexicon,
+) -> Result<Option<u64>> {
+    let manifest_path = root.join(OUT_OF_CORE_MANIFEST_FILE);
+    if !manifest_path.exists() {
+        return Ok(None);
+    }
+    let reader = SearchOutOfCoreReader::open_with_config_and_analyzer(
+        root,
+        SearchOutOfCoreConfig::default(),
+        analyzer_lexicon.clone(),
+    )?;
+    Ok(Some(reader.generation()))
+}
+
 pub(super) fn publish_out_of_core_projection(index: &SearchIndex, root: &Path) -> Result<()> {
     let descriptor = read_search_segment_descriptor(root)?.ok_or_else(|| {
         SkeinError::Storage("search segment descriptor is missing after checkpoint".to_string())
@@ -1625,7 +1641,6 @@ pub(super) fn publish_out_of_core_projection(index: &SearchIndex, root: &Path) -
         file.sync_all()?;
     }
     durable_replace_file(&tmp_path, &manifest_path)?;
-    cleanup_old_generations(root, generation);
     Ok(())
 }
 
@@ -2388,35 +2403,6 @@ fn temporary_artifact_path(target: &Path) -> PathBuf {
     ))
 }
 
-fn cleanup_old_generations(root: &Path, current: u64) {
-    let retain_from = current.saturating_sub(1);
-    let prefixes = [
-        "search_projection_segments.",
-        "search_projection_segment_payloads.",
-        "search_projection_metadata_payloads.",
-        "search_projection_vector_payloads.",
-        "search_projection_out_of_core_layout.",
-        "search_lexical.manifest.",
-    ];
-    let Ok(entries) = fs::read_dir(root) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
-            continue;
-        };
-        let stale = prefixes.iter().any(|prefix| {
-            name.strip_prefix(prefix)
-                .and_then(|value| value.strip_suffix(".skein"))
-                .and_then(|value| value.parse::<u64>().ok())
-                .is_some_and(|generation| generation < retain_from)
-        });
-        if stale {
-            let _ = fs::remove_file(entry.path());
-        }
-    }
-}
-
 fn read_exact_at(file: &File, offset: u64, bytes: &mut [u8]) -> Result<()> {
     #[cfg(unix)]
     {
@@ -2453,7 +2439,7 @@ mod tests {
     };
     use crate::search::{
         SearchFusionWeights, SearchLexicalFeasibilityCoverage, SearchLexicalFeasibilityMetrics,
-        SearchLexicalProductionQualificationReport,
+        SearchLexicalProductionQualificationReport, SearchProjectionCleanupOptions,
     };
     use std::io::{Seek, SeekFrom};
 
@@ -2869,6 +2855,9 @@ mod tests {
             .unwrap();
         assert_eq!(oldest.result.total_hits, 1);
         assert_eq!(newest.result.total_hits, 3);
+        drop(oldest_reader);
+        let cleanup = index.retry_projection_cleanup(SearchProjectionCleanupOptions::default());
+        assert!(!cleanup.retry_required);
         fs::remove_dir_all(path).unwrap();
     }
 

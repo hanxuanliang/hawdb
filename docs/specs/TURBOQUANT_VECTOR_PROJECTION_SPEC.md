@@ -82,7 +82,12 @@ Checkpoint publishes `search_turboquant.<generation>.skein` as an immutable
 generation. Segment payloads precede a checksummed JSON manifest and fixed
 footer. Each segment and the complete payload carry checksums. Publication
 MUST create a unique temporary file, flush it, atomically rename it to a new
-generation, and retain the previous generation during cleanup.
+generation, and retain the previous generation during cleanup. Generation
+cleanup MUST run only after publication, use a bounded pending-file queue, and
+revalidate every queued generation before retry. Delete failures MUST NOT turn
+a durable checkpoint into a failed checkpoint. They MUST remain observable in
+`SearchProjectionCleanupReport`, be retried during a later open, checkpoint, or
+explicit cleanup cycle, and block production qualification while pending.
 
 Open MUST validate footer magic, format version, all size arithmetic,
 checksums, unique IDs, segment offsets, source digest, document identity,

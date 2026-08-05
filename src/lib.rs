@@ -428,11 +428,12 @@ pub use search::{
     SearchLexicalProductionQualificationReport, SearchMode, SearchOutOfCoreConfig,
     SearchOutOfCoreHydrationOutput, SearchOutOfCoreMetrics, SearchOutOfCoreOutput,
     SearchOutOfCoreReader, SearchPredicateFieldPruningReport, SearchPredicatePushdownReport,
-    SearchProjectionDelta, SearchProjectionDeltaReport, SearchProjectionFreshness,
-    SearchProjectionKind, SearchProjectionProbeOptions, SearchProjectionQualificationIdentity,
-    SearchProjectionRow, SearchQueryOptions, SearchRangeReadConfig, SearchRebuildOptions,
-    SearchRebuildSummary, SearchResultSet, SearchRetrieverCandidateSetReport,
-    SearchTopKScoreParity, SearchTruncationReasonCode, VectorProjectionQualificationIdentity,
+    SearchProjectionCleanupOptions, SearchProjectionCleanupReport, SearchProjectionDelta,
+    SearchProjectionDeltaReport, SearchProjectionFreshness, SearchProjectionKind,
+    SearchProjectionProbeOptions, SearchProjectionQualificationIdentity, SearchProjectionRow,
+    SearchQueryOptions, SearchRangeReadConfig, SearchRebuildOptions, SearchRebuildSummary,
+    SearchResultSet, SearchRetrieverCandidateSetReport, SearchTopKScoreParity,
+    SearchTruncationReasonCode, VectorProjectionQualificationIdentity,
     VectorProjectionResourceEvidence, VectorRecallProductionQualificationReport,
     VectorRecallValidationBlocker, VectorRecallValidationOptions, VectorRecallValidationReport,
     VectorSearchExecutionOptions, VectorSearchKernelPreference,
@@ -440,8 +441,8 @@ pub use search::{
     MAX_VECTOR_RECALL_VALIDATION_SAMPLES, MAX_VECTOR_RECALL_VALIDATION_TOP_K,
     MINIMUM_VECTOR_QUALIFICATION_DOCUMENT_COUNT, NOWLEDGE_MEMORY_MATERIALIZED_METADATA_PATHS,
     NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, SEARCH_LEXICAL_QUALIFICATION_PROTOCOL,
-    SEARCH_LEXICAL_QUALIFICATION_PROTOCOL_VERSION, VECTOR_RECALL_PRODUCTION_QUALIFICATION_PROTOCOL,
-    VECTOR_RECALL_VALIDATION_PROTOCOL,
+    SEARCH_LEXICAL_QUALIFICATION_PROTOCOL_VERSION, SEARCH_PROJECTION_CLEANUP_PROTOCOL,
+    VECTOR_RECALL_PRODUCTION_QUALIFICATION_PROTOCOL, VECTOR_RECALL_VALIDATION_PROTOCOL,
 };
 pub use search_candidate_shadow_evidence::parse_search_candidate_shadow_probe;
 pub use search_projection_evidence::{
