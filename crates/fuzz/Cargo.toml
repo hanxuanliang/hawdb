@@ -12,3 +12,7 @@ skein = { path = "../..", default-features = false }
 [[bin]]
 name = "skein-fuzz"
 path = "src/main.rs"
+
+[[bin]]
+name = "skein-storage-fuzz"
+path = "src/storage_main.rs"

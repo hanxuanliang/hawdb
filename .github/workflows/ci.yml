@@ -39,6 +39,7 @@ jobs:
         run: |
           bash -n scripts/nowledge-previous-wrapper-preflight.sh
           bash -n scripts/check-storage-tla.sh
+          test "$(scripts/check-storage-tla.sh --manifest-json 4ebf76c | jq -r .source_revision)" = "4ebf76c"
 
       - name: Lint
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings

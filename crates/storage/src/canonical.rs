@@ -5,6 +5,7 @@ use crate::{
     SegmentCache, SegmentRangeReader, SegmentReadError, SegmentReadRange, StoreId,
 };
 use skein_core::{LabelId, RelTypeId, Value};
+use skein_integrity::{IntegrityHasher, Sha256Digest};
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -20,7 +21,6 @@ const MANIFEST_HEADER: &str = "SKEIN_CANONICAL_MANIFEST_V1";
 const SEGMENT_HEADER: &[u8; 8] = b"SKNSEG01";
 const ARTIFACT_ID: u64 = 0x534b_4341_4e4f_4e31;
 const MAX_VALUE_DEPTH: usize = 32;
-const LEGACY_BLOOM_WORDS: usize = 4;
 const BLOOM_MIN_WORDS: usize = 4;
 const BLOOM_MAX_WORDS: usize = 16 * 1024;
 const BLOOM_BITS_PER_ITEM: usize = 10;
@@ -60,13 +60,6 @@ impl Default for CanonicalEndpointBloom {
 }
 
 impl CanonicalEndpointBloom {
-    fn legacy_unbounded() -> Self {
-        Self {
-            words: vec![u64::MAX].into_boxed_slice(),
-            hash_count: 1,
-        }
-    }
-
     fn from_keys(keys: &[u64]) -> Self {
         if keys.is_empty() {
             return Self::default();
@@ -127,21 +120,17 @@ impl CanonicalEndpointBloom {
     }
 
     fn decode(value: &str) -> Result<Self, CanonicalSegmentError> {
-        let (hash_count, words) = if value.len() == LEGACY_BLOOM_WORDS * 16 {
-            (3, value)
-        } else {
-            if value.len() < 18 || !(value.len() - 2).is_multiple_of(16) {
-                return Err(CanonicalSegmentError::Corrupt(
-                    "canonical endpoint bloom has an invalid length".to_string(),
-                ));
-            }
-            let hash_count = u8::from_str_radix(&value[..2], 16).map_err(|_| {
-                CanonicalSegmentError::Corrupt(
-                    "canonical endpoint bloom has an invalid hash count".to_string(),
-                )
-            })?;
-            (hash_count, &value[2..])
-        };
+        if value.len() < 18 || !(value.len() - 2).is_multiple_of(16) {
+            return Err(CanonicalSegmentError::Corrupt(
+                "canonical endpoint bloom has an invalid length".to_string(),
+            ));
+        }
+        let hash_count = u8::from_str_radix(&value[..2], 16).map_err(|_| {
+            CanonicalSegmentError::Corrupt(
+                "canonical endpoint bloom has an invalid hash count".to_string(),
+            )
+        })?;
+        let words = &value[2..];
         let word_count = words.len() / 16;
         if hash_count == 0 || word_count == 0 || word_count > BLOOM_MAX_WORDS {
             return Err(CanonicalSegmentError::Corrupt(
@@ -204,6 +193,7 @@ pub struct CanonicalSegmentManifest {
     pub artifact_id: u64,
     pub artifact_len: u64,
     pub artifact_digest: ContentDigest,
+    pub artifact_sha256: Sha256Digest,
     pub node_count: u64,
     pub relationship_count: u64,
     pub segments: Vec<CanonicalSegmentDescriptor>,
@@ -282,11 +272,12 @@ impl CanonicalSegmentManifest {
     pub fn encode(&self) -> Result<String, CanonicalSegmentError> {
         self.validate()?;
         let mut body = format!(
-            "{MANIFEST_HEADER}\ngeneration\t{}\nartifact_id\t{}\nartifact_len\t{}\nartifact_digest\t{}\nnode_count\t{}\nrelationship_count\t{}\n",
+            "{MANIFEST_HEADER}\ngeneration\t{}\nartifact_id\t{}\nartifact_len\t{}\nartifact_digest\t{}\nartifact_sha256\t{}\nnode_count\t{}\nrelationship_count\t{}\n",
             self.generation.0,
             self.artifact_id,
             self.artifact_len,
             self.artifact_digest.0,
+            self.artifact_sha256,
             self.node_count,
             self.relationship_count
         );
@@ -337,6 +328,7 @@ impl CanonicalSegmentManifest {
         let mut artifact_id = None;
         let mut artifact_len = None;
         let mut artifact_digest = None;
+        let mut artifact_sha256 = None;
         let mut node_count = None;
         let mut relationship_count = None;
         let mut segments = Vec::new();
@@ -368,6 +360,15 @@ impl CanonicalSegmentManifest {
                     parse_u64(value, "artifact digest")?,
                     "artifact digest",
                 )?,
+                ["artifact_sha256", value] => set_once(
+                    &mut artifact_sha256,
+                    value.parse().map_err(|error| {
+                        CanonicalSegmentError::Corrupt(format!(
+                            "invalid artifact SHA-256 digest: {error}"
+                        ))
+                    })?,
+                    "artifact SHA-256 digest",
+                )?,
                 ["node_count", value] => set_once(
                     &mut node_count,
                     parse_u64(value, "node count")?,
@@ -378,67 +379,6 @@ impl CanonicalSegmentManifest {
                     parse_u64(value, "relationship count")?,
                     "relationship count",
                 )?,
-                ["segment", id, kind, offset, length, digest, min_id, max_id, count] => {
-                    let kind = CanonicalSegmentKind::from_tag(parse_u8(kind, "segment kind")?)?;
-                    segments.push(CanonicalSegmentDescriptor {
-                        segment_id: parse_u64(id, "segment id")?,
-                        kind,
-                        offset: parse_u64(offset, "segment offset")?,
-                        length: NonZeroU64::new(parse_u64(length, "segment length")?).ok_or_else(
-                            || {
-                                CanonicalSegmentError::Corrupt(
-                                    "canonical segment length must be non-zero".to_string(),
-                                )
-                            },
-                        )?,
-                        content_digest: ContentDigest(parse_u64(digest, "segment digest")?),
-                        min_record_id: parse_u64(min_id, "minimum record id")?,
-                        max_record_id: parse_u64(max_id, "maximum record id")?,
-                        record_count: parse_u32(count, "segment record count")?,
-                        source_endpoint_bloom: if kind == CanonicalSegmentKind::Relationships {
-                            CanonicalEndpointBloom::legacy_unbounded()
-                        } else {
-                            CanonicalEndpointBloom::default()
-                        },
-                        target_endpoint_bloom: if kind == CanonicalSegmentKind::Relationships {
-                            CanonicalEndpointBloom::legacy_unbounded()
-                        } else {
-                            CanonicalEndpointBloom::default()
-                        },
-                        node_property_bloom: if kind == CanonicalSegmentKind::Nodes {
-                            CanonicalEndpointBloom::legacy_unbounded()
-                        } else {
-                            CanonicalEndpointBloom::default()
-                        },
-                    });
-                }
-                ["segment", id, kind, offset, length, digest, min_id, max_id, count, source_bloom, target_bloom] =>
-                {
-                    let kind = CanonicalSegmentKind::from_tag(parse_u8(kind, "segment kind")?)?;
-                    segments.push(CanonicalSegmentDescriptor {
-                        segment_id: parse_u64(id, "segment id")?,
-                        kind,
-                        offset: parse_u64(offset, "segment offset")?,
-                        length: NonZeroU64::new(parse_u64(length, "segment length")?).ok_or_else(
-                            || {
-                                CanonicalSegmentError::Corrupt(
-                                    "canonical segment length must be non-zero".to_string(),
-                                )
-                            },
-                        )?,
-                        content_digest: ContentDigest(parse_u64(digest, "segment digest")?),
-                        min_record_id: parse_u64(min_id, "minimum record id")?,
-                        max_record_id: parse_u64(max_id, "maximum record id")?,
-                        record_count: parse_u32(count, "segment record count")?,
-                        source_endpoint_bloom: CanonicalEndpointBloom::decode(source_bloom)?,
-                        target_endpoint_bloom: CanonicalEndpointBloom::decode(target_bloom)?,
-                        node_property_bloom: if kind == CanonicalSegmentKind::Nodes {
-                            CanonicalEndpointBloom::legacy_unbounded()
-                        } else {
-                            CanonicalEndpointBloom::default()
-                        },
-                    });
-                }
                 ["segment", id, kind, offset, length, digest, min_id, max_id, count, source_bloom, target_bloom, property_bloom] =>
                 {
                     segments.push(CanonicalSegmentDescriptor {
@@ -479,6 +419,7 @@ impl CanonicalSegmentManifest {
             artifact_id: required(artifact_id, "artifact id")?,
             artifact_len: required(artifact_len, "artifact length")?,
             artifact_digest: ContentDigest(required(artifact_digest, "artifact digest")?),
+            artifact_sha256: required(artifact_sha256, "artifact SHA-256 digest")?,
             node_count: required(node_count, "node count")?,
             relationship_count: required(relationship_count, "relationship count")?,
             segments,
@@ -694,7 +635,7 @@ impl CanonicalSegmentWriter {
         R: IntoIterator<Item = Result<RelRecord, CanonicalSegmentError>>,
     {
         let mut file = File::create(path)?;
-        let mut artifact_digest = DigestState::new();
+        let mut artifact_digest = IntegrityHasher::new();
         write_hashed(&mut file, &mut artifact_digest, ARTIFACT_HEADER)?;
         write_hashed(&mut file, &mut artifact_digest, &generation.0.to_le_bytes())?;
         let mut artifact_len = ARTIFACT_HEADER.len() as u64 + 8;
@@ -779,11 +720,13 @@ impl CanonicalSegmentWriter {
             segments.push(descriptor);
         }
         file.sync_all()?;
+        let artifact_integrity = artifact_digest.finish();
         let manifest = CanonicalSegmentManifest {
             generation,
             artifact_id: ARTIFACT_ID,
             artifact_len,
-            artifact_digest: ContentDigest(artifact_digest.finish()),
+            artifact_digest: ContentDigest(artifact_integrity.crc32c.as_u64()),
+            artifact_sha256: artifact_integrity.sha256,
             node_count,
             relationship_count,
             segments,
@@ -888,7 +831,7 @@ impl SegmentAccumulator {
     fn flush(
         self,
         file: &mut File,
-        artifact_digest: &mut DigestState,
+        artifact_digest: &mut IntegrityHasher,
         offset: u64,
     ) -> Result<CanonicalSegmentDescriptor, CanonicalSegmentError> {
         let mut bytes = Vec::with_capacity(segment_header_len().saturating_add(self.records.len()));
@@ -1947,28 +1890,9 @@ impl<'a> SliceCursor<'a> {
     }
 }
 
-struct DigestState(u64);
-
-impl DigestState {
-    const fn new() -> Self {
-        Self(0xcbf29ce484222325)
-    }
-
-    fn update(&mut self, bytes: &[u8]) {
-        for byte in bytes {
-            self.0 ^= u64::from(*byte);
-            self.0 = self.0.wrapping_mul(0x100000001b3);
-        }
-    }
-
-    const fn finish(self) -> u64 {
-        self.0
-    }
-}
-
 fn write_hashed(
     file: &mut File,
-    digest: &mut DigestState,
+    digest: &mut IntegrityHasher,
     bytes: &[u8],
 ) -> Result<(), CanonicalSegmentError> {
     file.write_all(bytes)?;
@@ -2045,8 +1969,8 @@ mod tests {
     }
 
     #[test]
-    fn canonical_manifest_decodes_legacy_segment_summaries_without_false_negatives() {
-        let path = unique_path("legacy_manifest");
+    fn canonical_manifest_rejects_incomplete_segment_summaries() {
+        let path = unique_path("incomplete_manifest");
         let nodes = vec![NodeRecord {
             id: NodeId(1),
             labels: BTreeSet::from([LabelId(1)]),
@@ -2075,46 +1999,11 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n")
             + "\n";
-        let legacy = format!("{body}checksum\t{}\n", content_digest(body.as_bytes()).0);
-        let decoded = CanonicalSegmentManifest::decode(&legacy).unwrap();
-        for descriptor in decoded.node_segments() {
-            assert_eq!(
-                descriptor.node_property_bloom,
-                CanonicalEndpointBloom::legacy_unbounded()
-            );
-        }
-        for descriptor in decoded.relationship_segments() {
-            assert_eq!(
-                descriptor.source_endpoint_bloom,
-                CanonicalEndpointBloom::legacy_unbounded()
-            );
-            assert_eq!(
-                descriptor.target_endpoint_bloom,
-                CanonicalEndpointBloom::legacy_unbounded()
-            );
-        }
-
-        let reader = CanonicalSegmentReader::open(
-            &path,
-            decoded,
-            Arc::new(SegmentCache::new(4096)),
-            StoreId(14),
-            NonZeroU64::new(4096).unwrap(),
-        )
-        .unwrap();
-        let mut found = Vec::new();
-        reader
-            .scan_relationships_for_endpoint_control(
-                NodeId(1),
-                CanonicalEndpointDirection::Source,
-                Some(RelTypeId(1)),
-                |relationship| {
-                    found.push(relationship.id);
-                    Ok(CanonicalScanControl::Continue)
-                },
-            )
-            .unwrap();
-        assert_eq!(found, vec![RelId(2)]);
+        let incomplete = format!("{body}checksum\t{}\n", content_digest(body.as_bytes()).0);
+        let error = CanonicalSegmentManifest::decode(&incomplete).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("invalid canonical manifest line"));
         std::fs::remove_file(path).unwrap();
     }
 

@@ -13,6 +13,7 @@ pub(crate) struct RuntimeAdmissionPlan {
 }
 
 impl RuntimeAdmissionPlan {
+    #[cfg_attr(not(feature = "tokio-runtime"), allow(dead_code))]
     pub(crate) fn runtime_work_request(
         self,
         result_budget_bytes: u64,
@@ -343,6 +344,7 @@ impl Database {
                     task_context,
                 )
                 .map(|output| (output, QueryExecutionTrace::uncached(statement)));
+            self.store.poison_on_storage_error(&query_result);
             let statement_result = match &query_result {
                 Ok((output, _)) => Ok(output),
                 Err(error) => Err(error),
@@ -445,6 +447,7 @@ impl Database {
                 },
             ))
         })();
+        self.store.poison_on_storage_error(&query_result);
         let statement_result = match &query_result {
             Ok((output, _)) => Ok(output),
             Err(error) => Err(error),

@@ -30,6 +30,7 @@ rust_library(
         "//crates/ddl:skein_ddl",
         "//crates/executor:skein_executor",
         "//crates/expression:skein_expression",
+        "//crates/integrity:skein_integrity",
         "//crates/optimizer:skein_optimizer",
         "//crates/plan:skein_plan",
         "//crates/plan-cache:skein_plan_cache",
@@ -85,6 +86,7 @@ rust_test(
     ),
     deps = all_crate_deps(normal = True, normal_dev = True) + [
         ":skein",
+        "//crates/integrity:skein_integrity",
         "//crates/storage:skein_storage",
     ],
     proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),

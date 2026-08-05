@@ -2,6 +2,7 @@ use super::cjk_tokenizer::ANALYZER_FORMAT_VERSION;
 use super::{document_tokens, SearchAnalyzerLexicon, SearchDocument, BM25_B, BM25_K1};
 use crate::error::{Result, SkeinError};
 use serde::{Deserialize, Serialize};
+use skein_integrity::Crc32cHasher as Digest;
 use skein_storage::durable_replace_file;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
@@ -1674,25 +1675,6 @@ fn checksum(bytes: &[u8]) -> u64 {
     let mut digest = Digest::new();
     digest.update(bytes);
     digest.finish()
-}
-
-struct Digest(u64);
-
-impl Digest {
-    const fn new() -> Self {
-        Self(0xcbf29ce484222325)
-    }
-
-    fn update(&mut self, bytes: &[u8]) {
-        for byte in bytes {
-            self.0 ^= u64::from(*byte);
-            self.0 = self.0.wrapping_mul(0x100000001b3);
-        }
-    }
-
-    const fn finish(self) -> u64 {
-        self.0
-    }
 }
 
 #[cfg(test)]

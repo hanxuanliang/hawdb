@@ -35,7 +35,7 @@ use crate::store::{
     ProjectedGraphStatus, PropertyIndexConsistencyReport, PropertyIndexProjectionRebuildAction,
     RecoveryMode, RelId, RelRecord, SchemaMaintenanceAction, SegmentCacheSnapshot,
     StorageBackupReport, StorageReclamationWatermark, StorageRecoveryReport, StorageRestoreReport,
-    StoreStableIdMapping, WalReplayConfig,
+    StorageScrubReport, StoreStableIdMapping, WalReplayConfig,
 };
 use crate::telemetry::{
     operations_telemetry_readiness, qos_telemetry_sink, KernelTelemetry, KernelTelemetryOperation,
@@ -752,6 +752,7 @@ impl Database {
             )?;
             Ok(QueryOutput { rows })
         })();
+        self.store.poison_on_storage_error(&query_result);
         self.record_statement_execution(
             "cypher",
             cypher_text,
@@ -914,7 +915,9 @@ impl Database {
             self.config.max_read_result_rows,
             self.config.max_read_result_payload_bytes,
             &self.config.execution_memory,
-        )?;
+        );
+        self.store.poison_on_storage_error(&profiled);
+        let profiled = profiled?;
         Ok(ExplainAnalyzeOutput {
             output: QueryOutput {
                 rows: profiled.rows,
@@ -1010,6 +1013,10 @@ impl Database {
         self.store.backup_to(&self.catalog, destination)
     }
 
+    pub fn scrub_storage(&mut self) -> Result<StorageScrubReport> {
+        self.store.scrub_storage()
+    }
+
     pub fn restore_backup(
         backup: impl AsRef<Path>,
         destination: impl AsRef<Path>,
@@ -1032,7 +1039,7 @@ impl Database {
     }
 
     pub fn storage_handle_poisoned(&self) -> bool {
-        self.store.post_wal_apply_poisoned()
+        self.store.storage_handle_poisoned()
     }
 
     pub fn storage_residency_report(&self) -> crate::store::StorageResidencyReport {
@@ -31395,7 +31402,9 @@ impl DatabaseSession<'_> {
                 self.db.config.max_read_result_rows,
                 self.db.config.max_read_result_payload_bytes,
                 &self.db.config.execution_memory,
-            )?;
+            );
+            self.db.store.poison_on_storage_error(&profiled);
+            let profiled = profiled?;
             return Ok(QueryOutput {
                 rows: vec![explain_analyze_output_row(
                     &optimized,
@@ -31595,7 +31604,9 @@ impl DatabaseReadTransaction {
             max_payload_bytes,
             &mut consumer,
             &self.config.execution_memory,
-        )?;
+        );
+        self.store.poison_on_storage_error(&streamed);
+        let streamed = streamed?;
         let pipeline = &streamed.profile.pipeline_memory_report;
         Ok(QueryStreamReport {
             fully_streamed: streamed.fully_streamed,
@@ -31661,7 +31672,9 @@ impl DatabaseReadTransaction {
                 &mut consumer,
                 task_context,
                 &self.config.execution_memory,
-            )?;
+            );
+        self.store.poison_on_storage_error(&streamed);
+        let streamed = streamed?;
         let pipeline = &streamed.profile.pipeline_memory_report;
         Ok(QueryStreamReport {
             fully_streamed: streamed.fully_streamed,
@@ -31763,7 +31776,9 @@ impl DatabaseReadTransaction {
                     &self.config.execution_memory,
                 )
             }
-        }?;
+        };
+        self.store.poison_on_storage_error(&profiled);
+        let profiled = profiled?;
         query_runtime::query_runtime_checkpoint(task_context)?;
         Ok(BoundedReadQueryOutput {
             output: QueryOutput {
@@ -31831,7 +31846,9 @@ impl DatabaseReadTransaction {
                         &self.config.execution_memory,
                     )
                 }
-            }?;
+            };
+            self.store.poison_on_storage_error(&profiled);
+            let profiled = profiled?;
             query_runtime::query_runtime_checkpoint(task_context)?;
             let row_count = profiled.rows.len();
             return Ok(BoundedReadQueryOutput {

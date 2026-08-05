@@ -7,6 +7,7 @@ use crate::{
     SegmentReadRange, StoreId,
 };
 use skein_core::{LabelId, Value};
+use skein_integrity::{Crc32cHasher, IntegrityHasher, Sha256Digest};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, VecDeque};
 use std::error::Error;
@@ -195,6 +196,7 @@ pub struct PersistentPropertyProjectionManifest {
     pub artifact_id: u64,
     pub artifact_len: u64,
     pub artifact_digest: ContentDigest,
+    pub artifact_sha256: Sha256Digest,
     pub entry_count: u64,
     pub definitions: Vec<PersistentPropertyProjectionDefinition>,
     pub blocks: Vec<PersistentPropertyProjectionBlockDescriptor>,
@@ -296,12 +298,13 @@ impl PersistentPropertyProjectionManifest {
     pub fn encode(&self) -> Result<String, PersistentPropertyProjectionError> {
         self.validate()?;
         let mut body = format!(
-            "{MANIFEST_HEADER}\ngeneration\t{}\nsource_commit_epoch\t{}\nartifact_id\t{}\nartifact_len\t{}\nartifact_digest\t{}\nentry_count\t{}\n",
+            "{MANIFEST_HEADER}\ngeneration\t{}\nsource_commit_epoch\t{}\nartifact_id\t{}\nartifact_len\t{}\nartifact_digest\t{}\nartifact_sha256\t{}\nentry_count\t{}\n",
             self.generation.0,
             self.source_commit_epoch,
             self.artifact_id,
             self.artifact_len,
             self.artifact_digest.0,
+            self.artifact_sha256,
             self.entry_count
         );
         for definition in &self.definitions {
@@ -362,6 +365,7 @@ impl PersistentPropertyProjectionManifest {
         let mut artifact_id = None;
         let mut artifact_len = None;
         let mut artifact_digest = None;
+        let mut artifact_sha256 = None;
         let mut entry_count = None;
         let mut definitions = Vec::new();
         let mut blocks = Vec::new();
@@ -383,6 +387,13 @@ impl PersistentPropertyProjectionManifest {
                 }
                 ["artifact_digest", value] => {
                     artifact_digest = Some(parse_u64(value, "artifact digest")?)
+                }
+                ["artifact_sha256", value] => {
+                    artifact_sha256 = Some(value.parse().map_err(|error| {
+                        PersistentPropertyProjectionError::Corrupt(format!(
+                            "invalid artifact SHA-256 digest: {error}"
+                        ))
+                    })?)
                 }
                 ["entry_count", value] => entry_count = Some(parse_u64(value, "entry count")?),
                 ["definition", kind, label, property, complete] => {
@@ -448,6 +459,7 @@ impl PersistentPropertyProjectionManifest {
             artifact_id: required(artifact_id, "artifact id")?,
             artifact_len: required(artifact_len, "artifact length")?,
             artifact_digest: ContentDigest(required(artifact_digest, "artifact digest")?),
+            artifact_sha256: required(artifact_sha256, "artifact SHA-256 digest")?,
             entry_count: required(entry_count, "entry count")?,
             definitions,
             blocks,
@@ -961,7 +973,7 @@ fn merge_projection_run_group(
 
 struct ProjectionArtifactBuilder {
     writer: BufWriter<File>,
-    artifact_digest: DigestState,
+    artifact_digest: IntegrityHasher,
     generation: ManifestGeneration,
     source_commit_epoch: u64,
     definitions: Vec<PersistentPropertyProjectionDefinition>,
@@ -984,7 +996,7 @@ impl ProjectionArtifactBuilder {
         config: PersistentPropertyProjectionConfig,
     ) -> Result<Self, PersistentPropertyProjectionError> {
         let mut writer = BufWriter::new(file);
-        let mut artifact_digest = DigestState::new();
+        let mut artifact_digest = IntegrityHasher::new();
         write_hashed(&mut writer, &mut artifact_digest, ARTIFACT_HEADER)?;
         write_hashed(
             &mut writer,
@@ -1097,7 +1109,7 @@ impl ProjectionArtifactBuilder {
             .expect("projection block is non-empty")
             .value
             .clone();
-        let mut block_digest = DigestState::new();
+        let mut block_digest = Crc32cHasher::new();
         for bytes in [
             BLOCK_HEADER.as_slice(),
             &self.generation.0.to_le_bytes(),
@@ -1165,12 +1177,14 @@ impl ProjectionArtifactBuilder {
         self.flush_block()?;
         self.writer.flush()?;
         self.writer.get_ref().sync_all()?;
+        let artifact_integrity = self.artifact_digest.finish();
         let manifest = PersistentPropertyProjectionManifest {
             generation: self.generation,
             source_commit_epoch: self.source_commit_epoch,
             artifact_id: ARTIFACT_ID,
             artifact_len: self.artifact_len,
-            artifact_digest: ContentDigest(self.artifact_digest.finish()),
+            artifact_digest: ContentDigest(artifact_integrity.crc32c.as_u64()),
+            artifact_sha256: artifact_integrity.sha256,
             entry_count: self.entry_count,
             definitions: self.definitions,
             blocks: self.blocks,
@@ -1749,28 +1763,9 @@ impl<'a> Cursor<'a> {
     }
 }
 
-struct DigestState(u64);
-
-impl DigestState {
-    const fn new() -> Self {
-        Self(0xcbf29ce484222325)
-    }
-
-    fn update(&mut self, bytes: &[u8]) {
-        for byte in bytes {
-            self.0 ^= u64::from(*byte);
-            self.0 = self.0.wrapping_mul(0x100000001b3);
-        }
-    }
-
-    const fn finish(self) -> u64 {
-        self.0
-    }
-}
-
 fn write_hashed(
     writer: &mut impl Write,
-    digest: &mut DigestState,
+    digest: &mut IntegrityHasher,
     bytes: &[u8],
 ) -> Result<(), PersistentPropertyProjectionError> {
     writer.write_all(bytes)?;
@@ -1780,8 +1775,8 @@ fn write_hashed(
 
 fn write_double_hashed(
     writer: &mut impl Write,
-    artifact_digest: &mut DigestState,
-    block_digest: &mut DigestState,
+    artifact_digest: &mut IntegrityHasher,
+    block_digest: &mut Crc32cHasher,
     bytes: &[u8],
 ) -> Result<(), PersistentPropertyProjectionError> {
     writer.write_all(bytes)?;

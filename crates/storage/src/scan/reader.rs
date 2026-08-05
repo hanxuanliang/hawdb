@@ -10,8 +10,10 @@ use std::fmt::{self, Display, Formatter};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::num::NonZeroU64;
+use std::num::NonZeroUsize;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[derive(Debug)]
 pub enum SegmentReadError {
@@ -271,14 +273,121 @@ pub struct SegmentReadExecutionReport {
     pub max_wave_bytes_read: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone)]
+pub struct SegmentReadPool {
+    inner: Arc<rayon::ThreadPool>,
+    worker_count: NonZeroUsize,
+}
+
+impl fmt::Debug for SegmentReadPool {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SegmentReadPool")
+            .field("worker_count", &self.worker_count)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SegmentReadPool {
+    pub fn new(worker_count: NonZeroUsize) -> Result<Self, SegmentReadPoolError> {
+        let inner = rayon::ThreadPoolBuilder::new()
+            .num_threads(worker_count.get())
+            .thread_name(|index| format!("skein-segment-read-{index}"))
+            .build()
+            .map_err(|error| SegmentReadPoolError(error.to_string()))?;
+        Ok(Self {
+            inner: Arc::new(inner),
+            worker_count,
+        })
+    }
+
+    pub fn worker_count(&self) -> NonZeroUsize {
+        self.worker_count
+    }
+
+    fn shared_default() -> Option<Self> {
+        static SHARED: OnceLock<Option<SegmentReadPool>> = OnceLock::new();
+        SHARED
+            .get_or_init(|| {
+                let worker_count = std::thread::available_parallelism()
+                    .unwrap_or(NonZeroUsize::MIN)
+                    .min(NonZeroUsize::new(16).expect("shared segment read limit is non-zero"));
+                SegmentReadPool::new(worker_count).ok()
+            })
+            .clone()
+    }
+
+    fn read_wave<R: SegmentRangeReader>(
+        &self,
+        reader: &R,
+        ranges: &[SegmentReadRange],
+    ) -> Vec<Result<SegmentReadPayload, SegmentReadError>> {
+        let results = Mutex::new(
+            (0..ranges.len())
+                .map(|_| None)
+                .collect::<Vec<Option<Result<SegmentReadPayload, SegmentReadError>>>>(),
+        );
+        self.inner.scope(|scope| {
+            for (index, range) in ranges.iter().enumerate() {
+                let results = &results;
+                scope.spawn(move |_| {
+                    let result = catch_unwind(AssertUnwindSafe(|| reader.read_range(range)))
+                        .map(|result| {
+                            result.map(|bytes| SegmentReadPayload {
+                                range: range.clone(),
+                                bytes,
+                            })
+                        })
+                        .unwrap_or_else(|_| {
+                            Err(SegmentReadError::WorkerPanicked {
+                                artifact_id: range.artifact_id,
+                            })
+                        });
+                    results
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())[index] = Some(result);
+                });
+            }
+        });
+        results
+            .into_inner()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .into_iter()
+            .map(|result| result.expect("segment read worker always records a result"))
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SegmentReadPoolError(String);
+
+impl Display for SegmentReadPoolError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        write!(formatter, "segment read pool creation failed: {}", self.0)
+    }
+}
+
+impl Error for SegmentReadPoolError {}
+
+#[derive(Debug, Clone)]
 pub struct SegmentReadExecutor {
     max_wave_bytes: NonZeroU64,
+    pool: Option<SegmentReadPool>,
 }
 
 impl SegmentReadExecutor {
     pub fn new(max_wave_bytes: NonZeroU64) -> Self {
-        Self { max_wave_bytes }
+        Self {
+            max_wave_bytes,
+            pool: SegmentReadPool::shared_default(),
+        }
+    }
+
+    pub fn with_pool(max_wave_bytes: NonZeroU64, pool: SegmentReadPool) -> Self {
+        Self {
+            max_wave_bytes,
+            pool: Some(pool),
+        }
     }
 
     pub fn execute<R, F, E>(
@@ -340,31 +449,21 @@ impl SegmentReadExecutor {
                 ));
             }
 
-            let payloads = std::thread::scope(|scope| {
-                let workers = wave
+            let payloads = match &self.pool {
+                Some(pool) => pool.read_wave(reader, &wave.ranges),
+                None => wave
                     .ranges
                     .iter()
                     .map(|range| {
-                        (
-                            range.artifact_id,
-                            scope.spawn(move || {
-                                reader.read_range(range).map(|bytes| SegmentReadPayload {
-                                    range: range.clone(),
-                                    bytes,
-                                })
-                            }),
-                        )
+                        reader.read_range(range).map(|bytes| SegmentReadPayload {
+                            range: range.clone(),
+                            bytes,
+                        })
                     })
-                    .collect::<Vec<_>>();
-                workers
-                    .into_iter()
-                    .map(|(artifact_id, worker)| {
-                        worker
-                            .join()
-                            .map_err(|_| SegmentReadError::WorkerPanicked { artifact_id })?
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-            })
+                    .collect(),
+            }
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
             .map_err(SegmentReadExecutionError::Read)?;
 
             segment_read_checkpoint(context)?;
@@ -412,7 +511,44 @@ mod tests {
     use crate::scan::SegmentReadScheduler;
     use skein_core::{RuntimeCancellationReason, RuntimeCancellationToken, RuntimeTaskContext};
     use std::num::NonZeroUsize;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    #[derive(Default)]
+    struct ConcurrencyTrackingReader {
+        active: AtomicUsize,
+        peak: AtomicUsize,
+    }
+
+    impl SegmentRangeReader for ConcurrencyTrackingReader {
+        fn read_range(&self, range: &SegmentReadRange) -> Result<Arc<[u8]>, SegmentReadError> {
+            let active = self.active.fetch_add(1, Ordering::AcqRel) + 1;
+            self.peak.fetch_max(active, Ordering::AcqRel);
+            std::thread::sleep(Duration::from_millis(10));
+            self.active.fetch_sub(1, Ordering::AcqRel);
+            Ok(Arc::from(vec![0; range.length.get() as usize]))
+        }
+    }
+
+    #[test]
+    fn shared_pool_bounds_parallel_range_reads() {
+        let reader = ConcurrencyTrackingReader::default();
+        let ranges = (0..8)
+            .map(|segment_id| SegmentReadRange::new(1, segment_id, segment_id, NonZeroU64::MIN))
+            .collect::<Vec<_>>();
+        let schedule = SegmentReadScheduler::new(NonZeroUsize::new(8).unwrap(), NonZeroU64::MIN)
+            .schedule(ranges);
+        let pool = SegmentReadPool::new(NonZeroUsize::new(2).unwrap()).unwrap();
+
+        SegmentReadExecutor::with_pool(NonZeroU64::new(8).unwrap(), pool)
+            .execute(&reader, &schedule, |_| {
+                Ok::<(), std::convert::Infallible>(())
+            })
+            .unwrap();
+
+        assert_eq!(reader.active.load(Ordering::Acquire), 0);
+        assert_eq!(reader.peak.load(Ordering::Acquire), 2);
+    }
 
     #[test]
     fn executes_file_ranges_in_schedule_order() {

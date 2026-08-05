@@ -12,6 +12,7 @@ use crate::value::Value;
 use crate::{RuntimeCapabilities, RuntimeCapability};
 use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use simsimd::SpatialSimilarity;
+use skein_integrity::checksum_u64;
 use skein_optimizer::{
     normalize_search_enum_value, push_search_predicates, search_field_is_enum_like,
     select_adaptive_vector_backend, AdaptiveVectorBackend, AdaptiveVectorBackendDecision,
@@ -6968,13 +6969,12 @@ fn encode_search_snapshot_text(text: &str) -> Result<Vec<u8>> {
 
 fn read_search_snapshot_text(path: &Path) -> Result<String> {
     let bytes = fs::read(path)?;
-    if bytes.starts_with(SEARCH_COMPRESSION_HEADER.as_bytes()) {
-        decode_search_snapshot_text(&bytes)
-    } else {
-        String::from_utf8(bytes).map_err(|error| {
-            SkeinError::Storage(format!("search projection is not valid UTF-8: {error}"))
-        })
+    if !bytes.starts_with(SEARCH_COMPRESSION_HEADER.as_bytes()) {
+        return Err(SkeinError::Storage(
+            "search projection is missing the V1 compressed envelope".to_string(),
+        ));
     }
+    decode_search_snapshot_text(&bytes)
 }
 
 fn decode_search_snapshot_text(bytes: &[u8]) -> Result<String> {
@@ -7001,11 +7001,18 @@ fn decode_search_snapshot_text_bounded(
     let mut uncompressed_checksum = None;
     let mut compressed_len = None;
     let mut uncompressed_len = None;
+    let mut seen_fields = BTreeSet::new();
     for line in header.lines() {
         if line == SEARCH_COMPRESSION_HEADER {
             continue;
         }
         let fields = line.split('\t').collect::<Vec<_>>();
+        if !seen_fields.insert(fields[0]) {
+            return Err(SkeinError::Storage(format!(
+                "search projection compressed envelope has duplicate field: {}",
+                fields[0]
+            )));
+        }
         match fields.as_slice() {
             ["codec", value] => codec = Some(*value),
             ["compressed_checksum", value] => {
@@ -7108,12 +7115,7 @@ fn decode_search_snapshot_text_bounded(
 }
 
 fn checksum_bytes(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf29ce484222325u64;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
+    checksum_u64(bytes)
 }
 
 fn elapsed_micros(started: std::time::Instant) -> u64 {
@@ -9671,7 +9673,7 @@ mod tests {
         assert_eq!(automatic_result.hits[0].id, "memory:b");
         assert_eq!(
             automatic_result.retrievers[0].backend,
-            "turbovec_projection"
+            "skein_turboquant_candidate_projection"
         );
         assert_eq!(
             automatic_result.retrievers[0].backend_selection_reason,
@@ -9692,7 +9694,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "turbovec")]
-    fn compressed_vector_projection_preference_falls_back_when_artifact_is_corrupt() {
+    fn corrupt_turbovec_oracle_does_not_disable_turboquant_projection() {
         let path = unique_test_dir("search_turbovec_artifact_corrupt_fallback");
         let artifact_path = path.join(SEARCH_TURBOVEC_PROJECTION_FILE);
         {
@@ -9731,13 +9733,16 @@ mod tests {
         );
 
         assert_eq!(result.hits[0].id, "memory:a");
-        assert_eq!(result.retrievers[0].backend, "scalar_vector_scan");
-        assert!(result.retrievers[0]
+        assert_eq!(
+            result.retrievers[0].backend,
+            "skein_turboquant_candidate_projection"
+        );
+        assert!(!result.retrievers[0]
             .fallback_reason_codes
             .contains(&SearchFallbackReasonCode::CompressedVectorProjectionUnavailable));
         assert_eq!(
             result.retrievers[0].backend_selection_reason,
-            Some(VectorBackendSelectionReason::QuantizedProjectionUnavailable)
+            Some(VectorBackendSelectionReason::QuantizedPreferred)
         );
 
         std::fs::remove_dir_all(path).unwrap();

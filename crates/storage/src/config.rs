@@ -8,8 +8,8 @@ pub enum DurabilityPolicy {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum RecoveryMode {
     #[default]
-    TolerateTornTail,
     Strict,
+    DoctorRepairTornTail,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -79,7 +79,7 @@ mod tests {
             DurabilityPolicy::default(),
             DurabilityPolicy::SyncOnEveryWrite
         );
-        assert_eq!(RecoveryMode::default(), RecoveryMode::TolerateTornTail);
+        assert_eq!(RecoveryMode::default(), RecoveryMode::Strict);
         assert_eq!(DurableCompression::default(), DurableCompression::Zstd);
         let replay = WalReplayConfig::default();
         assert_eq!(replay.max_entries, Some(DEFAULT_MAX_WAL_REPLAY_ENTRIES));

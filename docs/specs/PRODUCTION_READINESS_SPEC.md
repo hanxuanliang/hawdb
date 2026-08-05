@@ -20,7 +20,7 @@ Readiness is divided into three non-interchangeable states:
 1. **development ready**: the capability is implemented and its deterministic
    unit, integration, and model tests pass;
 2. **traffic ready**: the exact production build and configuration pass
-   recovery, resource, authorization, and platform qualification on a
+   recovery, resource, enabled-feature, and platform qualification on a
    representative replica;
 3. **cutover ready**: every active route is traffic ready, offline shadow
    evidence demonstrates semantic equivalence, and rollback controls remain
@@ -51,6 +51,13 @@ Evidence from another source revision, target, feature set, dataset, schema,
 or projection generation MUST NOT qualify the current runtime. Regenerating a
 canonical or search projection generation invalidates generation-bound
 evidence.
+
+Authorization is feature-bound. The initial Mem release MAY omit the `acl`
+feature and MUST record that exact feature set in its qualification identity.
+When `acl` is enabled, authorization policy freshness, pre-materialization
+enforcement, filtered search parity, and cache isolation become mandatory
+traffic-readiness evidence. Evidence from a build without `acl` MUST NOT
+qualify a build that enables it.
 
 `ProductionQualificationIdentity` is the typed release identity and
 `ProductionEvidenceBinding` adds the generation time. The identity comparison
@@ -216,8 +223,10 @@ in-process failpoints. The crash matrix MUST cover at least:
 Each crash point MUST reopen the database in a fresh process and verify that a
 mutation batch is either entirely absent or entirely recovered. The harness
 MUST verify commit epoch, replay LSN, endpoint integrity, projection watermark,
-and the absence of partially published artifacts. Torn-tail tolerance MUST
-preserve a structured repair record even when normal serving can resume.
+and the absence of partially published artifacts. Ordinary startup MUST reject
+a torn WAL tail without changing it. Explicit doctor repair MUST preserve a
+structured repair record and report discarded bytes before normal serving can
+resume.
 
 Durable-before-publish and pinned-reader invariants MUST be model checked for
 the released storage protocol. Model-check configuration and results MUST be
@@ -246,7 +255,8 @@ Search traffic readiness MUST recompute qualification from raw evidence and
 require:
 
 - exact TopK and score parity for text, vector, and hybrid modes;
-- ACL, lifecycle, space, metadata, and source-filter parity before ranking;
+- lifecycle, space, metadata, and source-filter parity before ranking, plus
+  ACL parity when the release feature set enables `acl`;
 - incremental update, delete, checkpoint, reopen, stale-generation, and
   corruption cases;
 - bounded candidate spill, score state, sidecar reads, and late hydration;
@@ -276,7 +286,8 @@ including:
 
 - route ownership or query-family coverage;
 - storage recovery and resource qualification;
-- authorization policy freshness and pre-materialization enforcement;
+- authorization policy freshness and pre-materialization enforcement when the
+  release feature set enables `acl`;
 - search projection generation, freshness, and parity;
 - background QoS and foreground admission;
 - redaction and production library-path verification;
@@ -310,14 +321,17 @@ artifact retention for production resource evidence. These checks MUST become
 required before their corresponding risk is accepted for production.
 
 The scheduled quality workflow MUST run the advisory and license policy,
-deterministic optimizer differential/metamorphic campaigns, and a mixed
-foreground/background runtime soak. Fuzz failures MUST retain their campaign
-report and minimized replay bundle before the job fails. The runtime soak MUST
+deterministic optimizer differential/metamorphic campaigns, persistent-format
+corruption campaigns, the scalar/SIMD differential corpus under an address
+sanitizer, and a mixed foreground/background runtime soak. Fuzz failures MUST
+retain their campaign report and minimized replay bundle before the job fails.
+The runtime soak MUST
 use an out-of-core fixture whose raw bytes exceed the admitted runtime memory
 and whose canonical artifact exceeds the segment cache. It MUST exercise the
-admitted Tokio facade, observe bounded external spill, complete a concurrent
-mutation and checkpoint, and retain latency, RSS, page-fault, cache, spill,
-checkpoint, and governor counters in a revision-bound typed report.
+admitted Tokio facade, high-cardinality distinct and Cartesian paths, observe
+bounded external spill, complete a concurrent mutation and checkpoint, and
+retain latency, RSS, page-fault, cache, spill, checkpoint, and governor
+counters in a revision-bound typed report.
 
 Scheduled synthetic soak evidence MUST identify its controlled fixture setup
 path and carry `production_eligible=false`. It verifies regression behavior but

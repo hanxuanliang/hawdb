@@ -13987,49 +13987,41 @@ fn unique_test_dir(name: &str) -> std::path::PathBuf {
 }
 
 fn active_wal_path(path: impl AsRef<std::path::Path>) -> std::path::PathBuf {
-    active_generation_path(path.as_ref(), "wal_generation", "wal", "wal.skein")
+    active_generation_path(path.as_ref(), "wal_generation", "wal")
 }
 
 fn active_checkpoint_path(path: impl AsRef<std::path::Path>) -> std::path::PathBuf {
-    active_generation_path(
-        path.as_ref(),
-        "checkpoint_generation",
-        "checkpoint",
-        "checkpoint.skein",
-    )
+    active_generation_path(path.as_ref(), "checkpoint_generation", "checkpoint")
 }
 
 fn read_test_wal(path: impl AsRef<std::path::Path>) -> std::io::Result<String> {
     let wal = std::fs::read_to_string(active_wal_path(path))?;
-    if wal.starts_with("SKEIN_WAL_V2\t") {
-        Ok(wal
-            .split_once('\n')
-            .map_or_else(String::new, |(_, records)| records.to_string()))
-    } else {
-        Ok(wal)
+    if !wal.starts_with("SKEIN_WAL_V1\t") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "WAL is missing the V1 header",
+        ));
     }
+    Ok(wal
+        .split_once('\n')
+        .map_or_else(String::new, |(_, records)| records.to_string()))
 }
 
 fn active_generation_path(
     root: &std::path::Path,
     manifest_field: &str,
     prefix: &str,
-    legacy_name: &str,
 ) -> std::path::PathBuf {
-    let Ok(manifest) = std::fs::read_to_string(root.join("manifest.skein")) else {
-        return root.join(legacy_name);
-    };
-    if !manifest.contains("SKEIN_MANIFEST_V2\n") {
-        return root.join(legacy_name);
-    }
+    let manifest = std::fs::read_to_string(root.join("manifest.skein")).unwrap();
+    assert!(manifest.contains("SKEIN_MANIFEST_V1\n"));
     let generation = manifest.lines().find_map(|line| {
         let (field, value) = line.split_once('\t')?;
         (field == manifest_field && value != "none").then_some(value)
     });
-    generation.map_or_else(
-        || root.join(legacy_name),
-        |generation| root.join(format!("{prefix}.{generation}.skein")),
-    )
+    root.join(format!(
+        "{prefix}.{}.skein",
+        generation.expect("active generation must exist")
+    ))
 }
 
 fn read_test_durable_text(path: &std::path::Path) -> std::io::Result<String> {

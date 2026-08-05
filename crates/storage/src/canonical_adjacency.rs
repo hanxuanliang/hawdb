@@ -5,6 +5,7 @@ use crate::{
     SegmentRangeReader, SegmentReadError, SegmentReadRange, StoreId,
 };
 use skein_core::{RelTypeId, Value};
+use skein_integrity::{Crc32cHasher, IntegrityHasher, Sha256Digest};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::error::Error;
@@ -173,6 +174,7 @@ pub struct CanonicalAdjacencyManifest {
     pub artifact_id: u64,
     pub artifact_len: u64,
     pub artifact_digest: ContentDigest,
+    pub artifact_sha256: Sha256Digest,
     pub relationship_count: u64,
     pub entry_count: u64,
     pub blocks: Vec<CanonicalAdjacencyBlockDescriptor>,
@@ -245,11 +247,12 @@ impl CanonicalAdjacencyManifest {
     pub fn encode(&self) -> Result<String, CanonicalAdjacencyError> {
         self.validate()?;
         let mut output = format!(
-            "{MANIFEST_HEADER}\ngeneration\t{}\nartifact_id\t{}\nartifact_len\t{}\nartifact_digest\t{}\nrelationship_count\t{}\nentry_count\t{}\n",
+            "{MANIFEST_HEADER}\ngeneration\t{}\nartifact_id\t{}\nartifact_len\t{}\nartifact_digest\t{}\nartifact_sha256\t{}\nrelationship_count\t{}\nentry_count\t{}\n",
             self.generation.0,
             self.artifact_id,
             self.artifact_len,
             self.artifact_digest.0,
+            self.artifact_sha256,
             self.relationship_count,
             self.entry_count
         );
@@ -277,6 +280,7 @@ impl CanonicalAdjacencyManifest {
         let mut artifact_id = None;
         let mut artifact_len = None;
         let mut artifact_digest = None;
+        let mut artifact_sha256 = None;
         let mut relationship_count = None;
         let mut entry_count = None;
         let mut blocks = Vec::new();
@@ -298,6 +302,13 @@ impl CanonicalAdjacencyManifest {
                 }
                 ["artifact_digest", value] => {
                     artifact_digest = Some(parse_u64(value, "artifact digest")?)
+                }
+                ["artifact_sha256", value] => {
+                    artifact_sha256 = Some(value.parse().map_err(|error| {
+                        CanonicalAdjacencyError::Corrupt(format!(
+                            "invalid artifact SHA-256 digest: {error}"
+                        ))
+                    })?)
                 }
                 ["relationship_count", value] => {
                     relationship_count = Some(parse_u64(value, "relationship count")?)
@@ -336,6 +347,7 @@ impl CanonicalAdjacencyManifest {
             artifact_id: required(artifact_id, "artifact id")?,
             artifact_len: required(artifact_len, "artifact length")?,
             artifact_digest: ContentDigest(required(artifact_digest, "artifact digest")?),
+            artifact_sha256: required(artifact_sha256, "artifact SHA-256 digest")?,
             relationship_count: required(relationship_count, "relationship count")?,
             entry_count: required(entry_count, "entry count")?,
             blocks,
@@ -784,7 +796,7 @@ fn merge_run_group(
 
 struct ArtifactBuilder {
     writer: BufWriter<File>,
-    digest: DigestState,
+    digest: IntegrityHasher,
     generation: ManifestGeneration,
     config: CanonicalAdjacencyConfig,
     artifact_len: u64,
@@ -803,7 +815,7 @@ impl ArtifactBuilder {
         config: CanonicalAdjacencyConfig,
     ) -> Result<Self, CanonicalAdjacencyError> {
         let mut writer = BufWriter::new(file);
-        let mut digest = DigestState::new();
+        let mut digest = IntegrityHasher::new();
         write_hashed(&mut writer, &mut digest, ARTIFACT_HEADER)?;
         write_hashed(&mut writer, &mut digest, &generation.0.to_le_bytes())?;
         Ok(Self {
@@ -946,7 +958,7 @@ impl ArtifactBuilder {
                 .neighbor,
         );
         let length = NonZeroU64::new(block_bytes).expect("canonical adjacency block is non-empty");
-        let mut block_digest = DigestState::new();
+        let mut block_digest = Crc32cHasher::new();
         write_double_hashed(
             &mut self.writer,
             &mut self.digest,
@@ -1057,11 +1069,13 @@ impl ArtifactBuilder {
         self.finish_group()?;
         self.writer.flush()?;
         self.writer.get_ref().sync_all()?;
+        let artifact_integrity = self.digest.finish();
         let manifest = CanonicalAdjacencyManifest {
             generation: self.generation,
             artifact_id: ARTIFACT_ID,
             artifact_len: self.artifact_len,
-            artifact_digest: ContentDigest(self.digest.finish()),
+            artifact_digest: ContentDigest(artifact_integrity.crc32c.as_u64()),
+            artifact_sha256: artifact_integrity.sha256,
             relationship_count,
             entry_count: self.entry_count,
             blocks: self.blocks,
@@ -1543,28 +1557,9 @@ impl<'a> Cursor<'a> {
     }
 }
 
-struct DigestState(u64);
-
-impl DigestState {
-    const fn new() -> Self {
-        Self(0xcbf29ce484222325)
-    }
-
-    fn update(&mut self, bytes: &[u8]) {
-        for byte in bytes {
-            self.0 ^= u64::from(*byte);
-            self.0 = self.0.wrapping_mul(0x100000001b3);
-        }
-    }
-
-    const fn finish(self) -> u64 {
-        self.0
-    }
-}
-
 fn write_hashed(
     writer: &mut impl Write,
-    digest: &mut DigestState,
+    digest: &mut IntegrityHasher,
     bytes: &[u8],
 ) -> Result<(), CanonicalAdjacencyError> {
     writer.write_all(bytes)?;
@@ -1574,8 +1569,8 @@ fn write_hashed(
 
 fn write_double_hashed(
     writer: &mut impl Write,
-    artifact_digest: &mut DigestState,
-    block_digest: &mut DigestState,
+    artifact_digest: &mut IntegrityHasher,
+    block_digest: &mut Crc32cHasher,
     bytes: &[u8],
 ) -> Result<(), CanonicalAdjacencyError> {
     writer.write_all(bytes)?;

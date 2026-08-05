@@ -2,6 +2,7 @@ use crate::{
     content_digest, ContentDigest, FileSegmentRangeReader, ManifestGeneration, SegmentCache,
     SegmentRangeReader, SegmentReadError, SegmentReadRange, StoreId,
 };
+use skein_integrity::{Crc32cHasher, IntegrityHasher, Sha256Digest};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::fs::{self, File};
@@ -110,6 +111,7 @@ pub struct PropertySpillManifest {
     pub artifact_id: u64,
     pub artifact_len: u64,
     pub artifact_digest: ContentDigest,
+    pub artifact_sha256: Sha256Digest,
     pub value_count: u64,
     pub value_bytes: u64,
     pub blocks: Vec<PropertySpillBlockDescriptor>,
@@ -169,11 +171,12 @@ impl PropertySpillManifest {
     pub fn encode(&self) -> Result<String, PropertySpillError> {
         self.validate()?;
         let mut body = format!(
-            "{MANIFEST_HEADER}\ngeneration\t{}\nartifact_id\t{}\nartifact_len\t{}\nartifact_digest\t{}\nvalue_count\t{}\nvalue_bytes\t{}\n",
+            "{MANIFEST_HEADER}\ngeneration\t{}\nartifact_id\t{}\nartifact_len\t{}\nartifact_digest\t{}\nartifact_sha256\t{}\nvalue_count\t{}\nvalue_bytes\t{}\n",
             self.generation.0,
             self.artifact_id,
             self.artifact_len,
             self.artifact_digest.0,
+            self.artifact_sha256,
             self.value_count,
             self.value_bytes
         );
@@ -219,6 +222,7 @@ impl PropertySpillManifest {
         let mut artifact_id = None;
         let mut artifact_len = None;
         let mut artifact_digest = None;
+        let mut artifact_sha256 = None;
         let mut value_count = None;
         let mut value_bytes = None;
         let mut blocks = Vec::new();
@@ -237,6 +241,13 @@ impl PropertySpillManifest {
                 }
                 ["artifact_digest", value] => {
                     artifact_digest = Some(parse_u64(value, "artifact digest")?)
+                }
+                ["artifact_sha256", value] => {
+                    artifact_sha256 = Some(value.parse().map_err(|error| {
+                        PropertySpillError::Corrupt(format!(
+                            "invalid artifact SHA-256 digest: {error}"
+                        ))
+                    })?)
                 }
                 ["value_count", value] => value_count = Some(parse_u64(value, "value count")?),
                 ["value_bytes", value] => value_bytes = Some(parse_u64(value, "value bytes")?),
@@ -275,6 +286,7 @@ impl PropertySpillManifest {
             artifact_id: required(artifact_id, "artifact id")?,
             artifact_len: required(artifact_len, "artifact length")?,
             artifact_digest: ContentDigest(required(artifact_digest, "artifact digest")?),
+            artifact_sha256: required(artifact_sha256, "artifact SHA-256 digest")?,
             value_count: required(value_count, "value count")?,
             value_bytes: required(value_bytes, "value bytes")?,
             blocks,
@@ -289,7 +301,7 @@ pub struct PropertySpillWriter {
     file: File,
     generation: ManifestGeneration,
     config: PropertySpillConfig,
-    artifact_digest: DigestState,
+    artifact_digest: IntegrityHasher,
     artifact_len: u64,
     next_spill_id: u64,
     next_block_id: u64,
@@ -307,7 +319,7 @@ impl PropertySpillWriter {
     ) -> Result<Self, PropertySpillError> {
         let path = path.into();
         let mut file = File::create(&path)?;
-        let mut artifact_digest = DigestState::new();
+        let mut artifact_digest = IntegrityHasher::new();
         write_hashed(&mut file, &mut artifact_digest, ARTIFACT_HEADER)?;
         write_hashed(&mut file, &mut artifact_digest, &generation.0.to_le_bytes())?;
         Ok(Self {
@@ -361,11 +373,13 @@ impl PropertySpillWriter {
     pub fn finish(mut self) -> Result<PropertySpillManifest, PropertySpillError> {
         self.flush_block()?;
         self.file.sync_all()?;
+        let artifact_integrity = self.artifact_digest.finish();
         let manifest = PropertySpillManifest {
             generation: self.generation,
             artifact_id: ARTIFACT_ID,
             artifact_len: self.artifact_len,
-            artifact_digest: ContentDigest(self.artifact_digest.finish()),
+            artifact_digest: ContentDigest(artifact_integrity.crc32c.as_u64()),
+            artifact_sha256: artifact_integrity.sha256,
             value_count: self.next_spill_id,
             value_bytes: self.value_bytes,
             blocks: self.blocks,
@@ -401,7 +415,7 @@ impl PropertySpillWriter {
         let value_count = u32::try_from(self.pending.len()).map_err(|_| {
             PropertySpillError::Corrupt("property spill block count exceeds u32".to_string())
         })?;
-        let mut block_digest = DigestState::new();
+        let mut block_digest = Crc32cHasher::new();
         write_double_hashed(
             &mut self.file,
             &mut self.artifact_digest,
@@ -684,28 +698,9 @@ impl<'a> Cursor<'a> {
     }
 }
 
-struct DigestState(u64);
-
-impl DigestState {
-    const fn new() -> Self {
-        Self(0xcbf29ce484222325)
-    }
-
-    fn update(&mut self, bytes: &[u8]) {
-        for byte in bytes {
-            self.0 ^= u64::from(*byte);
-            self.0 = self.0.wrapping_mul(0x100000001b3);
-        }
-    }
-
-    const fn finish(self) -> u64 {
-        self.0
-    }
-}
-
 fn write_hashed(
     writer: &mut impl Write,
-    digest: &mut DigestState,
+    digest: &mut IntegrityHasher,
     bytes: &[u8],
 ) -> Result<(), PropertySpillError> {
     writer.write_all(bytes)?;
@@ -715,8 +710,8 @@ fn write_hashed(
 
 fn write_double_hashed(
     writer: &mut impl Write,
-    artifact_digest: &mut DigestState,
-    block_digest: &mut DigestState,
+    artifact_digest: &mut IntegrityHasher,
+    block_digest: &mut Crc32cHasher,
     bytes: &[u8],
 ) -> Result<(), PropertySpillError> {
     writer.write_all(bytes)?;

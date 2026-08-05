@@ -18,6 +18,7 @@ skein-cypher = { path = "crates/cypher" }
 skein-ddl = { path = "crates/ddl" }
 skein-executor = { path = "crates/executor" }
 skein-expression = { path = "crates/expression" }
+skein-integrity = { path = "crates/integrity" }
 skein-optimizer = { path = "crates/optimizer" }
 skein-plan = { path = "crates/plan" }
 skein-plan-cache = { path = "crates/plan-cache" }
@@ -62,6 +63,7 @@ members = [
   "crates/expression",
   "crates/fuzz",
   "crates/cgroup",
+  "crates/integrity",
   "crates/optimizer",
   "crates/plan",
   "crates/plan-cache",
@@ -136,4 +138,8 @@ harness = false
 
 [[bench]]
 name = "executor_vectorization"
+harness = false
+
+[[bench]]
+name = "integrity_checksum"
 harness = false

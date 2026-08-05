@@ -30,10 +30,10 @@ batch becomes a durable commit decision at the WAL sync boundary. Applying that
 batch makes it visible, and returning from the mutation acknowledges it. A crash
 between sync and acknowledgement may therefore recover a committed batch whose
 acknowledgement was not observed, which is the standard ambiguous-commit case.
-The model also uses the default `TolerateTornTail` recovery policy. One model
-epoch represents one logical batch and its contiguous WAL LSN. Tolerance is
-limited to a non-newline-terminated final frame; corruption in a complete frame
-fails closed regardless of its WAL position.
+The model uses strict recovery for ordinary startup. One model epoch represents
+one logical batch and its contiguous WAL LSN. A non-newline-terminated final
+frame fails startup and can only be discarded through the explicit writable
+doctor repair mode; corruption in a complete frame always fails closed.
 
 The model checks:
 
@@ -102,8 +102,8 @@ freedom, and rely on these environmental assumptions:
 - durable file replacement is atomic and the parent-directory sync preserves
   the selected name on supported filesystems;
 - the OS file lock provides exclusive ownership for a canonical directory;
-- checksums detect malformed complete records, and a tolerated torn write is a
-  non-newline-terminated frame at the non-synced WAL tail;
+- checksums detect malformed complete records, and doctor repair may discard
+  only a non-newline-terminated frame at the non-synced WAL tail;
 - validated WAL batches replay deterministically, or recovery fails without
   publishing a database handle;
 - the model's checkpoint artifact represents the checkpoint, canonical graph,

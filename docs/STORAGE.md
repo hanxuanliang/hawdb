@@ -1,6 +1,6 @@
 # Storage Design
 
-## Current V2 Storage
+## Current V1 Storage
 
 The current storage implementation is a small durable graph store slice. It is
 not an LSM tree and it does not depend on RocksDB or another storage engine.
@@ -33,12 +33,13 @@ Recovery:
 1. Load `manifest.skein` when present and verify its checksum.
 2. Reject unsupported manifest storage versions before using manifest state.
 3. Load the checkpoint generation named by the manifest.
-4. Verify the checkpoint checksum.
+4. Verify the checkpoint length, CRC32C, and SHA-256 identity.
 5. Reject unsupported checkpoint storage versions before importing records.
 6. Replay valid WAL entries in order. When configured, the WAL replay entry
    limit is checked after a record is decoded and before applying it.
-7. In the default recovery mode, stop replay at a torn tail or checksum
-   mismatch. In strict recovery mode, reject the open instead.
+7. Reject ordinary open on a torn WAL tail or checksum mismatch without
+   modifying the WAL. `DoctorRepairTornTail` is the only mode that may discard
+   an incomplete final frame.
 8. In materialized mode, rebuild in-memory adjacency and property indexes. In
    out-of-core mode, retain the immutable canonical reader and keep only the
    bounded mutation delta resident.
@@ -55,8 +56,7 @@ checkpoint persistence and old-WAL reclamation from replaying checkpointed
 mutations twice. Checkpoint, manifest, and projected graph artifact publication write a
 temporary file, sync the file contents, atomically rename it into place, and
 sync the parent directory. Checkpoint and projected graph artifact payloads use
-zstd by default inside a checksummed binary envelope while preserving legacy
-plain-text read compatibility. Manifest and WAL files remain plain text so boot
+zstd inside the required V1 checksummed binary envelope. Manifest and WAL files remain plain text so boot
 metadata and append-only mutation records stay inspectable and avoid compression
 work on every mutation. This keeps publication durable while avoiding
 per-mutation directory syncs, manifest writes, or WAL compression write
@@ -76,11 +76,21 @@ The relationship pattern create path uses a single batch record for source node,
 target node, and relationship creation. Recovery only applies a batch after its
 whole record passes checksum validation, so a torn tail cannot leave behind a
 half-created path.
-Torn-tail tolerance applies only to the final physical record when it is not
+Doctor torn-tail repair applies only to the final physical record when it is not
 newline-terminated. A newline-terminated record is a complete frame: malformed
 UTF-8, a missing or invalid checksum, or a checksum mismatch is corruption even
-at the end of the WAL, so recovery quarantines the WAL and fails closed instead
-of truncating a potentially acknowledged commit.
+at the end of the WAL, so recovery fails closed instead of truncating a
+potentially acknowledged commit.
+
+Integrity checks are layered for throughput. WAL records, immutable segment
+blocks, cache admission, manifests, and projection envelopes use CRC32C; the
+implementation selects hardware acceleration on supported x86-64 CPUs and a
+portable fallback elsewhere. Checkpoint and subordinate manifest publication
+also records SHA-256. Canonical artifact writers compute CRC32C and SHA-256 in
+the same sequential write pass, while request-time reads verify only the block
+being admitted to cache. `Database::scrub_storage` is the explicit full scan:
+it streams every canonical artifact through CRC32C and SHA-256, validates WAL
+framing and LSN continuity, and poisons the open handle on any integrity error.
 
 `max_wal_replay_entries` counts these top-level WAL records, not the child
 operations inside a batch, so a budgeted recovery either applies a complete
@@ -118,10 +128,11 @@ is durable.
 `Database::storage_recovery_report` exposes the open-time recovery boundary in
 structured form: recovery mode, checkpoint epoch, checkpoint-covered commit
 epoch, WAL presence, replay start LSN, next LSN after replay, replayed WAL
-record count, configured WAL replay entry bound when present, ignored torn-tail
-detail for tolerant recovery, recovered commit epoch, and whether the store is
-durable. This report is diagnostic state only; it does not change WAL replay
-semantics or the on-disk format.
+record count, configured WAL replay entry bound when present, explicit doctor
+repair detail when one was requested, recovered commit epoch, and whether the
+store is durable. Ordinary open is strict: a torn tail or checksum mismatch
+fails startup without changing the WAL. Doctor repair requires a writable,
+exclusive open and may discard the incomplete final record.
 The CLI command `skein storage-recovery-report [--strict]
 [--max-wal-replay-entries <n>] [--require-durable]
 [--require-checkpoint-boundary] [--require-bounded-wal-replay]
@@ -145,9 +156,8 @@ neighbor, relationship_id)`. Groups below the dense threshold use one sparse
 block; dense groups are split into bounded blocks and store complete
 relationship rows to avoid random canonical row lookups. The external merge
 uses key-only heap entries, bounded fan-in, and streaming block digests. A
-legacy generation without adjacency metadata falls back to endpoint Bloom
-pruning; a generation that declares the sidecar but fails validation returns an
-error rather than partial traversal results.
+missing or invalid adjacency metadata fails the V1 open rather than falling
+back to partial traversal behavior.
 
 The cache has a hard byte capacity, stable generation/digest keys, CLOCK
 eviction, pin accounting, and fail-closed oversized-entry admission. Endpoint
@@ -677,7 +687,7 @@ than using a partial index.
 Out-of-core range and full-text reads stream candidate IDs from a complete
 projection, fetch the canonical row for an exact residual check, skip base rows
 overridden or deleted by the WAL delta, and finally scan the bounded delta.
-Missing legacy projection metadata permits the canonical fallback. Published
+An absent rebuildable projection permits the canonical fallback. Published
 metadata with a corrupt manifest or block fails closed.
 
 ## Segmented Lexical Projection
@@ -696,9 +706,9 @@ for the authorized metadata candidate set, merges a bounded upsert/delete
 mini-delta, and retains only the text page window or hybrid rank window in a
 streaming TopK. Reports expose posting bytes read, candidate postings visited,
 the exact matching-document count, and whether segmented BM25 was selected.
-Checkpoint replaces the base generation and clears the mini-delta. A stale or
-legacy manifest falls back to the reference scorer; a declared corrupt artifact
-fails closed.
+Checkpoint replaces the base generation and clears the mini-delta. A stale
+rebuildable projection falls back to the reference scorer; a declared corrupt
+artifact fails closed.
 
 Checkpoint also publishes immutable, generation-named document descriptor,
 full-document payload, metadata-only sidecar, vector-only sidecar, sidecar

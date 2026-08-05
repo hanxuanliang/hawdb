@@ -25,8 +25,9 @@ and algorithms outside active routes are not implied backlog items.
 
 - [ ] Qualify the generation-bound out-of-core search path on production-shaped
   data.
-  - Run exact text, vector, and hybrid parity for metadata, ACL, lifecycle,
-    incremental, checkpoint, reopen, and corruption cases.
+  - Run exact text, vector, and hybrid parity for metadata, lifecycle,
+    incremental, checkpoint, reopen, and corruption cases. Include ACL parity
+    only when the release feature set enables `acl`.
   - Exercise at least 100,000 documents and a corpus larger than the admitted
     search memory budget.
   - Record P50, P95, and P99 latency, RSS, page faults, posting and sidecar
@@ -41,8 +42,9 @@ and algorithms outside active routes are not implied backlog items.
   Mem embeddings.
   - Compare 4-bit candidate recall against canonical raw-vector TopK and use
     the optional `turbovec` feature as a differential oracle, not as truth.
-  - Cover unfiltered, metadata-filtered, ACL-filtered, incremental, checkpoint,
-    reopen, stale-generation, corruption, cancellation, and mixed-load cases.
+  - Cover unfiltered, metadata-filtered, incremental, checkpoint, reopen,
+    stale-generation, corruption, cancellation, and mixed-load cases. Include
+    ACL-filtered cases only when the release feature set enables `acl`.
   - Record candidate recall, final raw-reranked recall, P50/P95/P99 latency,
     steady and peak RSS, page faults, projection bytes, build amplification,
     skipped blocks, admitted workers, and kernel selection.

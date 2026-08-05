@@ -10,6 +10,7 @@ use crate::search::{
 use crate::telemetry::{KernelTelemetry, KernelTelemetryOperation, TelemetrySink};
 use crate::value::Value;
 use skein_core::RuntimeTaskContext;
+use skein_integrity::{checksum_u64, integrity_digest, IntegrityHasher, Sha256Digest};
 #[path = "store/source_scan.rs"]
 mod source_scan;
 #[path = "store/statistics_refresh.rs"]
@@ -45,7 +46,7 @@ pub use skein_storage::{
     SegmentRangeReader, SegmentReadError, SegmentReadExecutionError, SegmentReadExecutionReport,
     SegmentReadExecutor, SegmentReadPayload, SegmentReadRange, SegmentReadSchedule,
     SegmentReadScheduler, SegmentReadWave, StorageBackupReport, StorageReclamationWatermark,
-    StorageRecoveryReport, StorageResidencyMode, StorageRestoreReport, StoreId,
+    StorageRecoveryReport, StorageResidencyMode, StorageRestoreReport, StorageScrubReport, StoreId,
     StoreStableIdMapping, WalReplayConfig,
 };
 pub use source_scan::SourceScanRow;
@@ -56,21 +57,17 @@ use std::io::{BufRead, BufReader, Cursor, Read, Write};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
-const LEGACY_STORAGE_VERSION: &str = "skein-storage-v1";
-const STORAGE_VERSION: &str = "skein-storage-v2";
-const LEGACY_CHECKPOINT_FILE: &str = "checkpoint.skein";
+const STORAGE_VERSION: &str = "skein-storage-v1";
 const MANIFEST_FILE: &str = "manifest.skein";
 const PROJECTED_GRAPHS_FILE: &str = "projected_graphs.skein";
 const STABLE_ID_MAPPING_FILE: &str = "stable_ids.skein";
 const PROJECTED_GRAPH_ARTIFACT_VERSION: u64 = 1;
-const LEGACY_WAL_FILE: &str = "wal.skein";
 const CHECKPOINT_HEADER_V1: &str = "SKEIN_CHECKPOINT_V1";
-const CHECKPOINT_HEADER_V2: &str = "SKEIN_CHECKPOINT_V2";
 const MANIFEST_HEADER_V1: &str = "SKEIN_MANIFEST_V1";
-const MANIFEST_HEADER_V2: &str = "SKEIN_MANIFEST_V2";
-const WAL_HEADER_V2: &str = "SKEIN_WAL_V2";
+const WAL_HEADER_V1: &str = "SKEIN_WAL_V1";
 const BACKUP_MANIFEST_FILE: &str = "backup.skein";
 const BACKUP_HEADER_V1: &str = "SKEIN_BACKUP_V1";
 const CANONICAL_MANIFEST_MAX_BYTES: u64 = 256 * 1024 * 1024;
@@ -245,23 +242,13 @@ fn parse_property_projection_manifest_generation_file(name: &str) -> Option<u64>
         .ok()
 }
 
-fn has_generational_artifacts(root: &Path) -> Result<bool> {
+fn has_storage_artifacts(root: &Path) -> Result<bool> {
     for entry in fs::read_dir(root)? {
         let name = entry?.file_name();
         let Some(name) = name.to_str() else {
             continue;
         };
-        if parse_generation_file(name, "checkpoint.").is_some()
-            || parse_generation_file(name, "wal.").is_some()
-            || parse_generation_file(name, "canonical.").is_some()
-            || parse_canonical_manifest_generation_file(name).is_some()
-            || parse_generation_file(name, "adjacency.").is_some()
-            || parse_canonical_adjacency_manifest_generation_file(name).is_some()
-            || parse_generation_file(name, "properties.").is_some()
-            || parse_property_spill_manifest_generation_file(name).is_some()
-            || parse_generation_file(name, "property-index.").is_some()
-            || parse_property_projection_manifest_generation_file(name).is_some()
-        {
+        if name.ends_with(".skein") || name.ends_with(".skein.tmp") {
             return Ok(true);
         }
     }
@@ -280,7 +267,7 @@ fn store_id_for_path(root: &Path) -> Result<StoreId> {
 }
 
 fn encode_wal_header(generation: u64, start_lsn: u64) -> String {
-    let body = format!("{WAL_HEADER_V2}\t{generation}\t{start_lsn}");
+    let body = format!("{WAL_HEADER_V1}\t{generation}\t{start_lsn}");
     let checksum = checksum_bytes(body.as_bytes());
     format!("{body}\t{checksum}")
 }
@@ -1203,6 +1190,7 @@ pub struct GraphStore {
     auto_materialize_checkpoint_bytes: u64,
     max_out_of_core_delta_bytes: Option<u64>,
     post_wal_apply_poisoned: bool,
+    integrity_poisoned: Arc<AtomicBool>,
     durable: Option<DurableStore>,
 }
 
@@ -1411,7 +1399,7 @@ impl Iterator for GraphRelationshipIterator {
 }
 
 fn canonical_segment_error(error: CanonicalSegmentError) -> SkeinError {
-    SkeinError::Storage(error.to_string())
+    SkeinError::StorageIntegrity(error.to_string())
 }
 
 /// Result of reading Source scan sidecar candidates. The rows have passed
@@ -1468,6 +1456,12 @@ impl GraphStore {
     }
 
     pub(crate) fn ensure_usable(&self) -> Result<()> {
+        if self.integrity_poisoned.load(AtomicOrdering::Acquire) {
+            return Err(SkeinError::Storage(
+                "database handle is poisoned after a runtime storage integrity failure; close and reopen the database before issuing more operations"
+                    .to_string(),
+            ));
+        }
         if self.post_wal_apply_poisoned {
             return Err(SkeinError::Storage(
                 "database handle is poisoned after a durable WAL batch failed during in-memory apply; close and reopen the database before issuing more operations"
@@ -1479,6 +1473,16 @@ impl GraphStore {
 
     pub fn post_wal_apply_poisoned(&self) -> bool {
         self.post_wal_apply_poisoned
+    }
+
+    pub fn storage_handle_poisoned(&self) -> bool {
+        self.post_wal_apply_poisoned || self.integrity_poisoned.load(AtomicOrdering::Acquire)
+    }
+
+    pub(crate) fn poison_on_storage_error<T>(&self, result: &Result<T>) {
+        if matches!(result, Err(SkeinError::StorageIntegrity(_))) {
+            self.integrity_poisoned.store(true, AtomicOrdering::Release);
+        }
     }
 
     pub fn open(path: impl AsRef<Path>, catalog: &mut Catalog) -> Result<Self> {
@@ -1621,6 +1625,7 @@ impl GraphStore {
             auto_materialize_checkpoint_bytes: replay_config.auto_materialize_checkpoint_bytes,
             max_out_of_core_delta_bytes: replay_config.max_out_of_core_delta_bytes,
             post_wal_apply_poisoned: false,
+            integrity_poisoned: Arc::new(AtomicBool::new(false)),
             durable: Some(durable),
         };
         store.load_checkpoint(catalog, replay_config)?;
@@ -5683,6 +5688,18 @@ impl GraphStore {
             .backup_to(destination.as_ref())
     }
 
+    pub fn scrub_storage(&mut self) -> Result<StorageScrubReport> {
+        self.ensure_usable()?;
+        let durable = self.durable.as_ref().ok_or_else(|| {
+            SkeinError::Storage("an in-memory database has no durable storage to scrub".to_string())
+        })?;
+        let result = durable.scrub_storage();
+        if result.is_err() {
+            self.integrity_poisoned.store(true, AtomicOrdering::Release);
+        }
+        result
+    }
+
     pub fn checkpoint_with_reader_epoch(
         &mut self,
         catalog: &Catalog,
@@ -6110,11 +6127,7 @@ impl GraphStore {
         self.durable
             .as_ref()
             .and_then(|durable| durable.canonical_segments.as_ref())
-            .map(|reader| {
-                reader
-                    .get_node(id)
-                    .map_err(|error| SkeinError::Storage(error.to_string()))
-            })
+            .map(|reader| reader.get_node(id).map_err(canonical_segment_error))
             .transpose()
             .map(Option::flatten)
     }
@@ -6123,11 +6136,7 @@ impl GraphStore {
         self.durable
             .as_ref()
             .and_then(|durable| durable.canonical_segments.as_ref())
-            .map(|reader| {
-                reader
-                    .get_relationship(id)
-                    .map_err(|error| SkeinError::Storage(error.to_string()))
-            })
+            .map(|reader| reader.get_relationship(id).map_err(canonical_segment_error))
             .transpose()
             .map(Option::flatten)
     }
@@ -6284,11 +6293,7 @@ impl GraphStore {
         }
         self.canonical_base
             .as_ref()
-            .map(|reader| {
-                reader
-                    .get_node(id)
-                    .map_err(|error| SkeinError::Storage(error.to_string()))
-            })
+            .map(|reader| reader.get_node(id).map_err(canonical_segment_error))
             .transpose()
             .map(Option::flatten)
     }
@@ -6302,11 +6307,7 @@ impl GraphStore {
         }
         self.canonical_base
             .as_ref()
-            .map(|reader| {
-                reader
-                    .get_relationship(id)
-                    .map_err(|error| SkeinError::Storage(error.to_string()))
-            })
+            .map(|reader| reader.get_relationship(id).map_err(canonical_segment_error))
             .transpose()
             .map(Option::flatten)
     }
@@ -6361,7 +6362,7 @@ impl GraphStore {
                 }
                 Ok(CanonicalScanControl::Continue)
             })
-            .map_err(|error| SkeinError::Storage(error.to_string()))?;
+            .map_err(canonical_segment_error)?;
         if canonical_control == CanonicalScanControl::Stop {
             return Ok(graph_control);
         }
@@ -6447,7 +6448,7 @@ impl GraphStore {
                 }
                 Ok(CanonicalScanControl::Continue)
             })
-            .map_err(|error| SkeinError::Storage(error.to_string()))?;
+            .map_err(canonical_segment_error)?;
         if canonical_control == CanonicalScanControl::Stop {
             return Ok(graph_control);
         }
@@ -6593,6 +6594,7 @@ impl GraphStore {
             auto_materialize_checkpoint_bytes: self.auto_materialize_checkpoint_bytes,
             max_out_of_core_delta_bytes: self.max_out_of_core_delta_bytes,
             post_wal_apply_poisoned: self.post_wal_apply_poisoned,
+            integrity_poisoned: Arc::clone(&self.integrity_poisoned),
             durable: None,
         }
     }
@@ -7799,7 +7801,7 @@ impl GraphStore {
                 }
                 Ok(CanonicalScanControl::Continue)
             })
-            .map_err(|error| SkeinError::Storage(error.to_string()))?;
+            .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
         if projection_control == CanonicalScanControl::Stop {
             return Ok(graph_control);
         }
@@ -7926,7 +7928,7 @@ impl GraphStore {
                 }
                 Ok(CanonicalScanControl::Continue)
             })
-            .map_err(|error| SkeinError::Storage(error.to_string()))?;
+            .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
         if projection_control == CanonicalScanControl::Stop {
             return Ok(graph_control);
         }
@@ -8028,7 +8030,7 @@ impl GraphStore {
                         };
                         Ok(consume_canonical(relationship))
                     })
-                    .map_err(|error| SkeinError::Storage(error.to_string()))?
+                    .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?
                     .1
             } else {
                 let endpoint_direction = match direction {
@@ -8876,36 +8878,39 @@ impl GraphStore {
         let mut consume = |payload: SegmentReadPayload| {
             for segment_id in &payload.range.segment_ids {
                 let range = ranges.get(segment_id).ok_or_else(|| {
-                    SkeinError::Storage(format!(
+                    SkeinError::StorageIntegrity(format!(
                         "source scan reader returned unknown segment {segment_id}"
                     ))
                 })?;
                 let start = usize::try_from(range.offset.saturating_sub(payload.range.offset))
                     .map_err(|_| {
-                        SkeinError::Storage(
+                        SkeinError::StorageIntegrity(
                             "source scan payload offset exceeds address space".to_string(),
                         )
                     })?;
                 let end = start
                     .checked_add(usize::try_from(range.length.get()).map_err(|_| {
-                        SkeinError::Storage(
+                        SkeinError::StorageIntegrity(
                             "source scan payload length exceeds address space".to_string(),
                         )
                     })?)
                     .ok_or_else(|| {
-                        SkeinError::Storage("source scan payload slice overflows".to_string())
+                        SkeinError::StorageIntegrity(
+                            "source scan payload slice overflows".to_string(),
+                        )
                     })?;
                 let bytes = payload.bytes.get(start..end).ok_or_else(|| {
-                    SkeinError::Storage(
+                    SkeinError::StorageIntegrity(
                         "source scan coalesced payload does not cover a segment".to_string(),
                     )
                 })?;
                 if checksum_bytes(bytes) != checksums[segment_id] {
-                    return Err(SkeinError::Storage(format!(
+                    return Err(SkeinError::StorageIntegrity(format!(
                             "source scan segment {segment_id} checksum changed after manifest validation"
                         )));
                 }
-                let segment_rows = source_scan::decode_payload(bytes)?;
+                let segment_rows = source_scan::decode_payload(bytes)
+                    .map_err(|error| SkeinError::StorageIntegrity(error.to_string()))?;
                 let positions = candidates.remove(segment_id).flatten();
                 for (row_id, row) in segment_rows.into_iter().enumerate() {
                     if positions
@@ -8942,7 +8947,7 @@ impl GraphStore {
             SegmentReadExecutionError::Stopped(reason) => {
                 SkeinError::Execution(format!("runtime task stopped: {reason}"))
             }
-            error => SkeinError::Storage(error.to_string()),
+            error => SkeinError::StorageIntegrity(error.to_string()),
         })?;
         Ok(SourceScanCandidateRead::Rows {
             graph_epoch: plan.graph_epoch,
@@ -9873,7 +9878,6 @@ impl GraphStore {
             }
             return Ok(());
         }
-        let expected_format = durable.format;
         let expected_generation = durable.checkpoint_epoch;
         let expected_commit_epoch = durable.checkpoint_commit_epoch;
         let text = durable.read_checkpoint_text(config)?;
@@ -9890,29 +9894,25 @@ impl GraphStore {
         let mut loaded_statistics_complete = None;
         let mut saw_checkpoint_statistics = false;
         let mut canonical_records = false;
-        let mut saw_format_header = false;
-        for line in body.lines() {
-            if line == CHECKPOINT_HEADER_V1 {
-                if expected_format != DurableFormat::LegacyV1 {
-                    return Err(SkeinError::Storage(
-                        "generational manifest references a legacy checkpoint".to_string(),
-                    ));
-                }
-                saw_format_header = true;
-                continue;
-            }
-            if line == CHECKPOINT_HEADER_V2 {
-                if expected_format != DurableFormat::GenerationalV2 {
-                    return Err(SkeinError::Storage(
-                        "legacy manifest references a generational checkpoint".to_string(),
-                    ));
-                }
-                saw_format_header = true;
-                continue;
-            }
+        let mut lines = body.lines();
+        if lines.next() != Some(CHECKPOINT_HEADER_V1) {
+            return Err(SkeinError::Storage(
+                "checkpoint is missing the V1 format header".to_string(),
+            ));
+        }
+        let mut saw_storage_version = false;
+        for line in lines {
             let fields = line.split('\t').collect::<Vec<_>>();
             match fields.as_slice() {
-                ["version", version] => validate_storage_version(version)?,
+                ["version", version] => {
+                    if saw_storage_version {
+                        return Err(SkeinError::Storage(
+                            "checkpoint has duplicate storage version".to_string(),
+                        ));
+                    }
+                    validate_storage_version(version)?;
+                    saw_storage_version = true;
+                }
                 ["generation", raw] => {
                     loaded_generation = Some(parse_u64(raw, "checkpoint generation")?);
                 }
@@ -10309,28 +10309,26 @@ impl GraphStore {
                 }
             }
         }
-        if !saw_format_header {
+        if !saw_storage_version {
             return Err(SkeinError::Storage(
-                "checkpoint is missing a supported format header".to_string(),
+                "checkpoint is missing its storage version".to_string(),
             ));
         }
         if saw_checkpoint_statistics {
             self.checkpoint_statistics.advanced_statistics_complete =
                 loaded_statistics_complete.unwrap_or(true);
         }
-        if expected_format == DurableFormat::GenerationalV2 {
-            if loaded_generation != Some(expected_generation) {
-                return Err(SkeinError::Storage(format!(
-                    "checkpoint generation {:?} does not match manifest generation {expected_generation}",
-                    loaded_generation
-                )));
-            }
-            if loaded_commit_epoch != Some(expected_commit_epoch) {
-                return Err(SkeinError::Storage(format!(
-                    "checkpoint commit epoch {:?} does not match manifest commit epoch {expected_commit_epoch}",
-                    loaded_commit_epoch
-                )));
-            }
+        if loaded_generation != Some(expected_generation) {
+            return Err(SkeinError::Storage(format!(
+                "checkpoint generation {:?} does not match manifest generation {expected_generation}",
+                loaded_generation
+            )));
+        }
+        if loaded_commit_epoch != Some(expected_commit_epoch) {
+            return Err(SkeinError::Storage(format!(
+                "checkpoint commit epoch {:?} does not match manifest commit epoch {expected_commit_epoch}",
+                loaded_commit_epoch
+            )));
         }
         match loaded_search_projection_change_log_start_epoch {
             Some(start_epoch) => {
@@ -10339,11 +10337,6 @@ impl GraphStore {
                     self.commit_epoch,
                     &self.search_projection_graph_changes,
                 )?;
-            }
-            None if self.search_projection_graph_changes.is_empty() => {
-                // Checkpoints written before durable projection deltas were
-                // introduced can only resume from mutations after the snapshot.
-                self.search_projection_change_log_start_epoch = self.commit_epoch;
             }
             None => {
                 return Err(SkeinError::Storage(
@@ -10430,7 +10423,6 @@ impl GraphStore {
         let checkpoint_commit_epoch = durable.checkpoint_commit_epoch;
         let wal_replay_start_lsn = durable.wal_replay_start_lsn;
         let wal_generation = durable.wal_generation;
-        let durable_format = durable.format;
         let read_only = durable.read_only;
         let checkpoint_present = durable.checkpoint_path.exists();
         let mut replayed_entries = 0_usize;
@@ -10440,7 +10432,7 @@ impl GraphStore {
         let mut discarded_wal_tail_bytes = 0u64;
         let wal_present = wal_path.exists();
         if !wal_path.exists() {
-            if durable_format == DurableFormat::GenerationalV2 && checkpoint_epoch > 0 {
+            if checkpoint_epoch > 0 {
                 return Err(SkeinError::Storage(format!(
                     "manifest WAL generation {wal_generation} is missing"
                 )));
@@ -10478,7 +10470,7 @@ impl GraphStore {
         let mut expected_lsn = wal_replay_start_lsn;
         let mut byte_offset = 0u64;
         let mut last_valid_offset = 0u64;
-        let mut saw_wal_header = durable_format == DurableFormat::LegacyV1;
+        let mut saw_wal_header = false;
         while let Some(record) = read_bounded_wal_record(&mut reader, config.max_record_bytes)? {
             let record_start = byte_offset;
             byte_offset = byte_offset.saturating_add(record.encoded_len);
@@ -10490,15 +10482,19 @@ impl GraphStore {
                 }
                 let reason = "WAL tail record is not newline-terminated";
                 match config.recovery_mode {
-                    RecoveryMode::TolerateTornTail => {
+                    RecoveryMode::DoctorRepairTornTail => {
+                        if read_only {
+                            return Err(SkeinError::Storage(format!(
+                                "WAL doctor repair requires a writable exclusive open and may discard {} tail bytes",
+                                wal_len.saturating_sub(last_valid_offset)
+                            )));
+                        }
                         torn_tail_reason = Some(reason.to_string());
                         discarded_wal_tail_bytes = wal_len.saturating_sub(last_valid_offset);
-                        if !read_only {
-                            let file = OpenOptions::new().write(true).open(&wal_path)?;
-                            file.set_len(last_valid_offset)?;
-                            file.sync_all()?;
-                            torn_tail_repaired = true;
-                        }
+                        let file = OpenOptions::new().write(true).open(&wal_path)?;
+                        file.set_len(last_valid_offset)?;
+                        file.sync_all()?;
+                        torn_tail_repaired = true;
                         break;
                     }
                     RecoveryMode::Strict => {
@@ -10629,7 +10625,7 @@ impl GraphStore {
             }
             last_valid_offset = byte_offset;
         }
-        if durable_format == DurableFormat::GenerationalV2 && !saw_wal_header {
+        if !saw_wal_header {
             return Err(SkeinError::Storage(format!(
                 "WAL generation {wal_generation} is missing its header"
             )));
@@ -10920,17 +10916,21 @@ struct DurableStore {
     projected_graphs_path: PathBuf,
     stable_id_mapping_path: PathBuf,
     wal_path: PathBuf,
-    format: DurableFormat,
     checkpoint_encoded_len: Option<u64>,
     checkpoint_encoded_checksum: Option<u64>,
+    checkpoint_encoded_sha256: Option<Sha256Digest>,
     canonical_manifest_encoded_len: Option<u64>,
     canonical_manifest_encoded_checksum: Option<u64>,
+    canonical_manifest_encoded_sha256: Option<Sha256Digest>,
     canonical_adjacency_manifest_encoded_len: Option<u64>,
     canonical_adjacency_manifest_encoded_checksum: Option<u64>,
+    canonical_adjacency_manifest_encoded_sha256: Option<Sha256Digest>,
     property_spill_manifest_encoded_len: Option<u64>,
     property_spill_manifest_encoded_checksum: Option<u64>,
+    property_spill_manifest_encoded_sha256: Option<Sha256Digest>,
     property_projection_manifest_encoded_len: Option<u64>,
     property_projection_manifest_encoded_checksum: Option<u64>,
+    property_projection_manifest_encoded_sha256: Option<Sha256Digest>,
     wal_generation: u64,
     checkpoint_epoch: u64,
     checkpoint_commit_epoch: u64,
@@ -10969,6 +10969,18 @@ struct CheckpointImage<'a> {
 struct DurableArtifactMetadata {
     encoded_len: u64,
     encoded_checksum: u64,
+    encoded_sha256: Sha256Digest,
+}
+
+impl DurableArtifactMetadata {
+    fn for_bytes(bytes: &[u8]) -> Self {
+        let digest = integrity_digest(bytes);
+        Self {
+            encoded_len: bytes.len() as u64,
+            encoded_checksum: digest.crc32c.as_u64(),
+            encoded_sha256: digest.sha256,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -10985,6 +10997,7 @@ struct BackupFileEntry {
     name: String,
     encoded_len: u64,
     encoded_checksum: u64,
+    sha256: Sha256Digest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10999,21 +11012,6 @@ struct BackupManifest {
 enum DurableOpenMode {
     CreateIfMissing,
     ExistingOnly,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DurableFormat {
-    LegacyV1,
-    GenerationalV2,
-}
-
-impl DurableFormat {
-    const fn storage_version(self) -> &'static str {
-        match self {
-            Self::LegacyV1 => LEGACY_STORAGE_VERSION,
-            Self::GenerationalV2 => STORAGE_VERSION,
-        }
-    }
 }
 
 impl DurableStore {
@@ -11080,12 +11078,9 @@ impl DurableStore {
         let manifest_path = path.join(MANIFEST_FILE);
         let manifest = if manifest_path.exists() {
             DurableManifest::load(&manifest_path)?
-        } else if path.join(LEGACY_CHECKPOINT_FILE).exists() || path.join(LEGACY_WAL_FILE).exists()
-        {
-            DurableManifest::legacy_default()
-        } else if has_generational_artifacts(path)? {
+        } else if has_storage_artifacts(path)? {
             return Err(SkeinError::Storage(
-                "database has generational artifacts but no durable manifest".to_string(),
+                "database has storage artifacts but no durable manifest".to_string(),
             ));
         } else if initialize_if_empty {
             let manifest = DurableManifest::initial_generation();
@@ -11144,22 +11139,28 @@ impl DurableStore {
             projected_graphs_path: path.join(PROJECTED_GRAPHS_FILE),
             stable_id_mapping_path: path.join(STABLE_ID_MAPPING_FILE),
             wal_path,
-            format: manifest.format,
             checkpoint_encoded_len: manifest.checkpoint_encoded_len,
             checkpoint_encoded_checksum: manifest.checkpoint_encoded_checksum,
+            checkpoint_encoded_sha256: manifest.checkpoint_encoded_sha256,
             canonical_manifest_encoded_len: manifest.canonical_manifest_encoded_len,
             canonical_manifest_encoded_checksum: manifest.canonical_manifest_encoded_checksum,
+            canonical_manifest_encoded_sha256: manifest.canonical_manifest_encoded_sha256,
             canonical_adjacency_manifest_encoded_len: manifest
                 .canonical_adjacency_manifest_encoded_len,
             canonical_adjacency_manifest_encoded_checksum: manifest
                 .canonical_adjacency_manifest_encoded_checksum,
+            canonical_adjacency_manifest_encoded_sha256: manifest
+                .canonical_adjacency_manifest_encoded_sha256,
             property_spill_manifest_encoded_len: manifest.property_spill_manifest_encoded_len,
             property_spill_manifest_encoded_checksum: manifest
                 .property_spill_manifest_encoded_checksum,
+            property_spill_manifest_encoded_sha256: manifest.property_spill_manifest_encoded_sha256,
             property_projection_manifest_encoded_len: manifest
                 .property_projection_manifest_encoded_len,
             property_projection_manifest_encoded_checksum: manifest
                 .property_projection_manifest_encoded_checksum,
+            property_projection_manifest_encoded_sha256: manifest
+                .property_projection_manifest_encoded_sha256,
             wal_generation: manifest.wal_generation,
             checkpoint_epoch: manifest.checkpoint_epoch,
             checkpoint_commit_epoch: manifest.checkpoint_commit_epoch,
@@ -11188,11 +11189,6 @@ impl DurableStore {
     }
 
     fn backup_to(&self, destination: &Path) -> Result<StorageBackupReport> {
-        if self.format != DurableFormat::GenerationalV2 {
-            return Err(SkeinError::Storage(
-                "legacy storage must be checkpointed before backup".to_string(),
-            ));
-        }
         let generation = self.checkpoint_epoch;
         if self.checkpoint_encoded_len.is_none() {
             return Err(SkeinError::Storage(
@@ -11299,6 +11295,270 @@ impl DurableStore {
         result
     }
 
+    fn scrub_storage(&self) -> Result<StorageScrubReport> {
+        let manifest = DurableManifest::load(&self.manifest_path)?;
+        let mut checked_file_count = 1usize;
+        let mut checked_bytes = fs::metadata(&self.manifest_path)?.len();
+        let mut sha256_verified_file_count = 0usize;
+
+        let mut verify_path = |path: &Path,
+                               expected_len: u64,
+                               expected_checksum: u64,
+                               expected_sha256: Sha256Digest,
+                               artifact: &str|
+         -> Result<()> {
+            let (actual_len, actual_checksum, actual_sha256) = file_checksum(path)?;
+            if actual_len != expected_len {
+                return Err(SkeinError::Storage(format!(
+                    "{artifact} length mismatch during scrub: expected {expected_len}, got {actual_len}"
+                )));
+            }
+            if actual_checksum != expected_checksum {
+                return Err(SkeinError::Storage(format!(
+                    "{artifact} CRC32C mismatch during scrub: expected {expected_checksum}, got {actual_checksum}"
+                )));
+            }
+            if actual_sha256 != expected_sha256 {
+                return Err(SkeinError::Storage(format!(
+                    "{artifact} SHA-256 mismatch during scrub: expected {expected_sha256}, got {actual_sha256}"
+                )));
+            }
+            checked_file_count = checked_file_count.saturating_add(1);
+            checked_bytes = checked_bytes.saturating_add(actual_len);
+            sha256_verified_file_count = sha256_verified_file_count.saturating_add(1);
+            Ok(())
+        };
+
+        if let (
+            Some(generation),
+            Some(expected_len),
+            Some(expected_checksum),
+            Some(expected_sha256),
+        ) = (
+            manifest.checkpoint_generation,
+            manifest.checkpoint_encoded_len,
+            manifest.checkpoint_encoded_checksum,
+            manifest.checkpoint_encoded_sha256,
+        ) {
+            verify_path(
+                &self.root_path.join(checkpoint_generation_file(generation)),
+                expected_len,
+                expected_checksum,
+                expected_sha256,
+                "checkpoint",
+            )?;
+        }
+
+        if let (Some(expected_len), Some(expected_checksum), Some(expected_sha256)) = (
+            manifest.canonical_manifest_encoded_len,
+            manifest.canonical_manifest_encoded_checksum,
+            manifest.canonical_manifest_encoded_sha256,
+        ) {
+            let generation = manifest
+                .checkpoint_generation
+                .expect("validated canonical metadata has a checkpoint generation");
+            let manifest_path = self
+                .root_path
+                .join(canonical_manifest_generation_file(generation));
+            verify_path(
+                &manifest_path,
+                expected_len,
+                expected_checksum,
+                expected_sha256,
+                "canonical manifest",
+            )?;
+            let artifact = CanonicalSegmentManifest::decode(&fs::read_to_string(&manifest_path)?)
+                .map_err(|error| SkeinError::Storage(error.to_string()))?;
+            verify_path(
+                &self
+                    .root_path
+                    .join(canonical_artifact_generation_file(generation)),
+                artifact.artifact_len,
+                artifact.artifact_digest.0,
+                artifact.artifact_sha256,
+                "canonical artifact",
+            )?;
+        }
+
+        if let (Some(expected_len), Some(expected_checksum), Some(expected_sha256)) = (
+            manifest.canonical_adjacency_manifest_encoded_len,
+            manifest.canonical_adjacency_manifest_encoded_checksum,
+            manifest.canonical_adjacency_manifest_encoded_sha256,
+        ) {
+            let generation = manifest
+                .checkpoint_generation
+                .expect("validated adjacency metadata has a checkpoint generation");
+            let manifest_path = self
+                .root_path
+                .join(canonical_adjacency_manifest_generation_file(generation));
+            verify_path(
+                &manifest_path,
+                expected_len,
+                expected_checksum,
+                expected_sha256,
+                "canonical adjacency manifest",
+            )?;
+            let artifact = CanonicalAdjacencyManifest::decode(&fs::read_to_string(&manifest_path)?)
+                .map_err(|error| SkeinError::Storage(error.to_string()))?;
+            verify_path(
+                &self
+                    .root_path
+                    .join(canonical_adjacency_artifact_generation_file(generation)),
+                artifact.artifact_len,
+                artifact.artifact_digest.0,
+                artifact.artifact_sha256,
+                "canonical adjacency artifact",
+            )?;
+        }
+
+        if let (Some(expected_len), Some(expected_checksum), Some(expected_sha256)) = (
+            manifest.property_spill_manifest_encoded_len,
+            manifest.property_spill_manifest_encoded_checksum,
+            manifest.property_spill_manifest_encoded_sha256,
+        ) {
+            let generation = manifest
+                .checkpoint_generation
+                .expect("validated property spill metadata has a checkpoint generation");
+            let manifest_path = self
+                .root_path
+                .join(property_spill_manifest_generation_file(generation));
+            verify_path(
+                &manifest_path,
+                expected_len,
+                expected_checksum,
+                expected_sha256,
+                "property spill manifest",
+            )?;
+            let artifact = PropertySpillManifest::decode(&fs::read_to_string(&manifest_path)?)
+                .map_err(|error| SkeinError::Storage(error.to_string()))?;
+            verify_path(
+                &self
+                    .root_path
+                    .join(property_spill_artifact_generation_file(generation)),
+                artifact.artifact_len,
+                artifact.artifact_digest.0,
+                artifact.artifact_sha256,
+                "property spill artifact",
+            )?;
+        }
+
+        if let (Some(expected_len), Some(expected_checksum), Some(expected_sha256)) = (
+            manifest.property_projection_manifest_encoded_len,
+            manifest.property_projection_manifest_encoded_checksum,
+            manifest.property_projection_manifest_encoded_sha256,
+        ) {
+            let generation = manifest
+                .checkpoint_generation
+                .expect("validated property projection metadata has a checkpoint generation");
+            let manifest_path = self
+                .root_path
+                .join(property_projection_manifest_generation_file(generation));
+            verify_path(
+                &manifest_path,
+                expected_len,
+                expected_checksum,
+                expected_sha256,
+                "property projection manifest",
+            )?;
+            let artifact =
+                PersistentPropertyProjectionManifest::decode(&fs::read_to_string(&manifest_path)?)
+                    .map_err(|error| SkeinError::Storage(error.to_string()))?;
+            verify_path(
+                &self
+                    .root_path
+                    .join(property_projection_artifact_generation_file(generation)),
+                artifact.artifact_len,
+                artifact.artifact_digest.0,
+                artifact.artifact_sha256,
+                "property projection artifact",
+            )?;
+        }
+
+        let (wal_record_count, wal_bytes) = self.scrub_wal()?;
+        if self.wal_path.exists() {
+            checked_file_count = checked_file_count.saturating_add(1);
+            checked_bytes = checked_bytes.saturating_add(wal_bytes);
+        }
+        Ok(StorageScrubReport {
+            generation: manifest.wal_generation,
+            checked_file_count,
+            checked_bytes,
+            sha256_verified_file_count,
+            wal_record_count,
+            wal_bytes,
+        })
+    }
+
+    fn scrub_wal(&self) -> Result<(usize, u64)> {
+        if !self.wal_path.exists() {
+            if self.checkpoint_epoch > 0 {
+                return Err(SkeinError::Storage(format!(
+                    "manifest WAL generation {} is missing during scrub",
+                    self.wal_generation
+                )));
+            }
+            return Ok((0, 0));
+        }
+        let wal_bytes = fs::metadata(&self.wal_path)?.len();
+        let mut reader = BufReader::new(File::open(&self.wal_path)?);
+        let mut saw_header = false;
+        let mut expected_lsn = self.wal_replay_start_lsn;
+        let mut record_count = 0usize;
+        while let Some(record) = read_bounded_wal_record(&mut reader, self.max_record_bytes)? {
+            if !record.terminated_by_newline {
+                return Err(SkeinError::Storage(
+                    "WAL scrub rejected a torn tail; use explicit doctor repair if discarding the incomplete record is acceptable"
+                        .to_string(),
+                ));
+            }
+            let line = std::str::from_utf8(&record.bytes).map_err(|error| {
+                SkeinError::Storage(format!("WAL scrub found invalid UTF-8: {error}"))
+            })?;
+            if !saw_header {
+                let (generation, start_lsn) = decode_wal_header(line)?;
+                if generation != self.wal_generation || start_lsn != self.wal_replay_start_lsn {
+                    return Err(SkeinError::Storage(
+                        "WAL scrub found a header that does not match the durable manifest"
+                            .to_string(),
+                    ));
+                }
+                saw_header = true;
+                continue;
+            }
+            let entry = match WalEntry::decode(line)? {
+                WalDecodeResult::Entry(entry) => entry,
+                WalDecodeResult::Corrupt(reason) => {
+                    return Err(SkeinError::Storage(format!(
+                        "WAL scrub found a corrupt record: {reason}"
+                    )));
+                }
+            };
+            if entry.lsn != expected_lsn {
+                return Err(SkeinError::Storage(format!(
+                    "WAL scrub found an LSN sequence mismatch: expected {expected_lsn}, got {}",
+                    entry.lsn
+                )));
+            }
+            expected_lsn = expected_lsn
+                .checked_add(1)
+                .ok_or_else(|| SkeinError::Storage("WAL LSN overflow during scrub".to_string()))?;
+            record_count = record_count.saturating_add(1);
+        }
+        if !saw_header {
+            return Err(SkeinError::Storage(format!(
+                "WAL generation {} is missing its header during scrub",
+                self.wal_generation
+            )));
+        }
+        if expected_lsn != self.next_lsn {
+            return Err(SkeinError::Storage(format!(
+                "WAL scrub ended at next LSN {expected_lsn}, but the open store expects {}",
+                self.next_lsn
+            )));
+        }
+        Ok((record_count, wal_bytes))
+    }
+
     fn read_checkpoint_text(&self, config: WalReplayConfig) -> Result<String> {
         let metadata = fs::metadata(&self.checkpoint_path)?;
         if config
@@ -11311,32 +11571,22 @@ impl DurableStore {
             )));
         }
         let bytes = fs::read(&self.checkpoint_path)?;
-        if self.format == DurableFormat::GenerationalV2 {
-            let expected_len = self.checkpoint_encoded_len.ok_or_else(|| {
-                SkeinError::Storage(
-                    "generational checkpoint is missing its encoded length".to_string(),
-                )
-            })?;
-            let actual_len = u64::try_from(bytes.len()).map_err(|_| {
-                SkeinError::Storage("checkpoint encoded length exceeds u64".to_string())
-            })?;
-            if actual_len != expected_len {
-                return Err(SkeinError::Storage(format!(
-                    "checkpoint encoded length mismatch: expected {expected_len}, got {actual_len}"
-                )));
-            }
-            let expected_checksum = self.checkpoint_encoded_checksum.ok_or_else(|| {
-                SkeinError::Storage(
-                    "generational checkpoint is missing its encoded checksum".to_string(),
-                )
-            })?;
-            let actual_checksum = checksum_bytes(&bytes);
-            if actual_checksum != expected_checksum {
-                return Err(SkeinError::Storage(format!(
-                    "checkpoint encoded checksum mismatch: expected {expected_checksum}, got {actual_checksum}"
-                )));
-            }
-        }
+        let expected_len = self.checkpoint_encoded_len.ok_or_else(|| {
+            SkeinError::Storage("checkpoint is missing its encoded length".to_string())
+        })?;
+        let expected_checksum = self.checkpoint_encoded_checksum.ok_or_else(|| {
+            SkeinError::Storage("checkpoint is missing its encoded checksum".to_string())
+        })?;
+        let expected_sha256 = self.checkpoint_encoded_sha256.ok_or_else(|| {
+            SkeinError::Storage("checkpoint is missing its encoded SHA-256".to_string())
+        })?;
+        verify_integrity(
+            &bytes,
+            expected_len,
+            expected_checksum,
+            expected_sha256,
+            "checkpoint",
+        )?;
         read_durable_text_bytes_with_limit(
             &bytes,
             "checkpoint",
@@ -11450,7 +11700,7 @@ impl DurableStore {
         process_crash_failpoint("before_wal_append");
         let result = (|| {
             let (mut file, created) = self.open_wal_append()?;
-            if created && self.format == DurableFormat::GenerationalV2 {
+            if created {
                 let header = encode_wal_header(self.wal_generation, self.wal_replay_start_lsn);
                 byte_count = byte_count.saturating_add(header.len().saturating_add(1) as u64);
                 writeln!(file, "{header}")?;
@@ -11531,8 +11781,7 @@ impl DurableStore {
         let encoded = canonical_manifest
             .encode()
             .map_err(|error| SkeinError::Storage(error.to_string()))?;
-        let encoded_len = encoded.len() as u64;
-        let encoded_checksum = checksum_bytes(encoded.as_bytes());
+        let metadata = DurableArtifactMetadata::for_bytes(encoded.as_bytes());
         let manifest_path = self
             .root_path
             .join(canonical_manifest_generation_file(generation));
@@ -11557,14 +11806,8 @@ impl DurableStore {
         }
         durable_replace_file(&property_tmp_path, &property_manifest_path)?;
         Ok((
-            DurableArtifactMetadata {
-                encoded_len,
-                encoded_checksum,
-            },
-            DurableArtifactMetadata {
-                encoded_len: property_encoded.len() as u64,
-                encoded_checksum: checksum_bytes(property_encoded.as_bytes()),
-            },
+            metadata,
+            DurableArtifactMetadata::for_bytes(property_encoded.as_bytes()),
         ))
     }
 
@@ -11592,8 +11835,7 @@ impl DurableStore {
             .manifest
             .encode()
             .map_err(|error| SkeinError::Storage(error.to_string()))?;
-        let encoded_len = encoded.len() as u64;
-        let encoded_checksum = checksum_bytes(encoded.as_bytes());
+        let metadata = DurableArtifactMetadata::for_bytes(encoded.as_bytes());
         let manifest_path = self
             .root_path
             .join(canonical_adjacency_manifest_generation_file(generation));
@@ -11604,10 +11846,7 @@ impl DurableStore {
             file.sync_all()?;
         }
         durable_replace_file(&tmp_path, &manifest_path)?;
-        Ok(DurableArtifactMetadata {
-            encoded_len,
-            encoded_checksum,
-        })
+        Ok(metadata)
     }
 
     fn write_persistent_property_projection<N>(
@@ -11642,8 +11881,7 @@ impl DurableStore {
             .manifest
             .encode()
             .map_err(|error| SkeinError::Storage(error.to_string()))?;
-        let encoded_len = encoded.len() as u64;
-        let encoded_checksum = checksum_bytes(encoded.as_bytes());
+        let metadata = DurableArtifactMetadata::for_bytes(encoded.as_bytes());
         let manifest_path = self
             .root_path
             .join(property_projection_manifest_generation_file(generation));
@@ -11654,10 +11892,7 @@ impl DurableStore {
             file.sync_all()?;
         }
         durable_replace_file(&tmp_path, &manifest_path)?;
-        Ok(DurableArtifactMetadata {
-            encoded_len,
-            encoded_checksum,
-        })
+        Ok(metadata)
     }
 
     fn write_checkpoint(
@@ -11671,7 +11906,7 @@ impl DurableStore {
             image.search_projection_graph_changes,
         )?;
         let mut body = String::new();
-        body.push_str(&format!("{CHECKPOINT_HEADER_V2}\n"));
+        body.push_str(&format!("{CHECKPOINT_HEADER_V1}\n"));
         body.push_str(&format!("version\t{STORAGE_VERSION}\n"));
         body.push_str(&format!("generation\t{generation}\n"));
         body.push_str(&format!("commit_epoch\t{}\n", image.commit_epoch));
@@ -11943,20 +12178,14 @@ impl DurableStore {
         let checkpoint_path = self.root_path.join(checkpoint_generation_file(generation));
         let tmp_path = checkpoint_path.with_extension("skein.tmp");
         let encoded = encode_durable_text(&data, DurableCompression::default())?;
-        let encoded_len = u64::try_from(encoded.len()).map_err(|_| {
-            SkeinError::Storage("checkpoint encoded length exceeds u64".to_string())
-        })?;
-        let encoded_checksum = checksum_bytes(&encoded);
+        let metadata = DurableArtifactMetadata::for_bytes(&encoded);
         {
             let mut file = File::create(&tmp_path)?;
             file.write_all(&encoded)?;
             file.sync_all()?;
         }
         durable_replace_file(&tmp_path, &checkpoint_path)?;
-        Ok(DurableArtifactMetadata {
-            encoded_len,
-            encoded_checksum,
-        })
+        Ok(metadata)
     }
 
     fn write_projected_graph_artifacts(&self, body: &str) -> Result<()> {
@@ -11985,9 +12214,9 @@ impl DurableStore {
         if !self.projected_graphs_path.exists() {
             return Ok(BTreeMap::new());
         }
-        let text = read_durable_text(&self.projected_graphs_path, "projected graph artifact")?;
-        let artifacts = split_projected_graph_artifact_checksum(&text)
-            .and_then(|(body, checksum)| {
+        let artifacts = read_durable_text(&self.projected_graphs_path, "projected graph artifact")
+            .and_then(|text| {
+                let (body, checksum) = split_projected_graph_artifact_checksum(&text)?;
                 let actual = checksum_bytes(body.as_bytes());
                 if checksum != actual {
                     return Err(SkeinError::Storage(format!(
@@ -12072,27 +12301,35 @@ impl DurableStore {
             property_projection_manifest,
         } = artifacts;
         let manifest = DurableManifest {
-            format: DurableFormat::GenerationalV2,
             checkpoint_generation: Some(generation),
             checkpoint_encoded_len: Some(checkpoint.encoded_len),
             checkpoint_encoded_checksum: Some(checkpoint.encoded_checksum),
+            checkpoint_encoded_sha256: Some(checkpoint.encoded_sha256),
             canonical_manifest_encoded_len: Some(canonical_manifest.encoded_len),
             canonical_manifest_encoded_checksum: Some(canonical_manifest.encoded_checksum),
+            canonical_manifest_encoded_sha256: Some(canonical_manifest.encoded_sha256),
             canonical_adjacency_manifest_encoded_len: Some(
                 canonical_adjacency_manifest.encoded_len,
             ),
             canonical_adjacency_manifest_encoded_checksum: Some(
                 canonical_adjacency_manifest.encoded_checksum,
             ),
+            canonical_adjacency_manifest_encoded_sha256: Some(
+                canonical_adjacency_manifest.encoded_sha256,
+            ),
             property_spill_manifest_encoded_len: Some(property_spill_manifest.encoded_len),
             property_spill_manifest_encoded_checksum: Some(
                 property_spill_manifest.encoded_checksum,
             ),
+            property_spill_manifest_encoded_sha256: Some(property_spill_manifest.encoded_sha256),
             property_projection_manifest_encoded_len: Some(
                 property_projection_manifest.encoded_len,
             ),
             property_projection_manifest_encoded_checksum: Some(
                 property_projection_manifest.encoded_checksum,
+            ),
+            property_projection_manifest_encoded_sha256: Some(
+                property_projection_manifest.encoded_sha256,
             ),
             wal_generation: generation,
             checkpoint_epoch: generation,
@@ -12108,24 +12345,31 @@ impl DurableStore {
         manifest.write(&self.manifest_path)?;
         checkpoint_publish_failpoint(CheckpointPublishStage::ManifestPublished)?;
 
-        self.format = manifest.format;
         self.checkpoint_path = manifest.checkpoint_path(&self.root_path);
         self.wal_path = manifest.wal_path(&self.root_path);
         self.checkpoint_encoded_len = manifest.checkpoint_encoded_len;
         self.checkpoint_encoded_checksum = manifest.checkpoint_encoded_checksum;
+        self.checkpoint_encoded_sha256 = manifest.checkpoint_encoded_sha256;
         self.canonical_manifest_encoded_len = manifest.canonical_manifest_encoded_len;
         self.canonical_manifest_encoded_checksum = manifest.canonical_manifest_encoded_checksum;
+        self.canonical_manifest_encoded_sha256 = manifest.canonical_manifest_encoded_sha256;
         self.canonical_adjacency_manifest_encoded_len =
             manifest.canonical_adjacency_manifest_encoded_len;
         self.canonical_adjacency_manifest_encoded_checksum =
             manifest.canonical_adjacency_manifest_encoded_checksum;
+        self.canonical_adjacency_manifest_encoded_sha256 =
+            manifest.canonical_adjacency_manifest_encoded_sha256;
         self.property_spill_manifest_encoded_len = manifest.property_spill_manifest_encoded_len;
         self.property_spill_manifest_encoded_checksum =
             manifest.property_spill_manifest_encoded_checksum;
+        self.property_spill_manifest_encoded_sha256 =
+            manifest.property_spill_manifest_encoded_sha256;
         self.property_projection_manifest_encoded_len =
             manifest.property_projection_manifest_encoded_len;
         self.property_projection_manifest_encoded_checksum =
             manifest.property_projection_manifest_encoded_checksum;
+        self.property_projection_manifest_encoded_sha256 =
+            manifest.property_projection_manifest_encoded_sha256;
         self.wal_generation = manifest.wal_generation;
         self.checkpoint_epoch = manifest.checkpoint_epoch;
         self.checkpoint_commit_epoch = manifest.checkpoint_commit_epoch;
@@ -12204,18 +12448,22 @@ impl DurableStore {
 
 #[derive(Debug, Clone, Copy)]
 struct DurableManifest {
-    format: DurableFormat,
     checkpoint_generation: Option<u64>,
     checkpoint_encoded_len: Option<u64>,
     checkpoint_encoded_checksum: Option<u64>,
+    checkpoint_encoded_sha256: Option<Sha256Digest>,
     canonical_manifest_encoded_len: Option<u64>,
     canonical_manifest_encoded_checksum: Option<u64>,
+    canonical_manifest_encoded_sha256: Option<Sha256Digest>,
     canonical_adjacency_manifest_encoded_len: Option<u64>,
     canonical_adjacency_manifest_encoded_checksum: Option<u64>,
+    canonical_adjacency_manifest_encoded_sha256: Option<Sha256Digest>,
     property_spill_manifest_encoded_len: Option<u64>,
     property_spill_manifest_encoded_checksum: Option<u64>,
+    property_spill_manifest_encoded_sha256: Option<Sha256Digest>,
     property_projection_manifest_encoded_len: Option<u64>,
     property_projection_manifest_encoded_checksum: Option<u64>,
+    property_projection_manifest_encoded_sha256: Option<Sha256Digest>,
     wal_generation: u64,
     checkpoint_epoch: u64,
     checkpoint_commit_epoch: u64,
@@ -12227,6 +12475,15 @@ struct DurableManifest {
     source_scan_descriptor_checksum: Option<u64>,
 }
 
+fn artifact_metadata_presence_consistent(
+    encoded_len: Option<u64>,
+    encoded_checksum: Option<u64>,
+    encoded_sha256: Option<Sha256Digest>,
+) -> bool {
+    let present = encoded_len.is_some();
+    encoded_checksum.is_some() == present && encoded_sha256.is_some() == present
+}
+
 impl Default for DurableManifest {
     fn default() -> Self {
         Self::initial_generation()
@@ -12236,44 +12493,22 @@ impl Default for DurableManifest {
 impl DurableManifest {
     const fn initial_generation() -> Self {
         Self {
-            format: DurableFormat::GenerationalV2,
             checkpoint_generation: None,
             checkpoint_encoded_len: None,
             checkpoint_encoded_checksum: None,
+            checkpoint_encoded_sha256: None,
             canonical_manifest_encoded_len: None,
             canonical_manifest_encoded_checksum: None,
+            canonical_manifest_encoded_sha256: None,
             canonical_adjacency_manifest_encoded_len: None,
             canonical_adjacency_manifest_encoded_checksum: None,
+            canonical_adjacency_manifest_encoded_sha256: None,
             property_spill_manifest_encoded_len: None,
             property_spill_manifest_encoded_checksum: None,
+            property_spill_manifest_encoded_sha256: None,
             property_projection_manifest_encoded_len: None,
             property_projection_manifest_encoded_checksum: None,
-            wal_generation: 0,
-            checkpoint_epoch: 0,
-            checkpoint_commit_epoch: 0,
-            oldest_reader_commit_epoch: None,
-            safe_reclaim_commit_epoch: 0,
-            wal_replay_start_lsn: 1,
-            next_lsn: 1,
-            source_scan_commit_epoch: None,
-            source_scan_descriptor_checksum: None,
-        }
-    }
-
-    const fn legacy_default() -> Self {
-        Self {
-            format: DurableFormat::LegacyV1,
-            checkpoint_generation: None,
-            checkpoint_encoded_len: None,
-            checkpoint_encoded_checksum: None,
-            canonical_manifest_encoded_len: None,
-            canonical_manifest_encoded_checksum: None,
-            canonical_adjacency_manifest_encoded_len: None,
-            canonical_adjacency_manifest_encoded_checksum: None,
-            property_spill_manifest_encoded_len: None,
-            property_spill_manifest_encoded_checksum: None,
-            property_projection_manifest_encoded_len: None,
-            property_projection_manifest_encoded_checksum: None,
+            property_projection_manifest_encoded_sha256: None,
             wal_generation: 0,
             checkpoint_epoch: 0,
             checkpoint_commit_epoch: 0,
@@ -12287,19 +12522,13 @@ impl DurableManifest {
     }
 
     fn checkpoint_path(self, root: &Path) -> PathBuf {
-        match self.format {
-            DurableFormat::LegacyV1 => root.join(LEGACY_CHECKPOINT_FILE),
-            DurableFormat::GenerationalV2 => root.join(checkpoint_generation_file(
-                self.checkpoint_generation.unwrap_or(self.checkpoint_epoch),
-            )),
-        }
+        root.join(checkpoint_generation_file(
+            self.checkpoint_generation.unwrap_or(self.checkpoint_epoch),
+        ))
     }
 
     fn wal_path(self, root: &Path) -> PathBuf {
-        match self.format {
-            DurableFormat::LegacyV1 => root.join(LEGACY_WAL_FILE),
-            DurableFormat::GenerationalV2 => root.join(wal_generation_file(self.wal_generation)),
-        }
+        root.join(wal_generation_file(self.wal_generation))
     }
 
     fn validate(self) -> Result<()> {
@@ -12314,97 +12543,115 @@ impl DurableManifest {
                 self.next_lsn, self.wal_replay_start_lsn
             )));
         }
-        if self.format == DurableFormat::GenerationalV2 {
-            if self.canonical_manifest_encoded_len.is_some()
-                != self.canonical_manifest_encoded_checksum.is_some()
-            {
-                return Err(SkeinError::Storage(
-                    "manifest canonical segment metadata is incomplete".to_string(),
-                ));
-            }
-            if self.canonical_adjacency_manifest_encoded_len.is_some()
-                != self.canonical_adjacency_manifest_encoded_checksum.is_some()
-            {
-                return Err(SkeinError::Storage(
-                    "manifest canonical adjacency metadata is incomplete".to_string(),
-                ));
-            }
-            if self.canonical_adjacency_manifest_encoded_len.is_some()
-                && self.canonical_manifest_encoded_len.is_none()
-            {
-                return Err(SkeinError::Storage(
-                    "manifest canonical adjacency requires canonical segments".to_string(),
-                ));
-            }
-            if self.property_spill_manifest_encoded_len.is_some()
-                != self.property_spill_manifest_encoded_checksum.is_some()
-            {
-                return Err(SkeinError::Storage(
-                    "manifest property spill metadata is incomplete".to_string(),
-                ));
-            }
-            if self.property_spill_manifest_encoded_len.is_some()
-                && self.canonical_manifest_encoded_len.is_none()
-            {
-                return Err(SkeinError::Storage(
-                    "manifest property spills require canonical segments".to_string(),
-                ));
-            }
-            if self.property_projection_manifest_encoded_len.is_some()
-                != self.property_projection_manifest_encoded_checksum.is_some()
-            {
-                return Err(SkeinError::Storage(
-                    "manifest property projection metadata is incomplete".to_string(),
-                ));
-            }
-            if self.property_projection_manifest_encoded_len.is_some()
-                && self.canonical_manifest_encoded_len.is_none()
-            {
-                return Err(SkeinError::Storage(
-                    "manifest property projections require canonical segments".to_string(),
-                ));
-            }
-            if self.wal_generation != self.checkpoint_epoch {
-                return Err(SkeinError::Storage(format!(
-                    "manifest WAL generation {} does not match checkpoint epoch {}",
-                    self.wal_generation, self.checkpoint_epoch
-                )));
-            }
-            match self.checkpoint_generation {
-                Some(generation) => {
-                    if generation != self.checkpoint_epoch {
-                        return Err(SkeinError::Storage(format!(
+        if !artifact_metadata_presence_consistent(
+            self.canonical_manifest_encoded_len,
+            self.canonical_manifest_encoded_checksum,
+            self.canonical_manifest_encoded_sha256,
+        ) {
+            return Err(SkeinError::Storage(
+                "manifest canonical segment metadata is incomplete".to_string(),
+            ));
+        }
+        if !artifact_metadata_presence_consistent(
+            self.canonical_adjacency_manifest_encoded_len,
+            self.canonical_adjacency_manifest_encoded_checksum,
+            self.canonical_adjacency_manifest_encoded_sha256,
+        ) {
+            return Err(SkeinError::Storage(
+                "manifest canonical adjacency metadata is incomplete".to_string(),
+            ));
+        }
+        if self.canonical_adjacency_manifest_encoded_len.is_some()
+            && self.canonical_manifest_encoded_len.is_none()
+        {
+            return Err(SkeinError::Storage(
+                "manifest canonical adjacency requires canonical segments".to_string(),
+            ));
+        }
+        if self.canonical_manifest_encoded_len.is_some()
+            && self.canonical_adjacency_manifest_encoded_len.is_none()
+        {
+            return Err(SkeinError::Storage(
+                "manifest canonical segments require canonical adjacency".to_string(),
+            ));
+        }
+        if !artifact_metadata_presence_consistent(
+            self.property_spill_manifest_encoded_len,
+            self.property_spill_manifest_encoded_checksum,
+            self.property_spill_manifest_encoded_sha256,
+        ) {
+            return Err(SkeinError::Storage(
+                "manifest property spill metadata is incomplete".to_string(),
+            ));
+        }
+        if self.property_spill_manifest_encoded_len.is_some()
+            && self.canonical_manifest_encoded_len.is_none()
+        {
+            return Err(SkeinError::Storage(
+                "manifest property spills require canonical segments".to_string(),
+            ));
+        }
+        if !artifact_metadata_presence_consistent(
+            self.property_projection_manifest_encoded_len,
+            self.property_projection_manifest_encoded_checksum,
+            self.property_projection_manifest_encoded_sha256,
+        ) {
+            return Err(SkeinError::Storage(
+                "manifest property projection metadata is incomplete".to_string(),
+            ));
+        }
+        if self.property_projection_manifest_encoded_len.is_some()
+            && self.canonical_manifest_encoded_len.is_none()
+        {
+            return Err(SkeinError::Storage(
+                "manifest property projections require canonical segments".to_string(),
+            ));
+        }
+        if self.wal_generation != self.checkpoint_epoch {
+            return Err(SkeinError::Storage(format!(
+                "manifest WAL generation {} does not match checkpoint epoch {}",
+                self.wal_generation, self.checkpoint_epoch
+            )));
+        }
+        match self.checkpoint_generation {
+            Some(generation) => {
+                if generation != self.checkpoint_epoch {
+                    return Err(SkeinError::Storage(format!(
                             "manifest checkpoint generation {generation} does not match checkpoint epoch {}",
                             self.checkpoint_epoch
                         )));
-                    }
-                    if self.checkpoint_encoded_len.is_none()
-                        || self.checkpoint_encoded_checksum.is_none()
-                    {
-                        return Err(SkeinError::Storage(
-                            "manifest checkpoint artifact metadata is incomplete".to_string(),
-                        ));
-                    }
                 }
-                None => {
-                    if self.checkpoint_epoch != 0
-                        || self.checkpoint_commit_epoch != 0
-                        || self.checkpoint_encoded_len.is_some()
-                        || self.checkpoint_encoded_checksum.is_some()
-                        || self.canonical_manifest_encoded_len.is_some()
-                        || self.canonical_manifest_encoded_checksum.is_some()
-                        || self.canonical_adjacency_manifest_encoded_len.is_some()
-                        || self.canonical_adjacency_manifest_encoded_checksum.is_some()
-                        || self.property_spill_manifest_encoded_len.is_some()
-                        || self.property_spill_manifest_encoded_checksum.is_some()
-                        || self.property_projection_manifest_encoded_len.is_some()
-                        || self.property_projection_manifest_encoded_checksum.is_some()
-                    {
-                        return Err(SkeinError::Storage(
-                            "manifest without a checkpoint must describe generation zero"
-                                .to_string(),
-                        ));
-                    }
+                if self.checkpoint_encoded_len.is_none()
+                    || self.checkpoint_encoded_checksum.is_none()
+                    || self.checkpoint_encoded_sha256.is_none()
+                {
+                    return Err(SkeinError::Storage(
+                        "manifest checkpoint artifact metadata is incomplete".to_string(),
+                    ));
+                }
+            }
+            None => {
+                if self.checkpoint_epoch != 0
+                    || self.checkpoint_commit_epoch != 0
+                    || self.checkpoint_encoded_len.is_some()
+                    || self.checkpoint_encoded_checksum.is_some()
+                    || self.checkpoint_encoded_sha256.is_some()
+                    || self.canonical_manifest_encoded_len.is_some()
+                    || self.canonical_manifest_encoded_checksum.is_some()
+                    || self.canonical_manifest_encoded_sha256.is_some()
+                    || self.canonical_adjacency_manifest_encoded_len.is_some()
+                    || self.canonical_adjacency_manifest_encoded_checksum.is_some()
+                    || self.canonical_adjacency_manifest_encoded_sha256.is_some()
+                    || self.property_spill_manifest_encoded_len.is_some()
+                    || self.property_spill_manifest_encoded_checksum.is_some()
+                    || self.property_spill_manifest_encoded_sha256.is_some()
+                    || self.property_projection_manifest_encoded_len.is_some()
+                    || self.property_projection_manifest_encoded_checksum.is_some()
+                    || self.property_projection_manifest_encoded_sha256.is_some()
+                {
+                    return Err(SkeinError::Storage(
+                        "manifest without a checkpoint must describe generation zero".to_string(),
+                    ));
                 }
             }
         }
@@ -12420,26 +12667,27 @@ impl DurableManifest {
                 "manifest checksum mismatch: expected {checksum}, got {actual}"
             )));
         }
-        let format = if body.lines().any(|line| line == MANIFEST_HEADER_V2) {
-            DurableFormat::GenerationalV2
-        } else if body.lines().any(|line| line == MANIFEST_HEADER_V1) {
-            DurableFormat::LegacyV1
-        } else {
+        let mut lines = body.lines();
+        if lines.next() != Some(MANIFEST_HEADER_V1) {
             return Err(SkeinError::Storage(
-                "manifest is missing a supported format header".to_string(),
+                "manifest is missing the V1 format header".to_string(),
             ));
-        };
-        let mut manifest = match format {
-            DurableFormat::LegacyV1 => Self::legacy_default(),
-            DurableFormat::GenerationalV2 => Self::initial_generation(),
-        };
-        for line in body.lines() {
-            if line == MANIFEST_HEADER_V1 || line == MANIFEST_HEADER_V2 {
+        }
+        let mut manifest = Self::initial_generation();
+        let mut seen_fields = BTreeSet::new();
+        for line in lines {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            if fields == [""] {
                 continue;
             }
-            let fields = line.split('\t').collect::<Vec<_>>();
+            let field = fields[0];
+            if !seen_fields.insert(field) {
+                return Err(SkeinError::Storage(format!(
+                    "manifest has duplicate field: {field}"
+                )));
+            }
             match fields.as_slice() {
-                ["version", version] => validate_storage_version_for_format(version, format)?,
+                ["version", version] => validate_storage_version(version)?,
                 ["checkpoint_generation", raw] => {
                     manifest.checkpoint_generation =
                         parse_optional_u64(raw, "checkpoint generation")?;
@@ -12452,6 +12700,10 @@ impl DurableManifest {
                     manifest.checkpoint_encoded_checksum =
                         parse_optional_u64(raw, "checkpoint encoded checksum")?;
                 }
+                ["checkpoint_encoded_sha256", raw] => {
+                    manifest.checkpoint_encoded_sha256 =
+                        parse_optional_sha256(raw, "checkpoint encoded SHA-256")?;
+                }
                 ["canonical_manifest_encoded_len", raw] => {
                     manifest.canonical_manifest_encoded_len =
                         parse_optional_u64(raw, "canonical manifest encoded length")?;
@@ -12459,6 +12711,10 @@ impl DurableManifest {
                 ["canonical_manifest_encoded_checksum", raw] => {
                     manifest.canonical_manifest_encoded_checksum =
                         parse_optional_u64(raw, "canonical manifest encoded checksum")?;
+                }
+                ["canonical_manifest_encoded_sha256", raw] => {
+                    manifest.canonical_manifest_encoded_sha256 =
+                        parse_optional_sha256(raw, "canonical manifest encoded SHA-256")?;
                 }
                 ["canonical_adjacency_manifest_encoded_len", raw] => {
                     manifest.canonical_adjacency_manifest_encoded_len =
@@ -12468,6 +12724,10 @@ impl DurableManifest {
                     manifest.canonical_adjacency_manifest_encoded_checksum =
                         parse_optional_u64(raw, "canonical adjacency manifest encoded checksum")?;
                 }
+                ["canonical_adjacency_manifest_encoded_sha256", raw] => {
+                    manifest.canonical_adjacency_manifest_encoded_sha256 =
+                        parse_optional_sha256(raw, "canonical adjacency manifest encoded SHA-256")?;
+                }
                 ["property_spill_manifest_encoded_len", raw] => {
                     manifest.property_spill_manifest_encoded_len =
                         parse_optional_u64(raw, "property spill manifest encoded length")?;
@@ -12476,6 +12736,10 @@ impl DurableManifest {
                     manifest.property_spill_manifest_encoded_checksum =
                         parse_optional_u64(raw, "property spill manifest encoded checksum")?;
                 }
+                ["property_spill_manifest_encoded_sha256", raw] => {
+                    manifest.property_spill_manifest_encoded_sha256 =
+                        parse_optional_sha256(raw, "property spill manifest encoded SHA-256")?;
+                }
                 ["property_projection_manifest_encoded_len", raw] => {
                     manifest.property_projection_manifest_encoded_len =
                         parse_optional_u64(raw, "property projection manifest encoded length")?;
@@ -12483,6 +12747,10 @@ impl DurableManifest {
                 ["property_projection_manifest_encoded_checksum", raw] => {
                     manifest.property_projection_manifest_encoded_checksum =
                         parse_optional_u64(raw, "property projection manifest encoded checksum")?;
+                }
+                ["property_projection_manifest_encoded_sha256", raw] => {
+                    manifest.property_projection_manifest_encoded_sha256 =
+                        parse_optional_sha256(raw, "property projection manifest encoded SHA-256")?;
                 }
                 ["wal_generation", raw] => {
                     manifest.wal_generation = parse_u64(raw, "WAL generation")?;
@@ -12515,12 +12783,45 @@ impl DurableManifest {
                     manifest.source_scan_descriptor_checksum =
                         parse_optional_u64(raw, "source scan descriptor checksum")?;
                 }
-                [""] => {}
                 _ => {
                     return Err(SkeinError::Storage(format!(
                         "invalid manifest line: {line}"
                     )));
                 }
+            }
+        }
+        for required in [
+            "version",
+            "checkpoint_generation",
+            "checkpoint_encoded_len",
+            "checkpoint_encoded_checksum",
+            "checkpoint_encoded_sha256",
+            "canonical_manifest_encoded_len",
+            "canonical_manifest_encoded_checksum",
+            "canonical_manifest_encoded_sha256",
+            "canonical_adjacency_manifest_encoded_len",
+            "canonical_adjacency_manifest_encoded_checksum",
+            "canonical_adjacency_manifest_encoded_sha256",
+            "property_spill_manifest_encoded_len",
+            "property_spill_manifest_encoded_checksum",
+            "property_spill_manifest_encoded_sha256",
+            "property_projection_manifest_encoded_len",
+            "property_projection_manifest_encoded_checksum",
+            "property_projection_manifest_encoded_sha256",
+            "wal_generation",
+            "checkpoint_epoch",
+            "checkpoint_commit_epoch",
+            "oldest_reader_commit_epoch",
+            "safe_reclaim_commit_epoch",
+            "wal_replay_start_lsn",
+            "next_lsn",
+            "source_scan_commit_epoch",
+            "source_scan_descriptor_checksum",
+        ] {
+            if !seen_fields.contains(required) {
+                return Err(SkeinError::Storage(format!(
+                    "manifest is missing required field: {required}"
+                )));
             }
         }
         if manifest.safe_reclaim_commit_epoch == 0 && manifest.checkpoint_commit_epoch > 0 {
@@ -12535,58 +12836,73 @@ impl DurableManifest {
 
     fn write(&self, path: &Path) -> Result<()> {
         let mut body = String::new();
-        match self.format {
-            DurableFormat::LegacyV1 => body.push_str(&format!("{MANIFEST_HEADER_V1}\n")),
-            DurableFormat::GenerationalV2 => body.push_str(&format!("{MANIFEST_HEADER_V2}\n")),
-        }
-        body.push_str(&format!("version\t{}\n", self.format.storage_version()));
-        if self.format == DurableFormat::GenerationalV2 {
-            body.push_str(&format!(
-                "checkpoint_generation\t{}\n",
-                encode_optional_u64(self.checkpoint_generation)
-            ));
-            body.push_str(&format!(
-                "checkpoint_encoded_len\t{}\n",
-                encode_optional_u64(self.checkpoint_encoded_len)
-            ));
-            body.push_str(&format!(
-                "checkpoint_encoded_checksum\t{}\n",
-                encode_optional_u64(self.checkpoint_encoded_checksum)
-            ));
-            body.push_str(&format!(
-                "canonical_manifest_encoded_len\t{}\n",
-                encode_optional_u64(self.canonical_manifest_encoded_len)
-            ));
-            body.push_str(&format!(
-                "canonical_manifest_encoded_checksum\t{}\n",
-                encode_optional_u64(self.canonical_manifest_encoded_checksum)
-            ));
-            body.push_str(&format!(
-                "canonical_adjacency_manifest_encoded_len\t{}\n",
-                encode_optional_u64(self.canonical_adjacency_manifest_encoded_len)
-            ));
-            body.push_str(&format!(
-                "canonical_adjacency_manifest_encoded_checksum\t{}\n",
-                encode_optional_u64(self.canonical_adjacency_manifest_encoded_checksum)
-            ));
-            body.push_str(&format!(
-                "property_spill_manifest_encoded_len\t{}\n",
-                encode_optional_u64(self.property_spill_manifest_encoded_len)
-            ));
-            body.push_str(&format!(
-                "property_spill_manifest_encoded_checksum\t{}\n",
-                encode_optional_u64(self.property_spill_manifest_encoded_checksum)
-            ));
-            body.push_str(&format!(
-                "property_projection_manifest_encoded_len\t{}\n",
-                encode_optional_u64(self.property_projection_manifest_encoded_len)
-            ));
-            body.push_str(&format!(
-                "property_projection_manifest_encoded_checksum\t{}\n",
-                encode_optional_u64(self.property_projection_manifest_encoded_checksum)
-            ));
-            body.push_str(&format!("wal_generation\t{}\n", self.wal_generation));
-        }
+        body.push_str(&format!("{MANIFEST_HEADER_V1}\n"));
+        body.push_str(&format!("version\t{STORAGE_VERSION}\n"));
+        body.push_str(&format!(
+            "checkpoint_generation\t{}\n",
+            encode_optional_u64(self.checkpoint_generation)
+        ));
+        body.push_str(&format!(
+            "checkpoint_encoded_len\t{}\n",
+            encode_optional_u64(self.checkpoint_encoded_len)
+        ));
+        body.push_str(&format!(
+            "checkpoint_encoded_checksum\t{}\n",
+            encode_optional_u64(self.checkpoint_encoded_checksum)
+        ));
+        body.push_str(&format!(
+            "checkpoint_encoded_sha256\t{}\n",
+            encode_optional_sha256(self.checkpoint_encoded_sha256)
+        ));
+        body.push_str(&format!(
+            "canonical_manifest_encoded_len\t{}\n",
+            encode_optional_u64(self.canonical_manifest_encoded_len)
+        ));
+        body.push_str(&format!(
+            "canonical_manifest_encoded_checksum\t{}\n",
+            encode_optional_u64(self.canonical_manifest_encoded_checksum)
+        ));
+        body.push_str(&format!(
+            "canonical_manifest_encoded_sha256\t{}\n",
+            encode_optional_sha256(self.canonical_manifest_encoded_sha256)
+        ));
+        body.push_str(&format!(
+            "canonical_adjacency_manifest_encoded_len\t{}\n",
+            encode_optional_u64(self.canonical_adjacency_manifest_encoded_len)
+        ));
+        body.push_str(&format!(
+            "canonical_adjacency_manifest_encoded_checksum\t{}\n",
+            encode_optional_u64(self.canonical_adjacency_manifest_encoded_checksum)
+        ));
+        body.push_str(&format!(
+            "canonical_adjacency_manifest_encoded_sha256\t{}\n",
+            encode_optional_sha256(self.canonical_adjacency_manifest_encoded_sha256)
+        ));
+        body.push_str(&format!(
+            "property_spill_manifest_encoded_len\t{}\n",
+            encode_optional_u64(self.property_spill_manifest_encoded_len)
+        ));
+        body.push_str(&format!(
+            "property_spill_manifest_encoded_checksum\t{}\n",
+            encode_optional_u64(self.property_spill_manifest_encoded_checksum)
+        ));
+        body.push_str(&format!(
+            "property_spill_manifest_encoded_sha256\t{}\n",
+            encode_optional_sha256(self.property_spill_manifest_encoded_sha256)
+        ));
+        body.push_str(&format!(
+            "property_projection_manifest_encoded_len\t{}\n",
+            encode_optional_u64(self.property_projection_manifest_encoded_len)
+        ));
+        body.push_str(&format!(
+            "property_projection_manifest_encoded_checksum\t{}\n",
+            encode_optional_u64(self.property_projection_manifest_encoded_checksum)
+        ));
+        body.push_str(&format!(
+            "property_projection_manifest_encoded_sha256\t{}\n",
+            encode_optional_sha256(self.property_projection_manifest_encoded_sha256)
+        ));
+        body.push_str(&format!("wal_generation\t{}\n", self.wal_generation));
         body.push_str(&format!("checkpoint_epoch\t{}\n", self.checkpoint_epoch));
         body.push_str(&format!(
             "checkpoint_commit_epoch\t{}\n",
@@ -12632,9 +12948,10 @@ fn load_published_canonical_segments(
     cache: Arc<SegmentCache>,
     store_id: StoreId,
 ) -> Result<Option<CanonicalSegmentReader>> {
-    let (Some(expected_len), Some(expected_checksum)) = (
+    let (Some(expected_len), Some(expected_checksum), Some(expected_sha256)) = (
         durable_manifest.canonical_manifest_encoded_len,
         durable_manifest.canonical_manifest_encoded_checksum,
+        durable_manifest.canonical_manifest_encoded_sha256,
     ) else {
         return Ok(None);
     };
@@ -12650,11 +12967,13 @@ fn load_published_canonical_segments(
     })?;
     let manifest_path = root.join(canonical_manifest_generation_file(generation));
     let encoded = fs::read(&manifest_path)?;
-    if encoded.len() as u64 != expected_len || checksum_bytes(&encoded) != expected_checksum {
-        return Err(SkeinError::Storage(
-            "canonical manifest artifact does not match the durable manifest".to_string(),
-        ));
-    }
+    verify_integrity(
+        &encoded,
+        expected_len,
+        expected_checksum,
+        expected_sha256,
+        "canonical manifest",
+    )?;
     let text = std::str::from_utf8(&encoded).map_err(|error| {
         SkeinError::Storage(format!("canonical manifest is not UTF-8: {error}"))
     })?;
@@ -12703,9 +13022,10 @@ fn load_published_property_spills(
     cache: Arc<SegmentCache>,
     store_id: StoreId,
 ) -> Result<Option<PropertySpillReader>> {
-    let (Some(expected_len), Some(expected_checksum)) = (
+    let (Some(expected_len), Some(expected_checksum), Some(expected_sha256)) = (
         durable_manifest.property_spill_manifest_encoded_len,
         durable_manifest.property_spill_manifest_encoded_checksum,
+        durable_manifest.property_spill_manifest_encoded_sha256,
     ) else {
         return Ok(None);
     };
@@ -12719,11 +13039,13 @@ fn load_published_property_spills(
     })?;
     let manifest_path = root.join(property_spill_manifest_generation_file(generation));
     let encoded = fs::read(&manifest_path)?;
-    if encoded.len() as u64 != expected_len || checksum_bytes(&encoded) != expected_checksum {
-        return Err(SkeinError::Storage(
-            "property spill manifest artifact does not match the durable manifest".to_string(),
-        ));
-    }
+    verify_integrity(
+        &encoded,
+        expected_len,
+        expected_checksum,
+        expected_sha256,
+        "property spill manifest",
+    )?;
     let text = std::str::from_utf8(&encoded).map_err(|error| {
         SkeinError::Storage(format!("property spill manifest is not UTF-8: {error}"))
     })?;
@@ -12760,9 +13082,10 @@ fn load_published_property_projection(
     cache: Arc<SegmentCache>,
     store_id: StoreId,
 ) -> Result<Option<PersistentPropertyProjectionReader>> {
-    let (Some(expected_len), Some(expected_checksum)) = (
+    let (Some(expected_len), Some(expected_checksum), Some(expected_sha256)) = (
         durable_manifest.property_projection_manifest_encoded_len,
         durable_manifest.property_projection_manifest_encoded_checksum,
+        durable_manifest.property_projection_manifest_encoded_sha256,
     ) else {
         return Ok(None);
     };
@@ -12778,11 +13101,13 @@ fn load_published_property_projection(
     })?;
     let manifest_path = root.join(property_projection_manifest_generation_file(generation));
     let encoded = fs::read(&manifest_path)?;
-    if encoded.len() as u64 != expected_len || checksum_bytes(&encoded) != expected_checksum {
-        return Err(SkeinError::Storage(
-            "property projection manifest artifact does not match the durable manifest".to_string(),
-        ));
-    }
+    verify_integrity(
+        &encoded,
+        expected_len,
+        expected_checksum,
+        expected_sha256,
+        "property projection manifest",
+    )?;
     let text = std::str::from_utf8(&encoded).map_err(|error| {
         SkeinError::Storage(format!(
             "property projection manifest is not UTF-8: {error}"
@@ -12823,9 +13148,10 @@ fn load_published_canonical_adjacency(
     cache: Arc<SegmentCache>,
     store_id: StoreId,
 ) -> Result<Option<CanonicalAdjacencyReader>> {
-    let (Some(expected_len), Some(expected_checksum)) = (
+    let (Some(expected_len), Some(expected_checksum), Some(expected_sha256)) = (
         durable_manifest.canonical_adjacency_manifest_encoded_len,
         durable_manifest.canonical_adjacency_manifest_encoded_checksum,
+        durable_manifest.canonical_adjacency_manifest_encoded_sha256,
     ) else {
         return Ok(None);
     };
@@ -12841,11 +13167,13 @@ fn load_published_canonical_adjacency(
     })?;
     let manifest_path = root.join(canonical_adjacency_manifest_generation_file(generation));
     let encoded = fs::read(&manifest_path)?;
-    if encoded.len() as u64 != expected_len || checksum_bytes(&encoded) != expected_checksum {
-        return Err(SkeinError::Storage(
-            "canonical adjacency manifest artifact does not match the durable manifest".to_string(),
-        ));
-    }
+    verify_integrity(
+        &encoded,
+        expected_len,
+        expected_checksum,
+        expected_sha256,
+        "canonical adjacency manifest",
+    )?;
     let text = std::str::from_utf8(&encoded).map_err(|error| {
         SkeinError::Storage(format!(
             "canonical adjacency manifest is not UTF-8: {error}"
@@ -12934,7 +13262,7 @@ impl BackupManifest {
                         ));
                     }
                 }
-                ["file", encoded_name, encoded_len, encoded_checksum] => {
+                ["file", encoded_name, encoded_len, encoded_checksum, sha256] => {
                     let name = decode_string(encoded_name)?;
                     validate_backup_file_name(&name)?;
                     if !names.insert(name.clone()) {
@@ -12946,6 +13274,11 @@ impl BackupManifest {
                         name,
                         encoded_len: parse_u64(encoded_len, "backup file length")?,
                         encoded_checksum: parse_u64(encoded_checksum, "backup file checksum")?,
+                        sha256: sha256.parse().map_err(|error| {
+                            SkeinError::Storage(format!(
+                                "invalid backup file SHA-256 digest: {error}"
+                            ))
+                        })?,
                     });
                 }
                 [""] => {}
@@ -12986,10 +13319,11 @@ impl BackupManifest {
         );
         for file in &files {
             body.push_str(&format!(
-                "file\t{}\t{}\t{}\n",
+                "file\t{}\t{}\t{}\t{}\n",
                 encode_string(&file.name),
                 file.encoded_len,
-                file.encoded_checksum
+                file.encoded_checksum,
+                file.sha256
             ));
         }
         let checksum = checksum_bytes(body.as_bytes());
@@ -13074,21 +13408,22 @@ fn validate_new_backup_destination(root: &Path, destination: &Path) -> Result<()
 }
 
 fn copy_backup_file(source: &Path, destination: &Path, name: &str) -> Result<BackupFileEntry> {
-    let (encoded_len, encoded_checksum) = copy_file_with_checksum(source, destination)?;
+    let (encoded_len, encoded_checksum, sha256) = copy_file_with_checksum(source, destination)?;
     Ok(BackupFileEntry {
         name: name.to_string(),
         encoded_len,
         encoded_checksum,
+        sha256,
     })
 }
 
-fn copy_file_with_checksum(source: &Path, destination: &Path) -> Result<(u64, u64)> {
+fn copy_file_with_checksum(source: &Path, destination: &Path) -> Result<(u64, u64, Sha256Digest)> {
     let mut source = File::open(source)?;
     let mut destination = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(destination)?;
-    let mut checksum = StreamingChecksum::new();
+    let mut integrity = IntegrityHasher::new();
     let mut total = 0u64;
     let mut buffer = vec![0u8; 1024 * 1024];
     loop {
@@ -13097,18 +13432,19 @@ fn copy_file_with_checksum(source: &Path, destination: &Path) -> Result<(u64, u6
             break;
         }
         destination.write_all(&buffer[..read])?;
-        checksum.update(&buffer[..read]);
+        integrity.update(&buffer[..read]);
         total = total
             .checked_add(read as u64)
             .ok_or_else(|| SkeinError::Storage("file byte count overflow".to_string()))?;
     }
     destination.sync_all()?;
-    Ok((total, checksum.finish()))
+    let digest = integrity.finish();
+    Ok((total, digest.crc32c.as_u64(), digest.sha256))
 }
 
-fn file_checksum(path: &Path) -> Result<(u64, u64)> {
+fn file_checksum(path: &Path) -> Result<(u64, u64, Sha256Digest)> {
     let mut file = File::open(path)?;
-    let mut checksum = StreamingChecksum::new();
+    let mut integrity = IntegrityHasher::new();
     let mut total = 0u64;
     let mut buffer = vec![0u8; 1024 * 1024];
     loop {
@@ -13116,12 +13452,13 @@ fn file_checksum(path: &Path) -> Result<(u64, u64)> {
         if read == 0 {
             break;
         }
-        checksum.update(&buffer[..read]);
+        integrity.update(&buffer[..read]);
         total = total
             .checked_add(read as u64)
             .ok_or_else(|| SkeinError::Storage("file byte count overflow".to_string()))?;
     }
-    Ok((total, checksum.finish()))
+    let digest = integrity.finish();
+    Ok((total, digest.crc32c.as_u64(), digest.sha256))
 }
 
 fn validate_backup_files(root: &Path, files: &[BackupFileEntry], generation: u64) -> Result<()> {
@@ -13131,8 +13468,7 @@ fn validate_backup_files(root: &Path, files: &[BackupFileEntry], generation: u64
         .collect::<BTreeSet<_>>();
     let manifest_path = root.join(MANIFEST_FILE);
     let manifest = DurableManifest::load(&manifest_path)?;
-    if manifest.format != DurableFormat::GenerationalV2
-        || manifest.checkpoint_generation != Some(generation)
+    if manifest.checkpoint_generation != Some(generation)
         || manifest.checkpoint_epoch != generation
         || manifest.wal_generation != generation
     {
@@ -13151,8 +13487,11 @@ fn validate_backup_files(root: &Path, files: &[BackupFileEntry], generation: u64
     }
     for file in files {
         validate_backup_file_name(&file.name)?;
-        let (actual_len, actual_checksum) = file_checksum(&root.join(&file.name))?;
-        if actual_len != file.encoded_len || actual_checksum != file.encoded_checksum {
+        let (actual_len, actual_checksum, actual_sha256) = file_checksum(&root.join(&file.name))?;
+        if actual_len != file.encoded_len
+            || actual_checksum != file.encoded_checksum
+            || actual_sha256 != file.sha256
+        {
             return Err(SkeinError::Storage(format!(
                 "backup file verification failed: {}",
                 file.name
@@ -13165,6 +13504,7 @@ fn validate_backup_files(root: &Path, files: &[BackupFileEntry], generation: u64
         .expect("required checkpoint must exist");
     if manifest.checkpoint_encoded_len != Some(checkpoint.encoded_len)
         || manifest.checkpoint_encoded_checksum != Some(checkpoint.encoded_checksum)
+        || manifest.checkpoint_encoded_sha256 != Some(checkpoint.sha256)
     {
         return Err(SkeinError::Storage(
             "backup checkpoint metadata does not match the durable manifest".to_string(),
@@ -13192,6 +13532,7 @@ fn validate_backup_files(root: &Path, files: &[BackupFileEntry], generation: u64
             .expect("required canonical manifest must exist");
         if encoded_manifest.encoded_len != expected_len
             || encoded_manifest.encoded_checksum != expected_checksum
+            || manifest.canonical_manifest_encoded_sha256 != Some(encoded_manifest.sha256)
         {
             return Err(SkeinError::Storage(
                 "backup canonical manifest metadata does not match the durable manifest"
@@ -13207,6 +13548,7 @@ fn validate_backup_files(root: &Path, files: &[BackupFileEntry], generation: u64
             .expect("required canonical artifact must exist");
         if canonical_manifest.artifact_len != canonical_artifact.encoded_len
             || canonical_manifest.artifact_digest.0 != canonical_artifact.encoded_checksum
+            || canonical_manifest.artifact_sha256 != canonical_artifact.sha256
         {
             return Err(SkeinError::Storage(
                 "backup canonical artifact metadata does not match its manifest".to_string(),
@@ -13235,6 +13577,7 @@ fn validate_backup_files(root: &Path, files: &[BackupFileEntry], generation: u64
             .expect("required canonical adjacency manifest must exist");
         if encoded_manifest.encoded_len != expected_len
             || encoded_manifest.encoded_checksum != expected_checksum
+            || manifest.canonical_adjacency_manifest_encoded_sha256 != Some(encoded_manifest.sha256)
         {
             return Err(SkeinError::Storage(
                 "backup canonical adjacency manifest metadata does not match the durable manifest"
@@ -13250,6 +13593,7 @@ fn validate_backup_files(root: &Path, files: &[BackupFileEntry], generation: u64
             .expect("required canonical adjacency artifact must exist");
         if adjacency_manifest.artifact_len != adjacency_artifact.encoded_len
             || adjacency_manifest.artifact_digest.0 != adjacency_artifact.encoded_checksum
+            || adjacency_manifest.artifact_sha256 != adjacency_artifact.sha256
         {
             return Err(SkeinError::Storage(
                 "backup canonical adjacency artifact metadata does not match its manifest"
@@ -13279,6 +13623,7 @@ fn validate_backup_files(root: &Path, files: &[BackupFileEntry], generation: u64
             .expect("required property spill manifest must exist");
         if encoded_manifest.encoded_len != expected_len
             || encoded_manifest.encoded_checksum != expected_checksum
+            || manifest.property_spill_manifest_encoded_sha256 != Some(encoded_manifest.sha256)
         {
             return Err(SkeinError::Storage(
                 "backup property spill manifest metadata does not match the durable manifest"
@@ -13294,6 +13639,7 @@ fn validate_backup_files(root: &Path, files: &[BackupFileEntry], generation: u64
             .expect("required property spill artifact must exist");
         if property_manifest.artifact_len != property_artifact.encoded_len
             || property_manifest.artifact_digest.0 != property_artifact.encoded_checksum
+            || property_manifest.artifact_sha256 != property_artifact.sha256
         {
             return Err(SkeinError::Storage(
                 "backup property spill artifact metadata does not match its manifest".to_string(),
@@ -13322,6 +13668,7 @@ fn validate_backup_files(root: &Path, files: &[BackupFileEntry], generation: u64
             .expect("required property projection manifest must exist");
         if encoded_manifest.encoded_len != expected_len
             || encoded_manifest.encoded_checksum != expected_checksum
+            || manifest.property_projection_manifest_encoded_sha256 != Some(encoded_manifest.sha256)
         {
             return Err(SkeinError::Storage(
                 "backup property projection manifest metadata does not match the durable manifest"
@@ -13340,6 +13687,7 @@ fn validate_backup_files(root: &Path, files: &[BackupFileEntry], generation: u64
             || projection_manifest.source_commit_epoch != manifest.checkpoint_commit_epoch
             || projection_manifest.artifact_len != projection_artifact.encoded_len
             || projection_manifest.artifact_digest.0 != projection_artifact.encoded_checksum
+            || projection_manifest.artifact_sha256 != projection_artifact.sha256
         {
             return Err(SkeinError::Storage(
                 "backup property projection artifact metadata does not match its manifest"
@@ -13373,9 +13721,12 @@ pub fn restore_storage_backup(
             .iter()
             .filter(|entry| entry.name != MANIFEST_FILE)
         {
-            let (encoded_len, encoded_checksum) =
+            let (encoded_len, encoded_checksum, sha256) =
                 copy_file_with_checksum(&backup.join(&entry.name), &destination.join(&entry.name))?;
-            if encoded_len != entry.encoded_len || encoded_checksum != entry.encoded_checksum {
+            if encoded_len != entry.encoded_len
+                || encoded_checksum != entry.encoded_checksum
+                || sha256 != entry.sha256
+            {
                 return Err(SkeinError::Storage(format!(
                     "backup file changed while restoring: {}",
                     entry.name
@@ -13388,12 +13739,13 @@ pub fn restore_storage_backup(
             .iter()
             .find(|entry| entry.name == MANIFEST_FILE)
             .expect("validated backup must contain durable manifest");
-        let (encoded_len, encoded_checksum) = copy_file_with_checksum(
+        let (encoded_len, encoded_checksum, sha256) = copy_file_with_checksum(
             &backup.join(MANIFEST_FILE),
             &destination.join(MANIFEST_FILE),
         )?;
         if encoded_len != manifest_entry.encoded_len
             || encoded_checksum != manifest_entry.encoded_checksum
+            || sha256 != manifest_entry.sha256
         {
             return Err(SkeinError::Storage(
                 "backup manifest file changed while restoring".to_string(),
@@ -13520,7 +13872,7 @@ fn decode_wal_header(line: &str) -> Result<(u64, u64)> {
     }
     let fields = body.split('\t').collect::<Vec<_>>();
     match fields.as_slice() {
-        [header, raw_generation, raw_start_lsn] if *header == WAL_HEADER_V2 => Ok((
+        [header, raw_generation, raw_start_lsn] if *header == WAL_HEADER_V1 => Ok((
             parse_u64(raw_generation, "WAL generation")?,
             parse_u64(raw_start_lsn, "WAL start LSN")?,
         )),
@@ -16781,18 +17133,12 @@ fn read_durable_text_bytes_with_limit(
     name: &str,
     max_decoded_bytes: Option<u64>,
 ) -> Result<String> {
-    if bytes.starts_with(DURABLE_COMPRESSION_HEADER.as_bytes()) {
-        decode_compressed_durable_text(bytes, name, max_decoded_bytes)
-    } else {
-        if max_decoded_bytes.is_some_and(|limit| bytes.len() as u64 > limit) {
-            return Err(SkeinError::Storage(format!(
-                "{name} decoded byte limit exceeded: max_decoded_bytes={}",
-                max_decoded_bytes.unwrap_or_default()
-            )));
-        }
-        String::from_utf8(bytes.to_vec())
-            .map_err(|error| SkeinError::Storage(format!("{name} is not valid UTF-8: {error}")))
+    if !bytes.starts_with(DURABLE_COMPRESSION_HEADER.as_bytes()) {
+        return Err(SkeinError::Storage(format!(
+            "{name} is missing the V1 compressed envelope"
+        )));
     }
+    decode_compressed_durable_text(bytes, name, max_decoded_bytes)
 }
 
 fn decode_compressed_durable_text(
@@ -16816,11 +17162,18 @@ fn decode_compressed_durable_text(
     let mut uncompressed_checksum = None;
     let mut compressed_len = None;
     let mut uncompressed_len = None;
+    let mut seen_fields = BTreeSet::new();
     for line in header.lines() {
         if line == DURABLE_COMPRESSION_HEADER {
             continue;
         }
         let fields = line.split('\t').collect::<Vec<_>>();
+        if !seen_fields.insert(fields[0]) {
+            return Err(SkeinError::Storage(format!(
+                "{name} compressed envelope has duplicate field: {}",
+                fields[0]
+            )));
+        }
         match fields.as_slice() {
             ["codec", value] => codec = Some(*value),
             ["compressed_checksum", value] => {
@@ -17350,28 +17703,36 @@ pub(crate) fn decode_string(input: &str) -> Result<String> {
 }
 
 pub(crate) fn checksum_bytes(bytes: &[u8]) -> u64 {
-    let mut checksum = StreamingChecksum::new();
-    checksum.update(bytes);
-    checksum.finish()
+    checksum_u64(bytes)
 }
 
-struct StreamingChecksum(u64);
-
-impl StreamingChecksum {
-    const fn new() -> Self {
-        Self(0xcbf29ce484222325)
+fn verify_integrity(
+    bytes: &[u8],
+    expected_len: u64,
+    expected_checksum: u64,
+    expected_sha256: Sha256Digest,
+    artifact: &str,
+) -> Result<()> {
+    let actual_len = bytes.len() as u64;
+    if actual_len != expected_len {
+        return Err(SkeinError::Storage(format!(
+            "{artifact} encoded length mismatch: expected {expected_len}, got {actual_len}"
+        )));
     }
-
-    fn update(&mut self, bytes: &[u8]) {
-        for byte in bytes {
-            self.0 ^= u64::from(*byte);
-            self.0 = self.0.wrapping_mul(0x100000001b3);
-        }
+    let actual = integrity_digest(bytes);
+    if actual.crc32c.as_u64() != expected_checksum {
+        return Err(SkeinError::Storage(format!(
+            "{artifact} CRC32C mismatch: expected {expected_checksum}, got {}",
+            actual.crc32c
+        )));
     }
-
-    const fn finish(self) -> u64 {
-        self.0
+    if actual.sha256 != expected_sha256 {
+        return Err(SkeinError::Storage(format!(
+            "{artifact} SHA-256 mismatch: expected {expected_sha256}, got {}",
+            actual.sha256
+        )));
     }
+    Ok(())
 }
 
 fn elapsed_micros(started: std::time::Instant) -> u64 {
@@ -17435,6 +17796,12 @@ fn encode_optional_u64(value: Option<u64>) -> String {
         .unwrap_or_else(|| "none".to_string())
 }
 
+fn encode_optional_sha256(value: Option<Sha256Digest>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "none".to_string())
+}
+
 fn parse_optional_u64(input: &str, name: &str) -> Result<Option<u64>> {
     if input == "none" {
         Ok(None)
@@ -17443,25 +17810,23 @@ fn parse_optional_u64(input: &str, name: &str) -> Result<Option<u64>> {
     }
 }
 
-fn validate_storage_version(version: &str) -> Result<()> {
-    if version == STORAGE_VERSION || version == LEGACY_STORAGE_VERSION {
-        return Ok(());
+fn parse_optional_sha256(input: &str, name: &str) -> Result<Option<Sha256Digest>> {
+    if input == "none" {
+        Ok(None)
+    } else {
+        input
+            .parse()
+            .map(Some)
+            .map_err(|error| SkeinError::Storage(format!("invalid {name}: {error}")))
     }
-    Err(SkeinError::Storage(format!(
-        "unsupported storage version: {version}; expected {STORAGE_VERSION} or {LEGACY_STORAGE_VERSION}"
-    )))
 }
 
-fn validate_storage_version_for_format(version: &str, format: DurableFormat) -> Result<()> {
-    if version == format.storage_version() {
+fn validate_storage_version(version: &str) -> Result<()> {
+    if version == STORAGE_VERSION {
         return Ok(());
     }
-    if version != STORAGE_VERSION && version != LEGACY_STORAGE_VERSION {
-        return validate_storage_version(version);
-    }
     Err(SkeinError::Storage(format!(
-        "storage version {version} does not match {} manifest",
-        format.storage_version()
+        "unsupported storage version: {version}; expected {STORAGE_VERSION}"
     )))
 }
 
@@ -17515,8 +17880,9 @@ mod tests {
     };
     use crate::schema::{Catalog, LabelId};
     use crate::value::Value;
+    use skein_integrity::integrity_digest;
     use skein_storage::{
-        DurabilityPolicy, ScanPredicate, ScanSegmentAccessPlan, ScanSegmentFallback,
+        DurabilityPolicy, RecoveryMode, ScanPredicate, ScanSegmentAccessPlan, ScanSegmentFallback,
         ScanSegmentManifest, StorageResidencyMode, WalReplayConfig,
     };
     use std::collections::{BTreeMap, BTreeSet};
@@ -18317,13 +18683,12 @@ mod tests {
     }
 
     #[test]
-    fn out_of_core_checkpoint_without_adjacency_metadata_uses_legacy_canonical_fallback() {
-        let path = unique_test_dir("canonical_adjacency_legacy_fallback");
+    fn out_of_core_checkpoint_requires_adjacency_metadata() {
+        let path = unique_test_dir("canonical_adjacency_required");
         let replay_config = WalReplayConfig {
             residency_mode: StorageResidencyMode::OutOfCore,
             ..WalReplayConfig::default()
         };
-        let source;
         {
             let mut catalog = Catalog::default();
             let mut store = GraphStore::open_with_durability_and_replay_config(
@@ -18333,7 +18698,7 @@ mod tests {
                 replay_config,
             )
             .unwrap();
-            source = store
+            let source = store
                 .create_node(&mut catalog, "Memory", BTreeMap::new())
                 .unwrap();
             let target = store
@@ -18349,9 +18714,14 @@ mod tests {
         let manifest = fs::read_to_string(&manifest_path).unwrap();
         let mut body = manifest
             .lines()
-            .filter(|line| {
-                !line.starts_with("canonical_adjacency_manifest_")
-                    && !line.starts_with("checksum\t")
+            .filter(|line| !line.starts_with("checksum\t"))
+            .map(|line| {
+                if line.starts_with("canonical_adjacency_manifest_") {
+                    let (field, _) = line.split_once('\t').unwrap();
+                    format!("{field}\tnone")
+                } else {
+                    line.to_string()
+                }
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -18365,28 +18735,16 @@ mod tests {
         fs::remove_file(path.join(canonical_adjacency_manifest_generation_file(1))).unwrap();
 
         let mut catalog = Catalog::default();
-        let store = GraphStore::open_with_durability_and_replay_config(
+        let error = GraphStore::open_with_durability_and_replay_config(
             &path,
             &mut catalog,
             DurabilityPolicy::default(),
             replay_config,
         )
-        .unwrap();
-        assert!(store.canonical_adjacency_manifest().is_none());
-        let mention_type = catalog.rel_type_id("MENTIONS").unwrap();
-        let mut relationships = Vec::new();
-        store
-            .visit_adjacent_relationships_owned(
-                source,
-                Some(mention_type),
-                AdjacencyDirection::Outgoing,
-                |relationship| {
-                    relationships.push(relationship.id);
-                    GraphScanControl::Continue
-                },
-            )
-            .unwrap();
-        assert_eq!(relationships, vec![RelId(0)]);
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("canonical segments require canonical adjacency"));
         std::fs::remove_dir_all(path).unwrap();
     }
 
@@ -19218,8 +19576,8 @@ mod tests {
     }
 
     #[test]
-    fn legacy_checkpoint_without_projection_changes_resumes_after_snapshot() {
-        let path = unique_test_dir("legacy_search_projection_checkpoint");
+    fn checkpoint_requires_projection_change_boundary() {
+        let path = unique_test_dir("search_projection_checkpoint_boundary");
         {
             let mut catalog = Catalog::default();
             let mut store = GraphStore::open(&path, &mut catalog).unwrap();
@@ -19227,7 +19585,7 @@ mod tests {
                 .create_node(
                     &mut catalog,
                     "Memory",
-                    properties([("id", Value::String("legacy-memory".to_string()))]),
+                    properties([("id", Value::String("memory-1".to_string()))]),
                 )
                 .unwrap();
             store.checkpoint(&catalog).unwrap();
@@ -19247,10 +19605,10 @@ mod tests {
         );
 
         let mut catalog = Catalog::default();
-        let store = GraphStore::open(&path, &mut catalog).unwrap();
-        assert_eq!(store.commit_epoch(), 1);
-        assert_eq!(store.search_projection_change_log_start_epoch(), 1);
-        assert!(store.search_projection_graph_changes_after(0).is_empty());
+        let error = GraphStore::open(&path, &mut catalog).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("checkpoint search projection changes are missing their start epoch"));
         std::fs::remove_dir_all(path).unwrap();
     }
 
@@ -19318,7 +19676,7 @@ mod tests {
         let checkpoint = read_durable_text(&active_checkpoint_path(&path), "checkpoint").unwrap();
         assert!(checkpoint.contains("commit_epoch\t2\n"));
         let manifest = std::fs::read_to_string(path.join("manifest.skein")).unwrap();
-        assert!(manifest.contains("SKEIN_MANIFEST_V2\n"));
+        assert!(manifest.contains("SKEIN_MANIFEST_V1\n"));
         assert!(manifest.contains("checkpoint_generation\t1\n"));
         assert!(manifest.contains("wal_generation\t1\n"));
         assert!(manifest.contains("checkpoint_epoch\t1\n"));
@@ -19476,7 +19834,7 @@ mod tests {
         }
         rewrite_checksummed_file(
             &path.join("manifest.skein"),
-            "version\tskein-storage-v2\n",
+            "version\tskein-storage-v1\n",
             "version\tskein-storage-v0\n",
             "manifest",
         );
@@ -19486,6 +19844,62 @@ mod tests {
         assert!(error
             .to_string()
             .contains("unsupported storage version: skein-storage-v0"));
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn single_storage_format_rejects_unpublished_manifest() {
+        let path = unique_test_dir("unpublished_manifest_format");
+        {
+            let mut catalog = Catalog::default();
+            GraphStore::open(&path, &mut catalog).unwrap();
+        }
+        rewrite_checksummed_file(
+            &path.join("manifest.skein"),
+            "SKEIN_MANIFEST_V1\n",
+            "INVALID_MANIFEST_HEADER\n",
+            "manifest",
+        );
+
+        let mut catalog = Catalog::default();
+        let error = GraphStore::open(&path, &mut catalog).unwrap_err();
+        assert!(error.to_string().contains("missing the V1 format header"));
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn single_storage_format_rejects_incomplete_v1_manifest() {
+        let path = unique_test_dir("incomplete_v1_manifest");
+        {
+            let mut catalog = Catalog::default();
+            GraphStore::open(&path, &mut catalog).unwrap();
+        }
+        rewrite_checksummed_file(
+            &path.join("manifest.skein"),
+            "checkpoint_generation\tnone\n",
+            "",
+            "manifest",
+        );
+
+        let mut catalog = Catalog::default();
+        let error = GraphStore::open(&path, &mut catalog).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("manifest is missing required field: checkpoint_generation"));
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn single_storage_format_rejects_manifestless_artifacts() {
+        let path = unique_test_dir("artifacts_without_manifest");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("checkpoint.skein"), b"unpublished format").unwrap();
+
+        let mut catalog = Catalog::default();
+        let error = GraphStore::open(&path, &mut catalog).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("storage artifacts but no durable manifest"));
         std::fs::remove_dir_all(path).unwrap();
     }
 
@@ -19502,7 +19916,7 @@ mod tests {
         }
         rewrite_checksummed_file(
             &active_checkpoint_path(&path),
-            "version\tskein-storage-v2\n",
+            "version\tskein-storage-v1\n",
             "version\tskein-storage-v0\n",
             "checkpoint",
         );
@@ -20407,7 +20821,7 @@ mod tests {
     }
 
     #[test]
-    fn stops_replay_at_torn_wal_tail() {
+    fn doctor_repairs_torn_wal_tail_after_strict_open_rejects_it() {
         let path = unique_test_dir("torn_wal");
         {
             let mut catalog = Catalog::default();
@@ -20424,7 +20838,17 @@ mod tests {
             .unwrap();
 
         let mut catalog = Catalog::default();
-        let store = GraphStore::open(&path, &mut catalog).unwrap();
+        let error = GraphStore::open(&path, &mut catalog).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("strict WAL recovery rejected torn tail"));
+        let store = GraphStore::open_with_durability_and_recovery(
+            &path,
+            &mut catalog,
+            DurabilityPolicy::default(),
+            RecoveryMode::DoctorRepairTornTail,
+        )
+        .unwrap();
         let label = catalog.label_id("Memory").unwrap();
         let nodes = store.scan_nodes(Some(label)).collect::<Vec<_>>();
         assert_eq!(nodes.len(), 1);
@@ -20432,7 +20856,7 @@ mod tests {
     }
 
     #[test]
-    fn skips_torn_batch_wal_without_partial_path_recovery() {
+    fn doctor_discards_torn_batch_wal_without_partial_path_recovery() {
         let path = unique_test_dir("torn_batch_wal");
         {
             let mut catalog = Catalog::default();
@@ -20457,7 +20881,13 @@ mod tests {
         std::fs::write(&wal_path, torn).unwrap();
 
         let mut catalog = Catalog::default();
-        let store = GraphStore::open(&path, &mut catalog).unwrap();
+        let store = GraphStore::open_with_durability_and_recovery(
+            &path,
+            &mut catalog,
+            DurabilityPolicy::default(),
+            RecoveryMode::DoctorRepairTornTail,
+        )
+        .unwrap();
         assert!(store.scan_nodes(None).next().is_none());
         assert!(catalog.rel_type_id("MENTIONS").is_none());
         std::fs::remove_dir_all(path).unwrap();
@@ -20562,7 +20992,7 @@ mod tests {
     }
 
     #[test]
-    fn generational_manifest_fails_closed_for_missing_canonical_artifacts() {
+    fn manifest_fails_closed_for_missing_canonical_artifacts() {
         for missing in ["checkpoint", "wal", "manifest"] {
             let path = unique_test_dir(&format!("missing_{missing}"));
             {
@@ -20591,7 +21021,7 @@ mod tests {
     }
 
     #[test]
-    fn recovers_mem_shaped_batches_after_checkpoint_without_torn_tail() {
+    fn doctor_recovers_complete_mem_shaped_batches_before_torn_tail() {
         let path = unique_test_dir("mem_shaped_batch_recovery");
         {
             let mut catalog = Catalog::default();
@@ -20677,7 +21107,13 @@ mod tests {
         std::fs::write(&wal_path, torn).unwrap();
 
         let mut catalog = Catalog::default();
-        let store = GraphStore::open(&path, &mut catalog).unwrap();
+        let store = GraphStore::open_with_durability_and_recovery(
+            &path,
+            &mut catalog,
+            DurabilityPolicy::default(),
+            RecoveryMode::DoctorRepairTornTail,
+        )
+        .unwrap();
         let report = store.storage_recovery_report();
         assert!(report.durable);
         assert_eq!(report.checkpoint_commit_epoch, Some(1));
@@ -21413,56 +21849,52 @@ mod tests {
     }
 
     fn active_wal_path(path: impl AsRef<std::path::Path>) -> std::path::PathBuf {
-        active_generation_path(path.as_ref(), "wal_generation", "wal", "wal.skein")
+        active_generation_path(path.as_ref(), "wal_generation", "wal")
     }
 
     fn active_checkpoint_path(path: impl AsRef<std::path::Path>) -> std::path::PathBuf {
-        active_generation_path(
-            path.as_ref(),
-            "checkpoint_generation",
-            "checkpoint",
-            "checkpoint.skein",
-        )
+        active_generation_path(path.as_ref(), "checkpoint_generation", "checkpoint")
     }
 
     fn read_test_wal(path: impl AsRef<std::path::Path>) -> std::io::Result<String> {
         let wal = std::fs::read_to_string(active_wal_path(path))?;
-        if wal.starts_with("SKEIN_WAL_V2\t") {
-            Ok(wal
-                .split_once('\n')
-                .map_or_else(String::new, |(_, records)| records.to_string()))
-        } else {
-            Ok(wal)
+        if !wal.starts_with("SKEIN_WAL_V1\t") {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "WAL is missing the V1 header",
+            ));
         }
+        Ok(wal
+            .split_once('\n')
+            .map_or_else(String::new, |(_, records)| records.to_string()))
     }
 
     fn active_generation_path(
         root: &std::path::Path,
         manifest_field: &str,
         prefix: &str,
-        legacy_name: &str,
     ) -> std::path::PathBuf {
-        let Ok(manifest) = std::fs::read_to_string(root.join("manifest.skein")) else {
-            return root.join(legacy_name);
-        };
-        if !manifest.contains("SKEIN_MANIFEST_V2\n") {
-            return root.join(legacy_name);
-        }
+        let manifest = std::fs::read_to_string(root.join("manifest.skein")).unwrap();
+        assert!(manifest.contains("SKEIN_MANIFEST_V1\n"));
         let generation = manifest.lines().find_map(|line| {
             let (field, value) = line.split_once('\t')?;
             (field == manifest_field && value != "none").then_some(value)
         });
-        generation.map_or_else(
-            || root.join(legacy_name),
-            |generation| root.join(format!("{prefix}.{generation}.skein")),
-        )
+        root.join(format!(
+            "{prefix}.{}.skein",
+            generation.expect("active generation must exist")
+        ))
     }
 
     fn rewrite_checksummed_file(path: &std::path::Path, from: &str, to: &str, kind: &str) {
         let was_compressed = std::fs::read(path)
             .unwrap()
             .starts_with(DURABLE_COMPRESSION_HEADER.as_bytes());
-        let text = read_durable_text(path, kind).unwrap();
+        let text = if kind == "manifest" {
+            std::fs::read_to_string(path).unwrap()
+        } else {
+            read_durable_text(path, kind).unwrap()
+        };
         let (body, _) = text.rsplit_once("checksum\t").unwrap();
         let body = body.replace(from, to);
         let checksum = checksum_bytes(body.as_bytes());
@@ -21483,7 +21915,11 @@ mod tests {
         {
             refresh_manifest_checkpoint_metadata(path);
         }
-        let rewritten = read_durable_text(path, kind).unwrap();
+        let rewritten = if kind == "manifest" {
+            std::fs::read_to_string(path).unwrap()
+        } else {
+            read_durable_text(path, kind).unwrap()
+        };
         assert!(
             rewritten.contains(to),
             "{kind} rewrite did not update storage version"
@@ -21497,7 +21933,9 @@ mod tests {
         let (body, _) = manifest.rsplit_once("checksum\t").unwrap();
         let checkpoint = std::fs::read(checkpoint_path).unwrap();
         let encoded_len = checkpoint.len() as u64;
-        let encoded_checksum = checksum_bytes(&checkpoint);
+        let integrity = integrity_digest(&checkpoint);
+        let encoded_checksum = integrity.crc32c.as_u64();
+        let encoded_sha256 = integrity.sha256;
         let mut rewritten_body = String::new();
         for line in body.lines() {
             if line.starts_with("checkpoint_encoded_len\t") {
@@ -21506,6 +21944,8 @@ mod tests {
                 rewritten_body.push_str(&format!(
                     "checkpoint_encoded_checksum\t{encoded_checksum}\n"
                 ));
+            } else if line.starts_with("checkpoint_encoded_sha256\t") {
+                rewritten_body.push_str(&format!("checkpoint_encoded_sha256\t{encoded_sha256}\n"));
             } else {
                 rewritten_body.push_str(line);
                 rewritten_body.push('\n');

@@ -20,7 +20,7 @@ pub use adjacency::{
     ADJACENCY_DELTA_CONSOLIDATION_ENTRIES, ADJACENCY_DELTA_HARD_MAX_ENTRIES,
     ADJACENCY_MINI_DELTA_MAX_ENTRIES, ADJACENCY_PIVOT_MIN_DEGREE,
 };
-pub use backup::{StorageBackupReport, StorageRestoreReport};
+pub use backup::{StorageBackupReport, StorageRestoreReport, StorageScrubReport};
 pub use cache::{
     content_digest, ContentDigest, ManifestGeneration, RepresentationKind, SegmentCache,
     SegmentCacheError, SegmentCacheKey, SegmentCacheLease, SegmentCacheSnapshot, StoreId,
@@ -85,7 +85,8 @@ pub use scan::{
     ScanSegmentAccessPlan, ScanSegmentFallback, ScanSegmentManifest, ScanSegmentManifestError,
     SegmentPayloadRange, SegmentPruner, SegmentRangeReader, SegmentReadError,
     SegmentReadExecutionError, SegmentReadExecutionReport, SegmentReadExecutor, SegmentReadPayload,
-    SegmentReadRange, SegmentReadSchedule, SegmentReadScheduler, SegmentReadWave, SegmentSummary,
+    SegmentReadPool, SegmentReadPoolError, SegmentReadRange, SegmentReadSchedule,
+    SegmentReadScheduler, SegmentReadWave, SegmentSummary,
 };
 pub use snapshot::{
     SnapshotCommitError, SnapshotCoordinator, SnapshotReadGuard, VersionedSnapshot,

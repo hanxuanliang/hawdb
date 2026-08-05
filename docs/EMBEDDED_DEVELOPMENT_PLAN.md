@@ -280,8 +280,9 @@ streaming, EXPLAIN ANALYZE, and system SQL results; callers may further tighten
 the limits, while unbounded results require explicitly setting both fields to
 `None`. `max_optimizer_groups` caps cascades memo search groups with
 the existing deterministic direct physical fallback warning. `recovery_mode`
-defaults to torn-tail tolerant WAL replay and can be set to strict recovery to
-reject a torn WAL tail or checksum mismatch during open.
+defaults to strict WAL replay. A torn tail or checksum mismatch rejects normal
+open; `DoctorRepairTornTail` is an explicit writable repair mode that may
+discard the incomplete final record.
 `max_wal_replay_entries` caps startup WAL replay after valid record decode and
 before applying the next record; it counts top-level WAL records rather than
 child operations inside a batch, preserving batch replay atomicity. Mutation

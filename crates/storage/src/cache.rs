@@ -1,3 +1,4 @@
+use skein_integrity::checksum_u64;
 use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
@@ -313,12 +314,7 @@ impl SegmentCacheInner {
 }
 
 pub fn content_digest(bytes: &[u8]) -> ContentDigest {
-    let mut hash = 0xcbf29ce484222325u64;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    ContentDigest(hash)
+    ContentDigest(checksum_u64(bytes))
 }
 
 #[cfg(test)]

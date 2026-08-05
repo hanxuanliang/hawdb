@@ -48,6 +48,7 @@ use skein::{
     BackgroundMaintenanceOptions, CompatibilityFixture, LocalQosPolicy, LocalQosState, WorkClass,
     WORK_CLASS_COUNT,
 };
+use skein_integrity::checksum_u64;
 use skein_storage::{durable_replace_file, sync_directory as sync_storage_directory};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -2673,8 +2674,8 @@ fn background_maintenance_work_classes() -> [WorkClass; WORK_CLASS_COUNT] {
 
 fn recovery_mode_name(recovery_mode: RecoveryMode) -> &'static str {
     match recovery_mode {
-        RecoveryMode::TolerateTornTail => "tolerate_torn_tail",
         RecoveryMode::Strict => "strict",
+        RecoveryMode::DoctorRepairTornTail => "doctor_repair_torn_tail",
     }
 }
 
@@ -4686,12 +4687,7 @@ fn graph_lightning_artifact_kind(file_name: &str) -> &'static str {
 }
 
 fn checksum_bytes(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf29ce484222325u64;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
+    checksum_u64(bytes)
 }
 
 fn sync_directory(path: &Path) -> Result<()> {
@@ -6572,7 +6568,7 @@ mod tests {
     fn storage_recovery_requirements_reject_unbounded_wal_replay() {
         let report = StorageRecoveryReport {
             durable: true,
-            recovery_mode: RecoveryMode::TolerateTornTail,
+            recovery_mode: RecoveryMode::Strict,
             max_wal_replay_entries: None,
             checkpoint_epoch: Some(1),
             checkpoint_commit_epoch: Some(1),
@@ -8451,7 +8447,7 @@ mod tests {
     fn test_storage_recovery_report(graph_commit_epoch: u64) -> StorageRecoveryReport {
         StorageRecoveryReport {
             durable: true,
-            recovery_mode: RecoveryMode::TolerateTornTail,
+            recovery_mode: RecoveryMode::Strict,
             max_wal_replay_entries: Some(32),
             max_wal_replay_bytes: Some(4096),
             max_wal_record_bytes: Some(1024),

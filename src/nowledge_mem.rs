@@ -61,14 +61,19 @@ use skein_core::RuntimeTaskContext;
 use skein_optimizer::AdaptiveVectorBackendPolicy;
 use skein_qos::{
     IoConcurrencyBudget, RuntimeGovernor, RuntimeGovernorConfig, RuntimeGovernorSnapshot,
-    RuntimePermit, StorageDeviceProfile,
+    RuntimePermit, RuntimeWorkKind, RuntimeWorkPriority, RuntimeWorkRequest, StorageDeviceProfile,
+    WorkPriority,
 };
 pub use skein_readiness::{NowledgeMemReadinessAreaMap, NowledgeMemReadinessAreaSummary};
 use std::collections::{BTreeMap, BTreeSet};
+use std::mem::size_of;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Instant;
+
+const TYPED_CONTROL_STATEMENT_MEMORY_BYTES: u64 = 1024 * 1024;
+const SEARCH_PROJECTION_CHANGEFEED_OPERATION_BYTES: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NowledgeMemGraphMode {
@@ -7728,18 +7733,41 @@ impl NowledgeMemEmbeddedStoreHandle {
                 document_ids.len()
             )));
         }
+        let _permit = self.admit_typed_search()?;
         let store = self.read_store()?;
         let projection = store.require_search_projection()?;
-        Ok(document_ids
-            .iter()
-            .filter_map(|id| projection.index().document(id).cloned())
-            .collect())
+        let max_payload_bytes = store
+            .graph
+            .database()
+            .config()
+            .max_read_result_payload_bytes
+            .ok_or_else(|| {
+                SkeinError::Execution(
+                    "admitted search hydration requires max_read_result_payload_bytes".to_string(),
+                )
+            })?;
+        let mut documents = Vec::with_capacity(document_ids.len());
+        let mut payload_bytes = 0usize;
+        for id in document_ids {
+            let Some(document) = projection.index().document(id) else {
+                continue;
+            };
+            payload_bytes = payload_bytes.saturating_add(search_document_payload_bytes(document));
+            if payload_bytes > max_payload_bytes {
+                return Err(SkeinError::Execution(format!(
+                    "search projection document hydration produced {payload_bytes} payload bytes, limit is {max_payload_bytes}"
+                )));
+            }
+            documents.push(document.clone());
+        }
+        Ok(documents)
     }
 
     pub fn knowledge_source_candidates(
         &self,
         request: &KnowledgeSourceCandidateScanRequest,
     ) -> Result<KnowledgeSourceCandidateScanOutput> {
+        let _permit = self.admit_typed_query()?;
         self.read_store()?
             .graph
             .database()
@@ -7751,6 +7779,7 @@ impl NowledgeMemEmbeddedStoreHandle {
         &self,
         request: &KnowledgeSubgraphRequest,
     ) -> Result<KnowledgeSubgraphOutput> {
+        let _permit = self.admit_typed_query()?;
         self.read_store()?
             .graph
             .database()
@@ -7763,6 +7792,7 @@ impl NowledgeMemEmbeddedStoreHandle {
         &self,
         request: &KnowledgeInducedEdgeListRequest,
     ) -> Result<KnowledgeInducedEdgeListOutput> {
+        let _permit = self.admit_typed_query()?;
         self.read_store()?
             .graph
             .database()
@@ -7775,6 +7805,7 @@ impl NowledgeMemEmbeddedStoreHandle {
         &self,
         request: &KnowledgeMemoryPrefixOwnershipRequest,
     ) -> Result<KnowledgeMemoryPrefixOwnershipOutput> {
+        let _permit = self.admit_typed_query()?;
         self.read_store()?
             .graph
             .database()
@@ -7785,6 +7816,7 @@ impl NowledgeMemEmbeddedStoreHandle {
         &self,
         request: &KnowledgeEntityDetailsRequest,
     ) -> Result<KnowledgeEntityDetailsOutput> {
+        let _permit = self.admit_typed_query()?;
         self.read_store()?
             .graph
             .database()
@@ -7795,6 +7827,7 @@ impl NowledgeMemEmbeddedStoreHandle {
         &self,
         request: &KnowledgeMemoryEvolvesCreateBatchRequest,
     ) -> Result<KnowledgeMemoryEvolvesCreateBatchOutput> {
+        let _permit = self.admit_typed_mutation()?;
         self.write_store()?
             .graph_mut()
             .database_mut()
@@ -7805,6 +7838,7 @@ impl NowledgeMemEmbeddedStoreHandle {
         &self,
         request: &KnowledgeMemoryLifecycleBatchRequest,
     ) -> Result<KnowledgeMemoryLifecycleBatchOutput> {
+        let _permit = self.admit_typed_mutation()?;
         self.write_store()?
             .graph_mut()
             .database_mut()
@@ -7815,6 +7849,7 @@ impl NowledgeMemEmbeddedStoreHandle {
         &self,
         request: &KnowledgeEntityDeleteBatchRequest,
     ) -> Result<KnowledgeEntityDeleteBatchOutput> {
+        let _permit = self.admit_typed_mutation()?;
         self.write_store()?
             .graph_mut()
             .database_mut()
@@ -7825,6 +7860,7 @@ impl NowledgeMemEmbeddedStoreHandle {
         &self,
         statements: &[NowledgeGraphStatement],
     ) -> Result<crate::NowledgeGraphTransactionOutput> {
+        let _permit = self.admit_transaction(statements)?;
         let mut store = self.write_store()?;
         let db = store.graph_mut().database_mut();
         let mut transaction = db.begin_transaction();
@@ -7848,6 +7884,13 @@ impl NowledgeMemEmbeddedStoreHandle {
         checkpoint: Option<&GraphLightningInitialImportCheckpoint>,
         document_identities: &[GraphLightningInitialImportDocumentIdentity],
     ) -> Result<GraphLightningInitialImportApplyReport> {
+        let estimated_input_bytes = encoded_graph_stream.len().saturating_add(
+            document_identities
+                .iter()
+                .map(|identity| identity.document_id.len())
+                .sum::<usize>(),
+        );
+        let _permit = self.admit_typed_maintenance(estimated_input_bytes, 1)?;
         self.write_store()?
             .graph_mut()
             .database_mut()
@@ -7867,6 +7910,7 @@ impl NowledgeMemEmbeddedStoreHandle {
         &self,
         delta: SearchProjectionDelta,
     ) -> Result<SearchProjectionDeltaReport> {
+        let _permit = self.admit_typed_maintenance(search_projection_delta_bytes(&delta), 1)?;
         self.write_store()?
             .apply_search_projection_delta_and_checkpoint(delta)
     }
@@ -7878,6 +7922,7 @@ impl NowledgeMemEmbeddedStoreHandle {
         delta: SearchProjectionDelta,
         import_source_graph_commit_epoch: u64,
     ) -> Result<SearchProjectionDeltaReport> {
+        let _permit = self.admit_typed_maintenance(search_projection_delta_bytes(&delta), 1)?;
         self.write_store()?
             .apply_initial_import_projection_delta_and_checkpoint(
                 delta,
@@ -8059,6 +8104,7 @@ impl NowledgeMemEmbeddedStoreHandle {
         &self,
         request: &NowledgeMemSearchCandidateRequest,
     ) -> Result<SearchResultSet> {
+        let _permit = self.admit_typed_search()?;
         Ok(self.read_store()?.search_candidates(request)?.result)
     }
 
@@ -8066,6 +8112,7 @@ impl NowledgeMemEmbeddedStoreHandle {
         &self,
         request: &NowledgeMemSearchCandidateRequest,
     ) -> Result<NowledgeMemSearchCandidateOutput> {
+        let _permit = self.admit_typed_search()?;
         self.read_store()?.search_candidates(request)
     }
 
@@ -8080,6 +8127,7 @@ impl NowledgeMemEmbeddedStoreHandle {
         &self,
         request: &KnowledgeRetrievalRequest,
     ) -> Result<KnowledgeRetrievalOutput> {
+        let _permit = self.admit_typed_search()?;
         self.read_store()?.retrieve_knowledge(request)
     }
 
@@ -8087,6 +8135,7 @@ impl NowledgeMemEmbeddedStoreHandle {
         &self,
         request: &KnowledgeRetrievalRequest,
     ) -> Result<NowledgeMemRetrievalOutput> {
+        let _permit = self.admit_typed_search()?;
         self.read_store()?.retrieve_knowledge_with_report(request)
     }
 
@@ -8279,6 +8328,10 @@ impl NowledgeMemEmbeddedStoreHandle {
         max_operations_per_batch: usize,
         max_batches: usize,
     ) -> Result<SearchProjectionCatchUpReport> {
+        let estimated_operations = max_operations_per_batch.saturating_mul(max_batches);
+        let estimated_input_bytes =
+            estimated_operations.saturating_mul(SEARCH_PROJECTION_CHANGEFEED_OPERATION_BYTES);
+        let _permit = self.admit_typed_maintenance(estimated_input_bytes, 1)?;
         self.write_store()?
             .catch_up_search_projection(max_operations_per_batch, max_batches)
     }
@@ -8298,12 +8351,146 @@ impl NowledgeMemEmbeddedStoreHandle {
         max_operations_per_batch: usize,
         max_batches: usize,
     ) -> Result<ScheduledSearchProjectionCatchUpReport> {
+        let estimated_operations = max_operations_per_batch.saturating_mul(max_batches);
+        let estimated_input_bytes =
+            estimated_operations.saturating_mul(SEARCH_PROJECTION_CHANGEFEED_OPERATION_BYTES);
+        let _permit = self.admit_typed_maintenance(estimated_input_bytes, 1)?;
         self.write_store()?
             .catch_up_search_projection_with_scheduler(
                 scheduler,
                 max_operations_per_batch,
                 max_batches,
             )
+    }
+
+    fn admit_typed_mutation(&self) -> Result<RuntimePermit> {
+        let store = self.read_store()?;
+        let config = store.graph.database().config();
+        let estimated_memory_bytes = crate::executor::estimated_mutation_memory_bytes(
+            config.mutation_limits,
+            config.max_wal_record_bytes,
+        );
+        store
+            .graph
+            .try_admit_runtime(RuntimeWorkRequest::foreground_mutation(
+                estimated_memory_bytes,
+            ))
+    }
+
+    fn admit_typed_maintenance(
+        &self,
+        estimated_input_bytes: usize,
+        io_slots: usize,
+    ) -> Result<RuntimePermit> {
+        let store = self.read_store()?;
+        let config = store.graph.database().config();
+        let working_memory_bytes =
+            u64::try_from(config.execution_memory.blocking_operator_bytes.get())
+                .unwrap_or(u64::MAX);
+        let estimated_input_bytes = u64::try_from(estimated_input_bytes).unwrap_or(u64::MAX);
+        store.graph.try_admit_runtime(
+            RuntimeWorkRequest::background_maintenance(
+                working_memory_bytes.saturating_add(estimated_input_bytes),
+            )
+            .with_io_slots(io_slots)
+            .with_blocking(true),
+        )
+    }
+
+    fn admit_typed_search(&self) -> Result<RuntimePermit> {
+        let store = self.read_store()?;
+        let config = store.graph.database().config();
+        let result_bytes = config
+            .max_read_result_payload_bytes
+            .ok_or_else(|| {
+                SkeinError::Execution(
+                    "admitted typed search requires max_read_result_payload_bytes".to_string(),
+                )
+            })
+            .and_then(|bytes| {
+                u64::try_from(bytes).map_err(|_| {
+                    SkeinError::Execution(
+                        "admitted typed search result budget exceeds u64".to_string(),
+                    )
+                })
+            })?;
+        let memory_bytes = u64::try_from(config.execution_memory.blocking_operator_bytes.get())
+            .unwrap_or(u64::MAX);
+        let io_slots = store
+            .require_search_projection()?
+            .index()
+            .range_read_config()
+            .io_depth
+            .get();
+        store.graph.try_admit_runtime(
+            RuntimeWorkRequest::foreground_query(memory_bytes, result_bytes)
+                .with_io_slots(io_slots)
+                .with_blocking(true),
+        )
+    }
+
+    fn admit_typed_query(&self) -> Result<RuntimePermit> {
+        let store = self.read_store()?;
+        let config = store.graph.database().config();
+        let result_bytes = config
+            .max_read_result_payload_bytes
+            .ok_or_else(|| {
+                SkeinError::Execution(
+                    "admitted typed query requires max_read_result_payload_bytes".to_string(),
+                )
+            })
+            .and_then(|bytes| {
+                u64::try_from(bytes).map_err(|_| {
+                    SkeinError::Execution(
+                        "admitted typed query result budget exceeds u64".to_string(),
+                    )
+                })
+            })?;
+        let memory_bytes = u64::try_from(config.execution_memory.blocking_operator_bytes.get())
+            .unwrap_or(u64::MAX);
+        store.graph.try_admit_runtime(
+            RuntimeWorkRequest::foreground_query(memory_bytes, result_bytes).with_blocking(true),
+        )
+    }
+
+    fn admit_transaction(&self, statements: &[NowledgeGraphStatement]) -> Result<RuntimePermit> {
+        let store = self.read_store()?;
+        let db = store.graph.database();
+        let config = db.config();
+        let mut priority = RuntimeWorkPriority::Background;
+        let mut kind = RuntimeWorkKind::Query;
+        let mut estimated_memory_bytes = TYPED_CONTROL_STATEMENT_MEMORY_BYTES;
+        let mut result_bytes = 0u64;
+        let mut io_slots = 0usize;
+        for statement in statements {
+            let admission = db.runtime_admission_plan(&statement.cypher, &statement.parameters)?;
+            if admission.work_request.priority == WorkPriority::Foreground {
+                priority = RuntimeWorkPriority::Foreground;
+            }
+            if admission.is_mutation {
+                kind = RuntimeWorkKind::Mutation;
+            }
+            estimated_memory_bytes = estimated_memory_bytes.max(admission.estimated_memory_bytes);
+            io_slots = io_slots.max(admission.required_io_slots);
+            let statement_result_bytes = if admission.is_mutation {
+                config.mutation_limits.max_result_payload_bytes.get()
+            } else {
+                config.max_read_result_payload_bytes.ok_or_else(|| {
+                    SkeinError::Execution(
+                        "admitted transaction requires max_read_result_payload_bytes".to_string(),
+                    )
+                })?
+            };
+            result_bytes = result_bytes
+                .saturating_add(u64::try_from(statement_result_bytes).unwrap_or(u64::MAX));
+        }
+        let request = RuntimeWorkRequest::new(priority, kind)
+            .with_cpu_slots(1)
+            .with_memory_bytes(estimated_memory_bytes)
+            .with_io_slots(io_slots)
+            .with_result_bytes(result_bytes)
+            .with_blocking(true);
+        store.graph.try_admit_runtime(request)
     }
 
     fn read_store(&self) -> Result<RwLockReadGuard<'_, NowledgeMemEmbeddedStore>> {
@@ -8317,6 +8504,53 @@ impl NowledgeMemEmbeddedStoreHandle {
             SkeinError::Execution("nowledge mem embedded store write lock poisoned".to_string())
         })
     }
+}
+
+fn search_projection_delta_bytes(delta: &SearchProjectionDelta) -> usize {
+    let upsert_bytes = delta.upserts.iter().fold(0usize, |total, row| {
+        let embedding_bytes = row.embedding.as_ref().map_or(0, |embedding| {
+            embedding.len().saturating_mul(size_of::<f32>())
+        });
+        let metadata_bytes = row
+            .metadata
+            .iter()
+            .fold(0usize, |metadata_total, (key, value)| {
+                metadata_total
+                    .saturating_add(key.len())
+                    .saturating_add(value.len())
+            });
+        total
+            .saturating_add(size_of::<crate::SearchProjectionRow>())
+            .saturating_add(row.external_id.len())
+            .saturating_add(row.title.len())
+            .saturating_add(row.body.len())
+            .saturating_add(row.source_id.as_ref().map_or(0, String::len))
+            .saturating_add(embedding_bytes)
+            .saturating_add(metadata_bytes)
+    });
+    delta.deletes.iter().fold(upsert_bytes, |total, id| {
+        total
+            .saturating_add(size_of::<String>())
+            .saturating_add(id.len())
+    })
+}
+
+fn search_document_payload_bytes(document: &SearchDocument) -> usize {
+    let embedding_bytes = document.embedding.as_ref().map_or(0, |embedding| {
+        embedding.len().saturating_mul(size_of::<f32>())
+    });
+    let metadata_bytes = document
+        .metadata
+        .iter()
+        .fold(0usize, |total, (key, value)| {
+            total.saturating_add(key.len()).saturating_add(value.len())
+        });
+    size_of::<SearchDocument>()
+        .saturating_add(document.id.len())
+        .saturating_add(document.title.len())
+        .saturating_add(document.content.len())
+        .saturating_add(embedding_bytes)
+        .saturating_add(metadata_bytes)
 }
 
 impl NowledgeMemEmbeddedStore {
@@ -8358,12 +8592,18 @@ impl NowledgeMemEmbeddedStore {
             runtime_governor,
         )?;
         report.graph_opened = true;
+        let default_search_range_read_config = SearchRangeReadConfig {
+            io_depth: graph.runtime_governor_snapshot().limits.foreground_io_depth,
+            ..SearchRangeReadConfig::default()
+        };
         let search_projection = match options.search_projection_path.as_ref() {
             Some(path) => {
                 let mut projection = NowledgeMemSearchProjection::open(path)?;
-                if let Some(config) = options.search_range_read_config {
-                    projection.set_range_read_config(config);
-                }
+                projection.set_range_read_config(
+                    options
+                        .search_range_read_config
+                        .unwrap_or(default_search_range_read_config),
+                );
                 report.search_projection_opened = true;
                 Some(projection)
             }
@@ -9778,7 +10018,7 @@ fn skein_error_class(error: &SkeinError) -> &'static str {
     match error {
         SkeinError::Parse(_) => "parse",
         SkeinError::Semantic(_) => "semantic",
-        SkeinError::Storage(_) => "storage",
+        SkeinError::Storage(_) | SkeinError::StorageIntegrity(_) => "storage",
         SkeinError::Execution(_) => "execution",
         SkeinError::CapabilityUnavailable { .. } => "capability_unavailable",
     }
@@ -9938,8 +10178,8 @@ fn is_simple_two_node_lookup(query: &cypher::MatchNodesReturn) -> bool {
 
 fn recovery_mode_name(mode: RecoveryMode) -> &'static str {
     match mode {
-        RecoveryMode::TolerateTornTail => "tolerate_torn_tail",
         RecoveryMode::Strict => "strict",
+        RecoveryMode::DoctorRepairTornTail => "doctor_repair_torn_tail",
     }
 }
 
@@ -13867,6 +14107,78 @@ mod tests {
     }
 
     #[test]
+    fn embedded_handle_transaction_rejects_before_mutation_without_runtime_memory() {
+        let governor = skein_qos::RuntimeGovernor::detect(
+            skein_qos::RuntimeGovernorConfig {
+                memory_budget_bytes: Some(1),
+                ..skein_qos::RuntimeGovernorConfig::default()
+            },
+            skein_qos::IoConcurrencyBudget::new(2, 1),
+        );
+        let graph = NowledgeMemGraph::from_database_with_runtime_governor(
+            Database::new(),
+            NowledgeMemGraphMode::WritableCutover,
+            governor,
+        );
+        let handle =
+            NowledgeMemEmbeddedStoreHandle::new(NowledgeMemEmbeddedStore::new(graph, None));
+
+        let error = handle
+            .transaction(&[NowledgeGraphStatement {
+                cypher: "CREATE (:Memory {id: 'transaction-rejected'})".to_string(),
+                parameters: BTreeMap::new(),
+            }])
+            .unwrap_err();
+
+        assert!(error.to_string().contains("runtime admission"));
+        assert_eq!(handle.runtime_governor_snapshot().unwrap().admissions, 0);
+        let mut store = handle.write_store().unwrap();
+        let output = store
+            .graph_mut()
+            .database_mut()
+            .query("MATCH (m:Memory) RETURN m.id AS id")
+            .unwrap();
+        assert!(output.rows.is_empty());
+    }
+
+    #[test]
+    fn embedded_handle_search_holds_governed_io_and_result_budget() {
+        let governor = skein_qos::RuntimeGovernor::detect(
+            skein_qos::RuntimeGovernorConfig {
+                memory_budget_bytes: Some(256 * 1024 * 1024),
+                result_budget_bytes: 64 * 1024 * 1024,
+                ..skein_qos::RuntimeGovernorConfig::default()
+            },
+            skein_qos::IoConcurrencyBudget::new(1, 1),
+        );
+        let graph = NowledgeMemGraph::from_database_with_runtime_governor(
+            Database::new(),
+            NowledgeMemGraphMode::WritableCutover,
+            governor,
+        );
+        let mut projection = NowledgeMemSearchProjection::from_index(SearchIndex::default());
+        projection.set_range_read_config(crate::SearchRangeReadConfig::new(
+            std::num::NonZeroUsize::MIN,
+            std::num::NonZeroU64::new(1024).unwrap(),
+        ));
+        let handle = NowledgeMemEmbeddedStoreHandle::new(NowledgeMemEmbeddedStore::new(
+            graph,
+            Some(projection),
+        ));
+
+        let output = handle
+            .search_candidates_with_report(&NowledgeMemSearchCandidateRequest::text("empty", 4))
+            .unwrap();
+
+        assert!(output.result.hits.is_empty());
+        let snapshot = handle.runtime_governor_snapshot().unwrap();
+        assert_eq!(snapshot.admissions, 1);
+        assert_eq!(snapshot.completions, 1);
+        assert_eq!(snapshot.active_foreground_io_slots, 0);
+        assert_eq!(snapshot.admitted_memory_bytes, 0);
+    }
+
+    #[test]
     fn graph_streaming_query_reports_pre_execution_cancellation() {
         let mut db = Database::new();
         db.query("CREATE (:Memory {id: 'cancelled-mem'})").unwrap();
@@ -15317,7 +15629,7 @@ mod tests {
         let recovery =
             NowledgeMemStorageRecoveryReport::from_storage_report(&StorageRecoveryReport {
                 durable: true,
-                recovery_mode: RecoveryMode::TolerateTornTail,
+                recovery_mode: RecoveryMode::DoctorRepairTornTail,
                 max_wal_replay_entries: Some(16),
                 max_wal_replay_bytes: Some(4096),
                 max_wal_record_bytes: Some(1024),
@@ -17320,6 +17632,43 @@ mod tests {
                 1,
             )
             .is_err());
+        let snapshot = handle.runtime_governor_snapshot().unwrap();
+        assert_eq!(snapshot.admissions, 1);
+        assert_eq!(snapshot.completions, 1);
+    }
+
+    #[test]
+    fn embedded_handle_search_hydration_rejects_payload_over_budget() {
+        let graph = NowledgeMemGraph::from_database(
+            Database::new_with_config(DatabaseConfig {
+                max_read_result_payload_bytes: Some(64),
+                ..DatabaseConfig::default()
+            }),
+            NowledgeMemGraphMode::ShadowReadOnly,
+        );
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(crate::SearchDocument {
+                id: "source_chunk:large".to_string(),
+                title: "Large".to_string(),
+                content: "x".repeat(256),
+                embedding: None,
+                metadata: BTreeMap::new(),
+            })
+            .unwrap();
+        let handle = NowledgeMemEmbeddedStoreHandle::new(NowledgeMemEmbeddedStore::new(
+            graph,
+            Some(NowledgeMemSearchProjection::from_index(index)),
+        ));
+
+        let error = handle
+            .search_projection_documents(&["source_chunk:large".to_string()], 1)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("payload bytes"));
+        let snapshot = handle.runtime_governor_snapshot().unwrap();
+        assert_eq!(snapshot.admissions, 1);
+        assert_eq!(snapshot.completions, 1);
     }
 
     #[test]

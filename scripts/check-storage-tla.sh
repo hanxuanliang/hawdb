@@ -15,8 +15,8 @@ readonly specifications=(
 )
 
 manifest_json() {
-  local source_revision="$1"
-  if [[ ! "$source_revision" =~ ^[0-9a-fA-F]{7,64}$ ]]; then
+  local revision="$1"
+  if [[ ! "$revision" =~ ^[0-9a-fA-F]{7,64}$ ]]; then
     printf 'TLA+ source revision must be a hexadecimal commit identity\n' >&2
     return 1
   fi
@@ -28,7 +28,7 @@ manifest_json() {
     separator=","
   done
   printf '{"schema_version":1,"source_revision":"%s","tla_tools_version":"%s","tla_tools_sha256":"%s","models":[%s]}' \
-    "$source_revision" "$tla_version" "$tla_sha256" "$models"
+    "$revision" "$tla_version" "$tla_sha256" "$models"
 }
 
 verify_results() {
@@ -68,6 +68,16 @@ verify_results() {
   fi
 }
 
+if [[ "${1:-}" == "--manifest-json" ]]; then
+  [[ "$#" -eq 2 ]] || {
+    printf 'usage: %s --manifest-json SOURCE_REVISION\n' "$0" >&2
+    exit 2
+  }
+  manifest_json "$2"
+  printf '\n'
+  exit
+fi
+
 if [[ "${1:-}" == "--verify-results" ]]; then
   [[ "$#" -eq 3 ]] || {
     printf 'usage: %s --verify-results RESULTS_DIR SOURCE_REVISION\n' "$0" >&2
@@ -78,7 +88,7 @@ if [[ "${1:-}" == "--verify-results" ]]; then
 fi
 
 if [[ "$#" -ne 0 ]]; then
-  printf 'usage: %s [--verify-results RESULTS_DIR SOURCE_REVISION]\n' "$0" >&2
+  printf 'usage: %s [--manifest-json SOURCE_REVISION | --verify-results RESULTS_DIR SOURCE_REVISION]\n' "$0" >&2
   exit 2
 fi
 
@@ -116,10 +126,10 @@ tla_jar="$(resolve_tla_jar)"
 readonly tla_jar
 readonly tla_java="${TLA_JAVA:-java}"
 readonly tla_results_dir="${TLA_RESULTS_DIR:-}"
-source_revision=""
+evidence_source_revision=""
 if [[ -n "$tla_results_dir" ]]; then
-  source_revision="${TLA_SOURCE_REVISION:-$(git -C "$repository_root" rev-parse HEAD)}"
-  manifest_json "$source_revision" > /dev/null
+  evidence_source_revision="${TLA_SOURCE_REVISION:-$(git -C "$repository_root" rev-parse HEAD)}"
+  manifest_json "$evidence_source_revision" > /dev/null
   mkdir -p "$tla_results_dir"
   if find "$tla_results_dir" -mindepth 1 -print -quit | grep -q .; then
     printf 'TLA_RESULTS_DIR must be empty before model checking\n' >&2
@@ -128,7 +138,7 @@ if [[ -n "$tla_results_dir" ]]; then
   mkdir "$tla_results_dir/models"
   "$tla_java" -version > "$tla_results_dir/java-version.txt" 2>&1
 fi
-readonly source_revision
+readonly evidence_source_revision
 
 for specification in "${specifications[@]}"; do
   model_state_dir="$tla_work_root/states/$specification"
@@ -152,6 +162,6 @@ for specification in "${specifications[@]}"; do
 done
 
 if [[ -n "$tla_results_dir" ]]; then
-  manifest_json "$source_revision" > "$tla_results_dir/manifest.json"
+  manifest_json "$evidence_source_revision" > "$tla_results_dir/manifest.json"
   printf '\n' >> "$tla_results_dir/manifest.json"
 fi

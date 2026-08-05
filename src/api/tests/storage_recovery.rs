@@ -318,6 +318,11 @@ fn typed_read_fails_closed_when_an_out_of_core_segment_is_corrupted() {
             .segment_cache_digest_mismatch_count,
         1
     );
+    assert!(db.storage_handle_poisoned());
+    let poisoned = db
+        .query("MATCH (m:Memory) RETURN m.id AS memory_id")
+        .unwrap_err();
+    assert!(poisoned.to_string().contains("close and reopen"));
 
     drop(db);
     std::fs::remove_dir_all(path).unwrap();
@@ -358,6 +363,11 @@ fn public_query_fails_closed_when_an_out_of_core_segment_is_corrupted() {
             .segment_cache_digest_mismatch_count,
         1
     );
+    assert!(db.storage_handle_poisoned());
+    let poisoned = db
+        .query("MATCH (m:Memory) RETURN m.id AS memory_id")
+        .unwrap_err();
+    assert!(poisoned.to_string().contains("close and reopen"));
 
     drop(db);
     std::fs::remove_dir_all(path).unwrap();
@@ -923,7 +933,7 @@ fn persists_nodes_across_reopen_with_wal_replay() {
 }
 
 #[test]
-fn strict_recovery_rejects_torn_wal_tail() {
+fn default_recovery_rejects_torn_wal_tail_until_explicit_doctor_repair() {
     let path = unique_test_dir("strict_torn_wal");
     {
         let mut db = Database::open(&path).unwrap();
@@ -937,33 +947,89 @@ fn strict_recovery_rejects_torn_wal_tail() {
         .write_all(b"torn-entry-without-checksum")
         .unwrap();
 
-    let error = Database::open_with_config(
-        &path,
-        DatabaseConfig {
-            recovery_mode: RecoveryMode::Strict,
-            ..DatabaseConfig::default()
-        },
-    )
-    .unwrap_err();
+    let error = Database::open(&path).unwrap_err();
     assert!(error
         .to_string()
         .contains("strict WAL recovery rejected torn tail"));
 
-    let mut tolerant = Database::open(&path).unwrap();
-    let output = tolerant
+    let read_only_doctor_error = Database::open_with_config(
+        &path,
+        DatabaseConfig {
+            read_only: true,
+            recovery_mode: RecoveryMode::DoctorRepairTornTail,
+            ..DatabaseConfig::default()
+        },
+    )
+    .unwrap_err();
+    assert!(read_only_doctor_error
+        .to_string()
+        .contains("requires a writable exclusive open"));
+
+    let mut repaired = Database::open_with_config(
+        &path,
+        DatabaseConfig {
+            recovery_mode: RecoveryMode::DoctorRepairTornTail,
+            ..DatabaseConfig::default()
+        },
+    )
+    .unwrap();
+    let output = repaired
         .query("MATCH (m:Memory) WHERE m.id = 1 RETURN m.title AS title")
         .unwrap();
     assert_eq!(
         output.rows[0].get("title"),
         Some(&Value::String("Graph foundations".to_string()))
     );
-    let recovery = tolerant.storage_recovery_report();
+    let recovery = repaired.storage_recovery_report();
     assert!(recovery.torn_tail_ignored);
     assert!(recovery.torn_tail_repaired);
     assert!(recovery.discarded_wal_tail_bytes > 0);
     assert!(!read_test_wal(&path)
         .unwrap()
         .contains("torn-entry-without-checksum"));
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn storage_scrub_streams_strong_artifact_verification_and_poisons_on_corruption() {
+    let path = unique_test_dir("storage_scrub_corruption");
+    let mut db = Database::open_with_config(
+        &path,
+        DatabaseConfig {
+            storage_residency_mode: StorageResidencyMode::OutOfCore,
+            segment_cache_capacity_bytes: 1024 * 1024,
+            ..DatabaseConfig::default()
+        },
+    )
+    .unwrap();
+    db.query("CREATE (:Memory {id: 1, title: 'Scrub me'})")
+        .unwrap();
+    db.checkpoint().unwrap();
+
+    let clean = db.scrub_storage().unwrap();
+    assert_eq!(clean.generation, 1);
+    assert!(clean.checked_file_count >= 4);
+    assert!(clean.sha256_verified_file_count >= 2);
+    assert!(clean.checked_bytes > 0);
+
+    let canonical_path = path.join("canonical.1.skein");
+    let mut bytes = std::fs::read(&canonical_path).unwrap();
+    bytes[24] ^= 0xff;
+    std::fs::write(&canonical_path, bytes).unwrap();
+
+    let error = db.scrub_storage().unwrap_err();
+    assert!(
+        error.to_string().contains("CRC32C mismatch during scrub")
+            || error.to_string().contains("SHA-256 mismatch during scrub"),
+        "unexpected scrub error: {error}"
+    );
+    assert!(db.storage_handle_poisoned());
+    let poisoned = db
+        .query("MATCH (m:Memory) RETURN m.id AS memory_id")
+        .unwrap_err();
+    assert!(poisoned.to_string().contains("close and reopen"));
+
+    drop(db);
     std::fs::remove_dir_all(path).unwrap();
 }
 
@@ -1018,7 +1084,7 @@ fn storage_recovery_report_tracks_wal_replay_boundary() {
     .unwrap();
     let report = db.storage_recovery_report();
     assert!(report.durable);
-    assert_eq!(report.recovery_mode, RecoveryMode::TolerateTornTail);
+    assert_eq!(report.recovery_mode, RecoveryMode::Strict);
     assert_eq!(report.max_wal_replay_entries, Some(8));
     assert_eq!(report.checkpoint_epoch, Some(1));
     assert_eq!(report.checkpoint_commit_epoch, Some(1));
@@ -1147,6 +1213,7 @@ fn mem_shaped_post_checkpoint_batch_replays_before_torn_tail() {
         let db = Database::open_with_config(
             &path,
             DatabaseConfig {
+                recovery_mode: RecoveryMode::DoctorRepairTornTail,
                 max_wal_replay_entries: Some(8),
                 ..DatabaseConfig::default()
             },

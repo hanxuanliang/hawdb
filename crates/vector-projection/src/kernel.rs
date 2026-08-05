@@ -182,6 +182,10 @@ unsafe fn score_neon(codes: &[u8], query: &[f32], centroids: &[f32; TURBOQUANT_L
 mod tests {
     use super::*;
 
+    const DIFFERENTIAL_DIMENSIONS: &[usize] = &[
+        1, 2, 15, 16, 31, 32, 33, 63, 64, 65, 67, 127, 128, 129, 384, 768, 1536,
+    ];
+
     #[test]
     fn selected_kernel_matches_scalar_reference() {
         let dimension: usize = 67;
@@ -199,5 +203,62 @@ mod tests {
             (scalar - accelerated).abs() < 1e-4,
             "{scalar} != {accelerated}"
         );
+    }
+
+    #[test]
+    fn available_simd_kernels_match_scalar_over_deterministic_corpus() {
+        let kernels = [ScanKernel::Avx2, ScanKernel::Neon]
+            .into_iter()
+            .filter(|kernel| match kernel {
+                ScanKernel::Avx2 => avx2_available(),
+                ScanKernel::Neon => neon_available(),
+                ScanKernel::Scalar => true,
+            })
+            .collect::<Vec<_>>();
+        for &dimension in DIFFERENTIAL_DIMENSIONS {
+            let codebook = TurboQuantCodebook::for_dimension(dimension).unwrap();
+            for case_index in 0..64u64 {
+                let seed = differential_seed(dimension, case_index);
+                let mut rng = DifferentialRng(seed);
+                let codes = (0..dimension.div_ceil(2))
+                    .map(|_| rng.next_u64() as u8)
+                    .collect::<Vec<_>>();
+                let query = (0..dimension)
+                    .map(|_| {
+                        let unit = (rng.next_u64() >> 40) as f32 / ((1u32 << 24) - 1) as f32;
+                        unit.mul_add(2.0, -1.0)
+                    })
+                    .collect::<Vec<_>>();
+                let scalar = score_codes(ScanKernel::Scalar, &codes, &query, codebook.centroids());
+                for &kernel in &kernels {
+                    let accelerated = score_codes(kernel, &codes, &query, codebook.centroids());
+                    let tolerance = 5e-4 * scalar.abs().max(1.0);
+                    assert!(
+                        (scalar - accelerated).abs() <= tolerance,
+                        "kernel={} dimension={dimension} case={case_index} seed={seed} scalar={scalar} accelerated={accelerated} tolerance={tolerance}",
+                        kernel.as_str(),
+                    );
+                }
+            }
+        }
+    }
+
+    fn differential_seed(dimension: usize, case_index: u64) -> u64 {
+        (dimension as u64)
+            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            .rotate_left(17)
+            ^ case_index.wrapping_mul(0xbf58_476d_1ce4_e5b9)
+    }
+
+    struct DifferentialRng(u64);
+
+    impl DifferentialRng {
+        fn next_u64(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0 = self.0.wrapping_mul(0x2545_f491_4f6c_dd1d);
+            self.0
+        }
     }
 }

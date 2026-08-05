@@ -6,6 +6,7 @@ pub enum SkeinError {
     Parse(String),
     Semantic(String),
     Storage(String),
+    StorageIntegrity(String),
     Execution(String),
     CapabilityUnavailable { capability: RuntimeCapability },
 }
@@ -16,6 +17,9 @@ impl Display for SkeinError {
             SkeinError::Parse(message) => write!(f, "parse error: {message}"),
             SkeinError::Semantic(message) => write!(f, "semantic error: {message}"),
             SkeinError::Storage(message) => write!(f, "storage error: {message}"),
+            SkeinError::StorageIntegrity(message) => {
+                write!(f, "storage integrity error: {message}")
+            }
             SkeinError::Execution(message) => write!(f, "execution error: {message}"),
             SkeinError::CapabilityUnavailable { capability } => {
                 write!(f, "capability unavailable: {}", capability.as_str())

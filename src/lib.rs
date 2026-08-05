@@ -520,7 +520,7 @@ pub use store::{
     SegmentReadExecutor, SegmentReadPayload, SegmentReadRange, SegmentReadSchedule,
     SegmentReadScheduler, SegmentReadWave, StorageBackupReport, StorageReclamationWatermark,
     StorageRecoveryReport, StorageResidencyMode, StorageResidencyReport, StorageRestoreReport,
-    WalReplayConfig, DENSE_ADJACENCY_DEGREE_THRESHOLD,
+    StorageScrubReport, WalReplayConfig, DENSE_ADJACENCY_DEGREE_THRESHOLD,
 };
 #[cfg(feature = "opentelemetry")]
 pub use telemetry::OpenTelemetryMetrics;

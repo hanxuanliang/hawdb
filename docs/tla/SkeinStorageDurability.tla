@@ -95,6 +95,7 @@ Open(owner) ==
     /\ mode = "closed"
     /\ leases = {}
     /\ diskStatus = "valid"
+    /\ tornTail = {}
     /\ leases' = {owner}
     /\ mode' = "running"
     /\ volatileEpoch' = durableEpoch
@@ -396,11 +397,38 @@ Recover(owner) ==
     /\ mode = "crashed"
     /\ leases = {}
     /\ diskStatus = "valid"
+    /\ tornTail = {}
     /\ mode' = "running"
     /\ leases' = {owner}
     /\ volatileEpoch' = durableEpoch
     /\ tornTail' = {}
     /\ UNCHANGED <<
+        durableEpoch,
+        acknowledgedEpoch,
+        activeGeneration,
+        manifestCheckpointEpoch,
+        manifestReplayLsn,
+        checkpointByGeneration,
+        walStartByGeneration,
+        walRecords,
+        diskStatus,
+        pendingPhase,
+        pendingEpoch,
+        checkpointPhase,
+        buildGeneration,
+        buildEpoch
+        >>
+
+DoctorRepairTornTail ==
+    /\ mode \in {"closed", "crashed"}
+    /\ leases = {}
+    /\ diskStatus = "valid"
+    /\ tornTail # {}
+    /\ tornTail' = {}
+    /\ UNCHANGED <<
+        mode,
+        leases,
+        volatileEpoch,
         durableEpoch,
         acknowledgedEpoch,
         activeGeneration,
@@ -481,6 +509,7 @@ Next ==
     \/ PublishManifest
     \/ Crash
     \/ \E owner \in Owners: Recover(owner)
+    \/ DoctorRepairTornTail
     \/ InjectCompleteRecordCorruption
     \/ RejectCorruptOpen
 

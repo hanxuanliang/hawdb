@@ -23,7 +23,7 @@ use tokio::sync::Barrier;
 
 pub const MIXED_SOAK_PROTOCOL: &str = "skein-mixed-runtime-soak-v1";
 pub const MIXED_SOAK_WORKLOAD: &str =
-    "foreground-point-read+background-distinct+background-checkpoint-v1";
+    "foreground-point-read+background-distinct-cartesian+background-checkpoint-v2";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MixedSoakConfig {
@@ -457,12 +457,20 @@ async fn run_concurrent_workload(
         background_barrier.wait().await;
         let mut reports = Vec::with_capacity(background_config.background_rounds);
         let mut durations = Vec::with_capacity(background_config.background_rounds);
-        for _ in 0..background_config.background_rounds {
+        for round in 0..background_config.background_rounds {
             let started = Instant::now();
+            let cypher = if round % 2 == 0 {
+                "CYPHER system.work_priority = 'background' system.work_class = 'analytics' \
+                 MATCH (m:Memory) RETURN DISTINCT m.bucket AS bucket"
+            } else {
+                "CYPHER system.work_priority = 'background' system.work_class = 'analytics' \
+                 MATCH (a:Memory), (b:Memory) \
+                 WHERE a.id < 32 AND b.id < 32 \
+                 RETURN a.id AS left_id, b.id AS right_id"
+            };
             let report = stream_query(
                 &background_database,
-                "CYPHER system.work_priority = 'background' system.work_class = 'analytics' \
-                 MATCH (m:Memory) RETURN DISTINCT m.bucket AS bucket",
+                cypher,
                 BTreeMap::new(),
                 background_config.task_timeout,
             )

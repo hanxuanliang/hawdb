@@ -42,3 +42,12 @@ error cannot replace a semantic mismatch during reduction.
 
 NoREC is intentionally deferred until the supported Cypher subset can express a general
 `SUM(CASE WHEN predicate THEN 1 ELSE 0 END)` relation without adding a fuzz-only executor path.
+
+The storage campaign mutates one bounded parser input in a generated graph and search fixture per
+case. A clean open or a typed storage error are both valid outcomes; a panic is a failure. Reports
+include the target artifact, mutation, case seed, and exact replay command:
+
+```console
+cargo run -p skein-fuzz --bin skein-storage-fuzz -- --seed 7 --cases 256
+cargo run -p skein-fuzz --bin skein-storage-fuzz -- --seed 7 --case-index 19
+```
