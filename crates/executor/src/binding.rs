@@ -13,6 +13,20 @@ pub struct Binding {
     pub relationships: BTreeMap<String, RelRecord>,
 }
 
+impl Binding {
+    pub fn values(values: BTreeMap<String, Value>) -> Self {
+        Self {
+            values,
+            nodes: BTreeMap::new(),
+            relationships: BTreeMap::new(),
+        }
+    }
+
+    pub fn scalar(name: impl Into<String>, value: Value) -> Self {
+        Self::values(BTreeMap::from([(name.into(), value)]))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopNBinding {
     pub sort_values: Vec<(Value, SortDirection)>,
@@ -162,6 +176,19 @@ mod tests {
     use skein_core::RelTypeId;
     use skein_storage::{NodeId, RelId};
     use std::collections::BTreeSet;
+
+    #[test]
+    fn value_only_constructors_leave_graph_bindings_empty() {
+        let values = Binding::values(BTreeMap::from([("left".to_string(), Value::Int(1))]));
+        assert_eq!(values.values["left"], Value::Int(1));
+        assert!(values.nodes.is_empty());
+        assert!(values.relationships.is_empty());
+
+        let scalar = Binding::scalar("right", Value::Bool(true));
+        assert_eq!(scalar.values["right"], Value::Bool(true));
+        assert!(scalar.nodes.is_empty());
+        assert!(scalar.relationships.is_empty());
+    }
 
     #[test]
     fn binding_accounting_includes_nested_values_and_graph_records() {

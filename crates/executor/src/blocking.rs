@@ -35,6 +35,47 @@ pub struct BlockingExecutionContext<'a> {
     pub observer: &'a dyn ExecutionObserver,
 }
 
+pub fn in_memory_report(
+    operator: &'static str,
+    tracker: &OperatorMemoryTracker,
+    peak_tracked_bytes: usize,
+    input_rows: usize,
+    memory: &ExecutionMemoryConfig,
+) -> BlockingOperatorMemoryReport {
+    BlockingOperatorMemoryReport {
+        operator: operator.to_string(),
+        budget_bytes: tracker.budget_bytes,
+        peak_tracked_bytes,
+        input_rows,
+        max_spill_bytes: memory.max_spill_bytes.get(),
+        max_spill_runs: memory.max_spill_runs.get(),
+        spilled_bytes: 0,
+        spill_run_count: 0,
+        spilled_rows: 0,
+    }
+}
+
+pub fn spill_backed_report(
+    operator: &'static str,
+    tracker: &OperatorMemoryTracker,
+    peak_tracked_bytes: usize,
+    input_rows: usize,
+    spill_budget: &SpillBudgetTracker,
+    spilled_rows: usize,
+) -> BlockingOperatorMemoryReport {
+    BlockingOperatorMemoryReport {
+        operator: operator.to_string(),
+        budget_bytes: tracker.budget_bytes,
+        peak_tracked_bytes,
+        input_rows,
+        max_spill_bytes: spill_budget.max_bytes,
+        max_spill_runs: spill_budget.max_runs,
+        spilled_bytes: spill_budget.used_bytes,
+        spill_run_count: spill_budget.run_count,
+        spilled_rows,
+    }
+}
+
 pub fn spill_binding_run(
     operator: &str,
     bindings: &mut Vec<Binding>,
@@ -93,6 +134,25 @@ mod tests {
             nodes: BTreeMap::new(),
             relationships: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn report_factory_snapshots_tracker_and_spill_state() {
+        let memory = ExecutionMemoryConfig::default();
+        let mut tracker = OperatorMemoryTracker::new(memory.blocking_operator_bytes);
+        tracker.charge(64);
+        let mut spill = SpillBudgetTracker::new("SortExec", &memory);
+        spill.begin_run().unwrap();
+        spill.charge(128).unwrap();
+
+        let report = spill_backed_report("SortExec", &tracker, 96, 10, &spill, 8);
+
+        assert_eq!(report.operator, "SortExec");
+        assert_eq!(report.peak_tracked_bytes, 96);
+        assert_eq!(report.input_rows, 10);
+        assert_eq!(report.spilled_bytes, 128);
+        assert_eq!(report.spill_run_count, 1);
+        assert_eq!(report.spilled_rows, 8);
     }
 
     #[test]

@@ -12,6 +12,17 @@ struct RootBindingBatchSource<'a> {
     context: BatchReadContext<'a>,
 }
 
+impl<'a> BatchReadContext<'a> {
+    fn blocking_context(self) -> BlockingExecutionContext<'a> {
+        BlockingExecutionContext {
+            catalog: self.catalog,
+            memory: self.memory,
+            task_context: self.task_context,
+            observer: self.observer,
+        }
+    }
+}
+
 impl BindingBatchSource for RootBindingBatchSource<'_> {
     fn execute(
         &mut self,
@@ -33,12 +44,7 @@ pub(super) fn stream_distinct_batches(
     executor_blocking::stream_distinct_batches(
         input,
         &mut source,
-        BlockingExecutionContext {
-            catalog: context.catalog,
-            memory: context.memory,
-            task_context: context.task_context,
-            observer: context.observer,
-        },
+        context.blocking_context(),
         execution_limit,
         emit,
     )
@@ -56,12 +62,7 @@ pub(super) fn stream_sort_batches(
         input,
         items,
         &mut source,
-        BlockingExecutionContext {
-            catalog: context.catalog,
-            memory: context.memory,
-            task_context: context.task_context,
-            observer: context.observer,
-        },
+        context.blocking_context(),
         execution_limit,
         emit,
     )
@@ -84,12 +85,7 @@ pub(super) fn stream_top_n_batches(
         offset,
         limit,
         &mut source,
-        BlockingExecutionContext {
-            catalog: context.catalog,
-            memory: context.memory,
-            task_context: context.task_context,
-            observer: context.observer,
-        },
+        context.blocking_context(),
         execution_limit,
         emit,
     )
@@ -109,12 +105,7 @@ pub(super) fn stream_aggregate_batches(
         group_keys,
         items,
         &mut source,
-        BlockingExecutionContext {
-            catalog: context.catalog,
-            memory: context.memory,
-            task_context: context.task_context,
-            observer: context.observer,
-        },
+        context.blocking_context(),
         execution_limit,
         emit,
     )
@@ -164,21 +155,18 @@ pub(super) fn stream_cartesian_product_batches(
     }
     context
         .observer
-        .record_blocking_memory_report(skein_executor::BlockingOperatorMemoryReport {
-            operator: "NodeCartesianProductExec".to_string(),
-            budget_bytes: tracker.budget_bytes,
-            peak_tracked_bytes: tracker.peak_bytes,
-            input_rows: right_ordinal as usize,
-            max_spill_bytes: spill_budget.max_bytes,
-            max_spill_runs: spill_budget.max_runs,
-            spilled_bytes: spill_budget.used_bytes,
-            spill_run_count: spill_budget.run_count,
-            spilled_rows: if runs.is_empty() {
+        .record_blocking_memory_report(executor_blocking::spill_backed_report(
+            "NodeCartesianProductExec",
+            &tracker,
+            tracker.peak_bytes,
+            right_ordinal as usize,
+            &spill_budget,
+            if runs.is_empty() {
                 0
             } else {
                 right_ordinal as usize
             },
-        });
+        ));
     if right_bindings.is_empty() && runs.is_empty() {
         return Ok(BatchControl::Continue);
     }

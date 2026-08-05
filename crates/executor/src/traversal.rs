@@ -1,6 +1,7 @@
 //! Shortest-path and relationship traversal operators.
 
 use crate::binding::{binding_memory_bytes, node_memory_bytes, relationship_memory_bytes, Binding};
+use crate::blocking::in_memory_report;
 use crate::kernel::{
     ensure_operator_item_fits, push_bounded_operator_binding, OperatorMemoryTracker,
 };
@@ -13,7 +14,7 @@ use crate::predicate::{
     relationship_properties_match,
 };
 use crate::store::{GraphExecutionRead, ScanControl};
-use crate::{BlockingOperatorMemoryReport, ExecutionLimit, ExecutionMemoryConfig};
+use crate::{ExecutionLimit, ExecutionMemoryConfig};
 use skein_core::{
     Catalog, LabelId, RelTypeId, RelationshipDirection, Result, RuntimeTaskContext, SkeinError,
     Value,
@@ -112,17 +113,13 @@ pub fn execute_shortest_path(
         output_tracker.charge(bytes);
         output.push(binding);
     }
-    observer.record_blocking_memory_report(BlockingOperatorMemoryReport {
-        operator: "ShortestPathExec".to_string(),
-        budget_bytes: memory.blocking_operator_bytes.get(),
-        peak_tracked_bytes: search_peak_bytes.max(output_tracker.peak_bytes),
-        input_rows: visited_paths,
-        max_spill_bytes: memory.max_spill_bytes.get(),
-        max_spill_runs: memory.max_spill_runs.get(),
-        spilled_bytes: 0,
-        spill_run_count: 0,
-        spilled_rows: 0,
-    });
+    observer.record_blocking_memory_report(in_memory_report(
+        "ShortestPathExec",
+        &output_tracker,
+        search_peak_bytes.max(output_tracker.peak_bytes),
+        visited_paths,
+        memory,
+    ));
     Ok(output)
 }
 

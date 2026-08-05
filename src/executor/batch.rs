@@ -11,42 +11,47 @@ fn stream_node_column_lookup_batches(
 ) -> Result<BatchControl> {
     let mut output = Vec::with_capacity(context.memory.batch_rows.get());
     let mut emitted = 0usize;
-    execute_binding_batches(input, context, ExecutionLimit::unlimited(), &mut |batch| {
-        let remaining = execution_limit
-            .output_rows
-            .unwrap_or(usize::MAX)
-            .saturating_sub(emitted);
-        if remaining == 0 {
-            return Ok(BatchControl::Stop);
-        }
-        let bindings = execute_node_column_lookup(
-            spec,
-            batch,
-            context.catalog,
-            context.store,
-            ExecutionLimit {
-                output_rows: Some(remaining),
-            },
-            context.memory.blocking_operator_bytes,
-            context.observer,
-        )?;
-        for binding in bindings {
-            output.push(binding);
-            emitted = emitted.saturating_add(1);
-            if output.len() == context.memory.batch_rows.get()
-                && emit(std::mem::replace(
-                    &mut output,
-                    Vec::with_capacity(context.memory.batch_rows.get()),
-                ))? == BatchControl::Stop
-            {
+    execute_prepared_binding_batches(
+        BatchPlanRef::descendant(input),
+        context,
+        ExecutionLimit::unlimited(),
+        &mut |batch| {
+            let remaining = execution_limit
+                .output_rows
+                .unwrap_or(usize::MAX)
+                .saturating_sub(emitted);
+            if remaining == 0 {
                 return Ok(BatchControl::Stop);
             }
-            if execution_limit.is_reached(emitted) {
-                return Ok(BatchControl::Stop);
+            let bindings = execute_node_column_lookup(
+                spec,
+                batch,
+                context.catalog,
+                context.store,
+                ExecutionLimit {
+                    output_rows: Some(remaining),
+                },
+                context.memory.blocking_operator_bytes,
+                context.observer,
+            )?;
+            for binding in bindings {
+                output.push(binding);
+                emitted = emitted.saturating_add(1);
+                if output.len() == context.memory.batch_rows.get()
+                    && emit(std::mem::replace(
+                        &mut output,
+                        Vec::with_capacity(context.memory.batch_rows.get()),
+                    ))? == BatchControl::Stop
+                {
+                    return Ok(BatchControl::Stop);
+                }
+                if execution_limit.is_reached(emitted) {
+                    return Ok(BatchControl::Stop);
+                }
             }
-        }
-        Ok(BatchControl::Continue)
-    })?;
+            Ok(BatchControl::Continue)
+        },
+    )?;
     if !output.is_empty() && emit(output)? == BatchControl::Stop {
         return Ok(BatchControl::Stop);
     }
@@ -89,47 +94,52 @@ impl OptionalDegreeSpec<'_> {
         };
         let target_label_ids = label_ids_for_pattern(context.catalog, target_label);
         let mut emitted = 0usize;
-        execute_binding_batches(input, context, execution_limit, &mut |batch| {
-            let mut output = Vec::with_capacity(batch.len());
-            for mut binding in batch {
-                let degree = if !rel_type.is_empty() && rel_type_id.is_none() {
-                    0
+        execute_prepared_binding_batches(
+            BatchPlanRef::descendant(input),
+            context,
+            execution_limit,
+            &mut |batch| {
+                let mut output = Vec::with_capacity(batch.len());
+                for mut binding in batch {
+                    let degree = if !rel_type.is_empty() && rel_type_id.is_none() {
+                        0
+                    } else {
+                        let source = binding.nodes.get(source_variable).ok_or_else(|| {
+                            SkeinError::Execution(format!(
+                                "missing variable '{source_variable}' during optional degree"
+                            ))
+                        })?;
+                        one_hop_relationships_with_budget(
+                            context.store,
+                            source.id,
+                            rel_type_id,
+                            target_label_ids.as_deref(),
+                            rel_properties,
+                            None,
+                            direction,
+                            context.memory.blocking_operator_bytes.get(),
+                            context.observer,
+                        )?
+                        .into_iter()
+                        .filter(|(_, target)| node_properties_match(target, target_properties))
+                        .count()
+                    };
+                    binding
+                        .values
+                        .insert(alias.to_string(), Value::Int(degree as i64));
+                    output.push(binding);
+                }
+                emitted = emitted.saturating_add(output.len());
+                if !output.is_empty() && emit(output)? == BatchControl::Stop {
+                    return Ok(BatchControl::Stop);
+                }
+                Ok(if execution_limit.is_reached(emitted) {
+                    BatchControl::Stop
                 } else {
-                    let source = binding.nodes.get(source_variable).ok_or_else(|| {
-                        SkeinError::Execution(format!(
-                            "missing variable '{source_variable}' during optional degree"
-                        ))
-                    })?;
-                    one_hop_relationships_with_budget(
-                        context.store,
-                        source.id,
-                        rel_type_id,
-                        target_label_ids.as_deref(),
-                        rel_properties,
-                        None,
-                        direction,
-                        context.memory.blocking_operator_bytes.get(),
-                        context.observer,
-                    )?
-                    .into_iter()
-                    .filter(|(_, target)| node_properties_match(target, target_properties))
-                    .count()
-                };
-                binding
-                    .values
-                    .insert(alias.to_string(), Value::Int(degree as i64));
-                output.push(binding);
-            }
-            emitted = emitted.saturating_add(output.len());
-            if !output.is_empty() && emit(output)? == BatchControl::Stop {
-                return Ok(BatchControl::Stop);
-            }
-            Ok(if execution_limit.is_reached(emitted) {
-                BatchControl::Stop
-            } else {
-                BatchControl::Continue
-            })
-        })
+                    BatchControl::Continue
+                })
+            },
+        )
     }
 }
 
@@ -144,39 +154,46 @@ pub(super) struct BatchReadContext<'a> {
     pub(super) observer: &'a QueryExecutionObserver,
 }
 
-pub(super) fn batch_pipeline_capable(plan: &PhysicalPlan) -> bool {
-    match plan {
-        PhysicalPlan::SeqNodeScan { .. }
-        | PhysicalPlan::SourceSegmentScan { .. }
-        | PhysicalPlan::IndexNodeSeek { .. }
-        | PhysicalPlan::IndexNodeMultiSeek { .. }
-        | PhysicalPlan::IndexNodeCompositeSeek { .. }
-        | PhysicalPlan::IndexNodeRangeSeek { .. }
-        | PhysicalPlan::IndexNodeTextSeek { .. }
-        | PhysicalPlan::ThreadRepairStatsExec { .. }
-        | PhysicalPlan::ShortestPathExec { .. }
-        | PhysicalPlan::OptionalRelationshipCountSumExec { .. }
-        | PhysicalPlan::GraphAlgorithm { .. }
-        | PhysicalPlan::VectorSeedScan { .. } => true,
-        PhysicalPlan::FilterExec { input, .. }
-        | PhysicalPlan::ProjectExec { input, .. }
-        | PhysicalPlan::LimitExec { input, .. }
-        | PhysicalPlan::DistinctExec { input }
-        | PhysicalPlan::NodeColumnLookupExec { input, .. }
-        | PhysicalPlan::OptionalDegreeExec { input, .. }
-        | PhysicalPlan::TopNExec { input, .. }
-        | PhysicalPlan::SortExec { input, .. }
-        | PhysicalPlan::AggregateExec { input, .. } => batch_pipeline_capable(input),
-        PhysicalPlan::NodeCartesianProductExec { left, right } => {
-            batch_pipeline_capable(left) && batch_pipeline_capable(right)
+#[derive(Clone, Copy)]
+pub(super) struct BatchPlanRef<'a>(&'a PhysicalPlan);
+
+impl<'a> BatchPlanRef<'a> {
+    pub(super) fn try_new(plan: &'a PhysicalPlan) -> Option<Self> {
+        let locally_supported = match plan.class() {
+            PhysicalPlanClass::Access
+            | PhysicalPlanClass::Traversal
+            | PhysicalPlanClass::Relational => true,
+            PhysicalPlanClass::Procedure => !matches!(plan, PhysicalPlan::ProjectGraph { .. }),
+            PhysicalPlanClass::Schema | PhysicalPlanClass::Mutation => false,
+        };
+        if !locally_supported {
+            return None;
         }
-        PhysicalPlan::AdjacencyExpandExec { input, .. } => batch_pipeline_capable(input),
-        _ => false,
+        match plan.children() {
+            PlanChildren::None => {}
+            PlanChildren::Unary(input) => {
+                Self::try_new(input)?;
+            }
+            PlanChildren::Binary(left, right) => {
+                Self::try_new(left)?;
+                Self::try_new(right)?;
+            }
+        }
+        Some(Self(plan))
+    }
+
+    fn descendant(plan: &'a PhysicalPlan) -> Self {
+        debug_assert!(Self::try_new(plan).is_some());
+        Self(plan)
+    }
+
+    fn plan(self) -> &'a PhysicalPlan {
+        self.0
     }
 }
 
 pub(super) fn collect_batch_pipeline(
-    plan: &PhysicalPlan,
+    plan: BatchPlanRef<'_>,
     catalog: &Catalog,
     store: &GraphStore,
     execution_context: &mut ExecutionContext<'_>,
@@ -196,7 +213,7 @@ pub(super) fn collect_batch_pipeline(
         task_context,
         observer: execution_context.observer,
     };
-    execute_binding_batches(plan, context, execution_limit, &mut |batch| {
+    execute_prepared_binding_batches(plan, context, execution_limit, &mut |batch| {
         for binding in batch {
             push_bounded_operator_binding(
                 "MaterializedBatchPipeline",
@@ -215,6 +232,21 @@ pub(super) fn collect_batch_pipeline(
 
 pub(super) fn execute_binding_batches(
     plan: &PhysicalPlan,
+    context: BatchReadContext<'_>,
+    execution_limit: ExecutionLimit,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<BatchControl> {
+    let plan = BatchPlanRef::try_new(plan).ok_or_else(|| {
+        SkeinError::Execution(format!(
+            "physical operator '{}' does not support batch execution",
+            plan.kind().as_str()
+        ))
+    })?;
+    execute_prepared_binding_batches(plan, context, execution_limit, emit)
+}
+
+pub(super) fn execute_prepared_binding_batches(
+    plan: BatchPlanRef<'_>,
     context: BatchReadContext<'_>,
     execution_limit: ExecutionLimit,
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
@@ -289,13 +321,13 @@ fn emit_byte_bounded_batches(
 }
 
 fn execute_binding_batches_inner(
-    plan: &PhysicalPlan,
+    plan: BatchPlanRef<'_>,
     context: BatchReadContext<'_>,
     execution_limit: ExecutionLimit,
     emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
 ) -> Result<BatchControl> {
     runtime_checkpoint(context.task_context)?;
-    debug_assert!(batch_pipeline_capable(plan));
+    let plan = plan.plan();
     let BatchReadContext {
         catalog,
         store,
@@ -755,39 +787,44 @@ fn execute_binding_batches_inner(
                 );
             }
             let mut emitted = 0usize;
-            execute_binding_batches(input, context, ExecutionLimit::unlimited(), &mut |batch| {
-                let remaining = execution_limit
-                    .output_rows
-                    .unwrap_or(usize::MAX)
-                    .saturating_sub(emitted);
-                if remaining == 0 {
-                    return Ok(BatchControl::Stop);
-                }
-                let mut filtered = Vec::with_capacity(batch.len().min(remaining));
-                for binding in batch {
-                    if evaluate_predicate_observed(
-                        predicate,
-                        catalog,
-                        store,
-                        &binding,
-                        context.observer,
-                    )? {
-                        filtered.push(binding);
-                        if filtered.len() == remaining {
-                            break;
+            execute_prepared_binding_batches(
+                BatchPlanRef::descendant(input),
+                context,
+                ExecutionLimit::unlimited(),
+                &mut |batch| {
+                    let remaining = execution_limit
+                        .output_rows
+                        .unwrap_or(usize::MAX)
+                        .saturating_sub(emitted);
+                    if remaining == 0 {
+                        return Ok(BatchControl::Stop);
+                    }
+                    let mut filtered = Vec::with_capacity(batch.len().min(remaining));
+                    for binding in batch {
+                        if evaluate_predicate_observed(
+                            predicate,
+                            catalog,
+                            store,
+                            &binding,
+                            context.observer,
+                        )? {
+                            filtered.push(binding);
+                            if filtered.len() == remaining {
+                                break;
+                            }
                         }
                     }
-                }
-                emitted = emitted.saturating_add(filtered.len());
-                if !filtered.is_empty() && emit(filtered)? == BatchControl::Stop {
-                    return Ok(BatchControl::Stop);
-                }
-                Ok(if execution_limit.is_reached(emitted) {
-                    BatchControl::Stop
-                } else {
-                    BatchControl::Continue
-                })
-            })
+                    emitted = emitted.saturating_add(filtered.len());
+                    if !filtered.is_empty() && emit(filtered)? == BatchControl::Stop {
+                        return Ok(BatchControl::Stop);
+                    }
+                    Ok(if execution_limit.is_reached(emitted) {
+                        BatchControl::Stop
+                    } else {
+                        BatchControl::Continue
+                    })
+                },
+            )
         }
         PhysicalPlan::ProjectExec { items, input } => {
             if let Some(result) =
@@ -796,30 +833,35 @@ fn execute_binding_batches_inner(
                 return result;
             }
             let mut emitted = 0usize;
-            execute_binding_batches(input, context, execution_limit, &mut |batch| {
-                let mut projected = Vec::with_capacity(batch.len());
-                for binding in batch {
-                    let mut values = BTreeMap::new();
-                    for item in items {
-                        let value = project_value(item, catalog, &binding)?;
-                        insert_projected_value(&mut values, &item.name, value);
+            execute_prepared_binding_batches(
+                BatchPlanRef::descendant(input),
+                context,
+                execution_limit,
+                &mut |batch| {
+                    let mut projected = Vec::with_capacity(batch.len());
+                    for binding in batch {
+                        let mut values = BTreeMap::new();
+                        for item in items {
+                            let value = project_value(item, catalog, &binding)?;
+                            insert_projected_value(&mut values, &item.name, value);
+                        }
+                        projected.push(Binding {
+                            values,
+                            nodes: binding.nodes,
+                            relationships: binding.relationships,
+                        });
                     }
-                    projected.push(Binding {
-                        values,
-                        nodes: binding.nodes,
-                        relationships: binding.relationships,
-                    });
-                }
-                emitted = emitted.saturating_add(projected.len());
-                if !projected.is_empty() && emit(projected)? == BatchControl::Stop {
-                    return Ok(BatchControl::Stop);
-                }
-                Ok(if execution_limit.is_reached(emitted) {
-                    BatchControl::Stop
-                } else {
-                    BatchControl::Continue
-                })
-            })
+                    emitted = emitted.saturating_add(projected.len());
+                    if !projected.is_empty() && emit(projected)? == BatchControl::Stop {
+                        return Ok(BatchControl::Stop);
+                    }
+                    Ok(if execution_limit.is_reached(emitted) {
+                        BatchControl::Stop
+                    } else {
+                        BatchControl::Continue
+                    })
+                },
+            )
         }
         PhysicalPlan::LimitExec {
             offset,
@@ -834,8 +876,8 @@ fn execute_binding_batches_inner(
                 (None, Some(parent)) => parent,
                 (None, None) => usize::MAX,
             };
-            execute_binding_batches(
-                input,
+            execute_prepared_binding_batches(
+                BatchPlanRef::descendant(input),
                 context,
                 ExecutionLimit {
                     output_rows: Some(offset.saturating_add(output_cap)),
@@ -889,7 +931,41 @@ fn execute_binding_batches_inner(
         PhysicalPlan::DistinctExec { input } => {
             stream_distinct_batches(input, context, execution_limit, emit)
         }
-        _ => unreachable!("batch pipeline capability check rejected this operator"),
+        PhysicalPlan::CreateNodeLabel { .. }
+        | PhysicalPlan::CreateRelationshipType { .. }
+        | PhysicalPlan::CreateNodeTable { .. }
+        | PhysicalPlan::CreateRelationshipTable { .. }
+        | PhysicalPlan::CreateProperty { .. }
+        | PhysicalPlan::AlterTableState { .. }
+        | PhysicalPlan::AlterPropertyState { .. }
+        | PhysicalPlan::CreateIndex { .. }
+        | PhysicalPlan::CreateCompositeIndex { .. }
+        | PhysicalPlan::CreateRangeIndex { .. }
+        | PhysicalPlan::CreateFullTextIndex { .. }
+        | PhysicalPlan::CreateUniqueConstraint { .. }
+        | PhysicalPlan::CreateNodePropertyExistsConstraint { .. }
+        | PhysicalPlan::CreateRelationshipUniqueConstraint { .. }
+        | PhysicalPlan::CreateRelationshipPropertyExistsConstraint { .. }
+        | PhysicalPlan::ProjectGraph { .. }
+        | PhysicalPlan::CreateNode { .. }
+        | PhysicalPlan::MergeNode { .. }
+        | PhysicalPlan::MergeRelationship { .. }
+        | PhysicalPlan::MergeMatchedRelationship { .. }
+        | PhysicalPlan::MergeRelationshipFromMatchedRelationship { .. }
+        | PhysicalPlan::MergeRelationshipToMatchedTarget { .. }
+        | PhysicalPlan::MergeRelationshipFromMatchedTarget { .. }
+        | PhysicalPlan::CreateMatchedRelationship { .. }
+        | PhysicalPlan::SetNodeProperty { .. }
+        | PhysicalPlan::SetNodeProperties { .. }
+        | PhysicalPlan::SetNodePropertiesReturn { .. }
+        | PhysicalPlan::SetRelationshipProperty { .. }
+        | PhysicalPlan::SetRelationshipProperties { .. }
+        | PhysicalPlan::DeleteNode { .. }
+        | PhysicalPlan::DeleteRelationship { .. }
+        | PhysicalPlan::DeleteRelationshipTargetNodes { .. }
+        | PhysicalPlan::CreateRelationship { .. } => {
+            unreachable!("BatchPlanRef rejected this physical operator")
+        }
     }
 }
 

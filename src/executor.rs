@@ -5,9 +5,9 @@ use crate::cypher::RelationshipDirection;
 use crate::error::{Result, SkeinError};
 use crate::optimizer::PhysicalPlan;
 use crate::planner::{
-    Aggregation, GraphAlgorithmKind, Predicate, Projection, ProjectionExpression,
-    RelationshipCountLeg, RelationshipOnCreateValue, SetNodePropertiesReturnMode, SetValue,
-    SortItem,
+    Aggregation, GraphAlgorithmKind, PhysicalPlanClass, PlanChildren, Predicate, Projection,
+    ProjectionExpression, RelationshipCountLeg, RelationshipOnCreateValue,
+    SetNodePropertiesReturnMode, SetValue, SortItem,
 };
 use crate::schema::Catalog;
 use crate::store::{
@@ -513,7 +513,8 @@ fn execute_with_row_consumer_profile_internal(
     let process_memory_start = skein_qos::ProcessMemorySnapshot::capture().ok();
     let execution_limit = ExecutionLimit::from_user_max_rows(max_rows)?;
     let mut profile = read_execution_profile(plan, max_rows)?;
-    let fully_streamed = batch_pipeline_capable(plan);
+    let batch_plan = BatchPlanRef::try_new(plan);
+    let fully_streamed = batch_plan.is_some();
     let mut output_rows = 0usize;
     let mut output_payload_bytes = 0usize;
     let mut emit_binding = |binding: Binding| -> Result<()> {
@@ -548,7 +549,7 @@ fn execute_with_row_consumer_profile_internal(
         task_context,
         observer: &observer,
     };
-    if fully_streamed {
+    if let Some(batch_plan) = batch_plan {
         let external = BatchExternalReadAdapter::new(&mut *context.external);
         let batch_context = BatchReadContext {
             catalog,
@@ -559,12 +560,17 @@ fn execute_with_row_consumer_profile_internal(
             task_context,
             observer: context.observer,
         };
-        execute_binding_batches(plan, batch_context, execution_limit, &mut |batch| {
-            for binding in batch {
-                emit_binding(binding)?;
-            }
-            Ok(BatchControl::Continue)
-        })?;
+        execute_prepared_binding_batches(
+            batch_plan,
+            batch_context,
+            execution_limit,
+            &mut |batch| {
+                for binding in batch {
+                    emit_binding(binding)?;
+                }
+                Ok(BatchControl::Continue)
+            },
+        )?;
     } else {
         let bindings =
             execute_bindings_with_limit(plan, catalog, store, &mut context, execution_limit)?;

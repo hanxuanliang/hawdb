@@ -10,57 +10,41 @@ pub(super) fn execute_bindings_with_limit(
     execution_limit: ExecutionLimit,
 ) -> Result<Vec<Binding>> {
     runtime_checkpoint(context.task_context)?;
-    if batch_pipeline_capable(plan) {
+    if let Some(plan) = BatchPlanRef::try_new(plan) {
         return collect_batch_pipeline(plan, catalog, store, context, execution_limit);
     }
     match plan {
         PhysicalPlan::CreateNodeLabel { label } => {
             let existed = catalog.label_id(label);
             let id = store.create_node_label(catalog, label)?;
-            Ok(vec![Binding {
-                values: BTreeMap::from([
-                    ("label_id".to_string(), Value::Int(id.0 as i64)),
-                    ("created".to_string(), Value::Bool(existed.is_none())),
-                ]),
-                nodes: BTreeMap::new(),
-                relationships: BTreeMap::new(),
-            }])
+            Ok(vec![Binding::values(BTreeMap::from([
+                ("label_id".to_string(), Value::Int(id.0 as i64)),
+                ("created".to_string(), Value::Bool(existed.is_none())),
+            ]))])
         }
         PhysicalPlan::CreateRelationshipType { rel_type } => {
             let existed = catalog.rel_type_id(rel_type);
             let id = store.create_relationship_type(catalog, rel_type)?;
-            Ok(vec![Binding {
-                values: BTreeMap::from([
-                    ("rel_type_id".to_string(), Value::Int(id.0 as i64)),
-                    ("created".to_string(), Value::Bool(existed.is_none())),
-                ]),
-                nodes: BTreeMap::new(),
-                relationships: BTreeMap::new(),
-            }])
+            Ok(vec![Binding::values(BTreeMap::from([
+                ("rel_type_id".to_string(), Value::Int(id.0 as i64)),
+                ("created".to_string(), Value::Bool(existed.is_none())),
+            ]))])
         }
         PhysicalPlan::CreateNodeTable { name } => {
             let existed = catalog.table_id(crate::schema::TableKind::Node, name);
             let id = store.create_node_table(catalog, name)?;
-            Ok(vec![Binding {
-                values: BTreeMap::from([
-                    ("table_id".to_string(), Value::Int(id.0 as i64)),
-                    ("created".to_string(), Value::Bool(existed.is_none())),
-                ]),
-                nodes: BTreeMap::new(),
-                relationships: BTreeMap::new(),
-            }])
+            Ok(vec![Binding::values(BTreeMap::from([
+                ("table_id".to_string(), Value::Int(id.0 as i64)),
+                ("created".to_string(), Value::Bool(existed.is_none())),
+            ]))])
         }
         PhysicalPlan::CreateRelationshipTable { name } => {
             let existed = catalog.table_id(crate::schema::TableKind::Relationship, name);
             let id = store.create_relationship_table(catalog, name)?;
-            Ok(vec![Binding {
-                values: BTreeMap::from([
-                    ("table_id".to_string(), Value::Int(id.0 as i64)),
-                    ("created".to_string(), Value::Bool(existed.is_none())),
-                ]),
-                nodes: BTreeMap::new(),
-                relationships: BTreeMap::new(),
-            }])
+            Ok(vec![Binding::values(BTreeMap::from([
+                ("table_id".to_string(), Value::Int(id.0 as i64)),
+                ("created".to_string(), Value::Bool(existed.is_none())),
+            ]))])
         }
         PhysicalPlan::CreateProperty {
             table_kind,
@@ -82,14 +66,10 @@ pub(super) fn execute_bindings_with_limit(
                 property_type_to_core(*value_type),
                 *nullable,
             )?;
-            Ok(vec![Binding {
-                values: BTreeMap::from([
-                    ("property_id".to_string(), Value::Int(id.0 as i64)),
-                    ("created".to_string(), Value::Bool(!existed)),
-                ]),
-                nodes: BTreeMap::new(),
-                relationships: BTreeMap::new(),
-            }])
+            Ok(vec![Binding::values(BTreeMap::from([
+                ("property_id".to_string(), Value::Int(id.0 as i64)),
+                ("created".to_string(), Value::Bool(!existed)),
+            ]))])
         }
         PhysicalPlan::AlterTableState {
             table_kind,
@@ -99,14 +79,10 @@ pub(super) fn execute_bindings_with_limit(
             let state = object_state_to_core(*state);
             let (id, changed) =
                 store.alter_table_state(catalog, table_kind_to_core(*table_kind), table, state)?;
-            Ok(vec![Binding {
-                values: BTreeMap::from([
-                    ("table_id".to_string(), Value::Int(id.0 as i64)),
-                    ("changed".to_string(), Value::Bool(changed)),
-                ]),
-                nodes: BTreeMap::new(),
-                relationships: BTreeMap::new(),
-            }])
+            Ok(vec![Binding::values(BTreeMap::from([
+                ("table_id".to_string(), Value::Int(id.0 as i64)),
+                ("changed".to_string(), Value::Bool(changed)),
+            ]))])
         }
         PhysicalPlan::AlterPropertyState {
             table_kind,
@@ -122,28 +98,20 @@ pub(super) fn execute_bindings_with_limit(
                 property,
                 state,
             )?;
-            Ok(vec![Binding {
-                values: BTreeMap::from([
-                    ("property_id".to_string(), Value::Int(id.0 as i64)),
-                    ("changed".to_string(), Value::Bool(changed)),
-                ]),
-                nodes: BTreeMap::new(),
-                relationships: BTreeMap::new(),
-            }])
+            Ok(vec![Binding::values(BTreeMap::from([
+                ("property_id".to_string(), Value::Int(id.0 as i64)),
+                ("changed".to_string(), Value::Bool(changed)),
+            ]))])
         }
         PhysicalPlan::CreateIndex { label, property } => {
             let existed = catalog
                 .label_id(label)
                 .is_some_and(|label_id| catalog.property_index_id(label_id, property).is_some());
             let id = store.create_property_index(catalog, label, property)?;
-            Ok(vec![Binding {
-                values: BTreeMap::from([
-                    ("index_id".to_string(), Value::Int(id.0 as i64)),
-                    ("created".to_string(), Value::Bool(!existed)),
-                ]),
-                nodes: BTreeMap::new(),
-                relationships: BTreeMap::new(),
-            }])
+            Ok(vec![Binding::values(BTreeMap::from([
+                ("index_id".to_string(), Value::Int(id.0 as i64)),
+                ("created".to_string(), Value::Bool(!existed)),
+            ]))])
         }
         PhysicalPlan::CreateCompositeIndex { label, properties } => {
             let existed = catalog.label_id(label).is_some_and(|label_id| {
@@ -152,14 +120,10 @@ pub(super) fn execute_bindings_with_limit(
                     .is_some()
             });
             let id = store.create_composite_property_index(catalog, label, properties)?;
-            Ok(vec![Binding {
-                values: BTreeMap::from([
-                    ("index_id".to_string(), Value::Int(id.0 as i64)),
-                    ("created".to_string(), Value::Bool(!existed)),
-                ]),
-                nodes: BTreeMap::new(),
-                relationships: BTreeMap::new(),
-            }])
+            Ok(vec![Binding::values(BTreeMap::from([
+                ("index_id".to_string(), Value::Int(id.0 as i64)),
+                ("created".to_string(), Value::Bool(!existed)),
+            ]))])
         }
         PhysicalPlan::CreateRangeIndex { label, property } => {
             let existed = catalog.label_id(label).is_some_and(|label_id| {
@@ -172,14 +136,10 @@ pub(super) fn execute_bindings_with_limit(
                     .is_some()
             });
             let id = store.create_range_property_index(catalog, label, property)?;
-            Ok(vec![Binding {
-                values: BTreeMap::from([
-                    ("index_id".to_string(), Value::Int(id.0 as i64)),
-                    ("created".to_string(), Value::Bool(!existed)),
-                ]),
-                nodes: BTreeMap::new(),
-                relationships: BTreeMap::new(),
-            }])
+            Ok(vec![Binding::values(BTreeMap::from([
+                ("index_id".to_string(), Value::Int(id.0 as i64)),
+                ("created".to_string(), Value::Bool(!existed)),
+            ]))])
         }
         PhysicalPlan::CreateFullTextIndex { label, property } => {
             let existed = catalog.label_id(label).is_some_and(|label_id| {
@@ -192,28 +152,20 @@ pub(super) fn execute_bindings_with_limit(
                     .is_some()
             });
             let id = store.create_full_text_property_index(catalog, label, property)?;
-            Ok(vec![Binding {
-                values: BTreeMap::from([
-                    ("index_id".to_string(), Value::Int(id.0 as i64)),
-                    ("created".to_string(), Value::Bool(!existed)),
-                ]),
-                nodes: BTreeMap::new(),
-                relationships: BTreeMap::new(),
-            }])
+            Ok(vec![Binding::values(BTreeMap::from([
+                ("index_id".to_string(), Value::Int(id.0 as i64)),
+                ("created".to_string(), Value::Bool(!existed)),
+            ]))])
         }
         PhysicalPlan::CreateUniqueConstraint { label, property } => {
             let existed = catalog
                 .label_id(label)
                 .is_some_and(|label_id| catalog.unique_constraint_id(label_id, property).is_some());
             let id = store.create_unique_constraint(catalog, label, property)?;
-            Ok(vec![Binding {
-                values: BTreeMap::from([
-                    ("constraint_id".to_string(), Value::Int(id.0 as i64)),
-                    ("created".to_string(), Value::Bool(!existed)),
-                ]),
-                nodes: BTreeMap::new(),
-                relationships: BTreeMap::new(),
-            }])
+            Ok(vec![Binding::values(BTreeMap::from([
+                ("constraint_id".to_string(), Value::Int(id.0 as i64)),
+                ("created".to_string(), Value::Bool(!existed)),
+            ]))])
         }
         PhysicalPlan::CreateNodePropertyExistsConstraint { label, property } => {
             let existed = catalog.label_id(label).is_some_and(|label_id| {
@@ -222,14 +174,10 @@ pub(super) fn execute_bindings_with_limit(
                     .is_some()
             });
             let id = store.create_node_property_exists_constraint(catalog, label, property)?;
-            Ok(vec![Binding {
-                values: BTreeMap::from([
-                    ("constraint_id".to_string(), Value::Int(id.0 as i64)),
-                    ("created".to_string(), Value::Bool(!existed)),
-                ]),
-                nodes: BTreeMap::new(),
-                relationships: BTreeMap::new(),
-            }])
+            Ok(vec![Binding::values(BTreeMap::from([
+                ("constraint_id".to_string(), Value::Int(id.0 as i64)),
+                ("created".to_string(), Value::Bool(!existed)),
+            ]))])
         }
         PhysicalPlan::CreateRelationshipUniqueConstraint { rel_type, property } => {
             let existed = catalog.rel_type_id(rel_type).is_some_and(|rel_type_id| {
@@ -238,14 +186,10 @@ pub(super) fn execute_bindings_with_limit(
                     .is_some()
             });
             let id = store.create_relationship_unique_constraint(catalog, rel_type, property)?;
-            Ok(vec![Binding {
-                values: BTreeMap::from([
-                    ("constraint_id".to_string(), Value::Int(id.0 as i64)),
-                    ("created".to_string(), Value::Bool(!existed)),
-                ]),
-                nodes: BTreeMap::new(),
-                relationships: BTreeMap::new(),
-            }])
+            Ok(vec![Binding::values(BTreeMap::from([
+                ("constraint_id".to_string(), Value::Int(id.0 as i64)),
+                ("created".to_string(), Value::Bool(!existed)),
+            ]))])
         }
         PhysicalPlan::CreateRelationshipPropertyExistsConstraint { rel_type, property } => {
             let existed = catalog.rel_type_id(rel_type).is_some_and(|rel_type_id| {
@@ -255,14 +199,10 @@ pub(super) fn execute_bindings_with_limit(
             });
             let id = store
                 .create_relationship_property_exists_constraint(catalog, rel_type, property)?;
-            Ok(vec![Binding {
-                values: BTreeMap::from([
-                    ("constraint_id".to_string(), Value::Int(id.0 as i64)),
-                    ("created".to_string(), Value::Bool(!existed)),
-                ]),
-                nodes: BTreeMap::new(),
-                relationships: BTreeMap::new(),
-            }])
+            Ok(vec![Binding::values(BTreeMap::from([
+                ("constraint_id".to_string(), Value::Int(id.0 as i64)),
+                ("created".to_string(), Value::Bool(!existed)),
+            ]))])
         }
         PhysicalPlan::ProjectGraph {
             name,
@@ -285,29 +225,21 @@ pub(super) fn execute_bindings_with_limit(
                     rel_types: rel_types.clone(),
                 },
             )?;
-            Ok(vec![Binding {
-                values: BTreeMap::from([
-                    ("graph_name".to_string(), Value::String(name.clone())),
-                    (
-                        "node_count".to_string(),
-                        Value::Int(graph.node_count() as i64),
-                    ),
-                    (
-                        "edge_count".to_string(),
-                        Value::Int(graph.edge_count() as i64),
-                    ),
-                ]),
-                nodes: BTreeMap::new(),
-                relationships: BTreeMap::new(),
-            }])
+            Ok(vec![Binding::values(BTreeMap::from([
+                ("graph_name".to_string(), Value::String(name.clone())),
+                (
+                    "node_count".to_string(),
+                    Value::Int(graph.node_count() as i64),
+                ),
+                (
+                    "edge_count".to_string(),
+                    Value::Int(graph.edge_count() as i64),
+                ),
+            ]))])
         }
         PhysicalPlan::CreateNode { label, properties } => {
             let id = store.create_node(catalog, label, properties.clone())?;
-            Ok(vec![Binding {
-                values: BTreeMap::from([("node_id".to_string(), Value::Int(id.0 as i64))]),
-                nodes: BTreeMap::new(),
-                relationships: BTreeMap::new(),
-            }])
+            Ok(vec![Binding::scalar("node_id", Value::Int(id.0 as i64))])
         }
         PhysicalPlan::MergeNode {
             label,
@@ -332,14 +264,10 @@ pub(super) fn execute_bindings_with_limit(
                 &on_match_assignments,
                 &post_merge_assignments,
             )?;
-            Ok(vec![Binding {
-                values: BTreeMap::from([
-                    ("node_id".to_string(), Value::Int(id.0 as i64)),
-                    ("created".to_string(), Value::Bool(created)),
-                ]),
-                nodes: BTreeMap::new(),
-                relationships: BTreeMap::new(),
-            }])
+            Ok(vec![Binding::values(BTreeMap::from([
+                ("node_id".to_string(), Value::Int(id.0 as i64)),
+                ("created".to_string(), Value::Bool(created)),
+            ]))])
         }
         PhysicalPlan::MergeRelationship {
             source_label,
@@ -360,16 +288,12 @@ pub(super) fn execute_bindings_with_limit(
                     target_properties: target_properties.clone(),
                 },
             )?;
-            Ok(vec![Binding {
-                values: BTreeMap::from([
-                    ("source_node_id".to_string(), Value::Int(source.0 as i64)),
-                    ("target_node_id".to_string(), Value::Int(target.0 as i64)),
-                    ("rel_id".to_string(), Value::Int(rel.0 as i64)),
-                    ("created".to_string(), Value::Bool(created)),
-                ]),
-                nodes: BTreeMap::new(),
-                relationships: BTreeMap::new(),
-            }])
+            Ok(vec![Binding::values(BTreeMap::from([
+                ("source_node_id".to_string(), Value::Int(source.0 as i64)),
+                ("target_node_id".to_string(), Value::Int(target.0 as i64)),
+                ("rel_id".to_string(), Value::Int(rel.0 as i64)),
+                ("created".to_string(), Value::Bool(created)),
+            ]))])
         }
         PhysicalPlan::MergeMatchedRelationship {
             source_label,
@@ -394,15 +318,13 @@ pub(super) fn execute_bindings_with_limit(
             )?;
             Ok(rows
                 .into_iter()
-                .map(|(source, rel, target, created)| Binding {
-                    values: BTreeMap::from([
+                .map(|(source, rel, target, created)| {
+                    Binding::values(BTreeMap::from([
                         ("source_node_id".to_string(), Value::Int(source.0 as i64)),
                         ("target_node_id".to_string(), Value::Int(target.0 as i64)),
                         ("rel_id".to_string(), Value::Int(rel.0 as i64)),
                         ("created".to_string(), Value::Bool(created)),
-                    ]),
-                    nodes: BTreeMap::new(),
-                    relationships: BTreeMap::new(),
+                    ]))
                 })
                 .collect())
         }
@@ -441,15 +363,13 @@ pub(super) fn execute_bindings_with_limit(
             )?;
             Ok(rows
                 .into_iter()
-                .map(|(source, rel, target, created)| Binding {
-                    values: BTreeMap::from([
+                .map(|(source, rel, target, created)| {
+                    Binding::values(BTreeMap::from([
                         ("source_node_id".to_string(), Value::Int(source.0 as i64)),
                         ("target_node_id".to_string(), Value::Int(target.0 as i64)),
                         ("rel_id".to_string(), Value::Int(rel.0 as i64)),
                         ("created".to_string(), Value::Bool(created)),
-                    ]),
-                    nodes: BTreeMap::new(),
-                    relationships: BTreeMap::new(),
+                    ]))
                 })
                 .collect())
         }
@@ -484,15 +404,13 @@ pub(super) fn execute_bindings_with_limit(
             )?;
             Ok(rows
                 .into_iter()
-                .map(|(source, rel, target, created)| Binding {
-                    values: BTreeMap::from([
+                .map(|(source, rel, target, created)| {
+                    Binding::values(BTreeMap::from([
                         ("source_node_id".to_string(), Value::Int(source.0 as i64)),
                         ("target_node_id".to_string(), Value::Int(target.0 as i64)),
                         ("rel_id".to_string(), Value::Int(rel.0 as i64)),
                         ("created".to_string(), Value::Bool(created)),
-                    ]),
-                    nodes: BTreeMap::new(),
-                    relationships: BTreeMap::new(),
+                    ]))
                 })
                 .collect())
         }
@@ -527,15 +445,13 @@ pub(super) fn execute_bindings_with_limit(
             )?;
             Ok(rows
                 .into_iter()
-                .map(|(source, rel, target, created)| Binding {
-                    values: BTreeMap::from([
+                .map(|(source, rel, target, created)| {
+                    Binding::values(BTreeMap::from([
                         ("source_node_id".to_string(), Value::Int(source.0 as i64)),
                         ("target_node_id".to_string(), Value::Int(target.0 as i64)),
                         ("rel_id".to_string(), Value::Int(rel.0 as i64)),
                         ("created".to_string(), Value::Bool(created)),
-                    ]),
-                    nodes: BTreeMap::new(),
-                    relationships: BTreeMap::new(),
+                    ]))
                 })
                 .collect())
         }
@@ -602,11 +518,7 @@ pub(super) fn execute_bindings_with_limit(
             };
             Ok(ids
                 .into_iter()
-                .map(|id| Binding {
-                    values: BTreeMap::from([("node_id".to_string(), Value::Int(id.0 as i64))]),
-                    nodes: BTreeMap::new(),
-                    relationships: BTreeMap::new(),
-                })
+                .map(|id| Binding::scalar("node_id", Value::Int(id.0 as i64)))
                 .collect())
         }
         PhysicalPlan::SetNodeProperties {
@@ -626,11 +538,7 @@ pub(super) fn execute_bindings_with_limit(
             let ids = store.set_node_properties(catalog, label, filter.as_ref(), &assignments)?;
             Ok(ids
                 .into_iter()
-                .map(|id| Binding {
-                    values: BTreeMap::from([("node_id".to_string(), Value::Int(id.0 as i64))]),
-                    nodes: BTreeMap::new(),
-                    relationships: BTreeMap::new(),
-                })
+                .map(|id| Binding::scalar("node_id", Value::Int(id.0 as i64)))
                 .collect())
         }
         PhysicalPlan::SetNodePropertiesReturn {
@@ -699,18 +607,13 @@ pub(super) fn execute_bindings_with_limit(
                                     .map(|value| (item.name.clone(), value))
                             })
                             .collect::<Result<BTreeMap<_, _>>>()?;
-                        Ok(Binding {
-                            values,
-                            nodes: BTreeMap::new(),
-                            relationships: BTreeMap::new(),
-                        })
+                        Ok(Binding::values(values))
                     })
                     .collect(),
-                SetNodePropertiesReturnMode::Count { name } => Ok(vec![Binding {
-                    values: BTreeMap::from([(name.clone(), Value::Int(ids.len() as i64))]),
-                    nodes: BTreeMap::new(),
-                    relationships: BTreeMap::new(),
-                }]),
+                SetNodePropertiesReturnMode::Count { name } => Ok(vec![Binding::scalar(
+                    name.clone(),
+                    Value::Int(ids.len() as i64),
+                )]),
             }
         }
         PhysicalPlan::SetRelationshipProperty {
@@ -747,11 +650,7 @@ pub(super) fn execute_bindings_with_limit(
             )?;
             Ok(ids
                 .into_iter()
-                .map(|id| Binding {
-                    values: BTreeMap::from([("rel_id".to_string(), Value::Int(id.0 as i64))]),
-                    nodes: BTreeMap::new(),
-                    relationships: BTreeMap::new(),
-                })
+                .map(|id| Binding::scalar("rel_id", Value::Int(id.0 as i64)))
                 .collect())
         }
         PhysicalPlan::SetRelationshipProperties {
@@ -793,11 +692,7 @@ pub(super) fn execute_bindings_with_limit(
             )?;
             Ok(ids
                 .into_iter()
-                .map(|id| Binding {
-                    values: BTreeMap::from([("rel_id".to_string(), Value::Int(id.0 as i64))]),
-                    nodes: BTreeMap::new(),
-                    relationships: BTreeMap::new(),
-                })
+                .map(|id| Binding::scalar("rel_id", Value::Int(id.0 as i64)))
                 .collect())
         }
         PhysicalPlan::DeleteNode {
@@ -854,11 +749,7 @@ pub(super) fn execute_bindings_with_limit(
             let ids = store.delete_node_ids(catalog, &ids, *detach)?;
             Ok(ids
                 .into_iter()
-                .map(|id| Binding {
-                    values: BTreeMap::from([("node_id".to_string(), Value::Int(id.0 as i64))]),
-                    nodes: BTreeMap::new(),
-                    relationships: BTreeMap::new(),
-                })
+                .map(|id| Binding::scalar("node_id", Value::Int(id.0 as i64)))
                 .collect())
         }
         PhysicalPlan::DeleteRelationship {
@@ -892,11 +783,7 @@ pub(super) fn execute_bindings_with_limit(
             )?;
             Ok(ids
                 .into_iter()
-                .map(|id| Binding {
-                    values: BTreeMap::from([("rel_id".to_string(), Value::Int(id.0 as i64))]),
-                    nodes: BTreeMap::new(),
-                    relationships: BTreeMap::new(),
-                })
+                .map(|id| Binding::scalar("rel_id", Value::Int(id.0 as i64)))
                 .collect())
         }
         PhysicalPlan::DeleteRelationshipTargetNodes {
@@ -927,11 +814,7 @@ pub(super) fn execute_bindings_with_limit(
             )?;
             Ok(ids
                 .into_iter()
-                .map(|id| Binding {
-                    values: BTreeMap::from([("node_id".to_string(), Value::Int(id.0 as i64))]),
-                    nodes: BTreeMap::new(),
-                    relationships: BTreeMap::new(),
-                })
+                .map(|id| Binding::scalar("node_id", Value::Int(id.0 as i64)))
                 .collect())
         }
         PhysicalPlan::CreateRelationship {
@@ -953,15 +836,11 @@ pub(super) fn execute_bindings_with_limit(
                     target_properties: target_properties.clone(),
                 },
             )?;
-            Ok(vec![Binding {
-                values: BTreeMap::from([
-                    ("source_node_id".to_string(), Value::Int(source.0 as i64)),
-                    ("target_node_id".to_string(), Value::Int(target.0 as i64)),
-                    ("rel_id".to_string(), Value::Int(rel.0 as i64)),
-                ]),
-                nodes: BTreeMap::new(),
-                relationships: BTreeMap::new(),
-            }])
+            Ok(vec![Binding::values(BTreeMap::from([
+                ("source_node_id".to_string(), Value::Int(source.0 as i64)),
+                ("target_node_id".to_string(), Value::Int(target.0 as i64)),
+                ("rel_id".to_string(), Value::Int(rel.0 as i64)),
+            ]))])
         }
         PhysicalPlan::CreateMatchedRelationship {
             source_label,
@@ -984,14 +863,12 @@ pub(super) fn execute_bindings_with_limit(
             )?;
             Ok(rows
                 .into_iter()
-                .map(|(source, rel, target)| Binding {
-                    values: BTreeMap::from([
+                .map(|(source, rel, target)| {
+                    Binding::values(BTreeMap::from([
                         ("source_node_id".to_string(), Value::Int(source.0 as i64)),
                         ("target_node_id".to_string(), Value::Int(target.0 as i64)),
                         ("rel_id".to_string(), Value::Int(rel.0 as i64)),
-                    ]),
-                    nodes: BTreeMap::new(),
-                    relationships: BTreeMap::new(),
+                    ]))
                 })
                 .collect())
         }

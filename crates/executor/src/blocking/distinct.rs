@@ -70,7 +70,7 @@ impl<'a> DistinctOperator<'a> {
         emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
     ) -> Result<BatchControl> {
         if self.runs.is_empty() {
-            self.record_memory_report(0, 0, 0, self.tracker.peak_bytes);
+            self.record_memory_report(0, self.tracker.peak_bytes);
             let mut selected = self.distinct.into_values().collect::<Vec<_>>();
             selected.sort_by_key(|(ordinal, _)| *ordinal);
             return emit_binding_iterator(
@@ -99,12 +99,7 @@ impl<'a> DistinctOperator<'a> {
             self.task_context,
             &mut peak_tracked_bytes,
         )?;
-        self.record_memory_report(
-            self.spill_budget.used_bytes,
-            self.spill_budget.run_count,
-            self.input_rows as usize,
-            peak_tracked_bytes,
-        );
+        self.record_memory_report(self.input_rows as usize, peak_tracked_bytes);
         emit_distinct_run(
             self.runs
                 .first()
@@ -117,25 +112,16 @@ impl<'a> DistinctOperator<'a> {
         )
     }
 
-    fn record_memory_report(
-        &self,
-        spilled_bytes: u64,
-        spill_run_count: usize,
-        spilled_rows: usize,
-        peak_tracked_bytes: usize,
-    ) {
+    fn record_memory_report(&self, spilled_rows: usize, peak_tracked_bytes: usize) {
         self.observer
-            .record_blocking_memory_report(BlockingOperatorMemoryReport {
-                operator: "DistinctExec".to_string(),
-                budget_bytes: self.tracker.budget_bytes,
+            .record_blocking_memory_report(spill_backed_report(
+                "DistinctExec",
+                &self.tracker,
                 peak_tracked_bytes,
-                input_rows: self.input_rows as usize,
-                max_spill_bytes: self.spill_budget.max_bytes,
-                max_spill_runs: self.spill_budget.max_runs,
-                spilled_bytes,
-                spill_run_count,
+                self.input_rows as usize,
+                &self.spill_budget,
                 spilled_rows,
-            });
+            ));
     }
 }
 

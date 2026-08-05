@@ -165,14 +165,11 @@ pub(super) fn execute_source_segment_scan(
         ..
     } = context;
     runtime_checkpoint(task_context)?;
+    let fallback = || {
+        execute_node_scan_with_optional_filter(variable, "Source", None, context, execution_limit)
+    };
     let Some(storage_predicate) = source_storage_scan_predicate(predicate, variable) else {
-        return execute_node_scan_with_optional_filter(
-            variable,
-            "Source",
-            None,
-            context,
-            execution_limit,
-        );
+        return fallback();
     };
     let io_depth = NonZeroUsize::new(SOURCE_SEGMENT_SCAN_IO_DEPTH)
         .expect("source segment scan I/O depth is non-zero");
@@ -218,13 +215,7 @@ pub(super) fn execute_source_segment_scan(
         }
         Err(error @ SkeinError::Execution(_)) => return Err(error),
         Ok(SourceScanCandidateRead::Fallback(_)) | Err(_) => {
-            return execute_node_scan_with_optional_filter(
-                variable,
-                "Source",
-                None,
-                context,
-                execution_limit,
-            );
+            return fallback();
         }
     };
     let source_label_id = catalog.label_id("Source");
@@ -232,24 +223,12 @@ pub(super) fn execute_source_segment_scan(
     let mut tracker = OperatorMemoryTracker::new(memory.blocking_operator_bytes);
     for row in rows {
         let Some(node) = store.node_owned(NodeId(row.node_id))? else {
-            return execute_node_scan_with_optional_filter(
-                variable,
-                "Source",
-                None,
-                context,
-                execution_limit,
-            );
+            return fallback();
         };
         if source_label_id.is_none_or(|label_id| !node.labels.contains(&label_id))
             || node.properties != row.properties
         {
-            return execute_node_scan_with_optional_filter(
-                variable,
-                "Source",
-                None,
-                context,
-                execution_limit,
-            );
+            return fallback();
         }
         let binding = Binding {
             values: BTreeMap::new(),

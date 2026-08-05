@@ -378,17 +378,13 @@ pub fn stream_aggregate_batches(
             }
             Ok(BatchControl::Continue)
         })?;
-        observer.record_blocking_memory_report(BlockingOperatorMemoryReport {
-            operator: "AggregateExec".to_string(),
-            budget_bytes: tracker.budget_bytes,
-            peak_tracked_bytes: tracker.peak_bytes,
+        observer.record_blocking_memory_report(in_memory_report(
+            "AggregateExec",
+            &tracker,
+            tracker.peak_bytes,
             input_rows,
-            max_spill_bytes: memory.max_spill_bytes.get(),
-            max_spill_runs: memory.max_spill_runs.get(),
-            spilled_bytes: 0,
-            spill_run_count: 0,
-            spilled_rows: 0,
-        });
+            memory,
+        ));
         return emit(vec![accumulator.finish()]);
     }
 
@@ -431,17 +427,13 @@ pub fn stream_aggregate_batches(
     })?;
 
     if runs.is_empty() {
-        observer.record_blocking_memory_report(BlockingOperatorMemoryReport {
-            operator: "AggregateExec".to_string(),
-            budget_bytes: tracker.budget_bytes,
-            peak_tracked_bytes: tracker.peak_bytes,
-            input_rows: ordinal as usize,
-            max_spill_bytes: memory.max_spill_bytes.get(),
-            max_spill_runs: memory.max_spill_runs.get(),
-            spilled_bytes: 0,
-            spill_run_count: 0,
-            spilled_rows: 0,
-        });
+        observer.record_blocking_memory_report(in_memory_report(
+            "AggregateExec",
+            &tracker,
+            tracker.peak_bytes,
+            ordinal as usize,
+            memory,
+        ));
         rows.sort_by(GroupRunRow::cmp_key);
         let aggregate_context = AggregateExecutionContext {
             group_keys,
@@ -470,17 +462,14 @@ pub fn stream_aggregate_batches(
         &mut spill_budget,
         task_context,
     )?;
-    observer.record_blocking_memory_report(BlockingOperatorMemoryReport {
-        operator: "AggregateExec".to_string(),
-        budget_bytes: tracker.budget_bytes,
-        peak_tracked_bytes: tracker.peak_bytes,
-        input_rows: ordinal as usize,
-        max_spill_bytes: spill_budget.max_bytes,
-        max_spill_runs: spill_budget.max_runs,
-        spilled_bytes: spill_budget.used_bytes,
-        spill_run_count: spill_budget.run_count,
-        spilled_rows: ordinal as usize,
-    });
+    observer.record_blocking_memory_report(spill_backed_report(
+        "AggregateExec",
+        &tracker,
+        tracker.peak_bytes,
+        ordinal as usize,
+        &spill_budget,
+        ordinal as usize,
+    ));
     let aggregate_context = AggregateExecutionContext {
         group_keys,
         items,

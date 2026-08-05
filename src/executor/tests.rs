@@ -611,7 +611,7 @@ fn graph_algorithms_admit_direction_specific_projections() {
             score_column: "score".to_string(),
             node_visibility_predicate: None,
         };
-        assert!(batch_pipeline_capable(&plan));
+        assert!(BatchPlanRef::try_new(&plan).is_some());
         let mut external = NoExternalReadOperator;
         let output = execute_with_row_limit_profile_and_external_and_memory(
             &plan,
@@ -625,6 +625,19 @@ fn graph_algorithms_admit_direction_specific_projections() {
         .unwrap();
         assert_eq!(output.rows.len(), 2);
     }
+}
+
+#[test]
+fn batch_plan_ref_rejects_an_unsupported_descendant() {
+    let plan = PhysicalPlan::FilterExec {
+        predicate: Predicate::ConstantBool(true),
+        input: Box::new(PhysicalPlan::CreateNode {
+            label: "Item".to_string(),
+            properties: BTreeMap::new(),
+        }),
+    };
+
+    assert!(BatchPlanRef::try_new(&plan).is_none());
 }
 
 #[test]
