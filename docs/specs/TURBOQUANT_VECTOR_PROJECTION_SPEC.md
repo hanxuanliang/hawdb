@@ -107,3 +107,12 @@ filtered and ACL parity, P50/P95/P99 latency, steady and peak RSS, page faults,
 payload bytes, build amplification, cancellation, mixed-load behavior, and
 reopen/corruption recovery. Until that evidence passes, the capability is
 eligible for shadow or canary use but is not independently production-qualified.
+
+The typed production evidence protocol is
+`skein-vector-recall-production-qualification-v1`. It wraps, but does not
+replace, the bounded recall probe. Validation recomputes readiness against the
+currently opened file-backed projection and an explicit current release
+identity; a stale revision, feature set, configuration, dataset fingerprint,
+canonical graph epoch, projection generation, source digest, or embedding
+identity fails closed. A generation-zero in-memory projection remains useful
+for development differential tests but cannot satisfy production admission.

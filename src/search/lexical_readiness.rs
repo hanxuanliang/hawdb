@@ -323,6 +323,23 @@ impl SearchLexicalProductionQualificationReport {
         }
     }
 
+    pub fn validate_for_projection_and_release(
+        &self,
+        projection_identity: &SearchProjectionQualificationIdentity,
+        expected_identity: &crate::ProductionQualificationIdentity,
+    ) -> Result<()> {
+        let blockers =
+            self.recompute_blocker_codes_for_release(projection_identity, expected_identity);
+        if blockers.is_empty() {
+            Ok(())
+        } else {
+            Err(SkeinError::Storage(format!(
+                "segmented lexical projection is not qualified for the current production release: {}",
+                blockers.join(",")
+            )))
+        }
+    }
+
     pub fn json(&self) -> serde_json::Value {
         let recomputed_blockers = self.recompute_blocker_codes(&self.projection_identity);
         serde_json::json!({
@@ -463,6 +480,29 @@ impl SearchLexicalProductionQualificationReport {
             self.metrics.baseline_checkpoint_p95_micros,
         ) {
             blockers.push("checkpoint_p95_regression_exceeded".to_string());
+        }
+        blockers.sort();
+        blockers.dedup();
+        blockers
+    }
+
+    fn recompute_blocker_codes_for_release(
+        &self,
+        projection_identity: &SearchProjectionQualificationIdentity,
+        expected_identity: &crate::ProductionQualificationIdentity,
+    ) -> Vec<String> {
+        let mut blockers = self.recompute_blocker_codes(projection_identity);
+        if self.expected_identity.as_ref() != Some(expected_identity) {
+            blockers.push("current_release_identity_mismatch".to_string());
+        }
+        match &self.evidence_binding {
+            Some(binding) => blockers.extend(binding.blocker_codes_for(expected_identity)),
+            None => blockers.push("production_evidence_binding_missing".to_string()),
+        }
+        if projection_identity.source_graph_commit_epoch
+            != Some(expected_identity.canonical_graph_commit_epoch)
+        {
+            blockers.push("source_graph_epoch_current_release_mismatch".to_string());
         }
         blockers.sort();
         blockers.dedup();
@@ -613,7 +653,37 @@ mod tests {
         report
             .validate_for_projection(&projection_identity)
             .unwrap();
+        report
+            .validate_for_projection_and_release(&projection_identity, &production_identity())
+            .unwrap();
         assert_eq!(report.json()["ready"], true);
+    }
+
+    #[test]
+    fn rejects_evidence_bound_to_a_different_current_dataset() {
+        let identity = production_identity();
+        let projection_identity = projection_identity(7, Some(42), 100_000);
+        let report = SearchLexicalProductionQualificationReport::evaluate_for_production(
+            projection_identity.clone(),
+            crate::ProductionEvidenceBinding {
+                identity: identity.clone(),
+                generated_at_unix_seconds: 1,
+            },
+            identity,
+            complete_parity(),
+            complete_coverage(),
+            passing_metrics(),
+        );
+        let mut current_identity = production_identity();
+        current_identity.dataset_fingerprint = "different-dataset".to_string();
+
+        let error = report
+            .validate_for_projection_and_release(&projection_identity, &current_identity)
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("current_release_identity_mismatch"));
+        assert!(error.to_string().contains("evidence_identity_mismatch"));
     }
 
     #[test]

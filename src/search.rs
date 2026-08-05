@@ -67,8 +67,10 @@ pub use out_of_core::{
 pub use range_io::SearchRangeReadConfig;
 use recall_validation::{sample_positions, VectorRecallValidationAccumulator};
 pub use recall_validation::{
+    VectorProjectionQualificationIdentity, VectorRecallProductionQualificationReport,
     VectorRecallValidationBlocker, VectorRecallValidationOptions, VectorRecallValidationReport,
     MAX_VECTOR_RECALL_VALIDATION_SAMPLES, MAX_VECTOR_RECALL_VALIDATION_TOP_K,
+    MINIMUM_VECTOR_QUALIFICATION_DOCUMENT_COUNT, VECTOR_RECALL_PRODUCTION_QUALIFICATION_PROTOCOL,
     VECTOR_RECALL_VALIDATION_PROTOCOL,
 };
 use vector_execution::{execute_search_vector_plan, SearchVectorExecutionRequest};
@@ -2415,6 +2417,52 @@ impl SearchIndex {
         }
 
         accumulator.finish()
+    }
+
+    pub fn vector_projection_qualification_identity(
+        &self,
+    ) -> Option<VectorProjectionQualificationIdentity> {
+        #[cfg(feature = "vector-search")]
+        {
+            let projection = self.turboquant_projection()?;
+            let manifest = projection.manifest();
+            Some(VectorProjectionQualificationIdentity {
+                projection_generation: manifest.identity.generation,
+                source_graph_commit_epoch: manifest.identity.source_epoch,
+                document_count: manifest.document_count,
+                source_digest: manifest.source_digest,
+                payload_bytes: manifest.payload_bytes,
+                payload_checksum: manifest.payload_checksum,
+                format_version: manifest.format_version,
+                algorithm: manifest.algorithm.clone(),
+                bit_width: manifest.bit_width,
+                dimension: manifest.dimension,
+                transform_seed: manifest.transform_seed,
+                embedding_model: manifest.identity.embedding_model.clone(),
+                embedding_version: manifest.identity.embedding_version.clone(),
+                file_backed: projection.is_file_backed(),
+            })
+        }
+        #[cfg(not(feature = "vector-search"))]
+        {
+            None
+        }
+    }
+
+    pub fn qualify_sampled_vector_recall_for_production(
+        &self,
+        options: VectorRecallValidationOptions,
+        evidence_binding: crate::ProductionEvidenceBinding,
+        expected_identity: crate::ProductionQualificationIdentity,
+    ) -> VectorRecallProductionQualificationReport {
+        let recall = self.validate_sampled_vector_recall(options);
+        VectorRecallProductionQualificationReport::evaluate(
+            recall,
+            self.vector_projection_qualification_identity()
+                .unwrap_or_default(),
+            evidence_binding,
+            expected_identity,
+        )
     }
 
     fn try_search_with_options_compressed_vector_projection_mode_internal(
@@ -9997,6 +10045,91 @@ mod tests {
         assert_eq!(report.approximate_hit_count, 2);
         assert_eq!(report.fallback_count, 0);
         assert!(report.blocker_codes.is_empty());
+    }
+
+    #[test]
+    #[cfg(feature = "vector-search")]
+    fn production_recall_identity_is_bound_to_reopened_file_projection() {
+        let path = unique_test_dir("production_recall_identity");
+        {
+            let mut index = SearchIndex::open(&path).unwrap();
+            index
+                .apply_embedding_manifest(SearchEmbeddingManifest {
+                    model: "test-embedding".to_string(),
+                    version: Some("1".to_string()),
+                    dimension: 8,
+                })
+                .unwrap();
+            index
+                .upsert(doc(
+                    "memory:a",
+                    "Recall A",
+                    "Generation-bound projection",
+                    [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                ))
+                .unwrap();
+            index
+                .upsert(doc(
+                    "memory:b",
+                    "Recall B",
+                    "Generation-bound projection",
+                    [0.9, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                ))
+                .unwrap();
+            index
+                .apply_projection_delta(SearchProjectionDelta {
+                    upserts: Vec::new(),
+                    deletes: Vec::new(),
+                    max_operations: Some(1),
+                    source_graph_commit_epoch: Some(42),
+                })
+                .unwrap();
+            index.checkpoint().unwrap();
+        }
+        let index = SearchIndex::open(&path).unwrap();
+        let identity = index.vector_projection_qualification_identity().unwrap();
+        assert!(identity.file_backed);
+        assert_eq!(identity.projection_generation, 1);
+        assert_eq!(identity.source_graph_commit_epoch, Some(42));
+        assert_eq!(identity.document_count, 2);
+        assert_eq!(identity.embedding_model.as_deref(), Some("test-embedding"));
+        assert_eq!(identity.embedding_version.as_deref(), Some("1"));
+        assert_eq!(identity.dimension, 8);
+        assert!(identity.source_digest > 0);
+
+        let expected = crate::ProductionQualificationIdentity {
+            source_revision: "test-revision".to_string(),
+            rust_toolchain: "test-toolchain".to_string(),
+            target_os: "linux".to_string(),
+            target_arch: "x86_64".to_string(),
+            enabled_features: vec!["vector-search".to_string()],
+            durable_format_version: 1,
+            schema_version: 1,
+            configuration_digest: "test-config".to_string(),
+            deployment_profile: "production-replica".to_string(),
+            dataset_fingerprint: "test-dataset".to_string(),
+            canonical_graph_commit_epoch: 42,
+            policy_version: crate::PRODUCTION_QUALIFICATION_POLICY_VERSION,
+        };
+        let qualification = index.qualify_sampled_vector_recall_for_production(
+            VectorRecallValidationOptions {
+                max_samples: 2,
+                top_k: 1,
+                minimum_recall_per_million: 1_000_000,
+                metadata_filters: BTreeMap::new(),
+            },
+            crate::ProductionEvidenceBinding {
+                identity: expected.clone(),
+                generated_at_unix_seconds: 1,
+            },
+            expected,
+        );
+        assert!(!qualification.ready);
+        assert_eq!(
+            qualification.blocker_codes,
+            vec!["dataset_too_small".to_string()]
+        );
+        std::fs::remove_dir_all(path).unwrap();
     }
 
     #[test]

@@ -2480,6 +2480,23 @@ mod tests {
         }
     }
 
+    fn production_identity() -> crate::ProductionQualificationIdentity {
+        crate::ProductionQualificationIdentity {
+            source_revision: "test-revision".to_string(),
+            rust_toolchain: "test-toolchain".to_string(),
+            target_os: "linux".to_string(),
+            target_arch: "x86_64".to_string(),
+            enabled_features: vec!["full-text-search".to_string(), "vector-search".to_string()],
+            durable_format_version: 1,
+            schema_version: 1,
+            configuration_digest: "test-config".to_string(),
+            deployment_profile: "production-replica".to_string(),
+            dataset_fingerprint: "test-dataset".to_string(),
+            canonical_graph_commit_epoch: 42,
+            policy_version: crate::PRODUCTION_QUALIFICATION_POLICY_VERSION,
+        }
+    }
+
     fn assert_search_parity(expected: &SearchResultSet, actual: &SearchResultSet) {
         assert_eq!(actual.total_hits, expected.total_hits);
         assert_eq!(
@@ -2892,8 +2909,12 @@ mod tests {
             SearchLexicalFeasibilityMetrics::default(),
         );
 
-        let error = NowledgeMemOutOfCoreSearchProjection::open_production(&path, &qualification)
-            .unwrap_err();
+        let error = NowledgeMemOutOfCoreSearchProjection::open_production(
+            &path,
+            &qualification,
+            &production_identity(),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("projection_identity_mismatch"));
         assert!(error.to_string().contains("workload_coverage_incomplete"));
         fs::remove_dir_all(path).unwrap();

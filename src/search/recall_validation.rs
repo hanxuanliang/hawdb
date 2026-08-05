@@ -1,9 +1,13 @@
 use super::{SearchRetrieverReport, TURBOQUANT_CANDIDATE_BACKEND};
+use crate::{Result, SkeinError};
 use std::collections::BTreeSet;
 
 pub const VECTOR_RECALL_VALIDATION_PROTOCOL: &str = "skein-vector-recall-validation-v1";
+pub const VECTOR_RECALL_PRODUCTION_QUALIFICATION_PROTOCOL: &str =
+    "skein-vector-recall-production-qualification-v1";
 pub const MAX_VECTOR_RECALL_VALIDATION_SAMPLES: usize = 128;
 pub const MAX_VECTOR_RECALL_VALIDATION_TOP_K: usize = 100;
+pub const MINIMUM_VECTOR_QUALIFICATION_DOCUMENT_COUNT: usize = 100_000;
 const PER_MILLION: u64 = 1_000_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,6 +115,164 @@ impl VectorRecallValidationReport {
             "max_filter_selectivity_per_million": self.max_filter_selectivity_per_million,
             "blocker_codes": self.blocker_codes.iter().map(|code| code.as_str()).collect::<Vec<_>>(),
         })
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VectorProjectionQualificationIdentity {
+    pub projection_generation: u64,
+    pub source_graph_commit_epoch: Option<u64>,
+    pub document_count: usize,
+    pub source_digest: u64,
+    pub payload_bytes: u64,
+    pub payload_checksum: u32,
+    pub format_version: u32,
+    pub algorithm: String,
+    pub bit_width: u8,
+    pub dimension: usize,
+    pub transform_seed: u64,
+    pub embedding_model: Option<String>,
+    pub embedding_version: Option<String>,
+    pub file_backed: bool,
+}
+
+impl VectorProjectionQualificationIdentity {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "projection_generation": self.projection_generation,
+            "source_graph_commit_epoch": self.source_graph_commit_epoch,
+            "document_count": self.document_count,
+            "source_digest": self.source_digest,
+            "payload_bytes": self.payload_bytes,
+            "payload_checksum": self.payload_checksum,
+            "format_version": self.format_version,
+            "algorithm": self.algorithm,
+            "bit_width": self.bit_width,
+            "dimension": self.dimension,
+            "transform_seed": self.transform_seed,
+            "embedding_model": self.embedding_model,
+            "embedding_version": self.embedding_version,
+            "file_backed": self.file_backed,
+        })
+    }
+
+    fn complete(&self) -> bool {
+        self.projection_generation > 0
+            && self.source_graph_commit_epoch.is_some()
+            && self.document_count > 0
+            && self.source_digest > 0
+            && self.payload_bytes > 0
+            && self.format_version > 0
+            && self.algorithm == "turboquant"
+            && self.bit_width == 4
+            && self.dimension > 0
+            && self
+                .embedding_model
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            && self
+                .embedding_version
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            && self.file_backed
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VectorRecallProductionQualificationReport {
+    pub protocol: String,
+    pub recall: VectorRecallValidationReport,
+    pub projection_identity: VectorProjectionQualificationIdentity,
+    pub evidence_binding: crate::ProductionEvidenceBinding,
+    pub expected_identity: crate::ProductionQualificationIdentity,
+    pub blocker_codes: Vec<String>,
+    pub ready: bool,
+}
+
+impl VectorRecallProductionQualificationReport {
+    pub fn evaluate(
+        recall: VectorRecallValidationReport,
+        projection_identity: VectorProjectionQualificationIdentity,
+        evidence_binding: crate::ProductionEvidenceBinding,
+        expected_identity: crate::ProductionQualificationIdentity,
+    ) -> Self {
+        let mut report = Self {
+            protocol: VECTOR_RECALL_PRODUCTION_QUALIFICATION_PROTOCOL.to_string(),
+            recall,
+            projection_identity,
+            evidence_binding,
+            expected_identity,
+            blocker_codes: Vec::new(),
+            ready: false,
+        };
+        report.blocker_codes =
+            report.recompute_blocker_codes(&report.projection_identity, &report.expected_identity);
+        report.ready = report.blocker_codes.is_empty();
+        report
+    }
+
+    pub fn validate_for(
+        &self,
+        projection_identity: &VectorProjectionQualificationIdentity,
+        expected_identity: &crate::ProductionQualificationIdentity,
+    ) -> Result<()> {
+        let blockers = self.recompute_blocker_codes(projection_identity, expected_identity);
+        if blockers.is_empty() {
+            Ok(())
+        } else {
+            Err(SkeinError::Storage(format!(
+                "TurboQuant projection is not qualified for the current production release: {}",
+                blockers.join(",")
+            )))
+        }
+    }
+
+    pub fn json(&self) -> serde_json::Value {
+        let blockers =
+            self.recompute_blocker_codes(&self.projection_identity, &self.expected_identity);
+        serde_json::json!({
+            "protocol": self.protocol,
+            "recall": self.recall.json(),
+            "projection_identity": self.projection_identity.json(),
+            "evidence_binding": self.evidence_binding.json(),
+            "expected_identity": self.expected_identity.json(),
+            "minimum_document_count": MINIMUM_VECTOR_QUALIFICATION_DOCUMENT_COUNT,
+            "blocker_codes": blockers,
+            "ready": blockers.is_empty(),
+        })
+    }
+
+    fn recompute_blocker_codes(
+        &self,
+        projection_identity: &VectorProjectionQualificationIdentity,
+        expected_identity: &crate::ProductionQualificationIdentity,
+    ) -> Vec<String> {
+        let mut blockers = Vec::new();
+        if self.protocol != VECTOR_RECALL_PRODUCTION_QUALIFICATION_PROTOCOL {
+            blockers.push("protocol_mismatch".to_string());
+        }
+        if !self.recall.validates_required_approximate_backend() {
+            blockers.push("recall_validation_failed".to_string());
+        }
+        if !self.projection_identity.complete() || self.projection_identity != *projection_identity
+        {
+            blockers.push("projection_identity_mismatch".to_string());
+        }
+        if projection_identity.document_count < MINIMUM_VECTOR_QUALIFICATION_DOCUMENT_COUNT {
+            blockers.push("dataset_too_small".to_string());
+        }
+        if self.expected_identity != *expected_identity {
+            blockers.push("current_release_identity_mismatch".to_string());
+        }
+        blockers.extend(self.evidence_binding.blocker_codes_for(expected_identity));
+        if projection_identity.source_graph_commit_epoch
+            != Some(expected_identity.canonical_graph_commit_epoch)
+        {
+            blockers.push("source_graph_epoch_current_release_mismatch".to_string());
+        }
+        blockers.sort();
+        blockers.dedup();
+        blockers
     }
 }
 
@@ -371,6 +533,58 @@ mod tests {
         }
     }
 
+    fn ready_recall_report() -> VectorRecallValidationReport {
+        let options = VectorRecallValidationOptions {
+            max_samples: 1,
+            top_k: 1,
+            minimum_recall_per_million: 1_000_000,
+            metadata_filters: Default::default(),
+        };
+        let mut accumulator = VectorRecallValidationAccumulator::new(1, &options);
+        accumulator.record(
+            &["a".to_string()],
+            &["a".to_string()],
+            &retriever(TURBOQUANT_CANDIDATE_BACKEND),
+        );
+        accumulator.finish()
+    }
+
+    fn projection_identity() -> VectorProjectionQualificationIdentity {
+        VectorProjectionQualificationIdentity {
+            projection_generation: 7,
+            source_graph_commit_epoch: Some(42),
+            document_count: MINIMUM_VECTOR_QUALIFICATION_DOCUMENT_COUNT,
+            source_digest: 11,
+            payload_bytes: 4096,
+            payload_checksum: 12,
+            format_version: 1,
+            algorithm: "turboquant".to_string(),
+            bit_width: 4,
+            dimension: 3,
+            transform_seed: 17,
+            embedding_model: Some("test-embedding".to_string()),
+            embedding_version: Some("1".to_string()),
+            file_backed: true,
+        }
+    }
+
+    fn production_identity() -> crate::ProductionQualificationIdentity {
+        crate::ProductionQualificationIdentity {
+            source_revision: "test-revision".to_string(),
+            rust_toolchain: "test-toolchain".to_string(),
+            target_os: "linux".to_string(),
+            target_arch: "x86_64".to_string(),
+            enabled_features: vec!["vector-search".to_string()],
+            durable_format_version: 1,
+            schema_version: 1,
+            configuration_digest: "test-config".to_string(),
+            deployment_profile: "production-replica".to_string(),
+            dataset_fingerprint: "test-dataset".to_string(),
+            canonical_graph_commit_epoch: 42,
+            policy_version: crate::PRODUCTION_QUALIFICATION_POLICY_VERSION,
+        }
+    }
+
     #[test]
     fn accumulator_reports_recall_and_overlap_without_copying_ids() {
         let options = VectorRecallValidationOptions {
@@ -428,6 +642,46 @@ mod tests {
         assert!(report
             .blocker_codes
             .contains(&VectorRecallValidationBlocker::RecallBelowThreshold));
+    }
+
+    #[test]
+    fn production_qualification_binds_current_release_and_projection_identity() {
+        let expected = production_identity();
+        let projection = projection_identity();
+        let report = VectorRecallProductionQualificationReport::evaluate(
+            ready_recall_report(),
+            projection.clone(),
+            crate::ProductionEvidenceBinding {
+                identity: expected.clone(),
+                generated_at_unix_seconds: 1,
+            },
+            expected.clone(),
+        );
+
+        assert!(
+            report.ready,
+            "unexpected blockers: {:?}",
+            report.blocker_codes
+        );
+        report.validate_for(&projection, &expected).unwrap();
+        assert_eq!(report.json()["ready"], true);
+
+        let mut stale_projection = projection;
+        stale_projection.projection_generation += 1;
+        let error = report
+            .validate_for(&stale_projection, &expected)
+            .unwrap_err();
+        assert!(error.to_string().contains("projection_identity_mismatch"));
+
+        let mut other_dataset = expected;
+        other_dataset.dataset_fingerprint = "other-dataset".to_string();
+        let error = report
+            .validate_for(&stale_projection, &other_dataset)
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("current_release_identity_mismatch"));
+        assert!(error.to_string().contains("evidence_identity_mismatch"));
     }
 
     #[test]

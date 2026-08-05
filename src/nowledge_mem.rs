@@ -8,8 +8,9 @@ use crate::search::{
     SearchFallbackReasonCode, SearchFusionWeights, SearchLexicalProductionQualificationReport,
     SearchMode, SearchOutOfCoreConfig, SearchOutOfCoreHydrationOutput, SearchOutOfCoreMetrics,
     SearchOutOfCoreReader, SearchQueryOptions, SearchRangeReadConfig,
-    VectorRecallValidationOptions, VectorRecallValidationReport,
-    NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, VECTOR_RECALL_VALIDATION_PROTOCOL,
+    VectorRecallProductionQualificationReport, VectorRecallValidationOptions,
+    VectorRecallValidationReport, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
+    VECTOR_RECALL_VALIDATION_PROTOCOL,
 };
 use crate::search_projection_evidence::{
     nowledge_search_projection_evidence_json, nowledge_search_projection_shadow_evidence_json,
@@ -7197,9 +7198,10 @@ impl NowledgeMemOutOfCoreSearchProjection {
     pub fn open_production(
         path: impl AsRef<Path>,
         qualification: &SearchLexicalProductionQualificationReport,
+        expected_identity: &crate::ProductionQualificationIdentity,
     ) -> Result<Self> {
         let projection = Self::open(path)?;
-        projection.validate_lexical_production_qualification(qualification)?;
+        projection.validate_lexical_production_qualification(qualification, expected_identity)?;
         Ok(projection)
     }
 
@@ -7207,17 +7209,22 @@ impl NowledgeMemOutOfCoreSearchProjection {
         path: impl AsRef<Path>,
         config: SearchOutOfCoreConfig,
         qualification: &SearchLexicalProductionQualificationReport,
+        expected_identity: &crate::ProductionQualificationIdentity,
     ) -> Result<Self> {
         let projection = Self::open_with_config(path, config)?;
-        projection.validate_lexical_production_qualification(qualification)?;
+        projection.validate_lexical_production_qualification(qualification, expected_identity)?;
         Ok(projection)
     }
 
     pub fn validate_lexical_production_qualification(
         &self,
         qualification: &SearchLexicalProductionQualificationReport,
+        expected_identity: &crate::ProductionQualificationIdentity,
     ) -> Result<()> {
-        qualification.validate_for_projection(&self.reader.production_qualification_identity())
+        qualification.validate_for_projection_and_release(
+            &self.reader.production_qualification_identity(),
+            expected_identity,
+        )
     }
 
     pub fn reader(&self) -> &SearchOutOfCoreReader {
@@ -7352,6 +7359,19 @@ impl NowledgeMemSearchProjection {
         options: VectorRecallValidationOptions,
     ) -> VectorRecallValidationReport {
         self.index.validate_sampled_vector_recall(options)
+    }
+
+    pub fn qualify_sampled_vector_recall_for_production(
+        &self,
+        options: VectorRecallValidationOptions,
+        evidence_binding: crate::ProductionEvidenceBinding,
+        expected_identity: crate::ProductionQualificationIdentity,
+    ) -> VectorRecallProductionQualificationReport {
+        self.index.qualify_sampled_vector_recall_for_production(
+            options,
+            evidence_binding,
+            expected_identity,
+        )
     }
 
     pub fn shadow_evidence_json(
@@ -8121,6 +8141,20 @@ impl NowledgeMemEmbeddedStoreHandle {
         options: VectorRecallValidationOptions,
     ) -> Result<VectorRecallValidationReport> {
         self.read_store()?.validate_sampled_vector_recall(options)
+    }
+
+    pub fn qualify_sampled_vector_recall_for_production(
+        &self,
+        options: VectorRecallValidationOptions,
+        evidence_binding: crate::ProductionEvidenceBinding,
+        expected_identity: crate::ProductionQualificationIdentity,
+    ) -> Result<VectorRecallProductionQualificationReport> {
+        self.read_store()?
+            .qualify_sampled_vector_recall_for_production(
+                options,
+                evidence_binding,
+                expected_identity,
+            )
     }
 
     pub fn retrieve_knowledge(
@@ -8982,6 +9016,21 @@ impl NowledgeMemEmbeddedStore {
         Ok(self
             .require_search_projection()?
             .validate_sampled_vector_recall(options))
+    }
+
+    pub fn qualify_sampled_vector_recall_for_production(
+        &self,
+        options: VectorRecallValidationOptions,
+        evidence_binding: crate::ProductionEvidenceBinding,
+        expected_identity: crate::ProductionQualificationIdentity,
+    ) -> Result<VectorRecallProductionQualificationReport> {
+        Ok(self
+            .require_search_projection()?
+            .qualify_sampled_vector_recall_for_production(
+                options,
+                evidence_binding,
+                expected_identity,
+            ))
     }
 
     pub fn search_projection_shadow_evidence_json(

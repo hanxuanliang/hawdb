@@ -430,11 +430,13 @@ pub use search::{
     SearchProjectionKind, SearchProjectionProbeOptions, SearchProjectionQualificationIdentity,
     SearchProjectionRow, SearchQueryOptions, SearchRangeReadConfig, SearchRebuildOptions,
     SearchRebuildSummary, SearchResultSet, SearchRetrieverCandidateSetReport,
-    SearchTopKScoreParity, SearchTruncationReasonCode, VectorRecallValidationBlocker,
+    SearchTopKScoreParity, SearchTruncationReasonCode, VectorProjectionQualificationIdentity,
+    VectorRecallProductionQualificationReport, VectorRecallValidationBlocker,
     VectorRecallValidationOptions, VectorRecallValidationReport,
     MAX_VECTOR_RECALL_VALIDATION_SAMPLES, MAX_VECTOR_RECALL_VALIDATION_TOP_K,
-    NOWLEDGE_MEMORY_MATERIALIZED_METADATA_PATHS, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
-    SEARCH_LEXICAL_QUALIFICATION_PROTOCOL, SEARCH_LEXICAL_QUALIFICATION_PROTOCOL_VERSION,
+    MINIMUM_VECTOR_QUALIFICATION_DOCUMENT_COUNT, NOWLEDGE_MEMORY_MATERIALIZED_METADATA_PATHS,
+    NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, SEARCH_LEXICAL_QUALIFICATION_PROTOCOL,
+    SEARCH_LEXICAL_QUALIFICATION_PROTOCOL_VERSION, VECTOR_RECALL_PRODUCTION_QUALIFICATION_PROTOCOL,
     VECTOR_RECALL_VALIDATION_PROTOCOL,
 };
 pub use search_candidate_shadow_evidence::parse_search_candidate_shadow_probe;

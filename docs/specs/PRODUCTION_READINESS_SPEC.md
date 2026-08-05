@@ -292,7 +292,18 @@ document digest, analyzer digest, and embedding model/version/dimension. It
 records target-appropriate process-memory capabilities, text/vector/hybrid
 TopK score parity, sidecar and hydration bytes, and P50/P95/P99 latency. The
 out-of-core production constructor MUST recompute these blockers against the
-opened projection identity.
+opened projection identity and an explicit current
+`ProductionQualificationIdentity`. A report whose internally recorded release
+identity is self-consistent but differs from the current revision, feature set,
+configuration, dataset fingerprint, or canonical graph epoch MUST fail.
+
+TurboQuant recall probes are development evidence until wrapped by
+`skein-vector-recall-production-qualification-v1`. The production report MUST
+bind the recall result to the current release identity and the opened file
+projection's generation, source graph epoch, raw-vector source digest, payload
+identity, format, algorithm, bit width, dimension, transform seed, embedding
+model/version, and document count. In-memory generation zero projections and
+corpora below 100,000 vector documents MUST NOT qualify production.
 
 ## Route And Cutover Qualification
 
