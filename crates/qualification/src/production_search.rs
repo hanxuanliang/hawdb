@@ -271,6 +271,8 @@ impl ProductionSearchOutOfCoreQualificationReport {
             "protocol": PRODUCTION_SEARCH_OUT_OF_CORE_QUALIFICATION_PROTOCOL,
             "evidence_kind": "representative_production_search_replica",
             "production_eligible": true,
+            "ready": self.qualification.ready,
+            "blocker_codes": self.qualification.blocker_codes,
             "qualification": self.qualification.json(),
             "query_evidence": self.query_evidence.iter().map(ProductionSearchQueryEvidence::json).collect::<Vec<_>>(),
             "lifecycle": self.lifecycle.json(),

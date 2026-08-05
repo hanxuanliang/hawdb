@@ -82,6 +82,22 @@ embeddings, credentials, and raw parser or I/O payload fragments. Debug-only
 diagnostics MAY expose local detail through an explicit host decision, but
 debug reports MUST NOT be accepted as production cutover evidence.
 
+`evaluate_production_release_qualification_bundle` is the final typed
+cross-process evidence gate. It consumes the raw graph-storage, out-of-core
+search, per-target vector, per-worker morsel, and active-route blocking
+artifacts. The evaluator does not trust their top-level `ready` fields: it
+revalidates protocols, release bindings, raw resource limits, lifecycle
+coverage, target and worker matrices, scalar parity, runtime-permit cleanup,
+spill cleanup, and the caller-declared regression policy. Its output retains
+only source-artifact SHA-256 digests and assessments, so it can be retained as
+release evidence without copying queries, paths, embeddings, or row payloads.
+
+`skein-qualification-bundle` is a thin CI and release transport over that
+typed evaluator. It accepts bounded JSON inputs from independently generated
+process and platform artifacts and exits unsuccessfully when the recomputed
+bundle is not ready. It is not a production serving control plane and cannot
+generate representative evidence by itself.
+
 ## Cross-Platform Qualification
 
 Linux, macOS, and Windows are production targets. Required CI checks for each

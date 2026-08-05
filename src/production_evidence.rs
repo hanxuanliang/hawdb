@@ -1,9 +1,10 @@
 use crate::{Result, SkeinError};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 pub const PRODUCTION_QUALIFICATION_POLICY_VERSION: u64 = 1;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProductionQualificationIdentity {
     pub source_revision: String,
     pub rust_toolchain: String,
@@ -93,7 +94,7 @@ impl ProductionQualificationIdentity {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProductionEvidenceBinding {
     pub identity: ProductionQualificationIdentity,
     pub generated_at_unix_seconds: u64,

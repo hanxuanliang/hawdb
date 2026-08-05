@@ -1,0 +1,224 @@
+use skein::ProductionQualificationIdentity;
+use skein_qualification::{
+    evaluate_production_release_qualification_bundle, ProductionReleaseQualificationArtifacts,
+    ProductionReleaseQualificationPolicy, PRODUCTION_RELEASE_QUALIFICATION_BUNDLE_PROTOCOL,
+};
+use std::fs::File;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+
+const MAX_ARTIFACT_BYTES: u64 = 32 * 1024 * 1024;
+
+fn main() -> ExitCode {
+    match run(std::env::args().skip(1)) {
+        Ok(Some(report)) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report.json())
+                    .expect("release qualification report must serialize")
+            );
+            if report.ready {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Ok(None) => {
+            println!("{}", usage());
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "protocol": PRODUCTION_RELEASE_QUALIFICATION_BUNDLE_PROTOCOL,
+                    "production_eligible": true,
+                    "ready": false,
+                    "blocker_codes": ["bundle_input_invalid"],
+                    "errors": [error],
+                })
+            );
+            eprintln!("skein-qualification-bundle: {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn run(
+    args: impl IntoIterator<Item = String>,
+) -> Result<Option<skein_qualification::ProductionReleaseQualificationBundleReport>, String> {
+    let Some(config) = parse_config(args)? else {
+        return Ok(None);
+    };
+    let expected_identity =
+        read_json::<ProductionQualificationIdentity>(&config.expected_identity)?;
+    let artifacts = ProductionReleaseQualificationArtifacts {
+        graph_storage: Some(read_value(&config.graph)?),
+        search: Some(read_value(&config.search)?),
+        vector_targets: config
+            .vectors
+            .iter()
+            .map(|path| read_value(path))
+            .collect::<Result<Vec<_>, _>>()?,
+        morsel_profiles: config
+            .morsels
+            .iter()
+            .map(|path| read_value(path))
+            .collect::<Result<Vec<_>, _>>()?,
+        blocking_operators: Some(read_value(&config.blocking)?),
+    };
+    Ok(Some(evaluate_production_release_qualification_bundle(
+        artifacts,
+        expected_identity,
+        config.policy,
+    )))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Config {
+    expected_identity: PathBuf,
+    graph: PathBuf,
+    search: PathBuf,
+    vectors: Vec<PathBuf>,
+    morsels: Vec<PathBuf>,
+    blocking: PathBuf,
+    policy: ProductionReleaseQualificationPolicy,
+}
+
+fn parse_config(args: impl IntoIterator<Item = String>) -> Result<Option<Config>, String> {
+    let mut expected_identity = None;
+    let mut graph = None;
+    let mut search = None;
+    let mut vectors = Vec::new();
+    let mut morsels = Vec::new();
+    let mut blocking = None;
+    let mut policy = ProductionReleaseQualificationPolicy::default();
+    let mut args = args.into_iter();
+    while let Some(argument) = args.next() {
+        if matches!(argument.as_str(), "--help" | "-h") {
+            return Ok(None);
+        }
+        let value = args
+            .next()
+            .ok_or_else(|| format!("missing value for {argument}"))?;
+        match argument.as_str() {
+            "--expected-identity-json" => expected_identity = Some(PathBuf::from(value)),
+            "--graph-json" => graph = Some(PathBuf::from(value)),
+            "--search-json" => search = Some(PathBuf::from(value)),
+            "--vector-json" => vectors.push(PathBuf::from(value)),
+            "--morsel-json" => morsels.push(PathBuf::from(value)),
+            "--blocking-json" => blocking = Some(PathBuf::from(value)),
+            "--min-throughput-gain-per-million" => {
+                policy.morsel.min_throughput_gain_per_million = parse_u32(&argument, &value)?;
+            }
+            "--max-p99-regression-per-million" => {
+                policy.morsel.max_p99_regression_per_million = parse_u32(&argument, &value)?;
+            }
+            "--max-peak-rss-regression-per-million" => {
+                policy.morsel.max_peak_rss_regression_per_million = parse_u32(&argument, &value)?;
+            }
+            "--max-cancellation-latency-micros" => {
+                policy.morsel.max_cancellation_latency_micros = parse_u64(&argument, &value)?;
+            }
+            "--require-turbovec-oracle" => {
+                policy.require_turbovec_oracle = parse_bool(&argument, &value)?;
+            }
+            _ => return Err(format!("unknown argument '{argument}'\n{}", usage())),
+        }
+    }
+    Ok(Some(Config {
+        expected_identity: required(expected_identity, "--expected-identity-json")?,
+        graph: required(graph, "--graph-json")?,
+        search: required(search, "--search-json")?,
+        vectors,
+        morsels,
+        blocking: required(blocking, "--blocking-json")?,
+        policy,
+    }))
+}
+
+fn required<T>(value: Option<T>, name: &str) -> Result<T, String> {
+    value.ok_or_else(|| format!("{name} is required"))
+}
+
+fn read_value(path: &Path) -> Result<serde_json::Value, String> {
+    read_json(path)
+}
+
+fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
+    let file =
+        File::open(path).map_err(|error| format!("failed to open {}: {error}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_ARTIFACT_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_ARTIFACT_BYTES {
+        return Err(format!(
+            "qualification artifact exceeds {MAX_ARTIFACT_BYTES} bytes: {}",
+            path.display()
+        ));
+    }
+    serde_json::from_slice(&bytes)
+        .map_err(|error| format!("invalid qualification JSON {}: {error}", path.display()))
+}
+
+fn parse_u32(name: &str, value: &str) -> Result<u32, String> {
+    value
+        .parse()
+        .map_err(|_| format!("{name} must be an unsigned 32-bit integer"))
+}
+
+fn parse_u64(name: &str, value: &str) -> Result<u64, String> {
+    value
+        .parse()
+        .map_err(|_| format!("{name} must be an unsigned 64-bit integer"))
+}
+
+fn parse_bool(name: &str, value: &str) -> Result<bool, String> {
+    value
+        .parse()
+        .map_err(|_| format!("{name} must be true or false"))
+}
+
+fn usage() -> &'static str {
+    "usage: skein-qualification-bundle \
+     --expected-identity-json <path> --graph-json <path> --search-json <path> \
+     --vector-json <path>... --morsel-json <path>... --blocking-json <path> \
+     [--min-throughput-gain-per-million <u32>] \
+     [--max-p99-regression-per-million <u32>] \
+     [--max-peak-rss-regression-per-million <u32>] \
+     [--max-cancellation-latency-micros <u64>] \
+     [--require-turbovec-oracle <bool>]"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_repeated_cross_process_artifacts() {
+        let config = parse_config([
+            "--expected-identity-json".to_string(),
+            "identity.json".to_string(),
+            "--graph-json".to_string(),
+            "graph.json".to_string(),
+            "--search-json".to_string(),
+            "search.json".to_string(),
+            "--vector-json".to_string(),
+            "vector-linux.json".to_string(),
+            "--vector-json".to_string(),
+            "vector-macos.json".to_string(),
+            "--morsel-json".to_string(),
+            "morsel-4.json".to_string(),
+            "--blocking-json".to_string(),
+            "blocking.json".to_string(),
+        ])
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(config.vectors.len(), 2);
+        assert_eq!(config.morsels.len(), 1);
+        assert!(config.policy.require_turbovec_oracle);
+    }
+}

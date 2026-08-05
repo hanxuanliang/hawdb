@@ -7,12 +7,14 @@ mod production_graph;
 mod production_morsel;
 mod production_search;
 mod production_vector;
+mod release_bundle;
 
 pub use production_blocking::*;
 pub use production_graph::*;
 pub use production_morsel::*;
 pub use production_search::*;
 pub use production_vector::*;
+pub use release_bundle::*;
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
