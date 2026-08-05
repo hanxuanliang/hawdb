@@ -8556,8 +8556,15 @@ fn search_document_payload_bytes(document: &SearchDocument) -> usize {
 impl NowledgeMemEmbeddedStore {
     pub fn new(
         graph: NowledgeMemGraph,
-        search_projection: Option<NowledgeMemSearchProjection>,
+        mut search_projection: Option<NowledgeMemSearchProjection>,
     ) -> Self {
+        if let Some(projection) = search_projection.as_mut() {
+            let mut range_read_config = projection.index().range_read_config();
+            range_read_config.io_depth = range_read_config
+                .io_depth
+                .min(graph.runtime_governor_snapshot().limits.foreground_io_depth);
+            projection.set_range_read_config(range_read_config);
+        }
         Self {
             graph,
             search_projection,
@@ -14176,6 +14183,41 @@ mod tests {
         assert_eq!(snapshot.completions, 1);
         assert_eq!(snapshot.active_foreground_io_slots, 0);
         assert_eq!(snapshot.admitted_memory_bytes, 0);
+    }
+
+    #[test]
+    fn embedded_store_clamps_search_io_depth_to_runtime_governor() {
+        let governor = skein_qos::RuntimeGovernor::detect(
+            skein_qos::RuntimeGovernorConfig {
+                memory_budget_bytes: Some(256 * 1024 * 1024),
+                result_budget_bytes: 64 * 1024 * 1024,
+                ..skein_qos::RuntimeGovernorConfig::default()
+            },
+            skein_qos::IoConcurrencyBudget::new(2, 1),
+        );
+        let graph = NowledgeMemGraph::from_database_with_runtime_governor(
+            Database::new(),
+            NowledgeMemGraphMode::WritableCutover,
+            governor,
+        );
+        let mut projection = NowledgeMemSearchProjection::from_index(SearchIndex::default());
+        projection.set_range_read_config(crate::SearchRangeReadConfig::new(
+            std::num::NonZeroUsize::new(4).unwrap(),
+            std::num::NonZeroU64::new(1024).unwrap(),
+        ));
+
+        let store = NowledgeMemEmbeddedStore::new(graph, Some(projection));
+
+        assert_eq!(
+            store
+                .search_projection()
+                .unwrap()
+                .index()
+                .range_read_config()
+                .io_depth
+                .get(),
+            2
+        );
     }
 
     #[test]
