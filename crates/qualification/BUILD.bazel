@@ -13,6 +13,7 @@ rust_library(
         "src/production_graph.rs",
         "src/production_morsel.rs",
         "src/production_search.rs",
+        "src/production_search/lifecycle.rs",
     ],
     edition = "2024",
     aliases = aliases(),
