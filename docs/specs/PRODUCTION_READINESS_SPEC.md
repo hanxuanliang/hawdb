@@ -217,6 +217,15 @@ evidence. Hosts MAY inject one shared governor into the Nowledge facade so all
 store handles participate in the same process-level CPU, memory, result, and
 I/O limits.
 
+The real Mem runtime MUST publish
+`skein-nowledge-mem-serving-path-readiness-v1` from its long-lived
+`NowledgeMemEmbeddedStoreHandle`. The report MUST bind a non-empty host runtime
+identity and prove shared-governor admission for foreground parameterized
+Cypher, bounded streaming reads, typed mutation, typed analytics, and typed
+maintenance. An unbound handle is admission-safe but is not production-path
+evidence. A raw `Database` report MUST remain fail-closed even when a controlled
+host identity is present.
+
 Parallel morsel qualification uses `run_production_morsel_profile` and
 `evaluate_production_morsel_matrix`. Each profile MUST run through the
 read-only `NowledgeMemEmbeddedStoreHandle`, contain at least 100 measured

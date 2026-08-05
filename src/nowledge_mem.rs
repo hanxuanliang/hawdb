@@ -73,6 +73,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Instant;
 
+mod serving_path;
+pub use serving_path::{
+    NowledgeMemServingEntrypoint, NowledgeMemServingPathReadiness,
+    NOWLEDGE_MEM_SERVING_PATH_READINESS_PROTOCOL,
+};
+
 const TYPED_CONTROL_STATEMENT_MEMORY_BYTES: u64 = 1024 * 1024;
 const SEARCH_PROJECTION_CHANGEFEED_OPERATION_BYTES: usize = 1024;
 
@@ -7877,6 +7883,12 @@ impl NowledgeMemEmbeddedStoreHandle {
 
     pub fn runtime_governor_snapshot(&self) -> Result<RuntimeGovernorSnapshot> {
         Ok(self.read_store()?.runtime_governor_snapshot())
+    }
+
+    /// Reports the admitted facade contract. Production hosts must bind this
+    /// report to their long-lived runtime identity before using it as evidence.
+    pub fn serving_path_readiness(&self) -> NowledgeMemServingPathReadiness {
+        NowledgeMemServingPathReadiness::embedded_store_handle()
     }
 
     pub fn refresh_runtime_resources(&self) -> Result<bool> {
