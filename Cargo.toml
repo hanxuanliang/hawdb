@@ -143,3 +143,7 @@ harness = false
 [[bench]]
 name = "integrity_checksum"
 harness = false
+
+[[bench]]
+name = "search_checkpoint"
+harness = false

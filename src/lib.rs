@@ -423,9 +423,9 @@ pub use search::turboquant_projection::{
 pub use search::{
     AdaptiveVectorSearchOptions, CompressedVectorSearchMode, MetadataRepairOptions,
     MetadataRepairSummary, SearchAccessControlContext, SearchAnalyzerLexicon,
-    SearchCandidateSetReport, SearchDerivedArtifactReport, SearchDocument, SearchEmbeddingManifest,
-    SearchEmptyReasonCode, SearchFallbackReasonCode, SearchFusionWeights, SearchHit, SearchIndex,
-    SearchLexicalFeasibilityCoverage, SearchLexicalFeasibilityMetrics,
+    SearchCandidateSetReport, SearchCheckpointReport, SearchDerivedArtifactReport, SearchDocument,
+    SearchEmbeddingManifest, SearchEmptyReasonCode, SearchFallbackReasonCode, SearchFusionWeights,
+    SearchHit, SearchIndex, SearchLexicalFeasibilityCoverage, SearchLexicalFeasibilityMetrics,
     SearchLexicalProductionQualificationReport, SearchMode, SearchOutOfCoreConfig,
     SearchOutOfCoreHydrationOutput, SearchOutOfCoreMetrics, SearchOutOfCoreOutput,
     SearchOutOfCoreReader, SearchPredicateFieldPruningReport, SearchPredicatePushdownReport,

@@ -47,6 +47,7 @@ pub mod turboquant_projection {
 mod out_of_core;
 mod range_io;
 mod recall_validation;
+mod snapshot_writer;
 #[cfg(feature = "turbovec")]
 pub mod turbovec_projection;
 mod vector_execution;
@@ -81,6 +82,8 @@ pub use recall_validation::{
     MAX_VECTOR_RECALL_VALIDATION_TOP_K, MINIMUM_VECTOR_QUALIFICATION_DOCUMENT_COUNT,
     VECTOR_RECALL_PRODUCTION_QUALIFICATION_PROTOCOL, VECTOR_RECALL_VALIDATION_PROTOCOL,
 };
+use snapshot_writer::write_search_snapshot;
+pub use snapshot_writer::SearchCheckpointReport;
 use vector_execution::{execute_search_vector_plan, SearchVectorExecutionRequest};
 
 #[cfg(feature = "vector-search")]
@@ -2219,47 +2222,27 @@ impl SearchIndex {
     }
 
     pub fn checkpoint(&self) -> Result<()> {
+        self.checkpoint_with_report().map(|_| ())
+    }
+
+    pub fn checkpoint_with_report(&self) -> Result<SearchCheckpointReport> {
         let Some(path) = &self.path else {
-            return Ok(());
+            return Ok(SearchCheckpointReport::in_memory(self.documents.len()));
         };
         let started = std::time::Instant::now();
         let result = (|| {
             let snapshot_path = path.join(SEARCH_SNAPSHOT_FILE);
-            let mut body = String::new();
-            body.push_str("SKEIN_SEARCH_PROJECTION_V1\n");
-            if let Some(epoch) = self.source_graph_commit_epoch {
-                body.push_str(&format!("source_graph_commit_epoch\t{epoch}\n"));
-            }
-            if let Some(epoch) = self.import_source_graph_commit_epoch {
-                body.push_str(&format!("import_source_graph_commit_epoch\t{epoch}\n"));
-            }
-            if let Some(manifest) = &self.embedding_manifest {
-                body.push_str(&format!(
-                    "embedding_manifest\t{}\t{}\t{}\n",
-                    encode_string(&manifest.model),
-                    encode_string(manifest.version.as_deref().unwrap_or_default()),
-                    manifest.dimension
-                ));
-            }
-            if let Some(dimension) = self.embedding_dimension {
-                body.push_str(&format!("embedding_dimension\t{dimension}\n"));
-            }
-            for document in self.documents.values() {
-                body.push_str(&encode_search_document_line(document));
-            }
-            let checksum = checksum_bytes(body.as_bytes());
-            let data = format!("{body}checksum\t{checksum}\n");
-            let tmp_path = snapshot_path.with_extension("skein.tmp");
-            {
-                let mut file = File::create(&tmp_path)?;
-                let encoded = encode_search_snapshot_text(&data)?;
-                file.write_all(&encoded)?;
-                file.sync_all()?;
-            }
-            durable_replace_file(&tmp_path, &snapshot_path)?;
+            let snapshot = write_search_snapshot(
+                &snapshot_path,
+                self.source_graph_commit_epoch,
+                self.import_source_graph_commit_epoch,
+                self.embedding_manifest.as_ref(),
+                self.embedding_dimension,
+                self.documents.values(),
+            )?;
             self.write_segment_artifacts(path)?;
             self.write_lexical_projection(path)?;
-            out_of_core::publish_out_of_core_projection(self, path)?;
+            let projection_generation = out_of_core::publish_out_of_core_projection(self, path)?;
             #[cfg(feature = "vector-search")]
             self.write_turboquant_projection(path)?;
             #[cfg(feature = "turbovec")]
@@ -2269,17 +2252,26 @@ impl SearchIndex {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = self.source_graph_commit_epoch;
             self.retry_projection_cleanup(SearchProjectionCleanupOptions::default());
-            Ok(())
+            Ok(snapshot.finish(projection_generation))
         })();
         if let Some(telemetry) = &self.telemetry {
+            let (byte_count, generation) = result
+                .as_ref()
+                .map(|report| {
+                    (
+                        report.snapshot_compressed_bytes,
+                        Some(report.projection_generation),
+                    )
+                })
+                .unwrap_or((0, None));
             telemetry.record_kernel(KernelTelemetry {
                 operation: KernelTelemetryOperation::SearchCheckpoint,
                 success: result.is_ok(),
                 elapsed_micros: elapsed_micros(started),
                 item_count: self.documents.len(),
-                byte_count: 0,
+                byte_count,
                 fsync_micros: 0,
-                generation: None,
+                generation,
             });
         }
         result
@@ -9764,7 +9756,13 @@ mod tests {
             index
                 .upsert(doc("a", "Graph storage", "Native adjacency", [1.0, 0.0]))
                 .unwrap();
-            index.checkpoint().unwrap();
+            let report = index.checkpoint_with_report().unwrap();
+            assert_eq!(report.document_count, 1);
+            assert!(report.snapshot_streamed);
+            assert!(report.snapshot_uncompressed_bytes > 0);
+            assert!(report.snapshot_compressed_bytes > 0);
+            assert!(report.snapshot_peak_record_bytes > 0);
+            assert!(report.projection_generation > 0);
         }
         {
             let index = SearchIndex::open(&path).unwrap();

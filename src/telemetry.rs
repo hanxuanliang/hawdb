@@ -266,6 +266,10 @@ mod tests {
         );
         assert!(events[0].success);
         assert_eq!(events[0].item_count, 1);
+        assert!(events[0].byte_count > 0);
+        assert!(events[0]
+            .generation
+            .is_some_and(|generation| generation > 0));
         drop(events);
         drop(index);
         std::fs::remove_dir_all(path).unwrap();

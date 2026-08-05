@@ -1560,7 +1560,7 @@ pub(super) fn published_generation(
     Ok(Some(reader.generation()))
 }
 
-pub(super) fn publish_out_of_core_projection(index: &SearchIndex, root: &Path) -> Result<()> {
+pub(super) fn publish_out_of_core_projection(index: &SearchIndex, root: &Path) -> Result<u64> {
     let descriptor = read_search_segment_descriptor(root)?.ok_or_else(|| {
         SkeinError::Storage("search segment descriptor is missing after checkpoint".to_string())
     })?;
@@ -1641,7 +1641,7 @@ pub(super) fn publish_out_of_core_projection(index: &SearchIndex, root: &Path) -
         file.sync_all()?;
     }
     durable_replace_file(&tmp_path, &manifest_path)?;
-    Ok(())
+    Ok(generation)
 }
 
 fn write_out_of_core_sidecars(

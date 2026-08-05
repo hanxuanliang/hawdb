@@ -78,7 +78,13 @@ Search projection snapshots use the same temporary-file, file sync, atomic
 rename, and parent-directory sync boundary when `SearchIndex::checkpoint`
 publishes `search_projection.skein`; the snapshot uses the same zstd envelope
 by default. The projection remains rebuildable and is not part of canonical
-graph WAL recovery.
+graph WAL recovery. Snapshot publication streams the header and one encoded
+document record at a time through zstd into a temporary payload, then copies
+that payload behind the checksummed envelope before publication. It does not
+materialize a corpus-sized plaintext `String` or compressed `Vec` on top of the
+resident build state. `SearchIndex::checkpoint_with_report` exposes the
+uncompressed and compressed byte counts, largest encoded record, and published
+out-of-core generation so qualification can verify the bounded writer path.
 
 WAL entries can represent either a single mutation or a batch commit record.
 The relationship pattern create path uses a single batch record for source node,
