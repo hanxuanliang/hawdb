@@ -73,14 +73,13 @@ and algorithms outside active routes are not implied backlog items.
     resource error in readiness evidence.
   - Do not weaken the existing blocking-operator memory limit.
 
-- [ ] Make production runtime admission non-ambiguous.
-  - Define which embedded query entrypoints are production admitted and report
-    raw `Database` access as non-production-safe unless the host supplies an
-    equivalent global governor.
-  - Prove the real Mem serving path uses the admitted facade for foreground
-    query, mutation, analytics, and maintenance work.
-  - Keep direct low-level access available for tests and controlled hosts
-    without allowing it to satisfy production-path readiness accidentally.
+- [ ] Bind the real Mem serving path to the admitted Skein facade.
+  - Use the shared-governor `NowledgeMemEmbeddedStoreHandle` entrypoints for
+    foreground parameterized Cypher and bounded streaming reads.
+  - Prove the host uses equivalent admission for typed mutation, analytics, and
+    maintenance work that cannot be expressed as one Cypher statement.
+  - Keep direct `Database` access limited to tests and controlled hosts; it must
+    not satisfy production-path readiness evidence.
 
 ## P2: Deferred Delivery Governance
 

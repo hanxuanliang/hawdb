@@ -57,7 +57,12 @@ use crate::{
         NowledgeGraphRouteWorkloadFixtureReport, NOWLEDGE_GRAPH_ROUTE_WORKLOAD_FIXTURE_PROTOCOL,
     },
 };
+use skein_core::RuntimeTaskContext;
 use skein_optimizer::AdaptiveVectorBackendPolicy;
+use skein_qos::{
+    IoConcurrencyBudget, RuntimeGovernor, RuntimeGovernorConfig, RuntimeGovernorSnapshot,
+    RuntimePermit, StorageDeviceProfile,
+};
 pub use skein_readiness::{NowledgeMemReadinessAreaMap, NowledgeMemReadinessAreaSummary};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -83,6 +88,21 @@ pub fn nowledge_mem_graph_config_with_search_mode(
         compressed_vector_search_mode,
         ..DatabaseConfig::default()
     }
+}
+
+fn default_nowledge_mem_runtime_governor(
+    path: &Path,
+    database_config: &DatabaseConfig,
+) -> RuntimeGovernor {
+    let storage_device = StorageDeviceProfile::detect(path);
+    let mut governor_config = RuntimeGovernorConfig::desktop_bound();
+    if let Some(max_payload_bytes) = database_config.max_read_result_payload_bytes {
+        governor_config.result_budget_bytes = u64::try_from(max_payload_bytes).unwrap_or(u64::MAX);
+    }
+    RuntimeGovernor::detect(
+        governor_config,
+        IoConcurrencyBudget::desktop_bound_for_device(storage_device),
+    )
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1832,6 +1852,7 @@ impl NowledgeMemGraphMode {
 pub struct NowledgeMemGraph {
     db: Database,
     mode: NowledgeMemGraphMode,
+    runtime_governor: RuntimeGovernor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5415,22 +5436,49 @@ impl NowledgeMemSearchCandidateOutput {
 
 impl NowledgeMemGraph {
     pub fn open(path: impl AsRef<Path>, mode: NowledgeMemGraphMode) -> Result<Self> {
-        let db = Database::open_with_config(path, nowledge_mem_graph_config(mode))?;
-        Ok(Self { db, mode })
+        let path = path.as_ref();
+        Self::open_with_config(path, nowledge_mem_graph_config(mode))
     }
 
     pub fn open_with_config(path: impl AsRef<Path>, config: DatabaseConfig) -> Result<Self> {
+        let path = path.as_ref();
+        let runtime_governor = default_nowledge_mem_runtime_governor(path, &config);
+        Self::open_with_config_and_runtime_governor(path, config, runtime_governor)
+    }
+
+    pub fn open_with_config_and_runtime_governor(
+        path: impl AsRef<Path>,
+        config: DatabaseConfig,
+        runtime_governor: RuntimeGovernor,
+    ) -> Result<Self> {
         let mode = if config.read_only {
             NowledgeMemGraphMode::ShadowReadOnly
         } else {
             NowledgeMemGraphMode::WritableCutover
         };
         let db = Database::open_with_config(path, config)?;
-        Ok(Self { db, mode })
+        Ok(Self {
+            db,
+            mode,
+            runtime_governor,
+        })
     }
 
     pub fn from_database(db: Database, mode: NowledgeMemGraphMode) -> Self {
-        Self { db, mode }
+        let runtime_governor = default_nowledge_mem_runtime_governor(Path::new("."), db.config());
+        Self::from_database_with_runtime_governor(db, mode, runtime_governor)
+    }
+
+    pub fn from_database_with_runtime_governor(
+        db: Database,
+        mode: NowledgeMemGraphMode,
+        runtime_governor: RuntimeGovernor,
+    ) -> Self {
+        Self {
+            db,
+            mode,
+            runtime_governor,
+        }
     }
 
     pub fn mode(&self) -> NowledgeMemGraphMode {
@@ -5445,12 +5493,24 @@ impl NowledgeMemGraph {
         &mut self.db
     }
 
+    pub fn runtime_governor(&self) -> &RuntimeGovernor {
+        &self.runtime_governor
+    }
+
+    pub fn runtime_governor_snapshot(&self) -> RuntimeGovernorSnapshot {
+        self.runtime_governor.snapshot()
+    }
+
+    pub fn refresh_runtime_resources(&self) -> bool {
+        self.runtime_governor.refresh_from_host()
+    }
+
     pub fn into_database(self) -> Database {
         self.db
     }
 
     pub fn query(&mut self, cypher: &str) -> Result<QueryOutput> {
-        self.db.query(cypher)
+        self.query_with_params(cypher, &BTreeMap::new())
     }
 
     pub fn query_with_report(&mut self, cypher: &str) -> Result<NowledgeMemQueryOutput> {
@@ -5470,7 +5530,9 @@ impl NowledgeMemGraph {
         cypher: &str,
         parameters: &BTreeMap<String, Value>,
     ) -> Result<QueryOutput> {
-        self.db.query_with_params(cypher, parameters)
+        Ok(self
+            .query_with_params_with_report(cypher, parameters)?
+            .output)
     }
 
     pub fn query_with_params_with_report(
@@ -5500,6 +5562,23 @@ impl NowledgeMemGraph {
         )
     }
 
+    pub fn query_with_params_with_report_options_context(
+        &mut self,
+        cypher: &str,
+        parameters: &BTreeMap<String, Value>,
+        options: NowledgeMemQueryReportOptions,
+        task_context: &RuntimeTaskContext,
+    ) -> Result<NowledgeMemQueryOutput> {
+        let mut external = crate::executor::NoExternalReadOperator;
+        self.query_with_params_with_report_options_and_external_context(
+            cypher,
+            parameters,
+            options,
+            &mut external,
+            task_context,
+        )
+    }
+
     fn query_with_params_with_report_options_and_external(
         &mut self,
         cypher: &str,
@@ -5507,14 +5586,39 @@ impl NowledgeMemGraph {
         options: NowledgeMemQueryReportOptions,
         external: &mut dyn crate::executor::ExternalReadOperator,
     ) -> Result<NowledgeMemQueryOutput> {
+        self.query_with_params_with_report_options_and_external_context(
+            cypher,
+            parameters,
+            options,
+            external,
+            &RuntimeTaskContext::default(),
+        )
+    }
+
+    fn query_with_params_with_report_options_and_external_context(
+        &mut self,
+        cypher: &str,
+        parameters: &BTreeMap<String, Value>,
+        options: NowledgeMemQueryReportOptions,
+        external: &mut dyn crate::executor::ExternalReadOperator,
+        task_context: &RuntimeTaskContext,
+    ) -> Result<NowledgeMemQueryOutput> {
+        self.check_runtime_context(task_context)?;
+        let (_permit, is_mutation) = self.admit_materialized_query(cypher, parameters)?;
         let started = Instant::now();
-        let (output, execution_trace) = self.db.query_with_params_trace_and_external(
+        let result = self.db.query_with_params_trace_and_external_with_context(
             cypher,
             parameters,
             options.capture_physical_plan,
             external,
             None,
-        )?;
+            Some(task_context),
+        );
+        self.record_runtime_cancellation(result.as_ref().err(), task_context);
+        let (output, execution_trace) = result?;
+        if !is_mutation {
+            self.check_runtime_context(task_context)?;
+        }
         let elapsed_micros = started.elapsed().as_micros();
         let report = nowledge_mem_query_report(NowledgeMemQueryReportInput {
             mode: self.mode,
@@ -5527,6 +5631,106 @@ impl NowledgeMemGraph {
             elapsed_micros,
         });
         Ok(NowledgeMemQueryOutput { output, report })
+    }
+
+    fn admit_materialized_query(
+        &self,
+        cypher: &str,
+        parameters: &BTreeMap<String, Value>,
+    ) -> Result<(RuntimePermit, bool)> {
+        let admission = self.db.runtime_admission_plan(cypher, parameters)?;
+        let is_mutation = admission.is_mutation;
+        let governor_budget = self.runtime_governor.snapshot().limits.result_budget_bytes;
+        let result_budget = if admission.is_mutation {
+            governor_budget
+        } else {
+            let configured = self
+                .db
+                .config()
+                .max_read_result_payload_bytes
+                .ok_or_else(|| {
+                    SkeinError::Execution(
+                        "admitted materialized query requires max_read_result_payload_bytes"
+                            .to_string(),
+                    )
+                })?;
+            let configured = u64::try_from(configured).unwrap_or(u64::MAX);
+            if configured > governor_budget {
+                return Err(SkeinError::Execution(format!(
+                    "admitted materialized query payload budget {configured} exceeds runtime result budget {governor_budget}"
+                )));
+            }
+            configured
+        };
+        self.try_admit_runtime(admission.runtime_work_request(result_budget))
+            .map(|permit| (permit, is_mutation))
+    }
+
+    fn admit_streaming_query(
+        &self,
+        cypher: &str,
+        parameters: &BTreeMap<String, Value>,
+        result_budget_bytes: usize,
+    ) -> Result<RuntimePermit> {
+        let admission = self.db.runtime_admission_plan(cypher, parameters)?;
+        if admission.is_mutation {
+            return Err(SkeinError::Execution(
+                "admitted streaming query must be read-only".to_string(),
+            ));
+        }
+        self.try_admit_runtime(
+            admission.runtime_work_request(u64::try_from(result_budget_bytes).unwrap_or(u64::MAX)),
+        )
+    }
+
+    fn try_admit_runtime(&self, request: skein_qos::RuntimeWorkRequest) -> Result<RuntimePermit> {
+        self.runtime_governor.try_admit(request).map_err(|error| {
+            if error.is_retryable() {
+                self.runtime_governor
+                    .record_admission_wait(request, error.code);
+            }
+            SkeinError::Execution(error.to_string())
+        })
+    }
+
+    fn admitted_streaming_result_bytes(&self, options: &NowledgeMemReadOptions) -> Result<usize> {
+        let governor_budget =
+            usize::try_from(self.runtime_governor.snapshot().limits.result_budget_bytes)
+                .unwrap_or(usize::MAX);
+        let configured = self
+            .db
+            .config()
+            .max_read_result_payload_bytes
+            .unwrap_or(governor_budget);
+        let requested = options
+            .max_estimated_payload_bytes
+            .unwrap_or(governor_budget);
+        let admitted = governor_budget.min(configured).min(requested);
+        if admitted == 0 {
+            return Err(SkeinError::Execution(
+                "admitted streaming query requires a non-zero result byte budget".to_string(),
+            ));
+        }
+        Ok(admitted)
+    }
+
+    fn check_runtime_context(&self, task_context: &RuntimeTaskContext) -> Result<()> {
+        task_context.checkpoint().map_err(|reason| {
+            self.runtime_governor.record_cancellation(reason);
+            SkeinError::Execution(format!("runtime task {reason}"))
+        })
+    }
+
+    fn record_runtime_cancellation(
+        &self,
+        error: Option<&SkeinError>,
+        task_context: &RuntimeTaskContext,
+    ) {
+        if error.is_some()
+            && let Err(reason) = task_context.checkpoint()
+        {
+            self.runtime_governor.record_cancellation(reason);
+        }
     }
 
     pub fn slow_query_report(&self) -> NowledgeMemSlowQueryReport {
@@ -5561,11 +5765,11 @@ impl NowledgeMemGraph {
         parameters: &BTreeMap<String, Value>,
         options: &NowledgeMemReadOptions,
     ) -> Result<NowledgeMemReadOutput> {
-        let bounded = self
-            .db
-            .begin_read_transaction()
-            .query_with_params_bounded_profile(cypher, parameters, options.max_rows)?;
-        bounded_nowledge_mem_read_output(self.mode, bounded, options)
+        let mut output = self
+            .read_query_with_params_streaming_collect(cypher, parameters, options)
+            .map_err(|error| legacy_nowledge_mem_read_error(error, options))?;
+        output.report.streaming = false;
+        Ok(output)
     }
 
     pub fn read_query_with_params_streaming(
@@ -5575,17 +5779,41 @@ impl NowledgeMemGraph {
         options: &NowledgeMemReadOptions,
         consumer: impl FnMut(BTreeMap<String, Value>) -> Result<()>,
     ) -> Result<QueryStreamReport> {
-        self.db
+        self.read_query_with_params_streaming_context(
+            cypher,
+            parameters,
+            options,
+            &RuntimeTaskContext::default(),
+            consumer,
+        )
+    }
+
+    pub fn read_query_with_params_streaming_context(
+        &self,
+        cypher: &str,
+        parameters: &BTreeMap<String, Value>,
+        options: &NowledgeMemReadOptions,
+        task_context: &RuntimeTaskContext,
+        consumer: impl FnMut(BTreeMap<String, Value>) -> Result<()>,
+    ) -> Result<QueryStreamReport> {
+        self.check_runtime_context(task_context)?;
+        let max_payload_bytes = self.admitted_streaming_result_bytes(options)?;
+        let _permit = self.admit_streaming_query(cypher, parameters, max_payload_bytes)?;
+        let result = self
+            .db
             .begin_read_transaction()
-            .query_with_params_streaming(
+            .query_with_params_streaming_context(
                 cypher,
                 parameters,
                 QueryStreamOptions {
                     max_rows: options.max_rows,
-                    max_payload_bytes: options.max_estimated_payload_bytes,
+                    max_payload_bytes: Some(max_payload_bytes),
                 },
+                task_context,
                 consumer,
-            )
+            );
+        self.record_runtime_cancellation(result.as_ref().err(), task_context);
+        result
     }
 
     /// Collects host-owned rows through the streaming consumer boundary.
@@ -7427,6 +7655,25 @@ impl NowledgeMemEmbeddedStoreHandle {
         Ok((Self::new(store), report))
     }
 
+    pub fn open_with_options_and_runtime_governor(
+        options: NowledgeMemOpenOptions,
+        runtime_governor: RuntimeGovernor,
+    ) -> Result<(Self, NowledgeMemOpenReport)> {
+        let (store, report) = NowledgeMemEmbeddedStore::open_with_options_and_runtime_governor(
+            options,
+            runtime_governor,
+        )?;
+        Ok((Self::new(store), report))
+    }
+
+    pub fn runtime_governor_snapshot(&self) -> Result<RuntimeGovernorSnapshot> {
+        Ok(self.read_store()?.runtime_governor_snapshot())
+    }
+
+    pub fn refresh_runtime_resources(&self) -> Result<bool> {
+        Ok(self.read_store()?.refresh_runtime_resources())
+    }
+
     pub fn query_with_report(&self, cypher: &str) -> Result<NowledgeMemQueryOutput> {
         self.write_store()?.query_with_report(cypher)
     }
@@ -7637,6 +7884,22 @@ impl NowledgeMemEmbeddedStoreHandle {
             .query_with_params_with_report_options(cypher, parameters, options)
     }
 
+    pub fn query_with_params_with_report_options_context(
+        &self,
+        cypher: &str,
+        parameters: &BTreeMap<String, Value>,
+        options: NowledgeMemQueryReportOptions,
+        task_context: &RuntimeTaskContext,
+    ) -> Result<NowledgeMemQueryOutput> {
+        self.write_store()?
+            .query_with_params_with_report_options_context(
+                cypher,
+                parameters,
+                options,
+                task_context,
+            )
+    }
+
     pub fn read_query(
         &self,
         cypher: &str,
@@ -7664,6 +7927,23 @@ impl NowledgeMemEmbeddedStoreHandle {
     ) -> Result<QueryStreamReport> {
         self.read_store()?
             .read_query_with_params_streaming(cypher, parameters, options, consumer)
+    }
+
+    pub fn read_query_with_params_streaming_context(
+        &self,
+        cypher: &str,
+        parameters: &BTreeMap<String, Value>,
+        options: &NowledgeMemReadOptions,
+        task_context: &RuntimeTaskContext,
+        consumer: impl FnMut(BTreeMap<String, Value>) -> Result<()>,
+    ) -> Result<QueryStreamReport> {
+        self.read_store()?.read_query_with_params_streaming_context(
+            cypher,
+            parameters,
+            options,
+            task_context,
+            consumer,
+        )
     }
 
     pub fn read_query_with_params_streaming_collect(
@@ -8042,13 +8322,30 @@ impl NowledgeMemEmbeddedStore {
     pub fn open_with_options(
         options: NowledgeMemOpenOptions,
     ) -> Result<(Self, NowledgeMemOpenReport)> {
+        let graph_config = nowledge_mem_graph_config_with_search_mode(
+            options.mode,
+            options.effective_compressed_vector_search_mode(),
+        );
+        let runtime_governor =
+            default_nowledge_mem_runtime_governor(&options.graph_path, &graph_config);
+        Self::open_with_options_and_runtime_governor(options, runtime_governor)
+    }
+
+    pub fn open_with_options_and_runtime_governor(
+        options: NowledgeMemOpenOptions,
+        runtime_governor: RuntimeGovernor,
+    ) -> Result<(Self, NowledgeMemOpenReport)> {
         let mut report = options.sanitized_report();
         let mut graph_config = nowledge_mem_graph_config_with_search_mode(
             options.mode,
             options.effective_compressed_vector_search_mode(),
         );
         graph_config.adaptive_vector_backend_policy = options.adaptive_vector_backend_policy;
-        let graph = NowledgeMemGraph::open_with_config(&options.graph_path, graph_config)?;
+        let graph = NowledgeMemGraph::open_with_config_and_runtime_governor(
+            &options.graph_path,
+            graph_config,
+            runtime_governor,
+        )?;
         report.graph_opened = true;
         let search_projection = match options.search_projection_path.as_ref() {
             Some(path) => {
@@ -8070,6 +8367,14 @@ impl NowledgeMemEmbeddedStore {
 
     pub fn graph_mut(&mut self) -> &mut NowledgeMemGraph {
         &mut self.graph
+    }
+
+    pub fn runtime_governor_snapshot(&self) -> RuntimeGovernorSnapshot {
+        self.graph.runtime_governor_snapshot()
+    }
+
+    pub fn refresh_runtime_resources(&self) -> bool {
+        self.graph.refresh_runtime_resources()
     }
 
     pub fn search_projection(&self) -> Option<&NowledgeMemSearchProjection> {
@@ -8540,6 +8845,29 @@ impl NowledgeMemEmbeddedStore {
         )
     }
 
+    pub fn query_with_params_with_report_options_context(
+        &mut self,
+        cypher: &str,
+        parameters: &BTreeMap<String, Value>,
+        options: NowledgeMemQueryReportOptions,
+        task_context: &RuntimeTaskContext,
+    ) -> Result<NowledgeMemQueryOutput> {
+        let Self {
+            graph,
+            search_projection,
+        } = self;
+        let mut external = SearchProjectionExternalReadOperator {
+            projection: search_projection.as_ref(),
+        };
+        graph.query_with_params_with_report_options_and_external_context(
+            cypher,
+            parameters,
+            options,
+            &mut external,
+            task_context,
+        )
+    }
+
     pub fn query_runtime_preflight(
         &mut self,
         probes: &[NowledgeQueryRuntimePreflightProbe],
@@ -8589,6 +8917,23 @@ impl NowledgeMemEmbeddedStore {
     ) -> Result<QueryStreamReport> {
         self.graph
             .read_query_with_params_streaming(cypher, parameters, options, consumer)
+    }
+
+    pub fn read_query_with_params_streaming_context(
+        &self,
+        cypher: &str,
+        parameters: &BTreeMap<String, Value>,
+        options: &NowledgeMemReadOptions,
+        task_context: &RuntimeTaskContext,
+        consumer: impl FnMut(BTreeMap<String, Value>) -> Result<()>,
+    ) -> Result<QueryStreamReport> {
+        self.graph.read_query_with_params_streaming_context(
+            cypher,
+            parameters,
+            options,
+            task_context,
+            consumer,
+        )
     }
 
     pub fn read_query_with_params_streaming_collect(
@@ -11421,6 +11766,25 @@ fn streamed_nowledge_mem_read_output(
     Ok(NowledgeMemReadOutput { output, report })
 }
 
+fn legacy_nowledge_mem_read_error(
+    error: SkeinError,
+    options: &NowledgeMemReadOptions,
+) -> SkeinError {
+    let Some(max_payload_bytes) = options.max_estimated_payload_bytes else {
+        return error;
+    };
+    if matches!(
+        &error,
+        SkeinError::Execution(message)
+            if message.contains(&format!("max_payload_bytes {max_payload_bytes}"))
+    ) {
+        return SkeinError::Execution(format!(
+            "nowledge mem read query payload exceeding max_estimated_payload_bytes {max_payload_bytes}"
+        ));
+    }
+    error
+}
+
 fn estimate_query_output_payload_bytes(output: &QueryOutput) -> usize {
     output
         .rows
@@ -13428,6 +13792,92 @@ mod tests {
             serde_json::json!(covered_routes)
         );
         assert_eq!(evidence["missing_covered_routes"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn graph_queries_hold_and_release_runtime_governor_permits() {
+        let db = Database::new();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+
+        graph
+            .query("CREATE (:Memory {id: 'admitted-mem'})")
+            .unwrap();
+        let read = graph
+            .read_query_with_options(
+                "MATCH (m:Memory {id: 'admitted-mem'}) RETURN m.id AS id",
+                &NowledgeMemReadOptions {
+                    max_rows: Some(1),
+                    max_estimated_payload_bytes: Some(1024),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(read.output.rows.len(), 1);
+        let snapshot = graph.runtime_governor_snapshot();
+        assert_eq!(snapshot.admissions, 2);
+        assert_eq!(snapshot.completions, 2);
+        assert_eq!(snapshot.active_foreground_tasks, 0);
+        assert_eq!(snapshot.active_cpu_slots, 0);
+        assert_eq!(snapshot.admitted_memory_bytes, 0);
+    }
+
+    #[test]
+    fn graph_query_rejects_before_mutation_when_runtime_memory_is_unavailable() {
+        let governor = skein_qos::RuntimeGovernor::detect(
+            skein_qos::RuntimeGovernorConfig {
+                memory_budget_bytes: Some(1),
+                ..skein_qos::RuntimeGovernorConfig::default()
+            },
+            skein_qos::IoConcurrencyBudget::new(1, 1),
+        );
+        let mut graph = NowledgeMemGraph::from_database_with_runtime_governor(
+            Database::new(),
+            NowledgeMemGraphMode::WritableCutover,
+            governor,
+        );
+
+        let error = graph
+            .query("CREATE (:Memory {id: 'rejected-mem'})")
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("runtime admission memory_saturated"));
+        assert!(graph
+            .database_mut()
+            .query("MATCH (m:Memory) RETURN m.id AS id")
+            .unwrap()
+            .rows
+            .is_empty());
+        let snapshot = graph.runtime_governor_snapshot();
+        assert_eq!(snapshot.admissions, 0);
+        assert_eq!(snapshot.completions, 0);
+        assert_eq!(snapshot.admission_rejections, 1);
+    }
+
+    #[test]
+    fn graph_streaming_query_reports_pre_execution_cancellation() {
+        let mut db = Database::new();
+        db.query("CREATE (:Memory {id: 'cancelled-mem'})").unwrap();
+        let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::ShadowReadOnly);
+        let cancellation = skein_core::RuntimeCancellationToken::new();
+        cancellation.cancel();
+        let context = skein_core::RuntimeTaskContext::without_deadline(cancellation);
+
+        let error = graph
+            .read_query_with_params_streaming_context(
+                "MATCH (m:Memory) RETURN m.id AS id",
+                &BTreeMap::new(),
+                &NowledgeMemReadOptions::default(),
+                &context,
+                |_| Ok(()),
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("runtime task cancelled"));
+        let snapshot = graph.runtime_governor_snapshot();
+        assert_eq!(snapshot.admissions, 0);
+        assert_eq!(snapshot.cancellations, 1);
     }
 
     #[test]

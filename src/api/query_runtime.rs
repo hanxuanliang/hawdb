@@ -52,7 +52,7 @@ impl Database {
 
     #[cfg_attr(not(feature = "tokio-runtime"), allow(dead_code))]
     pub(crate) fn runtime_admission_plan(
-        &mut self,
+        &self,
         cypher_text: &str,
         parameters: &BTreeMap<String, Value>,
     ) -> Result<RuntimeAdmissionPlan> {
@@ -69,7 +69,11 @@ impl Database {
             | cypher::Statement::Commit
             | cypher::Statement::Rollback => (true, CONTROL_STATEMENT_MEMORY_BYTES),
             _ => {
-                let optimized = self.optimized_query_plan(cypher_text, &statement, parameters)?;
+                let optimized = self.optimized_query_plan_for_runtime_admission(
+                    cypher_text,
+                    &statement,
+                    parameters,
+                )?;
                 let is_mutation = executor::is_mutation_plan(&optimized.physical_plan)?;
                 let estimated_memory_bytes = if is_mutation {
                     executor::estimated_mutation_memory_bytes(
@@ -92,6 +96,42 @@ impl Database {
             estimated_memory_bytes,
             streaming_eligible,
         })
+    }
+
+    fn optimized_query_plan_for_runtime_admission(
+        &self,
+        cypher_text: &str,
+        statement: &cypher::Statement,
+        parameters: &BTreeMap<String, Value>,
+    ) -> Result<OptimizedQueryPlan> {
+        let optimizer_search =
+            query_statement_variables_for_statement(&self.system_variables, statement)?
+                .optimizer_search;
+        let cache_mode = if optimizer_search != OptimizerSearchDirective::Auto {
+            PlanCacheMode::Bypass(plan_cache::PlanCacheBypassReason::OptimizerDirective)
+        } else if statement_uses_plan_cache(statement) {
+            PlanCacheMode::Use
+        } else {
+            PlanCacheMode::Bypass(plan_cache::PlanCacheBypassReason::StatementNotCacheable)
+        };
+        let plan_cache = SharedState::new(PlanCache::new(self.config.max_plan_cache_entries));
+        let planning_cache = SharedState::new(self.optimizer_planning_cache.borrow().clone());
+        optimized_query_plan_for(
+            cypher_text,
+            statement,
+            parameters,
+            cache_mode,
+            PlanCacheContext {
+                catalog: &self.catalog,
+                store: &self.store,
+                optimizer: &self.optimizer,
+                config: &self.config,
+                cache: &plan_cache,
+                planning_cache: &planning_cache,
+                access_control: None,
+                optimizer_search,
+            },
+        )
     }
 
     pub fn query(&mut self, cypher_text: &str) -> Result<QueryOutput> {
@@ -163,24 +203,6 @@ impl Database {
             &mut external,
             access_control,
             task_context,
-        )
-    }
-
-    pub(crate) fn query_with_params_trace_and_external(
-        &mut self,
-        cypher_text: &str,
-        parameters: &BTreeMap<String, Value>,
-        capture_trace: bool,
-        external: &mut dyn executor::ExternalReadOperator,
-        access_control: Option<QueryAccessControlContext>,
-    ) -> Result<(QueryOutput, QueryExecutionTrace)> {
-        self.query_with_params_trace_and_external_with_context(
-            cypher_text,
-            parameters,
-            capture_trace,
-            external,
-            access_control,
-            None,
         )
     }
 

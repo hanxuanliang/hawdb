@@ -151,6 +151,21 @@ and task-context variants, and `SkeinTokioEmbedded::query` are
 admission-safe path is only one input to production qualification and MUST NOT
 replace revision-, dataset-, and workload-bound evidence.
 
+The Nowledge production facade follows the same boundary. Its parameterized
+query and bounded streaming-read entrypoints on `NowledgeMemGraph`,
+`NowledgeMemEmbeddedStore`, and `NowledgeMemEmbeddedStoreHandle` MUST acquire a
+`RuntimeGovernor` permit before execution. Streaming reads MUST admit the
+minimum of the governor result budget, database result limit, and route payload
+limit, and MUST retain the permit until the consumer returns. Task-context
+variants MUST propagate cancellation and record it in the governor snapshot.
+Diagnostic preflight and multi-statement typed transaction helpers are not
+traffic-admission evidence until the host binds equivalent admission. The facade's
+`database`, `database_mut`, and `into_database` accessors remain explicitly
+controlled-host and test surfaces; calling them is not production admission
+evidence. Hosts MAY inject one shared governor into the Nowledge facade so all
+store handles participate in the same process-level CPU, memory, result, and
+I/O limits.
+
 An asynchronous facade that returns a materialized result remains subject to
 the result budget. A streaming asynchronous API MUST propagate consumer
 backpressure and cancellation without retaining the complete result.
