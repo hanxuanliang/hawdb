@@ -303,6 +303,21 @@ The mutable full-residency search index is a maintenance and compatibility
 owner. A larger-than-memory production caller MUST use the generation-bound
 out-of-core facade and its production constructor.
 
+The embedded serving entrypoint is
+`NowledgeMemOpenOptions::with_qualified_out_of_core_search_projection`. It MUST
+receive the raw lexical qualification report, the exact current release
+identity, and explicit out-of-core budgets. Open MUST reject a graph whose
+canonical commit epoch differs from the bound release identity and MUST expose
+`qualified_out_of_core` plus a successful production-qualification binding in
+the sanitized open report. This mode opens no full-residency `SearchIndex`.
+Candidate search, bounded late hydration, Knowledge Retrieval graph-context
+expansion, and Cypher vector seed reads MUST use the same admitted handle and
+the pinned out-of-core generation. Out-of-core byte metrics MUST remain visible
+on the typed candidate, hydration, and retrieval outputs. Runtime admission MUST
+charge the configured decoded-segment, candidate-block, hydration, and matched-
+span buffers in addition to blocking score state and the result budget; a bound
+larger than the shared governor can admit MUST reject before search I/O.
+
 Search traffic readiness MUST recompute qualification from raw evidence and
 require:
 

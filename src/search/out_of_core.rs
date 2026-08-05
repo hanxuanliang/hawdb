@@ -526,6 +526,10 @@ impl SearchOutOfCoreReader {
         self.manifest.document_count
     }
 
+    pub(crate) fn config(&self) -> &SearchOutOfCoreConfig {
+        &self.config
+    }
+
     pub fn generation(&self) -> u64 {
         self.manifest.generation
     }

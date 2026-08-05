@@ -191,12 +191,52 @@ fn advised_compressed_vector_search_mode(
 pub struct NowledgeMemOpenOptions {
     pub graph_path: PathBuf,
     pub search_projection_path: Option<PathBuf>,
+    pub search_projection_open_mode: NowledgeMemSearchProjectionOpenMode,
     pub mode: NowledgeMemGraphMode,
     pub database_config: Option<DatabaseConfig>,
     pub compressed_vector_search_mode: CompressedVectorSearchMode,
     pub adaptive_vector_backend_policy: AdaptiveVectorBackendPolicy,
     pub retrieval_projection_advisor: NowledgeMemRetrievalProjectionAdvisor,
     pub search_range_read_config: Option<SearchRangeReadConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemQualifiedOutOfCoreSearchOptions {
+    pub config: SearchOutOfCoreConfig,
+    pub qualification: SearchLexicalProductionQualificationReport,
+    pub expected_identity: crate::ProductionQualificationIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NowledgeMemSearchProjectionOpenMode {
+    FullResidencyMaintenance,
+    QualifiedOutOfCore(Box<NowledgeMemQualifiedOutOfCoreSearchOptions>),
+}
+
+impl NowledgeMemSearchProjectionOpenMode {
+    fn role(&self) -> NowledgeMemSearchProjectionRole {
+        match self {
+            Self::FullResidencyMaintenance => {
+                NowledgeMemSearchProjectionRole::FullResidencyMaintenance
+            }
+            Self::QualifiedOutOfCore(_) => NowledgeMemSearchProjectionRole::QualifiedOutOfCore,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NowledgeMemSearchProjectionRole {
+    FullResidencyMaintenance,
+    QualifiedOutOfCore,
+}
+
+impl NowledgeMemSearchProjectionRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FullResidencyMaintenance => "full_residency_maintenance",
+            Self::QualifiedOutOfCore => "qualified_out_of_core",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -209,6 +249,8 @@ impl NowledgeMemOpenOptions {
         Self {
             graph_path: graph_path.into(),
             search_projection_path: None,
+            search_projection_open_mode:
+                NowledgeMemSearchProjectionOpenMode::FullResidencyMaintenance,
             mode,
             database_config: None,
             compressed_vector_search_mode: CompressedVectorSearchMode::Disabled,
@@ -226,6 +268,29 @@ impl NowledgeMemOpenOptions {
         Self {
             graph_path: graph_path.into(),
             search_projection_path: Some(search_projection_path.into()),
+            search_projection_open_mode:
+                NowledgeMemSearchProjectionOpenMode::FullResidencyMaintenance,
+            mode,
+            database_config: None,
+            compressed_vector_search_mode: CompressedVectorSearchMode::Disabled,
+            adaptive_vector_backend_policy: AdaptiveVectorBackendPolicy::default(),
+            retrieval_projection_advisor: NowledgeMemRetrievalProjectionAdvisor::default(),
+            search_range_read_config: None,
+        }
+    }
+
+    pub fn with_qualified_out_of_core_search_projection(
+        graph_path: impl Into<PathBuf>,
+        search_projection_path: impl Into<PathBuf>,
+        mode: NowledgeMemGraphMode,
+        qualified: NowledgeMemQualifiedOutOfCoreSearchOptions,
+    ) -> Self {
+        Self {
+            graph_path: graph_path.into(),
+            search_projection_path: Some(search_projection_path.into()),
+            search_projection_open_mode: NowledgeMemSearchProjectionOpenMode::QualifiedOutOfCore(
+                Box::new(qualified),
+            ),
             mode,
             database_config: None,
             compressed_vector_search_mode: CompressedVectorSearchMode::Disabled,
@@ -283,6 +348,35 @@ impl NowledgeMemOpenOptions {
         config
     }
 
+    fn validate(&self) -> Result<()> {
+        match (
+            self.search_projection_path.as_ref(),
+            &self.search_projection_open_mode,
+        ) {
+            (None, NowledgeMemSearchProjectionOpenMode::QualifiedOutOfCore(_)) => {
+                return Err(SkeinError::Semantic(
+                    "qualified out-of-core search requires search_projection_path".to_string(),
+                ));
+            }
+            (Some(_), NowledgeMemSearchProjectionOpenMode::QualifiedOutOfCore(qualified)) => {
+                qualified.expected_identity.validate()?;
+                if self.search_range_read_config.is_some() {
+                    return Err(SkeinError::Semantic(
+                        "search_range_read_config applies only to the full-residency maintenance projection"
+                            .to_string(),
+                    ));
+                }
+            }
+            _ => {}
+        }
+        if self.search_projection_path.is_none() && self.search_range_read_config.is_some() {
+            return Err(SkeinError::Semantic(
+                "search_range_read_config requires search_projection_path".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn sanitized_report(&self) -> NowledgeMemOpenReport {
         let effective_compressed_vector_search_mode =
             self.effective_compressed_vector_search_mode();
@@ -291,6 +385,10 @@ impl NowledgeMemOpenOptions {
             mode: self.mode,
             graph_configured: true,
             search_projection_configured: self.search_projection_path.is_some(),
+            search_projection_role: self
+                .search_projection_path
+                .as_ref()
+                .map(|_| self.search_projection_open_mode.role()),
             compressed_vector_search_mode: effective_compressed_vector_search_mode,
             requested_compressed_vector_search_mode: self.compressed_vector_search_mode,
             adaptive_vector_backend_policy: self.adaptive_vector_backend_policy,
@@ -304,6 +402,7 @@ impl NowledgeMemOpenOptions {
             },
             graph_opened: false,
             search_projection_opened: false,
+            search_production_qualification_bound: false,
         }
     }
 
@@ -345,6 +444,7 @@ pub struct NowledgeMemOpenReport {
     pub mode: NowledgeMemGraphMode,
     pub graph_configured: bool,
     pub search_projection_configured: bool,
+    pub search_projection_role: Option<NowledgeMemSearchProjectionRole>,
     pub compressed_vector_search_mode: CompressedVectorSearchMode,
     pub requested_compressed_vector_search_mode: CompressedVectorSearchMode,
     pub adaptive_vector_backend_policy: AdaptiveVectorBackendPolicy,
@@ -352,6 +452,7 @@ pub struct NowledgeMemOpenReport {
     pub retrieval_projection_advisor_blocker_codes: Vec<String>,
     pub graph_opened: bool,
     pub search_projection_opened: bool,
+    pub search_production_qualification_bound: bool,
 }
 
 impl NowledgeMemOpenReport {
@@ -361,6 +462,7 @@ impl NowledgeMemOpenReport {
             "mode": self.mode.as_str(),
             "graph_configured": self.graph_configured,
             "search_projection_configured": self.search_projection_configured,
+            "search_projection_role": self.search_projection_role.map(NowledgeMemSearchProjectionRole::as_str),
             "compressed_vector_search_mode": self.compressed_vector_search_mode.as_str(),
             "requested_compressed_vector_search_mode": self.requested_compressed_vector_search_mode.as_str(),
             "adaptive_vector_backend_policy": {
@@ -372,6 +474,7 @@ impl NowledgeMemOpenReport {
             "retrieval_projection_advisor_blocker_codes": self.retrieval_projection_advisor_blocker_codes,
             "graph_opened": self.graph_opened,
             "search_projection_opened": self.search_projection_opened,
+            "search_production_qualification_bound": self.search_production_qualification_bound,
         })
     }
 }
@@ -4984,6 +5087,7 @@ impl NowledgeMemRetrievalReport {
 pub struct NowledgeMemRetrievalOutput {
     pub output: KnowledgeRetrievalOutput,
     pub report: NowledgeMemRetrievalReport,
+    pub out_of_core_search_metrics: Option<SearchOutOfCoreMetrics>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -5252,6 +5356,7 @@ impl NowledgeMemSearchCandidateReport {
 pub struct NowledgeMemSearchCandidateOutput {
     pub result: SearchResultSet,
     pub report: NowledgeMemSearchCandidateReport,
+    pub out_of_core_metrics: Option<SearchOutOfCoreMetrics>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7200,6 +7305,22 @@ pub struct NowledgeMemOutOfCoreSearchCandidateOutput {
     pub metrics: SearchOutOfCoreMetrics,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemSearchHydrationOutput {
+    pub documents: Vec<SearchDocument>,
+    pub out_of_core_metrics: Option<SearchOutOfCoreMetrics>,
+}
+
+impl From<NowledgeMemOutOfCoreSearchCandidateOutput> for NowledgeMemSearchCandidateOutput {
+    fn from(output: NowledgeMemOutOfCoreSearchCandidateOutput) -> Self {
+        Self {
+            result: output.result,
+            report: output.report,
+            out_of_core_metrics: Some(output.metrics),
+        }
+    }
+}
+
 impl NowledgeMemOutOfCoreSearchProjection {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Ok(Self {
@@ -7251,6 +7372,19 @@ impl NowledgeMemOutOfCoreSearchProjection {
 
     pub fn freshness(&self) -> SearchProjectionFreshness {
         self.reader.projection_freshness()
+    }
+
+    fn runtime_admission_memory_bytes(
+        &self,
+        working_memory_bytes: u64,
+        result_budget_bytes: u64,
+    ) -> u64 {
+        let config = self.reader.config();
+        working_memory_bytes
+            .saturating_add(config.max_uncompressed_segment_bytes.get())
+            .saturating_add(config.max_candidate_block_bytes.get())
+            .saturating_add(config.max_hydrated_bytes.get().min(result_budget_bytes))
+            .saturating_add(config.max_matched_span_bytes.get())
     }
 
     pub fn hydrate_documents(
@@ -7440,7 +7574,11 @@ impl NowledgeMemSearchProjection {
             effective_compressed_vector_search_mode,
             &result,
         );
-        NowledgeMemSearchCandidateOutput { result, report }
+        NowledgeMemSearchCandidateOutput {
+            result,
+            report,
+            out_of_core_metrics: None,
+        }
     }
 
     pub fn try_search_candidates_with_report(
@@ -7474,7 +7612,11 @@ impl NowledgeMemSearchProjection {
             effective_compressed_vector_search_mode,
             &result,
         );
-        Ok(NowledgeMemSearchCandidateOutput { result, report })
+        Ok(NowledgeMemSearchCandidateOutput {
+            result,
+            report,
+            out_of_core_metrics: None,
+        })
     }
 
     pub fn search_candidate_readiness(
@@ -7517,6 +7659,7 @@ impl NowledgeMemSearchProjection {
 
 struct SearchProjectionExternalReadOperator<'a> {
     projection: Option<&'a NowledgeMemSearchProjection>,
+    out_of_core_projection: Option<&'a NowledgeMemOutOfCoreSearchProjection>,
 }
 
 impl crate::executor::ExternalReadOperator for SearchProjectionExternalReadOperator<'_> {
@@ -7524,14 +7667,24 @@ impl crate::executor::ExternalReadOperator for SearchProjectionExternalReadOpera
         &mut self,
         request: crate::executor::VectorSeedExecutionRequest<'_>,
     ) -> Result<crate::executor::VectorSeedExecutionOutput> {
-        let projection = self
-            .projection
-            .ok_or_else(missing_search_projection_error)?;
         let top_k = vector_plan_top_k(request.vector_plan)?;
-        let output = projection.try_search_candidates_with_report(
-            &NowledgeMemSearchCandidateRequest::vector(request.embedding.to_vec(), top_k)
-                .with_metadata_filters(request.metadata_filters.clone()),
-        )?;
+        let search_request =
+            NowledgeMemSearchCandidateRequest::vector(request.embedding.to_vec(), top_k)
+                .with_metadata_filters(request.metadata_filters.clone());
+        let output = match (self.projection, self.out_of_core_projection) {
+            (Some(projection), None) => {
+                projection.try_search_candidates_with_report(&search_request)?
+            }
+            (None, Some(projection)) => projection
+                .search_candidates_with_report(&search_request)?
+                .into(),
+            (None, None) => return Err(missing_search_projection_error()),
+            (Some(_), Some(_)) => {
+                return Err(SkeinError::Storage(
+                    "nowledge mem search projection ownership is ambiguous".to_string(),
+                ));
+            }
+        };
         let retriever = output
             .result
             .retrievers
@@ -7688,6 +7841,8 @@ fn vector_fallback_reason_code(
 pub struct NowledgeMemEmbeddedStore {
     graph: NowledgeMemGraph,
     search_projection: Option<NowledgeMemSearchProjection>,
+    out_of_core_search_projection: Option<NowledgeMemOutOfCoreSearchProjection>,
+    retrieval_projection_advisor: NowledgeMemRetrievalProjectionAdvisor,
 }
 
 #[derive(Debug, Clone)]
@@ -7765,6 +7920,16 @@ impl NowledgeMemEmbeddedStoreHandle {
         document_ids: &[String],
         max_documents: usize,
     ) -> Result<Vec<SearchDocument>> {
+        Ok(self
+            .search_projection_documents_with_report(document_ids, max_documents)?
+            .documents)
+    }
+
+    pub fn search_projection_documents_with_report(
+        &self,
+        document_ids: &[String],
+        max_documents: usize,
+    ) -> Result<NowledgeMemSearchHydrationOutput> {
         if document_ids.len() > max_documents {
             return Err(SkeinError::Execution(format!(
                 "search projection document hydration requested {} rows, limit is {max_documents}",
@@ -7773,7 +7938,6 @@ impl NowledgeMemEmbeddedStoreHandle {
         }
         let _permit = self.admit_typed_search()?;
         let store = self.read_store()?;
-        let projection = store.require_search_projection()?;
         let max_payload_bytes = store
             .graph
             .database()
@@ -7784,21 +7948,49 @@ impl NowledgeMemEmbeddedStoreHandle {
                     "admitted search hydration requires max_read_result_payload_bytes".to_string(),
                 )
             })?;
-        let mut documents = Vec::with_capacity(document_ids.len());
-        let mut payload_bytes = 0usize;
-        for id in document_ids {
-            let Some(document) = projection.index().document(id) else {
-                continue;
-            };
-            payload_bytes = payload_bytes.saturating_add(search_document_payload_bytes(document));
-            if payload_bytes > max_payload_bytes {
-                return Err(SkeinError::Execution(format!(
-                    "search projection document hydration produced {payload_bytes} payload bytes, limit is {max_payload_bytes}"
-                )));
+        match (
+            store.search_projection.as_ref(),
+            store.out_of_core_search_projection.as_ref(),
+        ) {
+            (Some(projection), None) => {
+                let mut documents = Vec::with_capacity(document_ids.len());
+                let mut payload_bytes = 0usize;
+                for id in document_ids {
+                    let Some(document) = projection.index().document(id) else {
+                        continue;
+                    };
+                    payload_bytes =
+                        payload_bytes.saturating_add(search_document_payload_bytes(document));
+                    if payload_bytes > max_payload_bytes {
+                        return Err(SkeinError::Execution(format!(
+                            "search projection document hydration produced {payload_bytes} payload bytes, limit is {max_payload_bytes}"
+                        )));
+                    }
+                    documents.push(document.clone());
+                }
+                Ok(NowledgeMemSearchHydrationOutput {
+                    documents,
+                    out_of_core_metrics: None,
+                })
             }
-            documents.push(document.clone());
+            (None, Some(projection)) => {
+                let output = projection.hydrate_documents(document_ids)?;
+                if output.metrics.hydrated_bytes
+                    > u64::try_from(max_payload_bytes).unwrap_or(u64::MAX)
+                {
+                    return Err(SkeinError::Execution(format!(
+                        "search projection document hydration produced {} payload bytes, limit is {max_payload_bytes}",
+                        output.metrics.hydrated_bytes
+                    )));
+                }
+                Ok(NowledgeMemSearchHydrationOutput {
+                    documents: output.documents,
+                    out_of_core_metrics: Some(output.metrics),
+                })
+            }
+            (None, None) => Err(missing_search_projection_error()),
+            (Some(_), Some(_)) => Err(ambiguous_search_projection_error()),
         }
-        Ok(documents)
     }
 
     pub fn knowledge_source_candidates(
@@ -8196,6 +8388,7 @@ impl NowledgeMemEmbeddedStoreHandle {
         request: &NowledgeMemSearchCandidateRequest,
         options: &NowledgeMemSearchCandidateReadinessOptions,
     ) -> Result<NowledgeMemSearchCandidateReadinessReport> {
+        let _permit = self.admit_typed_search()?;
         self.read_store()?
             .search_candidate_readiness(request, options)
     }
@@ -8209,6 +8402,7 @@ impl NowledgeMemEmbeddedStoreHandle {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
+        let _permit = self.admit_typed_search()?;
         self.read_store()?
             .search_candidate_shadow_evidence_json(request, primary_candidate_ids)
     }
@@ -8480,14 +8674,11 @@ impl NowledgeMemEmbeddedStoreHandle {
                     )
                 })
             })?;
-        let memory_bytes = u64::try_from(config.execution_memory.blocking_operator_bytes.get())
-            .unwrap_or(u64::MAX);
-        let io_slots = store
-            .require_search_projection()?
-            .index()
-            .range_read_config()
-            .io_depth
-            .get();
+        let working_memory_bytes =
+            u64::try_from(config.execution_memory.blocking_operator_bytes.get())
+                .unwrap_or(u64::MAX);
+        let memory_bytes = store.search_memory_bytes(working_memory_bytes, result_bytes)?;
+        let io_slots = store.search_io_slots()?;
         store.graph.try_admit_runtime(
             RuntimeWorkRequest::foreground_query(memory_bytes, result_bytes)
                 .with_io_slots(io_slots)
@@ -8634,6 +8825,21 @@ impl NowledgeMemEmbeddedStore {
         Self {
             graph,
             search_projection,
+            out_of_core_search_projection: None,
+            retrieval_projection_advisor: NowledgeMemRetrievalProjectionAdvisor::default(),
+        }
+    }
+
+    fn new_with_out_of_core_search(
+        graph: NowledgeMemGraph,
+        out_of_core_search_projection: NowledgeMemOutOfCoreSearchProjection,
+        retrieval_projection_advisor: NowledgeMemRetrievalProjectionAdvisor,
+    ) -> Self {
+        Self {
+            graph,
+            search_projection: None,
+            out_of_core_search_projection: Some(out_of_core_search_projection),
+            retrieval_projection_advisor,
         }
     }
 
@@ -8650,6 +8856,7 @@ impl NowledgeMemEmbeddedStore {
         options: NowledgeMemOpenOptions,
         runtime_governor: RuntimeGovernor,
     ) -> Result<(Self, NowledgeMemOpenReport)> {
+        options.validate()?;
         let mut report = options.sanitized_report();
         let graph_config = options.effective_database_config();
         let graph = NowledgeMemGraph::open_with_config_and_runtime_governor(
@@ -8662,8 +8869,11 @@ impl NowledgeMemEmbeddedStore {
             io_depth: graph.runtime_governor_snapshot().limits.foreground_io_depth,
             ..SearchRangeReadConfig::default()
         };
-        let search_projection = match options.search_projection_path.as_ref() {
-            Some(path) => {
+        let Some(path) = options.search_projection_path.as_ref() else {
+            return Ok((Self::new(graph, None), report));
+        };
+        match &options.search_projection_open_mode {
+            NowledgeMemSearchProjectionOpenMode::FullResidencyMaintenance => {
                 let mut projection = NowledgeMemSearchProjection::open(path)?;
                 projection.set_range_read_config(
                     options
@@ -8671,11 +8881,34 @@ impl NowledgeMemEmbeddedStore {
                         .unwrap_or(default_search_range_read_config),
                 );
                 report.search_projection_opened = true;
-                Some(projection)
+                Ok((Self::new(graph, Some(projection)), report))
             }
-            None => None,
-        };
-        Ok((Self::new(graph, search_projection), report))
+            NowledgeMemSearchProjectionOpenMode::QualifiedOutOfCore(qualified) => {
+                let graph_commit_epoch = graph.database().commit_epoch();
+                if graph_commit_epoch != qualified.expected_identity.canonical_graph_commit_epoch {
+                    return Err(SkeinError::Storage(format!(
+                        "qualified out-of-core search expected canonical graph commit epoch {}, opened graph is at {graph_commit_epoch}",
+                        qualified.expected_identity.canonical_graph_commit_epoch
+                    )));
+                }
+                let projection = NowledgeMemOutOfCoreSearchProjection::open_production_with_config(
+                    path,
+                    qualified.config.clone(),
+                    &qualified.qualification,
+                    &qualified.expected_identity,
+                )?;
+                report.search_projection_opened = true;
+                report.search_production_qualification_bound = true;
+                Ok((
+                    Self::new_with_out_of_core_search(
+                        graph,
+                        projection,
+                        options.retrieval_projection_advisor.clone(),
+                    ),
+                    report,
+                ))
+            }
+        }
     }
 
     pub fn graph(&self) -> &NowledgeMemGraph {
@@ -8700,6 +8933,10 @@ impl NowledgeMemEmbeddedStore {
 
     pub fn search_projection_mut(&mut self) -> Option<&mut NowledgeMemSearchProjection> {
         self.search_projection.as_mut()
+    }
+
+    pub fn out_of_core_search_projection(&self) -> Option<&NowledgeMemOutOfCoreSearchProjection> {
+        self.out_of_core_search_projection.as_ref()
     }
 
     /// Applies a projection delta and checkpoints it before acknowledging
@@ -8792,10 +9029,7 @@ impl NowledgeMemEmbeddedStore {
             protocol: NOWLEDGE_MEM_RUNTIME_STATUS_PROTOCOL.to_string(),
             graph_commit_epoch,
             changefeed: self.graph.database().search_projection_changefeed_status(),
-            projection_freshness: self
-                .search_projection
-                .as_ref()
-                .map(|projection| projection.index().projection_freshness()),
+            projection_freshness: self.search_projection_freshness(),
         }
     }
 
@@ -8951,6 +9185,7 @@ impl NowledgeMemEmbeddedStore {
         let Self {
             graph,
             search_projection,
+            ..
         } = self;
         let search_projection = require_search_projection_mut(search_projection)?;
         graph
@@ -8966,6 +9201,7 @@ impl NowledgeMemEmbeddedStore {
         let Self {
             graph,
             search_projection,
+            ..
         } = self;
         let search_projection = require_search_projection_mut(search_projection)?;
         graph.database().catch_up_search_projection(
@@ -8984,6 +9220,7 @@ impl NowledgeMemEmbeddedStore {
         let Self {
             graph,
             search_projection,
+            ..
         } = self;
         let search_projection = require_search_projection_mut(search_projection)?;
         graph.database().catch_up_search_projection_with_scheduler(
@@ -9002,6 +9239,7 @@ impl NowledgeMemEmbeddedStore {
         let Self {
             graph,
             search_projection,
+            ..
         } = self;
         let search_projection = require_search_projection_mut(search_projection)?;
         graph
@@ -9072,8 +9310,17 @@ impl NowledgeMemEmbeddedStore {
         &self,
         request: &NowledgeMemSearchCandidateRequest,
     ) -> Result<NowledgeMemSearchCandidateOutput> {
-        self.require_search_projection()?
-            .try_search_candidates_with_report(request)
+        match (
+            self.search_projection.as_ref(),
+            self.out_of_core_search_projection.as_ref(),
+        ) {
+            (Some(projection), None) => projection.try_search_candidates_with_report(request),
+            (None, Some(projection)) => {
+                Ok(projection.search_candidates_with_report(request)?.into())
+            }
+            (None, None) => Err(missing_search_projection_error()),
+            (Some(_), Some(_)) => Err(ambiguous_search_projection_error()),
+        }
     }
 
     pub fn search_candidate_readiness(
@@ -9081,9 +9328,7 @@ impl NowledgeMemEmbeddedStore {
         request: &NowledgeMemSearchCandidateRequest,
         options: &NowledgeMemSearchCandidateReadinessOptions,
     ) -> Result<NowledgeMemSearchCandidateReadinessReport> {
-        Ok(self
-            .require_search_projection()?
-            .search_candidate_readiness(request, options))
+        Ok(self.search_candidates(request)?.readiness_report(options))
     }
 
     pub fn search_candidate_shadow_evidence_json<I, S>(
@@ -9111,17 +9356,39 @@ impl NowledgeMemEmbeddedStore {
         &self,
         request: &KnowledgeRetrievalRequest,
     ) -> Result<NowledgeMemRetrievalOutput> {
-        let search_projection = self.require_search_projection()?;
-        let output = self
-            .graph
-            .database()
-            .try_retrieve_knowledge(search_projection.index(), request)?;
+        let (output, out_of_core_search_metrics) = match (
+            self.search_projection.as_ref(),
+            self.out_of_core_search_projection.as_ref(),
+        ) {
+            (Some(search_projection), None) => (
+                self.graph
+                    .database()
+                    .try_retrieve_knowledge(search_projection.index(), request)?,
+                None,
+            ),
+            (None, Some(search_projection)) => {
+                let search = search_projection
+                    .search_candidates_with_report(&self.search_request_for_retrieval(request))?;
+                let output = self.graph.database().try_retrieve_knowledge_from_search(
+                    search.result,
+                    search_projection.freshness(),
+                    request,
+                )?;
+                (output, Some(search.metrics))
+            }
+            (None, None) => return Err(missing_search_projection_error()),
+            (Some(_), Some(_)) => return Err(ambiguous_search_projection_error()),
+        };
         let report = nowledge_mem_retrieval_report(
             self.graph.mode(),
             self.graph.database().config().compressed_vector_search_mode,
             &output,
         );
-        Ok(NowledgeMemRetrievalOutput { output, report })
+        Ok(NowledgeMemRetrievalOutput {
+            output,
+            report,
+            out_of_core_search_metrics,
+        })
     }
 
     pub fn read_query(&self, cypher: &str) -> Result<NowledgeMemReadOutput> {
@@ -9165,9 +9432,12 @@ impl NowledgeMemEmbeddedStore {
         let Self {
             graph,
             search_projection,
+            out_of_core_search_projection,
+            ..
         } = self;
         let mut external = SearchProjectionExternalReadOperator {
             projection: search_projection.as_ref(),
+            out_of_core_projection: out_of_core_search_projection.as_ref(),
         };
         graph.query_with_params_with_report_options_and_external(
             cypher,
@@ -9187,9 +9457,12 @@ impl NowledgeMemEmbeddedStore {
         let Self {
             graph,
             search_projection,
+            out_of_core_search_projection,
+            ..
         } = self;
         let mut external = SearchProjectionExternalReadOperator {
             projection: search_projection.as_ref(),
+            out_of_core_projection: out_of_core_search_projection.as_ref(),
         };
         graph.query_with_params_with_report_options_and_external_context(
             cypher,
@@ -9614,6 +9887,67 @@ impl NowledgeMemEmbeddedStore {
         }
     }
 
+    fn search_projection_freshness(&self) -> Option<SearchProjectionFreshness> {
+        match (
+            self.search_projection.as_ref(),
+            self.out_of_core_search_projection.as_ref(),
+        ) {
+            (Some(projection), None) => Some(projection.freshness()),
+            (None, Some(projection)) => Some(projection.freshness()),
+            _ => None,
+        }
+    }
+
+    fn search_io_slots(&self) -> Result<usize> {
+        match (
+            self.search_projection.as_ref(),
+            self.out_of_core_search_projection.as_ref(),
+        ) {
+            (Some(projection), None) => Ok(projection.index().range_read_config().io_depth.get()),
+            (None, Some(_)) => Ok(1),
+            (None, None) => Err(missing_search_projection_error()),
+            (Some(_), Some(_)) => Err(ambiguous_search_projection_error()),
+        }
+    }
+
+    fn search_memory_bytes(
+        &self,
+        working_memory_bytes: u64,
+        result_budget_bytes: u64,
+    ) -> Result<u64> {
+        match (
+            self.search_projection.as_ref(),
+            self.out_of_core_search_projection.as_ref(),
+        ) {
+            (Some(_), None) => Ok(working_memory_bytes),
+            (None, Some(projection)) => Ok(projection
+                .runtime_admission_memory_bytes(working_memory_bytes, result_budget_bytes)),
+            (None, None) => Err(missing_search_projection_error()),
+            (Some(_), Some(_)) => Err(ambiguous_search_projection_error()),
+        }
+    }
+
+    fn search_request_for_retrieval(
+        &self,
+        request: &KnowledgeRetrievalRequest,
+    ) -> NowledgeMemSearchCandidateRequest {
+        let config = self.graph.database().config();
+        NowledgeMemSearchCandidateRequest {
+            query_text: request.query_text.clone(),
+            query_embedding: request.query_embedding.clone(),
+            mode: request.mode,
+            limit: request.limit,
+            offset: request.offset,
+            rank_window: request.rank_window,
+            fusion_weights: request.search_fusion_weights,
+            metadata_filters: request.metadata_filters.clone(),
+            compressed_vector_search_mode: config.compressed_vector_search_mode,
+            adaptive_vector_backend_policy: config.adaptive_vector_backend_policy,
+            recall_validation_probe: false,
+            retrieval_projection_advisor: self.retrieval_projection_advisor.clone(),
+        }
+    }
+
     fn require_search_projection(&self) -> Result<&NowledgeMemSearchProjection> {
         self.search_projection
             .as_ref()
@@ -9623,6 +9957,10 @@ impl NowledgeMemEmbeddedStore {
 
 fn missing_search_projection_error() -> SkeinError {
     SkeinError::Storage("nowledge mem search projection is not configured".to_string())
+}
+
+fn ambiguous_search_projection_error() -> SkeinError {
+    SkeinError::Storage("nowledge mem search projection ownership is ambiguous".to_string())
 }
 
 fn require_search_projection_mut(
@@ -12180,6 +12518,7 @@ mod tests {
         NowledgeMemGraphMode, NowledgeMemGraphNodeDetailsOptions, NowledgeMemGraphOrphansOptions,
         NowledgeMemGraphOverviewOptions, NowledgeMemGraphPageRankPlanOptions,
         NowledgeMemGraphSampleOptions, NowledgeMemOpenDiagnosticOptions, NowledgeMemOpenOptions,
+        NowledgeMemOutOfCoreSearchProjection, NowledgeMemQualifiedOutOfCoreSearchOptions,
         NowledgeMemQueryExecutionPath, NowledgeMemQueryReportOptions, NowledgeMemReadOptions,
         NowledgeMemReadReport, NowledgeMemReadinessAreaSummary, NowledgeMemReadinessDashboard,
         NowledgeMemReadinessOptions, NowledgeMemRetrievalProjectionAdvisor,
@@ -12225,8 +12564,11 @@ mod tests {
         nowledge_mem_route_ownership_all_legacy, nowledge_mem_route_ownership_all_skein,
         nowledge_mem_route_ownership_readiness, NowledgeMemRouteOwnershipPolicy,
     };
-    use crate::search::CompressedVectorSearchMode;
-    use crate::search::SearchFusionWeights;
+    use crate::search::{
+        CompressedVectorSearchMode, SearchFusionWeights, SearchLexicalFeasibilityCoverage,
+        SearchLexicalFeasibilityMetrics, SearchLexicalProductionQualificationReport,
+        SearchOutOfCoreConfig, SearchTopKScoreParity,
+    };
     use crate::search_route_ownership::{
         nowledge_mem_active_search_route_ownership_all_skein,
         nowledge_mem_active_search_route_ownership_readiness,
@@ -12250,16 +12592,34 @@ mod tests {
         GraphRagQueryPattern, GraphRagQueryPredicate, GraphRagQueryPredicateOperator,
         GraphRagQueryProjection, GraphRagSchemaContextOptions, KnowledgeCandidateScoringPolicy,
         KnowledgeRetrievalRequest, LocalQosPolicy, LocalQosScheduler, LocalQosState,
-        NowledgeGraphStatement, RecoveryMode, SearchEmbeddingManifest, SearchIndex, SearchMode,
-        SearchProjectionDelta, SearchProjectionFreshness, SearchProjectionKind,
-        SearchProjectionProbeOptions, SearchProjectionRow, StorageRecoveryReport,
-        StorageResidencyMode, StorageResourceProfileLimits, VectorRecallValidationOptions,
-        VectorRecallValidationReport, WorkClass, VECTOR_RECALL_VALIDATION_PROTOCOL,
+        NowledgeGraphStatement, ProductionEvidenceBinding, ProductionQualificationIdentity,
+        RecoveryMode, SearchEmbeddingManifest, SearchIndex, SearchMode, SearchProjectionDelta,
+        SearchProjectionFreshness, SearchProjectionKind, SearchProjectionProbeOptions,
+        SearchProjectionRow, StorageRecoveryReport, StorageResidencyMode,
+        StorageResourceProfileLimits, VectorRecallValidationOptions, VectorRecallValidationReport,
+        WorkClass, PRODUCTION_QUALIFICATION_POLICY_VERSION, VECTOR_RECALL_VALIDATION_PROTOCOL,
     };
     use std::collections::BTreeMap;
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
+
+    fn production_identity(canonical_graph_commit_epoch: u64) -> ProductionQualificationIdentity {
+        ProductionQualificationIdentity {
+            source_revision: "test-revision".to_string(),
+            rust_toolchain: "test-toolchain".to_string(),
+            target_os: std::env::consts::OS.to_string(),
+            target_arch: std::env::consts::ARCH.to_string(),
+            enabled_features: vec!["vector-search".to_string()],
+            durable_format_version: 1,
+            schema_version: 1,
+            configuration_digest: "test-configuration".to_string(),
+            deployment_profile: "test".to_string(),
+            dataset_fingerprint: "test-dataset".to_string(),
+            canonical_graph_commit_epoch,
+            policy_version: PRODUCTION_QUALIFICATION_POLICY_VERSION,
+        }
+    }
 
     fn ready_vector_recall_report() -> VectorRecallValidationReport {
         VectorRecallValidationReport {
@@ -14257,6 +14617,61 @@ mod tests {
         assert_eq!(snapshot.completions, 1);
         assert_eq!(snapshot.active_foreground_io_slots, 0);
         assert_eq!(snapshot.admitted_memory_bytes, 0);
+    }
+
+    #[test]
+    fn embedded_handle_charges_out_of_core_buffers_to_runtime_admission() {
+        let root = unique_nowledge_mem_test_dir("out_of_core_runtime_admission");
+        let search_path = root.join("search");
+        {
+            let mut index = SearchIndex::open(&search_path).unwrap();
+            index
+                .upsert_projection_row(SearchProjectionRow {
+                    kind: SearchProjectionKind::Memory,
+                    external_id: "admission".to_string(),
+                    title: "Out of core admission".to_string(),
+                    body: "Bounded buffers must be admitted".to_string(),
+                    embedding: None,
+                    source_id: None,
+                    metadata: BTreeMap::new(),
+                })
+                .unwrap();
+            index.checkpoint().unwrap();
+        }
+        let governor = skein_qos::RuntimeGovernor::detect(
+            skein_qos::RuntimeGovernorConfig {
+                memory_budget_bytes: Some(256 * 1024 * 1024),
+                result_budget_bytes: 64 * 1024 * 1024,
+                ..skein_qos::RuntimeGovernorConfig::default()
+            },
+            skein_qos::IoConcurrencyBudget::new(1, 1),
+        );
+        let graph = NowledgeMemGraph::from_database_with_runtime_governor(
+            Database::new(),
+            NowledgeMemGraphMode::ShadowReadOnly,
+            governor,
+        );
+        let projection = NowledgeMemOutOfCoreSearchProjection::open(&search_path).unwrap();
+        let handle = NowledgeMemEmbeddedStoreHandle::new(
+            NowledgeMemEmbeddedStore::new_with_out_of_core_search(
+                graph,
+                projection,
+                NowledgeMemRetrievalProjectionAdvisor::default(),
+            ),
+        );
+
+        let error = handle
+            .search_candidates(&NowledgeMemSearchCandidateRequest::text("admission", 1))
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("runtime admission memory_saturated"));
+        let snapshot = handle.runtime_governor_snapshot().unwrap();
+        assert_eq!(snapshot.admissions, 0);
+        assert_eq!(snapshot.admission_rejections, 1);
+        drop(handle);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -16491,6 +16906,87 @@ mod tests {
     }
 
     #[test]
+    fn qualified_out_of_core_open_recomputes_production_evidence() {
+        let root = unique_nowledge_mem_test_dir("qualified_out_of_core_open");
+        let graph_path = root.join("graph");
+        let search_path = root.join("search");
+        let graph_commit_epoch = {
+            let mut db = Database::open(&graph_path).unwrap();
+            db.query("CREATE (:Memory {id: 'qualified-open'})").unwrap();
+            db.commit_epoch()
+        };
+        {
+            let mut index = SearchIndex::open(&search_path).unwrap();
+            index
+                .apply_embedding_manifest(SearchEmbeddingManifest {
+                    model: "test-embedding".to_string(),
+                    version: Some("v1".to_string()),
+                    dimension: 2,
+                })
+                .unwrap();
+            index
+                .apply_projection_delta(SearchProjectionDelta {
+                    upserts: vec![SearchProjectionRow {
+                        kind: SearchProjectionKind::Memory,
+                        external_id: "qualified-open".to_string(),
+                        title: "Qualified open".to_string(),
+                        body: "Production evidence is recomputed".to_string(),
+                        embedding: Some(vec![1.0, 0.0]),
+                        source_id: None,
+                        metadata: BTreeMap::new(),
+                    }],
+                    deletes: Vec::new(),
+                    max_operations: None,
+                    source_graph_commit_epoch: Some(graph_commit_epoch),
+                })
+                .unwrap();
+            index.checkpoint().unwrap();
+        }
+        let projection = NowledgeMemOutOfCoreSearchProjection::open(&search_path).unwrap();
+        let projection_identity = projection.reader().production_qualification_identity();
+        drop(projection);
+        let expected_identity = production_identity(graph_commit_epoch);
+        let qualification = SearchLexicalProductionQualificationReport::evaluate_for_production(
+            projection_identity,
+            ProductionEvidenceBinding {
+                identity: expected_identity.clone(),
+                generated_at_unix_seconds: 1,
+            },
+            expected_identity.clone(),
+            SearchTopKScoreParity {
+                text: true,
+                vector: true,
+                hybrid: true,
+            },
+            SearchLexicalFeasibilityCoverage::default(),
+            SearchLexicalFeasibilityMetrics::default(),
+        );
+        let out_of_core_config = SearchOutOfCoreConfig {
+            spill_directory: root.join("spill"),
+            ..SearchOutOfCoreConfig::default()
+        };
+        let options = NowledgeMemOpenOptions::with_qualified_out_of_core_search_projection(
+            &graph_path,
+            &search_path,
+            NowledgeMemGraphMode::ShadowReadOnly,
+            NowledgeMemQualifiedOutOfCoreSearchOptions {
+                config: out_of_core_config,
+                qualification,
+                expected_identity,
+            },
+        );
+        let report = options.sanitized_report().json();
+        assert_eq!(report["search_projection_role"], "qualified_out_of_core");
+        assert_eq!(report["search_production_qualification_bound"], false);
+
+        let error = NowledgeMemEmbeddedStore::open_with_options(options).unwrap_err();
+        assert!(error.to_string().contains("dataset_too_small"));
+        assert!(error.to_string().contains("workload_coverage_incomplete"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn embedded_store_opens_from_options_with_sanitized_report() {
         let root = unique_nowledge_mem_test_dir("open_options");
         let graph_path = root.join("graph");
@@ -17592,6 +18088,131 @@ mod tests {
             report.json()["protocol"],
             NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL
         );
+    }
+
+    #[test]
+    fn embedded_handle_serves_search_and_graph_context_without_document_residency() {
+        let root = unique_nowledge_mem_test_dir("embedded_out_of_core_serving");
+        let search_path = root.join("search");
+        let mut graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::WritableCutover);
+        graph
+            .query("CREATE (:Memory {id: 'mem-ooc', title: 'Bounded serving', content: 'Skein out of core retrieval'})")
+            .unwrap();
+        graph
+            .query("CREATE (:Entity {id: 'entity-ooc', name: 'OutOfCore'})")
+            .unwrap();
+        graph
+            .query("MATCH (m:Memory {id: 'mem-ooc'}), (e:Entity {id: 'entity-ooc'}) CREATE (m)-[:MENTIONS]->(e)")
+            .unwrap();
+        let graph_commit_epoch = graph.database().commit_epoch();
+        {
+            let mut index = SearchIndex::open(&search_path).unwrap();
+            index
+                .apply_embedding_manifest(SearchEmbeddingManifest {
+                    model: "test-embedding".to_string(),
+                    version: Some("v1".to_string()),
+                    dimension: 2,
+                })
+                .unwrap();
+            index
+                .apply_projection_delta(SearchProjectionDelta {
+                    upserts: vec![SearchProjectionRow {
+                        kind: SearchProjectionKind::Memory,
+                        external_id: "mem-ooc".to_string(),
+                        title: "Bounded serving".to_string(),
+                        body: "Skein out of core retrieval".to_string(),
+                        embedding: Some(vec![1.0, 0.0]),
+                        source_id: Some("source-ooc".to_string()),
+                        metadata: BTreeMap::from([
+                            ("space_id".to_string(), "default".to_string()),
+                            ("lifecycle_state".to_string(), "active".to_string()),
+                        ]),
+                    }],
+                    deletes: Vec::new(),
+                    max_operations: None,
+                    source_graph_commit_epoch: Some(graph_commit_epoch),
+                })
+                .unwrap();
+            index.checkpoint().unwrap();
+        }
+        let projection = NowledgeMemOutOfCoreSearchProjection::open(&search_path).unwrap();
+        assert_eq!(projection.reader().resident_document_count(), 0);
+        let handle = NowledgeMemEmbeddedStoreHandle::new(
+            NowledgeMemEmbeddedStore::new_with_out_of_core_search(
+                graph,
+                projection,
+                NowledgeMemRetrievalProjectionAdvisor::default(),
+            ),
+        );
+
+        let candidates = handle
+            .search_candidates_with_report(&NowledgeMemSearchCandidateRequest::text(
+                "bounded serving",
+                1,
+            ))
+            .unwrap();
+        assert_eq!(candidates.result.hits[0].id, "memory:mem-ooc");
+        assert!(candidates.out_of_core_metrics.is_some());
+
+        let hydration = handle
+            .search_projection_documents_with_report(&["memory:mem-ooc".to_string()], 1)
+            .unwrap();
+        assert_eq!(hydration.documents[0].id, "memory:mem-ooc");
+        assert_eq!(
+            hydration
+                .out_of_core_metrics
+                .as_ref()
+                .unwrap()
+                .hydrated_documents,
+            1
+        );
+
+        let retrieval = handle
+            .retrieve_knowledge_with_report(&KnowledgeRetrievalRequest {
+                query_text: "bounded serving".to_string(),
+                query_embedding: None,
+                mode: SearchMode::Text,
+                limit: 1,
+                offset: 0,
+                rank_window: None,
+                search_fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::new(),
+                candidate_limit: Some(4),
+                candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
+                graph_seed_limit: 4,
+                graph_context_limit: 4,
+                graph_context_max_hops: 1,
+            })
+            .unwrap();
+        assert_eq!(retrieval.output.search.hits[0].id, "memory:mem-ooc");
+        assert!(!retrieval.output.graph_context_paths.is_empty());
+        assert!(retrieval.out_of_core_search_metrics.is_some());
+        assert_eq!(
+            retrieval
+                .output
+                .projection_freshness
+                .source_graph_commit_epoch,
+            Some(graph_commit_epoch)
+        );
+
+        let vector = handle
+            .query_with_params_with_report(
+                "CALL vector_search($embedding, topK := 1) RETURN id, score",
+                &BTreeMap::from([(
+                    "embedding".to_string(),
+                    Value::List(vec![Value::Float(1.0), Value::Float(0.0)]),
+                )]),
+            )
+            .unwrap();
+        assert_eq!(vector.output.rows.len(), 1);
+        assert_eq!(
+            vector.output.rows[0].get("id"),
+            Some(&Value::String("memory:mem-ooc".to_string()))
+        );
+
+        drop(handle);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

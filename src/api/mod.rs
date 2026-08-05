@@ -2502,6 +2502,21 @@ impl Database {
         .try_retrieve_knowledge(search_index, request)
     }
 
+    pub(crate) fn try_retrieve_knowledge_from_search(
+        &self,
+        search: SearchResultSet,
+        projection_freshness: SearchProjectionFreshness,
+        request: &KnowledgeRetrievalRequest,
+    ) -> Result<KnowledgeRetrievalOutput> {
+        KnowledgeRetrievalGraphContext {
+            catalog: &self.catalog,
+            store: &self.store,
+            compressed_vector_search_mode: self.config.compressed_vector_search_mode,
+            adaptive_vector_backend_policy: self.config.adaptive_vector_backend_policy,
+        }
+        .retrieve_knowledge_from_search(search, projection_freshness, request)
+    }
+
     pub fn knowledge_entity(
         &self,
         request: &KnowledgeEntityRequest,
@@ -3737,6 +3752,15 @@ impl KnowledgeRetrievalGraphContext<'_> {
                     .with_backend_policy(self.adaptive_vector_backend_policy),
             )
         };
+        self.retrieve_knowledge_from_search(search, search_index.projection_freshness(), request)
+    }
+
+    fn retrieve_knowledge_from_search(
+        &self,
+        search: SearchResultSet,
+        projection_freshness: SearchProjectionFreshness,
+        request: &KnowledgeRetrievalRequest,
+    ) -> Result<KnowledgeRetrievalOutput> {
         let graph_seed_search = self.search_knowledge_graph_seeds(
             &request.query_text,
             request.graph_seed_limit,
@@ -3749,7 +3773,6 @@ impl KnowledgeRetrievalGraphContext<'_> {
             request.graph_context_max_hops,
         )?;
         let evidence = self.knowledge_evidence_for_search(&search, &graph_context_search.paths)?;
-        let projection_freshness = search_index.projection_freshness();
         let graph_commit_epoch = self.store.commit_epoch();
         let retrievers = knowledge_retriever_reports(
             &search,

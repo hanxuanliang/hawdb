@@ -784,8 +784,15 @@ silent fallback.
 The mutable compatibility `SearchIndex::open()` still materializes the complete
 snapshot because its rebuild, incremental mutation, and borrowed-document APIs
 require stable references. It is a maintenance owner, not the larger-than-memory
-production read owner. Production activation of the out-of-core reader remains
-gated on differential shadow evidence and representative resource profiles.
+production read owner. `NowledgeMemOpenOptions::with_qualified_out_of_core_search_projection`
+is the production read-owner boundary: it accepts explicit reader budgets and
+opens through the production qualification constructor only after the release
+identity, projection generation, source graph epoch, and opened graph commit
+epoch match. The admitted embedded handle then uses that pinned generation for
+candidate search, bounded hydration, Knowledge Retrieval graph-context
+expansion, and Cypher vector seed reads without opening the full-residency
+index. Production traffic activation remains gated on representative
+differential and resource-profile artifacts for the exact release.
 
 ## What This Is Not
 
