@@ -26,13 +26,13 @@ pub struct SearchLexicalFeasibilityCoverage {
 }
 
 impl SearchLexicalFeasibilityCoverage {
-    fn complete(&self) -> bool {
+    fn complete(&self, acl_required: bool) -> bool {
         self.selective_identifier
             && self.cjk_text
             && self.common_term
             && self.no_hit
             && self.metadata_filter
-            && self.acl_filter
+            && (!acl_required || self.acl_filter)
             && self.hybrid_rrf
             && self.incremental_upsert_delete
             && self.checkpoint_reopen
@@ -403,7 +403,13 @@ impl SearchLexicalProductionQualificationReport {
         if !self.exact_topk_score_parity || !self.topk_score_parity.complete() {
             blockers.push("topk_score_parity_failed".to_string());
         }
-        if !self.coverage.complete() {
+        let acl_required = self.expected_identity.as_ref().is_some_and(|identity| {
+            identity
+                .enabled_features
+                .iter()
+                .any(|feature| feature == "acl")
+        });
+        if !self.coverage.complete(acl_required) {
             blockers.push("workload_coverage_incomplete".to_string());
         }
         if self.metrics.storage_memory_budget_bytes == 0
@@ -657,6 +663,42 @@ mod tests {
             .validate_for_projection_and_release(&projection_identity, &production_identity())
             .unwrap();
         assert_eq!(report.json()["ready"], true);
+    }
+
+    #[test]
+    fn requires_acl_coverage_only_when_acl_is_in_the_release_feature_set() {
+        let mut coverage = complete_coverage();
+        coverage.acl_filter = false;
+        let identity = production_identity();
+        let without_acl = SearchLexicalProductionQualificationReport::evaluate_for_production(
+            projection_identity(7, Some(42), 100_000),
+            crate::ProductionEvidenceBinding {
+                identity: identity.clone(),
+                generated_at_unix_seconds: 1,
+            },
+            identity,
+            complete_parity(),
+            coverage.clone(),
+            passing_metrics(),
+        );
+        assert!(without_acl.ready);
+
+        let mut identity = production_identity();
+        identity.enabled_features.push("acl".to_string());
+        let with_acl = SearchLexicalProductionQualificationReport::evaluate_for_production(
+            projection_identity(7, Some(42), 100_000),
+            crate::ProductionEvidenceBinding {
+                identity: identity.clone(),
+                generated_at_unix_seconds: 1,
+            },
+            identity,
+            complete_parity(),
+            coverage,
+            passing_metrics(),
+        );
+        assert!(with_acl
+            .blocker_codes
+            .contains(&"workload_coverage_incomplete".to_string()));
     }
 
     #[test]

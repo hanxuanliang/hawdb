@@ -345,6 +345,25 @@ opened projection identity and an explicit current
 identity is self-consistent but differs from the current revision, feature set,
 configuration, dataset fingerprint, or canonical graph epoch MUST fail.
 
+`run_production_search_out_of_core_qualification` is the typed evidence
+collector. It MUST run in a fresh qualification process. It measures the
+out-of-core candidate before opening the full-residency canonical oracle so the
+oracle cannot inflate candidate RSS or lifetime peak RSS. Query text, vector,
+hybrid, metadata, and optional ACL cases are represented by named typed cases;
+the report stores request and result digests instead of query text, embeddings,
+or document identifiers. Exact TopK and score parity is derived from those
+digests, not from caller-provided booleans.
+
+Lifecycle probes MUST use at least three explicit, disposable writable copies
+of the same projection generation. The runner mutates those copies to measure
+incremental update and checkpoint latency, verifies reopen and pinned stale-
+generation reads, and overlaps old-generation reads with checkpoint work. A
+separate explicit corruption copy is intentionally damaged and MUST fail to
+open. The runner never copies, removes, or corrupts the configured source
+projection. Synthetic fixtures can test this protocol but remain blocked by
+the representative document-count, larger-than-memory, identity, and resource
+thresholds.
+
 TurboQuant recall probes are development evidence until wrapped by
 `skein-vector-recall-production-qualification-v1`. The production report MUST
 bind the recall result to the current release identity and the opened file

@@ -526,6 +526,16 @@ impl SearchOutOfCoreReader {
         self.manifest.document_count
     }
 
+    pub fn projection_payload_bytes(&self) -> u64 {
+        self.manifest
+            .descriptor_len
+            .saturating_add(self.manifest.payload_len)
+            .saturating_add(self.manifest.metadata_payload_len)
+            .saturating_add(self.manifest.vector_payload_len)
+            .saturating_add(self.manifest.layout_len)
+            .saturating_add(self.manifest.lexical_manifest_len)
+    }
+
     pub(crate) fn config(&self) -> &SearchOutOfCoreConfig {
         &self.config
     }

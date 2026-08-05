@@ -12,6 +12,7 @@ rust_library(
         "src/production_blocking.rs",
         "src/production_graph.rs",
         "src/production_morsel.rs",
+        "src/production_search.rs",
     ],
     edition = "2024",
     aliases = aliases(),
