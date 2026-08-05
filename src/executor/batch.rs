@@ -1,7 +1,6 @@
 //! Streaming batch orchestration and pipeline dispatch.
 
 use super::*;
-use std::cell::RefCell;
 
 fn stream_node_column_lookup_batches(
     spec: NodeColumnLookupSpec<'_>,
@@ -124,34 +123,6 @@ pub(super) struct BatchReadContext<'a> {
     pub(super) external: &'a dyn BatchExternalRead,
     pub(super) memory: &'a ExecutionMemoryConfig,
     pub(super) task_context: Option<&'a RuntimeTaskContext>,
-}
-
-pub(super) trait BatchExternalRead {
-    fn execute_vector_seed(
-        &self,
-        request: VectorSeedExecutionRequest<'_>,
-    ) -> Result<VectorSeedExecutionOutput>;
-}
-
-pub(super) struct BatchExternalReadAdapter<'a> {
-    external: RefCell<&'a mut dyn ExternalReadOperator>,
-}
-
-impl<'a> BatchExternalReadAdapter<'a> {
-    pub(super) fn new(external: &'a mut dyn ExternalReadOperator) -> Self {
-        Self {
-            external: RefCell::new(external),
-        }
-    }
-}
-
-impl BatchExternalRead for BatchExternalReadAdapter<'_> {
-    fn execute_vector_seed(
-        &self,
-        request: VectorSeedExecutionRequest<'_>,
-    ) -> Result<VectorSeedExecutionOutput> {
-        self.external.borrow_mut().execute_vector_seed(request)
-    }
 }
 
 pub(super) fn batch_pipeline_capable(plan: &PhysicalPlan) -> bool {

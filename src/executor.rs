@@ -34,6 +34,7 @@ mod read;
 mod scan;
 mod store_adapter;
 mod traversal;
+mod vector;
 
 use batch::*;
 use blocking::*;
@@ -80,6 +81,7 @@ pub use skein_executor::{
     VectorSeedExecutionRow,
 };
 use traversal::*;
+use vector::*;
 
 pub type Row = skein_executor::Row;
 pub type ReadExecutionProfile = skein_executor::ReadExecutionProfile<ScanPruningReport>;
@@ -674,62 +676,6 @@ pub fn read_execution_profile(
         blocking_operator_memory_reports: Vec::new(),
         pipeline_memory_report: skein_executor::PipelineMemoryReport::default(),
     })
-}
-
-fn vector_embedding_parameter(
-    parameters: &BTreeMap<String, Value>,
-    name: &str,
-    vector_plan: &skein_plan::VectorPhysicalPlan,
-) -> Result<Vec<f32>> {
-    let Some(Value::List(values)) = parameters.get(name) else {
-        return Err(SkeinError::Semantic(format!(
-            "vector search parameter '${name}' must be a numeric list"
-        )));
-    };
-    let embedding = values
-        .iter()
-        .map(|value| match value {
-            Value::Float(value) if value.is_finite() => {
-                let value = *value as f32;
-                if value.is_finite() {
-                    Ok(value)
-                } else {
-                    Err(SkeinError::Semantic(format!(
-                        "vector search parameter '${name}' exceeds f32 range"
-                    )))
-                }
-            }
-            Value::Int(value) => Ok(*value as f32),
-            _ => Err(SkeinError::Semantic(format!(
-                "vector search parameter '${name}' must contain finite numbers"
-            ))),
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let expected_dimension = vector_plan_embedding_dimension(vector_plan);
-    if embedding.len() != expected_dimension {
-        return Err(SkeinError::Semantic(format!(
-            "vector search parameter '${name}' dimension changed after planning"
-        )));
-    }
-    Ok(embedding)
-}
-
-fn vector_plan_embedding_dimension(plan: &skein_plan::VectorPhysicalPlan) -> usize {
-    match plan {
-        skein_plan::VectorPhysicalPlan::VectorCandidateScan {
-            embedding_dimension,
-            ..
-        }
-        | skein_plan::VectorPhysicalPlan::RawVectorRerank {
-            embedding_dimension,
-            ..
-        } => *embedding_dimension,
-        skein_plan::VectorPhysicalPlan::ResidualFilter { input, .. }
-        | skein_plan::VectorPhysicalPlan::TopK { input, .. } => {
-            vector_plan_embedding_dimension(input)
-        }
-        skein_plan::VectorPhysicalPlan::Filter { .. } => 0,
-    }
 }
 
 #[cfg(test)]
