@@ -57,7 +57,18 @@ jobs:
           java-version: "21"
 
       - name: Check storage TLA+ models
+        env:
+          TLA_RESULTS_DIR: tla-results
+          TLA_SOURCE_REVISION: ${{ github.sha }}
         run: scripts/check-storage-tla.sh
+
+      - name: Upload storage model-check evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tla-model-check-${{ github.sha }}
+          path: tla-results
+          if-no-files-found: error
 
   test:
     name: Test
@@ -909,50 +920,18 @@ jobs:
 
   tla-model-check:
     name: TLA Model Check
+    needs: storage-formal-models
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: Download pinned TLA tools
-        run: |
-          set -euo pipefail
-          mkdir -p tla-results
-          curl --fail --location --retry 3 \
-            https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar \
-            --output tla-results/tla2tools.jar
-          echo "bee4a54f3ee3d4afc347c3240ec2d9e93b075104  tla-results/tla2tools.jar" \
-            | sha1sum --check -
-
-      - name: Check durable publication models
-        run: |
-          set -euo pipefail
-          java -version 2> tla-results/java-version.txt
-          java -XX:+UseParallelGC -cp tla-results/tla2tools.jar tlc2.TLC \
-            -config docs/tla/SkeinConcurrentSnapshots.cfg \
-            docs/tla/SkeinConcurrentSnapshots.tla \
-            | tee tla-results/SkeinConcurrentSnapshots.txt
-          java -XX:+UseParallelGC -cp tla-results/tla2tools.jar tlc2.TLC \
-            -config docs/tla/SkeinSourceSegmentPublication.cfg \
-            docs/tla/SkeinSourceSegmentPublication.tla \
-            | tee tla-results/SkeinSourceSegmentPublication.txt
-          printf '{"source_revision":"%s","tla_tools_version":"1.7.4","models":["SkeinConcurrentSnapshots","SkeinSourceSegmentPublication"]}\n' \
-            "$GITHUB_SHA" > tla-results/manifest.json
-
-      - name: Remove downloaded tool from evidence
-        if: always()
-        run: rm -f tla-results/tla2tools.jar
-
-      - name: Upload model-check evidence
-        if: always()
-        uses: actions/upload-artifact@v4
+      - name: Download storage model-check evidence
+        uses: actions/download-artifact@v4
         with:
           name: tla-model-check-${{ github.sha }}
           path: tla-results
-          if-no-files-found: error
+
+      - name: Verify complete storage model-check evidence
+        run: scripts/check-storage-tla.sh --verify-results tla-results "$GITHUB_SHA"

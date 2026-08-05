@@ -14,6 +14,15 @@ Set `TLA2TOOLS_JAR` to use an existing `tla2tools.jar`, or `TLA_JAVA` to select
 a Java 11 or newer runtime. Without `TLA2TOOLS_JAR`, the script downloads TLA+
 Tools 1.7.4 and verifies its SHA-256 digest before execution.
 
+Set `TLA_RESULTS_DIR` and `TLA_SOURCE_REVISION` to retain a release artifact.
+The artifact contains the exact four `.tla` and `.cfg` inputs, one complete TLC
+log per model, the Java version, and a revision- and tool-bound manifest. CI
+validates the downloaded artifact with:
+
+```bash
+scripts/check-storage-tla.sh --verify-results tla-results "$GITHUB_SHA"
+```
+
 ## Durable WAL and Checkpoint Publication
 
 `SkeinStorageDurability.tla` models the default `SyncOnEveryWrite` path. A WAL
