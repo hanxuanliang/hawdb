@@ -55,22 +55,6 @@ and algorithms outside active routes are not implied backlog items.
 
 ## P1: Runtime And Availability Hardening
 
-- [x] Activate shared-pool parallel morsel execution by default for eligible
-  immutable read fragments.
-  - Keep the sequential ordinal scheduler as the differential oracle.
-  - Use a host-shared runtime-governed pool; never create worker threads per
-    query or morsel wave.
-  - Admit CPU slots, per-worker memory, result bytes, cancellation, and storage
-    I/O depth independently, and keep all morsels on one pinned snapshot.
-  - Start with independent read-only scan fragments and deterministic ordinal
-    merge. Mutations and graph traversal level barriers remain serial.
-  - Default policy is adaptive: cap workers by runtime CPU admission, per-worker
-    memory, input morsels, and the process-shared pool; retain serial execution
-    for small or early-limit fragments. Require at least four morsels per
-    worker before parallel activation. Use one quarter of effective CPU
-    capacity as the per-query soft ceiling and stop scaling at 16 workers for
-    64-core and larger machines.
-
 - [ ] Qualify default parallel morsel execution on production-shaped workloads.
   - Require higher throughput without a p99, peak RSS, cancellation-latency, or
     foreground-admission regression across 4, 8, and 16 workers.
