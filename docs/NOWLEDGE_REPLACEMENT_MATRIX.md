@@ -346,20 +346,11 @@ Memory rows and non-crystal rows, orders by `created_at` descending, supports
 bounded limits, can either return Memory title/unit-type preview rows or expand
 outgoing `HAS_LABEL` rows to Label id/canonical-name/name fields, reports
 matched Memory counts and the graph commit epoch, and does not write WAL.
-Memory bulk detail and filtered list reads are covered by
-`Database::knowledge_memories`. The typed read supports id-bounded bulk detail
-rows, normalized-space inclusion/exclusion using the Nowledge default-space
-rule, unit-type/latest/crystal filters, created-at or score ordering, and
-bounded limits. It returns Memory title/content/metadata/lifecycle/review/
-space/timestamp/source/rank fields, reports missing ids and the graph commit
-epoch, rejects unbounded scans without filters, and does not write WAL.
-Field-extensible Memory list reads are covered by
-`Database::knowledge_memory_projected_list`. The typed read reuses the same
-bounded Memory filters and ordering, but returns only caller-allowlisted Memory
-properties plus stable Memory id, node id, and normalized space id. Ordering can
-still use internal `created_at`, `pagerank_score`, or `importance` keys even
-when those fields are not projected, allowing Nowledge to add Memory fields
-without broadening the default row shape or writing WAL.
+Memory bulk detail, filtered list, and feature-specific projections use fixed
+parameterized Cypher statements. Each statement owns its exact Memory fields,
+space/unit/latest/crystal filters, score or created-at ordering, `LIMIT`, and
+row/payload budgets. Host code normalizes spaces and derives missing ids; there
+is no wide default row or caller-projection typed API.
 Metadata-related Memory detail reads use one fixed parameterized query that
 filters normalized space and the supported `source_id`/`source_thread_id`
 metadata markers. Each business phase owns its projection, created-at ordering,

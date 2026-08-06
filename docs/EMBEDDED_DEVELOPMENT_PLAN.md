@@ -502,16 +502,10 @@ Induced edge-list reads are available as `Database::knowledge_induced_edges`,
 covering Nowledge overview and MCP subgraph `MATCH (a)-[r]->(b) WHERE a.id IN
 $ids AND b.id IN $ids` shapes with relationship type and strength/confidence
 fallback projection and no WAL writes.
-Memory bulk detail and filtered list reads are available as
-`Database::knowledge_memories`, covering id-bounded metadata/space/detail
-reads, normalized-space inclusion and exclusion, learning latest lists, and
-ranked overview lists with bounded limits and no WAL writes.
-Field-extensible Memory list reads are available as
-`Database::knowledge_memory_projected_list`, covering the same bounded Memory
-filters and ordering while projecting only caller-allowlisted Memory fields.
-Sort keys remain internal, so Nowledge can request newly added Memory fields
-without widening the default typed row or emitting WAL entries.
-Metadata-related Memory detail reads are available as
+Memory bulk detail, filtered list, and feature-specific projections use fixed
+parameterized Cypher. Each business phase owns its projection, filters,
+ordering, `LIMIT`, and query budgets; host code derives missing ids and
+normalizes spaces without a wide default typed row.
 Metadata-related Memory reads use a fixed parameterized query for one normalized
 space and the supported `source_id`/`source_thread_id` metadata markers. Each
 named business phase selects its fields and supplies explicit ordering, limit,
