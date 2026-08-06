@@ -71,7 +71,7 @@ fn creates_knowledge_relationship_batch_through_typed_api() {
     assert_eq!(output.rows[2].target_node_id, Some(2));
 
     let relationships = db
-        .knowledge_relationships(&KnowledgeRelationshipsRequest {
+        .test_query_relationships(&KnowledgeRelationshipsRequest {
             seeds: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -154,7 +154,7 @@ fn scoped_knowledge_relationship_batch_create_does_not_write_filtered_endpoint()
     assert!(output.rows[1].source_filtered_out);
 
     let relationships = db
-        .knowledge_relationships(&KnowledgeRelationshipsRequest {
+        .test_query_relationships(&KnowledgeRelationshipsRequest {
             seeds: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -317,7 +317,7 @@ fn typed_knowledge_relationship_batch_create_persists_as_one_wal_batch_and_repla
     {
         let db = Database::open(&path).unwrap();
         let output = db
-            .knowledge_relationships(&KnowledgeRelationshipsRequest {
+            .test_query_relationships(&KnowledgeRelationshipsRequest {
                 seeds: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),

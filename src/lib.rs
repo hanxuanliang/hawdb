@@ -42,7 +42,6 @@ pub mod store;
 pub mod telemetry;
 pub mod workload_fixtures;
 
-mod regex_cache;
 pub mod search_projection_evidence;
 
 pub mod error {
@@ -117,7 +116,7 @@ pub use api::{
     KnowledgeCandidateScoreBreakdown, KnowledgeCandidateScoringPolicy, KnowledgeCandidateSource,
     KnowledgeEntityDeleteBatchOutput, KnowledgeEntityDeleteBatchRequest, KnowledgeEvidence,
     KnowledgeFallbackReasonCode, KnowledgeFanoutReasonCode, KnowledgeFanoutReasonDetail,
-    KnowledgeGraphContextPath, KnowledgeGraphPath, KnowledgeGraphPathDirection, KnowledgeGraphSeed,
+    KnowledgeGraphContextPath, KnowledgeGraphPathDirection, KnowledgeGraphSeed,
     KnowledgeMemoryEvolvesCreate, KnowledgeMemoryEvolvesCreateBatchOutput,
     KnowledgeMemoryEvolvesCreateBatchRequest, KnowledgeMemoryEvolvesCreateBatchRow,
     KnowledgeMemoryLifecycleBatchOutput, KnowledgeMemoryLifecycleBatchRequest,
@@ -126,7 +125,6 @@ pub use api::{
     KnowledgeRetrievalRequest, KnowledgeRetrieverCandidate, KnowledgeRetrieverReport,
     KnowledgeSourceCandidateRow, KnowledgeSourceCandidateScanOrigin,
     KnowledgeSourceCandidateScanOutput, KnowledgeSourceCandidateScanRequest,
-    KnowledgeTraversalDiagnostics, KnowledgeTraversalFallbackReasonCode,
     KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphExplainOutput,
     NowledgeGraphStatement, NowledgeGraphTransactionOutput, PlanCacheBypassReason, PlanCacheLookup,
     PlanCacheStats, QueryAccessControlContext, QueryOutput, QueryStreamOptions, QueryStreamReport,

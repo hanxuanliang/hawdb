@@ -36,7 +36,7 @@ fn creates_knowledge_relationship_through_typed_api() {
     assert_eq!(output.created_relationship_count, 1);
 
     let relationships = db
-        .knowledge_relationships(&KnowledgeRelationshipsRequest {
+        .test_query_relationships(&KnowledgeRelationshipsRequest {
             seeds: vec![KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "memory_1".to_string(),
@@ -105,7 +105,7 @@ fn scoped_knowledge_relationship_create_does_not_write_filtered_endpoint() {
     assert!(!output.target_filtered_out);
     assert_eq!(output.created_relationship_count, 0);
     let relationships = db
-        .knowledge_relationships(&KnowledgeRelationshipsRequest {
+        .test_query_relationships(&KnowledgeRelationshipsRequest {
             seeds: vec![KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "memory_1".to_string(),
@@ -240,7 +240,7 @@ fn upserts_knowledge_relationship_through_typed_api() {
     assert_eq!(existing.relationship_id, Some(0));
     assert_eq!(existing.created_relationship_count, 0);
     let relationships = db
-        .knowledge_relationships(&KnowledgeRelationshipsRequest {
+        .test_query_relationships(&KnowledgeRelationshipsRequest {
             seeds: vec![KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "memory_1".to_string(),
@@ -366,7 +366,7 @@ fn upserts_knowledge_relationship_batch_through_typed_api() {
 
     for memory_id in ["memory_1", "memory_2"] {
         let relationships = db
-            .knowledge_relationships(&KnowledgeRelationshipsRequest {
+            .test_query_relationships(&KnowledgeRelationshipsRequest {
                 seeds: vec![KnowledgeEntityRequest {
                     label: "Memory".to_string(),
                     external_id: memory_id.to_string(),
@@ -432,7 +432,7 @@ fn typed_knowledge_relationship_batch_upsert_persists_as_one_wal_batch_and_repla
     {
         let db = Database::open(&path).unwrap();
         let relationships = db
-            .knowledge_relationships(&KnowledgeRelationshipsRequest {
+            .test_query_relationships(&KnowledgeRelationshipsRequest {
                 seeds: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),
@@ -515,7 +515,7 @@ fn typed_knowledge_relationship_create_persists_and_replays_from_wal() {
     {
         let db = Database::open(&path).unwrap();
         let output = db
-            .knowledge_relationships(&KnowledgeRelationshipsRequest {
+            .test_query_relationships(&KnowledgeRelationshipsRequest {
                 seeds: vec![KnowledgeEntityRequest {
                     label: "Memory".to_string(),
                     external_id: "memory_1".to_string(),

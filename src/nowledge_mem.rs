@@ -1,8 +1,3 @@
-use crate::api::{
-    KnowledgeEntityDetailsOutput, KnowledgeEntityDetailsRequest, KnowledgeInducedEdgeListOutput,
-    KnowledgeInducedEdgeListRequest, KnowledgeMemoryPrefixOwnershipOutput,
-    KnowledgeMemoryPrefixOwnershipRequest, KnowledgeSubgraphOutput, KnowledgeSubgraphRequest,
-};
 use crate::search::{
     AdaptiveVectorSearchOptions, CompressedVectorSearchMode, SearchCandidateSetReport,
     SearchFallbackReasonCode, SearchFusionWeights, SearchLexicalProductionQualificationReport,
@@ -27,9 +22,8 @@ use crate::{
     KnowledgeEntityDeleteBatchRequest, KnowledgeMemoryEvolvesCreateBatchOutput,
     KnowledgeMemoryEvolvesCreateBatchRequest, KnowledgeMemoryLifecycleBatchOutput,
     KnowledgeMemoryLifecycleBatchRequest, KnowledgeRetrievalOutput, KnowledgeRetrievalRequest,
-    KnowledgeSourceCandidateScanOutput, KnowledgeSourceCandidateScanRequest, LocalQosPolicy,
-    LocalQosScheduler, LocalQosState, NowledgeGraphStatement, PlanCacheLookup, QueryOutput,
-    QueryStreamOptions, QueryStreamReport, ReadExecutionProfile, Result,
+    LocalQosPolicy, LocalQosScheduler, LocalQosState, NowledgeGraphStatement, PlanCacheLookup,
+    QueryOutput, QueryStreamOptions, QueryStreamReport, ReadExecutionProfile, Result,
     ScheduledSearchProjectionCatchUpReport, SearchDocument, SearchIndex,
     SearchProjectionCatchUpReport, SearchProjectionChangefeedReadiness,
     SearchProjectionChangefeedStatus, SearchProjectionDelta, SearchProjectionDeltaReport,
@@ -6093,32 +6087,49 @@ impl NowledgeMemGraph {
         } else {
             self.read_unscoped_graph_canvas_nodes(options, &mut nodes, &mut reports)?;
         }
-        let edges = if nodes.is_empty() {
-            Vec::new()
-        } else {
-            self.db
-                .knowledge_induced_edges(&KnowledgeInducedEdgeListRequest {
-                    external_ids: nodes.iter().map(|node| node.id.clone()).collect(),
-                    limit: options.edge_limit,
-                })?
-                .rows
-                .into_iter()
-                .filter_map(|row| {
-                    Some(NowledgeMemGraphCanvasEdge {
-                        source_id: row.source_id?,
-                        target_id: row.target_id?,
-                        relationship_id: row.relationship_id,
-                        relationship_type: row.relationship_type,
-                        strength: row.strength,
-                    })
-                })
-                .collect()
-        };
+        let edges = self.read_graph_canvas_edges(options, &nodes, &mut reports)?;
         Ok(NowledgeMemGraphCanvasOutput {
             nodes,
             edges,
             read_reports: reports,
         })
+    }
+
+    fn read_graph_canvas_edges(
+        &self,
+        options: &NowledgeMemGraphCanvasOptions,
+        nodes: &[NowledgeMemGraphCanvasNode],
+        reports: &mut Vec<NowledgeMemReadReport>,
+    ) -> Result<Vec<NowledgeMemGraphCanvasEdge>> {
+        if nodes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let limit = i64::try_from(options.edge_limit).map_err(|_| {
+            SkeinError::Semantic("graph canvas edge limit exceeds supported range".to_string())
+        })?;
+        let parameters = BTreeMap::from([
+            (
+                "external_ids".to_string(),
+                Value::List(
+                    nodes
+                        .iter()
+                        .map(|node| Value::String(node.id.clone()))
+                        .collect(),
+                ),
+            ),
+            ("limit".to_string(), Value::Int(limit)),
+        ]);
+        let read = self.read_query_with_params(
+            GRAPH_CANVAS_INDUCED_EDGE_QUERY,
+            &parameters,
+            &graph_canvas_read_options(options, options.edge_limit),
+        )?;
+        reports.push(read.report);
+        read.output
+            .rows
+            .iter()
+            .map(decode_graph_canvas_edge)
+            .collect()
     }
 
     fn read_unscoped_graph_canvas_nodes(
@@ -6773,6 +6784,7 @@ const GRAPH_CANVAS_SKILL_QUERY: &str =
 const GRAPH_CANVAS_SCOPED_MEMORY_SEED_QUERY: &str = "MATCH (m:Memory) WHERE CASE WHEN m.space_id IS NULL OR m.space_id = '' THEN 'default' ELSE m.space_id END = $space_id RETURN m AS node ORDER BY COALESCE(m.pagerank_score, m.importance, 0.5) DESC, m.id ASC LIMIT $limit";
 const GRAPH_CANVAS_SCOPED_MEMORY_NEIGHBOR_QUERY: &str = "MATCH (seed:Memory)-[r]-(m:Memory) WHERE seed.id IN $memory_ids AND CASE WHEN m.space_id IS NULL OR m.space_id = '' THEN 'default' ELSE m.space_id END = $space_id RETURN m AS node ORDER BY COALESCE(m.pagerank_score, m.importance, 0.5) DESC, m.id ASC LIMIT $limit";
 const GRAPH_CANVAS_SCOPED_ENTITY_NEIGHBOR_QUERY: &str = "MATCH (seed:Memory)-[r]-(e:Entity) WHERE seed.id IN $memory_ids RETURN e AS node ORDER BY COALESCE(e.pagerank_score, e.confidence, 0.5) DESC, e.id ASC LIMIT $limit";
+const GRAPH_CANVAS_INDUCED_EDGE_QUERY: &str = "MATCH (source)-[relationship]->(target) WHERE source.id IN $external_ids AND target.id IN $external_ids RETURN source.id AS source_id, target.id AS target_id, id(relationship) AS relationship_id, relationship AS relationship ORDER BY source_id ASC, target_id ASC, relationship_id ASC LIMIT $limit";
 
 fn graph_canvas_budgets(
     mode: NowledgeMemGraphCanvasMode,
@@ -6923,6 +6935,38 @@ fn graph_canvas_external_id(value: &Value) -> Option<String> {
         Value::String(value) if !value.is_empty() => Some(value.clone()),
         _ => None,
     }
+}
+
+fn decode_graph_canvas_edge(row: &BTreeMap<String, Value>) -> Result<NowledgeMemGraphCanvasEdge> {
+    let relationship = match row.get("relationship") {
+        Some(Value::Map(relationship)) => relationship,
+        Some(value) => {
+            return Err(SkeinError::Semantic(format!(
+                "graph canvas relationship expected map, got {value}"
+            )))
+        }
+        None => {
+            return Err(SkeinError::Semantic(
+                "graph canvas relationship is missing".to_string(),
+            ))
+        }
+    };
+    let relationship_type = relationship
+        .get("type")
+        .and_then(graph_canvas_external_id)
+        .unwrap_or_else(|| "<unknown>".to_string());
+    let strength = relationship
+        .get("strength")
+        .or_else(|| relationship.get("confidence"))
+        .cloned()
+        .unwrap_or(Value::Float(0.5));
+    Ok(NowledgeMemGraphCanvasEdge {
+        source_id: required_string_field(row, "source_id")?,
+        target_id: required_string_field(row, "target_id")?,
+        relationship_id: required_u64_field(row, "relationship_id")?,
+        relationship_type,
+        strength,
+    })
 }
 
 fn graph_node_details_read_options(
@@ -7993,66 +8037,6 @@ impl NowledgeMemEmbeddedStoreHandle {
         }
     }
 
-    pub fn knowledge_source_candidates(
-        &self,
-        request: &KnowledgeSourceCandidateScanRequest,
-    ) -> Result<KnowledgeSourceCandidateScanOutput> {
-        let _permit = self.admit_typed_query()?;
-        self.read_store()?
-            .graph
-            .database()
-            .knowledge_source_candidates(request)
-    }
-
-    /// Reads a bounded graph subgraph through the embedded query runtime.
-    pub fn knowledge_subgraph(
-        &self,
-        request: &KnowledgeSubgraphRequest,
-    ) -> Result<KnowledgeSubgraphOutput> {
-        let _permit = self.admit_typed_query()?;
-        self.read_store()?
-            .graph
-            .database()
-            .knowledge_subgraph(request)
-    }
-
-    /// Reads relationships induced by a bounded external-id set through the
-    /// embedded query runtime.
-    pub fn knowledge_induced_edges(
-        &self,
-        request: &KnowledgeInducedEdgeListRequest,
-    ) -> Result<KnowledgeInducedEdgeListOutput> {
-        let _permit = self.admit_typed_query()?;
-        self.read_store()?
-            .graph
-            .database()
-            .knowledge_induced_edges(request)
-    }
-
-    /// Resolves a Memory id prefix through the embedded query runtime. Hosts
-    /// use the result to preserve exact-first, unique-prefix reference rules.
-    pub fn knowledge_memory_prefix_ownership(
-        &self,
-        request: &KnowledgeMemoryPrefixOwnershipRequest,
-    ) -> Result<KnowledgeMemoryPrefixOwnershipOutput> {
-        let _permit = self.admit_typed_query()?;
-        self.read_store()?
-            .graph
-            .database()
-            .knowledge_memory_prefix_ownership(request)
-    }
-
-    pub fn knowledge_entity_details(
-        &self,
-        request: &KnowledgeEntityDetailsRequest,
-    ) -> Result<KnowledgeEntityDetailsOutput> {
-        let _permit = self.admit_typed_query()?;
-        self.read_store()?
-            .graph
-            .database()
-            .knowledge_entity_details(request)
-    }
-
     pub fn create_knowledge_memory_evolves_batch(
         &self,
         request: &KnowledgeMemoryEvolvesCreateBatchRequest,
@@ -8683,30 +8667,6 @@ impl NowledgeMemEmbeddedStoreHandle {
             RuntimeWorkRequest::foreground_query(memory_bytes, result_bytes)
                 .with_io_slots(io_slots)
                 .with_blocking(true),
-        )
-    }
-
-    fn admit_typed_query(&self) -> Result<RuntimePermit> {
-        let store = self.read_store()?;
-        let config = store.graph.database().config();
-        let result_bytes = config
-            .max_read_result_payload_bytes
-            .ok_or_else(|| {
-                SkeinError::Execution(
-                    "admitted typed query requires max_read_result_payload_bytes".to_string(),
-                )
-            })
-            .and_then(|bytes| {
-                u64::try_from(bytes).map_err(|_| {
-                    SkeinError::Execution(
-                        "admitted typed query result budget exceeds u64".to_string(),
-                    )
-                })
-            })?;
-        let memory_bytes = u64::try_from(config.execution_memory.blocking_operator_bytes.get())
-            .unwrap_or(u64::MAX);
-        store.graph.try_admit_runtime(
-            RuntimeWorkRequest::foreground_query(memory_bytes, result_bytes).with_blocking(true),
         )
     }
 

@@ -12,8 +12,11 @@ use crate::qos::{
     WorkPriority, WorkRequest,
 };
 use crate::schema::{
-    BasicGraphStatistics, Catalog, CompositeIndexDescriptor, ConstraintDescriptor, GraphStatistics,
-    IndexDescriptor, IndexKind, LabelId, PropertyDescriptor, RelTypeId, SchemaObjectState,
+    BasicGraphStatistics, Catalog, GraphStatistics, IndexKind, LabelId, SchemaObjectState,
+};
+#[cfg(test)]
+use crate::schema::{
+    CompositeIndexDescriptor, ConstraintDescriptor, IndexDescriptor, PropertyDescriptor, RelTypeId,
     TableDescriptor,
 };
 use crate::search::{
@@ -49,24 +52,12 @@ use plan_cache::{
     OptimizerPlanningCache, PlanCache, PlanCacheContext, PlanCacheMode,
     DEFAULT_PLAN_CACHE_MAX_ENTRIES,
 };
+#[cfg(test)]
 use query_domains::*;
 pub use skein_api_types::{
-    KnowledgeLabelRegexMemoryConnectionRow, KnowledgeLabelRegexMemoryConnectionsOutput,
-    KnowledgeLabelRegexMemoryConnectionsRequest, KnowledgeMemoryCleanupFingerprintOutput,
-    KnowledgeMemoryCleanupFingerprintRequest, KnowledgeMemoryCleanupFingerprintRow,
-    KnowledgeMemoryCrystalSynthesisCountOutput, KnowledgeMemoryCrystalSynthesisCountRequest,
-    KnowledgeMemoryCrystalSynthesisCountRow, KnowledgeMemoryDecayDetail,
-    KnowledgeMemoryDecayDetailOutput, KnowledgeMemoryDecayDetailRequest,
     KnowledgeMemoryDecayRefreshBatchOutput, KnowledgeMemoryDecayRefreshBatchRequest,
     KnowledgeMemoryDecayRefreshBatchRow, KnowledgeMemoryDecayRefreshUpdate,
-    KnowledgeMemoryEvolvesNeighborOutput, KnowledgeMemoryEvolvesNeighborRequest,
-    KnowledgeMemoryEvolvesNeighborRow, KnowledgeMemoryEvolvesProjectedSuccessorCursor,
-    KnowledgeMemoryEvolvesProjectedSuccessorGroup, KnowledgeMemoryEvolvesProjectedSuccessorOrder,
-    KnowledgeMemoryEvolvesProjectedSuccessorOutput,
-    KnowledgeMemoryEvolvesProjectedSuccessorPageCursor,
-    KnowledgeMemoryEvolvesProjectedSuccessorRequest, KnowledgeMemoryEvolvesProjectedSuccessorRow,
-    KnowledgeMemoryEvolvesRelationCountOutput, KnowledgeMemoryEvolvesRelationCountRequest,
-    KnowledgeMemoryEvolvesRelationCountRow, KnowledgeNeighborDirection,
+    KnowledgeNeighborDirection,
 };
 use skein_optimizer::{
     normalize_search_enum_value, search_field_is_enum_like, SearchPredicate, SearchPredicateOp,
@@ -88,6 +79,7 @@ mod explain;
 mod explain_format;
 mod observability;
 mod plan_cache;
+#[cfg(test)]
 mod query_domains;
 mod query_runtime;
 mod resource_profile;
@@ -712,6 +704,7 @@ impl Database {
         &self.system_variables
     }
 
+    #[cfg(test)]
     fn query_read_only_with_params_bounded(
         &self,
         cypher_text: &str,
@@ -1592,11 +1585,13 @@ impl Database {
         self.store.property_index_consistency_report()
     }
 
-    pub fn property_indexes(&self) -> Vec<IndexDescriptor> {
+    #[cfg(test)]
+    pub(crate) fn property_indexes(&self) -> Vec<IndexDescriptor> {
         self.catalog.property_indexes().cloned().collect()
     }
 
-    pub fn composite_property_indexes(&self) -> Vec<CompositeIndexDescriptor> {
+    #[cfg(test)]
+    pub(crate) fn composite_property_indexes(&self) -> Vec<CompositeIndexDescriptor> {
         self.catalog.composite_property_indexes().cloned().collect()
     }
 
@@ -1698,36 +1693,42 @@ impl Database {
         result
     }
 
-    pub fn unique_constraints(&self) -> Vec<ConstraintDescriptor> {
+    #[cfg(test)]
+    pub(crate) fn unique_constraints(&self) -> Vec<ConstraintDescriptor> {
         self.catalog.unique_constraints().cloned().collect()
     }
 
-    pub fn node_property_exists_constraints(&self) -> Vec<ConstraintDescriptor> {
+    #[cfg(test)]
+    pub(crate) fn node_property_exists_constraints(&self) -> Vec<ConstraintDescriptor> {
         self.catalog
             .node_property_exists_constraints()
             .cloned()
             .collect()
     }
 
-    pub fn relationship_property_exists_constraints(&self) -> Vec<ConstraintDescriptor> {
+    #[cfg(test)]
+    pub(crate) fn relationship_property_exists_constraints(&self) -> Vec<ConstraintDescriptor> {
         self.catalog
             .relationship_property_exists_constraints()
             .cloned()
             .collect()
     }
 
-    pub fn relationship_unique_constraints(&self) -> Vec<ConstraintDescriptor> {
+    #[cfg(test)]
+    pub(crate) fn relationship_unique_constraints(&self) -> Vec<ConstraintDescriptor> {
         self.catalog
             .relationship_unique_constraints()
             .cloned()
             .collect()
     }
 
-    pub fn table_descriptors(&self) -> Vec<TableDescriptor> {
+    #[cfg(test)]
+    pub(crate) fn table_descriptors(&self) -> Vec<TableDescriptor> {
         self.catalog.table_descriptors().cloned().collect()
     }
 
-    pub fn property_descriptors(&self) -> Vec<PropertyDescriptor> {
+    #[cfg(test)]
+    pub(crate) fn property_descriptors(&self) -> Vec<PropertyDescriptor> {
         self.catalog.property_descriptors().cloned().collect()
     }
 
@@ -2517,168 +2518,48 @@ impl Database {
         .retrieve_knowledge_from_search(search, projection_freshness, request)
     }
 
-    pub fn knowledge_entity(
+    #[cfg(test)]
+    pub(crate) fn test_query_entity(
         &self,
         request: &KnowledgeEntityRequest,
     ) -> Result<KnowledgeEntityOutput> {
         knowledge_entity_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_entity_details(
+    #[cfg(test)]
+    pub(crate) fn test_query_entity_details(
         &self,
         request: &KnowledgeEntityDetailsRequest,
     ) -> Result<KnowledgeEntityDetailsOutput> {
         knowledge_entity_details_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_entity_batch(
+    #[cfg(test)]
+    pub(crate) fn test_query_entity_batch(
         &self,
         request: &KnowledgeEntityBatchRequest,
     ) -> Result<KnowledgeEntityBatchOutput> {
         knowledge_entity_batch_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_memory_entities(
-        &self,
-        request: &KnowledgeMemoryEntityListRequest,
-    ) -> Result<KnowledgeMemoryEntityListOutput> {
-        knowledge_memory_entities_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_entity_mention_counts(
-        &self,
-        request: &KnowledgeEntityMentionCountListRequest,
-    ) -> Result<KnowledgeEntityMentionCountListOutput> {
-        knowledge_entity_mention_counts_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_community_entity_visibility(
+    #[cfg(test)]
+    pub(crate) fn test_query_community_entity_visibility(
         &self,
         request: &KnowledgeCommunityEntityVisibilityRequest,
     ) -> Result<KnowledgeCommunityEntityVisibilityOutput> {
         knowledge_community_entity_visibility_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_entity_delete_guard(
-        &self,
-        request: &KnowledgeEntityDeleteGuardRequest,
-    ) -> Result<KnowledgeEntityDeleteGuardOutput> {
-        knowledge_entity_delete_guard_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_community_memories(
+    #[cfg(test)]
+    pub(crate) fn test_query_community_memories(
         &self,
         request: &KnowledgeCommunityMemoryListRequest,
     ) -> Result<KnowledgeCommunityMemoryListOutput> {
         knowledge_community_memories_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_related_entity_names(
-        &self,
-        request: &KnowledgeRelatedEntityNameListRequest,
-    ) -> Result<KnowledgeRelatedEntityNameListOutput> {
-        knowledge_related_entity_names_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_context_memory_preview(
-        &self,
-        request: &KnowledgeContextMemoryPreviewRequest,
-    ) -> Result<KnowledgeContextMemoryPreviewOutput> {
-        knowledge_context_memory_preview_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_memories(
-        &self,
-        request: &KnowledgeMemoryListRequest,
-    ) -> Result<KnowledgeMemoryListOutput> {
-        knowledge_memories_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_memory_projected_list(
-        &self,
-        request: &KnowledgeMemoryProjectedListRequest,
-    ) -> Result<KnowledgeMemoryProjectedListOutput> {
-        knowledge_memory_projected_list_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_memory_cleanup_fingerprints(
-        &self,
-        request: &KnowledgeMemoryCleanupFingerprintRequest,
-    ) -> Result<KnowledgeMemoryCleanupFingerprintOutput> {
-        knowledge_memory_cleanup_fingerprints_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_memory_metadata_related_projected_list(
-        &self,
-        request: &KnowledgeMemoryMetadataRelatedProjectedListRequest,
-    ) -> Result<KnowledgeMemoryMetadataRelatedProjectedListOutput> {
-        knowledge_memory_metadata_related_projected_list_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_memory_prefix_ownership(
-        &self,
-        request: &KnowledgeMemoryPrefixOwnershipRequest,
-    ) -> Result<KnowledgeMemoryPrefixOwnershipOutput> {
-        knowledge_memory_prefix_ownership_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_memory_title_contents(
-        &self,
-        request: &KnowledgeMemoryTitleContentRequest,
-    ) -> Result<KnowledgeMemoryTitleContentOutput> {
-        knowledge_memory_title_contents_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_memory_evolves_latest(
-        &self,
-        request: &KnowledgeMemoryEvolvesLatestRequest,
-    ) -> Result<KnowledgeMemoryEvolvesLatestOutput> {
-        knowledge_memory_evolves_latest_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_memory_evolves_relation_counts(
-        &self,
-        request: &KnowledgeMemoryEvolvesRelationCountRequest,
-    ) -> Result<KnowledgeMemoryEvolvesRelationCountOutput> {
-        knowledge_memory_evolves_relation_counts_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_memory_crystal_synthesis_counts(
-        &self,
-        request: &KnowledgeMemoryCrystalSynthesisCountRequest,
-    ) -> Result<KnowledgeMemoryCrystalSynthesisCountOutput> {
-        knowledge_memory_crystal_synthesis_counts_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_memory_evolves_neighbors(
-        &self,
-        request: &KnowledgeMemoryEvolvesNeighborRequest,
-    ) -> Result<KnowledgeMemoryEvolvesNeighborOutput> {
-        knowledge_memory_evolves_neighbors_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_memory_evolves_projected_successors(
-        &self,
-        request: &KnowledgeMemoryEvolvesProjectedSuccessorRequest,
-    ) -> Result<KnowledgeMemoryEvolvesProjectedSuccessorOutput> {
-        knowledge_memory_evolves_projected_successors_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_source_reference_entities(
-        &self,
-        request: &KnowledgeSourceReferenceEntityListRequest,
-    ) -> Result<KnowledgeSourceReferenceEntityListOutput> {
-        knowledge_source_reference_entities_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_source_reference_relationship_count(
-        &self,
-        request: &KnowledgeSourceReferenceRelationshipCountRequest,
-    ) -> Result<KnowledgeSourceReferenceRelationshipCountOutput> {
-        knowledge_source_reference_relationship_count_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_crystals(
+    #[cfg(test)]
+    pub(crate) fn test_query_crystals(
         &self,
         request: &KnowledgeCrystalListRequest,
     ) -> Result<KnowledgeCrystalListOutput> {
@@ -2692,42 +2573,32 @@ impl Database {
         merge_knowledge_crystal_source_for(self, request)
     }
 
-    pub fn knowledge_crystal_communities(
+    #[cfg(test)]
+    pub(crate) fn test_query_crystal_communities(
         &self,
         request: &KnowledgeCrystalCommunityListRequest,
     ) -> Result<KnowledgeCrystalCommunityListOutput> {
         knowledge_crystal_communities_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_crystal_source_visibility(
+    #[cfg(test)]
+    pub(crate) fn test_query_crystal_source_visibility(
         &self,
         request: &KnowledgeCrystalSourceVisibilityRequest,
     ) -> Result<KnowledgeCrystalSourceVisibilityOutput> {
         knowledge_crystal_source_visibility_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_synthesized_source_coverage(
-        &self,
-        request: &KnowledgeSynthesizedSourceCoverageRequest,
-    ) -> Result<KnowledgeSynthesizedSourceCoverageOutput> {
-        knowledge_synthesized_source_coverage_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_synthesized_source_ids(
-        &self,
-        request: &KnowledgeSynthesizedSourceIdsRequest,
-    ) -> Result<KnowledgeSynthesizedSourceIdsOutput> {
-        knowledge_synthesized_source_ids_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_scoped_entity(
+    #[cfg(test)]
+    pub(crate) fn test_query_scoped_entity(
         &self,
         request: &KnowledgeScopedEntityRequest,
     ) -> Result<KnowledgeEntityOutput> {
         knowledge_scoped_entity_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_scoped_entity_batch(
+    #[cfg(test)]
+    pub(crate) fn test_query_scoped_entity_batch(
         &self,
         request: &KnowledgeScopedEntityBatchRequest,
     ) -> Result<KnowledgeEntityBatchOutput> {
@@ -2762,14 +2633,16 @@ impl Database {
         upsert_knowledge_entity_batch_for(self, request)
     }
 
-    pub fn knowledge_property_batch(
+    #[cfg(test)]
+    pub(crate) fn test_query_property_batch(
         &self,
         request: &KnowledgePropertyBatchRequest,
     ) -> Result<KnowledgePropertyBatchOutput> {
         knowledge_property_batch_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_scoped_property_batch(
+    #[cfg(test)]
+    pub(crate) fn test_query_scoped_property_batch(
         &self,
         request: &KnowledgeScopedPropertyBatchRequest,
     ) -> Result<KnowledgePropertyBatchOutput> {
@@ -2881,13 +2754,6 @@ impl Database {
         create_knowledge_source_parsed_batch_for(self, request)
     }
 
-    pub fn knowledge_source_latest_version(
-        &self,
-        request: &KnowledgeSourceVersionLookupRequest,
-    ) -> Result<KnowledgeSourceVersionLookupOutput> {
-        knowledge_source_latest_version_via_query_runtime(self, request)
-    }
-
     pub fn create_knowledge_source_revision_batch(
         &mut self,
         request: &KnowledgeSourceRevisionCreateBatchRequest,
@@ -2914,66 +2780,6 @@ impl Database {
         request: &KnowledgeSourceLabelDeleteBatchRequest,
     ) -> Result<KnowledgeSourceLabelDeleteBatchOutput> {
         delete_knowledge_source_labels_batch_for(self, request)
-    }
-
-    pub fn knowledge_source(
-        &self,
-        request: &KnowledgeSourceRequest,
-    ) -> Result<KnowledgeSourceOutput> {
-        knowledge_source_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_source_ids(
-        &self,
-        request: &KnowledgeSourceIdListRequest,
-    ) -> Result<KnowledgeSourceIdListOutput> {
-        knowledge_source_ids_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_sources(
-        &self,
-        request: &KnowledgeSourceListRequest,
-    ) -> Result<KnowledgeSourceListOutput> {
-        knowledge_sources_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_source_projected_list(
-        &self,
-        request: &KnowledgeSourceProjectedListRequest,
-    ) -> Result<KnowledgeSourceProjectedListOutput> {
-        knowledge_source_projected_list_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_source_count(&self) -> KnowledgeSourceCountOutput {
-        knowledge_source_count_via_query_runtime(self)
-    }
-
-    pub fn knowledge_source_sourced_memory_count(
-        &self,
-        request: &KnowledgeSourceSourcedMemoryCountRequest,
-    ) -> Result<KnowledgeSourceSourcedMemoryCountOutput> {
-        knowledge_source_sourced_memory_count_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_source_memories(
-        &self,
-        request: &KnowledgeSourceMemoryListRequest,
-    ) -> Result<KnowledgeSourceMemoryListOutput> {
-        knowledge_source_memories_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_source_memory_projected_list(
-        &self,
-        request: &KnowledgeSourceMemoryProjectedListRequest,
-    ) -> Result<KnowledgeSourceMemoryProjectedListOutput> {
-        knowledge_source_memory_projected_list_for(self, request)
-    }
-
-    pub fn knowledge_memory_source_attributions(
-        &self,
-        request: &KnowledgeMemorySourceAttributionRequest,
-    ) -> Result<KnowledgeMemorySourceAttributionOutput> {
-        knowledge_memory_source_attributions_via_query_runtime(self, request)
     }
 
     pub fn update_knowledge_memory_lifecycle_batch(
@@ -3032,48 +2838,6 @@ impl Database {
         delete_knowledge_skills_for(self, request)
     }
 
-    pub fn knowledge_skill_memories(
-        &self,
-        request: &KnowledgeSkillMemoryListRequest,
-    ) -> Result<KnowledgeSkillMemoryListOutput> {
-        knowledge_skill_memories_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_skill_thread_sources(
-        &self,
-        request: &KnowledgeSkillThreadSourceListRequest,
-    ) -> Result<KnowledgeSkillThreadSourceListOutput> {
-        knowledge_skill_thread_sources_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_skill_detail_lookup(
-        &self,
-        request: &KnowledgeSkillDetailLookupRequest,
-    ) -> Result<KnowledgeSkillDetailLookupOutput> {
-        knowledge_skill_detail_lookup_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_skill_state(
-        &self,
-        request: &KnowledgeSkillStateRequest,
-    ) -> Result<KnowledgeSkillStateOutput> {
-        knowledge_skill_state_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_skills(
-        &self,
-        request: &KnowledgeSkillListRequest,
-    ) -> Result<KnowledgeSkillListOutput> {
-        knowledge_skills_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_skill_projected_list(
-        &self,
-        request: &KnowledgeSkillProjectedListRequest,
-    ) -> Result<KnowledgeSkillProjectedListOutput> {
-        knowledge_skill_projected_list_via_query_runtime(self, request)
-    }
-
     pub fn update_knowledge_thread_metadata_batch(
         &mut self,
         request: &KnowledgeThreadMetadataBatchRequest,
@@ -3095,55 +2859,6 @@ impl Database {
         delete_knowledge_threads_for(self, request)
     }
 
-    pub fn knowledge_threads(
-        &self,
-        request: &KnowledgeThreadListRequest,
-    ) -> Result<KnowledgeThreadListOutput> {
-        knowledge_threads_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_thread_sources(
-        &self,
-        request: &KnowledgeThreadSourceListRequest,
-    ) -> Result<KnowledgeThreadSourceListOutput> {
-        knowledge_thread_sources_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_thread_title(
-        &self,
-        request: &KnowledgeThreadTitleLookupRequest,
-    ) -> Result<KnowledgeThreadTitleLookupOutput> {
-        knowledge_thread_title_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_thread_source(
-        &self,
-        request: &KnowledgeThreadSourceLookupRequest,
-    ) -> Result<KnowledgeThreadSourceLookupOutput> {
-        knowledge_thread_source_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_thread_message_lookup(
-        &self,
-        request: &KnowledgeThreadMessageLookupRequest,
-    ) -> Result<KnowledgeThreadMessageLookupOutput> {
-        knowledge_thread_message_lookup_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_thread_meta_lookup(
-        &self,
-        request: &KnowledgeThreadMetaLookupRequest,
-    ) -> Result<KnowledgeThreadMetaLookupOutput> {
-        knowledge_thread_meta_lookup_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_thread_identity(
-        &self,
-        request: &KnowledgeThreadIdentityRequest,
-    ) -> Result<KnowledgeThreadIdentityOutput> {
-        knowledge_thread_identity_via_query_runtime(self, request)
-    }
-
     pub fn delete_knowledge_thread_identities(
         &mut self,
         request: &KnowledgeThreadIdentityDeleteRequest,
@@ -3151,67 +2866,11 @@ impl Database {
         delete_knowledge_thread_identities_for(self, request)
     }
 
-    pub fn knowledge_thread_sync_metadata(
-        &self,
-        request: &KnowledgeThreadSyncMetadataRequest,
-    ) -> Result<KnowledgeThreadSyncMetadataOutput> {
-        knowledge_thread_sync_metadata_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_thread_distillation_candidates(
-        &self,
-        request: &KnowledgeThreadDistillationCandidateRequest,
-    ) -> Result<KnowledgeThreadDistillationCandidateOutput> {
-        knowledge_thread_distillation_candidates_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_thread_compacted_memories(
-        &self,
-        request: &KnowledgeThreadCompactedMemoryListRequest,
-    ) -> Result<KnowledgeThreadCompactedMemoryListOutput> {
-        knowledge_thread_compacted_memories_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_memory_decay_detail(
-        &self,
-        request: &KnowledgeMemoryDecayDetailRequest,
-    ) -> Result<KnowledgeMemoryDecayDetailOutput> {
-        knowledge_memory_decay_detail_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_thread_compacted_memory_projected_list(
-        &self,
-        request: &KnowledgeThreadCompactedMemoryProjectedListRequest,
-    ) -> Result<KnowledgeThreadCompactedMemoryProjectedListOutput> {
-        knowledge_thread_compacted_memory_projected_list_via_query_runtime(self, request)
-    }
-
     pub fn create_knowledge_thread_compaction_link(
         &mut self,
         request: &KnowledgeThreadCompactionLinkRequest,
     ) -> Result<KnowledgeThreadCompactionLinkOutput> {
         create_knowledge_thread_compaction_link_for(self, request)
-    }
-
-    pub fn knowledge_memory_compacting_threads(
-        &self,
-        request: &KnowledgeMemoryCompactingThreadListRequest,
-    ) -> Result<KnowledgeMemoryCompactingThreadListOutput> {
-        knowledge_memory_compacting_threads_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_memory_compacting_thread_projected_list(
-        &self,
-        request: &KnowledgeMemoryCompactingThreadProjectedListRequest,
-    ) -> Result<KnowledgeMemoryCompactingThreadProjectedListOutput> {
-        knowledge_memory_compacting_thread_projected_list_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_thread_messages(
-        &self,
-        request: &KnowledgeThreadMessageListRequest,
-    ) -> Result<KnowledgeThreadMessageListOutput> {
-        knowledge_thread_messages_via_query_runtime(self, request)
     }
 
     pub fn delete_knowledge_thread_messages(
@@ -3226,48 +2885,6 @@ impl Database {
         request: &KnowledgeLabelLifecycleBatchRequest,
     ) -> Result<KnowledgeLabelLifecycleBatchOutput> {
         update_knowledge_label_lifecycle_batch_for(self, request)
-    }
-
-    pub fn lookup_knowledge_labels_by_canonical_name(
-        &self,
-        request: &KnowledgeLabelCanonicalLookupRequest,
-    ) -> Result<KnowledgeLabelUsageListOutput> {
-        lookup_knowledge_labels_by_canonical_name_via_query_runtime(self, request)
-    }
-
-    pub fn scan_knowledge_labels_missing_canonical_name(
-        &self,
-        request: &KnowledgeLabelBackfillScanRequest,
-    ) -> Result<KnowledgeLabelUsageListOutput> {
-        scan_knowledge_labels_missing_canonical_name_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_label_usage(
-        &self,
-        request: &KnowledgeLabelUsageRequest,
-    ) -> Result<KnowledgeLabelUsageOutput> {
-        knowledge_label_usage_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_label_canonical_usage(
-        &self,
-        request: &KnowledgeLabelUsageListRequest,
-    ) -> Result<KnowledgeLabelUsageListOutput> {
-        knowledge_label_canonical_usage_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_label_memory_distribution(
-        &self,
-        request: &KnowledgeLabelMemoryDistributionRequest,
-    ) -> Result<KnowledgeLabelMemoryDistributionOutput> {
-        knowledge_label_memory_distribution_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_label_regex_memory_connections(
-        &self,
-        request: &KnowledgeLabelRegexMemoryConnectionsRequest,
-    ) -> Result<KnowledgeLabelRegexMemoryConnectionsOutput> {
-        knowledge_label_regex_memory_connections_via_query_runtime(self, request)
     }
 
     pub fn delete_knowledge_memory_labels(
@@ -3291,14 +2908,16 @@ impl Database {
         transfer_knowledge_memory_label_edges_for(self, request)
     }
 
-    pub fn knowledge_entity_labels(
+    #[cfg(test)]
+    pub(crate) fn test_query_entity_labels(
         &self,
         request: &KnowledgeEntityLabelListRequest,
     ) -> Result<KnowledgeEntityLabelListOutput> {
         knowledge_entity_labels_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_entity_label_projected_list(
+    #[cfg(test)]
+    pub(crate) fn test_query_entity_label_projected_list(
         &self,
         request: &KnowledgeEntityLabelProjectedListRequest,
     ) -> Result<KnowledgeEntityLabelProjectedListOutput> {
@@ -3317,34 +2936,6 @@ impl Database {
         request: &KnowledgePageRankClearRequest,
     ) -> Result<KnowledgePageRankClearOutput> {
         clear_knowledge_pagerank_scores_for(self, request)
-    }
-
-    pub fn knowledge_pagerank_plan(
-        &self,
-        request: &KnowledgePageRankPlanRequest,
-    ) -> Result<KnowledgePageRankPlanOutput> {
-        knowledge_pagerank_plan_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_pagerank_membership(
-        &self,
-        request: &KnowledgePageRankMembershipRequest,
-    ) -> Result<KnowledgePageRankMembershipOutput> {
-        knowledge_pagerank_membership_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_pagerank_memory_visibility(
-        &self,
-        request: &KnowledgePageRankMemoryVisibilityRequest,
-    ) -> Result<KnowledgePageRankMemoryVisibilityOutput> {
-        knowledge_pagerank_memory_visibility_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_pagerank_central_entity(
-        &self,
-        request: &KnowledgePageRankCentralEntityRequest,
-    ) -> Result<KnowledgePageRankCentralEntityOutput> {
-        knowledge_pagerank_central_entity_via_query_runtime(self, request)
     }
 
     pub fn clear_knowledge_community_assignments(
@@ -3368,14 +2959,16 @@ impl Database {
         update_knowledge_communities_batch_for(self, request)
     }
 
-    pub fn knowledge_communities(
+    #[cfg(test)]
+    pub(crate) fn test_query_communities(
         &self,
         request: &KnowledgeCommunityListRequest,
     ) -> Result<KnowledgeCommunityListOutput> {
         knowledge_communities_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_community(
+    #[cfg(test)]
+    pub(crate) fn test_query_community(
         &self,
         request: &KnowledgeCommunityRequest,
     ) -> Result<KnowledgeCommunityOutput> {
@@ -3396,20 +2989,6 @@ impl Database {
         stamp_knowledge_graph_meta_batch_for(self, request)
     }
 
-    pub fn knowledge_graph_meta(
-        &self,
-        request: &KnowledgeGraphMetaRequest,
-    ) -> Result<KnowledgeGraphMetaOutput> {
-        knowledge_graph_meta_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_graph_meta_projected(
-        &self,
-        request: &KnowledgeGraphMetaProjectedRequest,
-    ) -> Result<KnowledgeGraphMetaProjectedOutput> {
-        knowledge_graph_meta_projected_via_query_runtime(self, request)
-    }
-
     pub fn delete_knowledge_graph_meta(
         &mut self,
         request: &KnowledgeGraphMetaRequest,
@@ -3424,32 +3003,11 @@ impl Database {
         apply_knowledge_schema_migrations_batch_for(self, request)
     }
 
-    pub fn knowledge_schema_migrations(
-        &self,
-        request: &KnowledgeSchemaMigrationListRequest,
-    ) -> Result<KnowledgeSchemaMigrationListOutput> {
-        knowledge_schema_migrations_for(&self.catalog, &self.store, request)
-    }
-
     pub fn update_knowledge_augmentation_jobs_batch(
         &mut self,
         request: &KnowledgeAugmentationJobLifecycleBatchRequest,
     ) -> Result<KnowledgeAugmentationJobLifecycleBatchOutput> {
         update_knowledge_augmentation_jobs_batch_for(self, request)
-    }
-
-    pub fn knowledge_augmentation_job(
-        &self,
-        request: &KnowledgeAugmentationJobRequest,
-    ) -> Result<KnowledgeAugmentationJobOutput> {
-        knowledge_augmentation_job_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_augmentation_jobs(
-        &self,
-        request: &KnowledgeAugmentationJobListRequest,
-    ) -> Result<KnowledgeAugmentationJobListOutput> {
-        knowledge_augmentation_jobs_via_query_runtime(self, request)
     }
 
     pub fn interrupt_knowledge_augmentation_jobs(
@@ -3606,60 +3164,72 @@ impl Database {
         delete_knowledge_source_reference_relationships_for(self, request)
     }
 
-    pub fn knowledge_neighbors(
+    #[cfg(test)]
+    pub(crate) fn test_query_neighbors(
         &self,
         request: &KnowledgeNeighborsRequest,
     ) -> Result<KnowledgeNeighborsOutput> {
         knowledge_neighbors_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_scoped_neighbors(
+    #[cfg(test)]
+    pub(crate) fn test_query_scoped_neighbors(
         &self,
         request: &KnowledgeScopedNeighborsRequest,
     ) -> Result<KnowledgeNeighborsOutput> {
         knowledge_scoped_neighbors_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_relationships(
+    #[cfg(test)]
+    pub(crate) fn test_query_relationships(
         &self,
         request: &KnowledgeRelationshipsRequest,
     ) -> Result<KnowledgeRelationshipsOutput> {
         knowledge_relationships_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_scoped_relationships(
+    #[cfg(test)]
+    pub(crate) fn test_query_scoped_relationships(
         &self,
         request: &KnowledgeScopedRelationshipsRequest,
     ) -> Result<KnowledgeRelationshipsOutput> {
         knowledge_scoped_relationships_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_induced_edges(
+    #[cfg(test)]
+    pub(crate) fn test_query_induced_edges(
         &self,
         request: &KnowledgeInducedEdgeListRequest,
     ) -> Result<KnowledgeInducedEdgeListOutput> {
         knowledge_induced_edges_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_paths(&self, request: &KnowledgePathRequest) -> Result<KnowledgePathOutput> {
+    #[cfg(test)]
+    pub(crate) fn test_query_paths(
+        &self,
+        request: &KnowledgePathRequest,
+    ) -> Result<KnowledgePathOutput> {
         knowledge_paths_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_scoped_paths(
+    #[cfg(test)]
+    pub(crate) fn test_query_scoped_paths(
         &self,
         request: &KnowledgeScopedPathRequest,
     ) -> Result<KnowledgePathOutput> {
         knowledge_scoped_paths_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_subgraph(
+    #[cfg(test)]
+    pub(crate) fn test_query_subgraph(
         &self,
         request: &KnowledgeSubgraphRequest,
     ) -> Result<KnowledgeSubgraphOutput> {
         knowledge_subgraph_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_scoped_subgraph(
+    #[cfg(test)]
+    pub(crate) fn test_query_scoped_subgraph(
         &self,
         request: &KnowledgeScopedSubgraphRequest,
     ) -> Result<KnowledgeSubgraphOutput> {
@@ -5170,6 +4740,7 @@ fn knowledge_query_terms(text: &str) -> BTreeSet<String> {
         .collect()
 }
 
+#[cfg(test)]
 fn knowledge_entity_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -5185,6 +4756,7 @@ fn knowledge_entity_for(
     })
 }
 
+#[cfg(test)]
 fn knowledge_scoped_entity_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -5205,6 +4777,7 @@ fn knowledge_scoped_entity_for(
     })
 }
 
+#[cfg(test)]
 fn knowledge_entity_batch_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -5220,6 +4793,7 @@ fn knowledge_entity_batch_for(
     )
 }
 
+#[cfg(test)]
 fn knowledge_scoped_entity_batch_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -5259,736 +4833,7 @@ fn knowledge_scoped_entity_batch_for(
     })
 }
 
-fn knowledge_memory_entities_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeMemoryEntityListRequest,
-) -> Result<KnowledgeMemoryEntityListOutput> {
-    validate_knowledge_memory_entity_list_request(request)?;
-
-    let mut groups = Vec::with_capacity(request.memory_ids.len());
-    let mut distinct_entity_names = BTreeSet::new();
-    let mut found_memory_count = 0;
-    let mut missing_memory_count = 0;
-    let mut entity_count = 0;
-
-    for memory_id in &request.memory_ids {
-        let Some(memory) =
-            try_seed_node_by_label_and_external_id(catalog, store, "Memory", memory_id)?
-        else {
-            missing_memory_count += 1;
-            groups.push(KnowledgeMemoryEntityGroup {
-                memory_id: memory_id.clone(),
-                memory_node_id: None,
-                found: false,
-                entities: Vec::new(),
-                matched_count: 0,
-                returned_count: 0,
-            });
-            continue;
-        };
-
-        found_memory_count += 1;
-        let mut rows = memory_entity_rows(catalog, store, memory.id)?;
-        let matched_count = rows.len();
-        for name in rows
-            .iter()
-            .filter_map(|row| row.name.as_ref())
-            .filter(|name| !name.is_empty())
-        {
-            distinct_entity_names.insert(name.clone());
-        }
-        if request.limit_per_memory > 0 {
-            rows.truncate(request.limit_per_memory);
-        }
-        entity_count += rows.len();
-        groups.push(KnowledgeMemoryEntityGroup {
-            memory_id: memory_id.clone(),
-            memory_node_id: Some(memory.id.0),
-            found: true,
-            matched_count,
-            returned_count: rows.len(),
-            entities: rows,
-        });
-    }
-
-    let mut distinct_entity_names = distinct_entity_names.into_iter().collect::<Vec<_>>();
-    if request.distinct_name_limit > 0 {
-        distinct_entity_names.truncate(request.distinct_name_limit);
-    }
-
-    Ok(KnowledgeMemoryEntityListOutput {
-        graph_commit_epoch: store.commit_epoch(),
-        groups,
-        distinct_entity_names,
-        found_memory_count,
-        missing_memory_count,
-        entity_count,
-    })
-}
-
-fn knowledge_memory_entities_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeMemoryEntityListRequest,
-) -> Result<KnowledgeMemoryEntityListOutput> {
-    validate_knowledge_memory_entity_list_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let requested_ids = request.memory_ids.iter().cloned().collect::<BTreeSet<_>>();
-    let parameters = BTreeMap::from([(
-        "memory_ids".to_string(),
-        Value::List(requested_ids.iter().cloned().map(Value::String).collect()),
-    )]);
-    let memory_output = db.query_read_only_with_params_bounded(
-        "MATCH (m:Memory) WHERE m.id IN $memory_ids \
-         RETURN m.id AS memory_id, id(m) AS memory_node_id",
-        &parameters,
-        None,
-    )?;
-    let found_memories = memory_output
-        .rows
-        .iter()
-        .filter_map(|row| {
-            let memory_id = optional_string_cell(row, "memory_id")?;
-            let memory_node_id = row
-                .get("memory_node_id")
-                .and_then(value_to_non_negative_u64)?;
-            Some((memory_id, memory_node_id))
-        })
-        .collect::<BTreeMap<_, _>>();
-
-    let entity_output = db.query_read_only_with_params_bounded(
-        "MATCH (m:Memory)-[r:MENTIONS]->(e:Entity) WHERE m.id IN $memory_ids \
-         RETURN m.id AS memory_id, e AS entity, r AS relationship, id(r) AS relationship_id",
-        &parameters,
-        None,
-    )?;
-    let mut rows_by_memory = BTreeMap::<String, Vec<KnowledgeMemoryEntityRow>>::new();
-    for row in &entity_output.rows {
-        let (memory_id, entity_row) = knowledge_memory_entity_row_from_query(row)?;
-        rows_by_memory
-            .entry(memory_id)
-            .or_default()
-            .push(entity_row);
-    }
-    for rows in rows_by_memory.values_mut() {
-        sort_memory_entity_rows(rows);
-    }
-
-    let mut groups = Vec::with_capacity(request.memory_ids.len());
-    let mut distinct_entity_names = BTreeSet::new();
-    let mut found_memory_count = 0;
-    let mut missing_memory_count = 0;
-    let mut entity_count = 0;
-    for memory_id in &request.memory_ids {
-        let Some(memory_node_id) = found_memories.get(memory_id).copied() else {
-            missing_memory_count += 1;
-            groups.push(KnowledgeMemoryEntityGroup {
-                memory_id: memory_id.clone(),
-                memory_node_id: None,
-                found: false,
-                entities: Vec::new(),
-                matched_count: 0,
-                returned_count: 0,
-            });
-            continue;
-        };
-
-        found_memory_count += 1;
-        let mut rows = rows_by_memory.get(memory_id).cloned().unwrap_or_default();
-        let matched_count = rows.len();
-        for name in rows
-            .iter()
-            .filter_map(|row| row.name.as_ref())
-            .filter(|name| !name.is_empty())
-        {
-            distinct_entity_names.insert(name.clone());
-        }
-        if request.limit_per_memory > 0 {
-            rows.truncate(request.limit_per_memory);
-        }
-        let returned_count = rows.len();
-        entity_count += returned_count;
-        groups.push(KnowledgeMemoryEntityGroup {
-            memory_id: memory_id.clone(),
-            memory_node_id: Some(memory_node_id),
-            found: true,
-            entities: rows,
-            matched_count,
-            returned_count,
-        });
-    }
-
-    let mut distinct_entity_names = distinct_entity_names.into_iter().collect::<Vec<_>>();
-    if request.distinct_name_limit > 0 {
-        distinct_entity_names.truncate(request.distinct_name_limit);
-    }
-
-    Ok(KnowledgeMemoryEntityListOutput {
-        graph_commit_epoch,
-        groups,
-        distinct_entity_names,
-        found_memory_count,
-        missing_memory_count,
-        entity_count,
-    })
-}
-
-fn validate_knowledge_memory_entity_list_request(
-    request: &KnowledgeMemoryEntityListRequest,
-) -> Result<()> {
-    if request.memory_ids.is_empty() || request.memory_ids.iter().any(String::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge memory entity read requires non-empty memory ids".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn memory_entity_rows(
-    catalog: &Catalog,
-    store: &GraphStore,
-    memory_node_id: NodeId,
-) -> Result<Vec<KnowledgeMemoryEntityRow>> {
-    let Some(rel_type_id) = catalog.rel_type_id("MENTIONS") else {
-        return Ok(Vec::new());
-    };
-    let Some(entity_label_id) = catalog.label_id("Entity") else {
-        return Ok(Vec::new());
-    };
-    let mut rows = Vec::new();
-    store.try_visit_adjacent_relationships_owned(
-        memory_node_id,
-        Some(rel_type_id),
-        AdjacencyDirection::Outgoing,
-        |relationship| {
-            if let Some(entity) = store
-                .node_owned(relationship.target)?
-                .filter(|entity| entity.labels.contains(&entity_label_id))
-            {
-                rows.push(memory_entity_row(&entity, &relationship));
-            }
-            Ok(crate::store::GraphScanControl::Continue)
-        },
-    )?;
-    sort_memory_entity_rows(&mut rows);
-    Ok(rows)
-}
-
-fn sort_memory_entity_rows(rows: &mut [KnowledgeMemoryEntityRow]) {
-    rows.sort_by(|left, right| {
-        left.name
-            .cmp(&right.name)
-            .then_with(|| left.entity_id.cmp(&right.entity_id))
-            .then_with(|| left.relationship_id.cmp(&right.relationship_id))
-    });
-}
-
-fn memory_entity_row(entity: &NodeRecord, relationship: &RelRecord) -> KnowledgeMemoryEntityRow {
-    KnowledgeMemoryEntityRow {
-        entity_id: node_external_id(entity),
-        node_id: entity.id.0,
-        relationship_id: relationship.id.0,
-        name: string_property(entity, "name"),
-        entity_type: string_property(entity, "entity_type"),
-        confidence: entity.properties.get("confidence").cloned(),
-        relationship_confidence: relationship.properties.get("confidence").cloned(),
-        mention_count: relationship_integer_property(relationship, "mention_count"),
-    }
-}
-
-fn knowledge_memory_entity_row_from_query(row: &Row) -> Result<(String, KnowledgeMemoryEntityRow)> {
-    let memory_id = optional_string_cell(row, "memory_id").ok_or_else(|| {
-        SkeinError::Execution("knowledge memory entity row is missing memory_id".to_string())
-    })?;
-    let relationship_id = row
-        .get("relationship_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge memory entity row is missing relationship_id".to_string(),
-            )
-        })?;
-    let entity = row
-        .get("entity")
-        .and_then(knowledge_entity_from_value)
-        .ok_or_else(|| {
-            SkeinError::Execution("knowledge memory entity row is missing entity map".to_string())
-        })?;
-    let relationship_properties =
-        row.get("relationship")
-            .and_then(value_to_map)
-            .ok_or_else(|| {
-                SkeinError::Execution(
-                    "knowledge memory entity row is missing relationship map".to_string(),
-                )
-            })?;
-    Ok((
-        memory_id,
-        KnowledgeMemoryEntityRow {
-            entity_id: entity.external_id.clone(),
-            node_id: entity.node_id,
-            relationship_id,
-            name: string_property_value(&entity.properties, "name"),
-            entity_type: string_property_value(&entity.properties, "entity_type"),
-            confidence: entity.properties.get("confidence").cloned(),
-            relationship_confidence: relationship_properties.get("confidence").cloned(),
-            mention_count: match relationship_properties.get("mention_count") {
-                Some(Value::Int(value)) => Some(*value),
-                _ => None,
-            },
-        },
-    ))
-}
-
-fn knowledge_entity_mention_counts_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeEntityMentionCountListRequest,
-) -> Result<KnowledgeEntityMentionCountListOutput> {
-    validate_entity_mention_count_request(request)?;
-    let Some(entity_label_id) = catalog.label_id("Entity") else {
-        return Ok(KnowledgeEntityMentionCountListOutput {
-            graph_commit_epoch: store.commit_epoch(),
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-        });
-    };
-
-    let mut rows = Vec::new();
-    store.try_visit_nodes_owned(Some(entity_label_id), |entity| {
-        if let Some(row) = entity_mention_count_row(catalog, store, &entity)? {
-            rows.push(row);
-        }
-        Ok(crate::store::GraphScanControl::Continue)
-    })?;
-    rows.sort_by(compare_entity_mention_count_rows);
-    if let Some(cursor) = &request.cursor {
-        rows.retain(|row| {
-            row.mention_count < cursor.after_count
-                || (row.mention_count == cursor.after_count
-                    && row.name.as_str() > cursor.after_name.as_str())
-        });
-    }
-    let matched_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-
-    Ok(KnowledgeEntityMentionCountListOutput {
-        graph_commit_epoch: store.commit_epoch(),
-        rows,
-        matched_count,
-        returned_count,
-    })
-}
-
-fn knowledge_entity_mention_counts_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeEntityMentionCountListRequest,
-) -> Result<KnowledgeEntityMentionCountListOutput> {
-    validate_entity_mention_count_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (e:Entity) \
-         WHERE e.id IS NOT NULL AND e.name IS NOT NULL \
-         OPTIONAL MATCH (m:Memory)-[r:MENTIONS]->(e) \
-         WITH e, count(r) AS mention_count \
-         RETURN e.id AS entity_id, id(e) AS node_id, e.name AS name, \
-         e.updated_at AS updated_at, mention_count AS mention_count",
-        &BTreeMap::new(),
-        None,
-    )?;
-    let mut rows = output
-        .rows
-        .iter()
-        .map(knowledge_entity_mention_count_row_from_query)
-        .collect::<Result<Vec<_>>>()?;
-    rows.sort_by(compare_entity_mention_count_rows);
-    if let Some(cursor) = &request.cursor {
-        rows.retain(|row| {
-            row.mention_count < cursor.after_count
-                || (row.mention_count == cursor.after_count
-                    && row.name.as_str() > cursor.after_name.as_str())
-        });
-    }
-    let matched_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-
-    Ok(KnowledgeEntityMentionCountListOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        returned_count,
-    })
-}
-
-fn validate_entity_mention_count_request(
-    request: &KnowledgeEntityMentionCountListRequest,
-) -> Result<()> {
-    if let Some(cursor) = &request.cursor
-        && cursor.after_name.is_empty()
-    {
-        return Err(SkeinError::Semantic(
-            "knowledge entity mention count cursor requires a non-empty after_name".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn knowledge_entity_delete_guard_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeEntityDeleteGuardRequest,
-) -> Result<KnowledgeEntityDeleteGuardOutput> {
-    if request.entity_id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge entity delete guard requires a non-empty entity id".to_string(),
-        ));
-    }
-    if request.excluded_memory_id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge entity delete guard requires a non-empty excluded memory id".to_string(),
-        ));
-    }
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(entity) =
-        try_seed_node_by_label_and_external_id(catalog, store, "Entity", &request.entity_id)?
-    else {
-        return Ok(KnowledgeEntityDeleteGuardOutput {
-            graph_commit_epoch,
-            entity_id: request.entity_id.clone(),
-            entity_node_id: None,
-            found_entity: false,
-            other_memory_mention_count: 0,
-            label_relationship_count: 0,
-            distinct_relationship_count: 0,
-        });
-    };
-
-    Ok(KnowledgeEntityDeleteGuardOutput {
-        graph_commit_epoch,
-        entity_id: request.entity_id.clone(),
-        entity_node_id: Some(entity.id.0),
-        found_entity: true,
-        other_memory_mention_count: entity_delete_guard_other_memory_mentions(
-            catalog,
-            store,
-            entity.id,
-            &request.excluded_memory_id,
-        )?,
-        label_relationship_count: entity_delete_guard_label_relationship_count(
-            catalog, store, entity.id,
-        )?,
-        distinct_relationship_count: entity_delete_guard_distinct_relationship_count(
-            store, entity.id,
-        )?,
-    })
-}
-
-fn knowledge_entity_delete_guard_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeEntityDeleteGuardRequest,
-) -> Result<KnowledgeEntityDeleteGuardOutput> {
-    if request.entity_id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge entity delete guard requires a non-empty entity id".to_string(),
-        ));
-    }
-    if request.excluded_memory_id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge entity delete guard requires a non-empty excluded memory id".to_string(),
-        ));
-    }
-
-    let graph_commit_epoch = db.store.commit_epoch();
-    let mut parameters = BTreeMap::from([(
-        "entity_id".to_string(),
-        Value::String(request.entity_id.clone()),
-    )]);
-    let entity_output = db.query_read_only_with_params_bounded(
-        "MATCH (e:Entity) \
-         WHERE e.id = $entity_id \
-         RETURN id(e) AS entity_node_id",
-        &parameters,
-        Some(1),
-    )?;
-    let Some(entity_node_id) = entity_output
-        .rows
-        .first()
-        .and_then(|row| row.get("entity_node_id"))
-        .and_then(value_to_non_negative_u64)
-    else {
-        return Ok(KnowledgeEntityDeleteGuardOutput {
-            graph_commit_epoch,
-            entity_id: request.entity_id.clone(),
-            entity_node_id: None,
-            found_entity: false,
-            other_memory_mention_count: 0,
-            label_relationship_count: 0,
-            distinct_relationship_count: 0,
-        });
-    };
-
-    parameters.insert(
-        "entity_node_id".to_string(),
-        Value::Int(i64::try_from(entity_node_id).map_err(|_| {
-            SkeinError::Execution(format!(
-                "entity node id {entity_node_id} exceeds query parameter range"
-            ))
-        })?),
-    );
-    parameters.insert(
-        "excluded_memory_id".to_string(),
-        Value::String(request.excluded_memory_id.clone()),
-    );
-
-    let other_memory_mention_count = knowledge_entity_delete_guard_count_via_query_runtime(
-        db,
-        "MATCH (m:Memory)-[r:MENTIONS]->(e:Entity) \
-         WHERE id(e) = $entity_node_id AND m.id <> $excluded_memory_id \
-         RETURN count(r) AS other_memory_mention_count",
-        &parameters,
-        "other_memory_mention_count",
-    )?;
-    let label_relationship_count = knowledge_entity_delete_guard_count_via_query_runtime(
-        db,
-        "MATCH (e:Entity)-[r:HAS_LABEL]-() \
-         WHERE id(e) = $entity_node_id \
-         RETURN count(r) AS label_relationship_count",
-        &parameters,
-        "label_relationship_count",
-    )?;
-    let incident_relationship_count = knowledge_entity_delete_guard_count_via_query_runtime(
-        db,
-        "MATCH (e:Entity)-[r]-() \
-         WHERE id(e) = $entity_node_id \
-         RETURN count(r) AS incident_relationship_count",
-        &parameters,
-        "incident_relationship_count",
-    )?;
-    let incoming_relationship_count = knowledge_entity_delete_guard_count_via_query_runtime(
-        db,
-        "MATCH ()-[r]->(e:Entity) \
-         WHERE id(e) = $entity_node_id \
-         RETURN count(r) AS incoming_relationship_count",
-        &parameters,
-        "incoming_relationship_count",
-    )?;
-
-    Ok(KnowledgeEntityDeleteGuardOutput {
-        graph_commit_epoch,
-        entity_id: request.entity_id.clone(),
-        entity_node_id: Some(entity_node_id),
-        found_entity: true,
-        other_memory_mention_count,
-        label_relationship_count,
-        distinct_relationship_count: incident_relationship_count + incoming_relationship_count,
-    })
-}
-
-fn knowledge_entity_delete_guard_count_via_query_runtime(
-    db: &Database,
-    query: &str,
-    parameters: &BTreeMap<String, Value>,
-    column: &str,
-) -> Result<usize> {
-    let output = db.query_read_only_with_params_bounded(query, parameters, Some(1))?;
-    output
-        .rows
-        .first()
-        .and_then(|row| row.get(column))
-        .and_then(value_to_non_negative_usize)
-        .ok_or_else(|| {
-            SkeinError::Execution(format!(
-                "knowledge entity delete guard query is missing {column}"
-            ))
-        })
-}
-
-fn entity_delete_guard_other_memory_mentions(
-    catalog: &Catalog,
-    store: &GraphStore,
-    entity_node_id: NodeId,
-    excluded_memory_id: &str,
-) -> Result<usize> {
-    let Some(mentions_type_id) = catalog.rel_type_id("MENTIONS") else {
-        return Ok(0);
-    };
-    let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Ok(0);
-    };
-    let mut count = 0usize;
-    store.try_visit_adjacent_relationships_owned(
-        entity_node_id,
-        Some(mentions_type_id),
-        AdjacencyDirection::Incoming,
-        |relationship| {
-            if store
-                .node_owned(relationship.source)?
-                .filter(|memory| memory.labels.contains(&memory_label_id))
-                .as_ref()
-                .and_then(node_external_id)
-                .is_some_and(|memory_id| memory_id != excluded_memory_id)
-            {
-                count = count.saturating_add(1);
-            }
-            Ok(crate::store::GraphScanControl::Continue)
-        },
-    )?;
-    Ok(count)
-}
-
-fn entity_delete_guard_label_relationship_count(
-    catalog: &Catalog,
-    store: &GraphStore,
-    entity_node_id: NodeId,
-) -> Result<usize> {
-    let Some(has_label_type_id) = catalog.rel_type_id("HAS_LABEL") else {
-        return Ok(0);
-    };
-    let mut relationship_ids = BTreeSet::new();
-    for direction in [AdjacencyDirection::Outgoing, AdjacencyDirection::Incoming] {
-        store.visit_adjacent_relationships_owned(
-            entity_node_id,
-            Some(has_label_type_id),
-            direction,
-            |relationship| {
-                relationship_ids.insert(relationship.id);
-                crate::store::GraphScanControl::Continue
-            },
-        )?;
-    }
-    Ok(relationship_ids.len())
-}
-
-fn entity_delete_guard_distinct_relationship_count(
-    store: &GraphStore,
-    entity_node_id: NodeId,
-) -> Result<usize> {
-    let mut incident_relationships = BTreeSet::new();
-    let mut incoming_relationships = BTreeSet::new();
-    store.visit_adjacent_relationships_owned(
-        entity_node_id,
-        None,
-        AdjacencyDirection::Outgoing,
-        |relationship| {
-            incident_relationships.insert(relationship.id);
-            crate::store::GraphScanControl::Continue
-        },
-    )?;
-    store.visit_adjacent_relationships_owned(
-        entity_node_id,
-        None,
-        AdjacencyDirection::Incoming,
-        |relationship| {
-            incident_relationships.insert(relationship.id);
-            incoming_relationships.insert(relationship.id);
-            crate::store::GraphScanControl::Continue
-        },
-    )?;
-    Ok(incident_relationships.len() + incoming_relationships.len())
-}
-
-fn entity_mention_count_row(
-    catalog: &Catalog,
-    store: &GraphStore,
-    entity: &NodeRecord,
-) -> Result<Option<KnowledgeEntityMentionCountRow>> {
-    let Some(entity_id) = node_external_id(entity) else {
-        return Ok(None);
-    };
-    let Some(name) = string_property(entity, "name") else {
-        return Ok(None);
-    };
-    Ok(Some(KnowledgeEntityMentionCountRow {
-        entity_id,
-        node_id: entity.id.0,
-        name,
-        updated_at: entity.properties.get("updated_at").cloned(),
-        mention_count: memory_mention_count_for_entity(catalog, store, entity.id)?,
-    }))
-}
-
-fn knowledge_entity_mention_count_row_from_query(
-    row: &Row,
-) -> Result<KnowledgeEntityMentionCountRow> {
-    let entity_id = optional_string_cell(row, "entity_id").ok_or_else(|| {
-        SkeinError::Execution("knowledge entity mention count row is missing entity_id".to_string())
-    })?;
-    let node_id = row
-        .get("node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge entity mention count row is missing node_id".to_string(),
-            )
-        })?;
-    let name = optional_string_cell(row, "name").ok_or_else(|| {
-        SkeinError::Execution("knowledge entity mention count row is missing name".to_string())
-    })?;
-    let mention_count = row
-        .get("mention_count")
-        .and_then(value_to_non_negative_usize)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge entity mention count row is missing mention_count".to_string(),
-            )
-        })?;
-    Ok(KnowledgeEntityMentionCountRow {
-        entity_id,
-        node_id,
-        name,
-        updated_at: optional_value_cell(row, "updated_at"),
-        mention_count,
-    })
-}
-
-fn memory_mention_count_for_entity(
-    catalog: &Catalog,
-    store: &GraphStore,
-    entity_node_id: NodeId,
-) -> Result<usize> {
-    let Some(rel_type_id) = catalog.rel_type_id("MENTIONS") else {
-        return Ok(0);
-    };
-    let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Ok(0);
-    };
-    let mut count = 0usize;
-    store.try_visit_adjacent_relationships_owned(
-        entity_node_id,
-        Some(rel_type_id),
-        AdjacencyDirection::Incoming,
-        |relationship| {
-            if store
-                .node_owned(relationship.source)?
-                .is_some_and(|memory| memory.labels.contains(&memory_label_id))
-            {
-                count = count.saturating_add(1);
-            }
-            Ok(crate::store::GraphScanControl::Continue)
-        },
-    )?;
-    Ok(count)
-}
-
-fn compare_entity_mention_count_rows(
-    left: &KnowledgeEntityMentionCountRow,
-    right: &KnowledgeEntityMentionCountRow,
-) -> std::cmp::Ordering {
-    right
-        .mention_count
-        .cmp(&left.mention_count)
-        .then_with(|| left.name.cmp(&right.name))
-        .then_with(|| left.entity_id.cmp(&right.entity_id))
-        .then_with(|| left.node_id.cmp(&right.node_id))
-}
-
+#[cfg(test)]
 fn knowledge_community_entity_visibility_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -6059,6 +4904,7 @@ fn knowledge_community_entity_visibility_for(
     })
 }
 
+#[cfg(test)]
 fn knowledge_community_entity_visibility_via_query_runtime(
     db: &Database,
     request: &KnowledgeCommunityEntityVisibilityRequest,
@@ -6161,6 +5007,7 @@ fn knowledge_community_entity_visibility_via_query_runtime(
 }
 
 #[derive(Debug, Clone)]
+#[cfg(test)]
 struct CommunityEntityVisibilityEntityRow {
     community_id: Value,
     entity_id: Option<String>,
@@ -6169,6 +5016,7 @@ struct CommunityEntityVisibilityEntityRow {
     entity_type: Option<String>,
 }
 
+#[cfg(test)]
 impl CommunityEntityVisibilityEntityRow {
     fn with_memory(
         self,
@@ -6195,6 +5043,7 @@ impl CommunityEntityVisibilityEntityRow {
 }
 
 #[derive(Debug, Clone)]
+#[cfg(test)]
 struct CommunityEntityVisibilityMemoryRow {
     entity_node_id: u64,
     memory_id: Option<String>,
@@ -6204,6 +5053,7 @@ struct CommunityEntityVisibilityMemoryRow {
     memory_lifecycle_state: Option<String>,
 }
 
+#[cfg(test)]
 fn community_entity_visibility_entity_row_from_query(
     row: &Row,
 ) -> Result<CommunityEntityVisibilityEntityRow> {
@@ -6229,6 +5079,7 @@ fn community_entity_visibility_entity_row_from_query(
     })
 }
 
+#[cfg(test)]
 fn community_entity_visibility_memory_row_from_query(
     row: &Row,
 ) -> Result<CommunityEntityVisibilityMemoryRow> {
@@ -6269,6 +5120,7 @@ fn community_entity_visibility_memory_row_from_query(
     })
 }
 
+#[cfg(test)]
 fn empty_community_entity_visibility_output(
     graph_commit_epoch: u64,
 ) -> KnowledgeCommunityEntityVisibilityOutput {
@@ -6281,6 +5133,7 @@ fn empty_community_entity_visibility_output(
     }
 }
 
+#[cfg(test)]
 fn validate_knowledge_community_entity_visibility_request(
     request: &KnowledgeCommunityEntityVisibilityRequest,
 ) -> Result<()> {
@@ -6301,6 +5154,7 @@ fn validate_knowledge_community_entity_visibility_request(
     Ok(())
 }
 
+#[cfg(test)]
 fn community_entity_visibility_memory_rows(
     store: &GraphStore,
     memory_label_id: LabelId,
@@ -6330,6 +5184,7 @@ fn community_entity_visibility_memory_rows(
     Ok(rows)
 }
 
+#[cfg(test)]
 fn community_entity_visibility_row(
     entity: &NodeRecord,
     memory: Option<&NodeRecord>,
@@ -6352,6 +5207,7 @@ fn community_entity_visibility_row(
     }
 }
 
+#[cfg(test)]
 fn sort_community_entity_visibility_rows(rows: &mut [KnowledgeCommunityEntityVisibilityRow]) {
     rows.sort_by(|left, right| {
         left.community_id
@@ -6364,6 +5220,7 @@ fn sort_community_entity_visibility_rows(rows: &mut [KnowledgeCommunityEntityVis
     });
 }
 
+#[cfg(test)]
 struct KnowledgeCommunityMemoryAccumulator {
     community_id: Value,
     memory: NodeRecord,
@@ -6371,6 +5228,7 @@ struct KnowledgeCommunityMemoryAccumulator {
     mention_count: usize,
 }
 
+#[cfg(test)]
 fn knowledge_community_memories_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -6432,6 +5290,7 @@ fn knowledge_community_memories_for(
     })
 }
 
+#[cfg(test)]
 fn knowledge_community_memories_via_query_runtime(
     db: &Database,
     request: &KnowledgeCommunityMemoryListRequest,
@@ -6471,6 +5330,7 @@ fn knowledge_community_memories_via_query_runtime(
     })
 }
 
+#[cfg(test)]
 fn empty_community_memory_list_output(
     graph_commit_epoch: u64,
 ) -> KnowledgeCommunityMemoryListOutput {
@@ -6482,6 +5342,7 @@ fn empty_community_memory_list_output(
     }
 }
 
+#[cfg(test)]
 fn validate_knowledge_community_memory_list_request(
     request: &KnowledgeCommunityMemoryListRequest,
 ) -> Result<()> {
@@ -6507,6 +5368,7 @@ fn validate_knowledge_community_memory_list_request(
     Ok(())
 }
 
+#[cfg(test)]
 fn community_memory_unit_type_filter_values(
     request: &KnowledgeCommunityMemoryListRequest,
 ) -> Option<BTreeSet<String>> {
@@ -6517,6 +5379,7 @@ fn community_memory_unit_type_filter_values(
     }
 }
 
+#[cfg(test)]
 fn mentioned_community_memory_rows_via_query_runtime(
     db: &Database,
     request: &KnowledgeCommunityMemoryListRequest,
@@ -6543,6 +5406,7 @@ fn mentioned_community_memory_rows_via_query_runtime(
         .collect()
 }
 
+#[cfg(test)]
 fn direct_community_memory_rows_via_query_runtime(
     db: &Database,
     request: &KnowledgeCommunityMemoryListRequest,
@@ -6567,6 +5431,7 @@ fn direct_community_memory_rows_via_query_runtime(
         .collect()
 }
 
+#[cfg(test)]
 fn knowledge_community_memory_query_parameters(
     request: &KnowledgeCommunityMemoryListRequest,
 ) -> BTreeMap<String, Value> {
@@ -6590,6 +5455,7 @@ fn knowledge_community_memory_query_parameters(
     parameters
 }
 
+#[cfg(test)]
 fn knowledge_community_memory_query_predicate(
     alias: &str,
     request: &KnowledgeCommunityMemoryListRequest,
@@ -6618,6 +5484,7 @@ fn knowledge_community_memory_query_predicate(
     }
 }
 
+#[cfg(test)]
 fn mentioned_community_memory_rows(
     catalog: &Catalog,
     store: &GraphStore,
@@ -6701,6 +5568,7 @@ fn mentioned_community_memory_rows(
         .collect())
 }
 
+#[cfg(test)]
 fn direct_community_memory_rows(
     _catalog: &Catalog,
     store: &GraphStore,
@@ -6732,6 +5600,7 @@ fn direct_community_memory_rows(
     Ok(rows)
 }
 
+#[cfg(test)]
 fn memory_matches_community_memory_crystal_filter(
     memory: &NodeRecord,
     crystal_filter: KnowledgeCommunityMemoryCrystalFilter,
@@ -6747,6 +5616,7 @@ fn memory_matches_community_memory_crystal_filter(
     }
 }
 
+#[cfg(test)]
 fn memory_matches_community_memory_unit_types(
     memory: &NodeRecord,
     unit_types: &Option<BTreeSet<String>>,
@@ -6757,6 +5627,7 @@ fn memory_matches_community_memory_unit_types(
     })
 }
 
+#[cfg(test)]
 fn knowledge_community_memory_row(
     memory: &NodeRecord,
     community_id: Value,
@@ -6788,6 +5659,7 @@ fn knowledge_community_memory_row(
     }
 }
 
+#[cfg(test)]
 fn knowledge_community_memory_row_from_query(
     row: &Row,
     source: KnowledgeCommunityMemoryRowSource,
@@ -6844,6 +5716,7 @@ fn knowledge_community_memory_row_from_query(
     })
 }
 
+#[cfg(test)]
 fn sort_community_memory_rows(
     rows: &mut [KnowledgeCommunityMemoryRow],
     order: KnowledgeCommunityMemoryListOrder,
@@ -6855,10 +5728,10 @@ fn sort_community_memory_rows(
             .then_with(|| right.mention_breadth.cmp(&left.mention_breadth))
             .then_with(|| compare_community_memory_importance_desc(left, right))
             .then_with(|| {
-                compare_skill_memory_created_at(
+                compare_knowledge_created_at(
                     &left.created_at,
                     &right.created_at,
-                    KnowledgeSkillMemoryListOrder::CreatedAtDesc,
+                    KnowledgeCreatedAtOrder::Descending,
                 )
             })
             .then_with(|| compare_community_memory_ids(left, right)),
@@ -6878,25 +5751,27 @@ fn sort_community_memory_rows(
             .cmp(&right.community_id)
             .then_with(|| compare_community_memory_importance_desc(left, right))
             .then_with(|| {
-                compare_skill_memory_created_at(
+                compare_knowledge_created_at(
                     &left.created_at,
                     &right.created_at,
-                    KnowledgeSkillMemoryListOrder::CreatedAtDesc,
+                    KnowledgeCreatedAtOrder::Descending,
                 )
             })
             .then_with(|| compare_community_memory_ids(left, right)),
     });
 }
 
+#[cfg(test)]
 fn compare_community_memory_importance_desc(
     left: &KnowledgeCommunityMemoryRow,
     right: &KnowledgeCommunityMemoryRow,
 ) -> std::cmp::Ordering {
     let left_importance = left.importance.clone().unwrap_or(Value::Float(0.5));
     let right_importance = right.importance.clone().unwrap_or(Value::Float(0.5));
-    compare_skill_memory_values(&right_importance, &left_importance)
+    compare_knowledge_values(&right_importance, &left_importance)
 }
 
+#[cfg(test)]
 fn compare_community_memory_ids(
     left: &KnowledgeCommunityMemoryRow,
     right: &KnowledgeCommunityMemoryRow,
@@ -6907,3058 +5782,7 @@ fn compare_community_memory_ids(
         .then_with(|| left.memory_node_id.cmp(&right.memory_node_id))
 }
 
-fn knowledge_related_entity_names_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeRelatedEntityNameListRequest,
-) -> Result<KnowledgeRelatedEntityNameListOutput> {
-    validate_related_entity_name_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let mut entity_names = BTreeSet::new();
-    let mut matched_memory_count = 0;
-    let mut missing_memory_ids = Vec::new();
-    let mut thread_node_id = None;
-    let mut found_thread = None;
-
-    match &request.scope {
-        KnowledgeRelatedEntityNameScope::MemoryIds(memory_ids) => {
-            for memory_id in memory_ids {
-                let Some(memory) =
-                    try_seed_node_by_label_and_external_id(catalog, store, "Memory", memory_id)?
-                else {
-                    missing_memory_ids.push(memory_id.clone());
-                    continue;
-                };
-                matched_memory_count += 1;
-                collect_entity_names_for_memory(catalog, store, memory.id, &mut entity_names)?;
-            }
-        }
-        KnowledgeRelatedEntityNameScope::Thread {
-            thread_id,
-            identity_property,
-        } => {
-            if let Some(thread) =
-                thread_node_by_identity(catalog, store, identity_property, thread_id)?
-            {
-                thread_node_id = Some(thread.id.0);
-                found_thread = Some(true);
-                let memory_ids = compacted_memory_node_ids_for_thread(catalog, store, thread.id)?;
-                matched_memory_count = memory_ids.len();
-                for memory_id in memory_ids {
-                    collect_entity_names_for_memory(catalog, store, memory_id, &mut entity_names)?;
-                }
-            } else {
-                found_thread = Some(false);
-            }
-        }
-    }
-
-    let mut entity_names = entity_names.into_iter().collect::<Vec<_>>();
-    if request.limit > 0 {
-        entity_names.truncate(request.limit);
-    }
-    let returned_count = entity_names.len();
-    Ok(KnowledgeRelatedEntityNameListOutput {
-        graph_commit_epoch,
-        entity_names,
-        matched_memory_count,
-        returned_count,
-        missing_memory_ids,
-        thread_node_id,
-        found_thread,
-    })
-}
-
-fn knowledge_related_entity_names_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeRelatedEntityNameListRequest,
-) -> Result<KnowledgeRelatedEntityNameListOutput> {
-    validate_related_entity_name_request(request)?;
-    match &request.scope {
-        KnowledgeRelatedEntityNameScope::MemoryIds(memory_ids) => {
-            knowledge_related_entity_names_for_memory_ids_via_query_runtime(db, memory_ids, request)
-        }
-        KnowledgeRelatedEntityNameScope::Thread {
-            thread_id,
-            identity_property,
-        } => knowledge_related_entity_names_for_thread_via_query_runtime(
-            db,
-            thread_id,
-            identity_property,
-            request,
-        ),
-    }
-}
-
-fn knowledge_related_entity_names_for_memory_ids_via_query_runtime(
-    db: &Database,
-    memory_ids: &[String],
-    request: &KnowledgeRelatedEntityNameListRequest,
-) -> Result<KnowledgeRelatedEntityNameListOutput> {
-    let graph_commit_epoch = db.store.commit_epoch();
-    let requested_ids = memory_ids.iter().cloned().collect::<BTreeSet<_>>();
-    let parameters = BTreeMap::from([(
-        "memory_ids".to_string(),
-        Value::List(requested_ids.iter().cloned().map(Value::String).collect()),
-    )]);
-    let memory_output = db.query_read_only_with_params_bounded(
-        "MATCH (m:Memory) WHERE m.id IN $memory_ids RETURN m.id AS memory_id",
-        &parameters,
-        None,
-    )?;
-    let matched_ids = memory_output
-        .rows
-        .iter()
-        .filter_map(|row| optional_string_cell(row, "memory_id"))
-        .collect::<BTreeSet<_>>();
-    let mut matched_memory_count = 0;
-    let mut missing_memory_ids = Vec::new();
-    for memory_id in memory_ids {
-        if matched_ids.contains(memory_id) {
-            matched_memory_count += 1;
-        } else {
-            missing_memory_ids.push(memory_id.clone());
-        }
-    }
-
-    let name_output = db.query_read_only_with_params_bounded(
-        "MATCH (m:Memory)-[:MENTIONS]->(e:Entity) \
-         WHERE m.id IN $memory_ids \
-         RETURN DISTINCT e.name AS name",
-        &parameters,
-        None,
-    )?;
-    let mut entity_names = entity_names_from_query_rows(&name_output.rows);
-    if request.limit > 0 {
-        entity_names.truncate(request.limit);
-    }
-    let returned_count = entity_names.len();
-
-    Ok(KnowledgeRelatedEntityNameListOutput {
-        graph_commit_epoch,
-        entity_names,
-        matched_memory_count,
-        returned_count,
-        missing_memory_ids,
-        thread_node_id: None,
-        found_thread: None,
-    })
-}
-
-fn knowledge_related_entity_names_for_thread_via_query_runtime(
-    db: &Database,
-    thread_id: &str,
-    identity_property: &str,
-    request: &KnowledgeRelatedEntityNameListRequest,
-) -> Result<KnowledgeRelatedEntityNameListOutput> {
-    let graph_commit_epoch = db.store.commit_epoch();
-    let mut parameters = BTreeMap::from([(
-        "thread_id".to_string(),
-        Value::String(thread_id.to_string()),
-    )]);
-    let thread_query = format!(
-        "MATCH (t:Thread) WHERE t.{identity_property} = $thread_id RETURN id(t) AS thread_node_id"
-    );
-    let thread_output =
-        db.query_read_only_with_params_bounded(&thread_query, &parameters, Some(1))?;
-    let Some(thread_node_id) = thread_output
-        .rows
-        .first()
-        .and_then(|row| row.get("thread_node_id"))
-        .and_then(value_to_non_negative_u64)
-    else {
-        return Ok(KnowledgeRelatedEntityNameListOutput {
-            graph_commit_epoch,
-            entity_names: Vec::new(),
-            matched_memory_count: 0,
-            returned_count: 0,
-            missing_memory_ids: Vec::new(),
-            thread_node_id: None,
-            found_thread: Some(false),
-        });
-    };
-    let thread_node_id_value = i64::try_from(thread_node_id).map_err(|_| {
-        SkeinError::Execution("knowledge related entity name thread node id overflow".to_string())
-    })?;
-    parameters.insert(
-        "thread_node_id".to_string(),
-        Value::Int(thread_node_id_value),
-    );
-
-    let memory_count_query = "MATCH (t:Thread)-[:COMPACTS_TO]->(m:Memory) \
-         WHERE id(t) = $thread_node_id \
-         RETURN count(m) AS matched_memory_count";
-    let memory_count_output =
-        db.query_read_only_with_params_bounded(memory_count_query, &parameters, Some(1))?;
-    let matched_memory_count = memory_count_output
-        .rows
-        .first()
-        .and_then(|row| row.get("matched_memory_count"))
-        .and_then(value_to_non_negative_usize)
-        .unwrap_or(0);
-    let name_query = "MATCH (t:Thread)-[:COMPACTS_TO]->(m:Memory)-[:MENTIONS]->(e:Entity) \
-         WHERE id(t) = $thread_node_id \
-         RETURN DISTINCT e.name AS name";
-    let name_output = db.query_read_only_with_params_bounded(name_query, &parameters, None)?;
-    let mut entity_names = entity_names_from_query_rows(&name_output.rows);
-    if request.limit > 0 {
-        entity_names.truncate(request.limit);
-    }
-    let returned_count = entity_names.len();
-
-    Ok(KnowledgeRelatedEntityNameListOutput {
-        graph_commit_epoch,
-        entity_names,
-        matched_memory_count,
-        returned_count,
-        missing_memory_ids: Vec::new(),
-        thread_node_id: Some(thread_node_id),
-        found_thread: Some(true),
-    })
-}
-
-fn entity_names_from_query_rows(rows: &[Row]) -> Vec<String> {
-    let mut entity_names = rows
-        .iter()
-        .filter_map(|row| optional_string_cell(row, "name"))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    entity_names.sort();
-    entity_names
-}
-
-fn validate_related_entity_name_request(
-    request: &KnowledgeRelatedEntityNameListRequest,
-) -> Result<()> {
-    match &request.scope {
-        KnowledgeRelatedEntityNameScope::MemoryIds(memory_ids) => {
-            if memory_ids.is_empty() || memory_ids.iter().any(String::is_empty) {
-                return Err(SkeinError::Semantic(
-                    "knowledge related entity name read requires non-empty memory ids".to_string(),
-                ));
-            }
-        }
-        KnowledgeRelatedEntityNameScope::Thread {
-            thread_id,
-            identity_property,
-        } => {
-            if thread_id.is_empty() {
-                return Err(SkeinError::Semantic(
-                    "knowledge related entity name read requires a non-empty thread id".to_string(),
-                ));
-            }
-            if identity_property != "id" && identity_property != "thread_id" {
-                return Err(SkeinError::Semantic(
-                    "knowledge related entity name read requires id or thread_id identity"
-                        .to_string(),
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn compacted_memory_node_ids_for_thread(
-    catalog: &Catalog,
-    store: &GraphStore,
-    thread_node_id: NodeId,
-) -> Result<Vec<NodeId>> {
-    let Some(rel_type_id) = catalog.rel_type_id("COMPACTS_TO") else {
-        return Ok(Vec::new());
-    };
-    let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Ok(Vec::new());
-    };
-    let mut memory_ids = Vec::new();
-    store.try_visit_adjacent_relationships_owned(
-        thread_node_id,
-        Some(rel_type_id),
-        AdjacencyDirection::Outgoing,
-        |relationship| {
-            if let Some(memory) = store
-                .node_owned(relationship.target)?
-                .filter(|memory| memory.labels.contains(&memory_label_id))
-            {
-                memory_ids.push(memory.id);
-            }
-            Ok(crate::store::GraphScanControl::Continue)
-        },
-    )?;
-    Ok(memory_ids)
-}
-
-fn collect_entity_names_for_memory(
-    catalog: &Catalog,
-    store: &GraphStore,
-    memory_node_id: NodeId,
-    entity_names: &mut BTreeSet<String>,
-) -> Result<()> {
-    let Some(rel_type_id) = catalog.rel_type_id("MENTIONS") else {
-        return Ok(());
-    };
-    let Some(entity_label_id) = catalog.label_id("Entity") else {
-        return Ok(());
-    };
-    store.try_visit_adjacent_relationships_owned(
-        memory_node_id,
-        Some(rel_type_id),
-        AdjacencyDirection::Outgoing,
-        |relationship| {
-            if let Some(name) = store
-                .node_owned(relationship.target)?
-                .filter(|entity| entity.labels.contains(&entity_label_id))
-                .as_ref()
-                .and_then(|entity| string_property(entity, "name"))
-                .filter(|name| !name.is_empty())
-            {
-                entity_names.insert(name);
-            }
-            Ok(crate::store::GraphScanControl::Continue)
-        },
-    )?;
-    Ok(())
-}
-
-fn knowledge_context_memory_preview_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeContextMemoryPreviewRequest,
-) -> Result<KnowledgeContextMemoryPreviewOutput> {
-    if request.unit_types.is_empty() || request.unit_types.iter().any(String::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge context memory preview requires non-empty unit types".to_string(),
-        ));
-    }
-
-    let graph_commit_epoch = db.store.commit_epoch();
-    let parameters = BTreeMap::from([(
-        "unit_types".to_string(),
-        Value::List(
-            request
-                .unit_types
-                .iter()
-                .cloned()
-                .map(Value::String)
-                .collect(),
-        ),
-    )]);
-    let latest_predicate = match request.latest_filter {
-        KnowledgeContextMemoryLatestFilter::NullOrTrue => {
-            "(m.is_latest IS NULL OR m.is_latest = true)"
-        }
-        KnowledgeContextMemoryLatestFilter::TrueOnly => "m.is_latest = true",
-    };
-    let query = format!(
-        "MATCH (m:Memory) \
-         WHERE m.unit_type IN $unit_types \
-         AND {latest_predicate} \
-         AND (m.is_crystal IS NULL OR m.is_crystal = false) \
-         RETURN m.id AS memory_id, id(m) AS memory_node_id, m.title AS title, \
-         m.unit_type AS unit_type, m.created_at AS created_at"
-    );
-    let output = db.query_read_only_with_params_bounded(&query, &parameters, None)?;
-    let mut rows = output
-        .rows
-        .iter()
-        .map(context_memory_preview_memory_row_from_query)
-        .collect::<Result<Vec<_>>>()?;
-    sort_context_memory_preview_memory_rows(&mut rows);
-    let matched_memory_count = rows.len();
-
-    let mut rows = if request.include_labels {
-        context_memory_label_preview_rows_via_query_runtime(db, rows)?
-    } else {
-        rows.into_iter()
-            .map(|row| row.with_label(None))
-            .collect::<Vec<_>>()
-    };
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-
-    Ok(KnowledgeContextMemoryPreviewOutput {
-        graph_commit_epoch,
-        rows,
-        matched_memory_count,
-        returned_count,
-    })
-}
-
-#[derive(Debug, Clone)]
-struct ContextMemoryPreviewMemoryRow {
-    memory_id: Option<String>,
-    memory_node_id: u64,
-    title: Option<String>,
-    unit_type: Option<String>,
-    created_at: Option<Value>,
-}
-
-impl ContextMemoryPreviewMemoryRow {
-    fn with_label(
-        self,
-        label: Option<ContextMemoryPreviewLabelRow>,
-    ) -> KnowledgeContextMemoryPreviewRow {
-        KnowledgeContextMemoryPreviewRow {
-            memory_id: self.memory_id,
-            memory_node_id: self.memory_node_id,
-            title: self.title,
-            unit_type: self.unit_type,
-            created_at: self.created_at,
-            label_id: label.as_ref().and_then(|label| label.label_id.clone()),
-            label_node_id: label.as_ref().map(|label| label.label_node_id),
-            label_canonical_name: label
-                .as_ref()
-                .and_then(|label| label.label_canonical_name.clone()),
-            label_name: label.and_then(|label| label.label_name),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct ContextMemoryPreviewLabelRow {
-    memory_node_id: u64,
-    label_id: Option<String>,
-    label_node_id: u64,
-    label_canonical_name: Option<String>,
-    label_name: Option<String>,
-}
-
-fn context_memory_preview_memory_row_from_query(
-    row: &Row,
-) -> Result<ContextMemoryPreviewMemoryRow> {
-    let memory_node_id = row
-        .get("memory_node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge context memory preview row is missing memory_node_id".to_string(),
-            )
-        })?;
-    Ok(ContextMemoryPreviewMemoryRow {
-        memory_id: optional_string_cell(row, "memory_id"),
-        memory_node_id,
-        title: optional_string_cell(row, "title"),
-        unit_type: optional_string_cell(row, "unit_type"),
-        created_at: optional_value_cell(row, "created_at"),
-    })
-}
-
-fn context_memory_preview_label_row_from_query(row: &Row) -> Result<ContextMemoryPreviewLabelRow> {
-    let memory_node_id = row
-        .get("memory_node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge context memory preview label row is missing memory_node_id".to_string(),
-            )
-        })?;
-    let label_node_id = row
-        .get("label_node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge context memory preview label row is missing label_node_id".to_string(),
-            )
-        })?;
-    Ok(ContextMemoryPreviewLabelRow {
-        memory_node_id,
-        label_id: optional_string_cell(row, "label_id"),
-        label_node_id,
-        label_canonical_name: optional_string_cell(row, "label_canonical_name"),
-        label_name: optional_string_cell(row, "label_name"),
-    })
-}
-
-fn sort_context_memory_preview_memory_rows(rows: &mut [ContextMemoryPreviewMemoryRow]) {
-    rows.sort_by(|left, right| {
-        compare_skill_memory_created_at(
-            &left.created_at,
-            &right.created_at,
-            KnowledgeSkillMemoryListOrder::CreatedAtDesc,
-        )
-        .then_with(|| left.memory_id.cmp(&right.memory_id))
-        .then_with(|| left.memory_node_id.cmp(&right.memory_node_id))
-    });
-}
-
-fn sort_context_memory_preview_label_rows(rows: &mut [ContextMemoryPreviewLabelRow]) {
-    rows.sort_by(|left, right| {
-        left.label_canonical_name
-            .cmp(&right.label_canonical_name)
-            .then_with(|| left.label_name.cmp(&right.label_name))
-            .then_with(|| left.label_id.cmp(&right.label_id))
-            .then_with(|| left.label_node_id.cmp(&right.label_node_id))
-    });
-}
-
-fn context_memory_label_preview_rows_via_query_runtime(
-    db: &Database,
-    memories: Vec<ContextMemoryPreviewMemoryRow>,
-) -> Result<Vec<KnowledgeContextMemoryPreviewRow>> {
-    if memories.is_empty() {
-        return Ok(Vec::new());
-    }
-    let memory_node_ids = memories
-        .iter()
-        .map(|memory| {
-            i64::try_from(memory.memory_node_id)
-                .map(Value::Int)
-                .map_err(|_| {
-                    SkeinError::Execution(format!(
-                        "memory node id {} exceeds query parameter range",
-                        memory.memory_node_id
-                    ))
-                })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let parameters =
-        BTreeMap::from([("memory_node_ids".to_string(), Value::List(memory_node_ids))]);
-    let label_output = db.query_read_only_with_params_bounded(
-        "MATCH (m:Memory)-[:HAS_LABEL]->(l:Label) \
-         WHERE id(m) IN $memory_node_ids \
-         RETURN id(m) AS memory_node_id, l.id AS label_id, id(l) AS label_node_id, \
-         l.canonical_name AS label_canonical_name, l.name AS label_name",
-        &parameters,
-        None,
-    )?;
-    let mut labels_by_memory = BTreeMap::<u64, Vec<ContextMemoryPreviewLabelRow>>::new();
-    for row in &label_output.rows {
-        let label = context_memory_preview_label_row_from_query(row)?;
-        labels_by_memory
-            .entry(label.memory_node_id)
-            .or_default()
-            .push(label);
-    }
-    for labels in labels_by_memory.values_mut() {
-        sort_context_memory_preview_label_rows(labels);
-    }
-
-    let mut output = Vec::new();
-    for memory in memories {
-        if let Some(labels) = labels_by_memory.remove(&memory.memory_node_id) {
-            output.extend(
-                labels
-                    .into_iter()
-                    .map(|label| memory.clone().with_label(Some(label))),
-            );
-        }
-    }
-    Ok(output)
-}
-
-fn knowledge_memories_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeMemoryListRequest,
-) -> Result<KnowledgeMemoryListOutput> {
-    validate_knowledge_memory_list_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let mut parameters = BTreeMap::new();
-    let predicate = knowledge_memory_list_query_predicate(request, &mut parameters);
-    let query = format!("MATCH (m:Memory){predicate} RETURN m AS memory");
-    let output = db.query_read_only_with_params_bounded(&query, &parameters, None)?;
-    let mut matched_external_ids = BTreeSet::new();
-    let mut rows = output
-        .rows
-        .iter()
-        .filter_map(|row| {
-            row.get("memory")
-                .and_then(knowledge_entity_from_value)
-                .map(|memory| {
-                    if let Some(memory_id) = &memory.external_id {
-                        matched_external_ids.insert(memory_id.clone());
-                    }
-                    knowledge_memory_list_row_from_entity(&memory)
-                })
-        })
-        .collect::<Vec<_>>();
-    sort_memory_list_rows(&mut rows, request.order);
-    let matched_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-
-    let mut missing_external_ids = Vec::new();
-    let mut seen_missing = BTreeSet::new();
-    for external_id in &request.external_ids {
-        if !matched_external_ids.contains(external_id) && seen_missing.insert(external_id.clone()) {
-            missing_external_ids.push(external_id.clone());
-        }
-    }
-
-    Ok(KnowledgeMemoryListOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        returned_count,
-        missing_external_ids,
-    })
-}
-
-fn knowledge_memory_projected_list_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeMemoryProjectedListRequest,
-) -> Result<KnowledgeMemoryProjectedListOutput> {
-    validate_knowledge_memory_projected_list_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let mut parameters = BTreeMap::new();
-    let predicate = knowledge_memory_list_query_predicate(&request.list, &mut parameters);
-    let query = format!("MATCH (m:Memory){predicate} RETURN m AS memory");
-    let output = db.query_read_only_with_params_bounded(&query, &parameters, None)?;
-    let mut matched_external_ids = BTreeSet::new();
-    let mut rows = output
-        .rows
-        .iter()
-        .filter_map(|row| {
-            row.get("memory")
-                .and_then(knowledge_entity_from_value)
-                .map(|memory| {
-                    if let Some(memory_id) = &memory.external_id {
-                        matched_external_ids.insert(memory_id.clone());
-                    }
-                    (
-                        knowledge_memory_projected_row_from_entity(
-                            &memory,
-                            &request.property_names,
-                        ),
-                        memory.properties.get("created_at").cloned(),
-                        memory_score_from_entity(&memory),
-                    )
-                })
-        })
-        .collect::<Vec<_>>();
-    sort_memory_projected_rows(&mut rows, request.list.order);
-    let matched_count = rows.len();
-    if request.list.limit > 0 {
-        rows.truncate(request.list.limit);
-    }
-    let returned_count = rows.len();
-    let rows = rows
-        .into_iter()
-        .map(|(row, _created_at, _score)| row)
-        .collect::<Vec<_>>();
-
-    let mut missing_external_ids = Vec::new();
-    let mut seen_missing = BTreeSet::new();
-    for external_id in &request.list.external_ids {
-        if !matched_external_ids.contains(external_id) && seen_missing.insert(external_id.clone()) {
-            missing_external_ids.push(external_id.clone());
-        }
-    }
-
-    Ok(KnowledgeMemoryProjectedListOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        returned_count,
-        missing_external_ids,
-    })
-}
-
-fn validate_knowledge_memory_projected_list_request(
-    request: &KnowledgeMemoryProjectedListRequest,
-) -> Result<()> {
-    validate_knowledge_memory_list_request(&request.list)?;
-    if request.property_names.iter().any(String::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge memory projected list requires non-empty property names".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn knowledge_memory_list_query_predicate(
-    request: &KnowledgeMemoryListRequest,
-    parameters: &mut BTreeMap<String, Value>,
-) -> String {
-    let mut predicates = Vec::new();
-    if !request.external_ids.is_empty() {
-        parameters.insert(
-            "external_ids".to_string(),
-            Value::List(
-                request
-                    .external_ids
-                    .iter()
-                    .cloned()
-                    .map(Value::String)
-                    .collect(),
-            ),
-        );
-        predicates.push("m.id IN $external_ids");
-    }
-    if let Some(normalized_space_id) = &request.normalized_space_id {
-        parameters.insert(
-            "normalized_space_id".to_string(),
-            Value::String(normalized_space_id.clone()),
-        );
-        if normalized_space_id == "default" {
-            predicates.push(
-                "(m.space_id IS NULL OR m.space_id = '' OR m.space_id = $normalized_space_id)",
-            );
-        } else {
-            predicates.push("m.space_id = $normalized_space_id");
-        }
-    }
-    if let Some(exclude_normalized_space_id) = &request.exclude_normalized_space_id {
-        parameters.insert(
-            "exclude_normalized_space_id".to_string(),
-            Value::String(exclude_normalized_space_id.clone()),
-        );
-        if exclude_normalized_space_id == "default" {
-            predicates.push(
-                "m.space_id IS NOT NULL AND m.space_id <> '' AND m.space_id <> $exclude_normalized_space_id",
-            );
-        } else {
-            predicates.push(
-                "(m.space_id IS NULL OR m.space_id = '' OR m.space_id <> $exclude_normalized_space_id)",
-            );
-        }
-    }
-    if let Some(unit_type) = &request.unit_type {
-        parameters.insert("unit_type".to_string(), Value::String(unit_type.clone()));
-        predicates.push("m.unit_type = $unit_type");
-    }
-    if let Some(is_latest) = request.is_latest {
-        parameters.insert("is_latest".to_string(), Value::Bool(is_latest));
-        predicates.push("m.is_latest = $is_latest");
-    }
-    if let Some(is_crystal) = request.is_crystal {
-        parameters.insert("is_crystal".to_string(), Value::Bool(is_crystal));
-        predicates.push("m.is_crystal = $is_crystal");
-    }
-
-    if predicates.is_empty() {
-        String::new()
-    } else {
-        format!(" WHERE {}", predicates.join(" AND "))
-    }
-}
-
-const KNOWLEDGE_MEMORY_CLEANUP_FINGERPRINT_DEFAULT_PROPERTIES: &[&str] = &[
-    "id",
-    "title",
-    "metadata",
-    "is_latest",
-    "decay_score_cached",
-    "created_at",
-    "last_accessed_at",
-    "last_clicked_at",
-    "access_count",
-    "appearances",
-    "clicks",
-    "total_dwell_time_ms",
-    "importance",
-    "unit_type",
-    "semantic_field",
-];
-
-fn knowledge_memory_cleanup_fingerprints_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeMemoryCleanupFingerprintRequest,
-) -> Result<KnowledgeMemoryCleanupFingerprintOutput> {
-    validate_knowledge_memory_cleanup_fingerprint_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    if request.memory_ids.is_empty() {
-        return Ok(KnowledgeMemoryCleanupFingerprintOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-            missing_memory_ids: Vec::new(),
-        });
-    }
-    let ordered_memory_ids = deduplicated_strings_in_order(&request.memory_ids);
-    let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Ok(KnowledgeMemoryCleanupFingerprintOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-            missing_memory_ids: ordered_memory_ids,
-        });
-    };
-    let requested_ids = ordered_memory_ids.iter().cloned().collect::<BTreeSet<_>>();
-    let mut matched_memories = BTreeMap::new();
-    store.visit_nodes_owned(Some(memory_label_id), |memory| {
-        if let Some(memory_id) = node_external_id(&memory)
-            && requested_ids.contains(&memory_id)
-        {
-            matched_memories.insert(memory_id, memory);
-        }
-        crate::store::GraphScanControl::Continue
-    })?;
-    let mut rows = Vec::with_capacity(matched_memories.len());
-    let mut missing_memory_ids = Vec::new();
-    for memory_id in ordered_memory_ids {
-        match matched_memories.get(&memory_id) {
-            Some(memory) => rows.push(knowledge_memory_cleanup_fingerprint_row(memory, request)),
-            None => missing_memory_ids.push(memory_id),
-        }
-    }
-    let matched_count = rows.len();
-    Ok(KnowledgeMemoryCleanupFingerprintOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        returned_count: matched_count,
-        missing_memory_ids,
-    })
-}
-
-fn knowledge_memory_cleanup_fingerprints_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeMemoryCleanupFingerprintRequest,
-) -> Result<KnowledgeMemoryCleanupFingerprintOutput> {
-    validate_knowledge_memory_cleanup_fingerprint_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    if request.memory_ids.is_empty() {
-        return Ok(KnowledgeMemoryCleanupFingerprintOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-            missing_memory_ids: Vec::new(),
-        });
-    }
-
-    let ordered_memory_ids = deduplicated_strings_in_order(&request.memory_ids);
-    let entity_requests = ordered_memory_ids
-        .iter()
-        .map(|memory_id| KnowledgeEntityRequest {
-            label: "Memory".to_string(),
-            external_id: memory_id.clone(),
-        })
-        .collect::<Vec<_>>();
-    let (graph_commit_epoch, matched_memories) =
-        lookup_entities_via_query_runtime_strict(db, &entity_requests)?;
-    let mut rows = Vec::with_capacity(matched_memories.len());
-    let mut missing_memory_ids = Vec::new();
-    for memory_id in ordered_memory_ids {
-        match matched_memories.get(&("Memory".to_string(), memory_id.clone())) {
-            Some(memory) => {
-                rows.push(knowledge_memory_cleanup_fingerprint_row_from_entity(
-                    memory, request,
-                ));
-            }
-            None => missing_memory_ids.push(memory_id),
-        }
-    }
-    let matched_count = rows.len();
-    Ok(KnowledgeMemoryCleanupFingerprintOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        returned_count: matched_count,
-        missing_memory_ids,
-    })
-}
-
-fn validate_knowledge_memory_cleanup_fingerprint_request(
-    request: &KnowledgeMemoryCleanupFingerprintRequest,
-) -> Result<()> {
-    if request.memory_ids.iter().any(String::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge memory cleanup fingerprint read requires non-empty memory ids".to_string(),
-        ));
-    }
-    if request.property_names.iter().any(String::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge memory cleanup fingerprint read requires non-empty property names"
-                .to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn knowledge_memory_cleanup_fingerprint_row(
-    memory: &NodeRecord,
-    request: &KnowledgeMemoryCleanupFingerprintRequest,
-) -> KnowledgeMemoryCleanupFingerprintRow {
-    let property_names = knowledge_memory_cleanup_fingerprint_property_names(request);
-    KnowledgeMemoryCleanupFingerprintRow {
-        memory_id: node_external_id(memory),
-        node_id: memory.id.0,
-        title: string_property(memory, "title"),
-        metadata: memory.properties.get("metadata").cloned(),
-        is_latest: boolean_property(memory, "is_latest"),
-        decay_score_cached: memory.properties.get("decay_score_cached").cloned(),
-        created_at: memory.properties.get("created_at").cloned(),
-        last_accessed_at: memory.properties.get("last_accessed_at").cloned(),
-        last_clicked_at: memory.properties.get("last_clicked_at").cloned(),
-        access_count: memory.properties.get("access_count").cloned(),
-        appearances: memory.properties.get("appearances").cloned(),
-        clicks: memory.properties.get("clicks").cloned(),
-        total_dwell_time_ms: memory.properties.get("total_dwell_time_ms").cloned(),
-        importance: memory.properties.get("importance").cloned(),
-        unit_type: string_property(memory, "unit_type"),
-        semantic_field: string_property(memory, "semantic_field"),
-        properties: projected_properties(&memory.properties, &property_names),
-    }
-}
-
-fn knowledge_memory_cleanup_fingerprint_row_from_entity(
-    memory: &KnowledgeEntity,
-    request: &KnowledgeMemoryCleanupFingerprintRequest,
-) -> KnowledgeMemoryCleanupFingerprintRow {
-    let property_names = knowledge_memory_cleanup_fingerprint_property_names(request);
-    KnowledgeMemoryCleanupFingerprintRow {
-        memory_id: memory.external_id.clone(),
-        node_id: memory.node_id,
-        title: string_property_value(&memory.properties, "title"),
-        metadata: memory.properties.get("metadata").cloned(),
-        is_latest: boolean_property_value(&memory.properties, "is_latest"),
-        decay_score_cached: memory.properties.get("decay_score_cached").cloned(),
-        created_at: memory.properties.get("created_at").cloned(),
-        last_accessed_at: memory.properties.get("last_accessed_at").cloned(),
-        last_clicked_at: memory.properties.get("last_clicked_at").cloned(),
-        access_count: memory.properties.get("access_count").cloned(),
-        appearances: memory.properties.get("appearances").cloned(),
-        clicks: memory.properties.get("clicks").cloned(),
-        total_dwell_time_ms: memory.properties.get("total_dwell_time_ms").cloned(),
-        importance: memory.properties.get("importance").cloned(),
-        unit_type: string_property_value(&memory.properties, "unit_type"),
-        semantic_field: string_property_value(&memory.properties, "semantic_field"),
-        properties: projected_properties(&memory.properties, &property_names),
-    }
-}
-
-fn knowledge_memory_cleanup_fingerprint_property_names(
-    request: &KnowledgeMemoryCleanupFingerprintRequest,
-) -> Vec<String> {
-    if request.property_names.is_empty() {
-        return KNOWLEDGE_MEMORY_CLEANUP_FINGERPRINT_DEFAULT_PROPERTIES
-            .iter()
-            .map(|property_name| (*property_name).to_string())
-            .collect();
-    }
-    deduplicated_strings_in_order(&request.property_names)
-}
-
-fn knowledge_memory_metadata_related_projected_list_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeMemoryMetadataRelatedProjectedListRequest,
-) -> Result<KnowledgeMemoryMetadataRelatedProjectedListOutput> {
-    validate_knowledge_memory_metadata_related_projected_list_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Ok(KnowledgeMemoryMetadataRelatedProjectedListOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-        });
-    };
-
-    let markers = metadata_related_memory_markers(&request.source_id);
-    let mut rows = Vec::new();
-    store.visit_nodes_owned(Some(memory_label_id), |memory| {
-        if normalized_node_space_id(&memory) == request.normalized_space_id
-            && memory_metadata_contains_any(&memory, &markers)
-        {
-            rows.push((
-                knowledge_memory_projected_row(&memory, &request.property_names),
-                memory.properties.get("created_at").cloned(),
-            ));
-        }
-        crate::store::GraphScanControl::Continue
-    })?;
-    rows.sort_by(|left, right| {
-        compare_skill_memory_created_at(
-            &left.1,
-            &right.1,
-            KnowledgeSkillMemoryListOrder::CreatedAtDesc,
-        )
-        .then_with(|| compare_memory_projected_ids(&left.0, &right.0))
-    });
-    let matched_count = rows.len();
-    rows.truncate(request.limit);
-    let returned_count = rows.len();
-    let rows = rows
-        .into_iter()
-        .map(|(row, _created_at)| row)
-        .collect::<Vec<_>>();
-
-    Ok(KnowledgeMemoryMetadataRelatedProjectedListOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        returned_count,
-    })
-}
-
-fn knowledge_memory_metadata_related_projected_list_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeMemoryMetadataRelatedProjectedListRequest,
-) -> Result<KnowledgeMemoryMetadataRelatedProjectedListOutput> {
-    validate_knowledge_memory_metadata_related_projected_list_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let markers = metadata_related_memory_markers(&request.source_id);
-    let parameters = BTreeMap::from([
-        (
-            "normalized_space_id".to_string(),
-            Value::String(request.normalized_space_id.clone()),
-        ),
-        (
-            "source_id_marker".to_string(),
-            Value::String(markers[0].clone()),
-        ),
-        (
-            "source_id_compact_marker".to_string(),
-            Value::String(markers[1].clone()),
-        ),
-        (
-            "source_thread_id_marker".to_string(),
-            Value::String(markers[2].clone()),
-        ),
-        (
-            "source_thread_id_compact_marker".to_string(),
-            Value::String(markers[3].clone()),
-        ),
-    ]);
-    let space_predicate = if request.normalized_space_id == "default" {
-        "(m.space_id IS NULL OR m.space_id = '' OR m.space_id = $normalized_space_id)"
-    } else {
-        "m.space_id = $normalized_space_id"
-    };
-    let query = format!(
-        "MATCH (m:Memory) WHERE {space_predicate} AND \
-         (m.metadata CONTAINS $source_id_marker OR \
-          m.metadata CONTAINS $source_id_compact_marker OR \
-          m.metadata CONTAINS $source_thread_id_marker OR \
-          m.metadata CONTAINS $source_thread_id_compact_marker) \
-         RETURN m AS memory"
-    );
-    let output = db.query_read_only_with_params_bounded(&query, &parameters, None)?;
-    let mut rows = output
-        .rows
-        .iter()
-        .filter_map(|row| {
-            row.get("memory")
-                .and_then(knowledge_entity_from_value)
-                .map(|memory| {
-                    (
-                        knowledge_memory_projected_row_from_entity(
-                            &memory,
-                            &request.property_names,
-                        ),
-                        memory.properties.get("created_at").cloned(),
-                    )
-                })
-        })
-        .collect::<Vec<_>>();
-    rows.sort_by(|left, right| {
-        compare_skill_memory_created_at(
-            &left.1,
-            &right.1,
-            KnowledgeSkillMemoryListOrder::CreatedAtDesc,
-        )
-        .then_with(|| compare_memory_projected_ids(&left.0, &right.0))
-    });
-    let matched_count = rows.len();
-    rows.truncate(request.limit);
-    let returned_count = rows.len();
-    let rows = rows
-        .into_iter()
-        .map(|(row, _created_at)| row)
-        .collect::<Vec<_>>();
-
-    Ok(KnowledgeMemoryMetadataRelatedProjectedListOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        returned_count,
-    })
-}
-
-fn validate_knowledge_memory_metadata_related_projected_list_request(
-    request: &KnowledgeMemoryMetadataRelatedProjectedListRequest,
-) -> Result<()> {
-    if request.normalized_space_id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge memory metadata related projected list requires a non-empty normalized space id"
-                .to_string(),
-        ));
-    }
-    if request.source_id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge memory metadata related projected list requires a non-empty source id"
-                .to_string(),
-        ));
-    }
-    if request.limit == 0 {
-        return Err(SkeinError::Semantic(
-            "knowledge memory metadata related projected list requires a positive limit"
-                .to_string(),
-        ));
-    }
-    if request.property_names.iter().any(String::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge memory metadata related projected list requires non-empty property names"
-                .to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn metadata_related_memory_markers(source_id: &str) -> [String; 4] {
-    [
-        format!("\"source_id\": \"{source_id}\""),
-        format!("\"source_id\":\"{source_id}\""),
-        format!("\"source_thread_id\": \"{source_id}\""),
-        format!("\"source_thread_id\":\"{source_id}\""),
-    ]
-}
-
-fn memory_metadata_contains_any(memory: &NodeRecord, markers: &[String]) -> bool {
-    memory
-        .properties
-        .get("metadata")
-        .and_then(|value| match value {
-            Value::String(metadata) => Some(metadata.as_str()),
-            _ => None,
-        })
-        .is_some_and(|metadata| markers.iter().any(|marker| metadata.contains(marker)))
-}
-
-fn validate_knowledge_memory_list_request(request: &KnowledgeMemoryListRequest) -> Result<()> {
-    if request.external_ids.iter().any(String::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge memory list requires non-empty external ids".to_string(),
-        ));
-    }
-    if request
-        .normalized_space_id
-        .as_ref()
-        .is_some_and(String::is_empty)
-        || request
-            .exclude_normalized_space_id
-            .as_ref()
-            .is_some_and(String::is_empty)
-    {
-        return Err(SkeinError::Semantic(
-            "knowledge memory list requires non-empty normalized space ids".to_string(),
-        ));
-    }
-    if request.unit_type.as_ref().is_some_and(String::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge memory list requires a non-empty unit type".to_string(),
-        ));
-    }
-    if request.external_ids.is_empty()
-        && request.normalized_space_id.is_none()
-        && request.exclude_normalized_space_id.is_none()
-        && request.unit_type.is_none()
-        && request.is_latest.is_none()
-        && request.is_crystal.is_none()
-        && request.limit == 0
-    {
-        return Err(SkeinError::Semantic(
-            "knowledge memory list requires a filter or bounded limit".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn knowledge_memory_projected_row(
-    memory: &NodeRecord,
-    property_names: &[String],
-) -> KnowledgeMemoryProjectedRow {
-    KnowledgeMemoryProjectedRow {
-        memory_id: node_external_id(memory),
-        node_id: memory.id.0,
-        properties: projected_properties(&memory.properties, property_names),
-        normalized_space_id: normalized_node_space_id(memory),
-    }
-}
-
-fn knowledge_memory_projected_row_from_entity(
-    memory: &KnowledgeEntity,
-    property_names: &[String],
-) -> KnowledgeMemoryProjectedRow {
-    KnowledgeMemoryProjectedRow {
-        memory_id: memory.external_id.clone(),
-        node_id: memory.node_id,
-        properties: projected_properties(&memory.properties, property_names),
-        normalized_space_id: knowledge_entity_normalized_space_id(memory),
-    }
-}
-
-fn knowledge_memory_list_row_from_entity(memory: &KnowledgeEntity) -> KnowledgeMemoryListRow {
-    KnowledgeMemoryListRow {
-        memory_id: memory.external_id.clone(),
-        node_id: memory.node_id,
-        title: string_property_value(&memory.properties, "title"),
-        content: string_property_value(&memory.properties, "content"),
-        metadata: memory.properties.get("metadata").cloned(),
-        is_latest: boolean_property_value(&memory.properties, "is_latest"),
-        lifecycle_state: string_property_value(&memory.properties, "lifecycle_state"),
-        review_status: string_property_value(&memory.properties, "review_status"),
-        unit_type: string_property_value(&memory.properties, "unit_type"),
-        raw_space_id: memory.properties.get("space_id").map(value_to_external_id),
-        normalized_space_id: knowledge_entity_normalized_space_id(memory),
-        created_at: memory.properties.get("created_at").cloned(),
-        updated_at: memory.properties.get("updated_at").cloned(),
-        importance: memory.properties.get("importance").cloned(),
-        pagerank_score: memory.properties.get("pagerank_score").cloned(),
-        community_id: memory.properties.get("community_id").cloned(),
-        source: string_property_value(&memory.properties, "source"),
-        event_start: memory.properties.get("event_start").cloned(),
-        event_end: memory.properties.get("event_end").cloned(),
-    }
-}
-
-fn knowledge_memory_prefix_ownership_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeMemoryPrefixOwnershipRequest,
-) -> Result<KnowledgeMemoryPrefixOwnershipOutput> {
-    if request.prefix.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge memory prefix ownership requires a non-empty prefix".to_string(),
-        ));
-    }
-
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Ok(KnowledgeMemoryPrefixOwnershipOutput {
-            graph_commit_epoch,
-            prefix: request.prefix.clone(),
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-        });
-    };
-
-    let mut rows = Vec::new();
-    store.visit_nodes_owned(Some(memory_label_id), |memory| {
-        if let Some(memory_id) = node_external_id(&memory)
-            && memory_id.starts_with(&request.prefix)
-        {
-            rows.push(KnowledgeMemoryPrefixOwnershipRow {
-                memory_id,
-                memory_node_id: memory.id.0,
-                raw_space_id: memory.properties.get("space_id").map(value_to_external_id),
-                normalized_space_id: normalized_node_space_id(&memory),
-            });
-        }
-        crate::store::GraphScanControl::Continue
-    })?;
-    rows.sort_by(|left, right| {
-        left.memory_id
-            .cmp(&right.memory_id)
-            .then_with(|| left.memory_node_id.cmp(&right.memory_node_id))
-    });
-    let matched_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-
-    Ok(KnowledgeMemoryPrefixOwnershipOutput {
-        graph_commit_epoch,
-        prefix: request.prefix.clone(),
-        rows,
-        matched_count,
-        returned_count,
-    })
-}
-
-fn knowledge_memory_prefix_ownership_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeMemoryPrefixOwnershipRequest,
-) -> Result<KnowledgeMemoryPrefixOwnershipOutput> {
-    if request.prefix.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge memory prefix ownership requires a non-empty prefix".to_string(),
-        ));
-    }
-
-    let graph_commit_epoch = db.store.commit_epoch();
-    let parameters =
-        BTreeMap::from([("prefix".to_string(), Value::String(request.prefix.clone()))]);
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (m:Memory) WHERE m.id STARTS WITH $prefix RETURN m.id AS memory_id, id(m) AS memory_node_id, m.space_id AS raw_space_id",
-        &parameters,
-        None,
-    )?;
-    let mut rows = output
-        .rows
-        .iter()
-        .filter_map(knowledge_memory_prefix_ownership_row_from_query)
-        .collect::<Vec<_>>();
-    rows.sort_by(|left, right| {
-        left.memory_id
-            .cmp(&right.memory_id)
-            .then_with(|| left.memory_node_id.cmp(&right.memory_node_id))
-    });
-    let matched_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-
-    Ok(KnowledgeMemoryPrefixOwnershipOutput {
-        graph_commit_epoch,
-        prefix: request.prefix.clone(),
-        rows,
-        matched_count,
-        returned_count,
-    })
-}
-
-fn knowledge_memory_prefix_ownership_row_from_query(
-    row: &Row,
-) -> Option<KnowledgeMemoryPrefixOwnershipRow> {
-    let raw_space_id = row.get("raw_space_id").map(value_to_external_id);
-    Some(KnowledgeMemoryPrefixOwnershipRow {
-        memory_id: optional_string_cell(row, "memory_id")?,
-        memory_node_id: row
-            .get("memory_node_id")
-            .and_then(value_to_non_negative_u64)?,
-        normalized_space_id: raw_space_id
-            .as_ref()
-            .filter(|space_id| !space_id.is_empty())
-            .cloned()
-            .unwrap_or_else(|| "default".to_string()),
-        raw_space_id,
-    })
-}
-
-fn knowledge_memory_title_contents_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeMemoryTitleContentRequest,
-) -> Result<KnowledgeMemoryTitleContentOutput> {
-    validate_knowledge_memory_title_content_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    if request.memory_ids.is_empty() {
-        return Ok(KnowledgeMemoryTitleContentOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-            missing_memory_ids: Vec::new(),
-        });
-    }
-
-    let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Ok(KnowledgeMemoryTitleContentOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-            missing_memory_ids: deduplicated_strings_in_order(&request.memory_ids),
-        });
-    };
-
-    let requested_ids = request.memory_ids.iter().cloned().collect::<BTreeSet<_>>();
-    let mut matched_ids = BTreeSet::new();
-    let mut rows = Vec::new();
-    store.visit_nodes_owned(Some(memory_label_id), |memory| {
-        if node_external_id(&memory).is_some_and(|memory_id| {
-            let matched = requested_ids.contains(&memory_id);
-            if matched {
-                matched_ids.insert(memory_id);
-            }
-            matched
-        }) {
-            rows.push(knowledge_memory_title_content_row(&memory));
-        }
-        crate::store::GraphScanControl::Continue
-    })?;
-    rows.sort_by(|left, right| {
-        compare_skill_memory_created_at(
-            &left.created_at,
-            &right.created_at,
-            KnowledgeSkillMemoryListOrder::CreatedAtAsc,
-        )
-        .then_with(|| left.memory_id.cmp(&right.memory_id))
-        .then_with(|| left.node_id.cmp(&right.node_id))
-    });
-    let matched_count = rows.len();
-    let returned_count = rows.len();
-
-    let mut seen_missing = BTreeSet::new();
-    let missing_memory_ids = request
-        .memory_ids
-        .iter()
-        .filter(|memory_id| !matched_ids.contains(*memory_id))
-        .filter(|memory_id| seen_missing.insert((*memory_id).clone()))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    Ok(KnowledgeMemoryTitleContentOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        returned_count,
-        missing_memory_ids,
-    })
-}
-
-fn knowledge_memory_title_contents_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeMemoryTitleContentRequest,
-) -> Result<KnowledgeMemoryTitleContentOutput> {
-    validate_knowledge_memory_title_content_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    if request.memory_ids.is_empty() {
-        return Ok(KnowledgeMemoryTitleContentOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-            missing_memory_ids: Vec::new(),
-        });
-    }
-
-    let requested_ids = request.memory_ids.iter().cloned().collect::<BTreeSet<_>>();
-    let parameters = BTreeMap::from([(
-        "memory_ids".to_string(),
-        Value::List(requested_ids.iter().cloned().map(Value::String).collect()),
-    )]);
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (m:Memory) WHERE m.id IN $memory_ids RETURN m.id AS memory_id, id(m) AS node_id, m.title AS title, m.content AS content, m.created_at AS created_at",
-        &parameters,
-        None,
-    )?;
-    let mut matched_ids = BTreeSet::new();
-    let mut rows = output
-        .rows
-        .iter()
-        .filter_map(knowledge_memory_title_content_row_from_query)
-        .inspect(|row| {
-            if let Some(memory_id) = &row.memory_id {
-                matched_ids.insert(memory_id.clone());
-            }
-        })
-        .collect::<Vec<_>>();
-    rows.sort_by(|left, right| {
-        compare_skill_memory_created_at(
-            &left.created_at,
-            &right.created_at,
-            KnowledgeSkillMemoryListOrder::CreatedAtAsc,
-        )
-        .then_with(|| left.memory_id.cmp(&right.memory_id))
-        .then_with(|| left.node_id.cmp(&right.node_id))
-    });
-    let matched_count = rows.len();
-    let returned_count = rows.len();
-
-    let mut seen_missing = BTreeSet::new();
-    let missing_memory_ids = request
-        .memory_ids
-        .iter()
-        .filter(|memory_id| !matched_ids.contains(*memory_id))
-        .filter(|memory_id| seen_missing.insert((*memory_id).clone()))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    Ok(KnowledgeMemoryTitleContentOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        returned_count,
-        missing_memory_ids,
-    })
-}
-
-fn validate_knowledge_memory_title_content_request(
-    request: &KnowledgeMemoryTitleContentRequest,
-) -> Result<()> {
-    if request.memory_ids.iter().any(String::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge memory title content read requires non-empty memory ids".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn knowledge_memory_title_content_row(memory: &NodeRecord) -> KnowledgeMemoryTitleContentRow {
-    KnowledgeMemoryTitleContentRow {
-        memory_id: node_external_id(memory),
-        node_id: memory.id.0,
-        title: string_property(memory, "title"),
-        content: string_property(memory, "content"),
-        created_at: memory.properties.get("created_at").cloned(),
-    }
-}
-
-fn knowledge_memory_title_content_row_from_query(
-    row: &Row,
-) -> Option<KnowledgeMemoryTitleContentRow> {
-    Some(KnowledgeMemoryTitleContentRow {
-        memory_id: optional_string_cell(row, "memory_id"),
-        node_id: row.get("node_id").and_then(value_to_non_negative_u64)?,
-        title: optional_string_cell(row, "title"),
-        content: optional_string_cell(row, "content"),
-        created_at: optional_value_cell(row, "created_at"),
-    })
-}
-
-fn knowledge_memory_evolves_latest_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeMemoryEvolvesLatestRequest,
-) -> Result<KnowledgeMemoryEvolvesLatestOutput> {
-    validate_knowledge_memory_evolves_latest_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    if request.old_memory_ids.is_empty() {
-        return Ok(KnowledgeMemoryEvolvesLatestOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_old_memory_count: 0,
-            missing_old_memory_ids: Vec::new(),
-            matched_relationship_count: 0,
-            returned_count: 0,
-        });
-    }
-
-    let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Ok(KnowledgeMemoryEvolvesLatestOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_old_memory_count: 0,
-            missing_old_memory_ids: deduplicated_strings_in_order(&request.old_memory_ids),
-            matched_relationship_count: 0,
-            returned_count: 0,
-        });
-    };
-
-    let requested_ids = request
-        .old_memory_ids
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let mut matched_old_ids = BTreeSet::new();
-    let mut old_memories = Vec::new();
-    store.visit_nodes_owned(Some(memory_label_id), |memory| {
-        if node_external_id(&memory).is_some_and(|memory_id| {
-            let matched = requested_ids.contains(&memory_id);
-            if matched {
-                matched_old_ids.insert(memory_id);
-            }
-            matched
-        }) {
-            old_memories.push(memory);
-        }
-        crate::store::GraphScanControl::Continue
-    })?;
-
-    let mut seen_missing = BTreeSet::new();
-    let missing_old_memory_ids = request
-        .old_memory_ids
-        .iter()
-        .filter(|memory_id| !matched_old_ids.contains(*memory_id))
-        .filter(|memory_id| seen_missing.insert((*memory_id).clone()))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    let Some(evolves_type_id) = catalog.rel_type_id("EVOLVES") else {
-        return Ok(KnowledgeMemoryEvolvesLatestOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_old_memory_count: matched_old_ids.len(),
-            missing_old_memory_ids,
-            matched_relationship_count: 0,
-            returned_count: 0,
-        });
-    };
-
-    let mut distinct_rows = BTreeMap::new();
-    let mut matched_relationship_count = 0;
-    for old_memory in old_memories {
-        store.try_visit_adjacent_relationships_owned(
-            old_memory.id,
-            Some(evolves_type_id),
-            AdjacencyDirection::Outgoing,
-            |relationship| {
-                let Some(new_memory) = store
-                    .node_owned(relationship.target)?
-                    .filter(|memory| memory.labels.contains(&memory_label_id))
-                else {
-                    return Ok(crate::store::GraphScanControl::Continue);
-                };
-                matched_relationship_count += 1;
-                let new_memory_id = node_external_id(&new_memory);
-                let new_is_latest = boolean_property(&new_memory, "is_latest");
-                distinct_rows
-                    .entry((new_memory_id.clone(), new_is_latest))
-                    .or_insert_with(|| KnowledgeMemoryEvolvesLatestRow {
-                        new_memory_id,
-                        new_node_id: new_memory.id.0,
-                        new_is_latest,
-                    });
-                Ok(crate::store::GraphScanControl::Continue)
-            },
-        )?;
-    }
-
-    let mut rows = distinct_rows.into_values().collect::<Vec<_>>();
-    rows.sort_by(|left, right| {
-        left.new_memory_id
-            .cmp(&right.new_memory_id)
-            .then_with(|| left.new_is_latest.cmp(&right.new_is_latest))
-            .then_with(|| left.new_node_id.cmp(&right.new_node_id))
-    });
-    let returned_count = rows.len();
-
-    Ok(KnowledgeMemoryEvolvesLatestOutput {
-        graph_commit_epoch,
-        rows,
-        matched_old_memory_count: matched_old_ids.len(),
-        missing_old_memory_ids,
-        matched_relationship_count,
-        returned_count,
-    })
-}
-
-fn knowledge_memory_evolves_latest_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeMemoryEvolvesLatestRequest,
-) -> Result<KnowledgeMemoryEvolvesLatestOutput> {
-    validate_knowledge_memory_evolves_latest_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    if request.old_memory_ids.is_empty() {
-        return Ok(KnowledgeMemoryEvolvesLatestOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_old_memory_count: 0,
-            missing_old_memory_ids: Vec::new(),
-            matched_relationship_count: 0,
-            returned_count: 0,
-        });
-    }
-
-    let requested_ids = request
-        .old_memory_ids
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let parameters = BTreeMap::from([(
-        "old_memory_ids".to_string(),
-        Value::List(requested_ids.iter().cloned().map(Value::String).collect()),
-    )]);
-    let old_memory_output = db.query_read_only_with_params_bounded(
-        "MATCH (m:Memory) WHERE m.id IN $old_memory_ids RETURN m.id AS memory_id",
-        &parameters,
-        None,
-    )?;
-    let matched_old_ids = old_memory_output
-        .rows
-        .iter()
-        .filter_map(|row| optional_string_cell(row, "memory_id"))
-        .collect::<BTreeSet<_>>();
-    let mut seen_missing = BTreeSet::new();
-    let missing_old_memory_ids = request
-        .old_memory_ids
-        .iter()
-        .filter(|memory_id| !matched_old_ids.contains(*memory_id))
-        .filter(|memory_id| seen_missing.insert((*memory_id).clone()))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    let relationship_count_output = db.query_read_only_with_params_bounded(
-        "MATCH (old:Memory)-[r:EVOLVES]->(new:Memory) \
-         WHERE old.id IN $old_memory_ids \
-         RETURN count(r) AS matched_relationship_count",
-        &parameters,
-        Some(1),
-    )?;
-    let matched_relationship_count = relationship_count_output
-        .rows
-        .first()
-        .and_then(|row| row.get("matched_relationship_count"))
-        .and_then(value_to_non_negative_usize)
-        .unwrap_or(0);
-    let rows_output = db.query_read_only_with_params_bounded(
-        "MATCH (old:Memory)-[:EVOLVES]->(new:Memory) \
-         WHERE old.id IN $old_memory_ids \
-         RETURN DISTINCT new.id AS new_memory_id, id(new) AS new_node_id, \
-         new.is_latest AS new_is_latest",
-        &parameters,
-        None,
-    )?;
-    let mut rows = rows_output
-        .rows
-        .iter()
-        .map(knowledge_memory_evolves_latest_row_from_query)
-        .collect::<Result<Vec<_>>>()?;
-    rows.sort_by(|left, right| {
-        left.new_memory_id
-            .cmp(&right.new_memory_id)
-            .then_with(|| left.new_is_latest.cmp(&right.new_is_latest))
-            .then_with(|| left.new_node_id.cmp(&right.new_node_id))
-    });
-    let returned_count = rows.len();
-
-    Ok(KnowledgeMemoryEvolvesLatestOutput {
-        graph_commit_epoch,
-        rows,
-        matched_old_memory_count: matched_old_ids.len(),
-        missing_old_memory_ids,
-        matched_relationship_count,
-        returned_count,
-    })
-}
-
-fn knowledge_memory_evolves_latest_row_from_query(
-    row: &Row,
-) -> Result<KnowledgeMemoryEvolvesLatestRow> {
-    let new_node_id = row
-        .get("new_node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge memory evolves latest row is missing new_node_id".to_string(),
-            )
-        })?;
-    Ok(KnowledgeMemoryEvolvesLatestRow {
-        new_memory_id: optional_string_cell(row, "new_memory_id"),
-        new_node_id,
-        new_is_latest: match row.get("new_is_latest") {
-            Some(Value::Bool(value)) => Some(*value),
-            Some(Value::Null) | None => None,
-            _ => None,
-        },
-    })
-}
-
-fn knowledge_memory_evolves_relation_counts_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeMemoryEvolvesRelationCountRequest,
-) -> Result<KnowledgeMemoryEvolvesRelationCountOutput> {
-    validate_knowledge_memory_evolves_relation_count_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    if request.memory_ids.is_empty() {
-        return Ok(KnowledgeMemoryEvolvesRelationCountOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_memory_count: 0,
-            missing_memory_ids: Vec::new(),
-            matched_relationship_count: 0,
-            returned_count: 0,
-        });
-    }
-
-    let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Ok(KnowledgeMemoryEvolvesRelationCountOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_memory_count: 0,
-            missing_memory_ids: deduplicated_strings_in_order(&request.memory_ids),
-            matched_relationship_count: 0,
-            returned_count: 0,
-        });
-    };
-
-    let requested_ids = request.memory_ids.iter().cloned().collect::<BTreeSet<_>>();
-    let relation_filter = request
-        .content_relations
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let mut matched_ids = BTreeSet::new();
-    let mut memories = Vec::new();
-    store.visit_nodes_owned(Some(memory_label_id), |memory| {
-        if node_external_id(&memory).is_some_and(|memory_id| {
-            let matched = requested_ids.contains(&memory_id);
-            if matched {
-                matched_ids.insert(memory_id);
-            }
-            matched
-        }) {
-            memories.push(memory);
-        }
-        crate::store::GraphScanControl::Continue
-    })?;
-
-    let mut seen_missing = BTreeSet::new();
-    let missing_memory_ids = request
-        .memory_ids
-        .iter()
-        .filter(|memory_id| !matched_ids.contains(*memory_id))
-        .filter(|memory_id| seen_missing.insert((*memory_id).clone()))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    let Some(evolves_type_id) = catalog.rel_type_id("EVOLVES") else {
-        return Ok(KnowledgeMemoryEvolvesRelationCountOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_memory_count: matched_ids.len(),
-            missing_memory_ids,
-            matched_relationship_count: 0,
-            returned_count: 0,
-        });
-    };
-
-    let mut matched_relationship_count = 0;
-    let mut rows = Vec::new();
-    for memory in memories {
-        let mut count = 0usize;
-        store.try_visit_adjacent_relationships_owned(
-            memory.id,
-            Some(evolves_type_id),
-            AdjacencyDirection::Outgoing,
-            |relationship| {
-                let target_is_memory = store
-                    .node_owned(relationship.target)?
-                    .is_some_and(|target| target.labels.contains(&memory_label_id));
-                let relation_matches = relationship
-                    .properties
-                    .get("content_relation")
-                    .and_then(|value| match value {
-                        Value::String(relation) => Some(relation),
-                        _ => None,
-                    })
-                    .is_some_and(|relation| relation_filter.contains(relation));
-                if target_is_memory && relation_matches {
-                    count = count.saturating_add(1);
-                }
-                Ok(crate::store::GraphScanControl::Continue)
-            },
-        )?;
-        matched_relationship_count += count;
-        if count > 0
-            && let Some(memory_id) = node_external_id(&memory)
-        {
-            rows.push(KnowledgeMemoryEvolvesRelationCountRow {
-                memory_id,
-                node_id: memory.id.0,
-                count,
-            });
-        }
-    }
-
-    rows.sort_by(|left, right| {
-        left.memory_id
-            .cmp(&right.memory_id)
-            .then_with(|| left.node_id.cmp(&right.node_id))
-    });
-    let returned_count = rows.len();
-
-    Ok(KnowledgeMemoryEvolvesRelationCountOutput {
-        graph_commit_epoch,
-        rows,
-        matched_memory_count: matched_ids.len(),
-        missing_memory_ids,
-        matched_relationship_count,
-        returned_count,
-    })
-}
-
-fn knowledge_memory_evolves_relation_counts_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeMemoryEvolvesRelationCountRequest,
-) -> Result<KnowledgeMemoryEvolvesRelationCountOutput> {
-    validate_knowledge_memory_evolves_relation_count_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    if request.memory_ids.is_empty() {
-        return Ok(KnowledgeMemoryEvolvesRelationCountOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_memory_count: 0,
-            missing_memory_ids: Vec::new(),
-            matched_relationship_count: 0,
-            returned_count: 0,
-        });
-    }
-
-    let requested_ids = request.memory_ids.iter().cloned().collect::<BTreeSet<_>>();
-    let parameters = BTreeMap::from([
-        (
-            "memory_ids".to_string(),
-            Value::List(requested_ids.iter().cloned().map(Value::String).collect()),
-        ),
-        (
-            "content_relations".to_string(),
-            Value::List(
-                request
-                    .content_relations
-                    .iter()
-                    .cloned()
-                    .map(Value::String)
-                    .collect(),
-            ),
-        ),
-    ]);
-    let memory_output = db.query_read_only_with_params_bounded(
-        "MATCH (m:Memory) WHERE m.id IN $memory_ids RETURN m.id AS memory_id",
-        &parameters,
-        None,
-    )?;
-    let matched_ids = memory_output
-        .rows
-        .iter()
-        .filter_map(|row| optional_string_cell(row, "memory_id"))
-        .collect::<BTreeSet<_>>();
-    let mut seen_missing = BTreeSet::new();
-    let missing_memory_ids = request
-        .memory_ids
-        .iter()
-        .filter(|memory_id| !matched_ids.contains(*memory_id))
-        .filter(|memory_id| seen_missing.insert((*memory_id).clone()))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    let count_output = db.query_read_only_with_params_bounded(
-        "MATCH (m:Memory)-[r:EVOLVES]->(n:Memory) \
-         WHERE m.id IN $memory_ids AND r.content_relation IN $content_relations \
-         RETURN m.id AS memory_id, id(m) AS node_id, count(r) AS count",
-        &parameters,
-        None,
-    )?;
-    let mut rows = count_output
-        .rows
-        .iter()
-        .map(knowledge_memory_evolves_relation_count_row_from_query)
-        .collect::<Result<Vec<_>>>()?;
-    rows.sort_by(|left, right| {
-        left.memory_id
-            .cmp(&right.memory_id)
-            .then_with(|| left.node_id.cmp(&right.node_id))
-    });
-    let matched_relationship_count = rows.iter().map(|row| row.count).sum();
-    let returned_count = rows.len();
-
-    Ok(KnowledgeMemoryEvolvesRelationCountOutput {
-        graph_commit_epoch,
-        rows,
-        matched_memory_count: matched_ids.len(),
-        missing_memory_ids,
-        matched_relationship_count,
-        returned_count,
-    })
-}
-
-fn knowledge_memory_evolves_relation_count_row_from_query(
-    row: &Row,
-) -> Result<KnowledgeMemoryEvolvesRelationCountRow> {
-    let memory_id = optional_string_cell(row, "memory_id").ok_or_else(|| {
-        SkeinError::Execution(
-            "knowledge memory evolves relation count row is missing memory_id".to_string(),
-        )
-    })?;
-    let node_id = row
-        .get("node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge memory evolves relation count row is missing node_id".to_string(),
-            )
-        })?;
-    let count = row
-        .get("count")
-        .and_then(value_to_non_negative_usize)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge memory evolves relation count row is missing count".to_string(),
-            )
-        })?;
-    Ok(KnowledgeMemoryEvolvesRelationCountRow {
-        memory_id,
-        node_id,
-        count,
-    })
-}
-
-fn validate_knowledge_memory_evolves_latest_request(
-    request: &KnowledgeMemoryEvolvesLatestRequest,
-) -> Result<()> {
-    if request.old_memory_ids.iter().any(String::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge memory evolves latest read requires non-empty memory ids".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_knowledge_memory_evolves_relation_count_request(
-    request: &KnowledgeMemoryEvolvesRelationCountRequest,
-) -> Result<()> {
-    if request.memory_ids.iter().any(String::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge memory evolves relation count read requires non-empty memory ids"
-                .to_string(),
-        ));
-    }
-    if request.content_relations.is_empty()
-        || request.content_relations.iter().any(String::is_empty)
-    {
-        return Err(SkeinError::Semantic(
-            "knowledge memory evolves relation count read requires non-empty content relations"
-                .to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn knowledge_memory_crystal_synthesis_counts_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeMemoryCrystalSynthesisCountRequest,
-) -> Result<KnowledgeMemoryCrystalSynthesisCountOutput> {
-    validate_knowledge_memory_crystal_synthesis_count_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    if request.memory_ids.is_empty() {
-        return Ok(KnowledgeMemoryCrystalSynthesisCountOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_memory_count: 0,
-            missing_memory_ids: Vec::new(),
-            matched_relationship_count: 0,
-            returned_count: 0,
-        });
-    }
-
-    let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Ok(KnowledgeMemoryCrystalSynthesisCountOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_memory_count: 0,
-            missing_memory_ids: deduplicated_strings_in_order(&request.memory_ids),
-            matched_relationship_count: 0,
-            returned_count: 0,
-        });
-    };
-
-    let requested_ids = request.memory_ids.iter().cloned().collect::<BTreeSet<_>>();
-    let mut matched_ids = BTreeSet::new();
-    let mut memories = Vec::new();
-    store.visit_nodes_owned(Some(memory_label_id), |memory| {
-        if node_external_id(&memory).is_some_and(|memory_id| {
-            let matched = requested_ids.contains(&memory_id);
-            if matched {
-                matched_ids.insert(memory_id);
-            }
-            matched
-        }) {
-            memories.push(memory);
-        }
-        crate::store::GraphScanControl::Continue
-    })?;
-
-    let mut seen_missing = BTreeSet::new();
-    let missing_memory_ids = request
-        .memory_ids
-        .iter()
-        .filter(|memory_id| !matched_ids.contains(*memory_id))
-        .filter(|memory_id| seen_missing.insert((*memory_id).clone()))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    let Some(synthesized_from_type_id) = catalog.rel_type_id("SYNTHESIZED_FROM") else {
-        return Ok(KnowledgeMemoryCrystalSynthesisCountOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_memory_count: matched_ids.len(),
-            missing_memory_ids,
-            matched_relationship_count: 0,
-            returned_count: 0,
-        });
-    };
-
-    let mut matched_relationship_count = 0;
-    let mut rows = Vec::new();
-    for memory in memories {
-        let mut count = 0usize;
-        store.try_visit_adjacent_relationships_owned(
-            memory.id,
-            Some(synthesized_from_type_id),
-            AdjacencyDirection::Incoming,
-            |relationship| {
-                if store
-                    .node_owned(relationship.source)?
-                    .filter(|crystal| crystal.labels.contains(&memory_label_id))
-                    .is_some_and(|crystal| boolean_property(&crystal, "is_crystal") == Some(true))
-                {
-                    count = count.saturating_add(1);
-                }
-                Ok(crate::store::GraphScanControl::Continue)
-            },
-        )?;
-        matched_relationship_count += count;
-        if count > 0
-            && let Some(memory_id) = node_external_id(&memory)
-        {
-            rows.push(KnowledgeMemoryCrystalSynthesisCountRow {
-                memory_id,
-                node_id: memory.id.0,
-                count,
-            });
-        }
-    }
-
-    rows.sort_by(|left, right| {
-        left.memory_id
-            .cmp(&right.memory_id)
-            .then_with(|| left.node_id.cmp(&right.node_id))
-    });
-    let returned_count = rows.len();
-
-    Ok(KnowledgeMemoryCrystalSynthesisCountOutput {
-        graph_commit_epoch,
-        rows,
-        matched_memory_count: matched_ids.len(),
-        missing_memory_ids,
-        matched_relationship_count,
-        returned_count,
-    })
-}
-
-fn knowledge_memory_crystal_synthesis_counts_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeMemoryCrystalSynthesisCountRequest,
-) -> Result<KnowledgeMemoryCrystalSynthesisCountOutput> {
-    validate_knowledge_memory_crystal_synthesis_count_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    if request.memory_ids.is_empty() {
-        return Ok(KnowledgeMemoryCrystalSynthesisCountOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_memory_count: 0,
-            missing_memory_ids: Vec::new(),
-            matched_relationship_count: 0,
-            returned_count: 0,
-        });
-    }
-
-    let requested_ids = request.memory_ids.iter().cloned().collect::<BTreeSet<_>>();
-    let parameters = BTreeMap::from([(
-        "memory_ids".to_string(),
-        Value::List(requested_ids.iter().cloned().map(Value::String).collect()),
-    )]);
-    let memory_output = db.query_read_only_with_params_bounded(
-        "MATCH (m:Memory) WHERE m.id IN $memory_ids RETURN m.id AS memory_id",
-        &parameters,
-        None,
-    )?;
-    let matched_ids = memory_output
-        .rows
-        .iter()
-        .filter_map(|row| optional_string_cell(row, "memory_id"))
-        .collect::<BTreeSet<_>>();
-    let mut seen_missing = BTreeSet::new();
-    let missing_memory_ids = request
-        .memory_ids
-        .iter()
-        .filter(|memory_id| !matched_ids.contains(*memory_id))
-        .filter(|memory_id| seen_missing.insert((*memory_id).clone()))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    let count_output = db.query_read_only_with_params_bounded(
-        "MATCH (c:Memory)-[r:SYNTHESIZED_FROM]->(m:Memory) \
-         WHERE m.id IN $memory_ids AND c.is_crystal = true \
-         RETURN m.id AS memory_id, id(m) AS node_id, count(r) AS count",
-        &parameters,
-        None,
-    )?;
-    let mut rows = count_output
-        .rows
-        .iter()
-        .map(knowledge_memory_crystal_synthesis_count_row_from_query)
-        .collect::<Result<Vec<_>>>()?;
-    rows.sort_by(|left, right| {
-        left.memory_id
-            .cmp(&right.memory_id)
-            .then_with(|| left.node_id.cmp(&right.node_id))
-    });
-    let matched_relationship_count = rows.iter().map(|row| row.count).sum();
-    let returned_count = rows.len();
-
-    Ok(KnowledgeMemoryCrystalSynthesisCountOutput {
-        graph_commit_epoch,
-        rows,
-        matched_memory_count: matched_ids.len(),
-        missing_memory_ids,
-        matched_relationship_count,
-        returned_count,
-    })
-}
-
-fn knowledge_memory_crystal_synthesis_count_row_from_query(
-    row: &Row,
-) -> Result<KnowledgeMemoryCrystalSynthesisCountRow> {
-    let memory_id = optional_string_cell(row, "memory_id").ok_or_else(|| {
-        SkeinError::Execution(
-            "knowledge memory crystal synthesis count row is missing memory_id".to_string(),
-        )
-    })?;
-    let node_id = row
-        .get("node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge memory crystal synthesis count row is missing node_id".to_string(),
-            )
-        })?;
-    let count = row
-        .get("count")
-        .and_then(value_to_non_negative_usize)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge memory crystal synthesis count row is missing count".to_string(),
-            )
-        })?;
-    Ok(KnowledgeMemoryCrystalSynthesisCountRow {
-        memory_id,
-        node_id,
-        count,
-    })
-}
-
-fn validate_knowledge_memory_crystal_synthesis_count_request(
-    request: &KnowledgeMemoryCrystalSynthesisCountRequest,
-) -> Result<()> {
-    if request.memory_ids.iter().any(String::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge memory crystal synthesis count read requires non-empty memory ids"
-                .to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn knowledge_memory_evolves_neighbors_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeMemoryEvolvesNeighborRequest,
-) -> Result<KnowledgeMemoryEvolvesNeighborOutput> {
-    validate_knowledge_memory_evolves_neighbor_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Ok(KnowledgeMemoryEvolvesNeighborOutput {
-            graph_commit_epoch,
-            anchor_found: false,
-            anchor_node_id: None,
-            rows: Vec::new(),
-            matched_relationship_count: 0,
-            returned_count: 0,
-        });
-    };
-    let mut anchor = None;
-    store.visit_nodes_owned(Some(memory_label_id), |memory| {
-        if node_external_id(&memory).as_deref() == Some(request.memory_id.as_str()) {
-            anchor = Some(memory);
-            crate::store::GraphScanControl::Stop
-        } else {
-            crate::store::GraphScanControl::Continue
-        }
-    })?;
-    let Some(anchor) = anchor else {
-        return Ok(KnowledgeMemoryEvolvesNeighborOutput {
-            graph_commit_epoch,
-            anchor_found: false,
-            anchor_node_id: None,
-            rows: Vec::new(),
-            matched_relationship_count: 0,
-            returned_count: 0,
-        });
-    };
-    let Some(evolves_type_id) = catalog.rel_type_id("EVOLVES") else {
-        return Ok(KnowledgeMemoryEvolvesNeighborOutput {
-            graph_commit_epoch,
-            anchor_found: true,
-            anchor_node_id: Some(anchor.id.0),
-            rows: Vec::new(),
-            matched_relationship_count: 0,
-            returned_count: 0,
-        });
-    };
-
-    let mut rows = Vec::new();
-    if matches!(
-        request.direction,
-        KnowledgeNeighborDirection::Outgoing | KnowledgeNeighborDirection::Both
-    ) {
-        rows.extend({
-            let mut outgoing_rows = Vec::new();
-            store.try_visit_adjacent_relationships_owned(
-                anchor.id,
-                Some(evolves_type_id),
-                AdjacencyDirection::Outgoing,
-                |relationship| {
-                    if let Some(row) = knowledge_memory_evolves_neighbor_row(
-                        &anchor,
-                        &relationship,
-                        relationship.target,
-                        memory_label_id,
-                        store,
-                        request,
-                    )? {
-                        outgoing_rows.push(row);
-                    }
-                    Ok(crate::store::GraphScanControl::Continue)
-                },
-            )?;
-            outgoing_rows
-        });
-    }
-    if matches!(
-        request.direction,
-        KnowledgeNeighborDirection::Incoming | KnowledgeNeighborDirection::Both
-    ) {
-        rows.extend({
-            let mut incoming_rows = Vec::new();
-            store.try_visit_adjacent_relationships_owned(
-                anchor.id,
-                Some(evolves_type_id),
-                AdjacencyDirection::Incoming,
-                |relationship| {
-                    if let Some(row) = knowledge_memory_evolves_neighbor_row(
-                        &anchor,
-                        &relationship,
-                        relationship.source,
-                        memory_label_id,
-                        store,
-                        request,
-                    )? {
-                        incoming_rows.push(row);
-                    }
-                    Ok(crate::store::GraphScanControl::Continue)
-                },
-            )?;
-            incoming_rows
-        });
-    }
-    rows.sort_by(|left, right| {
-        left.neighbor_memory_id
-            .cmp(&right.neighbor_memory_id)
-            .then_with(|| left.neighbor_node_id.cmp(&right.neighbor_node_id))
-            .then_with(|| left.relationship_id.cmp(&right.relationship_id))
-    });
-    let matched_relationship_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-
-    Ok(KnowledgeMemoryEvolvesNeighborOutput {
-        graph_commit_epoch,
-        anchor_found: true,
-        anchor_node_id: Some(anchor.id.0),
-        rows,
-        matched_relationship_count,
-        returned_count,
-    })
-}
-
-fn knowledge_memory_evolves_neighbors_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeMemoryEvolvesNeighborRequest,
-) -> Result<KnowledgeMemoryEvolvesNeighborOutput> {
-    validate_knowledge_memory_evolves_neighbor_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let parameters = BTreeMap::from([(
-        "memory_id".to_string(),
-        Value::String(request.memory_id.clone()),
-    )]);
-    let anchor_output = db.query_read_only_with_params_bounded(
-        "MATCH (a:Memory) \
-         WHERE a.id = $memory_id \
-         RETURN a.id AS anchor_memory_id, id(a) AS anchor_node_id",
-        &parameters,
-        Some(1),
-    )?;
-    let Some(anchor_row) = anchor_output.rows.first() else {
-        return Ok(KnowledgeMemoryEvolvesNeighborOutput {
-            graph_commit_epoch,
-            anchor_found: false,
-            anchor_node_id: None,
-            rows: Vec::new(),
-            matched_relationship_count: 0,
-            returned_count: 0,
-        });
-    };
-    let anchor_node_id = anchor_row
-        .get("anchor_node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge memory evolves neighbor anchor row is missing anchor_node_id"
-                    .to_string(),
-            )
-        })?;
-    let anchor_memory_id =
-        optional_string_cell(anchor_row, "anchor_memory_id").ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge memory evolves neighbor anchor row is missing anchor_memory_id"
-                    .to_string(),
-            )
-        })?;
-
-    let mut rows = Vec::new();
-    if matches!(
-        request.direction,
-        KnowledgeNeighborDirection::Outgoing | KnowledgeNeighborDirection::Both
-    ) {
-        rows.extend(knowledge_memory_evolves_neighbor_rows_via_query_runtime(
-            db,
-            "MATCH (a:Memory)-[r:EVOLVES]->(n:Memory) \
-             WHERE a.id = $memory_id \
-             RETURN n AS neighbor, r AS relationship, id(r) AS relationship_id",
-            &parameters,
-            &anchor_memory_id,
-            anchor_node_id,
-            request,
-        )?);
-    }
-    if matches!(
-        request.direction,
-        KnowledgeNeighborDirection::Incoming | KnowledgeNeighborDirection::Both
-    ) {
-        rows.extend(knowledge_memory_evolves_neighbor_rows_via_query_runtime(
-            db,
-            "MATCH (n:Memory)-[r:EVOLVES]->(a:Memory) \
-             WHERE a.id = $memory_id \
-             RETURN n AS neighbor, r AS relationship, id(r) AS relationship_id",
-            &parameters,
-            &anchor_memory_id,
-            anchor_node_id,
-            request,
-        )?);
-    }
-
-    rows.sort_by(|left, right| {
-        left.neighbor_memory_id
-            .cmp(&right.neighbor_memory_id)
-            .then_with(|| left.neighbor_node_id.cmp(&right.neighbor_node_id))
-            .then_with(|| left.relationship_id.cmp(&right.relationship_id))
-    });
-    let matched_relationship_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-
-    Ok(KnowledgeMemoryEvolvesNeighborOutput {
-        graph_commit_epoch,
-        anchor_found: true,
-        anchor_node_id: Some(anchor_node_id),
-        rows,
-        matched_relationship_count,
-        returned_count,
-    })
-}
-
-fn knowledge_memory_evolves_neighbor_rows_via_query_runtime(
-    db: &Database,
-    query: &str,
-    parameters: &BTreeMap<String, Value>,
-    anchor_memory_id: &str,
-    anchor_node_id: u64,
-    request: &KnowledgeMemoryEvolvesNeighborRequest,
-) -> Result<Vec<KnowledgeMemoryEvolvesNeighborRow>> {
-    let output = db.query_read_only_with_params_bounded(query, parameters, None)?;
-    output
-        .rows
-        .iter()
-        .map(|row| {
-            knowledge_memory_evolves_neighbor_row_from_query(
-                row,
-                anchor_memory_id,
-                anchor_node_id,
-                request,
-            )
-        })
-        .collect()
-}
-
-fn knowledge_memory_evolves_projected_successors_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeMemoryEvolvesProjectedSuccessorRequest,
-) -> Result<KnowledgeMemoryEvolvesProjectedSuccessorOutput> {
-    validate_knowledge_memory_evolves_projected_successor_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Ok(empty_memory_evolves_projected_successor_output(
-            graph_commit_epoch,
-            request,
-        ));
-    };
-    let evolves_type_id = catalog.rel_type_id("EVOLVES");
-    let page_cursors = knowledge_memory_evolves_projected_successor_page_cursor_map(request);
-    let mut groups = Vec::with_capacity(request.old_memory_ids.len());
-    let mut found_old_memory_count = 0;
-    let mut missing_old_memory_count = 0;
-    let mut matched_relationship_count = 0;
-    let mut returned_count = 0;
-
-    for old_memory_id in &request.old_memory_ids {
-        let Some(old_memory) =
-            try_seed_node_by_label_and_external_id(catalog, store, "Memory", old_memory_id)?
-        else {
-            missing_old_memory_count += 1;
-            groups.push(KnowledgeMemoryEvolvesProjectedSuccessorGroup {
-                old_memory_id: old_memory_id.clone(),
-                old_node_id: None,
-                found_old_memory: false,
-                rows: Vec::new(),
-                matched_relationship_count: 0,
-                returned_count: 0,
-            });
-            continue;
-        };
-
-        found_old_memory_count += 1;
-        let (group_matched_relationship_count, mut rows) = match evolves_type_id {
-            Some(rel_type_id) => memory_evolves_projected_successor_rows(
-                store,
-                &old_memory,
-                memory_label_id,
-                rel_type_id,
-                MemoryEvolvesProjectedSuccessorReadSpec {
-                    order: request.order,
-                    page_cursor: page_cursors.get(old_memory_id).copied(),
-                    new_memory_property_names: &request.new_memory_property_names,
-                    relationship_property_names: &request.relationship_property_names,
-                },
-            )?,
-            None => (0, Vec::new()),
-        };
-        if request.limit_per_old_memory > 0 {
-            rows.truncate(request.limit_per_old_memory);
-        }
-        let group_returned_count = rows.len();
-        matched_relationship_count += group_matched_relationship_count;
-        returned_count += group_returned_count;
-        groups.push(KnowledgeMemoryEvolvesProjectedSuccessorGroup {
-            old_memory_id: old_memory_id.clone(),
-            old_node_id: Some(old_memory.id.0),
-            found_old_memory: true,
-            rows,
-            matched_relationship_count: group_matched_relationship_count,
-            returned_count: group_returned_count,
-        });
-    }
-
-    Ok(KnowledgeMemoryEvolvesProjectedSuccessorOutput {
-        graph_commit_epoch,
-        groups,
-        found_old_memory_count,
-        missing_old_memory_count,
-        matched_relationship_count,
-        returned_count,
-    })
-}
-
-fn knowledge_memory_evolves_projected_successors_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeMemoryEvolvesProjectedSuccessorRequest,
-) -> Result<KnowledgeMemoryEvolvesProjectedSuccessorOutput> {
-    validate_knowledge_memory_evolves_projected_successor_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    if request.old_memory_ids.is_empty() {
-        return Ok(empty_memory_evolves_projected_successor_output(
-            graph_commit_epoch,
-            request,
-        ));
-    }
-
-    let entity_requests = request
-        .old_memory_ids
-        .iter()
-        .map(|old_memory_id| KnowledgeEntityRequest {
-            label: "Memory".to_string(),
-            external_id: old_memory_id.clone(),
-        })
-        .collect::<Vec<_>>();
-    let (_, found_memories) = lookup_entities_via_query_runtime_strict(db, &entity_requests)?;
-    let requested_ids = request
-        .old_memory_ids
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let parameters = BTreeMap::from([(
-        "old_memory_ids".to_string(),
-        Value::List(requested_ids.into_iter().map(Value::String).collect()),
-    )]);
-    let successor_output = db.query_read_only_with_params_bounded(
-        "MATCH (old:Memory)-[r:EVOLVES]->(new:Memory) \
-         WHERE old.id IN $old_memory_ids \
-         RETURN old.id AS old_memory_id, new AS new_memory, \
-         r AS relationship, id(r) AS relationship_id",
-        &parameters,
-        None,
-    )?;
-    let mut rows_by_old_memory =
-        BTreeMap::<String, Vec<MemoryEvolvesProjectedSuccessorQueryRow>>::new();
-    for row in &successor_output.rows {
-        let (old_memory_id, successor_row) =
-            knowledge_memory_evolves_projected_successor_row_from_query(row, request)?;
-        rows_by_old_memory
-            .entry(old_memory_id)
-            .or_default()
-            .push(successor_row);
-    }
-
-    let page_cursors = knowledge_memory_evolves_projected_successor_page_cursor_map(request);
-    let mut groups = Vec::with_capacity(request.old_memory_ids.len());
-    let mut found_old_memory_count = 0;
-    let mut missing_old_memory_count = 0;
-    let mut matched_relationship_count = 0;
-    let mut returned_count = 0;
-
-    for old_memory_id in &request.old_memory_ids {
-        let Some(old_memory) = found_memories.get(&("Memory".to_string(), old_memory_id.clone()))
-        else {
-            missing_old_memory_count += 1;
-            groups.push(KnowledgeMemoryEvolvesProjectedSuccessorGroup {
-                old_memory_id: old_memory_id.clone(),
-                old_node_id: None,
-                found_old_memory: false,
-                rows: Vec::new(),
-                matched_relationship_count: 0,
-                returned_count: 0,
-            });
-            continue;
-        };
-
-        found_old_memory_count += 1;
-        let mut rows = rows_by_old_memory
-            .get(old_memory_id)
-            .cloned()
-            .unwrap_or_default();
-        rows.sort_by(|left, right| {
-            compare_memory_evolves_projected_successor_rows(left, right, request.order)
-        });
-        let group_matched_relationship_count = rows.len();
-        if let Some(page_cursor) = page_cursors.get(old_memory_id).copied() {
-            rows.retain(|row| {
-                memory_evolves_projected_successor_is_after_cursor(row, page_cursor, request.order)
-            });
-        }
-        let mut rows = rows.into_iter().map(|(row, _)| row).collect::<Vec<_>>();
-        if request.limit_per_old_memory > 0 {
-            rows.truncate(request.limit_per_old_memory);
-        }
-        let group_returned_count = rows.len();
-        matched_relationship_count += group_matched_relationship_count;
-        returned_count += group_returned_count;
-        groups.push(KnowledgeMemoryEvolvesProjectedSuccessorGroup {
-            old_memory_id: old_memory_id.clone(),
-            old_node_id: Some(old_memory.node_id),
-            found_old_memory: true,
-            rows,
-            matched_relationship_count: group_matched_relationship_count,
-            returned_count: group_returned_count,
-        });
-    }
-
-    Ok(KnowledgeMemoryEvolvesProjectedSuccessorOutput {
-        graph_commit_epoch,
-        groups,
-        found_old_memory_count,
-        missing_old_memory_count,
-        matched_relationship_count,
-        returned_count,
-    })
-}
-
-fn validate_knowledge_memory_evolves_neighbor_request(
-    request: &KnowledgeMemoryEvolvesNeighborRequest,
-) -> Result<()> {
-    if request.memory_id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge memory evolves neighbor read requires a non-empty memory id".to_string(),
-        ));
-    }
-    if request
-        .neighbor_property_names
-        .iter()
-        .chain(request.relationship_property_names.iter())
-        .any(String::is_empty)
-    {
-        return Err(SkeinError::Semantic(
-            "knowledge memory evolves neighbor read requires non-empty property names".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_knowledge_memory_evolves_projected_successor_request(
-    request: &KnowledgeMemoryEvolvesProjectedSuccessorRequest,
-) -> Result<()> {
-    if request.old_memory_ids.iter().any(String::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge memory evolves projected successor read requires non-empty memory ids"
-                .to_string(),
-        ));
-    }
-    if request
-        .new_memory_property_names
-        .iter()
-        .chain(request.relationship_property_names.iter())
-        .any(String::is_empty)
-    {
-        return Err(SkeinError::Semantic(
-            "knowledge memory evolves projected successor read requires non-empty property names"
-                .to_string(),
-        ));
-    }
-    let mut cursor_old_memory_ids = BTreeSet::new();
-    let requested_old_memory_ids = request
-        .old_memory_ids
-        .iter()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>();
-    for cursor in &request.page_cursors {
-        if cursor.old_memory_id.is_empty() {
-            return Err(SkeinError::Semantic(
-                "knowledge memory evolves projected successor read requires non-empty cursor memory ids"
-                    .to_string(),
-            ));
-        }
-        if !requested_old_memory_ids.contains(cursor.old_memory_id.as_str()) {
-            return Err(SkeinError::Semantic(
-                "knowledge memory evolves projected successor read requires cursor memory ids to be requested"
-                    .to_string(),
-            ));
-        }
-        if !cursor_old_memory_ids.insert(cursor.old_memory_id.as_str()) {
-            return Err(SkeinError::Semantic(
-                "knowledge memory evolves projected successor read requires one cursor per memory id"
-                    .to_string(),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn knowledge_memory_evolves_projected_successor_page_cursor_map(
-    request: &KnowledgeMemoryEvolvesProjectedSuccessorRequest,
-) -> BTreeMap<String, &KnowledgeMemoryEvolvesProjectedSuccessorCursor> {
-    request
-        .page_cursors
-        .iter()
-        .map(|cursor| (cursor.old_memory_id.clone(), &cursor.cursor))
-        .collect()
-}
-
-struct MemoryEvolvesProjectedSuccessorReadSpec<'a> {
-    order: KnowledgeMemoryEvolvesProjectedSuccessorOrder,
-    page_cursor: Option<&'a KnowledgeMemoryEvolvesProjectedSuccessorCursor>,
-    new_memory_property_names: &'a [String],
-    relationship_property_names: &'a [String],
-}
-
-type MemoryEvolvesProjectedSuccessorQueryRow =
-    (KnowledgeMemoryEvolvesProjectedSuccessorRow, Option<Value>);
-
-fn knowledge_memory_evolves_neighbor_row(
-    anchor: &NodeRecord,
-    relationship: &RelRecord,
-    neighbor_id: NodeId,
-    memory_label_id: LabelId,
-    store: &GraphStore,
-    request: &KnowledgeMemoryEvolvesNeighborRequest,
-) -> Result<Option<KnowledgeMemoryEvolvesNeighborRow>> {
-    let Some(neighbor) = store
-        .node_owned(neighbor_id)?
-        .filter(|node| node.labels.contains(&memory_label_id))
-    else {
-        return Ok(None);
-    };
-    let Some(anchor_memory_id) = node_external_id(anchor) else {
-        return Ok(None);
-    };
-    Ok(Some(KnowledgeMemoryEvolvesNeighborRow {
-        anchor_memory_id,
-        anchor_node_id: anchor.id.0,
-        neighbor_memory_id: node_external_id(&neighbor),
-        neighbor_node_id: neighbor.id.0,
-        neighbor_properties: projected_properties(
-            &neighbor.properties,
-            &request.neighbor_property_names,
-        ),
-        relationship_id: relationship.id.0,
-        relationship_properties: projected_properties(
-            &relationship.properties,
-            &request.relationship_property_names,
-        ),
-    }))
-}
-
-fn knowledge_memory_evolves_neighbor_row_from_query(
-    row: &Row,
-    anchor_memory_id: &str,
-    anchor_node_id: u64,
-    request: &KnowledgeMemoryEvolvesNeighborRequest,
-) -> Result<KnowledgeMemoryEvolvesNeighborRow> {
-    let neighbor = row
-        .get("neighbor")
-        .and_then(knowledge_entity_from_value)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge memory evolves neighbor row is missing neighbor map".to_string(),
-            )
-        })?;
-    let relationship_id = row
-        .get("relationship_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge memory evolves neighbor row is missing relationship_id".to_string(),
-            )
-        })?;
-    let relationship = row
-        .get("relationship")
-        .and_then(value_to_map)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge memory evolves neighbor row is missing relationship map".to_string(),
-            )
-        })?;
-    let mut relationship_properties = relationship.clone();
-    relationship_properties.remove("_id");
-    relationship_properties.remove("source_id");
-    relationship_properties.remove("target_id");
-    relationship_properties.remove("type");
-
-    Ok(KnowledgeMemoryEvolvesNeighborRow {
-        anchor_memory_id: anchor_memory_id.to_string(),
-        anchor_node_id,
-        neighbor_memory_id: neighbor.external_id,
-        neighbor_node_id: neighbor.node_id,
-        neighbor_properties: projected_properties(
-            &neighbor.properties,
-            &request.neighbor_property_names,
-        ),
-        relationship_id,
-        relationship_properties: projected_properties(
-            &relationship_properties,
-            &request.relationship_property_names,
-        ),
-    })
-}
-
-fn knowledge_memory_evolves_projected_successor_row_from_query(
-    row: &Row,
-    request: &KnowledgeMemoryEvolvesProjectedSuccessorRequest,
-) -> Result<(String, MemoryEvolvesProjectedSuccessorQueryRow)> {
-    let old_memory_id = optional_string_cell(row, "old_memory_id").ok_or_else(|| {
-        SkeinError::Execution(
-            "knowledge memory evolves projected successor row is missing old_memory_id".to_string(),
-        )
-    })?;
-    let new_memory = row
-        .get("new_memory")
-        .and_then(knowledge_entity_from_value)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge memory evolves projected successor row is missing new_memory map"
-                    .to_string(),
-            )
-        })?;
-    let relationship_id = row
-        .get("relationship_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge memory evolves projected successor row is missing relationship_id"
-                    .to_string(),
-            )
-        })?;
-    let relationship = row
-        .get("relationship")
-        .and_then(value_to_map)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge memory evolves projected successor row is missing relationship map"
-                    .to_string(),
-            )
-        })?;
-    let mut relationship_properties = relationship.clone();
-    relationship_properties.remove("_id");
-    relationship_properties.remove("source_id");
-    relationship_properties.remove("target_id");
-    relationship_properties.remove("type");
-
-    let updated_at = new_memory.properties.get("updated_at").cloned();
-    let successor_row = KnowledgeMemoryEvolvesProjectedSuccessorRow {
-        new_memory_id: new_memory.external_id.clone(),
-        new_node_id: new_memory.node_id,
-        relationship_id,
-        page_cursor: KnowledgeMemoryEvolvesProjectedSuccessorCursor {
-            new_memory_id: new_memory.external_id.clone(),
-            new_node_id: new_memory.node_id,
-            relationship_id,
-            updated_at: updated_at.clone(),
-        },
-        new_memory_properties: projected_properties(
-            &new_memory.properties,
-            &request.new_memory_property_names,
-        ),
-        relationship_properties: projected_properties(
-            &relationship_properties,
-            &request.relationship_property_names,
-        ),
-    };
-
-    Ok((old_memory_id, (successor_row, updated_at)))
-}
-
-fn empty_memory_evolves_projected_successor_output(
-    graph_commit_epoch: u64,
-    request: &KnowledgeMemoryEvolvesProjectedSuccessorRequest,
-) -> KnowledgeMemoryEvolvesProjectedSuccessorOutput {
-    KnowledgeMemoryEvolvesProjectedSuccessorOutput {
-        graph_commit_epoch,
-        groups: request
-            .old_memory_ids
-            .iter()
-            .map(
-                |old_memory_id| KnowledgeMemoryEvolvesProjectedSuccessorGroup {
-                    old_memory_id: old_memory_id.clone(),
-                    old_node_id: None,
-                    found_old_memory: false,
-                    rows: Vec::new(),
-                    matched_relationship_count: 0,
-                    returned_count: 0,
-                },
-            )
-            .collect(),
-        found_old_memory_count: 0,
-        missing_old_memory_count: request.old_memory_ids.len(),
-        matched_relationship_count: 0,
-        returned_count: 0,
-    }
-}
-
-fn memory_evolves_projected_successor_rows(
-    store: &GraphStore,
-    old_memory: &NodeRecord,
-    memory_label_id: LabelId,
-    evolves_type_id: RelTypeId,
-    spec: MemoryEvolvesProjectedSuccessorReadSpec<'_>,
-) -> Result<(usize, Vec<KnowledgeMemoryEvolvesProjectedSuccessorRow>)> {
-    let mut rows = Vec::new();
-    store.try_visit_adjacent_relationships_owned(
-        old_memory.id,
-        Some(evolves_type_id),
-        AdjacencyDirection::Outgoing,
-        |relationship| {
-            if let Some(new_memory) = store
-                .node_owned(relationship.target)?
-                .filter(|new_memory| new_memory.labels.contains(&memory_label_id))
-            {
-                rows.push((
-                    memory_evolves_projected_successor_row(
-                        &new_memory,
-                        &relationship,
-                        spec.new_memory_property_names,
-                        spec.relationship_property_names,
-                    ),
-                    new_memory.properties.get("updated_at").cloned(),
-                ));
-            }
-            Ok(crate::store::GraphScanControl::Continue)
-        },
-    )?;
-    rows.sort_by(|left, right| {
-        compare_memory_evolves_projected_successor_rows(left, right, spec.order)
-    });
-    let matched_relationship_count = rows.len();
-    if let Some(page_cursor) = spec.page_cursor {
-        rows.retain(|row| {
-            memory_evolves_projected_successor_is_after_cursor(row, page_cursor, spec.order)
-        });
-    }
-    Ok((
-        matched_relationship_count,
-        rows.into_iter().map(|(row, _)| row).collect(),
-    ))
-}
-
-fn compare_memory_evolves_projected_successor_rows(
-    left: &(KnowledgeMemoryEvolvesProjectedSuccessorRow, Option<Value>),
-    right: &(KnowledgeMemoryEvolvesProjectedSuccessorRow, Option<Value>),
-    order: KnowledgeMemoryEvolvesProjectedSuccessorOrder,
-) -> std::cmp::Ordering {
-    match order {
-        KnowledgeMemoryEvolvesProjectedSuccessorOrder::StableMemoryIdAsc => {
-            compare_memory_evolves_projected_successor_ids(&left.0, &right.0)
-        }
-        KnowledgeMemoryEvolvesProjectedSuccessorOrder::UpdatedAtDesc => {
-            compare_optional_values_desc(left.1.as_ref(), right.1.as_ref())
-                .then_with(|| compare_memory_evolves_projected_successor_ids(&left.0, &right.0))
-        }
-    }
-}
-
-fn compare_memory_evolves_projected_successor_ids(
-    left: &KnowledgeMemoryEvolvesProjectedSuccessorRow,
-    right: &KnowledgeMemoryEvolvesProjectedSuccessorRow,
-) -> std::cmp::Ordering {
-    left.new_memory_id
-        .cmp(&right.new_memory_id)
-        .then_with(|| left.new_node_id.cmp(&right.new_node_id))
-        .then_with(|| left.relationship_id.cmp(&right.relationship_id))
-}
-
-fn memory_evolves_projected_successor_is_after_cursor(
-    row: &(KnowledgeMemoryEvolvesProjectedSuccessorRow, Option<Value>),
-    cursor: &KnowledgeMemoryEvolvesProjectedSuccessorCursor,
-    order: KnowledgeMemoryEvolvesProjectedSuccessorOrder,
-) -> bool {
-    match order {
-        KnowledgeMemoryEvolvesProjectedSuccessorOrder::StableMemoryIdAsc => {
-            compare_memory_evolves_projected_successor_row_to_cursor(&row.0, cursor)
-                == std::cmp::Ordering::Greater
-        }
-        KnowledgeMemoryEvolvesProjectedSuccessorOrder::UpdatedAtDesc => {
-            compare_optional_values_desc(row.1.as_ref(), cursor.updated_at.as_ref()).then_with(
-                || compare_memory_evolves_projected_successor_row_to_cursor(&row.0, cursor),
-            ) == std::cmp::Ordering::Greater
-        }
-    }
-}
-
-fn compare_memory_evolves_projected_successor_row_to_cursor(
-    row: &KnowledgeMemoryEvolvesProjectedSuccessorRow,
-    cursor: &KnowledgeMemoryEvolvesProjectedSuccessorCursor,
-) -> std::cmp::Ordering {
-    row.new_memory_id
-        .cmp(&cursor.new_memory_id)
-        .then_with(|| row.new_node_id.cmp(&cursor.new_node_id))
-        .then_with(|| row.relationship_id.cmp(&cursor.relationship_id))
-}
-
-fn memory_evolves_projected_successor_row(
-    new_memory: &NodeRecord,
-    relationship: &RelRecord,
-    new_memory_property_names: &[String],
-    relationship_property_names: &[String],
-) -> KnowledgeMemoryEvolvesProjectedSuccessorRow {
-    let updated_at = new_memory.properties.get("updated_at").cloned();
-    KnowledgeMemoryEvolvesProjectedSuccessorRow {
-        new_memory_id: node_external_id(new_memory),
-        new_node_id: new_memory.id.0,
-        relationship_id: relationship.id.0,
-        page_cursor: KnowledgeMemoryEvolvesProjectedSuccessorCursor {
-            new_memory_id: node_external_id(new_memory),
-            new_node_id: new_memory.id.0,
-            relationship_id: relationship.id.0,
-            updated_at,
-        },
-        new_memory_properties: projected_properties(
-            &new_memory.properties,
-            new_memory_property_names,
-        ),
-        relationship_properties: projected_properties(
-            &relationship.properties,
-            relationship_property_names,
-        ),
-    }
-}
-
+#[cfg(test)]
 fn projected_properties(
     properties: &BTreeMap<String, Value>,
     property_names: &[String],
@@ -9975,15 +5799,7 @@ fn projected_properties(
     projected
 }
 
-fn deduplicated_strings_in_order(values: &[String]) -> Vec<String> {
-    let mut seen = BTreeSet::new();
-    values
-        .iter()
-        .filter(|value| seen.insert((*value).clone()))
-        .cloned()
-        .collect()
-}
-
+#[cfg(test)]
 fn boolean_property(node: &NodeRecord, property: &str) -> Option<bool> {
     match node.properties.get(property) {
         Some(Value::Bool(value)) => Some(*value),
@@ -9991,6 +5807,7 @@ fn boolean_property(node: &NodeRecord, property: &str) -> Option<bool> {
     }
 }
 
+#[cfg(test)]
 fn boolean_property_value(properties: &BTreeMap<String, Value>, property: &str) -> Option<bool> {
     match properties.get(property) {
         Some(Value::Bool(value)) => Some(*value),
@@ -9998,6 +5815,7 @@ fn boolean_property_value(properties: &BTreeMap<String, Value>, property: &str) 
     }
 }
 
+#[cfg(test)]
 fn integer_property_value(properties: &BTreeMap<String, Value>, property: &str) -> Option<i64> {
     match properties.get(property) {
         Some(Value::Int(value)) => Some(*value),
@@ -10005,92 +5823,7 @@ fn integer_property_value(properties: &BTreeMap<String, Value>, property: &str) 
     }
 }
 
-fn sort_memory_list_rows(rows: &mut [KnowledgeMemoryListRow], order: KnowledgeMemoryListOrder) {
-    rows.sort_by(|left, right| match order {
-        KnowledgeMemoryListOrder::ExternalIdAsc => compare_memory_ids(left, right),
-        KnowledgeMemoryListOrder::CreatedAtDesc => compare_skill_memory_created_at(
-            &left.created_at,
-            &right.created_at,
-            KnowledgeSkillMemoryListOrder::CreatedAtDesc,
-        )
-        .then_with(|| compare_memory_ids(left, right)),
-        KnowledgeMemoryListOrder::ScoreDesc => compare_memory_scores(left, right)
-            .then_with(|| {
-                compare_skill_memory_created_at(
-                    &left.created_at,
-                    &right.created_at,
-                    KnowledgeSkillMemoryListOrder::CreatedAtDesc,
-                )
-            })
-            .then_with(|| compare_memory_ids(left, right)),
-    });
-}
-
-fn compare_memory_ids(
-    left: &KnowledgeMemoryListRow,
-    right: &KnowledgeMemoryListRow,
-) -> std::cmp::Ordering {
-    left.memory_id
-        .cmp(&right.memory_id)
-        .then_with(|| left.node_id.cmp(&right.node_id))
-}
-
-fn sort_memory_projected_rows(
-    rows: &mut [(KnowledgeMemoryProjectedRow, Option<Value>, Value)],
-    order: KnowledgeMemoryListOrder,
-) {
-    rows.sort_by(|left, right| match order {
-        KnowledgeMemoryListOrder::ExternalIdAsc => compare_memory_projected_ids(&left.0, &right.0),
-        KnowledgeMemoryListOrder::CreatedAtDesc => compare_skill_memory_created_at(
-            &left.1,
-            &right.1,
-            KnowledgeSkillMemoryListOrder::CreatedAtDesc,
-        )
-        .then_with(|| compare_memory_projected_ids(&left.0, &right.0)),
-        KnowledgeMemoryListOrder::ScoreDesc => compare_skill_memory_values(&right.2, &left.2)
-            .then_with(|| {
-                compare_skill_memory_created_at(
-                    &left.1,
-                    &right.1,
-                    KnowledgeSkillMemoryListOrder::CreatedAtDesc,
-                )
-            })
-            .then_with(|| compare_memory_projected_ids(&left.0, &right.0)),
-    });
-}
-
-fn compare_memory_projected_ids(
-    left: &KnowledgeMemoryProjectedRow,
-    right: &KnowledgeMemoryProjectedRow,
-) -> std::cmp::Ordering {
-    left.memory_id
-        .cmp(&right.memory_id)
-        .then_with(|| left.node_id.cmp(&right.node_id))
-}
-
-fn compare_memory_scores(
-    left: &KnowledgeMemoryListRow,
-    right: &KnowledgeMemoryListRow,
-) -> std::cmp::Ordering {
-    compare_skill_memory_values(&memory_score(right), &memory_score(left))
-}
-
-fn memory_score(row: &KnowledgeMemoryListRow) -> Value {
-    row.pagerank_score
-        .clone()
-        .or_else(|| row.importance.clone())
-        .unwrap_or(Value::Float(0.5))
-}
-
-fn memory_score_from_entity(memory: &KnowledgeEntity) -> Value {
-    memory
-        .properties
-        .get("pagerank_score")
-        .cloned()
-        .or_else(|| memory.properties.get("importance").cloned())
-        .unwrap_or(Value::Float(0.5))
-}
-
+#[cfg(test)]
 fn knowledge_crystals_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -10131,6 +5864,7 @@ fn knowledge_crystals_for(
     })
 }
 
+#[cfg(test)]
 fn knowledge_crystals_via_query_runtime(
     db: &Database,
     request: &KnowledgeCrystalListRequest,
@@ -10165,6 +5899,7 @@ fn knowledge_crystals_via_query_runtime(
     })
 }
 
+#[cfg(test)]
 fn validate_knowledge_crystal_list_request(request: &KnowledgeCrystalListRequest) -> Result<()> {
     if request.key_match.as_ref().is_some_and(String::is_empty) {
         return Err(SkeinError::Semantic(
@@ -10184,6 +5919,7 @@ fn validate_knowledge_crystal_list_request(request: &KnowledgeCrystalListRequest
     Ok(())
 }
 
+#[cfg(test)]
 fn knowledge_crystal_list_query_predicate(
     request: &KnowledgeCrystalListRequest,
     parameters: &mut BTreeMap<String, Value>,
@@ -10201,6 +5937,7 @@ fn knowledge_crystal_list_query_predicate(
     format!(" WHERE {}", predicates.join(" AND "))
 }
 
+#[cfg(test)]
 fn memory_matches_crystal_list(memory: &NodeRecord, request: &KnowledgeCrystalListRequest) -> bool {
     let memory_id = node_external_id(memory).unwrap_or_default();
     request.key_match.as_ref().is_none_or(|key| {
@@ -10211,6 +5948,7 @@ fn memory_matches_crystal_list(memory: &NodeRecord, request: &KnowledgeCrystalLi
         .is_none_or(|after_id| memory_id > *after_id)
 }
 
+#[cfg(test)]
 fn knowledge_crystal_row(memory: &NodeRecord) -> KnowledgeCrystalRow {
     let crystal_title = string_property(memory, "crystal_title");
     let title = string_property(memory, "title");
@@ -10235,6 +5973,7 @@ fn knowledge_crystal_row(memory: &NodeRecord) -> KnowledgeCrystalRow {
     }
 }
 
+#[cfg(test)]
 fn knowledge_crystal_row_from_entity(memory: &KnowledgeEntity) -> KnowledgeCrystalRow {
     let crystal_title = string_property_value(&memory.properties, "crystal_title");
     let title = string_property_value(&memory.properties, "title");
@@ -10259,6 +5998,7 @@ fn knowledge_crystal_row_from_entity(memory: &KnowledgeEntity) -> KnowledgeCryst
     }
 }
 
+#[cfg(test)]
 fn sort_crystal_rows(rows: &mut [KnowledgeCrystalRow], request: &KnowledgeCrystalListRequest) {
     rows.sort_by(|left, right| {
         crystal_key_match_rank(left, request)
@@ -10343,6 +6083,7 @@ fn validate_knowledge_crystal_source_weight(weight: &Value) -> Result<()> {
     }
 }
 
+#[cfg(test)]
 fn crystal_key_match_rank(row: &KnowledgeCrystalRow, request: &KnowledgeCrystalListRequest) -> u8 {
     let Some(key) = &request.key_match else {
         return 0;
@@ -10359,6 +6100,7 @@ fn crystal_key_match_rank(row: &KnowledgeCrystalRow, request: &KnowledgeCrystalL
     }
 }
 
+#[cfg(test)]
 fn compare_crystal_ids(
     left: &KnowledgeCrystalRow,
     right: &KnowledgeCrystalRow,
@@ -10368,26 +6110,29 @@ fn compare_crystal_ids(
         .then_with(|| left.node_id.cmp(&right.node_id))
 }
 
+#[cfg(test)]
 fn compare_crystal_importance_created_at(
     left: &KnowledgeCrystalRow,
     right: &KnowledgeCrystalRow,
 ) -> std::cmp::Ordering {
     compare_optional_values_desc(left.importance.as_ref(), right.importance.as_ref()).then_with(
         || {
-            compare_skill_memory_created_at(
+            compare_knowledge_created_at(
                 &left.created_at,
                 &right.created_at,
-                KnowledgeSkillMemoryListOrder::CreatedAtDesc,
+                KnowledgeCreatedAtOrder::Descending,
             )
         },
     )
 }
 
+#[cfg(test)]
 struct KnowledgeCrystalCommunityAccumulator {
     row: KnowledgeCrystalCommunityRow,
     source_memory_ids: BTreeSet<u64>,
 }
 
+#[cfg(test)]
 fn knowledge_crystal_communities_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -10487,6 +6232,7 @@ fn knowledge_crystal_communities_for(
     })
 }
 
+#[cfg(test)]
 fn knowledge_crystal_communities_via_query_runtime(
     db: &Database,
     request: &KnowledgeCrystalCommunityListRequest,
@@ -10531,6 +6277,7 @@ fn knowledge_crystal_communities_via_query_runtime(
     })
 }
 
+#[cfg(test)]
 fn empty_crystal_community_output(graph_commit_epoch: u64) -> KnowledgeCrystalCommunityListOutput {
     KnowledgeCrystalCommunityListOutput {
         graph_commit_epoch,
@@ -10541,6 +6288,7 @@ fn empty_crystal_community_output(graph_commit_epoch: u64) -> KnowledgeCrystalCo
     }
 }
 
+#[cfg(test)]
 fn validate_knowledge_crystal_community_list_request(
     request: &KnowledgeCrystalCommunityListRequest,
 ) -> Result<()> {
@@ -10565,6 +6313,7 @@ fn validate_knowledge_crystal_community_list_request(
     Ok(())
 }
 
+#[cfg(test)]
 fn knowledge_crystal_community_query_predicate(
     request: &KnowledgeCrystalCommunityListRequest,
     parameters: &mut BTreeMap<String, Value>,
@@ -10583,6 +6332,7 @@ fn knowledge_crystal_community_query_predicate(
     }
 }
 
+#[cfg(test)]
 fn crystal_community_filter_values(
     request: &KnowledgeCrystalCommunityListRequest,
 ) -> Option<BTreeSet<Value>> {
@@ -10594,12 +6344,14 @@ fn crystal_community_filter_values(
     }
 }
 
+#[cfg(test)]
 fn crystal_community_scope_matches(community_id: &Value, filter: &Option<BTreeSet<Value>>) -> bool {
     filter
         .as_ref()
         .is_none_or(|community_ids| community_ids.contains(community_id))
 }
 
+#[cfg(test)]
 fn knowledge_crystal_community_row(
     crystal: &NodeRecord,
     community_id: Value,
@@ -10627,6 +6379,7 @@ fn knowledge_crystal_community_row(
     }
 }
 
+#[cfg(test)]
 fn knowledge_crystal_community_row_from_query(row: &Row) -> Result<KnowledgeCrystalCommunityRow> {
     let crystal_memory_id = row
         .get("crystal_memory_id")
@@ -10687,6 +6440,7 @@ fn knowledge_crystal_community_row_from_query(row: &Row) -> Result<KnowledgeCrys
     })
 }
 
+#[cfg(test)]
 fn sort_crystal_community_rows(
     rows: &mut [KnowledgeCrystalCommunityRow],
     order: KnowledgeCrystalCommunityListOrder,
@@ -10705,6 +6459,7 @@ fn sort_crystal_community_rows(
     });
 }
 
+#[cfg(test)]
 fn compare_crystal_community_ids(
     left: &KnowledgeCrystalCommunityRow,
     right: &KnowledgeCrystalCommunityRow,
@@ -10715,6 +6470,7 @@ fn compare_crystal_community_ids(
         .then_with(|| left.crystal_node_id.cmp(&right.crystal_node_id))
 }
 
+#[cfg(test)]
 fn knowledge_crystal_source_visibility_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -10803,6 +6559,7 @@ fn knowledge_crystal_source_visibility_for(
     })
 }
 
+#[cfg(test)]
 fn knowledge_crystal_source_visibility_via_query_runtime(
     db: &Database,
     request: &KnowledgeCrystalSourceVisibilityRequest,
@@ -10841,6 +6598,7 @@ fn knowledge_crystal_source_visibility_via_query_runtime(
     })
 }
 
+#[cfg(test)]
 fn empty_crystal_source_visibility_output(
     graph_commit_epoch: u64,
 ) -> KnowledgeCrystalSourceVisibilityOutput {
@@ -10852,6 +6610,7 @@ fn empty_crystal_source_visibility_output(
     }
 }
 
+#[cfg(test)]
 fn validate_knowledge_crystal_source_visibility_request(
     request: &KnowledgeCrystalSourceVisibilityRequest,
 ) -> Result<()> {
@@ -10872,6 +6631,7 @@ fn validate_knowledge_crystal_source_visibility_request(
     Ok(())
 }
 
+#[cfg(test)]
 fn knowledge_crystal_source_visibility_row(
     crystal: &NodeRecord,
     source_memory: &NodeRecord,
@@ -10906,6 +6666,7 @@ fn knowledge_crystal_source_visibility_row(
     }
 }
 
+#[cfg(test)]
 fn knowledge_crystal_source_visibility_row_from_query(
     row: &Row,
 ) -> Result<KnowledgeCrystalSourceVisibilityRow> {
@@ -10972,6 +6733,7 @@ fn knowledge_crystal_source_visibility_row_from_query(
     })
 }
 
+#[cfg(test)]
 fn sort_crystal_source_visibility_rows(rows: &mut [KnowledgeCrystalSourceVisibilityRow]) {
     rows.sort_by(|left, right| {
         left.community_id
@@ -10985,431 +6747,14 @@ fn sort_crystal_source_visibility_rows(rows: &mut [KnowledgeCrystalSourceVisibil
     });
 }
 
-fn knowledge_synthesized_source_coverage_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeSynthesizedSourceCoverageRequest,
-) -> Result<KnowledgeSynthesizedSourceCoverageOutput> {
-    validate_knowledge_synthesized_source_coverage_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Ok(empty_synthesized_source_coverage_output(graph_commit_epoch));
-    };
-    let Some(synthesized_from_type_id) = catalog.rel_type_id("SYNTHESIZED_FROM") else {
-        return Ok(empty_synthesized_source_coverage_output(graph_commit_epoch));
-    };
-    let source_memory_ids = request
-        .source_memory_ids
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let mut rows = Vec::new();
-
-    store.try_visit_nodes_owned(Some(memory_label_id), |crystal| {
-        if boolean_property(&crystal, "is_crystal") != Some(true) {
-            return Ok(crate::store::GraphScanControl::Continue);
-        }
-        let mut matched_source_memory_ids = BTreeSet::new();
-        store.try_visit_adjacent_relationships_owned(
-            crystal.id,
-            Some(synthesized_from_type_id),
-            AdjacencyDirection::Outgoing,
-            |source_rel| {
-                if let Some(source_memory_id) = store
-                    .node_owned(source_rel.target)?
-                    .filter(|node| node.labels.contains(&memory_label_id))
-                    .as_ref()
-                    .and_then(node_external_id)
-                    .filter(|source_memory_id| source_memory_ids.contains(source_memory_id))
-                {
-                    matched_source_memory_ids.insert(source_memory_id);
-                }
-                Ok(crate::store::GraphScanControl::Continue)
-            },
-        )?;
-        if matched_source_memory_ids.len() == request.required_covered_count {
-            rows.push(knowledge_synthesized_source_coverage_row(
-                &crystal,
-                matched_source_memory_ids.into_iter().collect(),
-            ));
-        }
-        Ok(crate::store::GraphScanControl::Continue)
-    })?;
-
-    sort_synthesized_source_coverage_rows(&mut rows);
-    let matched_candidate_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-
-    Ok(KnowledgeSynthesizedSourceCoverageOutput {
-        graph_commit_epoch,
-        rows,
-        matched_candidate_count,
-        returned_count,
-    })
-}
-
-fn knowledge_synthesized_source_coverage_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeSynthesizedSourceCoverageRequest,
-) -> Result<KnowledgeSynthesizedSourceCoverageOutput> {
-    validate_knowledge_synthesized_source_coverage_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let mut parameters = BTreeMap::from([
-        (
-            "source_memory_ids".to_string(),
-            Value::List(
-                request
-                    .source_memory_ids
-                    .iter()
-                    .cloned()
-                    .map(Value::String)
-                    .collect(),
-            ),
-        ),
-        (
-            "required_covered_count".to_string(),
-            Value::Int(i64::try_from(request.required_covered_count).unwrap_or(i64::MAX)),
-        ),
-    ]);
-    let limit_clause = if request.limit > 0 {
-        parameters.insert(
-            "limit".to_string(),
-            Value::Int(i64::try_from(request.limit).unwrap_or(i64::MAX)),
-        );
-        " LIMIT $limit"
-    } else {
-        ""
-    };
-    let query = format!(
-        "MATCH (c:Memory)-[:SYNTHESIZED_FROM]->(s:Memory) \
-         WHERE c.is_crystal = true AND s.id IN $source_memory_ids \
-         WITH c.id AS crystal_memory_id, id(c) AS crystal_node_id, \
-         c.crystal_title AS crystal_title, COUNT(DISTINCT s.id) AS covered_count, \
-         COLLECT(DISTINCT s.id) AS matched_source_memory_ids \
-         WHERE covered_count = $required_covered_count \
-         RETURN crystal_memory_id, crystal_node_id, crystal_title, covered_count, \
-         matched_source_memory_ids \
-         ORDER BY crystal_memory_id ASC, crystal_node_id ASC{limit_clause}"
-    );
-    let output = db.query_read_only_with_params_bounded(
-        &query,
-        &parameters,
-        request.limit.gt(&0).then_some(request.limit),
-    )?;
-    let rows = output
-        .rows
-        .iter()
-        .map(knowledge_synthesized_source_coverage_row_from_query)
-        .collect::<Result<Vec<_>>>()?;
-    let returned_count = rows.len();
-
-    let matched_candidate_count = if request.limit > 0 {
-        let count_output = db.query_read_only_with_params_bounded(
-            "MATCH (c:Memory)-[:SYNTHESIZED_FROM]->(s:Memory) \
-             WHERE c.is_crystal = true AND s.id IN $source_memory_ids \
-             WITH c.id AS crystal_memory_id, COUNT(DISTINCT s.id) AS covered_count \
-             WHERE covered_count = $required_covered_count \
-             RETURN crystal_memory_id",
-            &parameters,
-            None,
-        )?;
-        count_output.rows.len()
-    } else {
-        returned_count
-    };
-
-    Ok(KnowledgeSynthesizedSourceCoverageOutput {
-        graph_commit_epoch,
-        rows,
-        matched_candidate_count,
-        returned_count,
-    })
-}
-
-fn empty_synthesized_source_coverage_output(
-    graph_commit_epoch: u64,
-) -> KnowledgeSynthesizedSourceCoverageOutput {
-    KnowledgeSynthesizedSourceCoverageOutput {
-        graph_commit_epoch,
-        rows: Vec::new(),
-        matched_candidate_count: 0,
-        returned_count: 0,
-    }
-}
-
-fn validate_knowledge_synthesized_source_coverage_request(
-    request: &KnowledgeSynthesizedSourceCoverageRequest,
-) -> Result<()> {
-    if request.source_memory_ids.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge synthesized source coverage requires non-empty source memory ids"
-                .to_string(),
-        ));
-    }
-    if request.source_memory_ids.iter().any(String::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge synthesized source coverage requires non-empty source memory ids"
-                .to_string(),
-        ));
-    }
-    if request.required_covered_count == 0 {
-        return Err(SkeinError::Semantic(
-            "knowledge synthesized source coverage requires positive covered count".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn knowledge_synthesized_source_coverage_row(
-    crystal: &NodeRecord,
-    matched_source_memory_ids: Vec<String>,
-) -> KnowledgeSynthesizedSourceCoverageRow {
-    KnowledgeSynthesizedSourceCoverageRow {
-        crystal_memory_id: node_external_id(crystal),
-        crystal_node_id: crystal.id.0,
-        crystal_title: string_property(crystal, "crystal_title"),
-        covered_count: matched_source_memory_ids.len(),
-        matched_source_memory_ids,
-    }
-}
-
-fn knowledge_synthesized_source_coverage_row_from_query(
-    row: &Row,
-) -> Result<KnowledgeSynthesizedSourceCoverageRow> {
-    let crystal_node_id = row
-        .get("crystal_node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge synthesized source coverage row is missing crystal_node_id".to_string(),
-            )
-        })?;
-    let covered_count = row
-        .get("covered_count")
-        .and_then(value_to_non_negative_usize)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge synthesized source coverage row is missing covered_count".to_string(),
-            )
-        })?;
-    let matched_source_memory_ids = row
-        .get("matched_source_memory_ids")
-        .and_then(value_to_string_list)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge synthesized source coverage row is missing source ids".to_string(),
-            )
-        })?;
-
-    Ok(KnowledgeSynthesizedSourceCoverageRow {
-        crystal_memory_id: optional_string_cell(row, "crystal_memory_id"),
-        crystal_node_id,
-        crystal_title: optional_string_cell(row, "crystal_title"),
-        covered_count,
-        matched_source_memory_ids,
-    })
-}
-
-fn sort_synthesized_source_coverage_rows(rows: &mut [KnowledgeSynthesizedSourceCoverageRow]) {
-    rows.sort_by(|left, right| {
-        left.crystal_memory_id
-            .cmp(&right.crystal_memory_id)
-            .then_with(|| left.crystal_node_id.cmp(&right.crystal_node_id))
-    });
-}
-
-fn knowledge_synthesized_source_ids_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeSynthesizedSourceIdsRequest,
-) -> Result<KnowledgeSynthesizedSourceIdsOutput> {
-    validate_knowledge_synthesized_source_ids_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let mut rows = Vec::new();
-    let mut found_crystal_count = 0;
-    let mut missing_crystal_count = 0;
-
-    for crystal_memory_id in &request.crystal_memory_ids {
-        let Some(crystal) =
-            try_seed_node_by_label_and_external_id(catalog, store, "Memory", crystal_memory_id)?
-        else {
-            missing_crystal_count += 1;
-            rows.push(KnowledgeSynthesizedSourceIdsRow {
-                crystal_memory_id: crystal_memory_id.clone(),
-                crystal_node_id: None,
-                found_crystal: false,
-                source_memory_ids: Vec::new(),
-            });
-            continue;
-        };
-
-        found_crystal_count += 1;
-        rows.push(KnowledgeSynthesizedSourceIdsRow {
-            crystal_memory_id: crystal_memory_id.clone(),
-            crystal_node_id: Some(crystal.id.0),
-            found_crystal: true,
-            source_memory_ids: synthesized_source_ids_for_crystal(catalog, store, &crystal)?,
-        });
-    }
-
-    let returned_count = rows.len();
-    Ok(KnowledgeSynthesizedSourceIdsOutput {
-        graph_commit_epoch,
-        rows,
-        found_crystal_count,
-        missing_crystal_count,
-        returned_count,
-    })
-}
-
-fn knowledge_synthesized_source_ids_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeSynthesizedSourceIdsRequest,
-) -> Result<KnowledgeSynthesizedSourceIdsOutput> {
-    validate_knowledge_synthesized_source_ids_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let parameters = BTreeMap::from([(
-        "crystal_memory_ids".to_string(),
-        Value::List(
-            request
-                .crystal_memory_ids
-                .iter()
-                .cloned()
-                .map(Value::String)
-                .collect(),
-        ),
-    )]);
-    let crystal_output = db.query_read_only_with_params_bounded(
-        "MATCH (c:Memory) \
-         WHERE c.id IN $crystal_memory_ids \
-         RETURN c.id AS crystal_memory_id, id(c) AS crystal_node_id",
-        &parameters,
-        Some(request.crystal_memory_ids.len()),
-    )?;
-    let mut crystal_node_ids = BTreeMap::new();
-    for row in &crystal_output.rows {
-        let Some(crystal_memory_id) = optional_string_cell(row, "crystal_memory_id") else {
-            continue;
-        };
-        let Some(crystal_node_id) = row
-            .get("crystal_node_id")
-            .and_then(value_to_non_negative_u64)
-        else {
-            continue;
-        };
-        crystal_node_ids.insert(crystal_memory_id, crystal_node_id);
-    }
-
-    let source_output = db.query_read_only_with_params_bounded(
-        "MATCH (c:Memory)-[:SYNTHESIZED_FROM]->(s:Memory) \
-         WHERE c.id IN $crystal_memory_ids \
-         WITH c.id AS crystal_memory_id, COLLECT(DISTINCT s.id) AS source_memory_ids \
-         RETURN crystal_memory_id, source_memory_ids",
-        &parameters,
-        None,
-    )?;
-    let mut source_ids_by_crystal = BTreeMap::new();
-    for row in &source_output.rows {
-        let Some(crystal_memory_id) = optional_string_cell(row, "crystal_memory_id") else {
-            continue;
-        };
-        let Some(source_memory_ids) = row.get("source_memory_ids").and_then(value_to_string_list)
-        else {
-            continue;
-        };
-        source_ids_by_crystal.insert(crystal_memory_id, source_memory_ids);
-    }
-
-    let mut rows = Vec::with_capacity(request.crystal_memory_ids.len());
-    let mut found_crystal_count = 0;
-    let mut missing_crystal_count = 0;
-    for crystal_memory_id in &request.crystal_memory_ids {
-        if let Some(crystal_node_id) = crystal_node_ids.get(crystal_memory_id) {
-            found_crystal_count += 1;
-            rows.push(KnowledgeSynthesizedSourceIdsRow {
-                crystal_memory_id: crystal_memory_id.clone(),
-                crystal_node_id: Some(*crystal_node_id),
-                found_crystal: true,
-                source_memory_ids: source_ids_by_crystal
-                    .get(crystal_memory_id)
-                    .cloned()
-                    .unwrap_or_default(),
-            });
-        } else {
-            missing_crystal_count += 1;
-            rows.push(KnowledgeSynthesizedSourceIdsRow {
-                crystal_memory_id: crystal_memory_id.clone(),
-                crystal_node_id: None,
-                found_crystal: false,
-                source_memory_ids: Vec::new(),
-            });
-        }
-    }
-
-    let returned_count = rows.len();
-    Ok(KnowledgeSynthesizedSourceIdsOutput {
-        graph_commit_epoch,
-        rows,
-        found_crystal_count,
-        missing_crystal_count,
-        returned_count,
-    })
-}
-
-fn validate_knowledge_synthesized_source_ids_request(
-    request: &KnowledgeSynthesizedSourceIdsRequest,
-) -> Result<()> {
-    if request.crystal_memory_ids.is_empty()
-        || request.crystal_memory_ids.iter().any(String::is_empty)
-    {
-        return Err(SkeinError::Semantic(
-            "knowledge synthesized source ids requires non-empty crystal memory ids".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn synthesized_source_ids_for_crystal(
-    catalog: &Catalog,
-    store: &GraphStore,
-    crystal: &NodeRecord,
-) -> Result<Vec<String>> {
-    let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Ok(Vec::new());
-    };
-    let Some(synthesized_from_type_id) = catalog.rel_type_id("SYNTHESIZED_FROM") else {
-        return Ok(Vec::new());
-    };
-
-    let mut source_ids = BTreeSet::new();
-    store.try_visit_adjacent_relationships_owned(
-        crystal.id,
-        Some(synthesized_from_type_id),
-        AdjacencyDirection::Outgoing,
-        |relationship| {
-            if let Some(source_id) = store
-                .node_owned(relationship.target)?
-                .filter(|node| node.labels.contains(&memory_label_id))
-                .as_ref()
-                .and_then(node_external_id)
-            {
-                source_ids.insert(source_id);
-            }
-            Ok(crate::store::GraphScanControl::Continue)
-        },
-    )?;
-    Ok(source_ids.into_iter().collect())
-}
-
+#[cfg(test)]
 enum KnowledgeScopedEntityMatch {
     Found(KnowledgeEntity),
     Missing,
     FilteredOut,
 }
 
+#[cfg(test)]
 fn knowledge_scoped_entity_match(
     catalog: &Catalog,
     store: &GraphStore,
@@ -11915,6 +7260,7 @@ fn knowledge_entity_upsert_update_properties(
         .collect()
 }
 
+#[cfg(test)]
 fn knowledge_property_batch_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -11930,6 +7276,7 @@ fn knowledge_property_batch_for(
     )
 }
 
+#[cfg(test)]
 fn knowledge_scoped_property_batch_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -11992,6 +7339,7 @@ fn knowledge_scoped_property_batch_for(
     })
 }
 
+#[cfg(test)]
 fn dedup_property_names(property_names: &[String]) -> Vec<String> {
     let mut seen = BTreeSet::new();
     property_names
@@ -12001,6 +7349,7 @@ fn dedup_property_names(property_names: &[String]) -> Vec<String> {
         .collect()
 }
 
+#[cfg(test)]
 fn empty_property_projection(property_names: &[String]) -> BTreeMap<String, Option<Value>> {
     property_names
         .iter()
@@ -12009,6 +7358,7 @@ fn empty_property_projection(property_names: &[String]) -> BTreeMap<String, Opti
         .collect()
 }
 
+#[cfg(test)]
 fn project_node_properties(
     node: &NodeRecord,
     property_names: &[String],
@@ -12023,6 +7373,7 @@ fn project_node_properties(
         .collect()
 }
 
+#[cfg(test)]
 fn project_knowledge_entity_properties(
     entity: &KnowledgeEntity,
     property_names: &[String],
@@ -13989,100 +9340,6 @@ fn knowledge_source_parsed_entity_create(
     }
 }
 
-fn knowledge_source_latest_version_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeSourceVersionLookupRequest,
-) -> Result<KnowledgeSourceVersionLookupOutput> {
-    validate_knowledge_source_version_lookup(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let mut parameters = BTreeMap::from([(
-        "space_id".to_string(),
-        Value::String(request.space_id.clone()),
-    )]);
-    let lookup_predicate = if let Some(original_name) = &request.original_name {
-        parameters.insert(
-            "original_name".to_string(),
-            Value::String(original_name.clone()),
-        );
-        "s.original_name = $original_name"
-    } else if let Some(sha256) = &request.sha256 {
-        parameters.insert("sha256".to_string(), Value::String(sha256.clone()));
-        "s.sha256 = $sha256"
-    } else {
-        return Err(SkeinError::Semantic(
-            "knowledge source version lookup requires exactly one original name or sha256"
-                .to_string(),
-        ));
-    };
-
-    let query = format!(
-        "MATCH (s:Source) \
-         WHERE s.space_id = $space_id AND {lookup_predicate} \
-         OPTIONAL MATCH (m:Memory)-[r:SOURCED_FROM]->(s) \
-         WITH s, count(r) AS sourced_memory_count \
-         RETURN s.id AS source_id, id(s) AS node_id, s.original_name AS original_name, \
-         s.title AS title, s.summary AS summary, s.source_type AS source_type, \
-         s.lifecycle_state AS lifecycle_state, s.space_id AS raw_space_id, \
-         s.parsed_path AS parsed_path, s.file_path AS file_path, s.mime_type AS mime_type, \
-         s.source_url AS source_url, s.metadata AS metadata, s.memory_count AS memory_count, \
-         s.chunk_count AS chunk_count, s.size_bytes AS size_bytes, \
-         COALESCE(s.version, 1) AS version, \
-         s.created_at AS created_at, s.updated_at AS updated_at, \
-         sourced_memory_count AS sourced_memory_count \
-         ORDER BY version DESC, source_id ASC, node_id ASC LIMIT 1"
-    );
-    let output = db.query_read_only_with_params_bounded(&query, &parameters, Some(1))?;
-    let row = output
-        .rows
-        .first()
-        .map(knowledge_source_list_row_from_query)
-        .transpose()?;
-
-    Ok(KnowledgeSourceVersionLookupOutput {
-        graph_commit_epoch,
-        found: row.is_some(),
-        source_id: row.as_ref().and_then(|row| row.source_id.clone()),
-        node_id: row.as_ref().map(|row| row.node_id),
-        version: row.as_ref().map(|row| row.version),
-        row,
-    })
-}
-
-fn validate_knowledge_source_version_lookup(
-    request: &KnowledgeSourceVersionLookupRequest,
-) -> Result<()> {
-    let has_original_name = match request.original_name.as_deref() {
-        Some("") => {
-            return Err(SkeinError::Semantic(
-                "knowledge source version lookup requires a non-empty original name".to_string(),
-            ));
-        }
-        Some(_) => true,
-        None => false,
-    };
-    let has_sha256 = match request.sha256.as_deref() {
-        Some("") => {
-            return Err(SkeinError::Semantic(
-                "knowledge source version lookup requires a non-empty sha256".to_string(),
-            ));
-        }
-        Some(_) => true,
-        None => false,
-    };
-    if has_original_name == has_sha256 {
-        return Err(SkeinError::Semantic(
-            "knowledge source version lookup requires exactly one original name or sha256"
-                .to_string(),
-        ));
-    }
-    if request.space_id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge source version lookup requires a non-empty space id".to_string(),
-        ));
-    }
-    Ok(())
-}
-
 fn create_knowledge_source_revision_batch_for(
     db: &mut Database,
     request: &KnowledgeSourceRevisionCreateBatchRequest,
@@ -14393,294 +9650,7 @@ fn validate_knowledge_source_label_delete(delete: &KnowledgeSourceLabelDelete) -
     Ok(())
 }
 
-fn knowledge_source_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeSourceRequest,
-) -> Result<KnowledgeSourceOutput> {
-    if request.source_id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge source read requires a non-empty source id".to_string(),
-        ));
-    }
-    let mut parameters = BTreeMap::new();
-    parameters.insert(
-        "source_id".to_string(),
-        Value::String(request.source_id.clone()),
-    );
-    let detail = db.query_read_only_with_params_bounded(
-        "MATCH (s:Source {id: $source_id}) \
-         RETURN id(s) AS node_id, s.id AS source_id, s.original_name AS original_name, \
-         s.title AS title, s.source_type AS source_type, s.lifecycle_state AS lifecycle_state, \
-         s.space_id AS space_id, s.parsed_path AS parsed_path, s.file_path AS file_path, \
-         s.mime_type AS mime_type, s.memory_count AS memory_count, s.chunk_count AS chunk_count, \
-         s.size_bytes AS size_bytes, s.created_at AS created_at, s.updated_at AS updated_at \
-         LIMIT 1",
-        &parameters,
-        Some(1),
-    )?;
-    let Some(detail_row) = detail.rows.first() else {
-        return Ok(KnowledgeSourceOutput {
-            graph_commit_epoch: db.store.commit_epoch(),
-            found: false,
-            row: None,
-        });
-    };
-    let count = db.query_read_only_with_params_bounded(
-        "MATCH (:Memory)-[r:SOURCED_FROM]->(:Source {id: $source_id}) \
-         RETURN count(r) AS sourced_memory_count",
-        &parameters,
-        Some(1),
-    )?;
-    let sourced_memory_count = count
-        .rows
-        .first()
-        .and_then(|row| row.get("sourced_memory_count"))
-        .and_then(value_to_non_negative_usize)
-        .unwrap_or(0);
-    let row = knowledge_source_row_from_query(detail_row, sourced_memory_count)?;
-    Ok(KnowledgeSourceOutput {
-        graph_commit_epoch: db.store.commit_epoch(),
-        found: true,
-        row: Some(row),
-    })
-}
-
-fn knowledge_source_row_from_query(
-    row: &Row,
-    sourced_memory_count: usize,
-) -> Result<KnowledgeSourceRow> {
-    let node_id = row
-        .get("node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution("knowledge source row is missing node_id".to_string())
-        })?;
-    let normalized_space_id = optional_string_cell(row, "space_id")
-        .filter(|space_id| !space_id.is_empty())
-        .unwrap_or_else(|| "default".to_string());
-    Ok(KnowledgeSourceRow {
-        source_id: optional_string_cell(row, "source_id"),
-        node_id,
-        original_name: optional_string_cell(row, "original_name"),
-        title: optional_string_cell(row, "title"),
-        source_type: optional_string_cell(row, "source_type"),
-        lifecycle_state: optional_string_cell(row, "lifecycle_state"),
-        normalized_space_id,
-        parsed_path: optional_string_cell(row, "parsed_path"),
-        file_path: optional_string_cell(row, "file_path"),
-        mime_type: optional_string_cell(row, "mime_type"),
-        memory_count: optional_i64_cell(row, "memory_count"),
-        chunk_count: optional_i64_cell(row, "chunk_count"),
-        size_bytes: optional_i64_cell(row, "size_bytes"),
-        created_at: optional_value_cell(row, "created_at"),
-        updated_at: optional_value_cell(row, "updated_at"),
-        sourced_memory_count,
-    })
-}
-
-fn knowledge_source_memory_row_from_query(row: &Row) -> Result<KnowledgeSourceMemoryRow> {
-    let node_id = row
-        .get("node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution("knowledge source memory row is missing node_id".to_string())
-        })?;
-    let relationship_id = row
-        .get("relationship_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge source memory row is missing relationship_id".to_string(),
-            )
-        })?;
-    Ok(KnowledgeSourceMemoryRow {
-        memory_id: optional_string_cell(row, "memory_id"),
-        node_id,
-        relationship_id,
-        title: optional_string_cell(row, "title"),
-        content: optional_string_cell(row, "content"),
-        unit_type: optional_string_cell(row, "unit_type"),
-        confidence: optional_value_cell(row, "confidence"),
-        chunk_index: optional_i64_cell(row, "chunk_index"),
-        chunk_range: optional_string_cell(row, "chunk_range"),
-        source_version: optional_string_cell(row, "source_version"),
-        created_at: optional_value_cell(row, "created_at"),
-    })
-}
-
-fn knowledge_source_memory_projected_row_from_query(
-    row: &Row,
-    memory_property_names: &[String],
-    relationship_property_names: &[String],
-) -> Result<KnowledgeSourceMemoryProjectedRow> {
-    let memory_node_id = row
-        .get("memory_node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge source projected memory row is missing memory_node_id".to_string(),
-            )
-        })?;
-    let relationship_id = row
-        .get("relationship_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge source projected memory row is missing relationship_id".to_string(),
-            )
-        })?;
-    let memory_properties = row.get("memory").and_then(value_to_map).ok_or_else(|| {
-        SkeinError::Execution(
-            "knowledge source projected memory row is missing memory map".to_string(),
-        )
-    })?;
-    let relationship_properties =
-        row.get("relationship")
-            .and_then(value_to_map)
-            .ok_or_else(|| {
-                SkeinError::Execution(
-                    "knowledge source projected memory row is missing relationship map".to_string(),
-                )
-            })?;
-    Ok(KnowledgeSourceMemoryProjectedRow {
-        memory_id: optional_string_cell(row, "memory_id"),
-        memory_node_id,
-        relationship_id,
-        memory_properties: projected_properties(memory_properties, memory_property_names),
-        relationship_properties: projected_properties(
-            relationship_properties,
-            relationship_property_names,
-        ),
-        normalized_space_id: optional_string_cell(row, "normalized_space_id")
-            .unwrap_or_else(|| "default".to_string()),
-    })
-}
-
-fn knowledge_source_ids_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeSourceIdListRequest,
-) -> Result<KnowledgeSourceIdListOutput> {
-    validate_knowledge_source_id_list_request(request)?;
-
-    let mut parameters = BTreeMap::new();
-    let predicate = knowledge_source_id_list_predicate(request, &mut parameters);
-    let count_query = format!("MATCH (s:Source){predicate} RETURN count(s) AS count");
-    let count_output =
-        db.query_read_only_with_params_bounded(&count_query, &parameters, Some(1))?;
-    let matched_count = count_output
-        .rows
-        .first()
-        .and_then(|row| row.get("count"))
-        .and_then(value_to_non_negative_usize)
-        .unwrap_or(0);
-
-    let limit_clause = if request.limit > 0 {
-        parameters.insert(
-            "limit".to_string(),
-            Value::Int(i64::try_from(request.limit).unwrap_or(i64::MAX)),
-        );
-        " LIMIT $limit"
-    } else {
-        ""
-    };
-    let list_query = format!(
-        "MATCH (s:Source){predicate} RETURN s.id AS source_id ORDER BY source_id ASC{limit_clause}"
-    );
-    let list_output = db.query_read_only_with_params_bounded(&list_query, &parameters, None)?;
-    let source_ids = list_output
-        .rows
-        .iter()
-        .filter_map(|row| row.get("source_id").map(value_to_external_id))
-        .filter(|source_id| !source_id.is_empty())
-        .collect::<Vec<_>>();
-    let returned_count = source_ids.len();
-
-    Ok(KnowledgeSourceIdListOutput {
-        graph_commit_epoch: db.store.commit_epoch(),
-        source_ids,
-        matched_count,
-        returned_count,
-    })
-}
-
-fn knowledge_source_count_via_query_runtime(db: &Database) -> KnowledgeSourceCountOutput {
-    let graph_commit_epoch = db.store.commit_epoch();
-    let Ok(output) = db.query_read_only_with_params_bounded(
-        "MATCH (s:Source) RETURN count(s) AS count",
-        &BTreeMap::new(),
-        Some(1),
-    ) else {
-        return KnowledgeSourceCountOutput {
-            graph_commit_epoch,
-            count: 0,
-        };
-    };
-    let count = output
-        .rows
-        .first()
-        .and_then(|row| row.get("count"))
-        .and_then(value_to_non_negative_usize)
-        .unwrap_or(0);
-    KnowledgeSourceCountOutput {
-        graph_commit_epoch,
-        count,
-    }
-}
-
-fn validate_knowledge_source_id_list_request(request: &KnowledgeSourceIdListRequest) -> Result<()> {
-    if request
-        .lifecycle_state
-        .as_deref()
-        .is_some_and(str::is_empty)
-    {
-        return Err(SkeinError::Semantic(
-            "knowledge source id list requires a non-empty lifecycle state".to_string(),
-        ));
-    }
-    if request
-        .normalized_space_id
-        .as_deref()
-        .is_some_and(str::is_empty)
-    {
-        return Err(SkeinError::Semantic(
-            "knowledge source id list requires a non-empty normalized space id".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn knowledge_source_id_list_predicate(
-    request: &KnowledgeSourceIdListRequest,
-    parameters: &mut BTreeMap<String, Value>,
-) -> String {
-    let mut predicates = Vec::new();
-    if let Some(lifecycle_state) = &request.lifecycle_state {
-        parameters.insert(
-            "lifecycle_state".to_string(),
-            Value::String(lifecycle_state.clone()),
-        );
-        predicates.push("s.lifecycle_state = $lifecycle_state");
-    }
-    if let Some(normalized_space_id) = &request.normalized_space_id {
-        parameters.insert(
-            "normalized_space_id".to_string(),
-            Value::String(normalized_space_id.clone()),
-        );
-        if normalized_space_id == "default" {
-            predicates.push(
-                "(s.space_id IS NULL OR s.space_id = '' OR s.space_id = $normalized_space_id)",
-            );
-        } else {
-            predicates.push("s.space_id = $normalized_space_id");
-        }
-    }
-    if predicates.is_empty() {
-        String::new()
-    } else {
-        format!(" WHERE {}", predicates.join(" AND "))
-    }
-}
-
+#[cfg(test)]
 fn value_to_non_negative_usize(value: &Value) -> Option<usize> {
     match value {
         Value::Int(value) if *value >= 0 => usize::try_from(*value).ok(),
@@ -14688,6 +9658,7 @@ fn value_to_non_negative_usize(value: &Value) -> Option<usize> {
     }
 }
 
+#[cfg(test)]
 fn value_to_non_negative_u64(value: &Value) -> Option<u64> {
     match value {
         Value::Int(value) if *value >= 0 => u64::try_from(*value).ok(),
@@ -14695,13 +9666,7 @@ fn value_to_non_negative_u64(value: &Value) -> Option<u64> {
     }
 }
 
-fn value_to_i64(value: &Value) -> Option<i64> {
-    match value {
-        Value::Int(value) => Some(*value),
-        _ => None,
-    }
-}
-
+#[cfg(test)]
 fn value_to_bool(value: &Value) -> Option<bool> {
     match value {
         Value::Bool(value) => Some(*value),
@@ -14709,6 +9674,7 @@ fn value_to_bool(value: &Value) -> Option<bool> {
     }
 }
 
+#[cfg(test)]
 fn optional_external_id_value(value: &Value) -> Option<String> {
     if matches!(value, Value::Null) {
         return None;
@@ -14717,10 +9683,12 @@ fn optional_external_id_value(value: &Value) -> Option<String> {
     (!external_id.is_empty()).then_some(external_id)
 }
 
+#[cfg(test)]
 fn optional_non_null_value(value: &Value) -> Option<Value> {
     (!matches!(value, Value::Null)).then(|| value.clone())
 }
 
+#[cfg(test)]
 fn value_to_map(value: &Value) -> Option<&BTreeMap<String, Value>> {
     match value {
         Value::Map(values) => Some(values),
@@ -14728,6 +9696,7 @@ fn value_to_map(value: &Value) -> Option<&BTreeMap<String, Value>> {
     }
 }
 
+#[cfg(test)]
 fn value_to_string_list(value: &Value) -> Option<Vec<String>> {
     let Value::List(values) = value else {
         return None;
@@ -14742,6 +9711,7 @@ fn value_to_string_list(value: &Value) -> Option<Vec<String>> {
     )
 }
 
+#[cfg(test)]
 fn optional_string_cell(row: &Row, column: &str) -> Option<String> {
     row.get(column)
         .filter(|value| !matches!(value, Value::Null))
@@ -14749,1240 +9719,11 @@ fn optional_string_cell(row: &Row, column: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn optional_raw_string_cell(row: &Row, column: &str) -> Option<String> {
-    match row.get(column) {
-        Some(Value::String(value)) => Some(value.clone()),
-        _ => None,
-    }
-}
-
-fn optional_i64_cell(row: &Row, column: &str) -> Option<i64> {
-    match row.get(column) {
-        Some(Value::Int(value)) => Some(*value),
-        _ => None,
-    }
-}
-
+#[cfg(test)]
 fn optional_value_cell(row: &Row, column: &str) -> Option<Value> {
     row.get(column)
         .filter(|value| !matches!(value, Value::Null))
         .cloned()
-}
-
-fn knowledge_sources_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeSourceListRequest,
-) -> Result<KnowledgeSourceListOutput> {
-    validate_knowledge_source_list_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let mut parameters = BTreeMap::new();
-    let predicate = knowledge_source_list_predicate(request, &mut parameters);
-
-    let count_query = format!("MATCH (s:Source){predicate} RETURN count(s) AS matched_count");
-    let count = db.query_read_only_with_params_bounded(&count_query, &parameters, Some(1))?;
-    let matched_count = count
-        .rows
-        .first()
-        .and_then(|row| row.get("matched_count"))
-        .and_then(value_to_non_negative_usize)
-        .unwrap_or(0);
-
-    let matched_source_ids =
-        knowledge_source_matched_ids_via_query_runtime(db, request, &predicate, &parameters)?;
-    let page_clause = knowledge_source_page_clause(request, &mut parameters);
-    let order_clause = knowledge_source_list_order_clause(request.order);
-    let list_query = format!(
-        "MATCH (s:Source){predicate} \
-         OPTIONAL MATCH (m:Memory)-[r:SOURCED_FROM]->(s) \
-         WITH s, count(r) AS sourced_memory_count \
-         RETURN s.id AS source_id, id(s) AS node_id, s.original_name AS original_name, \
-         s.title AS title, s.summary AS summary, s.source_type AS source_type, \
-         s.lifecycle_state AS lifecycle_state, s.space_id AS raw_space_id, \
-         s.parsed_path AS parsed_path, s.file_path AS file_path, s.mime_type AS mime_type, \
-         s.source_url AS source_url, s.metadata AS metadata, s.memory_count AS memory_count, \
-         s.chunk_count AS chunk_count, s.size_bytes AS size_bytes, s.version AS version, \
-         s.created_at AS created_at, s.updated_at AS updated_at, \
-         sourced_memory_count AS sourced_memory_count \
-         ORDER BY {order_clause}{page_clause}"
-    );
-    let list = db.query_read_only_with_params_bounded(
-        &list_query,
-        &parameters,
-        request.limit.gt(&0).then_some(request.limit),
-    )?;
-    let rows = list
-        .rows
-        .iter()
-        .map(knowledge_source_list_row_from_query)
-        .collect::<Result<Vec<_>>>()?;
-    let returned_count = rows.len();
-    let missing_source_ids = request
-        .source_ids
-        .iter()
-        .filter(|source_id| !matched_source_ids.contains(*source_id))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    Ok(KnowledgeSourceListOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        returned_count,
-        missing_source_ids,
-    })
-}
-
-fn knowledge_source_projected_list_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeSourceProjectedListRequest,
-) -> Result<KnowledgeSourceProjectedListOutput> {
-    validate_knowledge_source_projected_list_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let mut parameters = BTreeMap::new();
-    let predicate = knowledge_source_list_predicate(&request.list, &mut parameters);
-
-    let count_query = format!("MATCH (s:Source){predicate} RETURN count(s) AS matched_count");
-    let count = db.query_read_only_with_params_bounded(&count_query, &parameters, Some(1))?;
-    let matched_count = count
-        .rows
-        .first()
-        .and_then(|row| row.get("matched_count"))
-        .and_then(value_to_non_negative_usize)
-        .unwrap_or(0);
-
-    let matched_source_ids =
-        knowledge_source_matched_ids_via_query_runtime(db, &request.list, &predicate, &parameters)?;
-    let page_clause = knowledge_source_page_clause(&request.list, &mut parameters);
-    let order_clause = knowledge_source_list_order_clause(request.list.order);
-    let list_query = format!(
-        "MATCH (s:Source){predicate} \
-         RETURN s.id AS source_id, id(s) AS node_id, s AS source, s.space_id AS raw_space_id, \
-         s.memory_count AS memory_count, s.created_at AS created_at \
-         ORDER BY {order_clause}{page_clause}"
-    );
-    let list = db.query_read_only_with_params_bounded(
-        &list_query,
-        &parameters,
-        request.list.limit.gt(&0).then_some(request.list.limit),
-    )?;
-    let rows = list
-        .rows
-        .iter()
-        .map(|row| knowledge_source_projected_row_from_query(row, &request.property_names))
-        .collect::<Result<Vec<_>>>()?;
-    let returned_count = rows.len();
-    let missing_source_ids = request
-        .list
-        .source_ids
-        .iter()
-        .filter(|source_id| !matched_source_ids.contains(*source_id))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    Ok(KnowledgeSourceProjectedListOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        returned_count,
-        missing_source_ids,
-    })
-}
-
-fn knowledge_source_matched_ids_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeSourceListRequest,
-    predicate: &str,
-    parameters: &BTreeMap<String, Value>,
-) -> Result<BTreeSet<String>> {
-    if request.source_ids.is_empty() {
-        return Ok(BTreeSet::new());
-    }
-    let query = format!("MATCH (s:Source){predicate} RETURN s.id AS source_id");
-    let output =
-        db.query_read_only_with_params_bounded(&query, parameters, Some(request.source_ids.len()))?;
-    Ok(output
-        .rows
-        .iter()
-        .filter_map(|row| row.get("source_id").map(value_to_external_id))
-        .filter(|source_id| !source_id.is_empty())
-        .collect())
-}
-
-fn knowledge_source_list_predicate(
-    request: &KnowledgeSourceListRequest,
-    parameters: &mut BTreeMap<String, Value>,
-) -> String {
-    let mut predicates = Vec::new();
-    if !request.source_ids.is_empty() {
-        parameters.insert(
-            "source_ids".to_string(),
-            Value::List(
-                request
-                    .source_ids
-                    .iter()
-                    .cloned()
-                    .map(Value::String)
-                    .collect(),
-            ),
-        );
-        predicates.push("s.id IN $source_ids");
-    }
-    if let Some(after_source_id) = &request.after_source_id {
-        parameters.insert(
-            "after_source_id".to_string(),
-            Value::String(after_source_id.clone()),
-        );
-        predicates.push("s.id > $after_source_id");
-    }
-    if !request.lifecycle_states.is_empty() {
-        parameters.insert(
-            "lifecycle_states".to_string(),
-            Value::List(
-                request
-                    .lifecycle_states
-                    .iter()
-                    .cloned()
-                    .map(Value::String)
-                    .collect(),
-            ),
-        );
-        predicates.push("s.lifecycle_state IN $lifecycle_states");
-    }
-    if let Some(normalized_space_id) = &request.normalized_space_id {
-        parameters.insert(
-            "normalized_space_id".to_string(),
-            Value::String(normalized_space_id.clone()),
-        );
-        if normalized_space_id == "default" {
-            predicates.push(
-                "(s.space_id IS NULL OR s.space_id = '' OR s.space_id = $normalized_space_id)",
-            );
-        } else {
-            predicates.push("s.space_id = $normalized_space_id");
-        }
-    }
-    if let Some(source_type) = &request.source_type {
-        parameters.insert(
-            "source_type".to_string(),
-            Value::String(source_type.clone()),
-        );
-        predicates.push("s.source_type = $source_type");
-    }
-    if let Some(marker) = &request.metadata_contains {
-        parameters.insert(
-            "metadata_contains".to_string(),
-            Value::String(marker.clone()),
-        );
-        predicates.push("s.metadata CONTAINS $metadata_contains");
-    }
-    if request.parsed_path_required {
-        predicates.push("s.parsed_path IS NOT NULL AND s.parsed_path <> ''");
-    }
-
-    if predicates.is_empty() {
-        String::new()
-    } else {
-        format!(" WHERE {}", predicates.join(" AND "))
-    }
-}
-
-fn knowledge_source_page_clause(
-    request: &KnowledgeSourceListRequest,
-    parameters: &mut BTreeMap<String, Value>,
-) -> String {
-    let mut clause = String::new();
-    if request.offset > 0 {
-        parameters.insert(
-            "offset".to_string(),
-            Value::Int(i64::try_from(request.offset).unwrap_or(i64::MAX)),
-        );
-        clause.push_str(" SKIP $offset");
-    }
-    if request.limit > 0 {
-        parameters.insert(
-            "limit".to_string(),
-            Value::Int(i64::try_from(request.limit).unwrap_or(i64::MAX)),
-        );
-        clause.push_str(" LIMIT $limit");
-    }
-    clause
-}
-
-fn knowledge_source_list_order_clause(order: KnowledgeSourceListOrder) -> &'static str {
-    match order {
-        KnowledgeSourceListOrder::SourceIdAsc => "source_id ASC, node_id ASC",
-        KnowledgeSourceListOrder::MemoryCountDesc => {
-            "memory_count DESC, source_id ASC, node_id ASC"
-        }
-        KnowledgeSourceListOrder::CreatedAtDesc => "created_at DESC, source_id ASC, node_id ASC",
-    }
-}
-
-fn knowledge_source_list_row_from_query(row: &Row) -> Result<KnowledgeSourceListRow> {
-    let node_id = row
-        .get("node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution("knowledge source list row is missing node_id".to_string())
-        })?;
-    let original_name = optional_string_cell(row, "original_name");
-    let title = optional_string_cell(row, "title");
-    let file_path = optional_string_cell(row, "file_path");
-    let source_type = optional_string_cell(row, "source_type");
-    let display_name = original_name
-        .clone()
-        .or_else(|| title.clone())
-        .or_else(|| file_path.clone())
-        .or_else(|| source_type.clone())
-        .unwrap_or_else(|| "Source".to_string());
-    Ok(KnowledgeSourceListRow {
-        source_id: optional_string_cell(row, "source_id"),
-        node_id,
-        display_name,
-        original_name,
-        title,
-        summary: optional_string_cell(row, "summary"),
-        source_type,
-        lifecycle_state: optional_string_cell(row, "lifecycle_state"),
-        raw_space_id: optional_string_cell(row, "raw_space_id"),
-        normalized_space_id: optional_string_cell(row, "raw_space_id")
-            .unwrap_or_else(|| "default".to_string()),
-        parsed_path: optional_string_cell(row, "parsed_path"),
-        file_path,
-        mime_type: optional_string_cell(row, "mime_type"),
-        source_url: optional_string_cell(row, "source_url"),
-        metadata: optional_value_cell(row, "metadata"),
-        memory_count: optional_i64_cell(row, "memory_count").unwrap_or(0),
-        chunk_count: optional_i64_cell(row, "chunk_count").unwrap_or(0),
-        size_bytes: optional_i64_cell(row, "size_bytes").unwrap_or(0),
-        version: optional_i64_cell(row, "version").unwrap_or(1),
-        created_at: optional_value_cell(row, "created_at"),
-        updated_at: optional_value_cell(row, "updated_at"),
-        sourced_memory_count: row
-            .get("sourced_memory_count")
-            .and_then(value_to_non_negative_usize)
-            .unwrap_or(0),
-    })
-}
-
-fn knowledge_source_projected_row_from_query(
-    row: &Row,
-    property_names: &[String],
-) -> Result<KnowledgeSourceProjectedRow> {
-    let node_id = row
-        .get("node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution("knowledge source projected row is missing node_id".to_string())
-        })?;
-    let source = row.get("source").and_then(value_to_map).ok_or_else(|| {
-        SkeinError::Execution("knowledge source projected row is missing source map".to_string())
-    })?;
-    Ok(KnowledgeSourceProjectedRow {
-        source_id: optional_string_cell(row, "source_id"),
-        node_id,
-        properties: projected_properties(source, property_names),
-        normalized_space_id: optional_string_cell(row, "raw_space_id")
-            .unwrap_or_else(|| "default".to_string()),
-    })
-}
-
-fn validate_knowledge_source_projected_list_request(
-    request: &KnowledgeSourceProjectedListRequest,
-) -> Result<()> {
-    validate_knowledge_source_list_request(&request.list)?;
-    if request.property_names.iter().any(String::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge source projected list requires non-empty property names".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_knowledge_source_list_request(request: &KnowledgeSourceListRequest) -> Result<()> {
-    if request
-        .source_ids
-        .iter()
-        .any(|source_id| source_id.is_empty())
-    {
-        return Err(SkeinError::Semantic(
-            "knowledge source list requires non-empty source ids".to_string(),
-        ));
-    }
-    if request
-        .after_source_id
-        .as_deref()
-        .is_some_and(str::is_empty)
-    {
-        return Err(SkeinError::Semantic(
-            "knowledge source list requires a non-empty after source id".to_string(),
-        ));
-    }
-    if request
-        .lifecycle_states
-        .iter()
-        .any(|state| state.is_empty())
-    {
-        return Err(SkeinError::Semantic(
-            "knowledge source list requires non-empty lifecycle states".to_string(),
-        ));
-    }
-    if request
-        .normalized_space_id
-        .as_deref()
-        .is_some_and(str::is_empty)
-    {
-        return Err(SkeinError::Semantic(
-            "knowledge source list requires a non-empty normalized space id".to_string(),
-        ));
-    }
-    if request.source_type.as_deref().is_some_and(str::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge source list requires a non-empty source type".to_string(),
-        ));
-    }
-    if request
-        .metadata_contains
-        .as_deref()
-        .is_some_and(str::is_empty)
-    {
-        return Err(SkeinError::Semantic(
-            "knowledge source list requires a non-empty metadata marker".to_string(),
-        ));
-    }
-    if request.source_ids.is_empty()
-        && request.after_source_id.is_none()
-        && request.lifecycle_states.is_empty()
-        && request.normalized_space_id.is_none()
-        && request.source_type.is_none()
-        && request.metadata_contains.is_none()
-        && !request.parsed_path_required
-        && request.limit == 0
-    {
-        return Err(SkeinError::Semantic(
-            "knowledge source list requires a bounded limit or a filter".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn source_matches_list_request_direct(
-    node: &NodeRecord,
-    request: &KnowledgeSourceListRequest,
-    requested_ids: &BTreeSet<String>,
-) -> bool {
-    let source_id = node_external_id(node);
-    if !requested_ids.is_empty()
-        && !source_id
-            .as_ref()
-            .is_some_and(|source_id| requested_ids.contains(source_id))
-    {
-        return false;
-    }
-    if request.after_source_id.as_ref().is_some_and(|after| {
-        source_id
-            .as_ref()
-            .is_none_or(|source_id| source_id.as_str() <= after.as_str())
-    }) {
-        return false;
-    }
-    if !request.lifecycle_states.is_empty()
-        && !string_property(node, "lifecycle_state")
-            .as_ref()
-            .is_some_and(|state| request.lifecycle_states.contains(state))
-    {
-        return false;
-    }
-    if request
-        .normalized_space_id
-        .as_ref()
-        .is_some_and(|space_id| normalized_node_space_id(node) != *space_id)
-    {
-        return false;
-    }
-    if request.source_type.as_ref().is_some_and(|source_type| {
-        string_property(node, "source_type").as_ref() != Some(source_type)
-    }) {
-        return false;
-    }
-    if request.parsed_path_required && string_property(node, "parsed_path").is_none() {
-        return false;
-    }
-    if request
-        .metadata_contains
-        .as_ref()
-        .is_some_and(|marker| !source_metadata_contains_direct(node, marker))
-    {
-        return false;
-    }
-    true
-}
-
-fn source_metadata_contains_direct(node: &NodeRecord, marker: &str) -> bool {
-    node.properties
-        .get("metadata")
-        .map(value_to_external_id)
-        .is_some_and(|metadata| metadata.contains(marker))
-}
-
-fn knowledge_source_projected_list_direct(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeSourceProjectedListRequest,
-) -> Result<KnowledgeSourceProjectedListOutput> {
-    validate_knowledge_source_projected_list_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(label_id) = catalog.label_id("Source") else {
-        return Ok(KnowledgeSourceProjectedListOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-            missing_source_ids: request.list.source_ids.clone(),
-        });
-    };
-
-    let requested_ids = request
-        .list
-        .source_ids
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let mut matched_source_ids = BTreeSet::new();
-    let mut rows = Vec::new();
-    store.visit_nodes_owned(Some(label_id), |node| {
-        if source_matches_list_request_direct(&node, &request.list, &requested_ids) {
-            if let Some(source_id) = node_external_id(&node) {
-                matched_source_ids.insert(source_id);
-            }
-            rows.push((
-                knowledge_source_projected_row_direct(&node, &request.property_names),
-                integer_property(&node, "memory_count").unwrap_or(0),
-                node.properties.get("created_at").cloned(),
-            ));
-        }
-        crate::store::GraphScanControl::Continue
-    })?;
-
-    sort_source_projected_rows_direct(&mut rows, request.list.order);
-    let matched_count = rows.len();
-    if request.list.offset > 0 {
-        rows = rows.into_iter().skip(request.list.offset).collect();
-    }
-    if request.list.limit > 0 {
-        rows.truncate(request.list.limit);
-    }
-    let returned_count = rows.len();
-    let rows = rows
-        .into_iter()
-        .map(|(row, _memory_count, _created_at)| row)
-        .collect::<Vec<_>>();
-    let missing_source_ids = request
-        .list
-        .source_ids
-        .iter()
-        .filter(|source_id| !matched_source_ids.contains(*source_id))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    Ok(KnowledgeSourceProjectedListOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        returned_count,
-        missing_source_ids,
-    })
-}
-
-fn knowledge_source_projected_row_direct(
-    node: &NodeRecord,
-    property_names: &[String],
-) -> KnowledgeSourceProjectedRow {
-    KnowledgeSourceProjectedRow {
-        source_id: node_external_id(node),
-        node_id: node.id.0,
-        properties: projected_properties(&node.properties, property_names),
-        normalized_space_id: normalized_node_space_id(node),
-    }
-}
-
-fn sort_source_projected_rows_direct(
-    rows: &mut [(KnowledgeSourceProjectedRow, i64, Option<Value>)],
-    order: KnowledgeSourceListOrder,
-) {
-    rows.sort_by(|left, right| match order {
-        KnowledgeSourceListOrder::SourceIdAsc => compare_source_projected_ids(&left.0, &right.0),
-        KnowledgeSourceListOrder::MemoryCountDesc => right
-            .1
-            .cmp(&left.1)
-            .then_with(|| compare_source_projected_ids(&left.0, &right.0)),
-        KnowledgeSourceListOrder::CreatedAtDesc => compare_skill_memory_created_at(
-            &left.2,
-            &right.2,
-            KnowledgeSkillMemoryListOrder::CreatedAtDesc,
-        )
-        .then_with(|| compare_source_projected_ids(&left.0, &right.0)),
-    });
-}
-
-fn compare_source_projected_ids(
-    left: &KnowledgeSourceProjectedRow,
-    right: &KnowledgeSourceProjectedRow,
-) -> std::cmp::Ordering {
-    left.source_id
-        .cmp(&right.source_id)
-        .then_with(|| left.node_id.cmp(&right.node_id))
-}
-
-fn knowledge_source_memories_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeSourceMemoryListRequest,
-) -> Result<KnowledgeSourceMemoryListOutput> {
-    validate_knowledge_source_memory_list_request(request)?;
-
-    let mut parameters = BTreeMap::new();
-    parameters.insert(
-        "source_id".to_string(),
-        Value::String(request.source_id.clone()),
-    );
-    let source = db.query_read_only_with_params_bounded(
-        "MATCH (s:Source {id: $source_id}) RETURN id(s) AS source_node_id LIMIT 1",
-        &parameters,
-        Some(1),
-    )?;
-    let Some(source_node_id) = source
-        .rows
-        .first()
-        .and_then(|row| row.get("source_node_id"))
-        .and_then(value_to_non_negative_u64)
-    else {
-        return Ok(KnowledgeSourceMemoryListOutput {
-            graph_commit_epoch: db.store.commit_epoch(),
-            source_id: request.source_id.clone(),
-            source_node_id: None,
-            found: false,
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-        });
-    };
-
-    let count = db.query_read_only_with_params_bounded(
-        "MATCH (m:Memory)-[r:SOURCED_FROM]->(:Source {id: $source_id}) \
-         RETURN count(r) AS matched_count",
-        &parameters,
-        Some(1),
-    )?;
-    let matched_count = count
-        .rows
-        .first()
-        .and_then(|row| row.get("matched_count"))
-        .and_then(value_to_non_negative_usize)
-        .unwrap_or(0);
-
-    let limit_clause = if request.limit > 0 {
-        parameters.insert(
-            "limit".to_string(),
-            Value::Int(i64::try_from(request.limit).unwrap_or(i64::MAX)),
-        );
-        " LIMIT $limit"
-    } else {
-        ""
-    };
-    let list_query = format!(
-        "MATCH (m:Memory)-[r:SOURCED_FROM]->(:Source {{id: $source_id}}) \
-         RETURN m.id AS memory_id, id(m) AS node_id, id(r) AS relationship_id, \
-         m.title AS title, m.content AS content, m.unit_type AS unit_type, \
-         m.confidence AS confidence, r.chunk_index AS chunk_index, \
-         r.chunk_range AS chunk_range, r.source_version AS source_version, \
-         r.created_at AS created_at \
-         ORDER BY chunk_index ASC, memory_id ASC, relationship_id ASC{limit_clause}"
-    );
-    let list = db.query_read_only_with_params_bounded(&list_query, &parameters, None)?;
-    let rows = list
-        .rows
-        .iter()
-        .map(knowledge_source_memory_row_from_query)
-        .collect::<Result<Vec<_>>>()?;
-    let returned_count = rows.len();
-
-    Ok(KnowledgeSourceMemoryListOutput {
-        graph_commit_epoch: db.store.commit_epoch(),
-        source_id: request.source_id.clone(),
-        source_node_id: Some(source_node_id),
-        found: true,
-        rows,
-        matched_count,
-        returned_count,
-    })
-}
-
-fn knowledge_source_memory_projected_list_for(
-    db: &Database,
-    request: &KnowledgeSourceMemoryProjectedListRequest,
-) -> Result<KnowledgeSourceMemoryProjectedListOutput> {
-    validate_knowledge_source_memory_projected_list_request(request)?;
-
-    let mut parameters = BTreeMap::new();
-    parameters.insert(
-        "source_id".to_string(),
-        Value::String(request.list.source_id.clone()),
-    );
-    let source = db.query_read_only_with_params_bounded(
-        "MATCH (s:Source {id: $source_id}) RETURN id(s) AS source_node_id LIMIT 1",
-        &parameters,
-        Some(1),
-    )?;
-    let Some(source_node_id) = source
-        .rows
-        .first()
-        .and_then(|row| row.get("source_node_id"))
-        .and_then(value_to_non_negative_u64)
-    else {
-        return Ok(KnowledgeSourceMemoryProjectedListOutput {
-            graph_commit_epoch: db.store.commit_epoch(),
-            source_id: request.list.source_id.clone(),
-            source_node_id: None,
-            found: false,
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-        });
-    };
-
-    let count = db.query_read_only_with_params_bounded(
-        "MATCH (m:Memory)-[r:SOURCED_FROM]->(:Source {id: $source_id}) \
-         RETURN count(r) AS matched_count",
-        &parameters,
-        Some(1),
-    )?;
-    let matched_count = count
-        .rows
-        .first()
-        .and_then(|row| row.get("matched_count"))
-        .and_then(value_to_non_negative_usize)
-        .unwrap_or(0);
-
-    let limit_clause = if request.list.limit > 0 {
-        parameters.insert(
-            "limit".to_string(),
-            Value::Int(i64::try_from(request.list.limit).unwrap_or(i64::MAX)),
-        );
-        " LIMIT $limit"
-    } else {
-        ""
-    };
-    let list_query = format!(
-        "MATCH (m:Memory)-[r:SOURCED_FROM]->(:Source {{id: $source_id}}) \
-         RETURN m.id AS memory_id, id(m) AS memory_node_id, id(r) AS relationship_id, \
-         m AS memory, r AS relationship, m.space_id AS normalized_space_id, \
-         r.chunk_index AS chunk_index \
-         ORDER BY chunk_index ASC, memory_id ASC, relationship_id ASC{limit_clause}"
-    );
-    let list = db.query_read_only_with_params_bounded(&list_query, &parameters, None)?;
-    let rows = list
-        .rows
-        .iter()
-        .map(|row| {
-            knowledge_source_memory_projected_row_from_query(
-                row,
-                &request.memory_property_names,
-                &request.relationship_property_names,
-            )
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let returned_count = rows.len();
-    Ok(KnowledgeSourceMemoryProjectedListOutput {
-        graph_commit_epoch: db.store.commit_epoch(),
-        source_id: request.list.source_id.clone(),
-        source_node_id: Some(source_node_id),
-        found: true,
-        rows,
-        matched_count,
-        returned_count,
-    })
-}
-
-fn validate_knowledge_source_memory_list_request(
-    request: &KnowledgeSourceMemoryListRequest,
-) -> Result<()> {
-    if request.source_id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge source memory read requires a non-empty source id".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_knowledge_source_memory_projected_list_request(
-    request: &KnowledgeSourceMemoryProjectedListRequest,
-) -> Result<()> {
-    validate_knowledge_source_memory_list_request(&request.list)?;
-    if request.memory_property_names.iter().any(String::is_empty)
-        || request
-            .relationship_property_names
-            .iter()
-            .any(String::is_empty)
-    {
-        return Err(SkeinError::Semantic(
-            "knowledge source memory projected read requires non-empty property names".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn knowledge_source_memory_projected_list_direct(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeSourceMemoryProjectedListRequest,
-) -> Result<KnowledgeSourceMemoryProjectedListOutput> {
-    validate_knowledge_source_memory_projected_list_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(source) =
-        try_seed_node_by_label_and_external_id(catalog, store, "Source", &request.list.source_id)?
-    else {
-        return Ok(KnowledgeSourceMemoryProjectedListOutput {
-            graph_commit_epoch,
-            source_id: request.list.source_id.clone(),
-            source_node_id: None,
-            found: false,
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-        });
-    };
-
-    let mut rows = source_memory_projected_rows_direct(
-        catalog,
-        store,
-        source.id,
-        &request.memory_property_names,
-        &request.relationship_property_names,
-    )?;
-    let matched_count = rows.len();
-    if request.list.limit > 0 {
-        rows.truncate(request.list.limit);
-    }
-    let returned_count = rows.len();
-    Ok(KnowledgeSourceMemoryProjectedListOutput {
-        graph_commit_epoch,
-        source_id: request.list.source_id.clone(),
-        source_node_id: Some(source.id.0),
-        found: true,
-        rows,
-        matched_count,
-        returned_count,
-    })
-}
-
-fn source_memory_projected_rows_direct(
-    catalog: &Catalog,
-    store: &GraphStore,
-    source_node_id: NodeId,
-    memory_property_names: &[String],
-    relationship_property_names: &[String],
-) -> Result<Vec<KnowledgeSourceMemoryProjectedRow>> {
-    let Some(rel_type_id) = catalog.rel_type_id("SOURCED_FROM") else {
-        return Ok(Vec::new());
-    };
-    let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Ok(Vec::new());
-    };
-    let mut rows = Vec::new();
-    store.try_visit_adjacent_relationships_owned(
-        source_node_id,
-        Some(rel_type_id),
-        AdjacencyDirection::Incoming,
-        |relationship| {
-            if let Some(memory) = store
-                .node_owned(relationship.source)?
-                .filter(|memory| memory.labels.contains(&memory_label_id))
-            {
-                rows.push((
-                    source_memory_projected_row_direct(
-                        &memory,
-                        &relationship,
-                        memory_property_names,
-                        relationship_property_names,
-                    ),
-                    relationship_integer_property(&relationship, "chunk_index"),
-                ));
-            }
-            Ok(crate::store::GraphScanControl::Continue)
-        },
-    )?;
-    rows.sort_by(|left, right| {
-        left.1
-            .cmp(&right.1)
-            .then_with(|| left.0.memory_id.cmp(&right.0.memory_id))
-            .then_with(|| left.0.relationship_id.cmp(&right.0.relationship_id))
-    });
-    Ok(rows.into_iter().map(|(row, _chunk_index)| row).collect())
-}
-
-fn source_memory_projected_row_direct(
-    memory: &NodeRecord,
-    relationship: &RelRecord,
-    memory_property_names: &[String],
-    relationship_property_names: &[String],
-) -> KnowledgeSourceMemoryProjectedRow {
-    KnowledgeSourceMemoryProjectedRow {
-        memory_id: node_external_id(memory),
-        memory_node_id: memory.id.0,
-        relationship_id: relationship.id.0,
-        memory_properties: projected_properties(&memory.properties, memory_property_names),
-        relationship_properties: projected_properties(
-            &relationship.properties,
-            relationship_property_names,
-        ),
-        normalized_space_id: normalized_node_space_id(memory),
-    }
-}
-
-fn knowledge_source_sourced_memory_count_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeSourceSourcedMemoryCountRequest,
-) -> Result<KnowledgeSourceSourcedMemoryCountOutput> {
-    if request.source_id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge source sourced-memory count requires a non-empty source id".to_string(),
-        ));
-    }
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(source) =
-        try_seed_node_by_label_and_external_id(catalog, store, "Source", &request.source_id)?
-    else {
-        return Ok(KnowledgeSourceSourcedMemoryCountOutput {
-            graph_commit_epoch,
-            source_id: request.source_id.clone(),
-            source_node_id: None,
-            found: false,
-            sourced_memory_count: 0,
-        });
-    };
-
-    Ok(KnowledgeSourceSourcedMemoryCountOutput {
-        graph_commit_epoch,
-        source_id: request.source_id.clone(),
-        source_node_id: Some(source.id.0),
-        found: true,
-        sourced_memory_count: source_sourced_memory_count(catalog, store, source.id)?,
-    })
-}
-
-fn knowledge_source_sourced_memory_count_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeSourceSourcedMemoryCountRequest,
-) -> Result<KnowledgeSourceSourcedMemoryCountOutput> {
-    if request.source_id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge source sourced-memory count requires a non-empty source id".to_string(),
-        ));
-    }
-
-    let mut parameters = BTreeMap::new();
-    parameters.insert(
-        "source_id".to_string(),
-        Value::String(request.source_id.clone()),
-    );
-    let source = db.query_read_only_with_params_bounded(
-        "MATCH (s:Source {id: $source_id}) RETURN id(s) AS source_node_id LIMIT 1",
-        &parameters,
-        Some(1),
-    )?;
-    let Some(source_node_id) = source
-        .rows
-        .first()
-        .and_then(|row| row.get("source_node_id"))
-        .and_then(value_to_non_negative_u64)
-    else {
-        return Ok(KnowledgeSourceSourcedMemoryCountOutput {
-            graph_commit_epoch: db.store.commit_epoch(),
-            source_id: request.source_id.clone(),
-            source_node_id: None,
-            found: false,
-            sourced_memory_count: 0,
-        });
-    };
-
-    let count = db.query_read_only_with_params_bounded(
-        "MATCH (:Memory)-[r:SOURCED_FROM]->(:Source {id: $source_id}) \
-         RETURN count(r) AS sourced_memory_count",
-        &parameters,
-        Some(1),
-    )?;
-    let sourced_memory_count = count
-        .rows
-        .first()
-        .and_then(|row| row.get("sourced_memory_count"))
-        .and_then(value_to_non_negative_usize)
-        .unwrap_or(0);
-
-    Ok(KnowledgeSourceSourcedMemoryCountOutput {
-        graph_commit_epoch: db.store.commit_epoch(),
-        source_id: request.source_id.clone(),
-        source_node_id: Some(source_node_id),
-        found: true,
-        sourced_memory_count,
-    })
-}
-
-fn knowledge_memory_source_attributions_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeMemorySourceAttributionRequest,
-) -> Result<KnowledgeMemorySourceAttributionOutput> {
-    validate_knowledge_memory_source_attribution_request(request)?;
-    let mut parameters = BTreeMap::new();
-    let mut predicates = Vec::new();
-    if !request.memory_ids.is_empty() {
-        predicates.push("m.id IN $memory_ids");
-        parameters.insert(
-            "memory_ids".to_string(),
-            Value::List(
-                request
-                    .memory_ids
-                    .iter()
-                    .cloned()
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .map(Value::String)
-                    .collect(),
-            ),
-        );
-    }
-    if !request.source_ids.is_empty() {
-        predicates.push("s.id IN $source_ids");
-        parameters.insert(
-            "source_ids".to_string(),
-            Value::List(
-                request
-                    .source_ids
-                    .iter()
-                    .cloned()
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .map(Value::String)
-                    .collect(),
-            ),
-        );
-    }
-    let predicate = if predicates.is_empty() {
-        String::new()
-    } else {
-        format!(" WHERE {}", predicates.join(" AND "))
-    };
-    let query = format!(
-        "MATCH (m:Memory)-[r:SOURCED_FROM]->(s:Source){predicate} \
-         RETURN m.id AS memory_id, id(m) AS memory_node_id, \
-         s.id AS source_id, id(s) AS source_node_id, id(r) AS relationship_id, \
-         m.title AS memory_title, m.content AS memory_content, \
-         m.unit_type AS memory_unit_type, m.importance AS memory_importance, \
-         m.pagerank_score AS memory_pagerank_score, m.community_id AS memory_community_id, \
-         m.space_id AS memory_space_id, m.source AS memory_source, \
-         m.created_at AS memory_created_at, m.updated_at AS memory_updated_at, \
-         m.event_start AS memory_event_start, m.event_end AS memory_event_end, \
-         s.original_name AS source_original_name, s.source_type AS source_type, \
-         s.file_path AS source_file_path, r.chunk_index AS chunk_index, \
-         r.chunk_range AS chunk_range, r.source_version AS source_version, \
-         r.created_at AS relationship_created_at \
-         ORDER BY source_id ASC, memory_id ASC, chunk_index ASC, relationship_id ASC"
-    );
-    let output = db.query_read_only_with_params_bounded(&query, &parameters, None)?;
-    let mut seen_memory_ids = BTreeSet::new();
-    let mut seen_source_ids = BTreeSet::new();
-    let mut rows = Vec::with_capacity(output.rows.len());
-    for row in &output.rows {
-        let attribution = memory_source_attribution_row_from_query(row)?;
-        if let Some(memory_id) = &attribution.memory_id {
-            seen_memory_ids.insert(memory_id.clone());
-        }
-        if let Some(source_id) = &attribution.source_id {
-            seen_source_ids.insert(source_id.clone());
-        }
-        rows.push(attribution);
-    }
-    let matched_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-    let missing_memory_ids = request
-        .memory_ids
-        .iter()
-        .filter(|memory_id| !seen_memory_ids.contains(*memory_id))
-        .cloned()
-        .collect::<Vec<_>>();
-    let missing_source_ids = request
-        .source_ids
-        .iter()
-        .filter(|source_id| !seen_source_ids.contains(*source_id))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    Ok(KnowledgeMemorySourceAttributionOutput {
-        graph_commit_epoch: db.store.commit_epoch(),
-        rows,
-        matched_count,
-        returned_count,
-        missing_memory_ids,
-        missing_source_ids,
-    })
-}
-
-fn validate_knowledge_memory_source_attribution_request(
-    request: &KnowledgeMemorySourceAttributionRequest,
-) -> Result<()> {
-    if request
-        .memory_ids
-        .iter()
-        .any(|memory_id| memory_id.is_empty())
-    {
-        return Err(SkeinError::Semantic(
-            "knowledge memory source attribution read requires non-empty memory ids".to_string(),
-        ));
-    }
-    if request
-        .source_ids
-        .iter()
-        .any(|source_id| source_id.is_empty())
-    {
-        return Err(SkeinError::Semantic(
-            "knowledge memory source attribution read requires non-empty source ids".to_string(),
-        ));
-    }
-    if request.memory_ids.is_empty() && request.source_ids.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge memory source attribution read requires memory ids or source ids"
-                .to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn memory_source_attribution_row_from_query(
-    row: &Row,
-) -> Result<KnowledgeMemorySourceAttributionRow> {
-    let memory_node_id = row
-        .get("memory_node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge memory source attribution row is missing memory_node_id".to_string(),
-            )
-        })?;
-    let source_node_id = row
-        .get("source_node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge memory source attribution row is missing source_node_id".to_string(),
-            )
-        })?;
-    let relationship_id = row
-        .get("relationship_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge memory source attribution row is missing relationship_id".to_string(),
-            )
-        })?;
-    let memory_title = optional_string_cell(row, "memory_title");
-    let memory_content = optional_string_cell(row, "memory_content");
-    let memory_content_preview = memory_content
-        .as_ref()
-        .map(|content| truncate_chars(content, 200));
-    let memory_display_title = memory_title
-        .clone()
-        .or_else(|| {
-            memory_content
-                .as_ref()
-                .map(|content| truncate_chars(content, 60))
-        })
-        .unwrap_or_default();
-
-    Ok(KnowledgeMemorySourceAttributionRow {
-        memory_id: optional_string_cell(row, "memory_id"),
-        memory_node_id,
-        source_id: optional_string_cell(row, "source_id"),
-        source_node_id,
-        relationship_id,
-        memory_display_title,
-        memory_title,
-        memory_content_preview,
-        memory_content,
-        memory_unit_type: optional_string_cell(row, "memory_unit_type"),
-        memory_importance: row
-            .get("memory_importance")
-            .and_then(optional_non_null_value),
-        memory_pagerank_score: row
-            .get("memory_pagerank_score")
-            .and_then(optional_non_null_value),
-        memory_community_id: row
-            .get("memory_community_id")
-            .and_then(optional_non_null_value),
-        memory_raw_space_id: optional_string_cell(row, "memory_space_id"),
-        memory_normalized_space_id: optional_string_cell(row, "memory_space_id")
-            .unwrap_or_else(|| "default".to_string()),
-        memory_source: optional_string_cell(row, "memory_source"),
-        memory_created_at: row
-            .get("memory_created_at")
-            .and_then(optional_non_null_value),
-        memory_updated_at: row
-            .get("memory_updated_at")
-            .and_then(optional_non_null_value),
-        memory_event_start: row
-            .get("memory_event_start")
-            .and_then(optional_non_null_value),
-        memory_event_end: row
-            .get("memory_event_end")
-            .and_then(optional_non_null_value),
-        source_original_name: optional_string_cell(row, "source_original_name"),
-        source_type: optional_string_cell(row, "source_type"),
-        source_file_path: optional_string_cell(row, "source_file_path"),
-        chunk_index: optional_i64_cell(row, "chunk_index"),
-        chunk_range: optional_string_cell(row, "chunk_range"),
-        source_version: optional_string_cell(row, "source_version"),
-        relationship_created_at: row
-            .get("relationship_created_at")
-            .and_then(optional_non_null_value),
-    })
-}
-
-fn relationship_integer_property(relationship: &RelRecord, property: &str) -> Option<i64> {
-    match relationship.properties.get(property) {
-        Some(Value::Int(value)) => Some(*value),
-        _ => None,
-    }
-}
-
-fn source_sourced_memory_count(
-    catalog: &Catalog,
-    store: &GraphStore,
-    source_node_id: NodeId,
-) -> Result<usize> {
-    let Some(rel_type_id) = catalog.rel_type_id("SOURCED_FROM") else {
-        return Ok(0);
-    };
-    let memory_label_id = catalog.label_id("Memory");
-    let mut count = 0usize;
-    store.try_visit_adjacent_relationships_owned(
-        source_node_id,
-        Some(rel_type_id),
-        AdjacencyDirection::Incoming,
-        |relationship| {
-            if match memory_label_id {
-                Some(label_id) => store
-                    .node_owned(relationship.source)?
-                    .is_some_and(|node| node.labels.contains(&label_id)),
-                None => true,
-            } {
-                count = count.saturating_add(1);
-            }
-            Ok(crate::store::GraphScanControl::Continue)
-        },
-    )?;
-    Ok(count)
 }
 
 fn string_property(node: &NodeRecord, property: &str) -> Option<String> {
@@ -15992,6 +9733,7 @@ fn string_property(node: &NodeRecord, property: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+#[cfg(test)]
 fn string_property_value(properties: &BTreeMap<String, Value>, property: &str) -> Option<String> {
     properties
         .get(property)
@@ -15999,26 +9741,12 @@ fn string_property_value(properties: &BTreeMap<String, Value>, property: &str) -
         .filter(|value| !value.is_empty())
 }
 
-fn raw_string_property(node: &NodeRecord, property: &str) -> Option<String> {
-    node.properties.get(property).map(value_to_external_id)
-}
-
-fn coalesced_string_property(node: &NodeRecord, property: &str, fallback: &str) -> String {
-    node.properties
-        .get(property)
-        .map(value_to_external_id)
-        .unwrap_or_else(|| fallback.to_string())
-}
-
+#[cfg(test)]
 fn integer_property(node: &NodeRecord, property: &str) -> Option<i64> {
     match node.properties.get(property) {
         Some(Value::Int(value)) => Some(*value),
         _ => None,
     }
-}
-
-fn truncate_chars(value: &str, max_chars: usize) -> String {
-    value.chars().take(max_chars).collect()
 }
 
 fn update_knowledge_memory_lifecycle_batch_for(
@@ -17294,1131 +11022,26 @@ fn value_is_greater(left: &Value, right: &Value) -> bool {
     }
 }
 
-fn knowledge_skills_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeSkillListRequest,
-) -> Result<KnowledgeSkillListOutput> {
-    validate_knowledge_skill_list_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(label_id) = catalog.label_id("Skill") else {
-        return Ok(KnowledgeSkillListOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-            missing_ids: request.ids.clone(),
-        });
-    };
-
-    let requested_ids = request.ids.iter().cloned().collect::<BTreeSet<_>>();
-    let mut matched_ids = BTreeSet::new();
-    let mut rows = Vec::new();
-    store.visit_nodes_owned(Some(label_id), |node| {
-        if skill_matches_list_request(&node, request, &requested_ids) {
-            if let Some(id) = node_external_id(&node) {
-                matched_ids.insert(id);
-            }
-            rows.push(knowledge_skill_row(&node));
-        }
-        crate::store::GraphScanControl::Continue
-    })?;
-
-    sort_skill_rows(&mut rows, request.order);
-    let matched_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-    let missing_ids = request
-        .ids
-        .iter()
-        .filter(|id| !matched_ids.contains(*id))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    Ok(KnowledgeSkillListOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        returned_count,
-        missing_ids,
-    })
+#[derive(Clone, Copy)]
+#[cfg(test)]
+enum KnowledgeCreatedAtOrder {
+    Descending,
 }
 
-fn knowledge_skills_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeSkillListRequest,
-) -> Result<KnowledgeSkillListOutput> {
-    validate_knowledge_skill_list_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let (query, parameters) = knowledge_skill_list_query(request);
-    let output = db.query_read_only_with_params_bounded(&query, &parameters, None)?;
-    let mut matched_ids = BTreeSet::new();
-    let mut rows = output
-        .rows
-        .iter()
-        .map(|row| {
-            let skill = row
-                .get("skill")
-                .and_then(knowledge_entity_from_value)
-                .ok_or_else(|| {
-                    SkeinError::Execution(
-                        "knowledge skill list row is missing skill map".to_string(),
-                    )
-                })?;
-            if let Some(id) = knowledge_entity_id_property(&skill) {
-                matched_ids.insert(id);
-            }
-            Ok(knowledge_skill_row_from_entity(&skill))
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    sort_skill_rows(&mut rows, request.order);
-    let matched_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-    let missing_ids = request
-        .ids
-        .iter()
-        .filter(|id| !matched_ids.contains(*id))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    Ok(KnowledgeSkillListOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        returned_count,
-        missing_ids,
-    })
-}
-
-fn knowledge_skill_projected_list_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeSkillProjectedListRequest,
-) -> Result<KnowledgeSkillProjectedListOutput> {
-    validate_knowledge_skill_projected_list_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(label_id) = catalog.label_id("Skill") else {
-        return Ok(KnowledgeSkillProjectedListOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-            missing_ids: request.list.ids.clone(),
-        });
-    };
-
-    let requested_ids = request.list.ids.iter().cloned().collect::<BTreeSet<_>>();
-    let mut matched_ids = BTreeSet::new();
-    let mut rows = Vec::new();
-    store.visit_nodes_owned(Some(label_id), |node| {
-        if skill_matches_list_request(&node, &request.list, &requested_ids) {
-            if let Some(id) = node_external_id(&node) {
-                matched_ids.insert(id);
-            }
-            rows.push((
-                knowledge_skill_projected_row(&node, &request.property_names),
-                node.properties.get("updated_at").cloned(),
-            ));
-        }
-        crate::store::GraphScanControl::Continue
-    })?;
-
-    sort_skill_projected_rows(&mut rows, request.list.order);
-    let matched_count = rows.len();
-    if request.list.limit > 0 {
-        rows.truncate(request.list.limit);
-    }
-    let returned_count = rows.len();
-    let rows = rows
-        .into_iter()
-        .map(|(row, _updated_at)| row)
-        .collect::<Vec<_>>();
-    let missing_ids = request
-        .list
-        .ids
-        .iter()
-        .filter(|id| !matched_ids.contains(*id))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    Ok(KnowledgeSkillProjectedListOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        returned_count,
-        missing_ids,
-    })
-}
-
-fn knowledge_skill_projected_list_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeSkillProjectedListRequest,
-) -> Result<KnowledgeSkillProjectedListOutput> {
-    validate_knowledge_skill_projected_list_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let (query, parameters) = knowledge_skill_list_query(&request.list);
-    let output = db.query_read_only_with_params_bounded(&query, &parameters, None)?;
-    let mut matched_ids = BTreeSet::new();
-    let mut rows = output
-        .rows
-        .iter()
-        .map(|row| {
-            let skill = row
-                .get("skill")
-                .and_then(knowledge_entity_from_value)
-                .ok_or_else(|| {
-                    SkeinError::Execution(
-                        "knowledge skill projected list row is missing skill map".to_string(),
-                    )
-                })?;
-            if let Some(id) = knowledge_entity_id_property(&skill) {
-                matched_ids.insert(id);
-            }
-            Ok((
-                knowledge_skill_projected_row_from_entity(&skill, &request.property_names),
-                skill.properties.get("updated_at").cloned(),
-            ))
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    sort_skill_projected_rows(&mut rows, request.list.order);
-    let matched_count = rows.len();
-    if request.list.limit > 0 {
-        rows.truncate(request.list.limit);
-    }
-    let returned_count = rows.len();
-    let rows = rows
-        .into_iter()
-        .map(|(row, _updated_at)| row)
-        .collect::<Vec<_>>();
-    let missing_ids = request
-        .list
-        .ids
-        .iter()
-        .filter(|id| !matched_ids.contains(*id))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    Ok(KnowledgeSkillProjectedListOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        returned_count,
-        missing_ids,
-    })
-}
-
-fn validate_knowledge_skill_projected_list_request(
-    request: &KnowledgeSkillProjectedListRequest,
-) -> Result<()> {
-    validate_knowledge_skill_list_request(&request.list)?;
-    if request.property_names.iter().any(String::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge skill projected list requires non-empty property names".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_knowledge_skill_list_request(request: &KnowledgeSkillListRequest) -> Result<()> {
-    if request.ids.iter().any(String::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge skill list requires non-empty ids".to_string(),
-        ));
-    }
-    if request.lookup_key.as_deref().is_some_and(str::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge skill list requires a non-empty lookup key".to_string(),
-        ));
-    }
-    if request.stages.iter().any(String::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge skill list requires non-empty stages".to_string(),
-        ));
-    }
-    if request.after_id.as_deref().is_some_and(str::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge skill list requires a non-empty after id".to_string(),
-        ));
-    }
-    if request.ids.is_empty()
-        && request.lookup_key.is_none()
-        && request.stages.is_empty()
-        && request.after_id.is_none()
-        && request.limit == 0
-    {
-        return Err(SkeinError::Semantic(
-            "knowledge skill list requires a bounded limit or a filter".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn knowledge_skill_list_query(
-    request: &KnowledgeSkillListRequest,
-) -> (String, BTreeMap<String, Value>) {
-    let mut parameters = BTreeMap::new();
-    let mut predicates = Vec::new();
-    if !request.ids.is_empty() {
-        parameters.insert(
-            "ids".to_string(),
-            Value::List(request.ids.iter().cloned().map(Value::String).collect()),
-        );
-        predicates.push("skill.id IN $ids");
-    }
-    if let Some(lookup_key) = &request.lookup_key {
-        parameters.insert("lookup_key".to_string(), Value::String(lookup_key.clone()));
-        predicates.push(
-            "(skill.id = $lookup_key OR skill.id STARTS WITH $lookup_key OR skill.id CONTAINS $lookup_key)",
-        );
-    }
-    if !request.stages.is_empty() {
-        parameters.insert(
-            "stages".to_string(),
-            Value::List(request.stages.iter().cloned().map(Value::String).collect()),
-        );
-        predicates.push("skill.stage IN $stages");
-    }
-    if let Some(after_id) = &request.after_id {
-        parameters.insert("after_id".to_string(), Value::String(after_id.clone()));
-        predicates.push("skill.id > $after_id");
-    }
-    let predicate = if predicates.is_empty() {
-        String::new()
-    } else {
-        format!(" WHERE {}", predicates.join(" AND "))
-    };
-    (
-        format!("MATCH (skill:Skill){predicate} RETURN skill AS skill"),
-        parameters,
-    )
-}
-
-fn skill_matches_list_request(
-    node: &NodeRecord,
-    request: &KnowledgeSkillListRequest,
-    requested_ids: &BTreeSet<String>,
-) -> bool {
-    let id = node_external_id(node);
-    if !requested_ids.is_empty() && !id.as_ref().is_some_and(|id| requested_ids.contains(id)) {
-        return false;
-    }
-    if request.lookup_key.as_ref().is_some_and(|key| {
-        !id.as_ref()
-            .is_some_and(|id| id == key || id.starts_with(key) || id.contains(key))
-    }) {
-        return false;
-    }
-    if !request.stages.is_empty() {
-        let stages = request.stages.iter().collect::<BTreeSet<_>>();
-        if string_property(node, "stage")
-            .as_ref()
-            .is_none_or(|stage| !stages.contains(stage))
-        {
-            return false;
-        }
-    }
-    if request
-        .after_id
-        .as_ref()
-        .is_some_and(|after| id.as_ref().is_none_or(|id| id.as_str() <= after.as_str()))
-    {
-        return false;
-    }
-    true
-}
-
-fn knowledge_skill_projected_row(
-    node: &NodeRecord,
-    property_names: &[String],
-) -> KnowledgeSkillProjectedRow {
-    KnowledgeSkillProjectedRow {
-        id: node_external_id(node),
-        node_id: node.id.0,
-        properties: projected_properties(&node.properties, property_names),
-        normalized_space_id: normalized_node_space_id(node),
-    }
-}
-
-fn knowledge_skill_projected_row_from_entity(
-    skill: &KnowledgeEntity,
-    property_names: &[String],
-) -> KnowledgeSkillProjectedRow {
-    KnowledgeSkillProjectedRow {
-        id: knowledge_entity_id_property(skill),
-        node_id: skill.node_id,
-        properties: projected_properties(&skill.properties, property_names),
-        normalized_space_id: knowledge_entity_normalized_space_id(skill),
-    }
-}
-
-fn knowledge_skill_row(node: &NodeRecord) -> KnowledgeSkillRow {
-    KnowledgeSkillRow {
-        id: node_external_id(node),
-        node_id: node.id.0,
-        title: string_property(node, "title"),
-        name: string_property(node, "name"),
-        description: string_property(node, "description"),
-        stage: string_property(node, "stage"),
-        version: node.properties.get("version").cloned(),
-        use_count: integer_property(node, "use_count").unwrap_or(0),
-        success_rate: node.properties.get("success_rate").cloned(),
-        metadata: node.properties.get("metadata").cloned(),
-        bundle_path: string_property(node, "bundle_path"),
-        triggers: node.properties.get("triggers").cloned(),
-        content_hash: string_property(node, "content_hash"),
-        raw_space_id: string_property(node, "space_id"),
-        normalized_space_id: normalized_node_space_id(node),
-        created_at: node.properties.get("created_at").cloned(),
-        updated_at: node.properties.get("updated_at").cloned(),
-        evidence_count: integer_property(node, "evidence_count").unwrap_or(0),
-        scope: string_property(node, "scope"),
-        rationale: string_property(node, "rationale"),
-        kind: string_property(node, "kind"),
-        confidence: node.properties.get("confidence").cloned(),
-    }
-}
-
-fn knowledge_skill_row_from_entity(skill: &KnowledgeEntity) -> KnowledgeSkillRow {
-    KnowledgeSkillRow {
-        id: knowledge_entity_id_property(skill),
-        node_id: skill.node_id,
-        title: string_property_value(&skill.properties, "title"),
-        name: string_property_value(&skill.properties, "name"),
-        description: string_property_value(&skill.properties, "description"),
-        stage: string_property_value(&skill.properties, "stage"),
-        version: skill.properties.get("version").cloned(),
-        use_count: integer_property_value(&skill.properties, "use_count").unwrap_or(0),
-        success_rate: skill.properties.get("success_rate").cloned(),
-        metadata: skill.properties.get("metadata").cloned(),
-        bundle_path: string_property_value(&skill.properties, "bundle_path"),
-        triggers: skill.properties.get("triggers").cloned(),
-        content_hash: string_property_value(&skill.properties, "content_hash"),
-        raw_space_id: string_property_value(&skill.properties, "space_id"),
-        normalized_space_id: knowledge_entity_normalized_space_id(skill),
-        created_at: skill.properties.get("created_at").cloned(),
-        updated_at: skill.properties.get("updated_at").cloned(),
-        evidence_count: integer_property_value(&skill.properties, "evidence_count").unwrap_or(0),
-        scope: string_property_value(&skill.properties, "scope"),
-        rationale: string_property_value(&skill.properties, "rationale"),
-        kind: string_property_value(&skill.properties, "kind"),
-        confidence: skill.properties.get("confidence").cloned(),
-    }
-}
-
-fn sort_skill_rows(rows: &mut [KnowledgeSkillRow], order: KnowledgeSkillListOrder) {
-    rows.sort_by(|left, right| match order {
-        KnowledgeSkillListOrder::IdAsc => compare_skill_ids(left, right),
-        KnowledgeSkillListOrder::UpdatedAtDesc => {
-            compare_optional_values_desc(left.updated_at.as_ref(), right.updated_at.as_ref())
-                .then_with(|| compare_skill_ids(left, right))
-        }
-    });
-}
-
-fn compare_skill_ids(left: &KnowledgeSkillRow, right: &KnowledgeSkillRow) -> std::cmp::Ordering {
-    left.id
-        .cmp(&right.id)
-        .then_with(|| left.node_id.cmp(&right.node_id))
-}
-
-fn sort_skill_projected_rows(
-    rows: &mut [(KnowledgeSkillProjectedRow, Option<Value>)],
-    order: KnowledgeSkillListOrder,
-) {
-    rows.sort_by(|left, right| match order {
-        KnowledgeSkillListOrder::IdAsc => compare_skill_projected_ids(&left.0, &right.0),
-        KnowledgeSkillListOrder::UpdatedAtDesc => {
-            compare_optional_values_desc(left.1.as_ref(), right.1.as_ref())
-                .then_with(|| compare_skill_projected_ids(&left.0, &right.0))
-        }
-    });
-}
-
-fn compare_skill_projected_ids(
-    left: &KnowledgeSkillProjectedRow,
-    right: &KnowledgeSkillProjectedRow,
-) -> std::cmp::Ordering {
-    left.id
-        .cmp(&right.id)
-        .then_with(|| left.node_id.cmp(&right.node_id))
-}
-
-fn knowledge_skill_memories_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeSkillMemoryListRequest,
-) -> Result<KnowledgeSkillMemoryListOutput> {
-    validate_knowledge_skill_memory_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let mut parameters = BTreeMap::new();
-    let seed_predicate = knowledge_skill_memory_seed_predicate(request, &mut parameters);
-
-    let skill_query = format!(
-        "MATCH (s:Skill){seed_predicate} RETURN id(s) AS skill_node_id ORDER BY s.id ASC, id(s) ASC"
-    );
-    let skill_output = db.query_read_only_with_params_bounded(&skill_query, &parameters, None)?;
-    let matched_skill_count = skill_output.rows.len();
-    let missing_skill_count = usize::from(request.skill_id.is_some() && matched_skill_count == 0);
-
-    let memory_query = format!(
-        "MATCH (s:Skill){seed_predicate} \
-         MATCH (s)-[r:SYNTHESIZED_FROM]->(m:Memory) \
-         RETURN s.id AS skill_id, id(s) AS skill_node_id, \
-         m.id AS memory_id, id(m) AS memory_node_id, id(r) AS relationship_id, \
-         m.title AS title, m.content AS content, m.unit_type AS unit_type, m.created_at AS created_at"
-    );
-    let memory_output = db.query_read_only_with_params_bounded(&memory_query, &parameters, None)?;
-    let mut rows = memory_output
-        .rows
-        .iter()
-        .map(knowledge_skill_memory_row_from_query)
-        .collect::<Result<Vec<_>>>()?;
-    sort_skill_memory_rows(&mut rows, request.order);
-    let matched_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-
-    Ok(KnowledgeSkillMemoryListOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        returned_count,
-        matched_skill_count,
-        missing_skill_count,
-    })
-}
-
-fn knowledge_skill_memory_seed_predicate(
-    request: &KnowledgeSkillMemoryListRequest,
-    parameters: &mut BTreeMap<String, Value>,
-) -> String {
-    if let Some(skill_id) = &request.skill_id {
-        parameters.insert("skill_id".to_string(), Value::String(skill_id.clone()));
-        return " WHERE s.id = $skill_id".to_string();
-    }
-    parameters.insert(
-        "stages".to_string(),
-        Value::List(request.stages.iter().cloned().map(Value::String).collect()),
-    );
-    " WHERE s.stage IN $stages".to_string()
-}
-
-fn knowledge_skill_memory_row_from_query(row: &Row) -> Result<KnowledgeSkillMemoryRow> {
-    let skill_node_id = row
-        .get("skill_node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution("knowledge skill memory row is missing skill_node_id".to_string())
-        })?;
-    let memory_node_id = row
-        .get("memory_node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge skill memory row is missing memory_node_id".to_string(),
-            )
-        })?;
-    let relationship_id = row
-        .get("relationship_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge skill memory row is missing relationship_id".to_string(),
-            )
-        })?;
-
-    Ok(KnowledgeSkillMemoryRow {
-        skill_id: optional_string_cell(row, "skill_id"),
-        skill_node_id,
-        memory_id: optional_string_cell(row, "memory_id"),
-        memory_node_id,
-        relationship_id,
-        title: optional_string_cell(row, "title"),
-        content: optional_string_cell(row, "content"),
-        unit_type: optional_string_cell(row, "unit_type"),
-        created_at: optional_value_cell(row, "created_at"),
-    })
-}
-
-fn validate_knowledge_skill_memory_request(
-    request: &KnowledgeSkillMemoryListRequest,
-) -> Result<()> {
-    let has_skill_id = match request.skill_id.as_ref() {
-        Some(skill_id) if skill_id.is_empty() => {
-            return Err(SkeinError::Semantic(
-                "knowledge skill memory read requires a non-empty skill id".to_string(),
-            ));
-        }
-        Some(_) => true,
-        None => false,
-    };
-    if request.stages.iter().any(String::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge skill memory read requires non-empty stages".to_string(),
-        ));
-    }
-    let has_stages = !request.stages.is_empty();
-    if has_skill_id == has_stages {
-        return Err(SkeinError::Semantic(
-            "knowledge skill memory read requires exactly one skill id or stage filter".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn knowledge_skill_thread_sources_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeSkillThreadSourceListRequest,
-) -> Result<KnowledgeSkillThreadSourceListOutput> {
-    validate_knowledge_skill_thread_source_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(skill) =
-        try_seed_node_by_label_and_external_id(catalog, store, "Skill", &request.skill_id)?
-    else {
-        return Ok(KnowledgeSkillThreadSourceListOutput {
-            graph_commit_epoch,
-            skill_id: request.skill_id.clone(),
-            skill_node_id: None,
-            found_skill: false,
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-        });
-    };
-
-    let mut rows = skill_thread_source_rows(catalog, store, &skill)?;
-    sort_skill_thread_source_rows(&mut rows);
-    let matched_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-
-    Ok(KnowledgeSkillThreadSourceListOutput {
-        graph_commit_epoch,
-        skill_id: request.skill_id.clone(),
-        skill_node_id: Some(skill.id.0),
-        found_skill: true,
-        rows,
-        matched_count,
-        returned_count,
-    })
-}
-
-fn knowledge_skill_thread_sources_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeSkillThreadSourceListRequest,
-) -> Result<KnowledgeSkillThreadSourceListOutput> {
-    validate_knowledge_skill_thread_source_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let parameters = BTreeMap::from([(
-        "skill_id".to_string(),
-        Value::String(request.skill_id.clone()),
-    )]);
-    let skill_output = db.query_read_only_with_params_bounded(
-        "MATCH (s:Skill {id: $skill_id}) RETURN id(s) AS skill_node_id LIMIT 1",
-        &parameters,
-        Some(1),
-    )?;
-    let skill_node_id = skill_output
-        .rows
-        .first()
-        .and_then(|row| row.get("skill_node_id"))
-        .and_then(value_to_non_negative_u64);
-    let Some(skill_node_id) = skill_node_id else {
-        return Ok(KnowledgeSkillThreadSourceListOutput {
-            graph_commit_epoch,
-            skill_id: request.skill_id.clone(),
-            skill_node_id: None,
-            found_skill: false,
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-        });
-    };
-
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (s:Skill {id: $skill_id})-[sm:SYNTHESIZED_FROM]->(m:Memory)<-[ct:COMPACTS_TO]-(t:Thread) \
-         RETURN s.id AS skill_id, id(s) AS skill_node_id, \
-         m.id AS memory_id, id(m) AS memory_node_id, id(sm) AS skill_memory_relationship_id, \
-         t.id AS thread_id, id(t) AS thread_node_id, t.thread_id AS thread_logical_id, \
-         t.title AS title, t.source AS source, id(ct) AS compacts_to_relationship_id \
-         ORDER BY skill_memory_relationship_id ASC, compacts_to_relationship_id ASC",
-        &parameters,
-        None,
-    )?;
-    let mut seen = BTreeSet::new();
-    let mut rows = output
-        .rows
-        .iter()
-        .map(knowledge_skill_thread_source_row_from_query)
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .filter(|row| seen.insert((row.memory_node_id, row.thread_node_id)))
-        .collect::<Vec<_>>();
-    sort_skill_thread_source_rows(&mut rows);
-    let matched_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-
-    Ok(KnowledgeSkillThreadSourceListOutput {
-        graph_commit_epoch,
-        skill_id: request.skill_id.clone(),
-        skill_node_id: Some(skill_node_id),
-        found_skill: true,
-        rows,
-        matched_count,
-        returned_count,
-    })
-}
-
-fn validate_knowledge_skill_thread_source_request(
-    request: &KnowledgeSkillThreadSourceListRequest,
-) -> Result<()> {
-    if request.skill_id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge skill thread source read requires a non-empty skill id".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn knowledge_skill_thread_source_row_from_query(
-    row: &Row,
-) -> Result<KnowledgeSkillThreadSourceRow> {
-    let skill_node_id = row
-        .get("skill_node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge skill thread source row is missing skill_node_id".to_string(),
-            )
-        })?;
-    let memory_node_id = row
-        .get("memory_node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge skill thread source row is missing memory_node_id".to_string(),
-            )
-        })?;
-    let skill_memory_relationship_id = row
-        .get("skill_memory_relationship_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge skill thread source row is missing skill_memory_relationship_id"
-                    .to_string(),
-            )
-        })?;
-    let thread_node_id = row
-        .get("thread_node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge skill thread source row is missing thread_node_id".to_string(),
-            )
-        })?;
-    let compacts_to_relationship_id = row
-        .get("compacts_to_relationship_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge skill thread source row is missing compacts_to_relationship_id"
-                    .to_string(),
-            )
-        })?;
-
-    Ok(KnowledgeSkillThreadSourceRow {
-        skill_id: optional_string_cell(row, "skill_id"),
-        skill_node_id,
-        memory_id: optional_string_cell(row, "memory_id"),
-        memory_node_id,
-        skill_memory_relationship_id,
-        thread_id: optional_string_cell(row, "thread_id"),
-        thread_node_id,
-        thread_logical_id: optional_string_cell(row, "thread_logical_id"),
-        title: optional_string_cell(row, "title"),
-        source: optional_string_cell(row, "source"),
-        compacts_to_relationship_id,
-    })
-}
-
-fn knowledge_skill_detail_lookup_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeSkillDetailLookupRequest,
-) -> Result<KnowledgeSkillDetailLookupOutput> {
-    validate_knowledge_skill_detail_lookup_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(label_id) = catalog.label_id("Skill") else {
-        return Ok(KnowledgeSkillDetailLookupOutput {
-            graph_commit_epoch,
-            key: request.key.clone(),
-            skill_node_id: None,
-            found_skill: false,
-            id: None,
-            name: None,
-            title: None,
-            stage: None,
-            version: None,
-            created_at: None,
-            updated_at: None,
-            matched_count: 0,
-        });
-    };
-
-    let matched = skill_detail_lookup_candidates(store, label_id, &request.key)?;
-    let matched_count = matched.len();
-    let first = matched.into_iter().next();
-
-    Ok(KnowledgeSkillDetailLookupOutput {
-        graph_commit_epoch,
-        key: request.key.clone(),
-        skill_node_id: first.as_ref().map(|node| node.id.0),
-        found_skill: first.is_some(),
-        id: first.as_ref().and_then(node_external_id),
-        name: first
-            .as_ref()
-            .and_then(|node| string_property(node, "name")),
-        title: first
-            .as_ref()
-            .and_then(|node| string_property(node, "title")),
-        stage: first
-            .as_ref()
-            .and_then(|node| string_property(node, "stage")),
-        version: first
-            .as_ref()
-            .and_then(|node| node.properties.get("version").cloned()),
-        created_at: first
-            .as_ref()
-            .and_then(|node| node.properties.get("created_at").cloned()),
-        updated_at: first
-            .as_ref()
-            .and_then(|node| node.properties.get("updated_at").cloned()),
-        matched_count,
-    })
-}
-
-fn knowledge_skill_detail_lookup_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeSkillDetailLookupRequest,
-) -> Result<KnowledgeSkillDetailLookupOutput> {
-    validate_knowledge_skill_detail_lookup_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let parameters = BTreeMap::from([("key".to_string(), Value::String(request.key.clone()))]);
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (s:Skill) \
-         WHERE s.id = $key OR s.id STARTS WITH $key OR s.id CONTAINS $key \
-         RETURN s AS skill \
-         ORDER BY id(s) ASC",
-        &parameters,
-        None,
-    )?;
-    let matched = output
-        .rows
-        .iter()
-        .filter_map(|row| row.get("skill").and_then(knowledge_entity_from_value))
-        .collect::<Vec<_>>();
-    let matched_count = matched.len();
-    let first = matched.first();
-
-    Ok(KnowledgeSkillDetailLookupOutput {
-        graph_commit_epoch,
-        key: request.key.clone(),
-        skill_node_id: first.map(|skill| skill.node_id),
-        found_skill: first.is_some(),
-        id: first.and_then(|skill| string_property_value(&skill.properties, "id")),
-        name: first.and_then(|skill| string_property_value(&skill.properties, "name")),
-        title: first.and_then(|skill| string_property_value(&skill.properties, "title")),
-        stage: first.and_then(|skill| string_property_value(&skill.properties, "stage")),
-        version: first.and_then(|skill| skill.properties.get("version").cloned()),
-        created_at: first.and_then(|skill| skill.properties.get("created_at").cloned()),
-        updated_at: first.and_then(|skill| skill.properties.get("updated_at").cloned()),
-        matched_count,
-    })
-}
-
-fn validate_knowledge_skill_detail_lookup_request(
-    request: &KnowledgeSkillDetailLookupRequest,
-) -> Result<()> {
-    if request.key.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge skill detail lookup requires a non-empty key".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn skill_detail_lookup_candidates(
-    store: &GraphStore,
-    label_id: LabelId,
-    key: &str,
-) -> Result<Vec<NodeRecord>> {
-    let mut nodes = Vec::new();
-    store.visit_nodes_owned(Some(label_id), |node| {
-        if node_external_id(&node)
-            .is_some_and(|id| id.as_str() == key || id.starts_with(key) || id.contains(key))
-        {
-            nodes.push(node);
-        }
-        crate::store::GraphScanControl::Continue
-    })?;
-    nodes.sort_by_key(|node| node.id.0);
-    Ok(nodes)
-}
-
-fn knowledge_skill_state_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeSkillStateRequest,
-) -> Result<KnowledgeSkillStateOutput> {
-    validate_knowledge_skill_state_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let skill = try_seed_node_by_label_and_external_id(catalog, store, "Skill", &request.skill_id)?;
-
-    Ok(KnowledgeSkillStateOutput {
-        graph_commit_epoch,
-        skill_id: request.skill_id.clone(),
-        skill_node_id: skill.as_ref().map(|node| node.id.0),
-        found_skill: skill.is_some(),
-        id: skill.as_ref().and_then(node_external_id),
-        stage: skill
-            .as_ref()
-            .and_then(|node| string_property(node, "stage")),
-        metadata: skill
-            .as_ref()
-            .and_then(|node| node.properties.get("metadata").cloned()),
-        version: skill
-            .as_ref()
-            .and_then(|node| node.properties.get("version").cloned()),
-        use_count: skill
-            .as_ref()
-            .and_then(|node| node.properties.get("use_count").cloned()),
-        bundle_path: skill
-            .as_ref()
-            .and_then(|node| string_property(node, "bundle_path")),
-        content_hash: skill
-            .as_ref()
-            .and_then(|node| string_property(node, "content_hash")),
-        name: skill
-            .as_ref()
-            .and_then(|node| string_property(node, "name")),
-        description: skill
-            .as_ref()
-            .and_then(|node| string_property(node, "description")),
-        title: skill
-            .as_ref()
-            .and_then(|node| string_property(node, "title")),
-    })
-}
-
-fn knowledge_skill_state_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeSkillStateRequest,
-) -> Result<KnowledgeSkillStateOutput> {
-    validate_knowledge_skill_state_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let parameters = BTreeMap::from([(
-        "skill_id".to_string(),
-        Value::String(request.skill_id.clone()),
-    )]);
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (s:Skill {id: $skill_id}) RETURN s AS skill LIMIT 1",
-        &parameters,
-        Some(1),
-    )?;
-    let skill = output
-        .rows
-        .first()
-        .and_then(|row| row.get("skill"))
-        .and_then(knowledge_entity_from_value);
-
-    Ok(KnowledgeSkillStateOutput {
-        graph_commit_epoch,
-        skill_id: request.skill_id.clone(),
-        skill_node_id: skill.as_ref().map(|skill| skill.node_id),
-        found_skill: skill.is_some(),
-        id: skill
-            .as_ref()
-            .and_then(|skill| string_property_value(&skill.properties, "id")),
-        stage: skill
-            .as_ref()
-            .and_then(|skill| string_property_value(&skill.properties, "stage")),
-        metadata: skill
-            .as_ref()
-            .and_then(|skill| skill.properties.get("metadata").cloned()),
-        version: skill
-            .as_ref()
-            .and_then(|skill| skill.properties.get("version").cloned()),
-        use_count: skill
-            .as_ref()
-            .and_then(|skill| skill.properties.get("use_count").cloned()),
-        bundle_path: skill
-            .as_ref()
-            .and_then(|skill| string_property_value(&skill.properties, "bundle_path")),
-        content_hash: skill
-            .as_ref()
-            .and_then(|skill| string_property_value(&skill.properties, "content_hash")),
-        name: skill
-            .as_ref()
-            .and_then(|skill| string_property_value(&skill.properties, "name")),
-        description: skill
-            .as_ref()
-            .and_then(|skill| string_property_value(&skill.properties, "description")),
-        title: skill
-            .as_ref()
-            .and_then(|skill| string_property_value(&skill.properties, "title")),
-    })
-}
-
-fn validate_knowledge_skill_state_request(request: &KnowledgeSkillStateRequest) -> Result<()> {
-    if request.skill_id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge skill state read requires a non-empty skill id".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn skill_thread_source_rows(
-    catalog: &Catalog,
-    store: &GraphStore,
-    skill: &NodeRecord,
-) -> Result<Vec<KnowledgeSkillThreadSourceRow>> {
-    let Some(synthesized_from_type_id) = catalog.rel_type_id("SYNTHESIZED_FROM") else {
-        return Ok(Vec::new());
-    };
-    let Some(compacts_to_type_id) = catalog.rel_type_id("COMPACTS_TO") else {
-        return Ok(Vec::new());
-    };
-    let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Ok(Vec::new());
-    };
-    let Some(thread_label_id) = catalog.label_id("Thread") else {
-        return Ok(Vec::new());
-    };
-
-    let mut seen = BTreeSet::new();
-    let mut rows = Vec::new();
-    store.try_visit_adjacent_relationships_owned(
-        skill.id,
-        Some(synthesized_from_type_id),
-        AdjacencyDirection::Outgoing,
-        |skill_memory_rel| {
-            let Some(memory) = store
-                .node_owned(skill_memory_rel.target)?
-                .filter(|memory| memory.labels.contains(&memory_label_id))
-            else {
-                return Ok(crate::store::GraphScanControl::Continue);
-            };
-            store.try_visit_adjacent_relationships_owned(
-                memory.id,
-                Some(compacts_to_type_id),
-                AdjacencyDirection::Incoming,
-                |compact_rel| {
-                    let Some(thread) = store
-                        .node_owned(compact_rel.source)?
-                        .filter(|thread| thread.labels.contains(&thread_label_id))
-                    else {
-                        return Ok(crate::store::GraphScanControl::Continue);
-                    };
-                    if seen.insert((memory.id.0, thread.id.0)) {
-                        rows.push(skill_thread_source_row(
-                            skill,
-                            &memory,
-                            &skill_memory_rel,
-                            &thread,
-                            &compact_rel,
-                        ));
-                    }
-                    Ok(crate::store::GraphScanControl::Continue)
-                },
-            )?;
-            Ok(crate::store::GraphScanControl::Continue)
-        },
-    )?;
-    Ok(rows)
-}
-
-fn skill_thread_source_row(
-    skill: &NodeRecord,
-    memory: &NodeRecord,
-    skill_memory_relationship: &RelRecord,
-    thread: &NodeRecord,
-    compacts_to_relationship: &RelRecord,
-) -> KnowledgeSkillThreadSourceRow {
-    KnowledgeSkillThreadSourceRow {
-        skill_id: node_external_id(skill),
-        skill_node_id: skill.id.0,
-        memory_id: node_external_id(memory),
-        memory_node_id: memory.id.0,
-        skill_memory_relationship_id: skill_memory_relationship.id.0,
-        thread_id: node_external_id(thread),
-        thread_node_id: thread.id.0,
-        thread_logical_id: string_property(thread, "thread_id"),
-        title: string_property(thread, "title"),
-        source: string_property(thread, "source"),
-        compacts_to_relationship_id: compacts_to_relationship.id.0,
-    }
-}
-
-fn sort_skill_thread_source_rows(rows: &mut [KnowledgeSkillThreadSourceRow]) {
-    rows.sort_by(|left, right| {
-        left.title
-            .cmp(&right.title)
-            .then_with(|| left.source.cmp(&right.source))
-            .then_with(|| left.memory_id.cmp(&right.memory_id))
-            .then_with(|| left.thread_logical_id.cmp(&right.thread_logical_id))
-            .then_with(|| left.thread_id.cmp(&right.thread_id))
-            .then_with(|| {
-                left.skill_memory_relationship_id
-                    .cmp(&right.skill_memory_relationship_id)
-            })
-            .then_with(|| {
-                left.compacts_to_relationship_id
-                    .cmp(&right.compacts_to_relationship_id)
-            })
-    });
-}
-
-fn sort_skill_memory_rows(
-    rows: &mut [KnowledgeSkillMemoryRow],
-    order: KnowledgeSkillMemoryListOrder,
-) {
-    rows.sort_by(|left, right| {
-        compare_skill_memory_created_at(&left.created_at, &right.created_at, order)
-            .then_with(|| left.memory_id.cmp(&right.memory_id))
-            .then_with(|| left.skill_id.cmp(&right.skill_id))
-            .then_with(|| left.relationship_id.cmp(&right.relationship_id))
-    });
-}
-
-fn compare_skill_memory_created_at(
+#[cfg(test)]
+fn compare_knowledge_created_at(
     left: &Option<Value>,
     right: &Option<Value>,
-    order: KnowledgeSkillMemoryListOrder,
+    order: KnowledgeCreatedAtOrder,
 ) -> std::cmp::Ordering {
     let base = match (left, right) {
-        (Some(left), Some(right)) => compare_skill_memory_values(left, right),
+        (Some(left), Some(right)) => compare_knowledge_values(left, right),
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => std::cmp::Ordering::Equal,
     };
     match order {
-        KnowledgeSkillMemoryListOrder::CreatedAtAsc => base,
-        KnowledgeSkillMemoryListOrder::CreatedAtDesc => {
+        KnowledgeCreatedAtOrder::Descending => {
             if left.is_some() && right.is_some() {
                 base.reverse()
             } else {
@@ -18428,7 +11051,8 @@ fn compare_skill_memory_created_at(
     }
 }
 
-fn compare_skill_memory_values(left: &Value, right: &Value) -> std::cmp::Ordering {
+#[cfg(test)]
+fn compare_knowledge_values(left: &Value, right: &Value) -> std::cmp::Ordering {
     match (left, right) {
         (Value::Int(left), Value::Int(right)) => left.cmp(right),
         (Value::Float(left), Value::Float(right)) => left.total_cmp(right),
@@ -18437,887 +11061,6 @@ fn compare_skill_memory_values(left: &Value, right: &Value) -> std::cmp::Orderin
         (Value::String(left), Value::String(right)) => left.cmp(right),
         _ => value_to_external_id(left).cmp(&value_to_external_id(right)),
     }
-}
-
-fn knowledge_threads_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeThreadListRequest,
-) -> Result<KnowledgeThreadListOutput> {
-    validate_knowledge_thread_list_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let mut parameters = BTreeMap::new();
-    let predicate = knowledge_thread_list_query_predicate(request, &mut parameters);
-    let query = format!("MATCH (t:Thread){predicate} RETURN t AS thread");
-    let output = db.query_read_only_with_params_bounded(&query, &parameters, None)?;
-
-    let mut matched_ids = BTreeSet::new();
-    let mut matched_thread_ids = BTreeSet::new();
-    let mut rows = output
-        .rows
-        .iter()
-        .filter_map(|row| row.get("thread").and_then(knowledge_entity_from_value))
-        .filter(|thread| thread_metadata_matches_list_request(thread, request))
-        .map(|thread| {
-            let row = knowledge_thread_list_row_from_entity(&thread);
-            if let Some(id) = &row.id {
-                matched_ids.insert(id.clone());
-            }
-            if let Some(thread_id) = &row.thread_id {
-                matched_thread_ids.insert(thread_id.clone());
-            }
-            row
-        })
-        .collect::<Vec<_>>();
-
-    sort_thread_list_rows(&mut rows, request.order);
-    let matched_count = rows.len();
-    if request.offset > 0 {
-        rows = rows.into_iter().skip(request.offset).collect();
-    }
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-    let missing_ids = request
-        .ids
-        .iter()
-        .filter(|id| !matched_ids.contains(*id))
-        .cloned()
-        .collect::<Vec<_>>();
-    let missing_thread_ids = request
-        .thread_ids
-        .iter()
-        .filter(|thread_id| !matched_thread_ids.contains(*thread_id))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    Ok(KnowledgeThreadListOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        returned_count,
-        missing_ids,
-        missing_thread_ids,
-    })
-}
-
-fn validate_knowledge_thread_list_request(request: &KnowledgeThreadListRequest) -> Result<()> {
-    if request.ids.iter().any(|id| id.is_empty()) {
-        return Err(SkeinError::Semantic(
-            "knowledge thread list requires non-empty ids".to_string(),
-        ));
-    }
-    if request
-        .thread_ids
-        .iter()
-        .any(|thread_id| thread_id.is_empty())
-    {
-        return Err(SkeinError::Semantic(
-            "knowledge thread list requires non-empty thread ids".to_string(),
-        ));
-    }
-    if request.lookup_key.as_deref().is_some_and(str::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge thread list requires a non-empty lookup key".to_string(),
-        ));
-    }
-    if request.source.as_deref().is_some_and(str::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge thread list requires a non-empty source".to_string(),
-        ));
-    }
-    if request
-        .normalized_space_id
-        .as_deref()
-        .is_some_and(str::is_empty)
-    {
-        return Err(SkeinError::Semantic(
-            "knowledge thread list requires a non-empty normalized space id".to_string(),
-        ));
-    }
-    if request
-        .metadata_contains
-        .as_deref()
-        .is_some_and(str::is_empty)
-    {
-        return Err(SkeinError::Semantic(
-            "knowledge thread list requires a non-empty metadata marker".to_string(),
-        ));
-    }
-    if request.after_id.as_deref().is_some_and(str::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge thread list requires a non-empty after id".to_string(),
-        ));
-    }
-    if request.ids.is_empty()
-        && request.thread_ids.is_empty()
-        && request.lookup_key.is_none()
-        && request.source.is_none()
-        && request.normalized_space_id.is_none()
-        && request.metadata_contains.is_none()
-        && !request.require_thread_id
-        && request.after_id.is_none()
-        && request.limit == 0
-    {
-        return Err(SkeinError::Semantic(
-            "knowledge thread list requires a bounded limit or a filter".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn knowledge_thread_list_query_predicate(
-    request: &KnowledgeThreadListRequest,
-    parameters: &mut BTreeMap<String, Value>,
-) -> String {
-    let mut predicates = Vec::new();
-    if !request.ids.is_empty() {
-        parameters.insert(
-            "ids".to_string(),
-            Value::List(request.ids.iter().cloned().map(Value::String).collect()),
-        );
-        predicates.push("t.id IN $ids");
-    }
-    if !request.thread_ids.is_empty() {
-        parameters.insert(
-            "thread_ids".to_string(),
-            Value::List(
-                request
-                    .thread_ids
-                    .iter()
-                    .cloned()
-                    .map(Value::String)
-                    .collect(),
-            ),
-        );
-        predicates.push("t.thread_id IN $thread_ids");
-    }
-    if let Some(lookup_key) = &request.lookup_key {
-        parameters.insert("lookup_key".to_string(), Value::String(lookup_key.clone()));
-        predicates.push(
-            "(t.id = $lookup_key OR t.id STARTS WITH $lookup_key OR t.id CONTAINS $lookup_key OR t.thread_id = $lookup_key)",
-        );
-    }
-    if let Some(source) = &request.source {
-        parameters.insert("source".to_string(), Value::String(source.clone()));
-        predicates.push("t.source = $source");
-    }
-    if let Some(normalized_space_id) = &request.normalized_space_id {
-        parameters.insert(
-            "normalized_space_id".to_string(),
-            Value::String(normalized_space_id.clone()),
-        );
-        if normalized_space_id == "default" {
-            predicates.push(
-                "(t.space_id IS NULL OR t.space_id = '' OR t.space_id = $normalized_space_id)",
-            );
-        } else {
-            predicates.push("t.space_id = $normalized_space_id");
-        }
-    }
-    if request.require_thread_id {
-        predicates.push("t.thread_id IS NOT NULL AND t.thread_id <> ''");
-    }
-    if let Some(after_id) = &request.after_id {
-        parameters.insert("after_id".to_string(), Value::String(after_id.clone()));
-        predicates.push("t.id > $after_id");
-    }
-
-    if predicates.is_empty() {
-        String::new()
-    } else {
-        format!(" WHERE {}", predicates.join(" AND "))
-    }
-}
-
-fn thread_metadata_matches_list_request(
-    thread: &KnowledgeEntity,
-    request: &KnowledgeThreadListRequest,
-) -> bool {
-    request.metadata_contains.as_ref().is_none_or(|marker| {
-        thread
-            .properties
-            .get("metadata")
-            .map(value_to_external_id)
-            .is_some_and(|metadata| metadata.contains(marker))
-    })
-}
-
-fn knowledge_thread_list_row_from_entity(thread: &KnowledgeEntity) -> KnowledgeThreadListRow {
-    let id = string_property_value(&thread.properties, "id");
-    let title = string_property_value(&thread.properties, "title");
-    let source = string_property_value(&thread.properties, "source");
-    let display_title = title
-        .clone()
-        .or_else(|| source.clone())
-        .unwrap_or_else(|| "Thread".to_string());
-    KnowledgeThreadListRow {
-        id,
-        thread_id: string_property_value(&thread.properties, "thread_id"),
-        node_id: thread.node_id,
-        display_title,
-        title,
-        summary: string_property_value(&thread.properties, "summary"),
-        source,
-        project: string_property_value(&thread.properties, "project"),
-        workspace: string_property_value(&thread.properties, "workspace"),
-        raw_space_id: string_property_value(&thread.properties, "space_id"),
-        normalized_space_id: knowledge_entity_normalized_space_id(thread),
-        metadata: thread.properties.get("metadata").cloned(),
-        message_count: integer_property_value(&thread.properties, "message_count").unwrap_or(0),
-        created_at: thread.properties.get("created_at").cloned(),
-        updated_at: thread.properties.get("updated_at").cloned(),
-        import_date: thread.properties.get("import_date").cloned(),
-    }
-}
-
-fn sort_thread_list_rows(rows: &mut [KnowledgeThreadListRow], order: KnowledgeThreadListOrder) {
-    rows.sort_by(|left, right| match order {
-        KnowledgeThreadListOrder::ThreadIdAsc => compare_thread_list_thread_ids(left, right),
-        KnowledgeThreadListOrder::IdAsc => compare_thread_list_ids(left, right),
-        KnowledgeThreadListOrder::MessageCountDesc => right
-            .message_count
-            .cmp(&left.message_count)
-            .then_with(|| compare_thread_list_ids(left, right)),
-        KnowledgeThreadListOrder::UpdatedAtDesc => compare_thread_recent_values(left, right)
-            .then_with(|| compare_thread_list_thread_ids(left, right)),
-    });
-}
-
-fn compare_thread_list_ids(
-    left: &KnowledgeThreadListRow,
-    right: &KnowledgeThreadListRow,
-) -> std::cmp::Ordering {
-    left.id
-        .cmp(&right.id)
-        .then_with(|| left.node_id.cmp(&right.node_id))
-}
-
-fn compare_thread_list_thread_ids(
-    left: &KnowledgeThreadListRow,
-    right: &KnowledgeThreadListRow,
-) -> std::cmp::Ordering {
-    left.thread_id
-        .cmp(&right.thread_id)
-        .then_with(|| compare_thread_list_ids(left, right))
-}
-
-fn compare_thread_recent_values(
-    left: &KnowledgeThreadListRow,
-    right: &KnowledgeThreadListRow,
-) -> std::cmp::Ordering {
-    compare_optional_values_desc(
-        left.updated_at
-            .as_ref()
-            .or(left.import_date.as_ref())
-            .or(left.created_at.as_ref()),
-        right
-            .updated_at
-            .as_ref()
-            .or(right.import_date.as_ref())
-            .or(right.created_at.as_ref()),
-    )
-}
-
-fn knowledge_thread_sources_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeThreadSourceListRequest,
-) -> Result<KnowledgeThreadSourceListOutput> {
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(label_id) = catalog.label_id("Thread") else {
-        return Ok(KnowledgeThreadSourceListOutput {
-            graph_commit_epoch,
-            sources: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-        });
-    };
-
-    let mut source_set = BTreeSet::new();
-    store.visit_nodes_owned(Some(label_id), |node| {
-        if let Some(source) = string_property(&node, "source") {
-            source_set.insert(source);
-        }
-        crate::store::GraphScanControl::Continue
-    })?;
-    let mut sources = source_set.into_iter().collect::<Vec<_>>();
-    let matched_count = sources.len();
-    if request.limit > 0 {
-        sources.truncate(request.limit);
-    }
-    let returned_count = sources.len();
-
-    Ok(KnowledgeThreadSourceListOutput {
-        graph_commit_epoch,
-        sources,
-        matched_count,
-        returned_count,
-    })
-}
-
-fn knowledge_thread_sources_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeThreadSourceListRequest,
-) -> Result<KnowledgeThreadSourceListOutput> {
-    let graph_commit_epoch = db.store.commit_epoch();
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (t:Thread) \
-             WHERE t.source IS NOT NULL AND t.source <> '' \
-             RETURN DISTINCT t.source AS source \
-             ORDER BY source ASC",
-        &BTreeMap::new(),
-        None,
-    )?;
-    let matched_count = output.rows.len();
-    let mut sources = output
-        .rows
-        .iter()
-        .filter_map(|row| optional_string_cell(row, "source"))
-        .collect::<Vec<_>>();
-    if request.limit > 0 {
-        sources.truncate(request.limit);
-    }
-    let returned_count = sources.len();
-    Ok(KnowledgeThreadSourceListOutput {
-        graph_commit_epoch,
-        sources,
-        matched_count,
-        returned_count,
-    })
-}
-
-fn knowledge_thread_title_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeThreadTitleLookupRequest,
-) -> Result<KnowledgeThreadTitleLookupOutput> {
-    validate_knowledge_thread_title_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(label_id) = catalog.label_id("Thread") else {
-        return Ok(KnowledgeThreadTitleLookupOutput {
-            graph_commit_epoch,
-            id: request.id.clone(),
-            thread_node_id: None,
-            found_thread: false,
-            title: None,
-            matched_count: 0,
-        });
-    };
-
-    let matched = exact_thread_id_or_logical_candidates(store, label_id, &request.id)?;
-    let matched_count = matched.len();
-    let first = matched.into_iter().next();
-
-    Ok(KnowledgeThreadTitleLookupOutput {
-        graph_commit_epoch,
-        id: request.id.clone(),
-        thread_node_id: first.as_ref().map(|node| node.id.0),
-        found_thread: first.is_some(),
-        title: first
-            .as_ref()
-            .and_then(|node| string_property(node, "title")),
-        matched_count,
-    })
-}
-
-fn knowledge_thread_title_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeThreadTitleLookupRequest,
-) -> Result<KnowledgeThreadTitleLookupOutput> {
-    validate_knowledge_thread_title_request(request)?;
-    let parameters = BTreeMap::from([("id".to_string(), Value::String(request.id.clone()))]);
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (t:Thread) \
-         WHERE t.id = $id OR t.thread_id = $id \
-         RETURN id(t) AS thread_node_id, t.title AS title \
-         ORDER BY thread_node_id ASC",
-        &parameters,
-        None,
-    )?;
-    let matched_count = output.rows.len();
-    let first = output.rows.first();
-    Ok(KnowledgeThreadTitleLookupOutput {
-        graph_commit_epoch: db.store.commit_epoch(),
-        id: request.id.clone(),
-        thread_node_id: first
-            .and_then(|row| row.get("thread_node_id"))
-            .and_then(value_to_non_negative_u64),
-        found_thread: first.is_some(),
-        title: first.and_then(|row| optional_string_cell(row, "title")),
-        matched_count,
-    })
-}
-
-fn validate_knowledge_thread_title_request(
-    request: &KnowledgeThreadTitleLookupRequest,
-) -> Result<()> {
-    if request.id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge thread title read requires a non-empty thread id".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn knowledge_thread_source_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeThreadSourceLookupRequest,
-) -> Result<KnowledgeThreadSourceLookupOutput> {
-    validate_knowledge_thread_source_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(label_id) = catalog.label_id("Thread") else {
-        return Ok(KnowledgeThreadSourceLookupOutput {
-            graph_commit_epoch,
-            sid: request.sid.clone(),
-            thread_node_id: None,
-            found_thread: false,
-            thread_id: None,
-            title: None,
-            source: None,
-            created_at: None,
-            matched_count: 0,
-        });
-    };
-
-    let matched = exact_thread_id_or_logical_candidates(store, label_id, &request.sid)?;
-    let matched_count = matched.len();
-    let first = matched.into_iter().next();
-
-    Ok(KnowledgeThreadSourceLookupOutput {
-        graph_commit_epoch,
-        sid: request.sid.clone(),
-        thread_node_id: first.as_ref().map(|node| node.id.0),
-        found_thread: first.is_some(),
-        thread_id: first
-            .as_ref()
-            .and_then(|node| string_property(node, "thread_id")),
-        title: first
-            .as_ref()
-            .and_then(|node| string_property(node, "title")),
-        source: first
-            .as_ref()
-            .and_then(|node| string_property(node, "source")),
-        created_at: first
-            .as_ref()
-            .and_then(|node| node.properties.get("created_at").cloned()),
-        matched_count,
-    })
-}
-
-fn knowledge_thread_source_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeThreadSourceLookupRequest,
-) -> Result<KnowledgeThreadSourceLookupOutput> {
-    validate_knowledge_thread_source_request(request)?;
-    let parameters = BTreeMap::from([("sid".to_string(), Value::String(request.sid.clone()))]);
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (t:Thread) \
-         WHERE t.id = $sid OR t.thread_id = $sid \
-         RETURN id(t) AS thread_node_id, t.thread_id AS thread_id, \
-         t.title AS title, t.source AS source, t.created_at AS created_at \
-         ORDER BY thread_node_id ASC",
-        &parameters,
-        None,
-    )?;
-    let matched_count = output.rows.len();
-    let first = output.rows.first();
-    Ok(KnowledgeThreadSourceLookupOutput {
-        graph_commit_epoch: db.store.commit_epoch(),
-        sid: request.sid.clone(),
-        thread_node_id: first
-            .and_then(|row| row.get("thread_node_id"))
-            .and_then(value_to_non_negative_u64),
-        found_thread: first.is_some(),
-        thread_id: first.and_then(|row| optional_string_cell(row, "thread_id")),
-        title: first.and_then(|row| optional_string_cell(row, "title")),
-        source: first.and_then(|row| optional_string_cell(row, "source")),
-        created_at: first
-            .and_then(|row| row.get("created_at"))
-            .and_then(optional_non_null_value),
-        matched_count,
-    })
-}
-
-fn validate_knowledge_thread_source_request(
-    request: &KnowledgeThreadSourceLookupRequest,
-) -> Result<()> {
-    if request.sid.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge thread source read requires a non-empty thread id".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn knowledge_thread_message_lookup_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeThreadMessageLookupRequest,
-) -> Result<KnowledgeThreadMessageLookupOutput> {
-    validate_knowledge_thread_message_lookup_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(label_id) = catalog.label_id("Thread") else {
-        return Ok(KnowledgeThreadMessageLookupOutput {
-            graph_commit_epoch,
-            key: request.key.clone(),
-            source_filter: request.source.clone(),
-            thread_node_id: None,
-            found_thread: false,
-            id: None,
-            message_count: None,
-            raw_space_id: None,
-            matched_count: 0,
-        });
-    };
-
-    let matched =
-        thread_id_lookup_key_and_source_candidates(store, label_id, &request.key, &request.source)?;
-    let matched_count = matched.len();
-    let first = matched.into_iter().next();
-
-    Ok(KnowledgeThreadMessageLookupOutput {
-        graph_commit_epoch,
-        key: request.key.clone(),
-        source_filter: request.source.clone(),
-        thread_node_id: first.as_ref().map(|node| node.id.0),
-        found_thread: first.is_some(),
-        id: first.as_ref().and_then(node_external_id),
-        message_count: first
-            .as_ref()
-            .and_then(|node| node.properties.get("message_count").cloned()),
-        raw_space_id: first
-            .as_ref()
-            .and_then(|node| raw_string_property(node, "space_id")),
-        matched_count,
-    })
-}
-
-fn knowledge_thread_message_lookup_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeThreadMessageLookupRequest,
-) -> Result<KnowledgeThreadMessageLookupOutput> {
-    validate_knowledge_thread_message_lookup_request(request)?;
-    let parameters = thread_lookup_key_source_parameters(&request.key, &request.source);
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (t:Thread) \
-         WHERE (t.id = $key OR t.id STARTS WITH $key OR t.id CONTAINS $key) AND t.source = $source \
-         RETURN id(t) AS thread_node_id, t.id AS id, t.message_count AS message_count, \
-         t.space_id AS raw_space_id \
-         ORDER BY thread_node_id ASC",
-        &parameters,
-        None,
-    )?;
-    let matched_count = output.rows.len();
-    let first = output.rows.first();
-    Ok(KnowledgeThreadMessageLookupOutput {
-        graph_commit_epoch: db.store.commit_epoch(),
-        key: request.key.clone(),
-        source_filter: request.source.clone(),
-        thread_node_id: first
-            .and_then(|row| row.get("thread_node_id"))
-            .and_then(value_to_non_negative_u64),
-        found_thread: first.is_some(),
-        id: first.and_then(|row| optional_string_cell(row, "id")),
-        message_count: first
-            .and_then(|row| row.get("message_count"))
-            .and_then(optional_non_null_value),
-        raw_space_id: first
-            .and_then(|row| row.get("raw_space_id"))
-            .filter(|value| !matches!(value, Value::Null))
-            .map(value_to_external_id),
-        matched_count,
-    })
-}
-
-fn validate_knowledge_thread_message_lookup_request(
-    request: &KnowledgeThreadMessageLookupRequest,
-) -> Result<()> {
-    if request.key.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge thread message lookup requires a non-empty key".to_string(),
-        ));
-    }
-    if request.source.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge thread message lookup requires a non-empty source".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn knowledge_thread_meta_lookup_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeThreadMetaLookupRequest,
-) -> Result<KnowledgeThreadMetaLookupOutput> {
-    validate_knowledge_thread_meta_lookup_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(label_id) = catalog.label_id("Thread") else {
-        return Ok(KnowledgeThreadMetaLookupOutput {
-            graph_commit_epoch,
-            key: request.key.clone(),
-            source_filter: request.source.clone(),
-            thread_node_id: None,
-            found_thread: false,
-            id: None,
-            thread_id: None,
-            title: None,
-            summary: None,
-            message_count: None,
-            source: None,
-            created_at: None,
-            updated_at: None,
-            raw_space_id: None,
-            project: None,
-            workspace: None,
-            matched_count: 0,
-        });
-    };
-
-    let matched =
-        thread_id_lookup_key_and_source_candidates(store, label_id, &request.key, &request.source)?;
-    let matched_count = matched.len();
-    let first = matched.into_iter().next();
-
-    Ok(KnowledgeThreadMetaLookupOutput {
-        graph_commit_epoch,
-        key: request.key.clone(),
-        source_filter: request.source.clone(),
-        thread_node_id: first.as_ref().map(|node| node.id.0),
-        found_thread: first.is_some(),
-        id: first.as_ref().and_then(node_external_id),
-        thread_id: first
-            .as_ref()
-            .and_then(|node| string_property(node, "thread_id")),
-        title: first
-            .as_ref()
-            .and_then(|node| string_property(node, "title")),
-        summary: first
-            .as_ref()
-            .and_then(|node| string_property(node, "summary")),
-        message_count: first
-            .as_ref()
-            .and_then(|node| node.properties.get("message_count").cloned()),
-        source: first
-            .as_ref()
-            .and_then(|node| string_property(node, "source")),
-        created_at: first
-            .as_ref()
-            .and_then(|node| node.properties.get("created_at").cloned()),
-        updated_at: first
-            .as_ref()
-            .and_then(|node| node.properties.get("updated_at").cloned()),
-        raw_space_id: first
-            .as_ref()
-            .and_then(|node| raw_string_property(node, "space_id")),
-        project: first
-            .as_ref()
-            .and_then(|node| string_property(node, "project")),
-        workspace: first
-            .as_ref()
-            .and_then(|node| string_property(node, "workspace")),
-        matched_count,
-    })
-}
-
-fn knowledge_thread_meta_lookup_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeThreadMetaLookupRequest,
-) -> Result<KnowledgeThreadMetaLookupOutput> {
-    validate_knowledge_thread_meta_lookup_request(request)?;
-    let parameters = thread_lookup_key_source_parameters(&request.key, &request.source);
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (t:Thread) \
-         WHERE (t.id = $key OR t.id STARTS WITH $key OR t.id CONTAINS $key) AND t.source = $source \
-         RETURN id(t) AS thread_node_id, t.id AS id, t.thread_id AS thread_id, \
-         t.title AS title, t.summary AS summary, t.message_count AS message_count, \
-         t.source AS source, t.created_at AS created_at, t.updated_at AS updated_at, \
-         t.space_id AS raw_space_id, t.project AS project, t.workspace AS workspace \
-         ORDER BY thread_node_id ASC",
-        &parameters,
-        None,
-    )?;
-    let matched_count = output.rows.len();
-    let first = output.rows.first();
-    Ok(KnowledgeThreadMetaLookupOutput {
-        graph_commit_epoch: db.store.commit_epoch(),
-        key: request.key.clone(),
-        source_filter: request.source.clone(),
-        thread_node_id: first
-            .and_then(|row| row.get("thread_node_id"))
-            .and_then(value_to_non_negative_u64),
-        found_thread: first.is_some(),
-        id: first.and_then(|row| optional_string_cell(row, "id")),
-        thread_id: first.and_then(|row| optional_string_cell(row, "thread_id")),
-        title: first.and_then(|row| optional_string_cell(row, "title")),
-        summary: first.and_then(|row| optional_string_cell(row, "summary")),
-        message_count: first
-            .and_then(|row| row.get("message_count"))
-            .and_then(optional_non_null_value),
-        source: first.and_then(|row| optional_string_cell(row, "source")),
-        created_at: first
-            .and_then(|row| row.get("created_at"))
-            .and_then(optional_non_null_value),
-        updated_at: first
-            .and_then(|row| row.get("updated_at"))
-            .and_then(optional_non_null_value),
-        raw_space_id: first
-            .and_then(|row| row.get("raw_space_id"))
-            .filter(|value| !matches!(value, Value::Null))
-            .map(value_to_external_id),
-        project: first.and_then(|row| optional_string_cell(row, "project")),
-        workspace: first.and_then(|row| optional_string_cell(row, "workspace")),
-        matched_count,
-    })
-}
-
-fn validate_knowledge_thread_meta_lookup_request(
-    request: &KnowledgeThreadMetaLookupRequest,
-) -> Result<()> {
-    if request.key.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge thread meta lookup requires a non-empty key".to_string(),
-        ));
-    }
-    if request.source.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge thread meta lookup requires a non-empty source".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn thread_lookup_key_source_parameters(key: &str, source: &str) -> BTreeMap<String, Value> {
-    BTreeMap::from([
-        ("key".to_string(), Value::String(key.to_string())),
-        ("source".to_string(), Value::String(source.to_string())),
-    ])
-}
-
-fn exact_thread_id_or_logical_candidates(
-    store: &GraphStore,
-    label_id: LabelId,
-    id: &str,
-) -> Result<Vec<NodeRecord>> {
-    let mut matched = Vec::new();
-    store.visit_nodes_owned(Some(label_id), |node| {
-        if node_external_id(&node).as_deref() == Some(id)
-            || string_property(&node, "thread_id").as_deref() == Some(id)
-        {
-            matched.push(node);
-        }
-        crate::store::GraphScanControl::Continue
-    })?;
-    matched.sort_by_key(|node| node.id.0);
-    Ok(matched)
-}
-
-fn thread_id_lookup_key_and_source_candidates(
-    store: &GraphStore,
-    label_id: LabelId,
-    key: &str,
-    source: &str,
-) -> Result<Vec<NodeRecord>> {
-    let mut matched = Vec::new();
-    store.visit_nodes_owned(Some(label_id), |node| {
-        if node_external_id(&node).is_some_and(|id| {
-            (id == key || id.starts_with(key) || id.contains(key))
-                && string_property(&node, "source").as_deref() == Some(source)
-        }) {
-            matched.push(node);
-        }
-        crate::store::GraphScanControl::Continue
-    })?;
-    matched.sort_by_key(|node| node.id.0);
-    Ok(matched)
-}
-
-fn knowledge_thread_identity_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeThreadIdentityRequest,
-) -> Result<KnowledgeThreadIdentityOutput> {
-    validate_knowledge_thread_identity_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(identity) = try_seed_node_by_label_and_external_id(
-        catalog,
-        store,
-        "ThreadIdentity",
-        &request.identity_key,
-    )?
-    else {
-        return Ok(KnowledgeThreadIdentityOutput {
-            graph_commit_epoch,
-            identity_key: request.identity_key.clone(),
-            identity_node_id: None,
-            found_identity: false,
-            thread_node_id: None,
-            thread_id: None,
-            raw_space_id: None,
-            normalized_space_id: None,
-            source: None,
-        });
-    };
-
-    Ok(KnowledgeThreadIdentityOutput {
-        graph_commit_epoch,
-        identity_key: request.identity_key.clone(),
-        identity_node_id: Some(identity.id.0),
-        found_identity: true,
-        thread_node_id: string_property(&identity, "thread_node_id"),
-        thread_id: string_property(&identity, "thread_id"),
-        raw_space_id: string_property(&identity, "space_id"),
-        normalized_space_id: Some(normalized_node_space_id(&identity)),
-        source: string_property(&identity, "source"),
-    })
-}
-
-fn knowledge_thread_identity_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeThreadIdentityRequest,
-) -> Result<KnowledgeThreadIdentityOutput> {
-    validate_knowledge_thread_identity_request(request)?;
-    let parameters = BTreeMap::from([(
-        "identity_key".to_string(),
-        Value::String(request.identity_key.clone()),
-    )]);
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (ti:ThreadIdentity {id: $identity_key}) \
-         RETURN id(ti) AS identity_node_id, ti.thread_node_id AS thread_node_id, \
-         ti.thread_id AS thread_id, ti.space_id AS raw_space_id, \
-         CASE WHEN ti.space_id IS NULL OR ti.space_id = '' THEN 'default' ELSE ti.space_id END AS normalized_space_id, \
-         ti.source AS source \
-         LIMIT 1",
-        &parameters,
-        Some(1),
-    )?;
-    let first = output.rows.first();
-    Ok(KnowledgeThreadIdentityOutput {
-        graph_commit_epoch: db.store.commit_epoch(),
-        identity_key: request.identity_key.clone(),
-        identity_node_id: first
-            .and_then(|row| row.get("identity_node_id"))
-            .and_then(value_to_non_negative_u64),
-        found_identity: first.is_some(),
-        thread_node_id: first.and_then(|row| optional_string_cell(row, "thread_node_id")),
-        thread_id: first.and_then(|row| optional_string_cell(row, "thread_id")),
-        raw_space_id: first.and_then(|row| optional_string_cell(row, "raw_space_id")),
-        normalized_space_id: first.and_then(|row| optional_string_cell(row, "normalized_space_id")),
-        source: first.and_then(|row| optional_string_cell(row, "source")),
-    })
-}
-
-fn validate_knowledge_thread_identity_request(
-    request: &KnowledgeThreadIdentityRequest,
-) -> Result<()> {
-    if request.identity_key.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge thread identity read requires a non-empty identity key".to_string(),
-        ));
-    }
-    Ok(())
 }
 
 fn delete_knowledge_thread_identities_for(
@@ -19447,358 +11190,6 @@ fn thread_identity_delete_candidates(
     }
 }
 
-fn knowledge_thread_sync_metadata_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeThreadSyncMetadataRequest,
-) -> Result<KnowledgeThreadSyncMetadataOutput> {
-    validate_knowledge_thread_sync_metadata_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(thread) =
-        try_seed_node_by_label_and_external_id(catalog, store, "Thread", &request.id)?
-    else {
-        return Ok(KnowledgeThreadSyncMetadataOutput {
-            graph_commit_epoch,
-            id: request.id.clone(),
-            thread_node_id: None,
-            found_thread: false,
-            title: String::new(),
-            source: String::new(),
-            project: String::new(),
-            workspace: String::new(),
-            space_id: "default".to_string(),
-        });
-    };
-
-    Ok(KnowledgeThreadSyncMetadataOutput {
-        graph_commit_epoch,
-        id: request.id.clone(),
-        thread_node_id: Some(thread.id.0),
-        found_thread: true,
-        title: coalesced_string_property(&thread, "title", ""),
-        source: coalesced_string_property(&thread, "source", ""),
-        project: coalesced_string_property(&thread, "project", ""),
-        workspace: coalesced_string_property(&thread, "workspace", ""),
-        space_id: coalesced_string_property(&thread, "space_id", "default"),
-    })
-}
-
-fn knowledge_thread_sync_metadata_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeThreadSyncMetadataRequest,
-) -> Result<KnowledgeThreadSyncMetadataOutput> {
-    validate_knowledge_thread_sync_metadata_request(request)?;
-    let parameters = BTreeMap::from([("id".to_string(), Value::String(request.id.clone()))]);
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (t:Thread {id: $id}) \
-         RETURN id(t) AS thread_node_id, \
-         COALESCE(t.title, '') AS title, \
-         COALESCE(t.source, '') AS source, \
-         COALESCE(t.project, '') AS project, \
-         COALESCE(t.workspace, '') AS workspace, \
-         COALESCE(t.space_id, 'default') AS space_id \
-         LIMIT 1",
-        &parameters,
-        Some(1),
-    )?;
-    let first = output.rows.first();
-    Ok(KnowledgeThreadSyncMetadataOutput {
-        graph_commit_epoch: db.store.commit_epoch(),
-        id: request.id.clone(),
-        thread_node_id: first
-            .and_then(|row| row.get("thread_node_id"))
-            .and_then(value_to_non_negative_u64),
-        found_thread: first.is_some(),
-        title: first
-            .and_then(|row| optional_string_cell(row, "title"))
-            .unwrap_or_default(),
-        source: first
-            .and_then(|row| optional_string_cell(row, "source"))
-            .unwrap_or_default(),
-        project: first
-            .and_then(|row| optional_string_cell(row, "project"))
-            .unwrap_or_default(),
-        workspace: first
-            .and_then(|row| optional_string_cell(row, "workspace"))
-            .unwrap_or_default(),
-        space_id: first
-            .and_then(|row| row.get("space_id"))
-            .map(value_to_external_id)
-            .unwrap_or_else(|| "default".to_string()),
-    })
-}
-
-fn validate_knowledge_thread_sync_metadata_request(
-    request: &KnowledgeThreadSyncMetadataRequest,
-) -> Result<()> {
-    if request.id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge thread sync metadata read requires a non-empty thread id".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn knowledge_thread_distillation_candidates_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeThreadDistillationCandidateRequest,
-) -> Result<KnowledgeThreadDistillationCandidateOutput> {
-    validate_knowledge_thread_distillation_candidate_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let mut parameters = BTreeMap::from([(
-        "normalized_space_id".to_string(),
-        Value::String(request.normalized_space_id.clone()),
-    )]);
-    let predicate = thread_distillation_candidate_query_predicate(request, &mut parameters);
-    let query = format!(
-        "MATCH (t:Thread) WHERE {predicate} \
-         RETURN t.id AS id, t.thread_id AS thread_id, id(t) AS node_id, \
-         t.source AS source, t.space_id AS raw_space_id, t.updated_at AS updated_at, \
-         t.import_date AS import_date, t.created_at AS created_at"
-    );
-    let output = db.query_read_only_with_params_bounded(&query, &parameters, None)?;
-    let mut rows = output
-        .rows
-        .iter()
-        .map(knowledge_thread_distillation_candidate_row_from_query)
-        .collect::<Result<Vec<_>>>()?;
-    sort_thread_distillation_candidate_rows(&mut rows);
-    let matched_count = rows.len();
-    if request.offset > 0 {
-        rows = rows.into_iter().skip(request.offset).collect();
-    }
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    } else {
-        rows.clear();
-    }
-    let returned_count = rows.len();
-
-    Ok(KnowledgeThreadDistillationCandidateOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        returned_count,
-    })
-}
-
-fn thread_distillation_candidate_query_predicate(
-    request: &KnowledgeThreadDistillationCandidateRequest,
-    parameters: &mut BTreeMap<String, Value>,
-) -> String {
-    let mut predicates = vec![
-        "t.thread_id IS NOT NULL".to_string(),
-        "t.thread_id <> ''".to_string(),
-    ];
-    if request.normalized_space_id == "default" {
-        predicates.push(
-            "(t.space_id IS NULL OR t.space_id = '' OR t.space_id = $normalized_space_id)"
-                .to_string(),
-        );
-    } else {
-        predicates.push("t.space_id = $normalized_space_id".to_string());
-    }
-    if let Some(source) = &request.source {
-        parameters.insert("source".to_string(), Value::String(source.clone()));
-        predicates.push("t.source = $source".to_string());
-    }
-    predicates.join(" AND ")
-}
-
-fn knowledge_thread_distillation_candidate_row_from_query(
-    row: &Row,
-) -> Result<KnowledgeThreadDistillationCandidateRow> {
-    let thread_id = optional_string_cell(row, "thread_id").ok_or_else(|| {
-        SkeinError::Execution(
-            "knowledge thread distillation candidate row is missing thread_id".to_string(),
-        )
-    })?;
-    let node_id = row
-        .get("node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge thread distillation candidate row is missing node_id".to_string(),
-            )
-        })?;
-    Ok(KnowledgeThreadDistillationCandidateRow {
-        id: optional_string_cell(row, "id"),
-        thread_id,
-        node_id,
-        source: optional_string_cell(row, "source"),
-        raw_space_id: optional_string_cell(row, "raw_space_id"),
-        normalized_space_id: optional_string_cell(row, "raw_space_id")
-            .filter(|space_id| !space_id.is_empty())
-            .unwrap_or_else(|| "default".to_string()),
-        recent_at: row
-            .get("updated_at")
-            .and_then(optional_non_null_value)
-            .or_else(|| row.get("import_date").and_then(optional_non_null_value))
-            .or_else(|| row.get("created_at").and_then(optional_non_null_value)),
-    })
-}
-
-fn sort_thread_distillation_candidate_rows(rows: &mut [KnowledgeThreadDistillationCandidateRow]) {
-    rows.sort_by(|left, right| {
-        compare_optional_values_desc(left.recent_at.as_ref(), right.recent_at.as_ref())
-            .then_with(|| left.thread_id.cmp(&right.thread_id))
-            .then_with(|| left.id.cmp(&right.id))
-            .then_with(|| left.node_id.cmp(&right.node_id))
-    });
-}
-
-fn validate_knowledge_thread_distillation_candidate_request(
-    request: &KnowledgeThreadDistillationCandidateRequest,
-) -> Result<()> {
-    if request.normalized_space_id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge thread distillation candidate read requires a non-empty normalized space id"
-                .to_string(),
-        ));
-    }
-    if request.source.as_deref().is_some_and(str::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge thread distillation candidate read requires a non-empty source".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn knowledge_thread_compacted_memories_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeThreadCompactedMemoryListRequest,
-) -> Result<KnowledgeThreadCompactedMemoryListOutput> {
-    validate_thread_compacted_memory_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let thread = thread_entity_by_identity_via_query_runtime(
-        db,
-        &request.identity_property,
-        &request.thread_id,
-    )?;
-    let Some(thread) = thread else {
-        return Ok(KnowledgeThreadCompactedMemoryListOutput {
-            graph_commit_epoch,
-            thread_id: request.thread_id.clone(),
-            thread_node_id: None,
-            found: false,
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-        });
-    };
-
-    let mut rows = thread_compacted_memory_rows_via_query_runtime(db, thread.node_id)?;
-    let matched_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-    Ok(KnowledgeThreadCompactedMemoryListOutput {
-        graph_commit_epoch,
-        thread_id: request.thread_id.clone(),
-        thread_node_id: Some(thread.node_id),
-        found: true,
-        rows,
-        matched_count,
-        returned_count,
-    })
-}
-
-fn knowledge_thread_compacted_memory_projected_list_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeThreadCompactedMemoryProjectedListRequest,
-) -> Result<KnowledgeThreadCompactedMemoryProjectedListOutput> {
-    validate_thread_compacted_memory_projected_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(thread) = thread_node_by_identity(
-        catalog,
-        store,
-        &request.list.identity_property,
-        &request.list.thread_id,
-    )?
-    else {
-        return Ok(KnowledgeThreadCompactedMemoryProjectedListOutput {
-            graph_commit_epoch,
-            thread_id: request.list.thread_id.clone(),
-            thread_node_id: None,
-            found: false,
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-        });
-    };
-
-    let mut rows = thread_compacted_memory_projected_rows(
-        catalog,
-        store,
-        thread.id,
-        &request.memory_property_names,
-        &request.relationship_property_names,
-    )?;
-    let matched_count = rows.len();
-    if request.list.limit > 0 {
-        rows.truncate(request.list.limit);
-    }
-    let returned_count = rows.len();
-
-    Ok(KnowledgeThreadCompactedMemoryProjectedListOutput {
-        graph_commit_epoch,
-        thread_id: request.list.thread_id.clone(),
-        thread_node_id: Some(thread.id.0),
-        found: true,
-        rows,
-        matched_count,
-        returned_count,
-    })
-}
-
-fn knowledge_thread_compacted_memory_projected_list_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeThreadCompactedMemoryProjectedListRequest,
-) -> Result<KnowledgeThreadCompactedMemoryProjectedListOutput> {
-    validate_thread_compacted_memory_projected_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let thread = thread_entity_by_identity_via_query_runtime(
-        db,
-        &request.list.identity_property,
-        &request.list.thread_id,
-    )?;
-    let Some(thread) = thread else {
-        return Ok(KnowledgeThreadCompactedMemoryProjectedListOutput {
-            graph_commit_epoch,
-            thread_id: request.list.thread_id.clone(),
-            thread_node_id: None,
-            found: false,
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-        });
-    };
-
-    let mut rows = thread_compacted_memory_projected_rows_via_query_runtime(
-        db,
-        thread.node_id,
-        &request.memory_property_names,
-        &request.relationship_property_names,
-    )?;
-    let matched_count = rows.len();
-    if request.list.limit > 0 {
-        rows.truncate(request.list.limit);
-    }
-    let returned_count = rows.len();
-
-    Ok(KnowledgeThreadCompactedMemoryProjectedListOutput {
-        graph_commit_epoch,
-        thread_id: request.list.thread_id.clone(),
-        thread_node_id: Some(thread.node_id),
-        found: true,
-        rows,
-        matched_count,
-        returned_count,
-    })
-}
-
 fn create_knowledge_thread_compaction_link_for(
     db: &mut Database,
     request: &KnowledgeThreadCompactionLinkRequest,
@@ -19908,1154 +11299,6 @@ fn validate_knowledge_thread_compaction_link_request(
     Ok(())
 }
 
-fn validate_thread_compacted_memory_request(
-    request: &KnowledgeThreadCompactedMemoryListRequest,
-) -> Result<()> {
-    if request.thread_id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge thread compacted memory read requires a non-empty thread id".to_string(),
-        ));
-    }
-    if request.identity_property != "id" && request.identity_property != "thread_id" {
-        return Err(SkeinError::Semantic(
-            "knowledge thread compacted memory read requires id or thread_id identity".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_thread_compacted_memory_projected_request(
-    request: &KnowledgeThreadCompactedMemoryProjectedListRequest,
-) -> Result<()> {
-    validate_thread_compacted_memory_request(&request.list)?;
-    if request.memory_property_names.iter().any(String::is_empty)
-        || request
-            .relationship_property_names
-            .iter()
-            .any(String::is_empty)
-    {
-        return Err(SkeinError::Semantic(
-            "knowledge thread compacted memory projected read requires non-empty property names"
-                .to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn thread_node_by_identity(
-    catalog: &Catalog,
-    store: &GraphStore,
-    identity_property: &str,
-    thread_id: &str,
-) -> Result<Option<NodeRecord>> {
-    let Some(label_id) = catalog.label_id("Thread") else {
-        return Ok(None);
-    };
-    let mut found = None;
-    store.visit_nodes_owned(Some(label_id), |node| {
-        if node
-            .properties
-            .get(identity_property)
-            .map(value_to_external_id)
-            .as_deref()
-            == Some(thread_id)
-        {
-            found = Some(node);
-            crate::store::GraphScanControl::Stop
-        } else {
-            crate::store::GraphScanControl::Continue
-        }
-    })?;
-    Ok(found)
-}
-
-fn thread_entity_by_identity_via_query_runtime(
-    db: &Database,
-    identity_property: &str,
-    thread_id: &str,
-) -> Result<Option<KnowledgeEntity>> {
-    let parameters = BTreeMap::from([(
-        "thread_id".to_string(),
-        Value::String(thread_id.to_string()),
-    )]);
-    let query = format!(
-        "MATCH (thread:Thread) \
-         WHERE thread.{identity_property} = $thread_id \
-         RETURN thread AS thread \
-         ORDER BY id(thread) ASC \
-         LIMIT 1"
-    );
-    let output = db.query_read_only_with_params_bounded(&query, &parameters, Some(1))?;
-    output
-        .rows
-        .first()
-        .map(|row| {
-            row.get("thread")
-                .and_then(knowledge_entity_from_value)
-                .ok_or_else(|| {
-                    SkeinError::Execution(
-                        "knowledge thread compacted memory row is missing thread map".to_string(),
-                    )
-                })
-        })
-        .transpose()
-}
-
-fn thread_compacted_memory_rows_via_query_runtime(
-    db: &Database,
-    thread_node_id: u64,
-) -> Result<Vec<KnowledgeThreadCompactedMemoryRow>> {
-    let parameters = BTreeMap::from([(
-        "thread_node_id".to_string(),
-        Value::Int(i64::try_from(thread_node_id).map_err(|_| {
-            SkeinError::Execution("knowledge thread node id exceeds i64".to_string())
-        })?),
-    )]);
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (thread)-[relationship:COMPACTS_TO]->(memory:Memory) \
-         WHERE id(thread) = $thread_node_id \
-         RETURN thread AS thread, memory AS memory, relationship AS relationship, \
-         id(relationship) AS relationship_id",
-        &parameters,
-        None,
-    )?;
-    let mut rows = output
-        .rows
-        .iter()
-        .map(thread_compacted_memory_row_from_query)
-        .collect::<Result<Vec<_>>>()?;
-    rows.sort_by(|left, right| {
-        compare_optional_values_desc(left.importance.as_ref(), right.importance.as_ref())
-            .then_with(|| {
-                compare_skill_memory_created_at(
-                    &left.created_at,
-                    &right.created_at,
-                    KnowledgeSkillMemoryListOrder::CreatedAtDesc,
-                )
-            })
-            .then_with(|| left.memory_id.cmp(&right.memory_id))
-            .then_with(|| left.relationship_id.cmp(&right.relationship_id))
-    });
-    Ok(rows)
-}
-
-fn thread_compacted_memory_projected_rows(
-    catalog: &Catalog,
-    store: &GraphStore,
-    thread_node_id: NodeId,
-    memory_property_names: &[String],
-    relationship_property_names: &[String],
-) -> Result<Vec<KnowledgeThreadCompactedMemoryProjectedRow>> {
-    let Some(rel_type_id) = catalog.rel_type_id("COMPACTS_TO") else {
-        return Ok(Vec::new());
-    };
-    let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Ok(Vec::new());
-    };
-    let Some(thread) = store.node_owned(thread_node_id)? else {
-        return Ok(Vec::new());
-    };
-    let mut rows = Vec::new();
-    store.try_visit_adjacent_relationships_owned(
-        thread_node_id,
-        Some(rel_type_id),
-        AdjacencyDirection::Outgoing,
-        |relationship| {
-            if let Some(memory) = store
-                .node_owned(relationship.target)?
-                .filter(|memory| memory.labels.contains(&memory_label_id))
-            {
-                rows.push((
-                    thread_compacted_memory_projected_row(
-                        &thread,
-                        &memory,
-                        &relationship,
-                        memory_property_names,
-                        relationship_property_names,
-                    ),
-                    memory.properties.get("importance").cloned(),
-                    memory.properties.get("created_at").cloned(),
-                ));
-            }
-            Ok(crate::store::GraphScanControl::Continue)
-        },
-    )?;
-    rows.sort_by(|left, right| {
-        compare_optional_values_desc(left.1.as_ref(), right.1.as_ref())
-            .then_with(|| {
-                compare_skill_memory_created_at(
-                    &left.2,
-                    &right.2,
-                    KnowledgeSkillMemoryListOrder::CreatedAtDesc,
-                )
-            })
-            .then_with(|| left.0.memory_id.cmp(&right.0.memory_id))
-            .then_with(|| left.0.relationship_id.cmp(&right.0.relationship_id))
-    });
-    Ok(rows
-        .into_iter()
-        .map(|(row, _importance, _created_at)| row)
-        .collect())
-}
-
-fn thread_compacted_memory_projected_rows_via_query_runtime(
-    db: &Database,
-    thread_node_id: u64,
-    memory_property_names: &[String],
-    relationship_property_names: &[String],
-) -> Result<Vec<KnowledgeThreadCompactedMemoryProjectedRow>> {
-    let parameters = BTreeMap::from([(
-        "thread_node_id".to_string(),
-        Value::Int(i64::try_from(thread_node_id).map_err(|_| {
-            SkeinError::Execution("knowledge thread node id exceeds i64".to_string())
-        })?),
-    )]);
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (thread)-[relationship:COMPACTS_TO]->(memory:Memory) \
-         WHERE id(thread) = $thread_node_id \
-         RETURN thread AS thread, memory AS memory, relationship AS relationship, \
-         id(relationship) AS relationship_id",
-        &parameters,
-        None,
-    )?;
-    let mut rows = output
-        .rows
-        .iter()
-        .map(|row| {
-            thread_compacted_memory_projected_row_from_query(
-                row,
-                memory_property_names,
-                relationship_property_names,
-            )
-        })
-        .collect::<Result<Vec<_>>>()?;
-    rows.sort_by(|left, right| {
-        compare_optional_values_desc(
-            left.1.properties.get("importance"),
-            right.1.properties.get("importance"),
-        )
-        .then_with(|| {
-            compare_skill_memory_created_at(
-                &left.1.properties.get("created_at").cloned(),
-                &right.1.properties.get("created_at").cloned(),
-                KnowledgeSkillMemoryListOrder::CreatedAtDesc,
-            )
-        })
-        .then_with(|| left.0.memory_id.cmp(&right.0.memory_id))
-        .then_with(|| left.0.relationship_id.cmp(&right.0.relationship_id))
-    });
-    Ok(rows.into_iter().map(|(row, _memory)| row).collect())
-}
-
-fn thread_compacted_memory_projected_row(
-    thread: &NodeRecord,
-    memory: &NodeRecord,
-    relationship: &RelRecord,
-    memory_property_names: &[String],
-    relationship_property_names: &[String],
-) -> KnowledgeThreadCompactedMemoryProjectedRow {
-    KnowledgeThreadCompactedMemoryProjectedRow {
-        thread_id: node_external_id(thread),
-        thread_node_id: thread.id.0,
-        thread_logical_id: string_property(thread, "thread_id"),
-        relationship_id: relationship.id.0,
-        memory_id: node_external_id(memory),
-        memory_node_id: memory.id.0,
-        memory_properties: projected_properties(&memory.properties, memory_property_names),
-        relationship_properties: projected_properties(
-            &relationship.properties,
-            relationship_property_names,
-        ),
-        normalized_space_id: normalized_node_space_id(memory),
-    }
-}
-
-fn thread_compacted_memory_projected_row_from_query(
-    row: &Row,
-    memory_property_names: &[String],
-    relationship_property_names: &[String],
-) -> Result<(KnowledgeThreadCompactedMemoryProjectedRow, KnowledgeEntity)> {
-    let thread = row
-        .get("thread")
-        .and_then(knowledge_entity_from_value)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge thread compacted memory projected row is missing thread map".to_string(),
-            )
-        })?;
-    let memory = row
-        .get("memory")
-        .and_then(knowledge_entity_from_value)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge thread compacted memory projected row is missing memory map".to_string(),
-            )
-        })?;
-    let relationship = row
-        .get("relationship")
-        .and_then(value_to_map)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge thread compacted memory projected row is missing relationship map"
-                    .to_string(),
-            )
-        })?;
-    let relationship_id = row
-        .get("relationship_id")
-        .and_then(value_to_non_negative_u64)
-        .or_else(|| relationship.get("_id").and_then(value_to_non_negative_u64))
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge thread compacted memory projected row is missing relationship_id"
-                    .to_string(),
-            )
-        })?;
-    let mut relationship_properties = relationship.clone();
-    relationship_properties.remove("_id");
-    relationship_properties.remove("source_id");
-    relationship_properties.remove("target_id");
-    relationship_properties.remove("type");
-
-    Ok((
-        KnowledgeThreadCompactedMemoryProjectedRow {
-            thread_id: knowledge_entity_id_property(&thread),
-            thread_node_id: thread.node_id,
-            thread_logical_id: string_property_value(&thread.properties, "thread_id"),
-            relationship_id,
-            memory_id: knowledge_entity_id_property(&memory),
-            memory_node_id: memory.node_id,
-            memory_properties: projected_properties(&memory.properties, memory_property_names),
-            relationship_properties: projected_properties(
-                &relationship_properties,
-                relationship_property_names,
-            ),
-            normalized_space_id: knowledge_entity_normalized_space_id(&memory),
-        },
-        memory,
-    ))
-}
-
-fn thread_compacted_memory_row_from_query(row: &Row) -> Result<KnowledgeThreadCompactedMemoryRow> {
-    let thread = row
-        .get("thread")
-        .and_then(knowledge_entity_from_value)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge thread compacted memory row is missing thread map".to_string(),
-            )
-        })?;
-    let memory = row
-        .get("memory")
-        .and_then(knowledge_entity_from_value)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge thread compacted memory row is missing memory map".to_string(),
-            )
-        })?;
-    let relationship = row
-        .get("relationship")
-        .and_then(value_to_map)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge thread compacted memory row is missing relationship map".to_string(),
-            )
-        })?;
-    let relationship_id = row
-        .get("relationship_id")
-        .and_then(value_to_non_negative_u64)
-        .or_else(|| relationship.get("_id").and_then(value_to_non_negative_u64))
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge thread compacted memory row is missing relationship_id".to_string(),
-            )
-        })?;
-    Ok(thread_compacted_memory_row_from_entities(
-        &thread,
-        &memory,
-        relationship,
-        relationship_id,
-    ))
-}
-
-fn thread_compacted_memory_row_from_entities(
-    thread: &KnowledgeEntity,
-    memory: &KnowledgeEntity,
-    relationship: &BTreeMap<String, Value>,
-    relationship_id: u64,
-) -> KnowledgeThreadCompactedMemoryRow {
-    let title = string_property_value(&memory.properties, "title");
-    let content = string_property_value(&memory.properties, "content");
-    let display_title = title
-        .clone()
-        .or_else(|| content.as_ref().map(|content| truncate_chars(content, 60)))
-        .unwrap_or_default();
-    KnowledgeThreadCompactedMemoryRow {
-        thread_id: knowledge_entity_id_property(thread),
-        thread_node_id: thread.node_id,
-        thread_logical_id: string_property_value(&thread.properties, "thread_id"),
-        relationship_id,
-        memory_id: knowledge_entity_id_property(memory),
-        memory_node_id: memory.node_id,
-        display_title,
-        title,
-        content_preview: content.as_ref().map(|content| truncate_chars(content, 200)),
-        content,
-        importance: memory.properties.get("importance").cloned(),
-        pagerank_score: memory.properties.get("pagerank_score").cloned(),
-        confidence: memory.properties.get("confidence").cloned(),
-        source_range: memory.properties.get("source_range").cloned(),
-        source: string_property_value(&memory.properties, "source"),
-        created_at: memory.properties.get("created_at").cloned(),
-        updated_at: memory.properties.get("updated_at").cloned(),
-        metadata: memory.properties.get("metadata").cloned(),
-        raw_space_id: string_property_value(&memory.properties, "space_id"),
-        normalized_space_id: knowledge_entity_normalized_space_id(memory),
-        last_reindexed_at: memory.properties.get("last_reindexed_at").cloned(),
-        reindex_needed: boolean_property_value(&memory.properties, "reindex_needed"),
-        unit_type: string_property_value(&memory.properties, "unit_type")
-            .unwrap_or_else(|| "fact".to_string()),
-        is_latest: boolean_property_value(&memory.properties, "is_latest").unwrap_or(true),
-        version: integer_property_value(&memory.properties, "version").unwrap_or(1),
-        is_crystal: boolean_property_value(&memory.properties, "is_crystal").unwrap_or(false),
-        crystal_title: string_property_value(&memory.properties, "crystal_title"),
-        source_unit_count: integer_property_value(&memory.properties, "source_unit_count"),
-        extraction_method: string_property_value(&memory.properties, "extraction_method")
-            .unwrap_or_else(|| "manual".to_string()),
-        access_count: integer_property_value(&memory.properties, "access_count").unwrap_or(0),
-        appearances: integer_property_value(&memory.properties, "appearances").unwrap_or(0),
-        clicks: integer_property_value(&memory.properties, "clicks").unwrap_or(0),
-        decay_score_cached: memory.properties.get("decay_score_cached").cloned(),
-        event_end: memory.properties.get("event_end").cloned(),
-        event_start: memory.properties.get("event_start").cloned(),
-        last_accessed_at: memory.properties.get("last_accessed_at").cloned(),
-        last_clicked_at: memory.properties.get("last_clicked_at").cloned(),
-        last_evaluated_at: memory.properties.get("last_evaluated_at").cloned(),
-        review_status: string_property_value(&memory.properties, "review_status")
-            .unwrap_or_default(),
-        temporal_confidence: memory.properties.get("temporal_confidence").cloned(),
-        temporal_context: string_property_value(&memory.properties, "temporal_context"),
-        temporal_precision: string_property_value(&memory.properties, "temporal_precision"),
-        temporal_type: string_property_value(&memory.properties, "temporal_type"),
-        total_dwell_time_ms: integer_property_value(&memory.properties, "total_dwell_time_ms")
-            .unwrap_or(0),
-        compaction_method: relationship
-            .get("compaction_method")
-            .map(value_to_external_id)
-            .filter(|value| !value.is_empty()),
-        relationship_created_at: relationship.get("created_at").cloned(),
-        relationship_properties: relationship.get("properties").cloned(),
-    }
-}
-
-const KNOWLEDGE_MEMORY_DECAY_DETAIL_DEFAULT_PROPERTIES: &[&str] = &[
-    "id",
-    "title",
-    "content",
-    "unit_type",
-    "source",
-    "space_id",
-    "created_at",
-    "decay_score_cached",
-    "metadata",
-    "is_latest",
-    "lifecycle_state",
-];
-
-fn knowledge_memory_decay_detail_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeMemoryDecayDetailRequest,
-) -> Result<KnowledgeMemoryDecayDetailOutput> {
-    validate_knowledge_memory_decay_detail_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let memory =
-        try_seed_node_by_label_and_external_id(catalog, store, "Memory", &request.memory_id)?
-            .map(|memory| knowledge_memory_decay_detail_row(&memory, request));
-    Ok(KnowledgeMemoryDecayDetailOutput {
-        graph_commit_epoch,
-        found: memory.is_some(),
-        memory,
-    })
-}
-
-fn knowledge_memory_decay_detail_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeMemoryDecayDetailRequest,
-) -> Result<KnowledgeMemoryDecayDetailOutput> {
-    validate_knowledge_memory_decay_detail_request(request)?;
-    let parameters = BTreeMap::from([(
-        "memory_id".to_string(),
-        Value::String(request.memory_id.clone()),
-    )]);
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (m:Memory {id: $memory_id}) \
-         RETURN m AS memory \
-         ORDER BY id(m) ASC \
-         LIMIT 1",
-        &parameters,
-        Some(1),
-    )?;
-    let memory = output
-        .rows
-        .first()
-        .map(knowledge_memory_decay_detail_row_from_query)
-        .transpose()?
-        .map(|memory| knowledge_memory_decay_detail_row_from_entity(&memory, request));
-    Ok(KnowledgeMemoryDecayDetailOutput {
-        graph_commit_epoch: db.store.commit_epoch(),
-        found: memory.is_some(),
-        memory,
-    })
-}
-
-fn knowledge_memory_decay_detail_row_from_query(row: &Row) -> Result<KnowledgeEntity> {
-    row.get("memory")
-        .and_then(knowledge_entity_from_value)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge memory decay detail row is missing memory map".to_string(),
-            )
-        })
-}
-
-fn validate_knowledge_memory_decay_detail_request(
-    request: &KnowledgeMemoryDecayDetailRequest,
-) -> Result<()> {
-    if request.memory_id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge memory decay detail read requires a non-empty memory id".to_string(),
-        ));
-    }
-    if request.property_names.iter().any(String::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge memory decay detail read requires non-empty property names".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn knowledge_memory_decay_detail_row_from_entity(
-    memory: &KnowledgeEntity,
-    request: &KnowledgeMemoryDecayDetailRequest,
-) -> KnowledgeMemoryDecayDetail {
-    let property_names = knowledge_memory_decay_detail_property_names(request);
-    KnowledgeMemoryDecayDetail {
-        memory_id: memory.external_id.clone(),
-        node_id: memory.node_id,
-        title: string_property_value(&memory.properties, "title"),
-        content: string_property_value(&memory.properties, "content"),
-        unit_type: string_property_value(&memory.properties, "unit_type"),
-        source: string_property_value(&memory.properties, "source"),
-        raw_space_id: string_property_value(&memory.properties, "space_id"),
-        normalized_space_id: knowledge_entity_normalized_space_id(memory),
-        created_at: memory.properties.get("created_at").cloned(),
-        decay_score_cached: memory.properties.get("decay_score_cached").cloned(),
-        metadata: memory.properties.get("metadata").cloned(),
-        is_latest: boolean_property_value(&memory.properties, "is_latest"),
-        lifecycle_state: string_property_value(&memory.properties, "lifecycle_state"),
-        properties: projected_properties(&memory.properties, &property_names),
-    }
-}
-
-fn knowledge_memory_decay_detail_row(
-    memory: &NodeRecord,
-    request: &KnowledgeMemoryDecayDetailRequest,
-) -> KnowledgeMemoryDecayDetail {
-    let property_names = knowledge_memory_decay_detail_property_names(request);
-    KnowledgeMemoryDecayDetail {
-        memory_id: node_external_id(memory),
-        node_id: memory.id.0,
-        title: string_property(memory, "title"),
-        content: string_property(memory, "content"),
-        unit_type: string_property(memory, "unit_type"),
-        source: string_property(memory, "source"),
-        raw_space_id: string_property(memory, "space_id"),
-        normalized_space_id: normalized_node_space_id(memory),
-        created_at: memory.properties.get("created_at").cloned(),
-        decay_score_cached: memory.properties.get("decay_score_cached").cloned(),
-        metadata: memory.properties.get("metadata").cloned(),
-        is_latest: boolean_property(memory, "is_latest"),
-        lifecycle_state: string_property(memory, "lifecycle_state"),
-        properties: projected_properties(&memory.properties, &property_names),
-    }
-}
-
-fn knowledge_memory_decay_detail_property_names(
-    request: &KnowledgeMemoryDecayDetailRequest,
-) -> Vec<String> {
-    if request.property_names.is_empty() {
-        return KNOWLEDGE_MEMORY_DECAY_DETAIL_DEFAULT_PROPERTIES
-            .iter()
-            .map(|property_name| (*property_name).to_string())
-            .collect();
-    }
-    deduplicated_strings_in_order(&request.property_names)
-}
-
-fn knowledge_memory_compacting_threads_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeMemoryCompactingThreadListRequest,
-) -> Result<KnowledgeMemoryCompactingThreadListOutput> {
-    validate_memory_compacting_thread_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let mut rows = Vec::new();
-    let mut found_memory_count = 0;
-    let mut missing_memory_count = 0;
-    for memory_id in &request.memory_ids {
-        let Some(memory) = memory_entity_by_external_id_via_query_runtime(db, memory_id)? else {
-            missing_memory_count += 1;
-            rows.push(missing_memory_compacting_thread_row(memory_id));
-            continue;
-        };
-        found_memory_count += 1;
-        let mut memory_rows =
-            compacting_thread_rows_for_memory_via_query_runtime(db, memory_id, memory.node_id)?;
-        if request.limit_per_memory > 0 {
-            memory_rows.truncate(request.limit_per_memory);
-        }
-        rows.extend(memory_rows);
-    }
-    let returned_thread_count = rows.iter().filter(|row| row.thread_id.is_some()).count();
-    Ok(KnowledgeMemoryCompactingThreadListOutput {
-        graph_commit_epoch,
-        rows,
-        found_memory_count,
-        missing_memory_count,
-        returned_thread_count,
-    })
-}
-
-fn knowledge_memory_compacting_thread_projected_list_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeMemoryCompactingThreadProjectedListRequest,
-) -> Result<KnowledgeMemoryCompactingThreadProjectedListOutput> {
-    validate_memory_compacting_thread_projected_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let mut rows = Vec::new();
-    let mut found_memory_count = 0;
-    let mut missing_memory_count = 0;
-    for memory_id in &request.list.memory_ids {
-        let Some(memory) =
-            try_seed_node_by_label_and_external_id(catalog, store, "Memory", memory_id)?
-        else {
-            missing_memory_count += 1;
-            rows.push(missing_memory_compacting_thread_projected_row(memory_id));
-            continue;
-        };
-        found_memory_count += 1;
-        let mut memory_rows = compacting_thread_projected_rows_for_memory(
-            catalog,
-            store,
-            &memory,
-            &request.thread_property_names,
-            &request.relationship_property_names,
-        )?;
-        if request.list.limit_per_memory > 0 {
-            memory_rows.truncate(request.list.limit_per_memory);
-        }
-        rows.extend(memory_rows);
-    }
-    let returned_thread_count = rows.iter().filter(|row| row.thread_id.is_some()).count();
-    Ok(KnowledgeMemoryCompactingThreadProjectedListOutput {
-        graph_commit_epoch,
-        rows,
-        found_memory_count,
-        missing_memory_count,
-        returned_thread_count,
-    })
-}
-
-fn knowledge_memory_compacting_thread_projected_list_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeMemoryCompactingThreadProjectedListRequest,
-) -> Result<KnowledgeMemoryCompactingThreadProjectedListOutput> {
-    validate_memory_compacting_thread_projected_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let mut rows = Vec::new();
-    let mut found_memory_count = 0;
-    let mut missing_memory_count = 0;
-    for memory_id in &request.list.memory_ids {
-        let Some(memory) = memory_entity_by_external_id_via_query_runtime(db, memory_id)? else {
-            missing_memory_count += 1;
-            rows.push(missing_memory_compacting_thread_projected_row(memory_id));
-            continue;
-        };
-        found_memory_count += 1;
-        let mut memory_rows = compacting_thread_projected_rows_for_memory_via_query_runtime(
-            db,
-            memory_id,
-            memory.node_id,
-            &request.thread_property_names,
-            &request.relationship_property_names,
-        )?;
-        if request.list.limit_per_memory > 0 {
-            memory_rows.truncate(request.list.limit_per_memory);
-        }
-        rows.extend(memory_rows);
-    }
-    let returned_thread_count = rows.iter().filter(|row| row.thread_id.is_some()).count();
-    Ok(KnowledgeMemoryCompactingThreadProjectedListOutput {
-        graph_commit_epoch,
-        rows,
-        found_memory_count,
-        missing_memory_count,
-        returned_thread_count,
-    })
-}
-
-fn validate_memory_compacting_thread_request(
-    request: &KnowledgeMemoryCompactingThreadListRequest,
-) -> Result<()> {
-    if request.memory_ids.is_empty() || request.memory_ids.iter().any(String::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge memory compacting thread read requires non-empty memory ids".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_memory_compacting_thread_projected_request(
-    request: &KnowledgeMemoryCompactingThreadProjectedListRequest,
-) -> Result<()> {
-    validate_memory_compacting_thread_request(&request.list)?;
-    if request.thread_property_names.iter().any(String::is_empty)
-        || request
-            .relationship_property_names
-            .iter()
-            .any(String::is_empty)
-    {
-        return Err(SkeinError::Semantic(
-            "knowledge memory compacting thread projected read requires non-empty property names"
-                .to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn memory_entity_by_external_id_via_query_runtime(
-    db: &Database,
-    memory_id: &str,
-) -> Result<Option<KnowledgeEntity>> {
-    let parameters = BTreeMap::from([(
-        "memory_id".to_string(),
-        Value::String(memory_id.to_string()),
-    )]);
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (memory:Memory {id: $memory_id}) \
-         RETURN memory AS memory \
-         ORDER BY id(memory) ASC \
-         LIMIT 1",
-        &parameters,
-        Some(1),
-    )?;
-    let by_id = output
-        .rows
-        .first()
-        .map(|row| {
-            row.get("memory")
-                .and_then(knowledge_entity_from_value)
-                .ok_or_else(|| {
-                    SkeinError::Execution(
-                        "knowledge memory compacting thread row is missing memory map".to_string(),
-                    )
-                })
-        })
-        .transpose()?;
-    if by_id.is_some() {
-        return Ok(by_id);
-    }
-
-    let Some(memory_node_id) = memory_id
-        .parse::<u64>()
-        .ok()
-        .and_then(|id| i64::try_from(id).ok())
-    else {
-        return Ok(None);
-    };
-    let parameters = BTreeMap::from([("memory_node_id".to_string(), Value::Int(memory_node_id))]);
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (memory:Memory) \
-         WHERE id(memory) = $memory_node_id \
-         RETURN memory AS memory \
-         LIMIT 1",
-        &parameters,
-        Some(1),
-    )?;
-    output
-        .rows
-        .first()
-        .map(|row| {
-            row.get("memory")
-                .and_then(knowledge_entity_from_value)
-                .ok_or_else(|| {
-                    SkeinError::Execution(
-                        "knowledge memory compacting thread row is missing memory map".to_string(),
-                    )
-                })
-        })
-        .transpose()
-}
-
-fn compacting_thread_rows_for_memory_via_query_runtime(
-    db: &Database,
-    memory_id: &str,
-    memory_node_id: u64,
-) -> Result<Vec<KnowledgeMemoryCompactingThreadRow>> {
-    let parameters = BTreeMap::from([(
-        "memory_node_id".to_string(),
-        Value::Int(i64::try_from(memory_node_id).map_err(|_| {
-            SkeinError::Execution("knowledge memory node id exceeds i64".to_string())
-        })?),
-    )]);
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (thread:Thread)-[relationship:COMPACTS_TO]->(memory) \
-         WHERE id(memory) = $memory_node_id \
-         RETURN thread AS thread, relationship AS relationship, \
-         id(relationship) AS relationship_id",
-        &parameters,
-        None,
-    )?;
-    let mut rows = output
-        .rows
-        .iter()
-        .map(|row| compacting_thread_row_from_query(row, memory_id, memory_node_id))
-        .collect::<Result<Vec<_>>>()?;
-    sort_memory_compacting_thread_rows(&mut rows);
-    Ok(rows)
-}
-
-fn compacting_thread_projected_rows_for_memory(
-    catalog: &Catalog,
-    store: &GraphStore,
-    memory: &NodeRecord,
-    thread_property_names: &[String],
-    relationship_property_names: &[String],
-) -> Result<Vec<KnowledgeMemoryCompactingThreadProjectedRow>> {
-    let Some(rel_type_id) = catalog.rel_type_id("COMPACTS_TO") else {
-        return Ok(Vec::new());
-    };
-    let Some(thread_label_id) = catalog.label_id("Thread") else {
-        return Ok(Vec::new());
-    };
-    let memory_id = node_external_id(memory).unwrap_or_else(|| memory.id.0.to_string());
-    let mut rows = Vec::new();
-    store.try_visit_adjacent_relationships_owned(
-        memory.id,
-        Some(rel_type_id),
-        AdjacencyDirection::Incoming,
-        |relationship| {
-            if let Some(thread) = store
-                .node_owned(relationship.source)?
-                .filter(|thread| thread.labels.contains(&thread_label_id))
-            {
-                rows.push(compacting_thread_projected_row(
-                    &memory_id,
-                    memory.id,
-                    &thread,
-                    &relationship,
-                    thread_property_names,
-                    relationship_property_names,
-                ));
-            }
-            Ok(crate::store::GraphScanControl::Continue)
-        },
-    )?;
-    sort_memory_compacting_thread_projected_rows(&mut rows);
-    Ok(rows)
-}
-
-fn compacting_thread_projected_rows_for_memory_via_query_runtime(
-    db: &Database,
-    memory_id: &str,
-    memory_node_id: u64,
-    thread_property_names: &[String],
-    relationship_property_names: &[String],
-) -> Result<Vec<KnowledgeMemoryCompactingThreadProjectedRow>> {
-    let parameters = BTreeMap::from([(
-        "memory_node_id".to_string(),
-        Value::Int(i64::try_from(memory_node_id).map_err(|_| {
-            SkeinError::Execution("knowledge memory node id exceeds i64".to_string())
-        })?),
-    )]);
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (thread:Thread)-[relationship:COMPACTS_TO]->(memory) \
-         WHERE id(memory) = $memory_node_id \
-         RETURN thread AS thread, relationship AS relationship, \
-         id(relationship) AS relationship_id",
-        &parameters,
-        None,
-    )?;
-    let mut rows = output
-        .rows
-        .iter()
-        .map(|row| {
-            compacting_thread_projected_row_from_query(
-                row,
-                memory_id,
-                memory_node_id,
-                thread_property_names,
-                relationship_property_names,
-            )
-        })
-        .collect::<Result<Vec<_>>>()?;
-    sort_memory_compacting_thread_projected_rows(&mut rows);
-    Ok(rows)
-}
-
-fn sort_memory_compacting_thread_rows(rows: &mut [KnowledgeMemoryCompactingThreadRow]) {
-    rows.sort_by(|left, right| {
-        left.thread_logical_id
-            .cmp(&right.thread_logical_id)
-            .then_with(|| left.thread_id.cmp(&right.thread_id))
-            .then_with(|| left.relationship_id.cmp(&right.relationship_id))
-    });
-}
-
-fn sort_memory_compacting_thread_projected_rows(
-    rows: &mut [KnowledgeMemoryCompactingThreadProjectedRow],
-) {
-    rows.sort_by(|left, right| {
-        left.thread_logical_id
-            .cmp(&right.thread_logical_id)
-            .then_with(|| left.thread_id.cmp(&right.thread_id))
-            .then_with(|| left.relationship_id.cmp(&right.relationship_id))
-    });
-}
-
-fn missing_memory_compacting_thread_row(memory_id: &str) -> KnowledgeMemoryCompactingThreadRow {
-    KnowledgeMemoryCompactingThreadRow {
-        memory_id: memory_id.to_string(),
-        memory_node_id: None,
-        found_memory: false,
-        thread_id: None,
-        thread_node_id: None,
-        thread_logical_id: None,
-        title: None,
-        source: None,
-        metadata: None,
-        raw_space_id: None,
-        normalized_space_id: None,
-        relationship_id: None,
-    }
-}
-
-fn missing_memory_compacting_thread_projected_row(
-    memory_id: &str,
-) -> KnowledgeMemoryCompactingThreadProjectedRow {
-    KnowledgeMemoryCompactingThreadProjectedRow {
-        memory_id: memory_id.to_string(),
-        memory_node_id: None,
-        found_memory: false,
-        thread_id: None,
-        thread_node_id: None,
-        thread_logical_id: None,
-        thread_properties: BTreeMap::new(),
-        normalized_space_id: None,
-        relationship_id: None,
-        relationship_properties: BTreeMap::new(),
-    }
-}
-
-fn compacting_thread_projected_row(
-    memory_id: &str,
-    memory_node_id: NodeId,
-    thread: &NodeRecord,
-    relationship: &RelRecord,
-    thread_property_names: &[String],
-    relationship_property_names: &[String],
-) -> KnowledgeMemoryCompactingThreadProjectedRow {
-    KnowledgeMemoryCompactingThreadProjectedRow {
-        memory_id: memory_id.to_string(),
-        memory_node_id: Some(memory_node_id.0),
-        found_memory: true,
-        thread_id: node_external_id(thread),
-        thread_node_id: Some(thread.id.0),
-        thread_logical_id: string_property(thread, "thread_id"),
-        thread_properties: projected_properties(&thread.properties, thread_property_names),
-        normalized_space_id: Some(normalized_node_space_id(thread)),
-        relationship_id: Some(relationship.id.0),
-        relationship_properties: projected_properties(
-            &relationship.properties,
-            relationship_property_names,
-        ),
-    }
-}
-
-fn compacting_thread_projected_row_from_query(
-    row: &Row,
-    memory_id: &str,
-    memory_node_id: u64,
-    thread_property_names: &[String],
-    relationship_property_names: &[String],
-) -> Result<KnowledgeMemoryCompactingThreadProjectedRow> {
-    let thread = row
-        .get("thread")
-        .and_then(knowledge_entity_from_value)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge memory compacting thread projected row is missing thread map"
-                    .to_string(),
-            )
-        })?;
-    let relationship = row
-        .get("relationship")
-        .and_then(value_to_map)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge memory compacting thread projected row is missing relationship map"
-                    .to_string(),
-            )
-        })?;
-    let relationship_id = row
-        .get("relationship_id")
-        .and_then(value_to_non_negative_u64)
-        .or_else(|| relationship.get("_id").and_then(value_to_non_negative_u64))
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge memory compacting thread projected row is missing relationship_id"
-                    .to_string(),
-            )
-        })?;
-    let mut relationship_properties = relationship.clone();
-    relationship_properties.remove("_id");
-    relationship_properties.remove("source_id");
-    relationship_properties.remove("target_id");
-    relationship_properties.remove("type");
-
-    Ok(KnowledgeMemoryCompactingThreadProjectedRow {
-        memory_id: memory_id.to_string(),
-        memory_node_id: Some(memory_node_id),
-        found_memory: true,
-        thread_id: knowledge_entity_id_property(&thread),
-        thread_node_id: Some(thread.node_id),
-        thread_logical_id: string_property_value(&thread.properties, "thread_id"),
-        thread_properties: projected_properties(&thread.properties, thread_property_names),
-        normalized_space_id: Some(knowledge_entity_normalized_space_id(&thread)),
-        relationship_id: Some(relationship_id),
-        relationship_properties: projected_properties(
-            &relationship_properties,
-            relationship_property_names,
-        ),
-    })
-}
-
-fn compacting_thread_row_from_query(
-    row: &Row,
-    memory_id: &str,
-    memory_node_id: u64,
-) -> Result<KnowledgeMemoryCompactingThreadRow> {
-    let thread = row
-        .get("thread")
-        .and_then(knowledge_entity_from_value)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge memory compacting thread row is missing thread map".to_string(),
-            )
-        })?;
-    let relationship = row
-        .get("relationship")
-        .and_then(value_to_map)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge memory compacting thread row is missing relationship map".to_string(),
-            )
-        })?;
-    let relationship_id = row
-        .get("relationship_id")
-        .and_then(value_to_non_negative_u64)
-        .or_else(|| relationship.get("_id").and_then(value_to_non_negative_u64))
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge memory compacting thread row is missing relationship_id".to_string(),
-            )
-        })?;
-    Ok(KnowledgeMemoryCompactingThreadRow {
-        memory_id: memory_id.to_string(),
-        memory_node_id: Some(memory_node_id),
-        found_memory: true,
-        thread_id: knowledge_entity_id_property(&thread),
-        thread_node_id: Some(thread.node_id),
-        thread_logical_id: string_property_value(&thread.properties, "thread_id"),
-        title: string_property_value(&thread.properties, "title"),
-        source: string_property_value(&thread.properties, "source"),
-        metadata: thread.properties.get("metadata").cloned(),
-        raw_space_id: string_property_value(&thread.properties, "space_id"),
-        normalized_space_id: Some(knowledge_entity_normalized_space_id(&thread)),
-        relationship_id: Some(relationship_id),
-    })
-}
-
-fn knowledge_thread_messages_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeThreadMessageListRequest,
-) -> Result<KnowledgeThreadMessageListOutput> {
-    if request.thread_id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge thread message read requires a non-empty thread id".to_string(),
-        ));
-    }
-    let graph_commit_epoch = db.store.commit_epoch();
-    let thread = knowledge_thread_message_thread_via_query_runtime(db, &request.thread_id)?;
-    let Some(thread) = thread else {
-        return Ok(KnowledgeThreadMessageListOutput {
-            graph_commit_epoch,
-            thread_id: request.thread_id.clone(),
-            thread_node_id: None,
-            found: false,
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-        });
-    };
-    let mut rows = thread_message_rows_via_query_runtime(db, thread.node_id)?;
-    let matched_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-    Ok(KnowledgeThreadMessageListOutput {
-        graph_commit_epoch,
-        thread_id: request.thread_id.clone(),
-        thread_node_id: Some(thread.node_id),
-        found: true,
-        rows,
-        matched_count,
-        returned_count,
-    })
-}
-
-fn knowledge_thread_message_thread_via_query_runtime(
-    db: &Database,
-    thread_id: &str,
-) -> Result<Option<KnowledgeEntity>> {
-    let parameters = BTreeMap::from([(
-        "thread_id".to_string(),
-        Value::String(thread_id.to_string()),
-    )]);
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (t:Thread {id: $thread_id}) \
-         RETURN t AS thread \
-         ORDER BY id(t) ASC \
-         LIMIT 1",
-        &parameters,
-        Some(1),
-    )?;
-    output
-        .rows
-        .first()
-        .map(|row| {
-            row.get("thread")
-                .and_then(knowledge_entity_from_value)
-                .ok_or_else(|| {
-                    SkeinError::Execution(
-                        "knowledge thread message row is missing thread map".to_string(),
-                    )
-                })
-        })
-        .transpose()
-}
-
 fn delete_knowledge_thread_messages_for(
     db: &mut Database,
     request: &KnowledgeThreadMessageDeleteRequest,
@@ -21087,13 +11330,9 @@ fn delete_knowledge_thread_messages_for(
     };
 
     let thread_node_id = thread.id;
-    let message_rows = thread_message_rows(&db.catalog, &db.store, thread_node_id)?;
-    let matched_relationship_count = message_rows.len();
-    let deleted_message_count = message_rows
-        .iter()
-        .map(|row| row.node_id)
-        .collect::<BTreeSet<_>>()
-        .len();
+    let message_node_ids = thread_message_node_ids(&db.catalog, &db.store, thread_node_id)?;
+    let matched_relationship_count = message_node_ids.len();
+    let deleted_message_count = message_node_ids.into_iter().collect::<BTreeSet<_>>().len();
 
     if deleted_message_count == 0 {
         return Ok(KnowledgeThreadMessageDeleteOutput {
@@ -21126,18 +11365,18 @@ fn delete_knowledge_thread_messages_for(
     })
 }
 
-fn thread_message_rows(
+fn thread_message_node_ids(
     catalog: &Catalog,
     store: &GraphStore,
     thread_node_id: NodeId,
-) -> Result<Vec<KnowledgeThreadMessageRow>> {
+) -> Result<Vec<u64>> {
     let Some(rel_type_id) = catalog.rel_type_id("CONTAINS") else {
         return Ok(Vec::new());
     };
     let Some(message_label_id) = catalog.label_id("Message") else {
         return Ok(Vec::new());
     };
-    let mut rows = Vec::new();
+    let mut node_ids = Vec::new();
     store.try_visit_adjacent_relationships_owned(
         thread_node_id,
         Some(rel_type_id),
@@ -21147,113 +11386,12 @@ fn thread_message_rows(
                 .node_owned(relationship.target)?
                 .filter(|message| message.labels.contains(&message_label_id))
             {
-                rows.push(thread_message_row(&message, &relationship));
+                node_ids.push(message.id.0);
             }
             Ok(crate::store::GraphScanControl::Continue)
         },
     )?;
-    rows.sort_by(|left, right| {
-        left.order_index
-            .cmp(&right.order_index)
-            .then_with(|| left.message_id.cmp(&right.message_id))
-            .then_with(|| left.relationship_id.cmp(&right.relationship_id))
-    });
-    Ok(rows)
-}
-
-fn thread_message_rows_via_query_runtime(
-    db: &Database,
-    thread_node_id: u64,
-) -> Result<Vec<KnowledgeThreadMessageRow>> {
-    let parameters = BTreeMap::from([(
-        "thread_node_id".to_string(),
-        Value::Int(i64::try_from(thread_node_id).map_err(|_| {
-            SkeinError::Execution("knowledge thread node id exceeds i64".to_string())
-        })?),
-    )]);
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (thread)-[relationship:CONTAINS]->(message:Message) \
-         WHERE id(thread) = $thread_node_id \
-         RETURN message AS message, relationship AS relationship, \
-         id(relationship) AS relationship_id",
-        &parameters,
-        None,
-    )?;
-    let mut rows = output
-        .rows
-        .iter()
-        .map(thread_message_row_from_query)
-        .collect::<Result<Vec<_>>>()?;
-    rows.sort_by(|left, right| {
-        left.order_index
-            .cmp(&right.order_index)
-            .then_with(|| left.message_id.cmp(&right.message_id))
-            .then_with(|| left.relationship_id.cmp(&right.relationship_id))
-    });
-    Ok(rows)
-}
-
-fn thread_message_row(message: &NodeRecord, relationship: &RelRecord) -> KnowledgeThreadMessageRow {
-    let relationship_order_index = relationship_integer_property(relationship, "order_index");
-    let message_order_index = integer_property(message, "order_index");
-    KnowledgeThreadMessageRow {
-        message_id: node_external_id(message),
-        node_id: message.id.0,
-        relationship_id: relationship.id.0,
-        role: string_property(message, "role"),
-        content: string_property(message, "content"),
-        order_index: relationship_order_index.or(message_order_index),
-        relationship_order_index,
-        message_order_index,
-        timestamp: message.properties.get("timestamp").cloned(),
-        token_count: integer_property(message, "token_count"),
-        created_at: message.properties.get("created_at").cloned(),
-        updated_at: message.properties.get("updated_at").cloned(),
-        metadata: message.properties.get("metadata").cloned(),
-    }
-}
-
-fn thread_message_row_from_query(row: &Row) -> Result<KnowledgeThreadMessageRow> {
-    let message = row
-        .get("message")
-        .and_then(knowledge_entity_from_value)
-        .ok_or_else(|| {
-            SkeinError::Execution("knowledge thread message row is missing message map".to_string())
-        })?;
-    let relationship = row
-        .get("relationship")
-        .and_then(value_to_map)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge thread message row is missing relationship map".to_string(),
-            )
-        })?;
-    let relationship_id = row
-        .get("relationship_id")
-        .and_then(value_to_non_negative_u64)
-        .or_else(|| relationship.get("_id").and_then(value_to_non_negative_u64))
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge thread message row is missing relationship_id".to_string(),
-            )
-        })?;
-    let relationship_order_index = relationship.get("order_index").and_then(value_to_i64);
-    let message_order_index = integer_property_value(&message.properties, "order_index");
-    Ok(KnowledgeThreadMessageRow {
-        message_id: knowledge_entity_id_property(&message),
-        node_id: message.node_id,
-        relationship_id,
-        role: string_property_value(&message.properties, "role"),
-        content: string_property_value(&message.properties, "content"),
-        order_index: relationship_order_index.or(message_order_index),
-        relationship_order_index,
-        message_order_index,
-        timestamp: message.properties.get("timestamp").cloned(),
-        token_count: integer_property_value(&message.properties, "token_count"),
-        created_at: message.properties.get("created_at").cloned(),
-        updated_at: message.properties.get("updated_at").cloned(),
-        metadata: message.properties.get("metadata").cloned(),
-    })
+    Ok(node_ids)
 }
 
 fn update_knowledge_label_lifecycle_batch_for(
@@ -21414,417 +11552,6 @@ fn label_lifecycle_assignments(update: &KnowledgeLabelLifecycleUpdate) -> BTreeM
     insert_optional_assignment(&mut assignments, "metadata", &update.metadata);
     insert_optional_assignment(&mut assignments, "updated_at", &update.updated_at);
     assignments
-}
-
-fn lookup_knowledge_labels_by_canonical_name_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeLabelCanonicalLookupRequest,
-) -> Result<KnowledgeLabelUsageListOutput> {
-    if request.canonical_name.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge label canonical lookup requires a non-empty canonical name".to_string(),
-        ));
-    }
-    validate_optional_label_id(request.exclude_label_id.as_deref())?;
-
-    let mut parameters = BTreeMap::from([(
-        "canonical_name".to_string(),
-        Value::String(request.canonical_name.clone()),
-    )]);
-    let exclude_predicate = if let Some(exclude_label_id) = &request.exclude_label_id {
-        parameters.insert(
-            "exclude_label_id".to_string(),
-            Value::String(exclude_label_id.clone()),
-        );
-        " AND l.id <> $exclude_label_id"
-    } else {
-        ""
-    };
-    let query = format!(
-        "MATCH (l:Label) \
-         WHERE l.canonical_name = $canonical_name{exclude_predicate} \
-         OPTIONAL MATCH (l)<-[r:HAS_LABEL]-(n) \
-         WITH l, count(r) AS usage_count \
-         RETURN l.id AS label_id, id(l) AS node_id, l.name AS name, \
-         l.canonical_name AS canonical_name, l.color AS color, \
-         l.description AS description, l.created_at AS created_at, \
-         l.updated_at AS updated_at, usage_count \
-         ORDER BY node_id ASC"
-    );
-    knowledge_label_usage_list_output_via_query_runtime(
-        db,
-        query.as_str(),
-        &parameters,
-        request.limit,
-    )
-}
-
-fn scan_knowledge_labels_missing_canonical_name_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeLabelBackfillScanRequest,
-) -> Result<KnowledgeLabelUsageListOutput> {
-    validate_optional_label_id(request.exclude_label_id.as_deref())?;
-
-    let mut parameters = BTreeMap::new();
-    let exclude_predicate = if let Some(exclude_label_id) = &request.exclude_label_id {
-        parameters.insert(
-            "exclude_label_id".to_string(),
-            Value::String(exclude_label_id.clone()),
-        );
-        " AND l.id <> $exclude_label_id"
-    } else {
-        ""
-    };
-    let query = format!(
-        "MATCH (l:Label) \
-         WHERE l.canonical_name IS NULL{exclude_predicate} \
-         OPTIONAL MATCH (l)<-[r:HAS_LABEL]-(n) \
-         WITH l, count(r) AS usage_count \
-         RETURN l.id AS label_id, id(l) AS node_id, l.name AS name, \
-         l.canonical_name AS canonical_name, l.color AS color, \
-         l.description AS description, l.created_at AS created_at, \
-         l.updated_at AS updated_at, usage_count \
-         ORDER BY node_id ASC"
-    );
-    knowledge_label_usage_list_output_via_query_runtime(
-        db,
-        query.as_str(),
-        &parameters,
-        request.limit,
-    )
-}
-
-fn knowledge_label_usage_list_output_via_query_runtime(
-    db: &Database,
-    query: &str,
-    parameters: &BTreeMap<String, Value>,
-    limit: usize,
-) -> Result<KnowledgeLabelUsageListOutput> {
-    let output = db.query_read_only_with_params_bounded(query, parameters, None)?;
-    let matched_count = output.rows.len();
-    let mut rows = output
-        .rows
-        .iter()
-        .map(knowledge_label_usage_row_from_query)
-        .collect::<Result<Vec<_>>>()?;
-    if limit > 0 {
-        rows.truncate(limit);
-    } else {
-        rows.clear();
-    }
-    let returned_count = rows.len();
-    Ok(KnowledgeLabelUsageListOutput {
-        graph_commit_epoch: db.store.commit_epoch(),
-        rows,
-        matched_count,
-        returned_count,
-    })
-}
-
-fn knowledge_label_usage_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeLabelUsageRequest,
-) -> Result<KnowledgeLabelUsageOutput> {
-    if request.label_id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge label usage requires a non-empty label id".to_string(),
-        ));
-    }
-    let parameters = BTreeMap::from([(
-        "label_id".to_string(),
-        Value::String(request.label_id.clone()),
-    )]);
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (l:Label {id: $label_id}) \
-         OPTIONAL MATCH (l)<-[r:HAS_LABEL]-(n) \
-         WITH l, count(r) AS usage_count \
-         RETURN l.id AS label_id, id(l) AS node_id, l.name AS name, \
-         l.canonical_name AS canonical_name, l.color AS color, \
-         l.description AS description, l.created_at AS created_at, \
-         l.updated_at AS updated_at, usage_count \
-         LIMIT 1",
-        &parameters,
-        Some(1),
-    )?;
-    let row = output
-        .rows
-        .first()
-        .map(knowledge_label_usage_row_from_query)
-        .transpose()?;
-    Ok(KnowledgeLabelUsageOutput {
-        graph_commit_epoch: db.store.commit_epoch(),
-        found: row.is_some(),
-        row,
-    })
-}
-
-fn knowledge_label_canonical_usage_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeLabelUsageListRequest,
-) -> Result<KnowledgeLabelUsageListOutput> {
-    let predicate = if request.canonical_only {
-        " WHERE l.canonical_name IS NOT NULL"
-    } else {
-        ""
-    };
-    let query = format!(
-        "MATCH (l:Label){predicate} \
-         OPTIONAL MATCH (l)<-[r:HAS_LABEL]-(n) \
-         WITH l, count(r) AS usage_count \
-         RETURN l.id AS label_id, id(l) AS node_id, l.name AS name, \
-         l.canonical_name AS canonical_name, l.color AS color, \
-         l.description AS description, l.created_at AS created_at, \
-         l.updated_at AS updated_at, usage_count \
-         ORDER BY node_id ASC"
-    );
-    let output = db.query_read_only_with_params_bounded(&query, &BTreeMap::new(), None)?;
-    let matched_count = output.rows.len();
-    let mut rows = output
-        .rows
-        .iter()
-        .map(knowledge_label_usage_row_from_query)
-        .collect::<Result<Vec<_>>>()?;
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    } else {
-        rows.clear();
-    }
-    let returned_count = rows.len();
-    Ok(KnowledgeLabelUsageListOutput {
-        graph_commit_epoch: db.store.commit_epoch(),
-        rows,
-        matched_count,
-        returned_count,
-    })
-}
-
-fn knowledge_label_usage_row_from_query(row: &Row) -> Result<KnowledgeLabelUsageRow> {
-    let node_id = row
-        .get("node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution("knowledge label usage row is missing node_id".to_string())
-        })?;
-    Ok(KnowledgeLabelUsageRow {
-        label_id: optional_string_cell(row, "label_id"),
-        node_id,
-        name: optional_string_cell(row, "name"),
-        canonical_name: optional_string_cell(row, "canonical_name"),
-        color: optional_value_cell(row, "color"),
-        description: optional_value_cell(row, "description"),
-        created_at: optional_value_cell(row, "created_at"),
-        updated_at: optional_value_cell(row, "updated_at"),
-        usage_count: row
-            .get("usage_count")
-            .and_then(value_to_non_negative_usize)
-            .unwrap_or_default(),
-    })
-}
-
-fn knowledge_label_memory_distribution_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeLabelMemoryDistributionRequest,
-) -> Result<KnowledgeLabelMemoryDistributionOutput> {
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (m:Memory)-[:HAS_LABEL]->(l:Label) \
-         WITH l.id AS label_id, id(l) AS label_node_id, l.name AS label_name, \
-         count(DISTINCT m) AS memory_count \
-         RETURN label_id, label_node_id, label_name, memory_count",
-        &BTreeMap::new(),
-        None,
-    )?;
-    let mut rows = output
-        .rows
-        .iter()
-        .map(knowledge_label_memory_distribution_row_from_query)
-        .collect::<Result<Vec<_>>>()?;
-    sort_label_memory_distribution_rows(&mut rows);
-    let matched_count = rows.len();
-    let mut rows = rows.into_iter().skip(request.offset).collect::<Vec<_>>();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-
-    Ok(KnowledgeLabelMemoryDistributionOutput {
-        graph_commit_epoch: db.store.commit_epoch(),
-        rows,
-        matched_count,
-        returned_count,
-    })
-}
-
-fn knowledge_label_memory_distribution_row_from_query(
-    row: &Row,
-) -> Result<KnowledgeLabelMemoryDistributionRow> {
-    let label_node_id = row
-        .get("label_node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge label memory distribution row is missing label_node_id".to_string(),
-            )
-        })?;
-    let memory_count = row
-        .get("memory_count")
-        .and_then(value_to_non_negative_usize)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge label memory distribution row is missing memory_count".to_string(),
-            )
-        })?;
-    Ok(KnowledgeLabelMemoryDistributionRow {
-        label_id: optional_string_cell(row, "label_id"),
-        label_node_id,
-        label_name: optional_string_cell(row, "label_name"),
-        memory_count,
-    })
-}
-
-fn knowledge_label_regex_memory_connections_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeLabelRegexMemoryConnectionsRequest,
-) -> Result<KnowledgeLabelRegexMemoryConnectionsOutput> {
-    validate_knowledge_label_regex_memory_connections_request(request)?;
-
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Ok(empty_label_regex_memory_connections_output(
-            graph_commit_epoch,
-        ));
-    };
-    let Some(label_label_id) = catalog.label_id("Label") else {
-        return Ok(empty_label_regex_memory_connections_output(
-            graph_commit_epoch,
-        ));
-    };
-    let Some(has_label_type_id) = catalog.rel_type_id("HAS_LABEL") else {
-        return Ok(empty_label_regex_memory_connections_output(
-            graph_commit_epoch,
-        ));
-    };
-
-    let property_names = deduplicated_strings_in_order(&request.memory_property_names);
-    let mut counts = BTreeMap::<(NodeId, NodeId), usize>::new();
-    store.try_visit_nodes_owned(Some(memory_label_id), |memory| {
-        store.try_visit_adjacent_relationships_owned(
-            memory.id,
-            Some(has_label_type_id),
-            AdjacencyDirection::Outgoing,
-            |relationship| {
-                let Some(label) = store
-                    .node_owned(relationship.target)?
-                    .filter(|node| node.labels.contains(&label_label_id))
-                else {
-                    return Ok(crate::store::GraphScanControl::Continue);
-                };
-                let Some(label_name) = node_string_property(&label, "name") else {
-                    return Ok(crate::store::GraphScanControl::Continue);
-                };
-                if crate::regex_cache::regex_is_match(&request.label_name_pattern, &label_name) {
-                    *counts.entry((memory.id, label.id)).or_default() += 1;
-                }
-                Ok(crate::store::GraphScanControl::Continue)
-            },
-        )?;
-        Ok(crate::store::GraphScanControl::Continue)
-    })?;
-
-    let mut rows = Vec::with_capacity(counts.len());
-    for ((memory_node_id, label_node_id), label_connections) in counts {
-        let Some(memory) = store.node_owned(memory_node_id)? else {
-            continue;
-        };
-        let Some(label) = store.node_owned(label_node_id)? else {
-            continue;
-        };
-        rows.push(knowledge_label_regex_memory_connection_row(
-            &memory,
-            &label,
-            label_connections,
-            &property_names,
-        ));
-    }
-    sort_label_regex_memory_connection_rows(&mut rows);
-    let matched_count = rows.len();
-    let mut rows = rows.into_iter().skip(request.offset).collect::<Vec<_>>();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-
-    Ok(KnowledgeLabelRegexMemoryConnectionsOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        returned_count,
-    })
-}
-
-fn knowledge_label_regex_memory_connections_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeLabelRegexMemoryConnectionsRequest,
-) -> Result<KnowledgeLabelRegexMemoryConnectionsOutput> {
-    validate_knowledge_label_regex_memory_connections_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let property_names = deduplicated_strings_in_order(&request.memory_property_names);
-    let mut parameters = BTreeMap::from([(
-        "pattern".to_string(),
-        Value::String(request.label_name_pattern.clone()),
-    )]);
-
-    let count = db.query_read_only_with_params_bounded(
-        "MATCH (m:Memory)-[r:HAS_LABEL]->(l:Label) \
-         WHERE l.name =~ $pattern \
-         RETURN m.id AS memory_id, id(m) AS memory_node_id, l.id AS label_id, id(l) AS label_node_id, \
-         count(r) AS label_connections",
-        &parameters,
-        None,
-    )?;
-    let matched_count = count.rows.len();
-
-    if request.offset > 0 {
-        parameters.insert(
-            "offset".to_string(),
-            Value::Int(i64::try_from(request.offset).unwrap_or(i64::MAX)),
-        );
-    }
-    if request.limit > 0 {
-        parameters.insert(
-            "limit".to_string(),
-            Value::Int(i64::try_from(request.limit).unwrap_or(i64::MAX)),
-        );
-    }
-    let page_clause = match (request.offset > 0, request.limit > 0) {
-        (false, false) => "",
-        (true, false) => " SKIP $offset",
-        (false, true) => " LIMIT $limit",
-        (true, true) => " SKIP $offset LIMIT $limit",
-    };
-    let query = format!(
-        "MATCH (m:Memory)-[r:HAS_LABEL]->(l:Label) \
-         WHERE l.name =~ $pattern \
-         RETURN m AS memory, l AS label, count(r) AS label_connections, \
-         l.name AS label_name, m.id AS memory_id, id(m) AS memory_node_id, \
-         l.id AS label_id, id(l) AS label_node_id \
-         ORDER BY label_connections DESC, label_name ASC, memory_id ASC, \
-         memory_node_id ASC, label_id ASC, label_node_id ASC{page_clause}"
-    );
-    let page = db.query_read_only_with_params_bounded(&query, &parameters, None)?;
-    let rows = page
-        .rows
-        .iter()
-        .map(|row| knowledge_label_regex_memory_connection_row_from_query(row, &property_names))
-        .collect::<Result<Vec<_>>>()?;
-    let returned_count = rows.len();
-
-    Ok(KnowledgeLabelRegexMemoryConnectionsOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        returned_count,
-    })
 }
 
 fn delete_knowledge_memory_labels_for(
@@ -22562,117 +12289,7 @@ fn node_property_equals_external_id(node: &NodeRecord, key: &str, expected: &str
         .is_some_and(|value| value_to_external_id(value) == expected)
 }
 
-fn sort_label_memory_distribution_rows(rows: &mut [KnowledgeLabelMemoryDistributionRow]) {
-    rows.sort_by(|left, right| {
-        right
-            .memory_count
-            .cmp(&left.memory_count)
-            .then_with(|| left.label_name.cmp(&right.label_name))
-            .then_with(|| left.label_id.cmp(&right.label_id))
-            .then_with(|| left.label_node_id.cmp(&right.label_node_id))
-    });
-}
-
-fn validate_knowledge_label_regex_memory_connections_request(
-    request: &KnowledgeLabelRegexMemoryConnectionsRequest,
-) -> Result<()> {
-    if request.label_name_pattern.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge label regex memory connections requires a non-empty label name pattern"
-                .to_string(),
-        ));
-    }
-    crate::regex_cache::validate_regex_pattern(&request.label_name_pattern)?;
-    if request.memory_property_names.iter().any(String::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge label regex memory connections requires non-empty memory property names"
-                .to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn empty_label_regex_memory_connections_output(
-    graph_commit_epoch: u64,
-) -> KnowledgeLabelRegexMemoryConnectionsOutput {
-    KnowledgeLabelRegexMemoryConnectionsOutput {
-        graph_commit_epoch,
-        rows: Vec::new(),
-        matched_count: 0,
-        returned_count: 0,
-    }
-}
-
-fn knowledge_label_regex_memory_connection_row(
-    memory: &NodeRecord,
-    label: &NodeRecord,
-    label_connections: usize,
-    memory_property_names: &[String],
-) -> KnowledgeLabelRegexMemoryConnectionRow {
-    KnowledgeLabelRegexMemoryConnectionRow {
-        memory_id: node_external_id(memory),
-        memory_node_id: memory.id.0,
-        memory_properties: projected_properties(&memory.properties, memory_property_names),
-        label_id: node_external_id(label),
-        label_node_id: label.id.0,
-        label_name: node_string_property(label, "name"),
-        label_connections,
-    }
-}
-
-fn knowledge_label_regex_memory_connection_row_from_query(
-    row: &Row,
-    memory_property_names: &[String],
-) -> Result<KnowledgeLabelRegexMemoryConnectionRow> {
-    let memory = row
-        .get("memory")
-        .and_then(knowledge_entity_from_value)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge label regex memory connection row is missing memory map".to_string(),
-            )
-        })?;
-    let label = row
-        .get("label")
-        .and_then(knowledge_entity_from_value)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge label regex memory connection row is missing label map".to_string(),
-            )
-        })?;
-    let label_connections = row
-        .get("label_connections")
-        .and_then(value_to_non_negative_usize)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge label regex memory connection row is missing label_connections"
-                    .to_string(),
-            )
-        })?;
-    Ok(KnowledgeLabelRegexMemoryConnectionRow {
-        memory_id: memory.external_id,
-        memory_node_id: memory.node_id,
-        memory_properties: projected_properties(&memory.properties, memory_property_names),
-        label_id: label.external_id,
-        label_node_id: label.node_id,
-        label_name: string_property_value(&label.properties, "name"),
-        label_connections,
-    })
-}
-
-fn sort_label_regex_memory_connection_rows(rows: &mut [KnowledgeLabelRegexMemoryConnectionRow]) {
-    rows.sort_by(|left, right| {
-        right
-            .label_connections
-            .cmp(&left.label_connections)
-            .then_with(|| left.label_name.cmp(&right.label_name))
-            .then_with(|| left.memory_id.cmp(&right.memory_id))
-            .then_with(|| left.memory_node_id.cmp(&right.memory_node_id))
-            .then_with(|| left.label_id.cmp(&right.label_id))
-            .then_with(|| left.label_node_id.cmp(&right.label_node_id))
-    });
-}
-
+#[cfg(test)]
 fn knowledge_entity_labels_via_query_runtime(
     db: &Database,
     request: &KnowledgeEntityLabelListRequest,
@@ -22723,6 +12340,7 @@ fn knowledge_entity_labels_via_query_runtime(
     })
 }
 
+#[cfg(test)]
 fn knowledge_entity_label_projected_list_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -22781,6 +12399,7 @@ fn knowledge_entity_label_projected_list_for(
     })
 }
 
+#[cfg(test)]
 fn knowledge_entity_label_projected_list_via_query_runtime(
     db: &Database,
     request: &KnowledgeEntityLabelProjectedListRequest,
@@ -22836,6 +12455,7 @@ fn knowledge_entity_label_projected_list_via_query_runtime(
     })
 }
 
+#[cfg(test)]
 fn validate_knowledge_entity_label_list_request(
     request: &KnowledgeEntityLabelListRequest,
 ) -> Result<()> {
@@ -22852,6 +12472,7 @@ fn validate_knowledge_entity_label_list_request(
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_knowledge_entity_label_projected_list_request(
     request: &KnowledgeEntityLabelProjectedListRequest,
 ) -> Result<()> {
@@ -22869,15 +12490,7 @@ fn validate_knowledge_entity_label_projected_list_request(
     Ok(())
 }
 
-fn validate_optional_label_id(label_id: Option<&str>) -> Result<()> {
-    if label_id.is_some_and(str::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge label read requires a non-empty excluded label id".to_string(),
-        ));
-    }
-    Ok(())
-}
-
+#[cfg(test)]
 fn knowledge_entity_label_entities_via_query_runtime(
     db: &Database,
     entity_label: &str,
@@ -22916,6 +12529,7 @@ fn knowledge_entity_label_entities_via_query_runtime(
     Ok(entities)
 }
 
+#[cfg(test)]
 fn entity_label_rows_via_query_runtime(
     db: &Database,
     entity_node_id: u64,
@@ -22939,6 +12553,7 @@ fn entity_label_rows_via_query_runtime(
     Ok(rows)
 }
 
+#[cfg(test)]
 fn entity_label_projected_rows(
     catalog: &Catalog,
     store: &GraphStore,
@@ -22989,6 +12604,7 @@ fn entity_label_projected_rows(
     Ok(rows.into_iter().map(|(row, _name)| row).collect())
 }
 
+#[cfg(test)]
 fn entity_label_projected_rows_via_query_runtime(
     db: &Database,
     entity_node_id: u64,
@@ -23053,6 +12669,7 @@ fn entity_label_projected_rows_via_query_runtime(
     Ok(rows.into_iter().map(|(row, _name)| row).collect())
 }
 
+#[cfg(test)]
 fn entity_label_query_output_via_query_runtime(
     db: &Database,
     entity_node_id: u64,
@@ -23070,6 +12687,7 @@ fn entity_label_query_output_via_query_runtime(
     db.query_read_only_with_params_bounded(query, &parameters, None)
 }
 
+#[cfg(test)]
 fn entity_label_row_from_query_row(row: &Row) -> Result<KnowledgeEntityLabelRow> {
     let label = row
         .get("label")
@@ -23085,10 +12703,12 @@ fn entity_label_row_from_query_row(row: &Row) -> Result<KnowledgeEntityLabelRow>
     })
 }
 
+#[cfg(test)]
 fn knowledge_entity_string_property(entity: &KnowledgeEntity, key: &str) -> Option<String> {
     entity.properties.get(key).map(value_to_external_id)
 }
 
+#[cfg(test)]
 fn entity_label_projected_row(
     label: &NodeRecord,
     relationship: &RelRecord,
@@ -23328,233 +12948,7 @@ fn clear_knowledge_pagerank_scores_for(
     })
 }
 
-fn knowledge_pagerank_plan_via_query_runtime(
-    db: &Database,
-    request: &KnowledgePageRankPlanRequest,
-) -> Result<KnowledgePageRankPlanOutput> {
-    let graph_commit_epoch = db.store.commit_epoch();
-    let memory_node_count = pagerank_count_via_query_runtime(
-        db,
-        "MATCH (m:Memory) RETURN count(m) AS total",
-        BTreeMap::new(),
-    )?;
-    let entity_node_count = pagerank_count_via_query_runtime(
-        db,
-        "MATCH (e:Entity) RETURN count(e) AS total",
-        BTreeMap::new(),
-    )?;
-    let entity_relation_count = pagerank_count_via_query_runtime(
-        db,
-        "MATCH (:Entity)-[r:RELATES_TO]->(:Entity) RETURN count(r) AS total",
-        BTreeMap::new(),
-    )?;
-    let mention_edge_count = pagerank_count_via_query_runtime(
-        db,
-        "MATCH (:Memory)-[r:MENTIONS]->(:Entity) RETURN count(r) AS total",
-        BTreeMap::new(),
-    )?;
-    let active_memory_relation_count = pagerank_count_via_query_runtime(
-        db,
-        "MATCH (:Memory)-[r:MEMORY_RELATES_TO]->(:Memory) WHERE r.status = 'active' RETURN count(r) AS total",
-        BTreeMap::new(),
-    )?;
-
-    let (
-        changed_memory_count,
-        changed_entity_count,
-        changed_mention_edge_count,
-        changed_entity_relation_count,
-        changed_memory_relation_count,
-    ) = if let Some(cutoff) = request.changed_since_epoch_nanos {
-        let parameters = BTreeMap::from([("cutoff".to_string(), Value::Int(cutoff))]);
-        (
-            pagerank_count_via_query_runtime(
-                db,
-                "MATCH (m:Memory) WHERE m.created_at > $cutoff OR m.updated_at > $cutoff RETURN count(m) AS total",
-                parameters.clone(),
-            )?,
-            pagerank_count_via_query_runtime(
-                db,
-                "MATCH (e:Entity) WHERE e.created_at > $cutoff OR e.updated_at > $cutoff RETURN count(e) AS total",
-                parameters.clone(),
-            )?,
-            pagerank_count_via_query_runtime(
-                db,
-                "MATCH (:Memory)-[r:MENTIONS]->(:Entity) WHERE r.created_at > $cutoff OR r.updated_at > $cutoff RETURN count(r) AS total",
-                parameters.clone(),
-            )?,
-            pagerank_count_via_query_runtime(
-                db,
-                "MATCH (:Entity)-[r:RELATES_TO]->(:Entity) WHERE r.created_at > $cutoff OR r.updated_at > $cutoff RETURN count(r) AS total",
-                parameters.clone(),
-            )?,
-            pagerank_count_via_query_runtime(
-                db,
-                "MATCH (:Memory)-[r:MEMORY_RELATES_TO]->(:Memory) WHERE r.status = 'active' AND (r.created_at > $cutoff OR r.updated_at > $cutoff) RETURN count(r) AS total",
-                parameters,
-            )?,
-        )
-    } else {
-        (0, 0, 0, 0, 0)
-    };
-
-    Ok(KnowledgePageRankPlanOutput {
-        graph_commit_epoch,
-        memory_node_count,
-        entity_node_count,
-        entity_relation_count,
-        mention_edge_count,
-        active_memory_relation_count,
-        changed_memory_count,
-        changed_entity_count,
-        changed_mention_edge_count,
-        changed_entity_relation_count,
-        changed_memory_relation_count,
-    })
-}
-
-fn pagerank_count_via_query_runtime(
-    db: &Database,
-    query: &str,
-    parameters: BTreeMap<String, Value>,
-) -> Result<usize> {
-    let output = db.query_read_only_with_params_bounded(query, &parameters, Some(1))?;
-    output
-        .rows
-        .first()
-        .and_then(|row| row.get("total"))
-        .and_then(value_to_non_negative_usize)
-        .ok_or_else(|| SkeinError::Execution("pagerank count query returned no total".to_string()))
-}
-
-fn knowledge_pagerank_membership_via_query_runtime(
-    db: &Database,
-    request: &KnowledgePageRankMembershipRequest,
-) -> Result<KnowledgePageRankMembershipOutput> {
-    validate_pagerank_label(request.label.as_str())?;
-    validate_non_empty_external_ids(
-        &request.external_ids,
-        "knowledge pagerank membership requires non-empty external ids",
-    )?;
-    let label = pagerank_label(request.label.as_str()).to_string();
-    let entities = request
-        .external_ids
-        .iter()
-        .map(|external_id| KnowledgeEntityRequest {
-            label: label.clone(),
-            external_id: external_id.clone(),
-        })
-        .collect::<Vec<_>>();
-    let (graph_commit_epoch, found) = lookup_entities_via_query_runtime_strict(db, &entities)?;
-    let mut rows = Vec::with_capacity(request.external_ids.len());
-    let mut matched_count = 0;
-    let mut missing_count = 0;
-    for external_id in &request.external_ids {
-        if let Some(entity) = found.get(&(label.clone(), external_id.clone())) {
-            matched_count += 1;
-            rows.push(KnowledgePageRankMembershipRow {
-                label: label.clone(),
-                external_id: external_id.clone(),
-                node_id: Some(entity.node_id),
-                matched: true,
-            });
-        } else {
-            missing_count += 1;
-            rows.push(KnowledgePageRankMembershipRow {
-                label: label.clone(),
-                external_id: external_id.clone(),
-                node_id: None,
-                matched: false,
-            });
-        }
-    }
-
-    Ok(KnowledgePageRankMembershipOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        missing_count,
-    })
-}
-
-fn knowledge_pagerank_memory_visibility_via_query_runtime(
-    db: &Database,
-    request: &KnowledgePageRankMemoryVisibilityRequest,
-) -> Result<KnowledgePageRankMemoryVisibilityOutput> {
-    validate_non_empty_external_ids(
-        &request.memory_ids,
-        "knowledge pagerank memory visibility requires non-empty memory ids",
-    )?;
-    let entities = request
-        .memory_ids
-        .iter()
-        .map(|memory_id| KnowledgeEntityRequest {
-            label: "Memory".to_string(),
-            external_id: memory_id.clone(),
-        })
-        .collect::<Vec<_>>();
-    let (graph_commit_epoch, found) = lookup_entities_via_query_runtime_strict(db, &entities)?;
-    let mut rows = Vec::with_capacity(request.memory_ids.len());
-    let mut matched_count = 0;
-    let mut missing_count = 0;
-    for memory_id in &request.memory_ids {
-        if let Some(entity) = found.get(&("Memory".to_string(), memory_id.clone())) {
-            matched_count += 1;
-            rows.push(KnowledgePageRankMemoryVisibilityRow {
-                memory_id: memory_id.clone(),
-                node_id: Some(entity.node_id),
-                matched: true,
-                metadata: entity.properties.get("metadata").cloned(),
-                is_latest: entity.properties.get("is_latest") != Some(&Value::Bool(false)),
-            });
-        } else {
-            missing_count += 1;
-            rows.push(KnowledgePageRankMemoryVisibilityRow {
-                memory_id: memory_id.clone(),
-                node_id: None,
-                matched: false,
-                metadata: None,
-                is_latest: true,
-            });
-        }
-    }
-
-    Ok(KnowledgePageRankMemoryVisibilityOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        missing_count,
-    })
-}
-
-fn knowledge_pagerank_central_entity_via_query_runtime(
-    db: &Database,
-    request: &KnowledgePageRankCentralEntityRequest,
-) -> Result<KnowledgePageRankCentralEntityOutput> {
-    if request.entity_id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge pagerank central entity requires a non-empty entity id".to_string(),
-        ));
-    }
-    let (graph_commit_epoch, found) = lookup_entities_via_query_runtime_strict(
-        db,
-        &[KnowledgeEntityRequest {
-            label: "Entity".to_string(),
-            external_id: request.entity_id.clone(),
-        }],
-    )?;
-    let entity = found.get(&("Entity".to_string(), request.entity_id.clone()));
-    Ok(KnowledgePageRankCentralEntityOutput {
-        graph_commit_epoch,
-        found: entity.is_some(),
-        node_id: entity.map(|entity| entity.node_id),
-        name: entity
-            .and_then(|entity| entity.properties.get("name"))
-            .map(value_to_external_id)
-            .filter(|name| !name.is_empty()),
-    })
-}
-
+#[cfg(test)]
 fn validate_non_empty_external_ids(external_ids: &[String], message: &str) -> Result<()> {
     if external_ids.iter().any(String::is_empty) {
         return Err(SkeinError::Semantic(message.to_string()));
@@ -23778,6 +13172,7 @@ fn knowledge_community_membership_relationship_create(
     }
 }
 
+#[cfg(test)]
 fn knowledge_communities_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -23820,6 +13215,7 @@ fn knowledge_communities_for(
     })
 }
 
+#[cfg(test)]
 fn knowledge_communities_via_query_runtime(
     db: &Database,
     request: &KnowledgeCommunityListRequest,
@@ -23857,6 +13253,7 @@ fn knowledge_communities_via_query_runtime(
     })
 }
 
+#[cfg(test)]
 fn knowledge_community_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -23892,6 +13289,7 @@ fn knowledge_community_for(
     })
 }
 
+#[cfg(test)]
 fn knowledge_community_via_query_runtime(
     db: &Database,
     request: &KnowledgeCommunityRequest,
@@ -23928,6 +13326,7 @@ fn knowledge_community_via_query_runtime(
     })
 }
 
+#[cfg(test)]
 fn validate_knowledge_community_request(request: &KnowledgeCommunityRequest) -> Result<()> {
     if let KnowledgeCommunityLookupKey::Id(id) = &request.key
         && id.is_empty()
@@ -23939,6 +13338,7 @@ fn validate_knowledge_community_request(request: &KnowledgeCommunityRequest) -> 
     Ok(())
 }
 
+#[cfg(test)]
 fn knowledge_community_row_from_entity(community: &KnowledgeEntity) -> KnowledgeCommunityRow {
     let ai_summary = community.properties.get("ai_summary").cloned();
     KnowledgeCommunityRow {
@@ -23957,6 +13357,7 @@ fn knowledge_community_row_from_entity(community: &KnowledgeEntity) -> Knowledge
     }
 }
 
+#[cfg(test)]
 fn community_matches_lookup_key(node: &NodeRecord, key: &KnowledgeCommunityLookupKey) -> bool {
     match key {
         KnowledgeCommunityLookupKey::Id(id) => node_external_id(node).as_deref() == Some(id),
@@ -23966,6 +13367,7 @@ fn community_matches_lookup_key(node: &NodeRecord, key: &KnowledgeCommunityLooku
     }
 }
 
+#[cfg(test)]
 fn knowledge_community_row(node: &NodeRecord) -> KnowledgeCommunityRow {
     let ai_summary = node.properties.get("ai_summary").cloned();
     KnowledgeCommunityRow {
@@ -23983,6 +13385,7 @@ fn knowledge_community_row(node: &NodeRecord) -> KnowledgeCommunityRow {
     }
 }
 
+#[cfg(test)]
 fn compare_knowledge_community_rows(
     left: &KnowledgeCommunityRow,
     right: &KnowledgeCommunityRow,
@@ -24003,6 +13406,7 @@ fn compare_knowledge_community_rows(
     .then_with(|| left.node_id.cmp(&right.node_id))
 }
 
+#[cfg(test)]
 fn compare_optional_i64_desc(left: Option<i64>, right: Option<i64>) -> std::cmp::Ordering {
     match (left, right) {
         (Some(left), Some(right)) => right.cmp(&left),
@@ -24363,74 +13767,6 @@ fn knowledge_community_cleanup_statement(
     ))
 }
 
-fn knowledge_graph_meta_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeGraphMetaRequest,
-) -> Result<KnowledgeGraphMetaOutput> {
-    validate_graph_meta_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let meta = knowledge_graph_meta_entity_via_query_runtime(db, &request.meta_id)?
-        .map(knowledge_graph_meta_from_entity);
-    Ok(KnowledgeGraphMetaOutput {
-        graph_commit_epoch,
-        found: meta.is_some(),
-        meta,
-    })
-}
-
-fn knowledge_graph_meta_projected_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeGraphMetaProjectedRequest,
-) -> Result<KnowledgeGraphMetaProjectedOutput> {
-    validate_graph_meta_projected_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let meta = try_node_by_label_property_external_id(
-        catalog,
-        store,
-        "GraphMeta",
-        "meta_id",
-        &request.meta.meta_id,
-    )?
-    .map(|node| knowledge_graph_meta_projected_from_node(&node, &request.property_names));
-    Ok(KnowledgeGraphMetaProjectedOutput {
-        graph_commit_epoch,
-        found: meta.is_some(),
-        meta,
-    })
-}
-
-fn knowledge_graph_meta_projected_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeGraphMetaProjectedRequest,
-) -> Result<KnowledgeGraphMetaProjectedOutput> {
-    validate_graph_meta_projected_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let meta = knowledge_graph_meta_entity_via_query_runtime(db, &request.meta.meta_id)?
-        .map(|entity| knowledge_graph_meta_projected_from_entity(&entity, &request.property_names));
-    Ok(KnowledgeGraphMetaProjectedOutput {
-        graph_commit_epoch,
-        found: meta.is_some(),
-        meta,
-    })
-}
-
-fn knowledge_graph_meta_entity_via_query_runtime(
-    db: &Database,
-    meta_id: &str,
-) -> Result<Option<KnowledgeEntity>> {
-    let parameters = BTreeMap::from([("meta_id".to_string(), Value::String(meta_id.to_string()))]);
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (m:GraphMeta) WHERE m.meta_id = $meta_id RETURN m AS meta ORDER BY id(m) ASC LIMIT 1",
-        &parameters,
-        Some(1),
-    )?;
-    Ok(output
-        .rows
-        .first()
-        .and_then(|row| row.get("meta").and_then(knowledge_entity_from_value)))
-}
-
 fn delete_knowledge_graph_meta_for(
     db: &mut Database,
     request: &KnowledgeGraphMetaRequest,
@@ -24476,60 +13812,6 @@ fn validate_graph_meta_request(request: &KnowledgeGraphMetaRequest) -> Result<()
         ));
     }
     Ok(())
-}
-
-fn validate_graph_meta_projected_request(
-    request: &KnowledgeGraphMetaProjectedRequest,
-) -> Result<()> {
-    validate_graph_meta_request(&request.meta)?;
-    if request.property_names.iter().any(String::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge graph meta projected read requires non-empty property names".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn knowledge_graph_meta_from_entity(entity: KnowledgeEntity) -> KnowledgeGraphMeta {
-    KnowledgeGraphMeta {
-        meta_id: knowledge_entity_graph_meta_id(&entity),
-        node_id: entity.node_id,
-        properties: entity.properties,
-    }
-}
-
-fn knowledge_graph_meta_projected_from_node(
-    node: &NodeRecord,
-    property_names: &[String],
-) -> KnowledgeGraphMetaProjected {
-    KnowledgeGraphMetaProjected {
-        meta_id: node
-            .properties
-            .get("meta_id")
-            .map(value_to_external_id)
-            .filter(|meta_id| !meta_id.is_empty()),
-        node_id: node.id.0,
-        properties: projected_properties(&node.properties, property_names),
-    }
-}
-
-fn knowledge_graph_meta_projected_from_entity(
-    entity: &KnowledgeEntity,
-    property_names: &[String],
-) -> KnowledgeGraphMetaProjected {
-    KnowledgeGraphMetaProjected {
-        meta_id: knowledge_entity_graph_meta_id(entity),
-        node_id: entity.node_id,
-        properties: projected_properties(&entity.properties, property_names),
-    }
-}
-
-fn knowledge_entity_graph_meta_id(entity: &KnowledgeEntity) -> Option<String> {
-    entity
-        .properties
-        .get("meta_id")
-        .map(value_to_external_id)
-        .filter(|meta_id| !meta_id.is_empty())
 }
 
 fn knowledge_graph_meta_delete_statement(
@@ -24824,44 +14106,6 @@ fn apply_knowledge_schema_migrations_batch_for(
         created_count,
         already_applied_count,
         duplicate_count,
-    })
-}
-
-fn knowledge_schema_migrations_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeSchemaMigrationListRequest,
-) -> Result<KnowledgeSchemaMigrationListOutput> {
-    let Some(label_id) = catalog.label_id("SchemaMigrationLog") else {
-        return Ok(KnowledgeSchemaMigrationListOutput {
-            graph_commit_epoch: store.commit_epoch(),
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-        });
-    };
-    let mut rows = Vec::new();
-    store.visit_nodes_owned(Some(label_id), |node| {
-        if let Some(migration_id) = node_external_id(&node) {
-            rows.push(KnowledgeSchemaMigrationRow {
-                migration_id,
-                node_id: node.id.0,
-                applied_at: node.properties.get("applied_at").cloned(),
-            });
-        }
-        crate::store::GraphScanControl::Continue
-    })?;
-    rows.sort_by(|left, right| left.migration_id.cmp(&right.migration_id));
-    let matched_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-    Ok(KnowledgeSchemaMigrationListOutput {
-        graph_commit_epoch: store.commit_epoch(),
-        rows,
-        matched_count,
-        returned_count,
     })
 }
 
@@ -25249,146 +14493,7 @@ fn augmentation_job_create_statement(
     (cypher, parameters)
 }
 
-fn knowledge_augmentation_job_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeAugmentationJobRequest,
-) -> Result<KnowledgeAugmentationJobOutput> {
-    validate_knowledge_augmentation_job_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let parameters =
-        BTreeMap::from([("job_id".to_string(), Value::String(request.job_id.clone()))]);
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (j:AugmentationJob) WHERE j.job_id = $job_id \
-         RETURN j.job_id AS job_id, id(j) AS node_id, j.job_type AS job_type, \
-         j.status AS status, j.progress AS progress, j.message AS message, \
-         j.result AS result, j.error_message AS error_message, j.started_at AS started_at, \
-         j.completed_at AS completed_at, j.created_at AS created_at \
-         ORDER BY node_id ASC LIMIT 1",
-        &parameters,
-        Some(1),
-    )?;
-    let job = output
-        .rows
-        .first()
-        .map(knowledge_augmentation_job_from_query)
-        .transpose()?;
-    Ok(KnowledgeAugmentationJobOutput {
-        graph_commit_epoch,
-        found: job.is_some(),
-        job,
-    })
-}
-
-fn knowledge_augmentation_jobs_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeAugmentationJobListRequest,
-) -> Result<KnowledgeAugmentationJobListOutput> {
-    validate_knowledge_augmentation_job_list_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let mut parameters = BTreeMap::new();
-    let predicate = augmentation_job_list_predicate(request, &mut parameters);
-    let count_query = format!("MATCH (j:AugmentationJob){predicate} RETURN count(j) AS total");
-    let matched_count = pagerank_count_via_query_runtime(db, &count_query, parameters.clone())?;
-    if request.limit == 0 {
-        return Ok(KnowledgeAugmentationJobListOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_count,
-            returned_count: 0,
-        });
-    }
-
-    parameters.insert(
-        "limit".to_string(),
-        Value::Int(i64::try_from(request.limit).unwrap_or(i64::MAX)),
-    );
-    let order_column = match request.order_by {
-        KnowledgeAugmentationJobListOrder::StartedAtDesc => "j.started_at",
-        KnowledgeAugmentationJobListOrder::CreatedAtDesc => "j.created_at",
-    };
-    let query = format!(
-        "MATCH (j:AugmentationJob){predicate} \
-         RETURN j.job_id AS job_id, id(j) AS node_id, j.job_type AS job_type, \
-         j.status AS status, j.progress AS progress, j.message AS message, \
-         j.result AS result, j.error_message AS error_message, j.started_at AS started_at, \
-         j.completed_at AS completed_at, j.created_at AS created_at \
-         ORDER BY {order_column} DESC, node_id ASC LIMIT $limit"
-    );
-    let output = db.query_read_only_with_params_bounded(&query, &parameters, None)?;
-    let rows = output
-        .rows
-        .iter()
-        .map(knowledge_augmentation_job_from_query)
-        .collect::<Result<Vec<_>>>()?;
-    let returned_count = rows.len();
-
-    Ok(KnowledgeAugmentationJobListOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        returned_count,
-    })
-}
-
-fn validate_knowledge_augmentation_job_request(
-    request: &KnowledgeAugmentationJobRequest,
-) -> Result<()> {
-    if request.job_id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge augmentation job read requires a non-empty job id".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_knowledge_augmentation_job_list_request(
-    request: &KnowledgeAugmentationJobListRequest,
-) -> Result<()> {
-    if request
-        .status_filter
-        .as_ref()
-        .is_some_and(|status| status.is_empty())
-    {
-        return Err(SkeinError::Semantic(
-            "knowledge augmentation job list requires a non-empty status filter".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn augmentation_job_list_predicate(
-    request: &KnowledgeAugmentationJobListRequest,
-    parameters: &mut BTreeMap<String, Value>,
-) -> String {
-    let Some(status) = &request.status_filter else {
-        return String::new();
-    };
-    parameters.insert("status".to_string(), Value::String(status.clone()));
-    " WHERE j.status = $status".to_string()
-}
-
-fn knowledge_augmentation_job_from_query(row: &Row) -> Result<KnowledgeAugmentationJob> {
-    let node_id = row
-        .get("node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution("knowledge augmentation job row is missing node_id".to_string())
-        })?;
-    Ok(KnowledgeAugmentationJob {
-        job_id: optional_string_cell(row, "job_id"),
-        node_id,
-        job_type: optional_raw_string_cell(row, "job_type"),
-        status: optional_raw_string_cell(row, "status"),
-        progress: row.get("progress").and_then(value_to_finite_f64),
-        message: optional_raw_string_cell(row, "message"),
-        result: row.get("result").cloned(),
-        error_message: optional_raw_string_cell(row, "error_message"),
-        started_at: row.get("started_at").cloned(),
-        completed_at: row.get("completed_at").cloned(),
-        created_at: row.get("created_at").cloned(),
-    })
-}
-
+#[cfg(test)]
 fn node_string_property(node: &NodeRecord, property_name: &str) -> Option<String> {
     match node.properties.get(property_name) {
         Some(Value::String(value)) => Some(value.clone()),
@@ -25396,14 +14501,7 @@ fn node_string_property(node: &NodeRecord, property_name: &str) -> Option<String
     }
 }
 
-fn value_to_finite_f64(value: &Value) -> Option<f64> {
-    match value {
-        Value::Int(value) => Some(*value as f64),
-        Value::Float(value) if value.is_finite() => Some(*value),
-        _ => None,
-    }
-}
-
+#[cfg(test)]
 fn compare_optional_values_desc(left: Option<&Value>, right: Option<&Value>) -> std::cmp::Ordering {
     match (
         left.and_then(value_sort_key),
@@ -25418,6 +14516,7 @@ fn compare_optional_values_desc(left: Option<&Value>, right: Option<&Value>) -> 
     }
 }
 
+#[cfg(test)]
 fn value_sort_key(value: &Value) -> Option<f64> {
     match value {
         Value::Int(value) => Some(*value as f64),
@@ -27158,305 +16257,6 @@ struct KnowledgeSourceReferenceRelationshipDeleteCandidate {
     target_external_id: Option<String>,
 }
 
-fn knowledge_source_reference_entities_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeSourceReferenceEntityListRequest,
-) -> Result<KnowledgeSourceReferenceEntityListOutput> {
-    validate_source_reference(&request.source_reference, "source-reference entity read")?;
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(rel_type_id) = catalog.rel_type_id("RELATES_TO") else {
-        return Ok(KnowledgeSourceReferenceEntityListOutput {
-            graph_commit_epoch,
-            source_reference: request.source_reference.clone(),
-            rows: Vec::new(),
-            matched_relationship_count: 0,
-            returned_count: 0,
-        });
-    };
-    let Some(entity_label_id) = catalog.label_id("Entity") else {
-        return Ok(KnowledgeSourceReferenceEntityListOutput {
-            graph_commit_epoch,
-            source_reference: request.source_reference.clone(),
-            rows: Vec::new(),
-            matched_relationship_count: 0,
-            returned_count: 0,
-        });
-    };
-
-    let mut matched_relationship_count = 0;
-    let mut entity_node_ids = BTreeSet::new();
-    store.try_visit_relationships_owned(Some(rel_type_id), |relationship| {
-        if !relationship_source_reference_equals(&relationship, &request.source_reference) {
-            return Ok(crate::store::GraphScanControl::Continue);
-        }
-        matched_relationship_count += 1;
-        for node_id in [relationship.source, relationship.target] {
-            if store
-                .node_owned(node_id)?
-                .is_some_and(|node| node.labels.contains(&entity_label_id))
-            {
-                entity_node_ids.insert(node_id);
-            }
-        }
-        Ok(crate::store::GraphScanControl::Continue)
-    })?;
-
-    let mut rows = Vec::with_capacity(entity_node_ids.len());
-    for node_id in entity_node_ids {
-        if let Some(node) = store.node_owned(node_id)? {
-            rows.push(KnowledgeSourceReferenceEntityRow {
-                entity_id: node_external_id(&node),
-                node_id: node.id.0,
-            });
-        }
-    }
-    sort_source_reference_entity_rows(&mut rows);
-    let returned_count = rows.len();
-
-    Ok(KnowledgeSourceReferenceEntityListOutput {
-        graph_commit_epoch,
-        source_reference: request.source_reference.clone(),
-        rows,
-        matched_relationship_count,
-        returned_count,
-    })
-}
-
-fn knowledge_source_reference_entities_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeSourceReferenceEntityListRequest,
-) -> Result<KnowledgeSourceReferenceEntityListOutput> {
-    validate_source_reference(&request.source_reference, "source-reference entity read")?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let parameters = BTreeMap::from([(
-        "source_reference".to_string(),
-        Value::String(request.source_reference.clone()),
-    )]);
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (source:Entity)-[r:RELATES_TO]->(target:Entity) \
-         WHERE r.source_reference = $source_reference \
-         RETURN id(r) AS relationship_id, \
-         source.id AS source_entity_id, id(source) AS source_node_id, \
-         target.id AS target_entity_id, id(target) AS target_node_id \
-         ORDER BY relationship_id ASC",
-        &parameters,
-        None,
-    )?;
-
-    let mut matched_relationship_ids = BTreeSet::new();
-    let mut entity_rows = BTreeMap::new();
-    for row in &output.rows {
-        if let Some(relationship_id) = row
-            .get("relationship_id")
-            .and_then(value_to_non_negative_u64)
-        {
-            matched_relationship_ids.insert(relationship_id);
-        }
-        insert_source_reference_entity_row(
-            &mut entity_rows,
-            row,
-            "source_entity_id",
-            "source_node_id",
-        );
-        insert_source_reference_entity_row(
-            &mut entity_rows,
-            row,
-            "target_entity_id",
-            "target_node_id",
-        );
-    }
-
-    let mut rows = entity_rows.into_values().collect::<Vec<_>>();
-    sort_source_reference_entity_rows(&mut rows);
-    let returned_count = rows.len();
-
-    Ok(KnowledgeSourceReferenceEntityListOutput {
-        graph_commit_epoch,
-        source_reference: request.source_reference.clone(),
-        rows,
-        matched_relationship_count: matched_relationship_ids.len(),
-        returned_count,
-    })
-}
-
-fn insert_source_reference_entity_row(
-    entity_rows: &mut BTreeMap<u64, KnowledgeSourceReferenceEntityRow>,
-    row: &Row,
-    entity_id_column: &str,
-    node_id_column: &str,
-) {
-    let Some(node_id) = row.get(node_id_column).and_then(value_to_non_negative_u64) else {
-        return;
-    };
-    entity_rows
-        .entry(node_id)
-        .or_insert_with(|| KnowledgeSourceReferenceEntityRow {
-            entity_id: optional_string_cell(row, entity_id_column),
-            node_id,
-        });
-}
-
-fn knowledge_source_reference_relationship_count_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeSourceReferenceRelationshipCountRequest,
-) -> Result<KnowledgeSourceReferenceRelationshipCountOutput> {
-    if request.entity_id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge source-reference relationship count requires a non-empty entity id"
-                .to_string(),
-        ));
-    }
-    validate_source_reference(
-        &request.excluded_source_reference,
-        "source-reference relationship count",
-    )?;
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(entity) =
-        try_seed_node_by_label_and_external_id(catalog, store, "Entity", &request.entity_id)?
-    else {
-        return Ok(KnowledgeSourceReferenceRelationshipCountOutput {
-            graph_commit_epoch,
-            entity_id: request.entity_id.clone(),
-            entity_node_id: None,
-            found_entity: false,
-            relationship_count: 0,
-        });
-    };
-    let Some(rel_type_id) = catalog.rel_type_id("RELATES_TO") else {
-        return Ok(KnowledgeSourceReferenceRelationshipCountOutput {
-            graph_commit_epoch,
-            entity_id: request.entity_id.clone(),
-            entity_node_id: Some(entity.id.0),
-            found_entity: true,
-            relationship_count: 0,
-        });
-    };
-
-    let mut incident_count = 0usize;
-    store.visit_relationships_owned(Some(rel_type_id), |relationship| {
-        if (relationship.source == entity.id || relationship.target == entity.id)
-            && relationship_source_reference_is_counted(
-                &relationship,
-                &request.excluded_source_reference,
-            )
-        {
-            incident_count += 1;
-        }
-        crate::store::GraphScanControl::Continue
-    })?;
-    let mut incoming_count = 0usize;
-    store.visit_adjacent_relationships_owned(
-        entity.id,
-        Some(rel_type_id),
-        AdjacencyDirection::Incoming,
-        |relationship| {
-            if relationship_source_reference_is_counted(
-                &relationship,
-                &request.excluded_source_reference,
-            ) {
-                incoming_count += 1;
-            }
-            crate::store::GraphScanControl::Continue
-        },
-    )?;
-
-    Ok(KnowledgeSourceReferenceRelationshipCountOutput {
-        graph_commit_epoch,
-        entity_id: request.entity_id.clone(),
-        entity_node_id: Some(entity.id.0),
-        found_entity: true,
-        relationship_count: incident_count + incoming_count,
-    })
-}
-
-fn knowledge_source_reference_relationship_count_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeSourceReferenceRelationshipCountRequest,
-) -> Result<KnowledgeSourceReferenceRelationshipCountOutput> {
-    if request.entity_id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge source-reference relationship count requires a non-empty entity id"
-                .to_string(),
-        ));
-    }
-    validate_source_reference(
-        &request.excluded_source_reference,
-        "source-reference relationship count",
-    )?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let parameters = BTreeMap::from([
-        (
-            "entity_id".to_string(),
-            Value::String(request.entity_id.clone()),
-        ),
-        (
-            "excluded_source_reference".to_string(),
-            Value::String(request.excluded_source_reference.clone()),
-        ),
-    ]);
-    let entity = db.query_read_only_with_params_bounded(
-        "MATCH (e:Entity {id: $entity_id}) RETURN id(e) AS entity_node_id LIMIT 1",
-        &parameters,
-        Some(1),
-    )?;
-    let Some(entity_node_id) = entity
-        .rows
-        .first()
-        .and_then(|row| row.get("entity_node_id"))
-        .and_then(value_to_non_negative_u64)
-    else {
-        return Ok(KnowledgeSourceReferenceRelationshipCountOutput {
-            graph_commit_epoch,
-            entity_id: request.entity_id.clone(),
-            entity_node_id: None,
-            found_entity: false,
-            relationship_count: 0,
-        });
-    };
-
-    let counted_source_reference_predicate =
-        "(r.source_reference IS NULL OR r.source_reference = '' \
-         OR r.source_reference <> $excluded_source_reference)";
-    let incident_query = format!(
-        "MATCH (e:Entity {{id: $entity_id}})-[r:RELATES_TO]-(other:Entity) \
-         WHERE {counted_source_reference_predicate} \
-         RETURN count(r) AS relationship_count"
-    );
-    let incoming_query = format!(
-        "MATCH (other:Entity)-[r:RELATES_TO]->(e:Entity {{id: $entity_id}}) \
-         WHERE {counted_source_reference_predicate} \
-         RETURN count(r) AS relationship_count"
-    );
-    let incident_count =
-        source_reference_relationship_count_from_query(db, &incident_query, &parameters)?;
-    let incoming_count =
-        source_reference_relationship_count_from_query(db, &incoming_query, &parameters)?;
-
-    Ok(KnowledgeSourceReferenceRelationshipCountOutput {
-        graph_commit_epoch,
-        entity_id: request.entity_id.clone(),
-        entity_node_id: Some(entity_node_id),
-        found_entity: true,
-        relationship_count: incident_count + incoming_count,
-    })
-}
-
-fn source_reference_relationship_count_from_query(
-    db: &Database,
-    query: &str,
-    parameters: &BTreeMap<String, Value>,
-) -> Result<usize> {
-    Ok(db
-        .query_read_only_with_params_bounded(query, parameters, Some(1))?
-        .rows
-        .first()
-        .and_then(|row| row.get("relationship_count"))
-        .and_then(value_to_non_negative_usize)
-        .unwrap_or(0))
-}
-
 fn validate_source_reference(source_reference: &str, operation: &str) -> Result<()> {
     if source_reference.trim().is_empty() {
         return Err(SkeinError::Semantic(format!(
@@ -27464,34 +16264,6 @@ fn validate_source_reference(source_reference: &str, operation: &str) -> Result<
         )));
     }
     Ok(())
-}
-
-fn relationship_source_reference_equals(relationship: &RelRecord, source_reference: &str) -> bool {
-    relationship
-        .properties
-        .get("source_reference")
-        .is_some_and(|value| value_to_external_id(value) == source_reference)
-}
-
-fn relationship_source_reference_is_counted(
-    relationship: &RelRecord,
-    excluded_source_reference: &str,
-) -> bool {
-    match relationship.properties.get("source_reference") {
-        Some(Value::Null) | None => true,
-        Some(value) => {
-            let source_reference = value_to_external_id(value);
-            source_reference != excluded_source_reference || source_reference.is_empty()
-        }
-    }
-}
-
-fn sort_source_reference_entity_rows(rows: &mut [KnowledgeSourceReferenceEntityRow]) {
-    rows.sort_by(|left, right| {
-        left.entity_id
-            .cmp(&right.entity_id)
-            .then_with(|| left.node_id.cmp(&right.node_id))
-    });
 }
 
 fn delete_knowledge_source_reference_relationships_for(
@@ -27619,6 +16391,7 @@ fn validate_cypher_identifier(value: &str, kind: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn knowledge_neighbors_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -27634,6 +16407,7 @@ fn knowledge_neighbors_for(
     )
 }
 
+#[cfg(test)]
 fn knowledge_neighbors_via_query_runtime(
     db: &Database,
     request: &KnowledgeNeighborsRequest,
@@ -27647,6 +16421,7 @@ fn knowledge_neighbors_via_query_runtime(
     )
 }
 
+#[cfg(test)]
 fn knowledge_scoped_neighbors_via_query_runtime(
     db: &Database,
     request: &KnowledgeScopedNeighborsRequest,
@@ -27796,6 +16571,7 @@ fn knowledge_scoped_neighbors_via_query_runtime(
     })
 }
 
+#[cfg(test)]
 fn expand_knowledge_neighbors_via_query_runtime(
     db: &Database,
     seed_hit_id: &str,
@@ -27865,6 +16641,7 @@ fn expand_knowledge_neighbors_via_query_runtime(
     Ok((paths, fanout_reason_details))
 }
 
+#[cfg(test)]
 fn knowledge_scoped_neighbors_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -28014,6 +16791,7 @@ fn knowledge_scoped_neighbors_for(
     })
 }
 
+#[cfg(test)]
 fn knowledge_relationships_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -28029,6 +16807,7 @@ fn knowledge_relationships_for(
     )
 }
 
+#[cfg(test)]
 fn knowledge_relationships_via_query_runtime(
     db: &Database,
     request: &KnowledgeRelationshipsRequest,
@@ -28040,6 +16819,7 @@ fn knowledge_relationships_via_query_runtime(
     knowledge_scoped_relationships_via_query_runtime(db, &scoped_request)
 }
 
+#[cfg(test)]
 fn knowledge_scoped_relationships_via_query_runtime(
     db: &Database,
     request: &KnowledgeScopedRelationshipsRequest,
@@ -28120,6 +16900,7 @@ fn knowledge_scoped_relationships_via_query_runtime(
     })
 }
 
+#[cfg(test)]
 fn knowledge_relationship_seed_via_query_runtime(
     db: &Database,
     seed: &KnowledgeEntityRequest,
@@ -28140,6 +16921,7 @@ fn knowledge_relationship_seed_via_query_runtime(
         .find(|entity| entity.external_id.as_deref() == Some(seed.external_id.as_str())))
 }
 
+#[cfg(test)]
 fn knowledge_empty_relationship_group(
     seed: &KnowledgeEntityRequest,
     seed_node_id: Option<u64>,
@@ -28156,6 +16938,7 @@ fn knowledge_empty_relationship_group(
     }
 }
 
+#[cfg(test)]
 fn knowledge_relationship_rows_via_query_runtime(
     db: &Database,
     seed_hit_id: &str,
@@ -28246,6 +17029,7 @@ fn knowledge_relationship_rows_via_query_runtime(
     Ok((paths, fanout_reason_details))
 }
 
+#[cfg(test)]
 struct KnowledgeRelationshipDirectionQuery<'a> {
     db: &'a Database,
     query: &'a str,
@@ -28258,6 +17042,7 @@ struct KnowledgeRelationshipDirectionQuery<'a> {
     fanout_reason_details: &'a mut Vec<KnowledgeFanoutReasonDetail>,
 }
 
+#[cfg(test)]
 fn knowledge_relationship_rows_for_direction_via_query_runtime(
     context: KnowledgeRelationshipDirectionQuery<'_>,
 ) -> Result<()> {
@@ -28297,6 +17082,7 @@ fn knowledge_relationship_rows_for_direction_via_query_runtime(
     Ok(())
 }
 
+#[cfg(test)]
 fn knowledge_context_path_from_query_row(
     row: &Row,
     seed_hit_id: &str,
@@ -28350,6 +17136,7 @@ fn knowledge_context_path_from_query_row(
     })
 }
 
+#[cfg(test)]
 fn knowledge_scoped_relationships_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -28446,6 +17233,7 @@ fn knowledge_scoped_relationships_for(
     })
 }
 
+#[cfg(test)]
 fn knowledge_empty_relationship_groups_for_missing_type(
     store: &GraphStore,
     request: &KnowledgeScopedRelationshipsRequest,
@@ -28475,6 +17263,7 @@ fn knowledge_empty_relationship_groups_for_missing_type(
     }
 }
 
+#[cfg(test)]
 fn knowledge_paths_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -28491,6 +17280,7 @@ fn knowledge_paths_for(
     )
 }
 
+#[cfg(test)]
 fn knowledge_paths_via_query_runtime(
     db: &Database,
     request: &KnowledgePathRequest,
@@ -28505,6 +17295,7 @@ fn knowledge_paths_via_query_runtime(
     )
 }
 
+#[cfg(test)]
 fn knowledge_scoped_paths_via_query_runtime(
     db: &Database,
     request: &KnowledgeScopedPathRequest,
@@ -28731,6 +17522,7 @@ fn knowledge_scoped_paths_via_query_runtime(
     })
 }
 
+#[cfg(test)]
 fn expand_knowledge_paths_via_query_runtime(
     db: &Database,
     source_node_id: u64,
@@ -28805,6 +17597,7 @@ fn expand_knowledge_paths_via_query_runtime(
     Ok((paths, fanout_reason_details))
 }
 
+#[cfg(test)]
 fn knowledge_path_segments_from_node_via_query_runtime(
     db: &Database,
     current_node_id: u64,
@@ -28865,6 +17658,7 @@ fn knowledge_path_segments_from_node_via_query_runtime(
     Ok(segments)
 }
 
+#[cfg(test)]
 fn knowledge_path_segments_for_direction_via_query_runtime(
     db: &Database,
     query: &str,
@@ -28894,6 +17688,7 @@ fn knowledge_path_segments_for_direction_via_query_runtime(
     Ok(())
 }
 
+#[cfg(test)]
 fn knowledge_scoped_paths_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -29130,6 +17925,7 @@ fn knowledge_scoped_paths_for(
     })
 }
 
+#[cfg(test)]
 fn knowledge_subgraph_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -29145,6 +17941,7 @@ fn knowledge_subgraph_for(
     )
 }
 
+#[cfg(test)]
 fn knowledge_subgraph_via_query_runtime(
     db: &Database,
     request: &KnowledgeSubgraphRequest,
@@ -29158,6 +17955,7 @@ fn knowledge_subgraph_via_query_runtime(
     )
 }
 
+#[cfg(test)]
 fn knowledge_scoped_subgraph_via_query_runtime(
     db: &Database,
     request: &KnowledgeScopedSubgraphRequest,
@@ -29313,6 +18111,7 @@ fn knowledge_scoped_subgraph_via_query_runtime(
     })
 }
 
+#[cfg(test)]
 fn expand_knowledge_subgraph_via_query_runtime(
     db: &Database,
     seed: &KnowledgeEntity,
@@ -29383,11 +18182,13 @@ fn expand_knowledge_subgraph_via_query_runtime(
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg(test)]
 enum KnowledgeSubgraphNextEndpoint {
     Source,
     Target,
 }
 
+#[cfg(test)]
 struct ExpandKnowledgeSubgraphNodeQuery<'a> {
     db: &'a Database,
     current_node: NodeId,
@@ -29405,6 +18206,7 @@ struct ExpandKnowledgeSubgraphNodeQuery<'a> {
     fanout_reason_details: &'a mut Vec<KnowledgeFanoutReasonDetail>,
 }
 
+#[cfg(test)]
 struct KnowledgeSubgraphDirectionQuery<'a> {
     db: &'a Database,
     query: &'a str,
@@ -29423,6 +18225,7 @@ struct KnowledgeSubgraphDirectionQuery<'a> {
     fanout_reason_details: &'a mut Vec<KnowledgeFanoutReasonDetail>,
 }
 
+#[cfg(test)]
 fn expand_knowledge_subgraph_node_via_query_runtime(
     context: ExpandKnowledgeSubgraphNodeQuery<'_>,
 ) -> Result<bool> {
@@ -29501,6 +18304,7 @@ fn expand_knowledge_subgraph_node_via_query_runtime(
     Ok(false)
 }
 
+#[cfg(test)]
 fn knowledge_subgraph_for_direction_via_query_runtime(
     context: KnowledgeSubgraphDirectionQuery<'_>,
 ) -> Result<bool> {
@@ -29567,6 +18371,7 @@ fn knowledge_subgraph_for_direction_via_query_runtime(
     Ok(false)
 }
 
+#[cfg(test)]
 fn knowledge_scoped_subgraph_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -29719,6 +18524,7 @@ fn knowledge_scoped_subgraph_for(
     })
 }
 
+#[cfg(test)]
 struct KnowledgeTraversalDiagnosticInput {
     graph_commit_epoch: u64,
     seed_found: bool,
@@ -29736,6 +18542,7 @@ struct KnowledgeTraversalDiagnosticInput {
     relationship_limit: Option<usize>,
 }
 
+#[cfg(test)]
 fn knowledge_traversal_diagnostics(
     input: KnowledgeTraversalDiagnosticInput,
 ) -> KnowledgeTraversalDiagnostics {
@@ -29764,6 +18571,7 @@ fn knowledge_traversal_diagnostics(
     }
 }
 
+#[cfg(test)]
 fn attach_traversal_metadata_filters(
     diagnostics: &mut KnowledgeTraversalDiagnostics,
     metadata_filters: &BTreeMap<String, String>,
@@ -29776,6 +18584,7 @@ fn attach_traversal_metadata_filters(
     diagnostics.input_candidate_set.filtered_out_count = filtered_out_count;
 }
 
+#[cfg(test)]
 fn attach_path_endpoint_metadata_filters(
     diagnostics: &mut KnowledgeTraversalDiagnostics,
     source_metadata_filters: &BTreeMap<String, String>,
@@ -29793,6 +18602,7 @@ fn attach_path_endpoint_metadata_filters(
     diagnostics.input_candidate_set.filtered_out_count = filtered_out_count;
 }
 
+#[cfg(test)]
 fn prefixed_path_endpoint_metadata_filters(
     source_metadata_filters: &BTreeMap<String, String>,
     target_metadata_filters: &BTreeMap<String, String>,
@@ -29808,6 +18618,7 @@ fn prefixed_path_endpoint_metadata_filters(
         .collect()
 }
 
+#[cfg(test)]
 fn knowledge_traversal_input_candidate_set_report(
     input: &KnowledgeTraversalDiagnosticInput,
 ) -> SearchCandidateSetReport {
@@ -29828,6 +18639,7 @@ fn knowledge_traversal_input_candidate_set_report(
     }
 }
 
+#[cfg(test)]
 fn knowledge_traversal_candidate_set_report(
     input: &KnowledgeTraversalDiagnosticInput,
 ) -> SearchRetrieverCandidateSetReport {
@@ -29857,6 +18669,7 @@ fn knowledge_traversal_candidate_set_report(
     }
 }
 
+#[cfg(test)]
 fn knowledge_traversal_fallback_reason_codes(
     input: &KnowledgeTraversalDiagnosticInput,
 ) -> Vec<KnowledgeTraversalFallbackReasonCode> {
@@ -29885,6 +18698,7 @@ fn knowledge_traversal_fallback_reason_codes(
     codes
 }
 
+#[cfg(test)]
 fn knowledge_traversal_fallback_reasons(input: &KnowledgeTraversalDiagnosticInput) -> Vec<String> {
     let mut reasons = Vec::new();
     if let Some(seed_identity) = &input.missing_seed_identity {
@@ -29911,6 +18725,7 @@ fn knowledge_traversal_fallback_reasons(input: &KnowledgeTraversalDiagnosticInpu
     reasons
 }
 
+#[cfg(test)]
 fn knowledge_identity_description(label: &str, external_id: &str) -> String {
     format!("{label}:{external_id}")
 }
@@ -29923,6 +18738,7 @@ fn knowledge_context_path_node_count(paths: &[KnowledgeGraphContextPath]) -> usi
         .len()
 }
 
+#[cfg(test)]
 fn knowledge_graph_path_node_count(paths: &[KnowledgeGraphPath]) -> usize {
     paths
         .iter()
@@ -29932,6 +18748,7 @@ fn knowledge_graph_path_node_count(paths: &[KnowledgeGraphPath]) -> usize {
         .len()
 }
 
+#[cfg(test)]
 struct KnowledgeNeighborExpansion<'a> {
     seed_hit_id: &'a str,
     seed_node_id: NodeId,
@@ -29941,6 +18758,7 @@ struct KnowledgeNeighborExpansion<'a> {
     max_hops: usize,
 }
 
+#[cfg(test)]
 struct KnowledgePathExpansion {
     source_node_id: NodeId,
     target_node_id: NodeId,
@@ -29950,6 +18768,7 @@ struct KnowledgePathExpansion {
     limit: usize,
 }
 
+#[cfg(test)]
 struct KnowledgeSubgraphExpansion {
     seed_node_id: NodeId,
     requested_direction: KnowledgeNeighborDirection,
@@ -29973,6 +18792,7 @@ struct DenseAdjacencyDiagnosticContext<'a> {
     requested_direction: KnowledgeNeighborDirection,
 }
 
+#[cfg(test)]
 fn expand_knowledge_neighbors_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -30044,6 +18864,7 @@ fn expand_knowledge_neighbors_for(
     Ok((paths, fanout_reasons))
 }
 
+#[cfg(test)]
 fn expand_knowledge_paths_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -30121,6 +18942,7 @@ fn expand_knowledge_paths_for(
     Ok((paths, fanout_reasons))
 }
 
+#[cfg(test)]
 fn expand_knowledge_subgraph_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -30373,6 +19195,7 @@ fn try_node_by_label_property_external_id(
     Ok(found)
 }
 
+#[cfg(test)]
 fn knowledge_induced_edges_via_query_runtime(
     db: &Database,
     request: &KnowledgeInducedEdgeListRequest,
@@ -30483,6 +19306,7 @@ fn knowledge_induced_edges_via_query_runtime(
     })
 }
 
+#[cfg(test)]
 fn validate_knowledge_induced_edges_request(
     request: &KnowledgeInducedEdgeListRequest,
 ) -> Result<()> {
@@ -30494,6 +19318,7 @@ fn validate_knowledge_induced_edges_request(
     Ok(())
 }
 
+#[cfg(test)]
 fn knowledge_entity_id_property(entity: &KnowledgeEntity) -> Option<String> {
     entity
         .properties
@@ -30502,6 +19327,7 @@ fn knowledge_entity_id_property(entity: &KnowledgeEntity) -> Option<String> {
         .filter(|external_id| !external_id.is_empty())
 }
 
+#[cfg(test)]
 fn knowledge_induced_edge_row_from_query_row(row: &Row) -> Result<KnowledgeInducedEdgeRow> {
     let source = row
         .get("source")
@@ -30635,6 +19461,7 @@ fn knowledge_entity_from_node(catalog: &Catalog, node: &NodeRecord) -> Knowledge
     }
 }
 
+#[cfg(test)]
 fn knowledge_entity_from_value(value: &Value) -> Option<KnowledgeEntity> {
     let Value::Map(values) = value else {
         return None;
@@ -30660,6 +19487,7 @@ fn knowledge_entity_from_value(value: &Value) -> Option<KnowledgeEntity> {
     })
 }
 
+#[cfg(test)]
 fn knowledge_entity_matches_filters(
     entity: &KnowledgeEntity,
     metadata_filters: &BTreeMap<String, String>,
@@ -30669,6 +19497,7 @@ fn knowledge_entity_matches_filters(
         .all(|(key, value)| knowledge_entity_matches_filter_value(entity, key, value))
 }
 
+#[cfg(test)]
 fn knowledge_entity_matches_filter_value(entity: &KnowledgeEntity, key: &str, value: &str) -> bool {
     match key {
         "kind" => search_kind_to_label(value)
@@ -30683,6 +19512,7 @@ fn knowledge_entity_matches_filter_value(entity: &KnowledgeEntity, key: &str, va
     }
 }
 
+#[cfg(test)]
 fn knowledge_entity_normalized_space_id(entity: &KnowledgeEntity) -> String {
     entity
         .properties
@@ -30692,6 +19522,7 @@ fn knowledge_entity_normalized_space_id(entity: &KnowledgeEntity) -> String {
         .unwrap_or_else(|| "default".to_string())
 }
 
+#[cfg(test)]
 fn knowledge_entity_projection_source_id(entity: &KnowledgeEntity) -> Option<String> {
     ["source_id", "thread_id", "source"]
         .into_iter()
@@ -31490,6 +20321,10 @@ fn mutation_command_for_statement(
 }
 
 impl DatabaseReadTransaction {
+    pub fn commit_epoch(&self) -> u64 {
+        self.store.commit_epoch()
+    }
+
     pub fn query(&mut self, cypher_text: &str) -> Result<QueryOutput> {
         self.query_with_params(cypher_text, &BTreeMap::new())
     }
@@ -31914,9 +20749,12 @@ impl DatabaseReadTransaction {
             sql_text,
             max_rows,
             self.config.max_read_result_payload_bytes,
-            &self.plan_cache.borrow().stats(),
-            &self.slow_query_snapshot,
-            &self.statement_summary_snapshot,
+            &system_sql::SystemSqlContext {
+                catalog: &self.catalog,
+                plan_cache_stats: &self.plan_cache.borrow().stats(),
+                slow_queries: &self.slow_query_snapshot,
+                statement_summaries: &self.statement_summary_snapshot,
+            },
         )
     }
 
@@ -31950,13 +20788,6 @@ impl DatabaseReadTransaction {
 
     pub fn plan_cache_stats(&self) -> PlanCacheStats {
         self.plan_cache.borrow().stats()
-    }
-
-    pub fn knowledge_label_regex_memory_connections(
-        &self,
-        request: &KnowledgeLabelRegexMemoryConnectionsRequest,
-    ) -> Result<KnowledgeLabelRegexMemoryConnectionsOutput> {
-        knowledge_label_regex_memory_connections_for(&self.catalog, &self.store, request)
     }
 
     fn optimized_query_plan(
@@ -32066,407 +20897,132 @@ impl DatabaseReadTransaction {
         .try_retrieve_knowledge(search_index, request)
     }
 
-    pub fn knowledge_entity(
+    #[cfg(test)]
+    pub(crate) fn test_query_entity(
         &self,
         request: &KnowledgeEntityRequest,
     ) -> Result<KnowledgeEntityOutput> {
         knowledge_entity_for(&self.catalog, &self.store, request)
     }
 
-    pub fn knowledge_entity_batch(
+    #[cfg(test)]
+    pub(crate) fn test_query_entity_batch(
         &self,
         request: &KnowledgeEntityBatchRequest,
     ) -> Result<KnowledgeEntityBatchOutput> {
         knowledge_entity_batch_for(&self.catalog, &self.store, request)
     }
 
-    pub fn knowledge_memory_entities(
-        &self,
-        request: &KnowledgeMemoryEntityListRequest,
-    ) -> Result<KnowledgeMemoryEntityListOutput> {
-        knowledge_memory_entities_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_entity_mention_counts(
-        &self,
-        request: &KnowledgeEntityMentionCountListRequest,
-    ) -> Result<KnowledgeEntityMentionCountListOutput> {
-        knowledge_entity_mention_counts_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_community_entity_visibility(
+    #[cfg(test)]
+    pub(crate) fn test_query_community_entity_visibility(
         &self,
         request: &KnowledgeCommunityEntityVisibilityRequest,
     ) -> Result<KnowledgeCommunityEntityVisibilityOutput> {
         knowledge_community_entity_visibility_for(&self.catalog, &self.store, request)
     }
 
-    pub fn knowledge_entity_delete_guard(
-        &self,
-        request: &KnowledgeEntityDeleteGuardRequest,
-    ) -> Result<KnowledgeEntityDeleteGuardOutput> {
-        knowledge_entity_delete_guard_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_community_memories(
+    #[cfg(test)]
+    pub(crate) fn test_query_community_memories(
         &self,
         request: &KnowledgeCommunityMemoryListRequest,
     ) -> Result<KnowledgeCommunityMemoryListOutput> {
         knowledge_community_memories_for(&self.catalog, &self.store, request)
     }
 
-    pub fn knowledge_related_entity_names(
-        &self,
-        request: &KnowledgeRelatedEntityNameListRequest,
-    ) -> Result<KnowledgeRelatedEntityNameListOutput> {
-        knowledge_related_entity_names_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_memory_prefix_ownership(
-        &self,
-        request: &KnowledgeMemoryPrefixOwnershipRequest,
-    ) -> Result<KnowledgeMemoryPrefixOwnershipOutput> {
-        knowledge_memory_prefix_ownership_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_memory_metadata_related_projected_list(
-        &self,
-        request: &KnowledgeMemoryMetadataRelatedProjectedListRequest,
-    ) -> Result<KnowledgeMemoryMetadataRelatedProjectedListOutput> {
-        knowledge_memory_metadata_related_projected_list_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_memory_cleanup_fingerprints(
-        &self,
-        request: &KnowledgeMemoryCleanupFingerprintRequest,
-    ) -> Result<KnowledgeMemoryCleanupFingerprintOutput> {
-        knowledge_memory_cleanup_fingerprints_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_memory_title_contents(
-        &self,
-        request: &KnowledgeMemoryTitleContentRequest,
-    ) -> Result<KnowledgeMemoryTitleContentOutput> {
-        knowledge_memory_title_contents_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_memory_evolves_latest(
-        &self,
-        request: &KnowledgeMemoryEvolvesLatestRequest,
-    ) -> Result<KnowledgeMemoryEvolvesLatestOutput> {
-        knowledge_memory_evolves_latest_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_memory_evolves_relation_counts(
-        &self,
-        request: &KnowledgeMemoryEvolvesRelationCountRequest,
-    ) -> Result<KnowledgeMemoryEvolvesRelationCountOutput> {
-        knowledge_memory_evolves_relation_counts_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_memory_crystal_synthesis_counts(
-        &self,
-        request: &KnowledgeMemoryCrystalSynthesisCountRequest,
-    ) -> Result<KnowledgeMemoryCrystalSynthesisCountOutput> {
-        knowledge_memory_crystal_synthesis_counts_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_memory_evolves_neighbors(
-        &self,
-        request: &KnowledgeMemoryEvolvesNeighborRequest,
-    ) -> Result<KnowledgeMemoryEvolvesNeighborOutput> {
-        knowledge_memory_evolves_neighbors_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_memory_evolves_projected_successors(
-        &self,
-        request: &KnowledgeMemoryEvolvesProjectedSuccessorRequest,
-    ) -> Result<KnowledgeMemoryEvolvesProjectedSuccessorOutput> {
-        knowledge_memory_evolves_projected_successors_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_memory_decay_detail(
-        &self,
-        request: &KnowledgeMemoryDecayDetailRequest,
-    ) -> Result<KnowledgeMemoryDecayDetailOutput> {
-        knowledge_memory_decay_detail_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_source_sourced_memory_count(
-        &self,
-        request: &KnowledgeSourceSourcedMemoryCountRequest,
-    ) -> Result<KnowledgeSourceSourcedMemoryCountOutput> {
-        knowledge_source_sourced_memory_count_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_source_reference_entities(
-        &self,
-        request: &KnowledgeSourceReferenceEntityListRequest,
-    ) -> Result<KnowledgeSourceReferenceEntityListOutput> {
-        knowledge_source_reference_entities_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_source_reference_relationship_count(
-        &self,
-        request: &KnowledgeSourceReferenceRelationshipCountRequest,
-    ) -> Result<KnowledgeSourceReferenceRelationshipCountOutput> {
-        knowledge_source_reference_relationship_count_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_crystals(
+    #[cfg(test)]
+    pub(crate) fn test_query_crystals(
         &self,
         request: &KnowledgeCrystalListRequest,
     ) -> Result<KnowledgeCrystalListOutput> {
         knowledge_crystals_for(&self.catalog, &self.store, request)
     }
 
-    pub fn knowledge_crystal_communities(
+    #[cfg(test)]
+    pub(crate) fn test_query_crystal_communities(
         &self,
         request: &KnowledgeCrystalCommunityListRequest,
     ) -> Result<KnowledgeCrystalCommunityListOutput> {
         knowledge_crystal_communities_for(&self.catalog, &self.store, request)
     }
 
-    pub fn knowledge_crystal_source_visibility(
+    #[cfg(test)]
+    pub(crate) fn test_query_crystal_source_visibility(
         &self,
         request: &KnowledgeCrystalSourceVisibilityRequest,
     ) -> Result<KnowledgeCrystalSourceVisibilityOutput> {
         knowledge_crystal_source_visibility_for(&self.catalog, &self.store, request)
     }
 
-    pub fn knowledge_synthesized_source_coverage(
-        &self,
-        request: &KnowledgeSynthesizedSourceCoverageRequest,
-    ) -> Result<KnowledgeSynthesizedSourceCoverageOutput> {
-        knowledge_synthesized_source_coverage_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_synthesized_source_ids(
-        &self,
-        request: &KnowledgeSynthesizedSourceIdsRequest,
-    ) -> Result<KnowledgeSynthesizedSourceIdsOutput> {
-        knowledge_synthesized_source_ids_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_source_projected_list(
-        &self,
-        request: &KnowledgeSourceProjectedListRequest,
-    ) -> Result<KnowledgeSourceProjectedListOutput> {
-        knowledge_source_projected_list_direct(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_source_memory_projected_list(
-        &self,
-        request: &KnowledgeSourceMemoryProjectedListRequest,
-    ) -> Result<KnowledgeSourceMemoryProjectedListOutput> {
-        knowledge_source_memory_projected_list_direct(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_entity_label_projected_list(
+    #[cfg(test)]
+    pub(crate) fn test_query_entity_label_projected_list(
         &self,
         request: &KnowledgeEntityLabelProjectedListRequest,
     ) -> Result<KnowledgeEntityLabelProjectedListOutput> {
         knowledge_entity_label_projected_list_for(&self.catalog, &self.store, request)
     }
 
-    pub fn knowledge_graph_meta_projected(
-        &self,
-        request: &KnowledgeGraphMetaProjectedRequest,
-    ) -> Result<KnowledgeGraphMetaProjectedOutput> {
-        knowledge_graph_meta_projected_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_skills(
-        &self,
-        request: &KnowledgeSkillListRequest,
-    ) -> Result<KnowledgeSkillListOutput> {
-        knowledge_skills_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_skill_projected_list(
-        &self,
-        request: &KnowledgeSkillProjectedListRequest,
-    ) -> Result<KnowledgeSkillProjectedListOutput> {
-        knowledge_skill_projected_list_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_skill_thread_sources(
-        &self,
-        request: &KnowledgeSkillThreadSourceListRequest,
-    ) -> Result<KnowledgeSkillThreadSourceListOutput> {
-        knowledge_skill_thread_sources_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_skill_detail_lookup(
-        &self,
-        request: &KnowledgeSkillDetailLookupRequest,
-    ) -> Result<KnowledgeSkillDetailLookupOutput> {
-        knowledge_skill_detail_lookup_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_skill_state(
-        &self,
-        request: &KnowledgeSkillStateRequest,
-    ) -> Result<KnowledgeSkillStateOutput> {
-        knowledge_skill_state_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_thread_identity(
-        &self,
-        request: &KnowledgeThreadIdentityRequest,
-    ) -> Result<KnowledgeThreadIdentityOutput> {
-        knowledge_thread_identity_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_thread_sync_metadata(
-        &self,
-        request: &KnowledgeThreadSyncMetadataRequest,
-    ) -> Result<KnowledgeThreadSyncMetadataOutput> {
-        knowledge_thread_sync_metadata_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_thread_sources(
-        &self,
-        request: &KnowledgeThreadSourceListRequest,
-    ) -> Result<KnowledgeThreadSourceListOutput> {
-        knowledge_thread_sources_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_thread_title(
-        &self,
-        request: &KnowledgeThreadTitleLookupRequest,
-    ) -> Result<KnowledgeThreadTitleLookupOutput> {
-        knowledge_thread_title_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_thread_source(
-        &self,
-        request: &KnowledgeThreadSourceLookupRequest,
-    ) -> Result<KnowledgeThreadSourceLookupOutput> {
-        knowledge_thread_source_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_thread_message_lookup(
-        &self,
-        request: &KnowledgeThreadMessageLookupRequest,
-    ) -> Result<KnowledgeThreadMessageLookupOutput> {
-        knowledge_thread_message_lookup_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_thread_meta_lookup(
-        &self,
-        request: &KnowledgeThreadMetaLookupRequest,
-    ) -> Result<KnowledgeThreadMetaLookupOutput> {
-        knowledge_thread_meta_lookup_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_thread_compacted_memory_projected_list(
-        &self,
-        request: &KnowledgeThreadCompactedMemoryProjectedListRequest,
-    ) -> Result<KnowledgeThreadCompactedMemoryProjectedListOutput> {
-        knowledge_thread_compacted_memory_projected_list_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_memory_compacting_thread_projected_list(
-        &self,
-        request: &KnowledgeMemoryCompactingThreadProjectedListRequest,
-    ) -> Result<KnowledgeMemoryCompactingThreadProjectedListOutput> {
-        knowledge_memory_compacting_thread_projected_list_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_communities(
+    #[cfg(test)]
+    pub(crate) fn test_query_communities(
         &self,
         request: &KnowledgeCommunityListRequest,
     ) -> Result<KnowledgeCommunityListOutput> {
         knowledge_communities_for(&self.catalog, &self.store, request)
     }
 
-    pub fn knowledge_community(
+    #[cfg(test)]
+    pub(crate) fn test_query_community(
         &self,
         request: &KnowledgeCommunityRequest,
     ) -> Result<KnowledgeCommunityOutput> {
         knowledge_community_for(&self.catalog, &self.store, request)
     }
 
-    pub fn knowledge_scoped_entity(
+    #[cfg(test)]
+    pub(crate) fn test_query_scoped_entity(
         &self,
         request: &KnowledgeScopedEntityRequest,
     ) -> Result<KnowledgeEntityOutput> {
         knowledge_scoped_entity_for(&self.catalog, &self.store, request)
     }
 
-    pub fn knowledge_scoped_entity_batch(
-        &self,
-        request: &KnowledgeScopedEntityBatchRequest,
-    ) -> Result<KnowledgeEntityBatchOutput> {
-        knowledge_scoped_entity_batch_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_property_batch(
+    #[cfg(test)]
+    pub(crate) fn test_query_property_batch(
         &self,
         request: &KnowledgePropertyBatchRequest,
     ) -> Result<KnowledgePropertyBatchOutput> {
         knowledge_property_batch_for(&self.catalog, &self.store, request)
     }
 
-    pub fn knowledge_scoped_property_batch(
-        &self,
-        request: &KnowledgeScopedPropertyBatchRequest,
-    ) -> Result<KnowledgePropertyBatchOutput> {
-        knowledge_scoped_property_batch_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_neighbors(
+    #[cfg(test)]
+    pub(crate) fn test_query_neighbors(
         &self,
         request: &KnowledgeNeighborsRequest,
     ) -> Result<KnowledgeNeighborsOutput> {
         knowledge_neighbors_for(&self.catalog, &self.store, request)
     }
 
-    pub fn knowledge_scoped_neighbors(
-        &self,
-        request: &KnowledgeScopedNeighborsRequest,
-    ) -> Result<KnowledgeNeighborsOutput> {
-        knowledge_scoped_neighbors_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_relationships(
+    #[cfg(test)]
+    pub(crate) fn test_query_relationships(
         &self,
         request: &KnowledgeRelationshipsRequest,
     ) -> Result<KnowledgeRelationshipsOutput> {
         knowledge_relationships_for(&self.catalog, &self.store, request)
     }
 
-    pub fn knowledge_scoped_relationships(
+    #[cfg(test)]
+    pub(crate) fn test_query_paths(
         &self,
-        request: &KnowledgeScopedRelationshipsRequest,
-    ) -> Result<KnowledgeRelationshipsOutput> {
-        knowledge_scoped_relationships_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_paths(&self, request: &KnowledgePathRequest) -> Result<KnowledgePathOutput> {
+        request: &KnowledgePathRequest,
+    ) -> Result<KnowledgePathOutput> {
         knowledge_paths_for(&self.catalog, &self.store, request)
     }
 
-    pub fn knowledge_scoped_paths(
-        &self,
-        request: &KnowledgeScopedPathRequest,
-    ) -> Result<KnowledgePathOutput> {
-        knowledge_scoped_paths_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_subgraph(
+    #[cfg(test)]
+    pub(crate) fn test_query_subgraph(
         &self,
         request: &KnowledgeSubgraphRequest,
     ) -> Result<KnowledgeSubgraphOutput> {
         knowledge_subgraph_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_scoped_subgraph(
-        &self,
-        request: &KnowledgeScopedSubgraphRequest,
-    ) -> Result<KnowledgeSubgraphOutput> {
-        knowledge_scoped_subgraph_for(&self.catalog, &self.store, request)
     }
 
     pub fn statistics(&self) -> GraphStatistics {
@@ -32475,47 +21031,6 @@ impl DatabaseReadTransaction {
 
     pub fn basic_statistics(&self) -> BasicGraphStatistics {
         self.store.basic_statistics()
-    }
-
-    pub fn property_indexes(&self) -> Vec<IndexDescriptor> {
-        self.catalog.property_indexes().cloned().collect()
-    }
-
-    pub fn composite_property_indexes(&self) -> Vec<CompositeIndexDescriptor> {
-        self.catalog.composite_property_indexes().cloned().collect()
-    }
-
-    pub fn unique_constraints(&self) -> Vec<ConstraintDescriptor> {
-        self.catalog.unique_constraints().cloned().collect()
-    }
-
-    pub fn node_property_exists_constraints(&self) -> Vec<ConstraintDescriptor> {
-        self.catalog
-            .node_property_exists_constraints()
-            .cloned()
-            .collect()
-    }
-
-    pub fn relationship_property_exists_constraints(&self) -> Vec<ConstraintDescriptor> {
-        self.catalog
-            .relationship_property_exists_constraints()
-            .cloned()
-            .collect()
-    }
-
-    pub fn relationship_unique_constraints(&self) -> Vec<ConstraintDescriptor> {
-        self.catalog
-            .relationship_unique_constraints()
-            .cloned()
-            .collect()
-    }
-
-    pub fn table_descriptors(&self) -> Vec<TableDescriptor> {
-        self.catalog.table_descriptors().cloned().collect()
-    }
-
-    pub fn property_descriptors(&self) -> Vec<PropertyDescriptor> {
-        self.catalog.property_descriptors().cloned().collect()
     }
 }
 

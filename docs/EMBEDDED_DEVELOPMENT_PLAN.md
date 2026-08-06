@@ -202,22 +202,13 @@ Nowledge stage changes, rejections, promotions, compiled metadata, draft bundle
 writes, content hashes, and `updated_at` stamping. REST Skills source merges
 are exposed as a typed `merge_knowledge_skill_source` API for
 `(:Skill)-[:SYNTHESIZED_FROM]->(:Memory)` writes with create-only `weight`,
-`occasion_key`, and `created_at` relationship properties. Skill
-synthesized-memory evidence reads are exposed
-as a typed `knowledge_skill_memories` API for id-filtered and stage-filtered
-`SYNTHESIZED_FROM` Memory lists with explicit created-at ordering. Skill node
-catalog/detail reads are exposed as a typed `knowledge_skills` API for
-stage-filtered lists, exact id lookup, key prefix/contains lookup, active
-after-id pagination, and updated-at/id ordering without WAL writes. Skill
-projected catalog reads are also exposed as
-`knowledge_skill_projected_list`, reusing the same bounded filters and ordering
-while returning only caller-selected Skill properties through an explicit
-allowlist for future field growth. Skill
-context thread-source reads are exposed as a typed
-`knowledge_skill_thread_sources` API for the Nowledge business shape
-`(:Skill)-[:SYNTHESIZED_FROM]->(:Memory)<-[:COMPACTS_TO]-(:Thread)`,
-returning Thread title/source rows without treating Skill as a graph-kernel
-builtin. Skill rollback and cleanup deletes are exposed as a typed
+`occasion_key`, and `created_at` relationship properties. Skill catalog,
+detail, state, synthesized-memory evidence, and thread-source reads use fixed
+parameterized Cypher with explicit query row and payload budgets. Host code may
+coordinate multiple named statements and shape legacy responses, but graph
+filtering, joins, ordering, and per-phase limits remain in the query runtime.
+These reads do not expose route-specific typed database APIs. Skill rollback
+and cleanup deletes are exposed as a typed
 `delete_knowledge_skills` API for exact `(:Skill {id})` detach deletes,
 including `SYNTHESIZED_FROM` cascade cleanup through the shared WAL-backed
 typed entity delete path. Thread compensation deletes are exposed as a typed
@@ -227,34 +218,19 @@ Message and Memory endpoint nodes. Thread metadata updates are exposed as a
 typed batch for Nowledge `metadata` writes with optional `updated_at`
 stamping. Thread denormalized message-count refreshes are exposed as a typed
 batch for Nowledge `message_count` writes with optional timestamp stamping and
-preserve-newer `updated_at` behavior. ThreadIdentity exact-id resolution is exposed as a typed
-`knowledge_thread_identity` API for Nowledge legacy identity lookup without
-WAL writes. ThreadIdentity compensation and cascade cleanup are exposed as a
-typed `delete_knowledge_thread_identities` API for exact identity-key deletes
-and the Nowledge `public_thread_id`/`input_thread_id`/`thread_uuid` cascade
-shape. Thread sync metadata reads are exposed as a typed
-`knowledge_thread_sync_metadata` API for exact physical Thread ids and
-Cypher-compatible `COALESCE` fallbacks without WAL writes. Distinct Thread
-source listing is exposed as a typed `knowledge_thread_sources` API for REST FS
-source directories without WAL writes. Thread attachment title lookup is
-exposed as a typed `knowledge_thread_title` API for exact physical/logical
-Thread ids without WAL writes. Thread source summary lookup is exposed as a
-typed `knowledge_thread_source` API for exact physical/logical Thread ids
-without WAL writes. Thread message-render lookup is exposed as a typed
-`knowledge_thread_message_lookup` API for REST FS id lookup plus source filters
-without WAL writes. Thread metadata-render lookup is exposed as a typed
-`knowledge_thread_meta_lookup` API for REST FS id lookup plus source filters
-without WAL writes. Thread distilled-memory links are exposed as a typed
+preserve-newer `updated_at` behavior. Thread list, source, attachment,
+render-metadata, ThreadIdentity, and sync-metadata reads use fixed parameterized
+Cypher with explicit row and payload budgets; pinned read transactions provide
+snapshot consistency for multi-phase host workflows. ThreadIdentity
+compensation and cascade cleanup are exposed as a typed
+`delete_knowledge_thread_identities` API for exact identity-key deletes and the
+Nowledge `public_thread_id`/`input_thread_id`/`thread_uuid` cascade shape.
+Thread distilled-memory links are exposed as a typed
 `create_knowledge_thread_compaction_link` API for the Nowledge
 `(:Thread)-[:COMPACTS_TO]->(:Memory)` write shape with compaction metadata.
 Thread-owned Message cleanup is exposed as a typed `delete_knowledge_thread_messages`
 API for exact Thread `CONTAINS` Message target-node detach deletes while
 preserving the Thread node.
-REST FS Skill detail lookup is exposed as a typed
-`knowledge_skill_detail_lookup` API for physical Skill id lookup without WAL
-writes.
-REST Skills exact state reads are exposed as a typed `knowledge_skill_state`
-API for write-path metadata/version/title/stage checks without WAL writes.
 Label lifecycle writes are exposed as a typed batch for Nowledge metadata
 updates, canonical-name backfill, and rename/canonical-name updates.
 PageRank score persistence and clear operations are exposed as typed batches
@@ -491,19 +467,16 @@ available as `Database::update_knowledge_memory_latest_batch`, which updates
 only `is_latest`, supports the exact `space_id` filter used by in-space
 demotion, reports non-writable and duplicate rows, and commits eligible updates
 through one grouped WAL batch.
-Label canonical and usage reads used by label merge, canonical backfill, and
-label list surfaces are available as typed APIs:
-`Database::lookup_knowledge_labels_by_canonical_name`,
-`Database::scan_knowledge_labels_missing_canonical_name`,
-`Database::knowledge_label_usage`, and
-`Database::knowledge_label_canonical_usage`. They scan only `Label` nodes,
-validate non-empty lookup filters, and compute `HAS_LABEL` usage counts over
-any source node type. Label Memory distribution reads are available as
-`Database::knowledge_label_memory_distribution`, covering Nowledge
-`COUNT(DISTINCT m)` label stats and OKF label row shapes with Memory-only
+Label canonical collision lookup, missing-canonical backfill, single-Label
+usage, canonical-only usage, and all-Label usage reads use seven fixed
+parameterized Cypher statements. They scan only `Label` nodes, compute
+`HAS_LABEL` counts over any source node type, and expose no route-specific
+typed read API. Label Memory distribution reads use one fixed
+parameterized, row-bounded Cypher statement for the Nowledge
+`COUNT(DISTINCT m)` label stats and OKF label row shapes, with Memory-only
 counts, duplicate edge de-duplication, offset/limit pagination, and no WAL
-writes. Memory label cleanup writes are available as
-`Database::delete_knowledge_memory_labels`, covering exact
+writes. No route-specific typed read API is exposed. Memory label cleanup
+writes are available as `Database::delete_knowledge_memory_labels`, covering exact
 `(:Memory)-[:HAS_LABEL]->(:Label)` edge removal and all-label edge cleanup for
 one Memory through grouped WAL-backed relationship deletes. Label merge
 transfer writes are available as `Database::transfer_knowledge_label_memory_edges`,
@@ -512,198 +485,109 @@ target `HAS_LABEL` creation. Memory label carry-over writes are available as
 `Database::transfer_knowledge_memory_label_edges`, covering older-Memory to
 newer-Memory label copying inside one exact `space_id` with duplicate old label
 edges de-duplicated and target `HAS_LABEL` creation kept idempotent.
-Endpoint-known label assignment reads are also available as
-`Database::knowledge_entity_labels`, covering the Nowledge Memory/Source/Entity
-bulk `HAS_LABEL` id/name/metadata read shapes without application-side Cypher
-construction or WAL writes.
-Field-extensible endpoint-known label reads are available as
-`Database::knowledge_entity_label_projected_list`, reusing the same explicit
-entity label, external-id list, and per-entity limit while projecting only
-caller-allowlisted Label and `HAS_LABEL` relationship properties. This keeps
-future Memory/Source label fields extensible without cloning whole Label nodes
-or scanning labels outside the requested endpoints.
-Induced edge-list reads are available as `Database::knowledge_induced_edges`,
-covering Nowledge overview and MCP subgraph `MATCH (a)-[r]->(b) WHERE a.id IN
-$ids AND b.id IN $ids` shapes with relationship type and strength/confidence
-fallback projection and no WAL writes.
-Memory bulk detail and filtered list reads are available as
-`Database::knowledge_memories`, covering id-bounded metadata/space/detail
-reads, normalized-space inclusion and exclusion, learning latest lists, and
-ranked overview lists with bounded limits and no WAL writes.
-Field-extensible Memory list reads are available as
-`Database::knowledge_memory_projected_list`, covering the same bounded Memory
-filters and ordering while projecting only caller-allowlisted Memory fields.
-Sort keys remain internal, so Nowledge can request newly added Memory fields
-without widening the default typed row or emitting WAL entries.
-Metadata-related Memory detail reads are available as
-`Database::knowledge_memory_metadata_related_projected_list`, covering the
-Nowledge REST list fallback that finds Memories in one normalized space whose
-metadata references a source or source Thread id. The typed read builds only the
-Nowledge-used `source_id` and `source_thread_id` metadata markers, requires a
-positive limit, projects caller-allowlisted Memory fields, orders by internal
-`created_at` descending, supports pinned snapshots, and does not write WAL.
-Memory prefix ownership guard reads are available as
-`Database::knowledge_memory_prefix_ownership`, covering MCP skill-memory prefix
-ownership checks with raw and normalized `space_id` projection and no WAL
-writes.
-Memory title/content reads are available as
-`Database::knowledge_memory_title_contents`, covering REST Skills write-path
-Memory id-list source previews with `created_at` ascending ordering and no WAL
-writes.
-Memory EVOLVES latest reads are available as
-`Database::knowledge_memory_evolves_latest`, covering REST Skills successor
-checks over old Memory id lists with distinct latest-state rows and no WAL
-writes.
-Memory EVOLVES relation count reads are available as
-`Database::knowledge_memory_evolves_relation_counts`, covering the decay
-scheduler's bounded `content_relation IN [...]` count shape over requested
-Memory ids. The read scans only requested Memory nodes, filters outgoing
-`EVOLVES` edges to Memory targets by caller-supplied relation names, reports
-missing Memory ids separately, supports pinned read snapshots, and does not
-write WAL.
-Memory crystal synthesis count reads are available as
-`Database::knowledge_memory_crystal_synthesis_counts`, covering the decay
-scheduler's bounded incoming `SYNTHESIZED_FROM` count shape over requested
-source Memory ids. The read scans only requested Memory nodes, filters incoming
-`SYNTHESIZED_FROM` edges to `Memory` crystals with `is_crystal = true`, reports
-missing Memory ids separately, supports pinned read snapshots, and does not
-write WAL.
-Memory decay detail reads are available as
-`Database::knowledge_memory_decay_detail`, covering the scheduler's exact-id
-Memory detail lookup for title, content, unit type, source, space, created-at,
-cached decay score, metadata, latest flag, and lifecycle state. The read keeps
-the default projection to this production field set, accepts explicit
-additional property names for future field growth, supports pinned read
-snapshots, and does not write WAL.
+Endpoint-known Label assignment and field-extensible Label reads use fixed
+parameterized Cypher with explicit entity labels, external-id lists,
+per-entity limits, allowlisted Label and `HAS_LABEL` projections, and matching
+row and payload budgets. Induced edge-list reads use a separate bounded query
+with both endpoints constrained by the selected id set. These reads expose no
+route-specific typed API or DTO and do not write WAL.
+Memory bulk detail, filtered list, and feature-specific projections use fixed
+parameterized Cypher. Each business phase owns its projection, filters,
+ordering, `LIMIT`, and query budgets; host code derives missing ids and
+normalizes spaces without a wide default typed row.
+Metadata-related Memory reads use a fixed parameterized query for one normalized
+space and the supported `source_id`/`source_thread_id` metadata markers. Each
+named business phase selects its fields and supplies explicit ordering, limit,
+row, payload, and snapshot budgets.
+Memory prefix ownership guards use one fixed parameterized, bounded
+`STARTS WITH` query; host code handles `space_id` normalization and response
+shaping.
+Memory title/content reads use one fixed parameterized, id-bounded Cypher
+statement with explicit projection, created-at ordering, `LIMIT`, and pinned
+snapshot semantics; host code shapes missing ids.
+Memory EVOLVES latest reads use one fixed parameterized successor Cypher
+statement with deterministic ordering, `LIMIT`, a matching row budget, and a
+pinned snapshot. Source-existence and relationship-count response shaping
+remain in separate host-owned bounded query phases.
+Memory EVOLVES relation counts use one fixed parameterized aggregate Cypher
+statement with explicit source/target labels, relation filtering, deterministic
+ordering, `LIMIT`, a matching row budget, and a pinned snapshot. Missing-id and
+total-count shaping remains outside the embedded database facade.
+Memory crystal synthesis counts use one fixed parameterized aggregate Cypher
+statement with explicit Memory endpoint labels, `is_crystal = true`,
+deterministic ordering, `LIMIT`, a matching row budget, and a pinned snapshot.
+Missing-id and total-count shaping remains outside the embedded database facade.
+Memory decay detail reads use one fixed parameterized exact-id Cypher statement
+with explicit projection, stable ordering, `LIMIT 1`, a one-row budget, and a
+pinned snapshot. Scheduler response shaping remains outside the embedded
+database facade.
 Memory decay refresh writes are available as
 `Database::update_knowledge_memory_decay_refresh_batch`, covering the decay
 scheduler's exact-id score-only and score-plus-confidence update shapes. The
 typed write validates Memory ids and finite numeric decay/confidence values
 before WAL, reports missing, idless, and duplicate rows without writing those
 rows, and commits eligible updates through one grouped WAL batch.
-Memory cleanup fingerprint reads are available as
-`Database::knowledge_memory_cleanup_fingerprints`, covering the cleanup
-scheduler's bounded `m.id IN $ids` row fetch for metadata, lifecycle,
-engagement, decay, importance, type, and semantic fields. The read performs one
-Memory-label scan for the requested id set, returns rows in deduplicated request
-order, keeps default projection to the production field set, accepts explicit
-additional property names for future field growth, supports pinned read
-snapshots, and does not write WAL.
-Memory EVOLVES neighbor reads are available as
-`Database::knowledge_memory_evolves_neighbors`, covering MCP outgoing/incoming
-EVOLVES adjacency reads over one anchor Memory with explicit node and
-relationship property allowlists so future fields can be projected without
-adding another raw-Cypher path. The read scans only the anchor adjacency and
-does not write WAL.
-Memory EVOLVES projected successor reads are available as
-`Database::knowledge_memory_evolves_projected_successors`, covering old-Memory
-id batches with caller-order groups, missing-old rows, per-old limits, and
-caller-allowlisted successor Memory and `EVOLVES` relationship properties. This
-keeps evolution workflows bounded per parent while allowing future successor
-payload fields without cloning whole Memory nodes or scanning outside requested
-old Memories. Successors support stable id ordering and Nowledge's
-`updated_at DESC` ordering; `updated_at` is kept as an internal sort key unless
-the caller explicitly requests it in the projection allowlist. Per-old cursors
-can resume a sorted successor page without rereading already-returned
-successors, and duplicate `EVOLVES` edges remain pageable through the
-relationship id embedded in each returned cursor.
+Memory cleanup fingerprint reads use one fixed parameterized `m.id IN $ids`
+Cypher statement with explicit projection, stable ordering, `LIMIT`, a matching
+row budget, and a pinned snapshot. Request-order shaping and missing-id
+calculation remain outside the embedded database facade.
+Memory EVOLVES neighbor reads use separate fixed outgoing and incoming Cypher
+statements. Each owns its node and relationship projection, deterministic
+ordering, `LIMIT`, matching row budget, and pinned snapshot.
+Memory EVOLVES projected successor reads use separate fixed per-parent Cypher
+statements for stable-id and `updated_at DESC` ordering. Each statement owns its
+projection, deterministic tie-breakers, `SKIP`, `LIMIT`, matching row budget,
+and pinned snapshot. Parent grouping and missing-id shaping remain outside the
+embedded database facade.
 Memory EVOLVES creates are available as
 `Database::create_knowledge_memory_evolves_batch`, covering Nowledge
 `add_evolves_edge` and replacement-relation create shapes with caller-supplied
 relationship metadata, fixed Memory endpoints, and grouped WAL writes.
-Crystal Memory reads are available as `Database::knowledge_crystals`, covering
-Nowledge wiki crystal detail key lookup, crystal page `id > after` pagination,
-and OKF crystal list rows with `crystal_title`, display-title fallback,
-importance/created-at ordering, pinned read-transaction snapshots, and no WAL
-writes.
-Crystal-to-Community aggregation reads are available as
-`Database::knowledge_crystal_communities`, covering Nowledge
-`SYNTHESIZED_FROM` source Memory to `MENTIONS` Entity community paths for wiki
-topic crystal ranking and OKF crystal community mapping, with hit counts,
-distinct source-memory counts, pinned read-transaction snapshots, and no WAL
-writes.
-Crystal source visibility reads are available as
-`Database::knowledge_crystal_source_visibility`, covering the Nowledge wiki
-community crystal row shape that returns Crystal fields alongside source
-Memory metadata, latest-state fallback, and lifecycle state over the same
-`SYNTHESIZED_FROM` to `MENTIONS` community path, with pinned read-transaction
-snapshots and no WAL writes.
-Memory entity mention reads are available as
-`Database::knowledge_memory_entities`, covering Nowledge `Memory` outgoing
-`MENTIONS` Entity name/detail list shapes with grouped rows, distinct names,
-bounded limits, and no WAL writes.
-Entity mention-count list reads are available as
-`Database::knowledge_entity_mention_counts`, covering Nowledge wiki Entity
-listing and cursor shapes with non-empty Entity id/name filtering, incoming
-`Memory` `MENTIONS` counts including zero-mention Entities, mention-count/name
-ordering, cursor pagination, pinned read-transaction snapshots, and no WAL
-writes.
-Community Entity visibility reads are available as
-`Database::knowledge_community_entity_visibility`, covering the Nowledge wiki
-community anchor row shape for Entity nodes in explicit communities plus
-row-preserving optional incoming `Memory` `MENTIONS` metadata, latest-state
-fallback, and lifecycle fields with pinned read-transaction snapshots and no
-WAL writes.
-Community Memory ranking reads are available as
-`Database::knowledge_community_memories`, covering Nowledge wiki community
-memory ranking and export shapes over explicit community scopes. The typed read
-supports incoming `Memory` -> `MENTIONS` -> `Entity` mention breadth, direct
-`Memory.community_id` ranking, `is_crystal` false/null-or-false filters,
-Nowledge `unit_type IN $types` filters, importance and `created_at` fallbacks,
-distinct mentioned Entity ids, pinned read-transaction snapshots, and no WAL
-writes.
-Related Entity name reads are available as
-`Database::knowledge_related_entity_names`, covering Nowledge REST list
-`Memory` id to distinct `Entity.name` reads and `Thread` `COMPACTS_TO`
-`Memory` to `MENTIONS` Entity name reads with bounded limits, missing Memory id
-reporting, Thread physical/logical identity support, and no WAL writes.
-Thread ordered message reads are available as
-`Database::knowledge_thread_messages`, covering Nowledge `Thread` outgoing
-`CONTAINS` transcript/list shapes with `COALESCE(c.order_index, m.order_index)`
-ordering and no WAL writes.
-Bounded Thread list and source reads are available as
-`Database::knowledge_threads`, covering Nowledge Thread page, source lookup,
-source page, normalized-space count/list, favorite metadata, id/thread-id bulk
-lookup, and message-count ranking shapes with explicit filters, ordering,
-missing-id reporting, display-title fallbacks, and no WAL writes.
-Thread compacted-memory reads are available as
-`Database::knowledge_thread_compacted_memories`, covering Nowledge `COMPACTS_TO`
-count/id-list/summary/full-row read shapes by physical `id` or logical
-`thread_id`, with Memory display/rank/reindex/review/temporal/access fields,
-relationship metadata, bounded limits, and no WAL writes.
-Field-extensible Thread compacted-memory reads are available as
-`Database::knowledge_thread_compacted_memory_projected_list`, covering the same
-bounded `COMPACTS_TO` adjacency shape while projecting only caller-allowlisted
-Memory and relationship fields. Ordering remains driven by internal Memory
-importance and created-at keys, so Nowledge can add compacted-memory detail
-fields without widening the fixed row or scanning outside the target Thread.
-Memory compacting-Thread reads are available as
-`Database::knowledge_memory_compacting_threads`, covering Nowledge Memory id to
-Thread id/source/metadata reads over incoming `COMPACTS_TO` relationships with
-missing-Memory rows, per-Memory limits, normalized-space fallbacks, and no WAL
-writes.
-Field-extensible Memory compacting-Thread reads are available as
-`Database::knowledge_memory_compacting_thread_projected_list`, covering the
-same per-Memory incoming `COMPACTS_TO` attribution shape while projecting only
-caller-allowlisted Thread and relationship fields. It preserves missing-Memory
-rows, per-Memory limits, stable Thread identity, normalized-space fallback, and
-snapshot/no-WAL semantics without broadening the fixed attribution row.
-Source attribution memory reads are available as
-`Database::knowledge_source_memories`, covering the Nowledge
-`Source`-to-`Memory` incoming `SOURCED_FROM` detail/id-list shapes with
-Memory display fields, chunk attribution metadata, bounded limits, stable
-ordering, and no WAL writes.
-Field-extensible Source attribution memory reads are available as
-`Database::knowledge_source_memory_projected_list`, covering the same bounded
-incoming `SOURCED_FROM` adjacency while projecting only caller-allowlisted
-Memory and relationship fields. This keeps future Source-memory attribution
-field growth on an explicit projection surface without widening the fixed row,
-cloning whole nodes, or scanning outside the target Source.
-Bulk Memory/Source attribution reads are available as
-`Database::knowledge_memory_source_attributions`, covering Nowledge Memory id to
-Source id reads and Source id to Memory summary/library rows over
-`SOURCED_FROM`, with bounded filters, missing-id reporting, Memory display/rank
-fields, chunk metadata, and no WAL writes.
+Crystal Memory lists, key lookups, community aggregations, and source visibility
+reads use separate fixed parameterized Cypher statements. The statements own
+their concrete projection, cursor or community scope, deterministic ordering,
+`LIMIT`, row and payload budgets, and pinned snapshot. No Crystal route-specific
+read API or DTO is exposed, and these reads do not write WAL.
+Memory entity mention reads use one fixed parameterized Cypher statement per
+Memory with explicit projection, deterministic ordering, `LIMIT`, a matching
+row budget, and a shared pinned snapshot. Grouping, missing-id handling, and
+distinct-name shaping remain outside the embedded database facade.
+Entity mention-count list reads use separate fixed parameterized Cypher
+statements for first-page and cursor shapes, with non-empty Entity id/name
+filtering, incoming `Memory` `MENTIONS` counts including zero-mention Entities,
+deterministic ordering, bounded limits, pinned read-transaction snapshots, and
+no WAL writes. No route-specific typed read API is exposed.
+Community Entity visibility and Memory ranking reads use separate fixed
+parameterized Cypher statements for optional incoming `Memory` `MENTIONS`,
+direct `Memory.community_id`, unit-type filters, and crystal filters. Every
+phase has an explicit scope, deterministic ordering, `LIMIT`, row and payload
+budgets, and a pinned snapshot. No route-specific read API or DTO is exposed.
+Related Entity name reads use separate fixed parameterized Cypher statements
+for Memory-id batches and Thread-compaction paths. Each owns its distinct-name
+projection, deterministic ordering, `LIMIT`, matching row budget, and pinned
+snapshot; identity selection and missing-endpoint shaping remain in the host.
+Thread ordered message reads use fixed exact-Thread and bounded outgoing
+`CONTAINS` queries in one pinned read transaction, with
+`COALESCE(r.order_index, m.order_index)` ordering and no route-specific typed
+database API.
+Bounded Thread list and source reads use fixed parameterized Cypher covering
+Thread page, source lookup, normalized-space filtering, favorite metadata,
+id/thread-id bulk lookup, and message-count ranking shapes. The statement owns
+filters, ordering, projection, and limits; host code owns response shaping and
+cross-statement budgets.
+Thread compacted-memory reads use fixed Thread identity and bounded outgoing
+`COMPACTS_TO` statements in one pinned read transaction. Each named business
+phase owns its projection and ordering, avoiding both route-specific typed APIs
+and the former wide fixed row.
+Memory compacting-Thread reads use fixed exact-Memory and per-Memory bounded
+incoming `COMPACTS_TO` statements in one pinned read transaction. Host code
+preserves requested-Memory ordering, missing rows, and the cross-statement
+budget while each statement owns its Thread/relationship projection and stable
+ordering.
+Source attribution memory reads use host-owned fixed parameterized Cypher over
+incoming `SOURCED_FROM`. Hosts run separate count and page statements, bind a
+bounded Source or Memory id set, project only required Memory/Source/edge
+fields, and keep related phases on one pinned transaction.
 Source metadata timestamp writes are available as
 `Database::update_knowledge_source_metadata_batch`, covering Nowledge auto-OCR
 metadata updates through one grouped WAL batch.
@@ -716,11 +600,10 @@ Parsed Source creation is available as
 `Database::create_knowledge_source_parsed_batch`, covering Nowledge markdown,
 URL, PDF, generic file, and markdown import create shapes with fixed parsed
 lifecycle defaults and one grouped WAL batch for eligible new Source nodes.
-Source version-chain operations are available as
-`Database::knowledge_source_latest_version` for Nowledge original-name/checksum
-latest-version reads without WAL writes and
-`Database::create_knowledge_source_revision_batch` for fixed-property
-`REVISED_AS` edge creation through one grouped WAL batch.
+Source latest-version reads use separate fixed parameterized Cypher statements
+for original-name/checksum plus space filters. Source revision writes remain
+available as `Database::create_knowledge_source_revision_batch` for
+fixed-property `REVISED_AS` edge creation through one grouped WAL batch.
 Source node cleanup is available as `Database::delete_knowledge_sources`,
 covering Nowledge Source `DETACH DELETE` cleanup through the typed entity
 delete path and one grouped WAL batch.
@@ -729,26 +612,21 @@ Source label assignment and cleanup writes are available as
 `Database::delete_knowledge_source_labels_batch`, covering Nowledge
 `Source`-to-`Label` `HAS_LABEL` merge/delete shapes with fixed create-only
 edge properties and one grouped WAL batch for eligible relationship writes.
-Bounded Source list and summary reads are available as
-`Database::knowledge_sources`, covering Nowledge Source page, bulk summary,
-overview ranking, parsed-path list, lifecycle attention, and metadata-marker
-page shapes with explicit filters, ordering, missing-id reporting, display-name
-fallbacks, numeric defaults, and no WAL writes.
-Field-extensible Source list reads are also available as
-`Database::knowledge_source_projected_list`, reusing the same bounded filters,
-pagination, and ordering while returning only caller-selected Source properties
-through an explicit allowlist for future field growth.
+Bounded Source list and summary reads use named host-owned Cypher statements.
+Exact detail, count, id page, summary page, and projected page remain distinct
+query shapes with bound values, explicit row budgets, and pinned-snapshot
+coverage. New Source fields extend a fixed projection rather than a typed route
+DTO or dynamic property identifier.
 Source-reference relationship cleanup for Nowledge memory/source delete flows
 is available as `Database::delete_knowledge_source_reference_relationships`.
 It is intentionally scoped to `RELATES_TO.source_reference`, rejects empty
 references before WAL, preserves endpoint Entity nodes, and commits eligible
 relationship deletes through one grouped WAL batch.
-The same delete flow also has typed read guards:
-`Database::knowledge_source_reference_entities` returns distinct Entity
-endpoints touched by one `RELATES_TO.source_reference`, and
-`Database::knowledge_source_reference_relationship_count` preserves the
-existing Nowledge delete-guard count shape for non-deleted incoming and
-incident `RELATES_TO` relationships without WAL writes.
+The same delete flow uses host-owned fixed parameterized Cypher for its read
+guards. Endpoint discovery returns bounded relationship and endpoint identity
+rows; the guard runs exact-entity, incident-count, and incoming-count statements
+through one pinned transaction. Only the relationship cleanup remains typed
+because it validates and commits the delete set through grouped WAL.
 Entity-to-Community membership writes used by entity lifecycle community
 assignment are available as `Database::create_knowledge_community_memberships_batch`.
 The wrapper is fixed to `Entity` -> `Community` `BELONGS_TO` creation, validates
@@ -761,27 +639,19 @@ non-empty Community ids and names, non-negative numeric counters, and finite
 resolutions before WAL, reports existing, missing, duplicate, and non-writable
 rows, fixes detection-result `algorithm` to `louvain`, and commits eligible
 creates plus summary updates through one grouped WAL batch.
-Community summary list reads are available as
-`Database::knowledge_communities`, covering Nowledge REST community list and
-library summary-ranked shapes with `ai_summary` presence filtering, optional
-non-negative `community_id` filtering, member-count and summary-presence
-ordering, bounded limits, pinned read-transaction snapshots, and no WAL writes.
-Community detail reads are available as `Database::knowledge_community`,
-covering Nowledge wiki/MCP single Community lookups by numeric `community_id`
-or external `id`, returning id, community_id, name, description, ai_summary,
-member_count, updated_at, summary-presence metadata, pinned read-transaction
-snapshots, and no WAL writes.
-GraphMeta state reads and cleanup deletes used by PageRank, community
-detection, and fixture reset paths are available as
-`Database::knowledge_graph_meta` and `Database::delete_knowledge_graph_meta`.
-They use `meta_id` as the explicit identity, reject empty identities before
-WAL, preserve missing-row no-write semantics, and route eligible deletes
-through the WAL-backed `DELETE` path.
-Field-extensible GraphMeta state reads are available as
-`Database::knowledge_graph_meta_projected`. Callers provide an explicit
-property allowlist so future GraphMeta fields can be adopted without expanding
-every read response, while read-transaction snapshots remain pinned and no WAL
-writes are produced.
+Community summary lists and detail lookups use fixed parameterized Cypher.
+Summary-only and summary-presence rankings remain distinct bounded statements;
+numeric `community_id` and external `id` detail lookups use separate one-row
+statements. No Community list/detail route API or DTO is exposed.
+GraphMeta state reads used by PageRank and community detection use host-owned
+fixed, parameterized Cypher projections with explicit row budgets. Callers add
+a new fixed projection when state grows and use one
+`DatabaseReadTransaction` when related reads must remain pinned to a graph
+version; property identifiers are never interpolated into query text.
+GraphMeta stamp batches and cleanup deletes remain typed. Stamps own grouped
+WAL validation and atomicity. Deletes use `meta_id` as the explicit identity,
+reject empty identities before WAL, preserve missing-row no-write semantics,
+and route eligible cleanup through the WAL-backed `DELETE` path.
 Community node cleanup for replace-community and undo-community flows is
 available as `Database::delete_knowledge_communities`. It scans only
 `Community` nodes, supports the two Nowledge cleanup modes (`DELETE` and
@@ -794,12 +664,10 @@ available as `Database::interrupt_knowledge_augmentation_jobs`. It scans only
 interruption reason before WAL, marks eligible jobs as `failed` with the
 production interruption message, does not write WAL when no eligible jobs
 exist, and commits eligible updates through one grouped WAL batch.
-AugmentationJob status and list reads are available as
-`Database::knowledge_augmentation_job` and
-`Database::knowledge_augmentation_jobs`. They cover the Nowledge graph and REST
-graph job status/list shapes, including optional status filtering, bounded
-limits, and the two production orderings by `started_at DESC` or
-`created_at DESC`, without requiring application-side Cypher construction.
+AugmentationJob status and list reads use host-owned fixed parameterized Cypher
+for exact lookup and separate count/page phases. Hosts select the fixed
+`started_at DESC` or `created_at DESC` query variant and bind status and limit
+values; they do not interpolate identifiers or rely on route-specific DTOs.
 Two exact node patterns without a relationship are supported for Nowledge
 source-provenance endpoint checks, for example
 `MATCH (m:Memory {id: $memory_id}), (s:Source {id: $source_id}) RETURN count(m)`.
@@ -828,11 +696,11 @@ is supported as a single-node update-return path over already matched rows; it
 does not add generic row-binding relationship updates.
 Nowledge thread distillation reads support the optional source filter shape
 `($source IS NULL OR t.source = $source)` by binding parameter null checks into
-constant predicates before planning. The same Nowledge business path is
-available as the typed `Database::knowledge_thread_distillation_candidates`
-read, which combines the exact matched count with an optional bounded candidate
-page ordered by the production recency expression and does not write WAL;
-`limit = 0` is count-only.
+constant predicates before planning. The business path uses separate fixed
+parameterized count and bounded page statements in one pinned read transaction.
+The page orders by the production recency expression and carries explicit
+offset, limit, row, and payload budgets; no route-specific typed database API
+is exposed.
 The companion distilled-memory link write is available as
 `Database::create_knowledge_thread_compaction_link`, which fixes the
 `Thread`/`Memory`/`COMPACTS_TO` shape, validates endpoint ids and compaction
@@ -849,25 +717,22 @@ Nowledge graph path reads support the endpoint-id bounded
 through a dedicated shortest-path read operator. The operator returns all
 simple paths at the first target depth and only supports `properties(nodes(p),
 ...)` plus `length(p)` projections; generic returned path values and
-unbounded shortest-path searches remain outside the compatibility subset.
+unbounded shortest-path searches remain outside the supported subset.
 Nowledge feed reads support the bounded synthesized-source aggregation
 `MATCH (c:Memory)-[:SYNTHESIZED_FROM]->(s:Memory) WHERE c.id IN $ids WITH c, COLLECT(DISTINCT s.id) AS source_ids RETURN c.id, source_ids`
 as a direct group-by-property plus collected-property list. General `WITH`
 projection chains and general `COLLECT` expressions remain outside this
-bounded subset. The same feed hydration shape is also available as the typed
-`Database::knowledge_synthesized_source_ids` read, which accepts bounded
-crystal Memory ids, returns one ordered row per requested id with distinct
-sorted source Memory ids, reports missing crystals, and does not write WAL.
+bounded subset. Hosts combine it with a fixed bounded crystal-identity query on
+one `DatabaseReadTransaction` to distinguish present crystals without sources
+from missing crystal ids.
 Nowledge synthesized-source coverage lookups also support the bounded grouped
 aggregate filter shape
 `WITH c.id AS cid, count(DISTINCT s.id) AS covered WHERE covered = $n RETURN cid LIMIT 1`
 and the two-column title variant returning `cid, ct`. This is implemented as
 grouped aggregation over matched rows, a column filter on the aggregate alias,
-and final column projection; it is not a general HAVING implementation. The
-same Nowledge business shape is also available as the typed
-`Database::knowledge_synthesized_source_coverage` read, which accepts explicit
-source Memory ids plus the required distinct coverage count and returns matching
-crystal ids/titles without WAL writes.
+and final column projection; it is not a general HAVING implementation. Hosts
+bind source Memory ids and the required coverage count, choose a fixed bounded
+or unbounded query variant, and enforce an explicit result-row budget.
 Nowledge community memory reads also support the bounded
 `WITH m, COUNT(e) AS entity_count` shape after a one-hop relationship match.
 The grouped node is represented as a projected map column, so subsequent
@@ -910,8 +775,8 @@ remains rejected. Anonymous relationship endpoints such as `()` and `(:Label)`
 are supported for Nowledge relationship-count reads. Untyped one-hop
 relationship reads such as `MATCH (a)-[r]->(b)` are supported for Nowledge
 overview edge queries, and `label(r)`/`type(r)` can project the bound
-relationship type; `Database::knowledge_induced_edges` provides the typed API
-for the id-set induced subgraph edge-list business shape. Nowledge-used
+relationship type. The graph-canvas id-set induced subgraph is a fixed bounded
+query decoded by the host route. Nowledge-used
 `RETURN` projection fallbacks support
 `COALESCE(...)` and `LEFT(...)`, including nested forms such as
 `COALESCE(m.title, LEFT(COALESCE(m.content, ''), 60))`, and the same limited
@@ -1312,8 +1177,8 @@ agent context activity task reads,
 agent context stale crystal and EVOLVES cluster reads,
 health stale memory count reads,
 entity lifecycle impact counts, detail projections, relation/label/community
-preview reads, REST write Entity pre-delete guard counts, and entity-node
-`DETACH DELETE` cascade checks,
+preview reads, REST write Entity pre-delete guard counts expressed as five
+fixed queries on one snapshot, and entity-node `DETACH DELETE` cascade checks,
 graph orphan entity reads and cleanup-candidate reads with one-hop relationship
 existence predicates,
 AugmentationJob lifecycle create/running/progress/completed/failed writes and

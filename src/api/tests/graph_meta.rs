@@ -1,5 +1,20 @@
 use super::*;
 
+const GRAPH_META_ALGORITHM_STATE_QUERY: &str = "MATCH (m:GraphMeta) \
+     WHERE m.meta_id = $meta_id \
+     RETURN m.meta_id AS meta_id, id(m) AS node_id, \
+     m.pagerank_applied AS pagerank_applied, \
+     m.community_detection_applied AS community_detection_applied, \
+     m.pagerank_computed_at AS pagerank_computed_at \
+     ORDER BY node_id ASC LIMIT 1";
+
+const GRAPH_META_FUTURE_STATE_QUERY: &str = "MATCH (m:GraphMeta) \
+     WHERE m.meta_id = $meta_id \
+     RETURN m.meta_id AS meta_id, id(m) AS node_id, \
+     m.pagerank_applied AS pagerank_applied, \
+     m.future_state_field AS future_state_field \
+     ORDER BY node_id ASC LIMIT 1";
+
 #[test]
 fn stamps_graph_meta_batch_for_nowledge_algorithm_state() {
     let mut db = Database::new();
@@ -181,7 +196,7 @@ fn typed_graph_meta_stamp_persists_as_one_wal_batch_and_replays() {
 }
 
 #[test]
-fn reads_graph_meta_by_meta_id_for_nowledge_algorithm_state() {
+fn reads_graph_meta_by_meta_id_with_parameterized_cypher() {
     let mut db = Database::new_with_config(DatabaseConfig {
         max_plan_cache_entries: Some(8),
         statement_summary_capacity: 8,
@@ -190,48 +205,50 @@ fn reads_graph_meta_by_meta_id_for_nowledge_algorithm_state() {
     db.query("CREATE (:GraphMeta {meta_id: 'main', pagerank_applied: true, community_detection_applied: false, pagerank_computed_at: 100})")
         .unwrap();
 
-    let request = KnowledgeGraphMetaRequest {
-        meta_id: "main".to_string(),
-    };
-    let output = db.knowledge_graph_meta(&request).unwrap();
+    let parameters = BTreeMap::from([("meta_id".to_string(), Value::String("main".to_string()))]);
+    let mut read = db.begin_read_transaction();
+    let output = read
+        .query_with_params_bounded(GRAPH_META_ALGORITHM_STATE_QUERY, &parameters, Some(1))
+        .unwrap();
 
-    assert_eq!(output.graph_commit_epoch, 1);
-    assert!(output.found);
-    let meta = output.meta.as_ref().unwrap();
-    assert_eq!(meta.meta_id.as_deref(), Some("main"));
+    assert_eq!(read.commit_epoch(), 1);
+    let meta = &output.rows[0];
     assert_eq!(
-        meta.properties.get("pagerank_applied"),
-        Some(&Value::Bool(true))
+        meta.get("meta_id"),
+        Some(&Value::String("main".to_string()))
     );
+    assert_eq!(meta.get("pagerank_applied"), Some(&Value::Bool(true)));
     assert_eq!(
-        meta.properties.get("community_detection_applied"),
+        meta.get("community_detection_applied"),
         Some(&Value::Bool(false))
     );
-    assert_eq!(
-        meta.properties.get("pagerank_computed_at"),
-        Some(&Value::Int(100))
-    );
+    assert_eq!(meta.get("pagerank_computed_at"), Some(&Value::Int(100)));
 
-    let stats = db.plan_cache_stats();
-    let repeated_output = db.knowledge_graph_meta(&request).unwrap();
-    assert_eq!(repeated_output, output);
-    let repeated_stats = db.plan_cache_stats();
-    assert_eq!(repeated_stats.entries, stats.entries);
-    assert_eq!(repeated_stats.misses, stats.misses);
-    assert!(repeated_stats.hits > stats.hits);
-
-    let missing = db
-        .knowledge_graph_meta(&KnowledgeGraphMetaRequest {
-            meta_id: "missing".to_string(),
-        })
+    let entries = read_test_plan_cache_metric(&read, "entries");
+    let misses = read_test_plan_cache_metric(&read, "misses");
+    let hits = read_test_plan_cache_metric(&read, "hits");
+    let repeated_output = read
+        .query_with_params_bounded(GRAPH_META_ALGORITHM_STATE_QUERY, &parameters, Some(1))
         .unwrap();
-    assert_eq!(missing.graph_commit_epoch, 1);
-    assert!(!missing.found);
-    assert!(missing.meta.is_none());
+    assert_eq!(repeated_output, output);
+    assert_eq!(read_test_plan_cache_metric(&read, "entries"), entries);
+    assert_eq!(read_test_plan_cache_metric(&read, "misses"), misses);
+    assert!(read_test_plan_cache_metric(&read, "hits") > hits);
+
+    let missing_parameters =
+        BTreeMap::from([("meta_id".to_string(), Value::String("missing".to_string()))]);
+    let missing = read
+        .query_with_params_bounded(
+            GRAPH_META_ALGORITHM_STATE_QUERY,
+            &missing_parameters,
+            Some(1),
+        )
+        .unwrap();
+    assert!(missing.rows.is_empty());
 }
 
 #[test]
-fn projects_graph_meta_for_nowledge_state_growth() {
+fn fixed_graph_meta_projections_support_state_growth_and_pinned_reads() {
     let mut db = Database::new_with_config(DatabaseConfig {
         max_plan_cache_entries: Some(8),
         statement_summary_capacity: 8,
@@ -240,98 +257,70 @@ fn projects_graph_meta_for_nowledge_state_growth() {
     db.query("CREATE (:GraphMeta {meta_id: 'main', pagerank_applied: true, community_detection_applied: false, pagerank_computed_at: 100, future_state_field: 'future'})")
         .unwrap();
     let graph_commit_epoch = db.store.commit_epoch();
-    let snapshot = db.begin_read_transaction();
+    let mut snapshot = db.begin_read_transaction();
 
     db.query("MATCH (m:GraphMeta {meta_id: 'main'}) SET m.future_state_field = 'late', m.extra_field = 'extra'")
         .unwrap();
 
-    let projected_request = KnowledgeGraphMetaProjectedRequest {
-        meta: KnowledgeGraphMetaRequest {
-            meta_id: "main".to_string(),
-        },
-        property_names: vec![
-            "pagerank_applied".to_string(),
-            "future_state_field".to_string(),
-            "meta_id".to_string(),
-            "pagerank_applied".to_string(),
-        ],
-    };
-    let projected = db
-        .knowledge_graph_meta_projected(&projected_request)
+    let parameters = BTreeMap::from([("meta_id".to_string(), Value::String("main".to_string()))]);
+    let mut live = db.begin_read_transaction();
+    let projected = live
+        .query_with_params_bounded(GRAPH_META_FUTURE_STATE_QUERY, &parameters, Some(1))
         .unwrap();
-    assert_eq!(projected.graph_commit_epoch, db.store.commit_epoch());
-    assert!(projected.found);
-    let meta = projected.meta.as_ref().unwrap();
-    assert_eq!(meta.meta_id.as_deref(), Some("main"));
+    assert_eq!(live.commit_epoch(), db.store.commit_epoch());
+    let meta = &projected.rows[0];
     assert_eq!(
-        meta.properties.get("pagerank_applied"),
-        Some(&Value::Bool(true))
-    );
-    assert_eq!(
-        meta.properties.get("future_state_field"),
-        Some(&Value::String("late".to_string()))
-    );
-    assert_eq!(
-        meta.properties.get("meta_id"),
+        meta.get("meta_id"),
         Some(&Value::String("main".to_string()))
     );
-    assert!(!meta.properties.contains_key("community_detection_applied"));
-    assert!(!meta.properties.contains_key("extra_field"));
+    assert_eq!(meta.get("pagerank_applied"), Some(&Value::Bool(true)));
+    assert_eq!(
+        meta.get("future_state_field"),
+        Some(&Value::String("late".to_string()))
+    );
+    assert!(!meta.contains_key("community_detection_applied"));
+    assert!(!meta.contains_key("extra_field"));
 
-    let stats = db.plan_cache_stats();
-    let repeated_projected = db
-        .knowledge_graph_meta_projected(&projected_request)
+    let entries = read_test_plan_cache_metric(&live, "entries");
+    let misses = read_test_plan_cache_metric(&live, "misses");
+    let hits = read_test_plan_cache_metric(&live, "hits");
+    let repeated_projected = live
+        .query_with_params_bounded(GRAPH_META_FUTURE_STATE_QUERY, &parameters, Some(1))
         .unwrap();
     assert_eq!(repeated_projected, projected);
-    let repeated_stats = db.plan_cache_stats();
-    assert_eq!(repeated_stats.entries, stats.entries);
-    assert_eq!(repeated_stats.misses, stats.misses);
-    assert!(repeated_stats.hits > stats.hits);
+    assert_eq!(read_test_plan_cache_metric(&live, "entries"), entries);
+    assert_eq!(read_test_plan_cache_metric(&live, "misses"), misses);
+    assert!(read_test_plan_cache_metric(&live, "hits") > hits);
 
     let snapshot_projected = snapshot
-        .knowledge_graph_meta_projected(&KnowledgeGraphMetaProjectedRequest {
-            meta: KnowledgeGraphMetaRequest {
-                meta_id: "main".to_string(),
-            },
-            property_names: vec!["future_state_field".to_string()],
-        })
+        .query_with_params_bounded(GRAPH_META_FUTURE_STATE_QUERY, &parameters, Some(1))
         .unwrap();
-    assert_eq!(snapshot_projected.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(snapshot.commit_epoch(), graph_commit_epoch);
     assert_eq!(
-        snapshot_projected
-            .meta
-            .unwrap()
-            .properties
-            .get("future_state_field"),
+        snapshot_projected.rows[0].get("future_state_field"),
         Some(&Value::String("future".to_string()))
     );
 
-    let missing = db
-        .knowledge_graph_meta_projected(&KnowledgeGraphMetaProjectedRequest {
-            meta: KnowledgeGraphMetaRequest {
-                meta_id: "missing".to_string(),
-            },
-            property_names: vec!["pagerank_applied".to_string()],
-        })
+    let missing_parameters =
+        BTreeMap::from([("meta_id".to_string(), Value::String("missing".to_string()))]);
+    let missing = live
+        .query_with_params_bounded(GRAPH_META_FUTURE_STATE_QUERY, &missing_parameters, Some(1))
         .unwrap();
-    assert_eq!(missing.graph_commit_epoch, db.store.commit_epoch());
-    assert!(!missing.found);
-    assert!(missing.meta.is_none());
+    assert!(missing.rows.is_empty());
 }
 
 #[test]
-fn graph_meta_read_and_delete_reject_empty_meta_id_before_wal() {
+fn graph_meta_empty_read_returns_no_rows_and_delete_rejects_before_wal() {
     let mut db = Database::new();
     db.query("CREATE (:GraphMeta {meta_id: 'main', pagerank_applied: true})")
         .unwrap();
     let graph_commit_epoch_before = db.store.commit_epoch();
 
-    let read_error = db
-        .knowledge_graph_meta(&KnowledgeGraphMetaRequest {
-            meta_id: String::new(),
-        })
-        .unwrap_err();
-    assert!(read_error.to_string().contains("non-empty meta id"));
+    let parameters = BTreeMap::from([("meta_id".to_string(), Value::String(String::new()))]);
+    let read = db
+        .query_read_only_with_params_bounded(GRAPH_META_ALGORITHM_STATE_QUERY, &parameters, Some(1))
+        .unwrap();
+    assert!(read.rows.is_empty());
 
     let delete_error = db
         .delete_knowledge_graph_meta(&KnowledgeGraphMetaRequest {
@@ -343,8 +332,8 @@ fn graph_meta_read_and_delete_reject_empty_meta_id_before_wal() {
 }
 
 #[test]
-fn graph_meta_projected_read_rejects_empty_fields_without_wal() {
-    let path = unique_test_dir("graph_meta_projected_read_rejects_empty_fields_without_wal");
+fn graph_meta_read_parameters_cannot_change_query_shape_or_wal() {
+    let path = unique_test_dir("graph_meta_read_parameters_cannot_change_query_shape_or_wal");
     {
         let mut db = Database::open(&path).unwrap();
         db.query("CREATE (:GraphMeta {meta_id: 'main', pagerank_applied: true})")
@@ -354,28 +343,18 @@ fn graph_meta_projected_read_rejects_empty_fields_without_wal() {
     {
         let db = Database::open(&path).unwrap();
         let graph_commit_epoch_before = db.store.commit_epoch();
-
-        let meta_error = db
-            .knowledge_graph_meta_projected(&KnowledgeGraphMetaProjectedRequest {
-                meta: KnowledgeGraphMetaRequest {
-                    meta_id: String::new(),
-                },
-                property_names: vec!["pagerank_applied".to_string()],
-            })
-            .unwrap_err();
-        assert!(meta_error.to_string().contains("non-empty meta id"));
-
-        let property_error = db
-            .knowledge_graph_meta_projected(&KnowledgeGraphMetaProjectedRequest {
-                meta: KnowledgeGraphMetaRequest {
-                    meta_id: "main".to_string(),
-                },
-                property_names: vec![String::new()],
-            })
-            .unwrap_err();
-        assert!(property_error
-            .to_string()
-            .contains("non-empty property names"));
+        let parameters = BTreeMap::from([(
+            "meta_id".to_string(),
+            Value::String("main') MATCH (n) RETURN n //".to_string()),
+        )]);
+        let output = db
+            .query_read_only_with_params_bounded(
+                GRAPH_META_FUTURE_STATE_QUERY,
+                &parameters,
+                Some(1),
+            )
+            .unwrap();
+        assert!(output.rows.is_empty());
         assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
     }
     let wal_after = read_test_wal(&path).unwrap();
@@ -439,18 +418,28 @@ fn typed_graph_meta_delete_persists_and_replays() {
     assert_eq!(wal.matches("\tbatch\t").count(), setup_batch_count + 1);
     {
         let db = Database::open(&path).unwrap();
+        let main_parameters =
+            BTreeMap::from([("meta_id".to_string(), Value::String("main".to_string()))]);
         let main = db
-            .knowledge_graph_meta(&KnowledgeGraphMetaRequest {
-                meta_id: "main".to_string(),
-            })
+            .query_read_only_with_params_bounded(
+                GRAPH_META_ALGORITHM_STATE_QUERY,
+                &main_parameters,
+                Some(1),
+            )
             .unwrap();
-        assert!(!main.found);
+        assert!(main.rows.is_empty());
+        let community_parameters = BTreeMap::from([(
+            "meta_id".to_string(),
+            Value::String("community".to_string()),
+        )]);
         let community = db
-            .knowledge_graph_meta(&KnowledgeGraphMetaRequest {
-                meta_id: "community".to_string(),
-            })
+            .query_read_only_with_params_bounded(
+                GRAPH_META_ALGORITHM_STATE_QUERY,
+                &community_parameters,
+                Some(1),
+            )
             .unwrap();
-        assert!(community.found);
+        assert_eq!(community.rows.len(), 1);
     }
     std::fs::remove_dir_all(path).unwrap();
 }

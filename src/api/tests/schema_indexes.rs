@@ -1,6 +1,62 @@
 use super::*;
 
 #[test]
+fn system_sql_exposes_pinned_catalog_snapshot() {
+    let mut db = Database::new();
+    db.query("CREATE NODE LABEL Memory").unwrap();
+    db.query("CREATE NODE TABLE Memory").unwrap();
+    db.query("CREATE PROPERTY ON NODE TABLE Memory(id) TYPE STRING NOT NULL")
+        .unwrap();
+    db.query("CREATE INDEX ON :Memory(id)").unwrap();
+    db.query("CREATE CONSTRAINT ON :Memory(id) ASSERT UNIQUE")
+        .unwrap();
+    let read_tx = db.begin_read_transaction();
+
+    db.query("CREATE NODE LABEL Source").unwrap();
+    db.query("CREATE NODE TABLE Source").unwrap();
+
+    let pinned_tables = read_tx
+        .query_sql("SELECT table_name FROM system.tables ORDER BY table_id")
+        .unwrap();
+    assert_eq!(
+        pinned_tables.rows,
+        vec![BTreeMap::from([(
+            "table_name".to_string(),
+            Value::String("Memory".to_string()),
+        )])]
+    );
+
+    let live_tables = db
+        .query_sql("SELECT table_name FROM system.tables ORDER BY table_id")
+        .unwrap();
+    assert_eq!(live_tables.rows.len(), 2);
+    assert_eq!(
+        read_tx
+            .query_sql("SELECT property_name FROM system.properties")
+            .unwrap()
+            .rows
+            .len(),
+        1
+    );
+    assert_eq!(
+        read_tx
+            .query_sql("SELECT index_kind FROM system.indexes")
+            .unwrap()
+            .rows
+            .len(),
+        1
+    );
+    assert_eq!(
+        read_tx
+            .query_sql("SELECT constraint_kind FROM system.constraints")
+            .unwrap()
+            .rows
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn schema_ddl_creates_catalog_tokens_idempotently() {
     let mut db = Database::new();
     let first = db.query("CREATE NODE LABEL Memory").unwrap();

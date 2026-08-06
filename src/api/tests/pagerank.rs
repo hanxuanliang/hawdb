@@ -51,7 +51,7 @@ fn updates_and_clears_pagerank_scores_for_nowledge_shapes() {
     assert!(!output.rows[3].matched);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -88,7 +88,7 @@ fn updates_and_clears_pagerank_scores_for_nowledge_shapes() {
     assert_eq!(clear.rows.iter().filter(|row| row.non_writable).count(), 1);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -170,7 +170,7 @@ fn typed_pagerank_score_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),
@@ -196,8 +196,61 @@ fn typed_pagerank_score_batch_persists_as_one_wal_batch_and_replays() {
     std::fs::remove_dir_all(path).unwrap();
 }
 
+const PAGERANK_BASE_COUNT_QUERIES: [&str; 5] = [
+    "MATCH (m:Memory) RETURN count(m) AS total",
+    "MATCH (e:Entity) RETURN count(e) AS total",
+    "MATCH (:Entity)-[r:RELATES_TO]->(:Entity) RETURN count(r) AS total",
+    "MATCH (:Memory)-[r:MENTIONS]->(:Entity) RETURN count(r) AS total",
+    "MATCH (:Memory)-[r:MEMORY_RELATES_TO]->(:Memory) WHERE r.status = 'active' RETURN count(r) AS total",
+];
+
+const PAGERANK_CHANGED_COUNT_QUERIES: [&str; 5] = [
+    "MATCH (m:Memory) WHERE m.created_at > $cutoff OR m.updated_at > $cutoff RETURN count(m) AS total",
+    "MATCH (e:Entity) WHERE e.created_at > $cutoff OR e.updated_at > $cutoff RETURN count(e) AS total",
+    "MATCH (:Memory)-[r:MENTIONS]->(:Entity) WHERE r.created_at > $cutoff OR r.updated_at > $cutoff RETURN count(r) AS total",
+    "MATCH (:Entity)-[r:RELATES_TO]->(:Entity) WHERE r.created_at > $cutoff OR r.updated_at > $cutoff RETURN count(r) AS total",
+    "MATCH (:Memory)-[r:MEMORY_RELATES_TO]->(:Memory) WHERE r.status = 'active' AND (r.created_at > $cutoff OR r.updated_at > $cutoff) RETURN count(r) AS total",
+];
+
+const PAGERANK_ENTITY_MEMBERSHIP_QUERY: &str = "MATCH (e:Entity) WHERE e.id IN $external_ids \
+     RETURN id(e) AS node_id, e.id AS external_id ORDER BY external_id";
+
+const PAGERANK_MEMORY_VISIBILITY_QUERY: &str = "MATCH (m:Memory) WHERE m.id IN $memory_ids \
+     RETURN id(m) AS node_id, m.id AS memory_id, m.metadata AS metadata, \
+     COALESCE(m.is_latest, true) AS is_latest ORDER BY memory_id";
+
+const PAGERANK_CENTRAL_ENTITY_QUERY: &str = "MATCH (e:Entity) WHERE e.id = $entity_id \
+     RETURN id(e) AS node_id, e.name AS name LIMIT 1";
+
+fn pagerank_count(
+    read: &mut DatabaseReadTransaction,
+    query: &str,
+    parameters: &BTreeMap<String, Value>,
+) -> i64 {
+    let output = read
+        .query_with_params_bounded(query, parameters, Some(1))
+        .unwrap();
+    let Some(Value::Int(total)) = output.rows[0].get("total") else {
+        panic!("expected integer pagerank count");
+    };
+    *total
+}
+
+fn pagerank_counts(read: &mut DatabaseReadTransaction, cutoff: i64) -> Vec<i64> {
+    let empty = BTreeMap::new();
+    let changed = BTreeMap::from([("cutoff".to_string(), Value::Int(cutoff))]);
+    let mut counts = Vec::with_capacity(10);
+    for query in PAGERANK_BASE_COUNT_QUERIES {
+        counts.push(pagerank_count(read, query, &empty));
+    }
+    for query in PAGERANK_CHANGED_COUNT_QUERIES {
+        counts.push(pagerank_count(read, query, &changed));
+    }
+    counts
+}
+
 #[test]
-fn reads_pagerank_plan_counts_for_nowledge_shapes() {
+fn pagerank_plan_reads_use_parameterized_queries_on_one_snapshot() {
     let mut db = Database::new();
     db.query(
         "CREATE (:Memory {id: 'm1', created_at: 10, updated_at: 20, metadata: '{\"visible\":true}'})",
@@ -220,29 +273,21 @@ fn reads_pagerank_plan_counts_for_nowledge_shapes() {
     db.query("MATCH (a:Memory {id: 'm2'}), (b:Memory {id: 'm1'}) CREATE (a)-[:MEMORY_RELATES_TO {status: 'inactive', created_at: 190}]->(b)")
         .unwrap();
 
-    let graph_commit_epoch = db.store.commit_epoch();
-    let plan = db
-        .knowledge_pagerank_plan(&KnowledgePageRankPlanRequest {
-            changed_since_epoch_nanos: Some(100),
-        })
+    let mut read = db.begin_read_transaction();
+    let snapshot_epoch = read.commit_epoch();
+    db.query("CREATE (:Memory {id: 'after-snapshot', created_at: 200})")
         .unwrap();
 
-    assert_eq!(plan.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(plan.memory_node_count, 2);
-    assert_eq!(plan.entity_node_count, 2);
-    assert_eq!(plan.entity_relation_count, 1);
-    assert_eq!(plan.mention_edge_count, 2);
-    assert_eq!(plan.active_memory_relation_count, 1);
-    assert_eq!(plan.changed_memory_count, 1);
-    assert_eq!(plan.changed_entity_count, 1);
-    assert_eq!(plan.changed_mention_edge_count, 1);
-    assert_eq!(plan.changed_entity_relation_count, 1);
-    assert_eq!(plan.changed_memory_relation_count, 1);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+    assert_eq!(
+        pagerank_counts(&mut read, 100),
+        vec![2, 2, 1, 2, 1, 1, 1, 1, 1, 1]
+    );
+    assert_eq!(read.commit_epoch(), snapshot_epoch);
+    assert!(db.commit_epoch() > snapshot_epoch);
 }
 
 #[test]
-fn pagerank_plan_uses_query_runtime_plan_cache() {
+fn pagerank_plan_queries_use_query_runtime_plan_cache() {
     let mut db = Database::new_with_config(DatabaseConfig {
         max_plan_cache_entries: Some(32),
         statement_summary_capacity: 32,
@@ -262,75 +307,94 @@ fn pagerank_plan_uses_query_runtime_plan_cache() {
         .unwrap();
     db.query("MATCH (a:Memory {id: 'pagerank-cache-memory-one'}), (b:Memory {id: 'pagerank-cache-memory-two'}) CREATE (a)-[:MEMORY_RELATES_TO {status: 'active', created_at: 70}]->(b)")
         .unwrap();
-    let request = KnowledgePageRankPlanRequest {
-        changed_since_epoch_nanos: Some(25),
-    };
-
-    let first = db.knowledge_pagerank_plan(&request).unwrap();
-    let second = db.knowledge_pagerank_plan(&request).unwrap();
-
+    let mut read = db.begin_read_transaction();
+    let first = pagerank_counts(&mut read, 25);
+    let second = pagerank_counts(&mut read, 25);
     assert_eq!(first, second);
-    assert_eq!(first.memory_node_count, 2);
-    assert_eq!(first.entity_node_count, 2);
-    assert_eq!(first.mention_edge_count, 1);
-    assert_eq!(first.active_memory_relation_count, 1);
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, 10);
-    assert_eq!(stats.misses, 10);
-    assert_eq!(stats.hits, 10);
+    assert_eq!(first[0], 2);
+    assert_eq!(first[1], 2);
+    assert_eq!(first[3], 1);
+    assert_eq!(first[4], 1);
+    assert_eq!(read_test_plan_cache_metric(&read, "entries"), 10);
+    assert_eq!(read_test_plan_cache_metric(&read, "misses"), 10);
+    assert_eq!(read_test_plan_cache_metric(&read, "hits"), 10);
 }
 
 #[test]
-fn reads_pagerank_membership_visibility_and_central_entity() {
+fn pagerank_lookup_business_logic_uses_parameterized_queries() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 'm1', metadata: '{\"space\":\"default\"}', is_latest: false})")
         .unwrap();
     db.query("CREATE (:Memory {id: 'm2'})").unwrap();
     db.query("CREATE (:Entity {id: 'e1', name: 'Central Entity'})")
         .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let membership = db
-        .knowledge_pagerank_membership(&KnowledgePageRankMembershipRequest {
-            label: "Entity".to_string(),
-            external_ids: vec!["e1".to_string(), "missing".to_string()],
-        })
+    let graph_commit_epoch = db.commit_epoch();
+    let mut read = db.begin_read_transaction();
+    let membership_parameters = BTreeMap::from([(
+        "external_ids".to_string(),
+        Value::List(vec![
+            Value::String("e1".to_string()),
+            Value::String("missing".to_string()),
+        ]),
+    )]);
+    let membership = read
+        .query_with_params_bounded(
+            PAGERANK_ENTITY_MEMBERSHIP_QUERY,
+            &membership_parameters,
+            Some(2),
+        )
         .unwrap();
-    assert_eq!(membership.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(membership.matched_count, 1);
-    assert_eq!(membership.missing_count, 1);
-    assert!(membership.rows[0].matched);
-    assert!(!membership.rows[1].matched);
-
-    let visibility = db
-        .knowledge_pagerank_memory_visibility(&KnowledgePageRankMemoryVisibilityRequest {
-            memory_ids: vec!["m1".to_string(), "m2".to_string(), "missing".to_string()],
-        })
-        .unwrap();
-    assert_eq!(visibility.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(visibility.matched_count, 2);
-    assert_eq!(visibility.missing_count, 1);
+    assert_eq!(read.commit_epoch(), graph_commit_epoch);
+    assert_eq!(membership.rows.len(), 1);
     assert_eq!(
-        visibility.rows[0].metadata,
-        Some(Value::String("{\"space\":\"default\"}".to_string()))
+        membership.rows[0].get("external_id"),
+        Some(&Value::String("e1".to_string()))
     );
-    assert!(!visibility.rows[0].is_latest);
-    assert!(visibility.rows[1].is_latest);
-    assert!(!visibility.rows[2].matched);
 
-    let central = db
-        .knowledge_pagerank_central_entity(&KnowledgePageRankCentralEntityRequest {
-            entity_id: "e1".to_string(),
-        })
+    let visibility_parameters = BTreeMap::from([(
+        "memory_ids".to_string(),
+        Value::List(vec![
+            Value::String("m1".to_string()),
+            Value::String("m2".to_string()),
+            Value::String("missing".to_string()),
+        ]),
+    )]);
+    let visibility = read
+        .query_with_params_bounded(
+            PAGERANK_MEMORY_VISIBILITY_QUERY,
+            &visibility_parameters,
+            Some(3),
+        )
         .unwrap();
-    assert_eq!(central.graph_commit_epoch, graph_commit_epoch);
-    assert!(central.found);
-    assert_eq!(central.name.as_deref(), Some("Central Entity"));
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+    assert_eq!(visibility.rows.len(), 2);
+    assert_eq!(
+        visibility.rows[0].get("metadata"),
+        Some(&Value::String("{\"space\":\"default\"}".to_string()))
+    );
+    assert_eq!(
+        visibility.rows[0].get("is_latest"),
+        Some(&Value::Bool(false))
+    );
+    assert_eq!(
+        visibility.rows[1].get("is_latest"),
+        Some(&Value::Bool(true))
+    );
+
+    let central_parameters =
+        BTreeMap::from([("entity_id".to_string(), Value::String("e1".to_string()))]);
+    let central = read
+        .query_with_params_bounded(PAGERANK_CENTRAL_ENTITY_QUERY, &central_parameters, Some(1))
+        .unwrap();
+    assert_eq!(central.rows.len(), 1);
+    assert_eq!(
+        central.rows[0].get("name"),
+        Some(&Value::String("Central Entity".to_string()))
+    );
+    assert_eq!(read.commit_epoch(), graph_commit_epoch);
 }
 
 #[test]
-fn pagerank_lookup_reads_use_query_runtime_plan_cache() {
+fn pagerank_lookup_queries_use_query_runtime_plan_cache() {
     let mut db = Database::new_with_config(DatabaseConfig {
         max_plan_cache_entries: Some(8),
         statement_summary_capacity: 8,
@@ -341,79 +405,67 @@ fn pagerank_lookup_reads_use_query_runtime_plan_cache() {
     db.query("CREATE (:Entity {id: 'pagerank-cache-entity', name: 'Cache Entity'})")
         .unwrap();
 
-    let membership_request = KnowledgePageRankMembershipRequest {
-        label: "Entity".to_string(),
-        external_ids: vec!["pagerank-cache-entity".to_string(), "missing".to_string()],
-    };
-    let visibility_request = KnowledgePageRankMemoryVisibilityRequest {
-        memory_ids: vec!["pagerank-cache-memory".to_string(), "missing".to_string()],
-    };
-    let central_request = KnowledgePageRankCentralEntityRequest {
-        entity_id: "pagerank-cache-entity".to_string(),
-    };
+    let membership_parameters = BTreeMap::from([(
+        "external_ids".to_string(),
+        Value::List(vec![
+            Value::String("pagerank-cache-entity".to_string()),
+            Value::String("missing".to_string()),
+        ]),
+    )]);
+    let visibility_parameters = BTreeMap::from([(
+        "memory_ids".to_string(),
+        Value::List(vec![
+            Value::String("pagerank-cache-memory".to_string()),
+            Value::String("missing".to_string()),
+        ]),
+    )]);
+    let central_parameters = BTreeMap::from([(
+        "entity_id".to_string(),
+        Value::String("pagerank-cache-entity".to_string()),
+    )]);
+    let mut read = db.begin_read_transaction();
+    for _ in 0..2 {
+        read.query_with_params_bounded(
+            PAGERANK_ENTITY_MEMBERSHIP_QUERY,
+            &membership_parameters,
+            Some(2),
+        )
+        .unwrap();
+        read.query_with_params_bounded(
+            PAGERANK_MEMORY_VISIBILITY_QUERY,
+            &visibility_parameters,
+            Some(2),
+        )
+        .unwrap();
+        read.query_with_params_bounded(PAGERANK_CENTRAL_ENTITY_QUERY, &central_parameters, Some(1))
+            .unwrap();
+    }
 
-    let membership = db
-        .knowledge_pagerank_membership(&membership_request)
-        .unwrap();
-    let visibility = db
-        .knowledge_pagerank_memory_visibility(&visibility_request)
-        .unwrap();
-    let central = db
-        .knowledge_pagerank_central_entity(&central_request)
-        .unwrap();
-    db.knowledge_pagerank_membership(&membership_request)
-        .unwrap();
-    db.knowledge_pagerank_memory_visibility(&visibility_request)
-        .unwrap();
-    db.knowledge_pagerank_central_entity(&central_request)
-        .unwrap();
-
-    assert_eq!(membership.matched_count, 1);
-    assert_eq!(membership.missing_count, 1);
-    assert_eq!(visibility.matched_count, 1);
-    assert_eq!(visibility.missing_count, 1);
-    assert!(!visibility.rows[0].is_latest);
-    assert!(central.found);
-    assert_eq!(central.name.as_deref(), Some("Cache Entity"));
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, 3);
-    assert_eq!(stats.misses, 3);
-    assert_eq!(stats.hits, 3);
+    assert_eq!(read_test_plan_cache_metric(&read, "entries"), 3);
+    assert_eq!(read_test_plan_cache_metric(&read, "misses"), 3);
+    assert_eq!(read_test_plan_cache_metric(&read, "hits"), 3);
 }
 
 #[test]
-fn pagerank_read_requests_validate_nowledge_inputs() {
-    let db = Database::new();
+fn pagerank_read_queries_keep_user_values_in_parameters() {
+    let mut db = Database::new();
+    db.query("CREATE (:Entity {id: 'e1', name: 'Safe'})")
+        .unwrap();
+    let mut read = db.begin_read_transaction();
+    let parameters = BTreeMap::from([(
+        "external_ids".to_string(),
+        Value::List(vec![Value::String(
+            "e1') MATCH (n) RETURN n //".to_string(),
+        )]),
+    )]);
+    let output = read
+        .query_with_params_bounded(PAGERANK_ENTITY_MEMBERSHIP_QUERY, &parameters, Some(1))
+        .unwrap();
+    assert!(output.rows.is_empty());
 
-    let bad_label = db
-        .knowledge_pagerank_membership(&KnowledgePageRankMembershipRequest {
-            label: "Source".to_string(),
-            external_ids: vec!["s1".to_string()],
-        })
-        .unwrap_err();
-    assert!(bad_label
-        .to_string()
-        .contains("support only Memory and Entity labels"));
-
-    let bad_member = db
-        .knowledge_pagerank_membership(&KnowledgePageRankMembershipRequest {
-            label: "Memory".to_string(),
-            external_ids: vec![String::new()],
-        })
-        .unwrap_err();
-    assert!(bad_member.to_string().contains("non-empty external ids"));
-
-    let bad_visibility = db
-        .knowledge_pagerank_memory_visibility(&KnowledgePageRankMemoryVisibilityRequest {
-            memory_ids: vec![String::new()],
-        })
-        .unwrap_err();
-    assert!(bad_visibility.to_string().contains("non-empty memory ids"));
-
-    let bad_central = db
-        .knowledge_pagerank_central_entity(&KnowledgePageRankCentralEntityRequest {
-            entity_id: String::new(),
-        })
-        .unwrap_err();
-    assert!(bad_central.to_string().contains("non-empty entity id"));
+    let empty = BTreeMap::from([("external_ids".to_string(), Value::List(Vec::new()))]);
+    let output = read
+        .query_with_params_bounded(PAGERANK_ENTITY_MEMBERSHIP_QUERY, &empty, Some(1))
+        .unwrap();
+    assert!(output.rows.is_empty());
 }

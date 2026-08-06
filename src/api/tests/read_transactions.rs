@@ -57,7 +57,7 @@ fn read_transaction_keeps_typed_knowledge_snapshot() {
         .unwrap();
 
     let entity = read_tx
-        .knowledge_entity(&KnowledgeEntityRequest {
+        .test_query_entity(&KnowledgeEntityRequest {
             label: "Memory".to_string(),
             external_id: "root".to_string(),
         })
@@ -68,7 +68,7 @@ fn read_transaction_keeps_typed_knowledge_snapshot() {
         Some(&Value::String("Before snapshot".to_string()))
     );
     let scoped_entity = read_tx
-        .knowledge_scoped_entity(&KnowledgeScopedEntityRequest {
+        .test_query_scoped_entity(&KnowledgeScopedEntityRequest {
             entity: KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "root".to_string(),
@@ -82,7 +82,7 @@ fn read_transaction_keeps_typed_knowledge_snapshot() {
     assert_eq!(scoped_entity.graph_commit_epoch, 1);
     assert!(scoped_entity.entity.is_some());
     let entity_batch = read_tx
-        .knowledge_entity_batch(&KnowledgeEntityBatchRequest {
+        .test_query_entity_batch(&KnowledgeEntityBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -102,7 +102,7 @@ fn read_transaction_keeps_typed_knowledge_snapshot() {
     assert!(entity_batch.entities[0].is_some());
     assert!(entity_batch.entities[1].is_none());
     let property_batch = read_tx
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -127,7 +127,7 @@ fn read_transaction_keeps_typed_knowledge_snapshot() {
     assert_eq!(property_batch.rows[1].properties.get("name"), Some(&None));
 
     let snapshot_neighbors = read_tx
-        .knowledge_neighbors(&KnowledgeNeighborsRequest {
+        .test_query_neighbors(&KnowledgeNeighborsRequest {
             label: "Memory".to_string(),
             external_id: "root".to_string(),
             relationship_type: Some("LINKS".to_string()),
@@ -143,7 +143,7 @@ fn read_transaction_keeps_typed_knowledge_snapshot() {
         Some("mid")
     );
     let snapshot_relationships = read_tx
-        .knowledge_relationships(&KnowledgeRelationshipsRequest {
+        .test_query_relationships(&KnowledgeRelationshipsRequest {
             seeds: vec![KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "root".to_string(),
@@ -163,7 +163,7 @@ fn read_transaction_keeps_typed_knowledge_snapshot() {
     );
 
     let latest_neighbors = db
-        .knowledge_neighbors(&KnowledgeNeighborsRequest {
+        .test_query_neighbors(&KnowledgeNeighborsRequest {
             label: "Memory".to_string(),
             external_id: "root".to_string(),
             relationship_type: Some("LINKS".to_string()),
@@ -180,7 +180,7 @@ fn read_transaction_keeps_typed_knowledge_snapshot() {
         .any(|path| path.target_external_id.as_deref() == Some("leaf")));
 
     let snapshot_paths = read_tx
-        .knowledge_paths(&KnowledgePathRequest {
+        .test_query_paths(&KnowledgePathRequest {
             source_label: "Memory".to_string(),
             source_external_id: "root".to_string(),
             target_label: "Entity".to_string(),
@@ -194,7 +194,7 @@ fn read_transaction_keeps_typed_knowledge_snapshot() {
     assert!(snapshot_paths.paths.is_empty());
 
     let snapshot_subgraph = read_tx
-        .knowledge_subgraph(&KnowledgeSubgraphRequest {
+        .test_query_subgraph(&KnowledgeSubgraphRequest {
             label: "Memory".to_string(),
             external_id: "root".to_string(),
             relationship_type: Some("LINKS".to_string()),

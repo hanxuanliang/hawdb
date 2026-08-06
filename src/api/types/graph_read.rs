@@ -1,6 +1,8 @@
 use super::super::*;
+#[cfg(test)]
 use super::*;
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeNeighborsRequest {
     pub label: String,
@@ -11,12 +13,14 @@ pub struct KnowledgeNeighborsRequest {
     pub max_hops: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeScopedNeighborsRequest {
     pub navigation: KnowledgeNeighborsRequest,
     pub metadata_filters: BTreeMap<String, String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeNeighborsOutput {
     pub graph_commit_epoch: u64,
@@ -28,6 +32,7 @@ pub struct KnowledgeNeighborsOutput {
     pub diagnostics: KnowledgeTraversalDiagnostics,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeRelationshipsRequest {
     pub seeds: Vec<KnowledgeEntityRequest>,
@@ -36,12 +41,14 @@ pub struct KnowledgeRelationshipsRequest {
     pub limit_per_seed: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeScopedRelationshipsRequest {
     pub relationships: KnowledgeRelationshipsRequest,
     pub metadata_filters: BTreeMap<String, String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeRelationshipGroup {
     pub seed: KnowledgeEntityRequest,
@@ -53,6 +60,7 @@ pub struct KnowledgeRelationshipGroup {
     pub fanout_reasons: Vec<String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeRelationshipsOutput {
     pub graph_commit_epoch: u64,
@@ -64,12 +72,14 @@ pub struct KnowledgeRelationshipsOutput {
     pub relationship_count: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeInducedEdgeListRequest {
     pub external_ids: Vec<String>,
     pub limit: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeInducedEdgeRow {
     pub source_id: Option<String>,
@@ -81,6 +91,7 @@ pub struct KnowledgeInducedEdgeRow {
     pub strength: Value,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeInducedEdgeListOutput {
     pub graph_commit_epoch: u64,
@@ -91,6 +102,7 @@ pub struct KnowledgeInducedEdgeListOutput {
     pub returned_count: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgePathRequest {
     pub source_label: String,
@@ -103,6 +115,7 @@ pub struct KnowledgePathRequest {
     pub limit: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeScopedPathRequest {
     pub navigation: KnowledgePathRequest,
@@ -110,6 +123,7 @@ pub struct KnowledgeScopedPathRequest {
     pub target_metadata_filters: BTreeMap<String, String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgePathOutput {
     pub graph_commit_epoch: u64,
@@ -122,11 +136,13 @@ pub struct KnowledgePathOutput {
     pub diagnostics: KnowledgeTraversalDiagnostics,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeGraphPath {
     pub segments: Vec<KnowledgeGraphContextPath>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeSubgraphRequest {
     pub label: String,
@@ -138,12 +154,14 @@ pub struct KnowledgeSubgraphRequest {
     pub relationship_limit: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeScopedSubgraphRequest {
     pub navigation: KnowledgeSubgraphRequest,
     pub metadata_filters: BTreeMap<String, String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgeSubgraphOutput {
     pub graph_commit_epoch: u64,
@@ -156,6 +174,7 @@ pub struct KnowledgeSubgraphOutput {
     pub diagnostics: KnowledgeTraversalDiagnostics,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeTraversalDiagnostics {
     pub seed_found: bool,
@@ -177,6 +196,7 @@ pub struct KnowledgeTraversalDiagnostics {
     pub relationship_limit: Option<usize>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnowledgeTraversalFallbackReasonCode {
     SeedNotFound,
@@ -189,6 +209,7 @@ pub enum KnowledgeTraversalFallbackReasonCode {
     QueryRuntimeFailed,
 }
 
+#[cfg(test)]
 impl KnowledgeTraversalFallbackReasonCode {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -204,6 +225,7 @@ impl KnowledgeTraversalFallbackReasonCode {
     }
 }
 
+#[cfg(test)]
 impl FromStr for KnowledgeTraversalFallbackReasonCode {
     type Err = &'static str;
 
@@ -228,35 +250,41 @@ pub struct KnowledgeEntityRequest {
     pub external_id: String,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeScopedEntityRequest {
     pub entity: KnowledgeEntityRequest,
     pub metadata_filters: BTreeMap<String, String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeEntityBatchRequest {
     pub entities: Vec<KnowledgeEntityRequest>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeScopedEntityBatchRequest {
     pub entities: Vec<KnowledgeEntityRequest>,
     pub metadata_filters: BTreeMap<String, String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgeEntityOutput {
     pub graph_commit_epoch: u64,
     pub entity: Option<KnowledgeEntity>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeEntityDetailsRequest {
     pub label: String,
     pub external_id: String,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgeEntityDetailsOutput {
     pub graph_commit_epoch: u64,
@@ -265,6 +293,7 @@ pub struct KnowledgeEntityDetailsOutput {
     pub relationship_count: u64,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgeEntityBatchOutput {
     pub graph_commit_epoch: u64,
@@ -274,80 +303,14 @@ pub struct KnowledgeEntityBatchOutput {
     pub filtered_out_count: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryEntityListRequest {
-    pub memory_ids: Vec<String>,
-    pub limit_per_memory: usize,
-    pub distinct_name_limit: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryEntityRow {
-    pub entity_id: Option<String>,
-    pub node_id: u64,
-    pub relationship_id: u64,
-    pub name: Option<String>,
-    pub entity_type: Option<String>,
-    pub confidence: Option<Value>,
-    pub relationship_confidence: Option<Value>,
-    pub mention_count: Option<i64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryEntityGroup {
-    pub memory_id: String,
-    pub memory_node_id: Option<u64>,
-    pub found: bool,
-    pub entities: Vec<KnowledgeMemoryEntityRow>,
-    pub matched_count: usize,
-    pub returned_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryEntityListOutput {
-    pub graph_commit_epoch: u64,
-    pub groups: Vec<KnowledgeMemoryEntityGroup>,
-    pub distinct_entity_names: Vec<String>,
-    pub found_memory_count: usize,
-    pub missing_memory_count: usize,
-    pub entity_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeEntityMentionCountCursor {
-    pub after_count: usize,
-    pub after_name: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeEntityMentionCountListRequest {
-    pub cursor: Option<KnowledgeEntityMentionCountCursor>,
-    pub limit: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeEntityMentionCountRow {
-    pub entity_id: String,
-    pub node_id: u64,
-    pub name: String,
-    pub updated_at: Option<Value>,
-    pub mention_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeEntityMentionCountListOutput {
-    pub graph_commit_epoch: u64,
-    pub rows: Vec<KnowledgeEntityMentionCountRow>,
-    pub matched_count: usize,
-    pub returned_count: usize,
-}
-
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCommunityEntityVisibilityRequest {
     pub community_ids: Vec<Value>,
     pub limit: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCommunityEntityVisibilityRow {
     pub community_id: Value,
@@ -362,6 +325,7 @@ pub struct KnowledgeCommunityEntityVisibilityRow {
     pub memory_lifecycle_state: Option<String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCommunityEntityVisibilityOutput {
     pub graph_commit_epoch: u64,
@@ -371,6 +335,7 @@ pub struct KnowledgeCommunityEntityVisibilityOutput {
     pub returned_count: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnowledgeCommunityMemorySource {
     MentionedEntities,
@@ -378,6 +343,7 @@ pub enum KnowledgeCommunityMemorySource {
     Both,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnowledgeCommunityMemoryCrystalFilter {
     Any,
@@ -385,6 +351,7 @@ pub enum KnowledgeCommunityMemoryCrystalFilter {
     NullOrFalse,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnowledgeCommunityMemoryListOrder {
     CommunityBreadthImportanceCreatedAt,
@@ -392,6 +359,7 @@ pub enum KnowledgeCommunityMemoryListOrder {
     CommunityImportanceCreatedAt,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCommunityMemoryListRequest {
     pub community_ids: Vec<Value>,
@@ -402,12 +370,14 @@ pub struct KnowledgeCommunityMemoryListRequest {
     pub limit: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum KnowledgeCommunityMemoryRowSource {
     MentionedEntities,
     DirectMemoryCommunity,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCommunityMemoryRow {
     pub community_id: Value,
@@ -430,6 +400,7 @@ pub struct KnowledgeCommunityMemoryRow {
     pub entity_ids: Vec<String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCommunityMemoryListOutput {
     pub graph_commit_epoch: u64,
@@ -438,231 +409,14 @@ pub struct KnowledgeCommunityMemoryListOutput {
     pub returned_count: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum KnowledgeRelatedEntityNameScope {
-    MemoryIds(Vec<String>),
-    Thread {
-        thread_id: String,
-        identity_property: String,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeRelatedEntityNameListRequest {
-    pub scope: KnowledgeRelatedEntityNameScope,
-    pub limit: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeRelatedEntityNameListOutput {
-    pub graph_commit_epoch: u64,
-    pub entity_names: Vec<String>,
-    pub matched_memory_count: usize,
-    pub returned_count: usize,
-    pub missing_memory_ids: Vec<String>,
-    pub thread_node_id: Option<u64>,
-    pub found_thread: Option<bool>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KnowledgeContextMemoryLatestFilter {
-    NullOrTrue,
-    TrueOnly,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeContextMemoryPreviewRequest {
-    pub unit_types: Vec<String>,
-    pub latest_filter: KnowledgeContextMemoryLatestFilter,
-    pub include_labels: bool,
-    pub limit: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeContextMemoryPreviewRow {
-    pub memory_id: Option<String>,
-    pub memory_node_id: u64,
-    pub title: Option<String>,
-    pub unit_type: Option<String>,
-    pub created_at: Option<Value>,
-    pub label_id: Option<String>,
-    pub label_node_id: Option<u64>,
-    pub label_canonical_name: Option<String>,
-    pub label_name: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeContextMemoryPreviewOutput {
-    pub graph_commit_epoch: u64,
-    pub rows: Vec<KnowledgeContextMemoryPreviewRow>,
-    pub matched_memory_count: usize,
-    pub returned_count: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KnowledgeMemoryListOrder {
-    ExternalIdAsc,
-    CreatedAtDesc,
-    ScoreDesc,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryListRequest {
-    pub external_ids: Vec<String>,
-    pub normalized_space_id: Option<String>,
-    pub exclude_normalized_space_id: Option<String>,
-    pub unit_type: Option<String>,
-    pub is_latest: Option<bool>,
-    pub is_crystal: Option<bool>,
-    pub limit: usize,
-    pub order: KnowledgeMemoryListOrder,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryListRow {
-    pub memory_id: Option<String>,
-    pub node_id: u64,
-    pub title: Option<String>,
-    pub content: Option<String>,
-    pub metadata: Option<Value>,
-    pub is_latest: Option<bool>,
-    pub lifecycle_state: Option<String>,
-    pub review_status: Option<String>,
-    pub unit_type: Option<String>,
-    pub raw_space_id: Option<String>,
-    pub normalized_space_id: String,
-    pub created_at: Option<Value>,
-    pub updated_at: Option<Value>,
-    pub importance: Option<Value>,
-    pub pagerank_score: Option<Value>,
-    pub community_id: Option<Value>,
-    pub source: Option<String>,
-    pub event_start: Option<Value>,
-    pub event_end: Option<Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryListOutput {
-    pub graph_commit_epoch: u64,
-    pub rows: Vec<KnowledgeMemoryListRow>,
-    pub matched_count: usize,
-    pub returned_count: usize,
-    pub missing_external_ids: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryProjectedListRequest {
-    pub list: KnowledgeMemoryListRequest,
-    pub property_names: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryProjectedRow {
-    pub memory_id: Option<String>,
-    pub node_id: u64,
-    pub properties: BTreeMap<String, Value>,
-    pub normalized_space_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryProjectedListOutput {
-    pub graph_commit_epoch: u64,
-    pub rows: Vec<KnowledgeMemoryProjectedRow>,
-    pub matched_count: usize,
-    pub returned_count: usize,
-    pub missing_external_ids: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryMetadataRelatedProjectedListRequest {
-    pub normalized_space_id: String,
-    pub source_id: String,
-    pub limit: usize,
-    pub property_names: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryMetadataRelatedProjectedListOutput {
-    pub graph_commit_epoch: u64,
-    pub rows: Vec<KnowledgeMemoryProjectedRow>,
-    pub matched_count: usize,
-    pub returned_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryPrefixOwnershipRequest {
-    pub prefix: String,
-    pub limit: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryPrefixOwnershipRow {
-    pub memory_id: String,
-    pub memory_node_id: u64,
-    pub raw_space_id: Option<String>,
-    pub normalized_space_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryPrefixOwnershipOutput {
-    pub graph_commit_epoch: u64,
-    pub prefix: String,
-    pub rows: Vec<KnowledgeMemoryPrefixOwnershipRow>,
-    pub matched_count: usize,
-    pub returned_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryTitleContentRequest {
-    pub memory_ids: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryTitleContentRow {
-    pub memory_id: Option<String>,
-    pub node_id: u64,
-    pub title: Option<String>,
-    pub content: Option<String>,
-    pub created_at: Option<Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryTitleContentOutput {
-    pub graph_commit_epoch: u64,
-    pub rows: Vec<KnowledgeMemoryTitleContentRow>,
-    pub matched_count: usize,
-    pub returned_count: usize,
-    pub missing_memory_ids: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryEvolvesLatestRequest {
-    pub old_memory_ids: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryEvolvesLatestRow {
-    pub new_memory_id: Option<String>,
-    pub new_node_id: u64,
-    pub new_is_latest: Option<bool>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryEvolvesLatestOutput {
-    pub graph_commit_epoch: u64,
-    pub rows: Vec<KnowledgeMemoryEvolvesLatestRow>,
-    pub matched_old_memory_count: usize,
-    pub missing_old_memory_ids: Vec<String>,
-    pub matched_relationship_count: usize,
-    pub returned_count: usize,
-}
-
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnowledgeCrystalListOrder {
     ExternalIdAsc,
     ImportanceDescCreatedAtDesc,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCrystalListRequest {
     pub key_match: Option<String>,
@@ -671,6 +425,7 @@ pub struct KnowledgeCrystalListRequest {
     pub order: KnowledgeCrystalListOrder,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCrystalRow {
     pub memory_id: Option<String>,
@@ -688,6 +443,7 @@ pub struct KnowledgeCrystalRow {
     pub is_crystal: Option<bool>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCrystalListOutput {
     pub graph_commit_epoch: u64,
@@ -721,18 +477,21 @@ pub struct KnowledgeCrystalSourceMergeOutput {
     pub created_relationship_count: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KnowledgeCrystalCommunityScope {
     CommunityIds(Vec<Value>),
     NonNullCommunity,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnowledgeCrystalCommunityListOrder {
     CommunityIdAscCrystalIdAsc,
     HitsDescImportanceDesc,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCrystalCommunityListRequest {
     pub scope: KnowledgeCrystalCommunityScope,
@@ -740,6 +499,7 @@ pub struct KnowledgeCrystalCommunityListRequest {
     pub order: KnowledgeCrystalCommunityListOrder,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCrystalCommunityRow {
     pub crystal_memory_id: Option<String>,
@@ -757,6 +517,7 @@ pub struct KnowledgeCrystalCommunityRow {
     pub lifecycle_state: Option<String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCrystalCommunityListOutput {
     pub graph_commit_epoch: u64,
@@ -766,12 +527,14 @@ pub struct KnowledgeCrystalCommunityListOutput {
     pub returned_count: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCrystalSourceVisibilityRequest {
     pub community_ids: Vec<Value>,
     pub limit: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCrystalSourceVisibilityRow {
     pub crystal_memory_id: Option<String>,
@@ -794,56 +557,11 @@ pub struct KnowledgeCrystalSourceVisibilityRow {
     pub source_lifecycle_state: Option<String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCrystalSourceVisibilityOutput {
     pub graph_commit_epoch: u64,
     pub rows: Vec<KnowledgeCrystalSourceVisibilityRow>,
     pub matched_path_count: usize,
-    pub returned_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSynthesizedSourceCoverageRequest {
-    pub source_memory_ids: Vec<String>,
-    pub required_covered_count: usize,
-    pub limit: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSynthesizedSourceCoverageRow {
-    pub crystal_memory_id: Option<String>,
-    pub crystal_node_id: u64,
-    pub crystal_title: Option<String>,
-    pub covered_count: usize,
-    pub matched_source_memory_ids: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSynthesizedSourceCoverageOutput {
-    pub graph_commit_epoch: u64,
-    pub rows: Vec<KnowledgeSynthesizedSourceCoverageRow>,
-    pub matched_candidate_count: usize,
-    pub returned_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSynthesizedSourceIdsRequest {
-    pub crystal_memory_ids: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSynthesizedSourceIdsRow {
-    pub crystal_memory_id: String,
-    pub crystal_node_id: Option<u64>,
-    pub found_crystal: bool,
-    pub source_memory_ids: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSynthesizedSourceIdsOutput {
-    pub graph_commit_epoch: u64,
-    pub rows: Vec<KnowledgeSynthesizedSourceIdsRow>,
-    pub found_crystal_count: usize,
-    pub missing_crystal_count: usize,
     pub returned_count: usize,
 }

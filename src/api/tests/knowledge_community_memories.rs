@@ -40,7 +40,7 @@ fn reads_community_memories_for_wiki_ranking_shapes() {
     let graph_commit_epoch = db.store.commit_epoch();
 
     let mentioned = db
-        .knowledge_community_memories(&KnowledgeCommunityMemoryListRequest {
+        .test_query_community_memories(&KnowledgeCommunityMemoryListRequest {
             community_ids: vec![Value::Int(7), Value::Int(8)],
             source: KnowledgeCommunityMemorySource::MentionedEntities,
             crystal_filter: KnowledgeCommunityMemoryCrystalFilter::NullOrFalse,
@@ -91,7 +91,7 @@ fn reads_community_memories_for_wiki_ranking_shapes() {
     assert_eq!(mentioned.rows[2].is_crystal, None);
 
     let false_only = db
-        .knowledge_community_memories(&KnowledgeCommunityMemoryListRequest {
+        .test_query_community_memories(&KnowledgeCommunityMemoryListRequest {
             community_ids: vec![Value::Int(8)],
             source: KnowledgeCommunityMemorySource::MentionedEntities,
             crystal_filter: KnowledgeCommunityMemoryCrystalFilter::FalseOnly,
@@ -103,7 +103,7 @@ fn reads_community_memories_for_wiki_ranking_shapes() {
     assert_eq!(false_only.matched_row_count, 0);
 
     let direct = db
-        .knowledge_community_memories(&KnowledgeCommunityMemoryListRequest {
+        .test_query_community_memories(&KnowledgeCommunityMemoryListRequest {
             community_ids: vec![Value::Int(7), Value::Int(8)],
             source: KnowledgeCommunityMemorySource::DirectMemoryCommunity,
             crystal_filter: KnowledgeCommunityMemoryCrystalFilter::NullOrFalse,
@@ -139,7 +139,7 @@ fn reads_community_memories_for_wiki_ranking_shapes() {
     db.query("MATCH (m:Memory {id: 'memory_after'}), (e:Entity {id: 'entity_alpha'}) CREATE (m)-[:MENTIONS]->(e)")
         .unwrap();
     let snapshot = tx
-        .knowledge_community_memories(&KnowledgeCommunityMemoryListRequest {
+        .test_query_community_memories(&KnowledgeCommunityMemoryListRequest {
             community_ids: vec![Value::Int(7)],
             source: KnowledgeCommunityMemorySource::MentionedEntities,
             crystal_filter: KnowledgeCommunityMemoryCrystalFilter::NullOrFalse,
@@ -182,7 +182,7 @@ fn reads_community_memories_for_unit_type_filter_shape() {
     let graph_commit_epoch = db.store.commit_epoch();
 
     let output = db
-        .knowledge_community_memories(&KnowledgeCommunityMemoryListRequest {
+        .test_query_community_memories(&KnowledgeCommunityMemoryListRequest {
             community_ids: vec![Value::Int(17)],
             source: KnowledgeCommunityMemorySource::MentionedEntities,
             crystal_filter: KnowledgeCommunityMemoryCrystalFilter::FalseOnly,
@@ -218,7 +218,7 @@ fn community_memory_read_rejects_invalid_scope() {
     let db = Database::new();
 
     let empty_ids_error = db
-        .knowledge_community_memories(&KnowledgeCommunityMemoryListRequest {
+        .test_query_community_memories(&KnowledgeCommunityMemoryListRequest {
             community_ids: Vec::new(),
             source: KnowledgeCommunityMemorySource::MentionedEntities,
             crystal_filter: KnowledgeCommunityMemoryCrystalFilter::Any,
@@ -232,7 +232,7 @@ fn community_memory_read_rejects_invalid_scope() {
         .contains("non-empty community ids"));
 
     let null_id_error = db
-        .knowledge_community_memories(&KnowledgeCommunityMemoryListRequest {
+        .test_query_community_memories(&KnowledgeCommunityMemoryListRequest {
             community_ids: vec![Value::Null],
             source: KnowledgeCommunityMemorySource::DirectMemoryCommunity,
             crystal_filter: KnowledgeCommunityMemoryCrystalFilter::Any,
@@ -244,7 +244,7 @@ fn community_memory_read_rejects_invalid_scope() {
     assert!(null_id_error.to_string().contains("non-null community ids"));
 
     let empty_unit_type_error = db
-        .knowledge_community_memories(&KnowledgeCommunityMemoryListRequest {
+        .test_query_community_memories(&KnowledgeCommunityMemoryListRequest {
             community_ids: vec![Value::Int(1)],
             source: KnowledgeCommunityMemorySource::MentionedEntities,
             crystal_filter: KnowledgeCommunityMemoryCrystalFilter::Any,
@@ -282,8 +282,8 @@ fn community_memory_reads_use_query_runtime_plan_cache() {
         limit: 0,
     };
 
-    let first = db.knowledge_community_memories(&request).unwrap();
-    let second = db.knowledge_community_memories(&request).unwrap();
+    let first = db.test_query_community_memories(&request).unwrap();
+    let second = db.test_query_community_memories(&request).unwrap();
 
     assert_eq!(first, second);
     assert_eq!(first.matched_row_count, 2);

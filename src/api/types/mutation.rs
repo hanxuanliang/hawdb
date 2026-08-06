@@ -93,18 +93,21 @@ pub struct KnowledgeEntityUpsertBatchOutput {
     pub updated_property_count: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgePropertyBatchRequest {
     pub entities: Vec<KnowledgeEntityRequest>,
     pub property_names: Vec<String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeScopedPropertyBatchRequest {
     pub projection: KnowledgePropertyBatchRequest,
     pub metadata_filters: BTreeMap<String, String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgePropertyRow {
     pub entity: KnowledgeEntityRequest,
@@ -113,6 +116,7 @@ pub struct KnowledgePropertyRow {
     pub properties: BTreeMap<String, Option<Value>>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgePropertyBatchOutput {
     pub graph_commit_epoch: u64,
@@ -557,23 +561,6 @@ pub struct KnowledgeSourceParsedCreateBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSourceVersionLookupRequest {
-    pub original_name: Option<String>,
-    pub sha256: Option<String>,
-    pub space_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSourceVersionLookupOutput {
-    pub graph_commit_epoch: u64,
-    pub found: bool,
-    pub source_id: Option<String>,
-    pub node_id: Option<u64>,
-    pub version: Option<i64>,
-    pub row: Option<KnowledgeSourceListRow>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeSourceRevisionCreate {
     pub newer_source_id: String,
     pub older_source_id: String,
@@ -700,261 +687,6 @@ pub struct KnowledgeSourceLabelDeleteBatchOutput {
     pub missing_endpoint_count: usize,
     pub non_writable_count: usize,
     pub deleted_relationship_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSourceRequest {
-    pub source_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct KnowledgeSourceIdListRequest {
-    pub lifecycle_state: Option<String>,
-    pub normalized_space_id: Option<String>,
-    pub limit: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum KnowledgeSourceListOrder {
-    #[default]
-    SourceIdAsc,
-    MemoryCountDesc,
-    CreatedAtDesc,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct KnowledgeSourceListRequest {
-    pub source_ids: Vec<String>,
-    pub after_source_id: Option<String>,
-    pub lifecycle_states: Vec<String>,
-    pub normalized_space_id: Option<String>,
-    pub source_type: Option<String>,
-    pub metadata_contains: Option<String>,
-    pub parsed_path_required: bool,
-    pub limit: usize,
-    pub offset: usize,
-    pub order: KnowledgeSourceListOrder,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSourceListRow {
-    pub source_id: Option<String>,
-    pub node_id: u64,
-    pub display_name: String,
-    pub original_name: Option<String>,
-    pub title: Option<String>,
-    pub summary: Option<String>,
-    pub source_type: Option<String>,
-    pub lifecycle_state: Option<String>,
-    pub raw_space_id: Option<String>,
-    pub normalized_space_id: String,
-    pub parsed_path: Option<String>,
-    pub file_path: Option<String>,
-    pub mime_type: Option<String>,
-    pub source_url: Option<String>,
-    pub metadata: Option<Value>,
-    pub memory_count: i64,
-    pub chunk_count: i64,
-    pub size_bytes: i64,
-    pub version: i64,
-    pub created_at: Option<Value>,
-    pub updated_at: Option<Value>,
-    pub sourced_memory_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSourceListOutput {
-    pub graph_commit_epoch: u64,
-    pub rows: Vec<KnowledgeSourceListRow>,
-    pub matched_count: usize,
-    pub returned_count: usize,
-    pub missing_source_ids: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSourceProjectedListRequest {
-    pub list: KnowledgeSourceListRequest,
-    pub property_names: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSourceProjectedRow {
-    pub source_id: Option<String>,
-    pub node_id: u64,
-    pub properties: BTreeMap<String, Value>,
-    pub normalized_space_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSourceProjectedListOutput {
-    pub graph_commit_epoch: u64,
-    pub rows: Vec<KnowledgeSourceProjectedRow>,
-    pub matched_count: usize,
-    pub returned_count: usize,
-    pub missing_source_ids: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSourceRow {
-    pub source_id: Option<String>,
-    pub node_id: u64,
-    pub original_name: Option<String>,
-    pub title: Option<String>,
-    pub source_type: Option<String>,
-    pub lifecycle_state: Option<String>,
-    pub normalized_space_id: String,
-    pub parsed_path: Option<String>,
-    pub file_path: Option<String>,
-    pub mime_type: Option<String>,
-    pub memory_count: Option<i64>,
-    pub chunk_count: Option<i64>,
-    pub size_bytes: Option<i64>,
-    pub created_at: Option<Value>,
-    pub updated_at: Option<Value>,
-    pub sourced_memory_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSourceOutput {
-    pub graph_commit_epoch: u64,
-    pub found: bool,
-    pub row: Option<KnowledgeSourceRow>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSourceIdListOutput {
-    pub graph_commit_epoch: u64,
-    pub source_ids: Vec<String>,
-    pub matched_count: usize,
-    pub returned_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSourceCountOutput {
-    pub graph_commit_epoch: u64,
-    pub count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSourceSourcedMemoryCountRequest {
-    pub source_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSourceSourcedMemoryCountOutput {
-    pub graph_commit_epoch: u64,
-    pub source_id: String,
-    pub source_node_id: Option<u64>,
-    pub found: bool,
-    pub sourced_memory_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSourceMemoryListRequest {
-    pub source_id: String,
-    pub limit: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSourceMemoryRow {
-    pub memory_id: Option<String>,
-    pub node_id: u64,
-    pub relationship_id: u64,
-    pub title: Option<String>,
-    pub content: Option<String>,
-    pub unit_type: Option<String>,
-    pub confidence: Option<Value>,
-    pub chunk_index: Option<i64>,
-    pub chunk_range: Option<String>,
-    pub source_version: Option<String>,
-    pub created_at: Option<Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSourceMemoryListOutput {
-    pub graph_commit_epoch: u64,
-    pub source_id: String,
-    pub source_node_id: Option<u64>,
-    pub found: bool,
-    pub rows: Vec<KnowledgeSourceMemoryRow>,
-    pub matched_count: usize,
-    pub returned_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSourceMemoryProjectedListRequest {
-    pub list: KnowledgeSourceMemoryListRequest,
-    pub memory_property_names: Vec<String>,
-    pub relationship_property_names: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSourceMemoryProjectedRow {
-    pub memory_id: Option<String>,
-    pub memory_node_id: u64,
-    pub relationship_id: u64,
-    pub memory_properties: BTreeMap<String, Value>,
-    pub relationship_properties: BTreeMap<String, Value>,
-    pub normalized_space_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSourceMemoryProjectedListOutput {
-    pub graph_commit_epoch: u64,
-    pub source_id: String,
-    pub source_node_id: Option<u64>,
-    pub found: bool,
-    pub rows: Vec<KnowledgeSourceMemoryProjectedRow>,
-    pub matched_count: usize,
-    pub returned_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct KnowledgeMemorySourceAttributionRequest {
-    pub memory_ids: Vec<String>,
-    pub source_ids: Vec<String>,
-    pub limit: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemorySourceAttributionRow {
-    pub memory_id: Option<String>,
-    pub memory_node_id: u64,
-    pub source_id: Option<String>,
-    pub source_node_id: u64,
-    pub relationship_id: u64,
-    pub memory_display_title: String,
-    pub memory_title: Option<String>,
-    pub memory_content_preview: Option<String>,
-    pub memory_content: Option<String>,
-    pub memory_unit_type: Option<String>,
-    pub memory_importance: Option<Value>,
-    pub memory_pagerank_score: Option<Value>,
-    pub memory_community_id: Option<Value>,
-    pub memory_raw_space_id: Option<String>,
-    pub memory_normalized_space_id: String,
-    pub memory_source: Option<String>,
-    pub memory_created_at: Option<Value>,
-    pub memory_updated_at: Option<Value>,
-    pub memory_event_start: Option<Value>,
-    pub memory_event_end: Option<Value>,
-    pub source_original_name: Option<String>,
-    pub source_type: Option<String>,
-    pub source_file_path: Option<String>,
-    pub chunk_index: Option<i64>,
-    pub chunk_range: Option<String>,
-    pub source_version: Option<String>,
-    pub relationship_created_at: Option<Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemorySourceAttributionOutput {
-    pub graph_commit_epoch: u64,
-    pub rows: Vec<KnowledgeMemorySourceAttributionRow>,
-    pub matched_count: usize,
-    pub returned_count: usize,
-    pub missing_memory_ids: Vec<String>,
-    pub missing_source_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

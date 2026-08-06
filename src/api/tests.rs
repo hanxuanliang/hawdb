@@ -1,11 +1,10 @@
 use super::{
     nowledge_deep_search_graph_seed_limit, validate_graph_lightning_graph_stream,
     BackgroundMaintenanceKind, BackgroundMaintenanceOptions, CanonicalStableIdMapping, Database,
-    DatabaseConfig, DerivedArtifactJobStatus, ExternalContentArtifactJobCompletion,
-    ExternalContentArtifactRuntimeManifest, KnowledgeAugmentationJobInterruptRequest,
-    KnowledgeAugmentationJobLifecycleBatchRequest, KnowledgeAugmentationJobLifecycleTransition,
-    KnowledgeAugmentationJobLifecycleUpdate, KnowledgeAugmentationJobListOrder,
-    KnowledgeAugmentationJobListRequest, KnowledgeAugmentationJobRequest,
+    DatabaseConfig, DatabaseReadTransaction, DerivedArtifactJobStatus,
+    ExternalContentArtifactJobCompletion, ExternalContentArtifactRuntimeManifest,
+    KnowledgeAugmentationJobInterruptRequest, KnowledgeAugmentationJobLifecycleBatchRequest,
+    KnowledgeAugmentationJobLifecycleTransition, KnowledgeAugmentationJobLifecycleUpdate,
     KnowledgeCandidateScoringPolicy, KnowledgeCandidateSource,
     KnowledgeCommunityAssignmentClearRequest, KnowledgeCommunityCleanupRequest,
     KnowledgeCommunityCreate, KnowledgeCommunityEntityVisibilityRequest,
@@ -14,105 +13,68 @@ use super::{
     KnowledgeCommunityMembershipCreateBatchRequest, KnowledgeCommunityMemoryCrystalFilter,
     KnowledgeCommunityMemoryListOrder, KnowledgeCommunityMemoryListRequest,
     KnowledgeCommunityMemoryRowSource, KnowledgeCommunityMemorySource, KnowledgeCommunityRequest,
-    KnowledgeCommunitySummaryUpdate, KnowledgeContextMemoryLatestFilter,
-    KnowledgeContextMemoryPreviewRequest, KnowledgeCrystalCommunityListOrder,
+    KnowledgeCommunitySummaryUpdate, KnowledgeCrystalCommunityListOrder,
     KnowledgeCrystalCommunityListRequest, KnowledgeCrystalCommunityScope,
     KnowledgeCrystalListOrder, KnowledgeCrystalListRequest, KnowledgeCrystalSourceMergeRequest,
     KnowledgeCrystalSourceVisibilityRequest, KnowledgeEntityBatchRequest,
     KnowledgeEntityCreateBatchRequest, KnowledgeEntityCreateRequest,
-    KnowledgeEntityDeleteBatchRequest, KnowledgeEntityDeleteGuardRequest,
-    KnowledgeEntityDeleteRequest, KnowledgeEntityLabelListRequest,
-    KnowledgeEntityLabelProjectedListRequest, KnowledgeEntityMentionCountCursor,
-    KnowledgeEntityMentionCountListRequest, KnowledgeEntityRequest,
-    KnowledgeEntityUpsertBatchRequest, KnowledgeEntityUpsertRequest, KnowledgeFallbackReasonCode,
-    KnowledgeFanoutReasonCode, KnowledgeGraphMetaProjectedRequest, KnowledgeGraphMetaRequest,
+    KnowledgeEntityDeleteBatchRequest, KnowledgeEntityDeleteRequest,
+    KnowledgeEntityLabelListRequest, KnowledgeEntityLabelProjectedListRequest,
+    KnowledgeEntityRequest, KnowledgeEntityUpsertBatchRequest, KnowledgeEntityUpsertRequest,
+    KnowledgeFallbackReasonCode, KnowledgeFanoutReasonCode, KnowledgeGraphMetaRequest,
     KnowledgeGraphMetaStamp, KnowledgeGraphMetaStampBatchRequest, KnowledgeGraphPathDirection,
-    KnowledgeInducedEdgeListRequest, KnowledgeLabelBackfillScanRequest,
-    KnowledgeLabelCanonicalLookupRequest, KnowledgeLabelLifecycleBatchRequest,
-    KnowledgeLabelLifecycleUpdate, KnowledgeLabelMemoryDistributionRequest,
-    KnowledgeLabelMemoryTransferRequest, KnowledgeLabelRegexMemoryConnectionsRequest,
-    KnowledgeLabelUsageListRequest, KnowledgeLabelUsageRequest, KnowledgeMemoryAccessBatchRequest,
-    KnowledgeMemoryAccessTouch, KnowledgeMemoryCleanupFingerprintRequest,
-    KnowledgeMemoryCompactingThreadListRequest,
-    KnowledgeMemoryCompactingThreadProjectedListRequest, KnowledgeMemoryContentBatchRequest,
-    KnowledgeMemoryContentUpdate, KnowledgeMemoryCrystalSynthesisCountRequest,
-    KnowledgeMemoryDecayDetailRequest, KnowledgeMemoryDecayRefreshBatchRequest,
-    KnowledgeMemoryDecayRefreshUpdate, KnowledgeMemoryDedupReviewedBatchRequest,
-    KnowledgeMemoryEntityListRequest, KnowledgeMemoryEvolvesCreate,
-    KnowledgeMemoryEvolvesCreateBatchRequest, KnowledgeMemoryEvolvesLatestRequest,
-    KnowledgeMemoryEvolvesNeighborRequest, KnowledgeMemoryEvolvesProjectedSuccessorCursor,
-    KnowledgeMemoryEvolvesProjectedSuccessorOrder,
-    KnowledgeMemoryEvolvesProjectedSuccessorPageCursor,
-    KnowledgeMemoryEvolvesProjectedSuccessorRequest, KnowledgeMemoryEvolvesRelationCountRequest,
-    KnowledgeMemoryLabelDeleteRequest, KnowledgeMemoryLabelTransferRequest,
-    KnowledgeMemoryLatestBatchRequest, KnowledgeMemoryLatestUpdate,
-    KnowledgeMemoryLifecycleBatchRequest, KnowledgeMemoryLifecycleUpdate, KnowledgeMemoryListOrder,
-    KnowledgeMemoryListRequest, KnowledgeMemoryMetadataBatchRequest,
-    KnowledgeMemoryMetadataRelatedProjectedListRequest, KnowledgeMemoryMetadataUpdate,
-    KnowledgeMemoryPrefixOwnershipRequest, KnowledgeMemoryProjectedListRequest,
-    KnowledgeMemorySourceAttributionRequest, KnowledgeMemoryTitleContentRequest,
-    KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
-    KnowledgeNormalizedSpaceMoveBatchRequest, KnowledgePageRankCentralEntityRequest,
-    KnowledgePageRankClearRequest, KnowledgePageRankMembershipRequest,
-    KnowledgePageRankMemoryVisibilityRequest, KnowledgePageRankPlanRequest,
+    KnowledgeInducedEdgeListRequest, KnowledgeLabelLifecycleBatchRequest,
+    KnowledgeLabelLifecycleUpdate, KnowledgeLabelMemoryTransferRequest,
+    KnowledgeMemoryAccessBatchRequest, KnowledgeMemoryAccessTouch,
+    KnowledgeMemoryContentBatchRequest, KnowledgeMemoryContentUpdate,
+    KnowledgeMemoryDecayRefreshBatchRequest, KnowledgeMemoryDecayRefreshUpdate,
+    KnowledgeMemoryDedupReviewedBatchRequest, KnowledgeMemoryEvolvesCreate,
+    KnowledgeMemoryEvolvesCreateBatchRequest, KnowledgeMemoryLabelDeleteRequest,
+    KnowledgeMemoryLabelTransferRequest, KnowledgeMemoryLatestBatchRequest,
+    KnowledgeMemoryLatestUpdate, KnowledgeMemoryLifecycleBatchRequest,
+    KnowledgeMemoryLifecycleUpdate, KnowledgeMemoryMetadataBatchRequest,
+    KnowledgeMemoryMetadataUpdate, KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
+    KnowledgeNormalizedSpaceMoveBatchRequest, KnowledgePageRankClearRequest,
     KnowledgePageRankScoreBatchRequest, KnowledgePageRankScoreUpdate, KnowledgePathRequest,
     KnowledgePropertyBatchRequest, KnowledgePropertyUpdateBatchRequest,
-    KnowledgePropertyUpdateRequest, KnowledgeRelatedEntityNameListRequest,
-    KnowledgeRelatedEntityNameScope, KnowledgeRelationshipCreateBatchRequest,
+    KnowledgePropertyUpdateRequest, KnowledgeRelationshipCreateBatchRequest,
     KnowledgeRelationshipCreateRequest, KnowledgeRelationshipDeleteBatchRequest,
     KnowledgeRelationshipDeleteRequest, KnowledgeRelationshipUpdateBatchRequest,
     KnowledgeRelationshipUpdateRequest, KnowledgeRelationshipUpsertBatchRequest,
     KnowledgeRelationshipUpsertRequest, KnowledgeRelationshipsRequest,
     KnowledgeRetrievalEmptyReasonCode, KnowledgeRetrievalRequest, KnowledgeSchemaMigrationApply,
-    KnowledgeSchemaMigrationApplyBatchRequest, KnowledgeSchemaMigrationListRequest,
-    KnowledgeScopedEntityBatchRequest, KnowledgeScopedEntityDeleteBatchRequest,
-    KnowledgeScopedEntityDeleteRequest, KnowledgeScopedEntityRequest,
-    KnowledgeScopedNeighborsRequest, KnowledgeScopedPathRequest,
+    KnowledgeSchemaMigrationApplyBatchRequest, KnowledgeScopedEntityBatchRequest,
+    KnowledgeScopedEntityDeleteBatchRequest, KnowledgeScopedEntityDeleteRequest,
+    KnowledgeScopedEntityRequest, KnowledgeScopedNeighborsRequest, KnowledgeScopedPathRequest,
     KnowledgeScopedPropertyBatchRequest, KnowledgeScopedPropertyUpdateBatchRequest,
     KnowledgeScopedPropertyUpdateRequest, KnowledgeScopedRelationshipCreateBatchRequest,
     KnowledgeScopedRelationshipCreateRequest, KnowledgeScopedRelationshipDeleteBatchRequest,
     KnowledgeScopedRelationshipDeleteRequest, KnowledgeScopedRelationshipUpdateBatchRequest,
     KnowledgeScopedRelationshipUpdateRequest, KnowledgeScopedRelationshipsRequest,
     KnowledgeScopedSubgraphRequest, KnowledgeSkillDeleteBatchRequest,
-    KnowledgeSkillDetailLookupRequest, KnowledgeSkillLifecycleBatchRequest,
-    KnowledgeSkillLifecycleUpdate, KnowledgeSkillListOrder, KnowledgeSkillListRequest,
-    KnowledgeSkillMemoryListOrder, KnowledgeSkillMemoryListRequest,
+    KnowledgeSkillLifecycleBatchRequest, KnowledgeSkillLifecycleUpdate,
     KnowledgeSkillMetadataBatchRequest, KnowledgeSkillMetadataUpdate,
-    KnowledgeSkillProjectedListRequest, KnowledgeSkillSourceMergeRequest,
-    KnowledgeSkillStateRequest, KnowledgeSkillThreadSourceListRequest,
-    KnowledgeSkillUsageStatsBatchRequest, KnowledgeSkillUsageStatsUpdate,
-    KnowledgeSourceDeleteBatchRequest, KnowledgeSourceIdListRequest,
+    KnowledgeSkillSourceMergeRequest, KnowledgeSkillUsageStatsBatchRequest,
+    KnowledgeSkillUsageStatsUpdate, KnowledgeSourceDeleteBatchRequest,
     KnowledgeSourceLabelAssignment, KnowledgeSourceLabelAssignmentBatchRequest,
     KnowledgeSourceLabelDelete, KnowledgeSourceLabelDeleteBatchRequest,
-    KnowledgeSourceLifecycleBatchRequest, KnowledgeSourceLifecycleUpdate, KnowledgeSourceListOrder,
-    KnowledgeSourceListRequest, KnowledgeSourceMemoryCountAdjustment,
-    KnowledgeSourceMemoryCountBatchRequest, KnowledgeSourceMemoryListRequest,
-    KnowledgeSourceMemoryProjectedListRequest, KnowledgeSourceMetadataBatchRequest,
-    KnowledgeSourceMetadataUpdate, KnowledgeSourceParsedCreate,
-    KnowledgeSourceParsedCreateBatchRequest, KnowledgeSourceParsedMetadataBatchRequest,
-    KnowledgeSourceParsedMetadataUpdate, KnowledgeSourceProjectedListRequest,
-    KnowledgeSourceReferenceEntityListRequest, KnowledgeSourceReferenceRelationshipCleanupRequest,
-    KnowledgeSourceReferenceRelationshipCountRequest, KnowledgeSourceRequest,
-    KnowledgeSourceRevisionCreate, KnowledgeSourceRevisionCreateBatchRequest,
-    KnowledgeSourceSourcedMemoryCountRequest, KnowledgeSourceVersionLookupRequest,
-    KnowledgeSubgraphRequest, KnowledgeSynthesizedSourceCoverageRequest,
-    KnowledgeSynthesizedSourceIdsRequest, KnowledgeThreadCompactedMemoryListRequest,
-    KnowledgeThreadCompactedMemoryProjectedListRequest, KnowledgeThreadCompactionLinkRequest,
-    KnowledgeThreadDeleteBatchRequest, KnowledgeThreadDistillationCandidateRequest,
+    KnowledgeSourceLifecycleBatchRequest, KnowledgeSourceLifecycleUpdate,
+    KnowledgeSourceMemoryCountAdjustment, KnowledgeSourceMemoryCountBatchRequest,
+    KnowledgeSourceMetadataBatchRequest, KnowledgeSourceMetadataUpdate,
+    KnowledgeSourceParsedCreate, KnowledgeSourceParsedCreateBatchRequest,
+    KnowledgeSourceParsedMetadataBatchRequest, KnowledgeSourceParsedMetadataUpdate,
+    KnowledgeSourceReferenceRelationshipCleanupRequest, KnowledgeSourceRevisionCreate,
+    KnowledgeSourceRevisionCreateBatchRequest, KnowledgeSubgraphRequest,
+    KnowledgeThreadCompactionLinkRequest, KnowledgeThreadDeleteBatchRequest,
     KnowledgeThreadIdentityCascadeDeleteKeys, KnowledgeThreadIdentityDeleteRequest,
-    KnowledgeThreadIdentityRequest, KnowledgeThreadListOrder, KnowledgeThreadListRequest,
     KnowledgeThreadMessageCountBatchRequest, KnowledgeThreadMessageCountUpdate,
-    KnowledgeThreadMessageDeleteRequest, KnowledgeThreadMessageListRequest,
-    KnowledgeThreadMessageLookupRequest, KnowledgeThreadMetaLookupRequest,
-    KnowledgeThreadMetadataBatchRequest, KnowledgeThreadMetadataUpdate,
-    KnowledgeThreadSourceListRequest, KnowledgeThreadSourceLookupRequest,
-    KnowledgeThreadSyncMetadataRequest, KnowledgeThreadTitleLookupRequest,
-    KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
-    NowledgeGraphStatement, PlanCacheBypassReason, PlanCacheLookup, QueryOutput,
-    QueryStreamOptions, RecoveryMode, SearchProjectionGraphDeltaRequest,
-    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION, NOWLEDGE_DEEP_SEARCH_FILTERED_RANK_WINDOW,
-    NOWLEDGE_DEEP_SEARCH_GRAPH_CONTEXT_MAX_HOPS, NOWLEDGE_DEEP_SEARCH_MIN_GRAPH_SEED_LIMIT,
-    NOWLEDGE_DEEP_SEARCH_MIN_RANK_WINDOW,
+    KnowledgeThreadMessageDeleteRequest, KnowledgeThreadMetadataBatchRequest,
+    KnowledgeThreadMetadataUpdate, KnowledgeTraversalFallbackReasonCode,
+    KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphStatement,
+    PlanCacheBypassReason, PlanCacheLookup, QueryOutput, QueryStreamOptions, RecoveryMode,
+    SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    NOWLEDGE_DEEP_SEARCH_FILTERED_RANK_WINDOW, NOWLEDGE_DEEP_SEARCH_GRAPH_CONTEXT_MAX_HOPS,
+    NOWLEDGE_DEEP_SEARCH_MIN_GRAPH_SEED_LIMIT, NOWLEDGE_DEEP_SEARCH_MIN_RANK_WINDOW,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{
@@ -154,11 +116,21 @@ mod knowledge_community_entity_visibility;
 mod knowledge_community_memories;
 mod knowledge_context_memory_preview;
 mod knowledge_entity_batch_deletes;
+mod knowledge_entity_delete_guard;
 mod knowledge_entity_deletes;
 mod knowledge_entity_mention_counts;
 mod knowledge_entity_reads;
+mod knowledge_label_canonical_reads;
+mod knowledge_label_memory_distribution;
+mod knowledge_label_regex_memory_connections;
+mod knowledge_label_usage;
+mod knowledge_memory_cleanup_fingerprints;
+mod knowledge_memory_crystal_synthesis_counts;
+mod knowledge_memory_decay_detail;
 mod knowledge_memory_entities;
 mod knowledge_memory_evolves_latest;
+mod knowledge_memory_evolves_neighbors;
+mod knowledge_memory_evolves_projected_successors;
 mod knowledge_memory_evolves_relation_counts;
 mod knowledge_memory_lists;
 mod knowledge_memory_metadata_related;
@@ -181,7 +153,6 @@ mod knowledge_retrieval_filters;
 mod knowledge_retrieval_graph_context;
 mod knowledge_retrieval_identity;
 mod knowledge_retrieval_ranking;
-mod knowledge_source_plan_cache;
 mod merge_nodes;
 mod merge_relationships;
 mod mutation_guards;
@@ -203,10 +174,17 @@ mod search_projection_delta_facade;
 mod search_projection_graph_delta;
 mod search_projection_rebuild_facade;
 mod set_mutations;
+mod skill_reads;
+mod source_reads;
 mod source_reference;
 mod statistics;
 mod storage_recovery;
+mod synthesized_source_reads;
 mod system_variables;
+mod thread_compaction_reads;
+mod thread_distillation_reads;
+mod thread_message_reads;
+mod thread_metadata_reads;
 mod transaction_control;
 mod transaction_merge;
 
@@ -343,717 +321,6 @@ fn returns_relationship_endpoint_properties() {
 }
 
 #[test]
-fn counts_memory_crystal_synthesis_for_decay_scheduler_shape() {
-    let mut db = Database::new();
-    db.query("CREATE (:Memory {id: 'decay-base-a'})").unwrap();
-    db.query("CREATE (:Memory {id: 'decay-base-b'})").unwrap();
-    db.query("CREATE (:Memory {id: 'decay-crystal-a', is_crystal: true})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'decay-crystal-b', is_crystal: true})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'decay-non-crystal', is_crystal: false})")
-        .unwrap();
-    db.query("CREATE (:Source {id: 'decay-synthesis-source-skip'})")
-        .unwrap();
-    db.query("MATCH (c:Memory {id: 'decay-crystal-a'}), (m:Memory {id: 'decay-base-a'}) CREATE (c)-[:SYNTHESIZED_FROM]->(m)")
-        .unwrap();
-    db.query("MATCH (c:Memory {id: 'decay-crystal-b'}), (m:Memory {id: 'decay-base-a'}) CREATE (c)-[:SYNTHESIZED_FROM]->(m)")
-        .unwrap();
-    db.query("MATCH (c:Memory {id: 'decay-non-crystal'}), (m:Memory {id: 'decay-base-a'}) CREATE (c)-[:SYNTHESIZED_FROM]->(m)")
-        .unwrap();
-    db.query("MATCH (s:Source {id: 'decay-synthesis-source-skip'}), (m:Memory {id: 'decay-base-a'}) CREATE (s)-[:SYNTHESIZED_FROM]->(m)")
-        .unwrap();
-    db.query("MATCH (c:Memory {id: 'decay-crystal-a'}), (m:Memory {id: 'decay-base-b'}) CREATE (c)-[:SYNTHESIZED_FROM]->(m)")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let snapshot = db.begin_read_transaction();
-
-    db.query("MATCH (c:Memory {id: 'decay-crystal-b'}), (m:Memory {id: 'decay-base-b'}) CREATE (c)-[:SYNTHESIZED_FROM]->(m)")
-        .unwrap();
-
-    let counts = db
-        .knowledge_memory_crystal_synthesis_counts(&KnowledgeMemoryCrystalSynthesisCountRequest {
-            memory_ids: vec![
-                "decay-base-a".to_string(),
-                "missing-decay-base".to_string(),
-                "decay-base-b".to_string(),
-                "decay-base-a".to_string(),
-            ],
-        })
-        .unwrap();
-    assert_eq!(counts.graph_commit_epoch, db.store.commit_epoch());
-    assert_eq!(counts.matched_memory_count, 2);
-    assert_eq!(
-        counts.missing_memory_ids,
-        vec!["missing-decay-base".to_string()]
-    );
-    assert_eq!(counts.matched_relationship_count, 4);
-    assert_eq!(counts.returned_count, 2);
-    assert_eq!(counts.rows[0].memory_id, "decay-base-a");
-    assert_eq!(counts.rows[0].count, 2);
-    assert_eq!(counts.rows[1].memory_id, "decay-base-b");
-    assert_eq!(counts.rows[1].count, 2);
-
-    let snapshot_counts = snapshot
-        .knowledge_memory_crystal_synthesis_counts(&KnowledgeMemoryCrystalSynthesisCountRequest {
-            memory_ids: vec!["decay-base-b".to_string()],
-        })
-        .unwrap();
-    assert_eq!(snapshot_counts.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot_counts.matched_relationship_count, 1);
-    assert_eq!(snapshot_counts.rows[0].count, 1);
-}
-
-#[test]
-fn memory_crystal_synthesis_counts_use_query_runtime_plan_cache() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Memory {id: 'synthesis-count-cache-a'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'synthesis-count-cache-b'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'synthesis-count-cache-crystal-a', is_crystal: true})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'synthesis-count-cache-crystal-b', is_crystal: true})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'synthesis-count-cache-non-crystal', is_crystal: false})")
-        .unwrap();
-    db.query("CREATE (:Source {id: 'synthesis-count-cache-source'})")
-        .unwrap();
-    db.query("MATCH (c:Memory {id: 'synthesis-count-cache-crystal-a'}), (m:Memory {id: 'synthesis-count-cache-a'}) CREATE (c)-[:SYNTHESIZED_FROM]->(m)")
-        .unwrap();
-    db.query("MATCH (c:Memory {id: 'synthesis-count-cache-crystal-b'}), (m:Memory {id: 'synthesis-count-cache-a'}) CREATE (c)-[:SYNTHESIZED_FROM]->(m)")
-        .unwrap();
-    db.query("MATCH (c:Memory {id: 'synthesis-count-cache-non-crystal'}), (m:Memory {id: 'synthesis-count-cache-a'}) CREATE (c)-[:SYNTHESIZED_FROM]->(m)")
-        .unwrap();
-    db.query("MATCH (s:Source {id: 'synthesis-count-cache-source'}), (m:Memory {id: 'synthesis-count-cache-a'}) CREATE (s)-[:SYNTHESIZED_FROM]->(m)")
-        .unwrap();
-    let request = KnowledgeMemoryCrystalSynthesisCountRequest {
-        memory_ids: vec![
-            "synthesis-count-cache-a".to_string(),
-            "missing-synthesis-count-cache".to_string(),
-            "synthesis-count-cache-b".to_string(),
-            "synthesis-count-cache-a".to_string(),
-        ],
-    };
-
-    let first = db
-        .knowledge_memory_crystal_synthesis_counts(&request)
-        .unwrap();
-    let second = db
-        .knowledge_memory_crystal_synthesis_counts(&request)
-        .unwrap();
-
-    assert_eq!(first, second);
-    assert_eq!(first.matched_memory_count, 2);
-    assert_eq!(
-        first.missing_memory_ids,
-        vec!["missing-synthesis-count-cache".to_string()]
-    );
-    assert_eq!(first.matched_relationship_count, 2);
-    assert_eq!(first.returned_count, 1);
-    assert_eq!(first.rows[0].memory_id, "synthesis-count-cache-a");
-    assert_eq!(first.rows[0].count, 2);
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, 2);
-    assert_eq!(stats.misses, 2);
-    assert_eq!(stats.hits, 2);
-}
-
-#[test]
-fn memory_crystal_synthesis_counts_rejects_empty_ids_without_wal() {
-    let path = unique_test_dir("memory_crystal_synthesis_counts_empty_without_wal");
-    let mut db = Database::open(&path).unwrap();
-    db.query("CREATE (:Memory {id: 'decay-base'})").unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let wal_before = read_test_wal(&path).unwrap();
-
-    let error = db
-        .knowledge_memory_crystal_synthesis_counts(&KnowledgeMemoryCrystalSynthesisCountRequest {
-            memory_ids: vec![String::new()],
-        })
-        .unwrap_err();
-    assert!(error.to_string().contains("non-empty memory ids"));
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
-    std::fs::remove_dir_all(path).unwrap();
-}
-
-#[test]
-fn reads_memory_evolves_neighbors_for_mcp_shapes_with_projected_fields() {
-    let mut db = Database::new();
-    db.query("CREATE (:Memory {id: 'mcp-evolves-source', title: 'MCP Evolves Source', is_latest: false})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'mcp-evolves-target', title: 'MCP Evolves Target', is_latest: true, extra_status: 'ready'})")
-        .unwrap();
-    db.query(
-        "CREATE (:Memory {id: 'mcp-evolves-other', title: 'MCP Evolves Other', is_latest: true})",
-    )
-    .unwrap();
-    db.query("CREATE (:Source {id: 'mcp-evolves-non-memory'})")
-        .unwrap();
-    db.query("MATCH (a:Memory {id: 'mcp-evolves-source'}), (b:Memory {id: 'mcp-evolves-target'}) CREATE (a)-[:EVOLVES {content_relation: 'supersedes', confidence: 0.82, reviewed: true, reason: 'better evidence'}]->(b)")
-        .unwrap();
-    db.query("MATCH (a:Memory {id: 'mcp-evolves-other'}), (b:Memory {id: 'mcp-evolves-target'}) CREATE (a)-[:EVOLVES {content_relation: 'confirms', confidence: 0.64, reviewed: false}]->(b)")
-        .unwrap();
-    db.query("MATCH (a:Memory {id: 'mcp-evolves-source'}), (s:Source {id: 'mcp-evolves-non-memory'}) CREATE (a)-[:EVOLVES {content_relation: 'ignored'}]->(s)")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let outgoing = db
-        .knowledge_memory_evolves_neighbors(&KnowledgeMemoryEvolvesNeighborRequest {
-            memory_id: "mcp-evolves-source".to_string(),
-            direction: KnowledgeNeighborDirection::Outgoing,
-            neighbor_property_names: vec![
-                "title".to_string(),
-                "is_latest".to_string(),
-                "extra_status".to_string(),
-                "title".to_string(),
-            ],
-            relationship_property_names: vec![
-                "content_relation".to_string(),
-                "confidence".to_string(),
-                "reviewed".to_string(),
-                "reason".to_string(),
-            ],
-            limit: 0,
-        })
-        .unwrap();
-
-    assert_eq!(outgoing.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert!(outgoing.anchor_found);
-    assert_eq!(outgoing.matched_relationship_count, 1);
-    assert_eq!(outgoing.returned_count, 1);
-    assert_eq!(
-        outgoing.rows[0].neighbor_memory_id.as_deref(),
-        Some("mcp-evolves-target")
-    );
-    assert_eq!(
-        outgoing.rows[0].neighbor_properties.get("title"),
-        Some(&Value::String("MCP Evolves Target".to_string()))
-    );
-    assert_eq!(
-        outgoing.rows[0].neighbor_properties.get("is_latest"),
-        Some(&Value::Bool(true))
-    );
-    assert_eq!(
-        outgoing.rows[0].neighbor_properties.get("extra_status"),
-        Some(&Value::String("ready".to_string()))
-    );
-    assert_eq!(
-        outgoing.rows[0]
-            .relationship_properties
-            .get("content_relation"),
-        Some(&Value::String("supersedes".to_string()))
-    );
-    assert_eq!(
-        outgoing.rows[0].relationship_properties.get("confidence"),
-        Some(&Value::Float(0.82))
-    );
-    assert_eq!(
-        outgoing.rows[0].relationship_properties.get("reviewed"),
-        Some(&Value::Bool(true))
-    );
-    assert_eq!(
-        outgoing.rows[0].relationship_properties.get("reason"),
-        Some(&Value::String("better evidence".to_string()))
-    );
-
-    let cached_outgoing = db
-        .knowledge_memory_evolves_neighbors(&KnowledgeMemoryEvolvesNeighborRequest {
-            memory_id: "mcp-evolves-source".to_string(),
-            direction: KnowledgeNeighborDirection::Outgoing,
-            neighbor_property_names: vec![
-                "title".to_string(),
-                "is_latest".to_string(),
-                "extra_status".to_string(),
-                "title".to_string(),
-            ],
-            relationship_property_names: vec![
-                "content_relation".to_string(),
-                "confidence".to_string(),
-                "reviewed".to_string(),
-                "reason".to_string(),
-            ],
-            limit: 0,
-        })
-        .unwrap();
-    assert_eq!(cached_outgoing, outgoing);
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.misses, 2);
-    assert_eq!(stats.hits, 2);
-
-    let incoming = db
-        .knowledge_memory_evolves_neighbors(&KnowledgeMemoryEvolvesNeighborRequest {
-            memory_id: "mcp-evolves-target".to_string(),
-            direction: KnowledgeNeighborDirection::Incoming,
-            neighbor_property_names: vec!["title".to_string(), "is_latest".to_string()],
-            relationship_property_names: vec![
-                "content_relation".to_string(),
-                "confidence".to_string(),
-                "reviewed".to_string(),
-            ],
-            limit: 1,
-        })
-        .unwrap();
-    assert_eq!(incoming.matched_relationship_count, 2);
-    assert_eq!(incoming.returned_count, 1);
-    assert_eq!(
-        incoming.rows[0].neighbor_memory_id.as_deref(),
-        Some("mcp-evolves-other")
-    );
-    assert_eq!(
-        incoming.rows[0].neighbor_properties.get("title"),
-        Some(&Value::String("MCP Evolves Other".to_string()))
-    );
-
-    let snapshot = db.begin_read_transaction();
-    db.query("CREATE (:Memory {id: 'mcp-evolves-late', title: 'Late'})")
-        .unwrap();
-    db.query("MATCH (a:Memory {id: 'mcp-evolves-late'}), (b:Memory {id: 'mcp-evolves-target'}) CREATE (a)-[:EVOLVES {content_relation: 'late'}]->(b)")
-        .unwrap();
-    let snapshot_output = snapshot
-        .knowledge_memory_evolves_neighbors(&KnowledgeMemoryEvolvesNeighborRequest {
-            memory_id: "mcp-evolves-target".to_string(),
-            direction: KnowledgeNeighborDirection::Incoming,
-            neighbor_property_names: vec!["title".to_string()],
-            relationship_property_names: vec!["content_relation".to_string()],
-            limit: 0,
-        })
-        .unwrap();
-    assert_eq!(snapshot_output.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot_output.matched_relationship_count, 2);
-}
-
-#[test]
-fn memory_evolves_neighbors_rejects_empty_projection_fields_without_wal() {
-    let path = unique_test_dir("memory_evolves_neighbors_empty_projection_without_wal");
-    let mut db = Database::open(&path).unwrap();
-    db.query("CREATE (:Memory {id: 'mcp-evolves-source'})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let wal_before = read_test_wal(&path).unwrap();
-
-    let error = db
-        .knowledge_memory_evolves_neighbors(&KnowledgeMemoryEvolvesNeighborRequest {
-            memory_id: "mcp-evolves-source".to_string(),
-            direction: KnowledgeNeighborDirection::Outgoing,
-            neighbor_property_names: vec![String::new()],
-            relationship_property_names: Vec::new(),
-            limit: 10,
-        })
-        .unwrap_err();
-
-    assert!(error.to_string().contains("non-empty property names"));
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
-}
-
-#[test]
-fn projects_memory_evolves_successors_for_nowledge_growth() {
-    let mut db = Database::new();
-    db.query("CREATE (:Memory {id: 'evolves_old_a', title: 'Old A'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'evolves_old_b', title: 'Old B'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'evolves_new_a', title: 'New A', is_latest: true, future_memory_field: 'new-a'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'evolves_new_b', title: 'New B', is_latest: false, future_memory_field: 'new-b'})")
-        .unwrap();
-    db.query("CREATE (:Source {id: 'evolves_not_memory'})")
-        .unwrap();
-    db.query("MATCH (old:Memory {id: 'evolves_old_a'}), (new:Memory {id: 'evolves_new_b'}) CREATE (old)-[:EVOLVES {content_relation: 'supersedes', confidence: 0.7, future_edge_field: 'edge-b'}]->(new)")
-        .unwrap();
-    db.query("MATCH (old:Memory {id: 'evolves_old_a'}), (new:Memory {id: 'evolves_new_a'}) CREATE (old)-[:EVOLVES {content_relation: 'replaces', confidence: 0.9, future_edge_field: 'edge-a'}]->(new)")
-        .unwrap();
-    db.query("MATCH (old:Memory {id: 'evolves_old_a'}), (new:Memory {id: 'evolves_new_a'}) CREATE (old)-[:EVOLVES {content_relation: 'duplicate', confidence: 0.8, future_edge_field: 'edge-a-dup'}]->(new)")
-        .unwrap();
-    db.query("MATCH (old:Memory {id: 'evolves_old_b'}), (new:Memory {id: 'evolves_new_b'}) CREATE (old)-[:EVOLVES {content_relation: 'confirms', future_edge_field: 'edge-b2'}]->(new)")
-        .unwrap();
-    db.query("MATCH (old:Memory {id: 'evolves_old_a'}), (source:Source {id: 'evolves_not_memory'}) CREATE (old)-[:EVOLVES {content_relation: 'ignored'}]->(source)")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let snapshot = db.begin_read_transaction();
-
-    db.query(
-        "CREATE (:Memory {id: 'evolves_new_c', title: 'New C', future_memory_field: 'new-c'})",
-    )
-    .unwrap();
-    db.query("MATCH (old:Memory {id: 'evolves_old_b'}), (new:Memory {id: 'evolves_new_c'}) CREATE (old)-[:EVOLVES {content_relation: 'late', future_edge_field: 'edge-c'}]->(new)")
-        .unwrap();
-
-    let projected = db
-        .knowledge_memory_evolves_projected_successors(
-            &KnowledgeMemoryEvolvesProjectedSuccessorRequest {
-                old_memory_ids: vec![
-                    "evolves_old_a".to_string(),
-                    "missing_evolves_old".to_string(),
-                    "evolves_old_b".to_string(),
-                ],
-                limit_per_old_memory: 2,
-                order: KnowledgeMemoryEvolvesProjectedSuccessorOrder::StableMemoryIdAsc,
-                page_cursors: Vec::new(),
-                new_memory_property_names: vec![
-                    "title".to_string(),
-                    "future_memory_field".to_string(),
-                    "is_latest".to_string(),
-                    "title".to_string(),
-                ],
-                relationship_property_names: vec![
-                    "content_relation".to_string(),
-                    "future_edge_field".to_string(),
-                ],
-            },
-        )
-        .unwrap();
-
-    assert_eq!(projected.graph_commit_epoch, db.store.commit_epoch());
-    assert_eq!(projected.found_old_memory_count, 2);
-    assert_eq!(projected.missing_old_memory_count, 1);
-    assert_eq!(projected.matched_relationship_count, 5);
-    assert_eq!(projected.returned_count, 4);
-    assert_eq!(projected.groups[0].old_memory_id, "evolves_old_a");
-    assert!(projected.groups[0].found_old_memory);
-    assert_eq!(projected.groups[0].matched_relationship_count, 3);
-    assert_eq!(projected.groups[0].returned_count, 2);
-    assert_eq!(
-        projected.groups[0]
-            .rows
-            .iter()
-            .map(|row| row.new_memory_id.as_deref())
-            .collect::<Vec<_>>(),
-        vec![Some("evolves_new_a"), Some("evolves_new_a")]
-    );
-    assert_eq!(
-        projected.groups[0].rows[0]
-            .new_memory_properties
-            .get("future_memory_field"),
-        Some(&Value::String("new-a".to_string()))
-    );
-    assert!(!projected.groups[0].rows[0]
-        .new_memory_properties
-        .contains_key("content"));
-    assert_eq!(
-        projected.groups[0].rows[0]
-            .relationship_properties
-            .get("future_edge_field"),
-        Some(&Value::String("edge-a".to_string()))
-    );
-    assert!(!projected.groups[0].rows[0]
-        .relationship_properties
-        .contains_key("confidence"));
-    assert!(!projected.groups[1].found_old_memory);
-    assert!(projected.groups[1].rows.is_empty());
-    assert_eq!(projected.groups[2].matched_relationship_count, 2);
-    assert_eq!(projected.groups[2].returned_count, 2);
-    assert_eq!(
-        projected.groups[2]
-            .rows
-            .iter()
-            .map(|row| row.new_memory_id.as_deref())
-            .collect::<Vec<_>>(),
-        vec![Some("evolves_new_b"), Some("evolves_new_c")]
-    );
-
-    let snapshot_projected = snapshot
-        .knowledge_memory_evolves_projected_successors(
-            &KnowledgeMemoryEvolvesProjectedSuccessorRequest {
-                old_memory_ids: vec!["evolves_old_b".to_string()],
-                limit_per_old_memory: 0,
-                order: KnowledgeMemoryEvolvesProjectedSuccessorOrder::StableMemoryIdAsc,
-                page_cursors: Vec::new(),
-                new_memory_property_names: vec!["title".to_string()],
-                relationship_property_names: vec!["future_edge_field".to_string()],
-            },
-        )
-        .unwrap();
-    assert_eq!(snapshot_projected.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot_projected.matched_relationship_count, 1);
-    assert_eq!(
-        snapshot_projected.groups[0].rows[0]
-            .new_memory_id
-            .as_deref(),
-        Some("evolves_new_b")
-    );
-}
-
-#[test]
-fn orders_memory_evolves_successors_by_updated_at_without_forcing_projection() {
-    let mut db = Database::new();
-    db.query("CREATE (:Memory {id: 'evolves_order_old'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'evolves_order_new_a', title: 'A', updated_at: 10})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'evolves_order_new_b', title: 'B', updated_at: 30})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'evolves_order_new_c', title: 'C', updated_at: 20})")
-        .unwrap();
-    db.query("MATCH (old:Memory {id: 'evolves_order_old'}), (new:Memory {id: 'evolves_order_new_a'}) CREATE (old)-[:EVOLVES {content_relation: 'a'}]->(new)")
-        .unwrap();
-    db.query("MATCH (old:Memory {id: 'evolves_order_old'}), (new:Memory {id: 'evolves_order_new_b'}) CREATE (old)-[:EVOLVES {content_relation: 'b'}]->(new)")
-        .unwrap();
-    db.query("MATCH (old:Memory {id: 'evolves_order_old'}), (new:Memory {id: 'evolves_order_new_c'}) CREATE (old)-[:EVOLVES {content_relation: 'c'}]->(new)")
-        .unwrap();
-
-    let projected = db
-        .knowledge_memory_evolves_projected_successors(
-            &KnowledgeMemoryEvolvesProjectedSuccessorRequest {
-                old_memory_ids: vec!["evolves_order_old".to_string()],
-                limit_per_old_memory: 2,
-                order: KnowledgeMemoryEvolvesProjectedSuccessorOrder::UpdatedAtDesc,
-                page_cursors: Vec::new(),
-                new_memory_property_names: vec!["title".to_string()],
-                relationship_property_names: vec!["content_relation".to_string()],
-            },
-        )
-        .unwrap();
-
-    assert_eq!(projected.matched_relationship_count, 3);
-    assert_eq!(projected.returned_count, 2);
-    let rows = &projected.groups[0].rows;
-    assert_eq!(
-        rows.iter()
-            .map(|row| row.new_memory_id.as_deref())
-            .collect::<Vec<_>>(),
-        vec![Some("evolves_order_new_b"), Some("evolves_order_new_c")]
-    );
-    assert!(rows
-        .iter()
-        .all(|row| !row.new_memory_properties.contains_key("updated_at")));
-}
-
-#[test]
-fn pages_memory_evolves_successors_per_old_memory_with_returned_cursors() {
-    let mut db = Database::new();
-    db.query("CREATE (:Memory {id: 'evolves_page_old_a'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'evolves_page_old_b'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'evolves_page_new_a', title: 'A', updated_at: 10})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'evolves_page_new_b', title: 'B', updated_at: 30})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'evolves_page_new_c', title: 'C', updated_at: 20})")
-        .unwrap();
-    db.query("MATCH (old:Memory {id: 'evolves_page_old_a'}), (new:Memory {id: 'evolves_page_new_a'}) CREATE (old)-[:EVOLVES {content_relation: 'a'}]->(new)")
-        .unwrap();
-    db.query("MATCH (old:Memory {id: 'evolves_page_old_a'}), (new:Memory {id: 'evolves_page_new_b'}) CREATE (old)-[:EVOLVES {content_relation: 'b'}]->(new)")
-        .unwrap();
-    db.query("MATCH (old:Memory {id: 'evolves_page_old_a'}), (new:Memory {id: 'evolves_page_new_c'}) CREATE (old)-[:EVOLVES {content_relation: 'c'}]->(new)")
-        .unwrap();
-    db.query("MATCH (old:Memory {id: 'evolves_page_old_b'}), (new:Memory {id: 'evolves_page_new_b'}) CREATE (old)-[:EVOLVES {content_relation: 'b2'}]->(new)")
-        .unwrap();
-
-    let first_page = db
-        .knowledge_memory_evolves_projected_successors(
-            &KnowledgeMemoryEvolvesProjectedSuccessorRequest {
-                old_memory_ids: vec![
-                    "evolves_page_old_a".to_string(),
-                    "evolves_page_old_b".to_string(),
-                ],
-                limit_per_old_memory: 1,
-                order: KnowledgeMemoryEvolvesProjectedSuccessorOrder::UpdatedAtDesc,
-                page_cursors: Vec::new(),
-                new_memory_property_names: vec!["title".to_string()],
-                relationship_property_names: vec!["content_relation".to_string()],
-            },
-        )
-        .unwrap();
-    assert_eq!(
-        first_page.groups[0].rows[0].new_memory_id.as_deref(),
-        Some("evolves_page_new_b")
-    );
-    assert_eq!(
-        first_page.groups[1].rows[0].new_memory_id.as_deref(),
-        Some("evolves_page_new_b")
-    );
-    assert!(!first_page.groups[0].rows[0]
-        .new_memory_properties
-        .contains_key("updated_at"));
-
-    let second_page = db
-        .knowledge_memory_evolves_projected_successors(
-            &KnowledgeMemoryEvolvesProjectedSuccessorRequest {
-                old_memory_ids: vec![
-                    "evolves_page_old_a".to_string(),
-                    "evolves_page_old_b".to_string(),
-                ],
-                limit_per_old_memory: 2,
-                order: KnowledgeMemoryEvolvesProjectedSuccessorOrder::UpdatedAtDesc,
-                page_cursors: vec![
-                    KnowledgeMemoryEvolvesProjectedSuccessorPageCursor {
-                        old_memory_id: "evolves_page_old_a".to_string(),
-                        cursor: first_page.groups[0].rows[0].page_cursor.clone(),
-                    },
-                    KnowledgeMemoryEvolvesProjectedSuccessorPageCursor {
-                        old_memory_id: "evolves_page_old_b".to_string(),
-                        cursor: first_page.groups[1].rows[0].page_cursor.clone(),
-                    },
-                ],
-                new_memory_property_names: vec!["title".to_string()],
-                relationship_property_names: vec!["content_relation".to_string()],
-            },
-        )
-        .unwrap();
-
-    assert_eq!(second_page.groups[0].matched_relationship_count, 3);
-    assert_eq!(second_page.groups[0].returned_count, 2);
-    assert_eq!(
-        second_page.groups[0]
-            .rows
-            .iter()
-            .map(|row| row.new_memory_id.as_deref())
-            .collect::<Vec<_>>(),
-        vec![Some("evolves_page_new_c"), Some("evolves_page_new_a")]
-    );
-    assert_eq!(second_page.groups[1].matched_relationship_count, 1);
-    assert_eq!(second_page.groups[1].returned_count, 0);
-}
-
-#[test]
-fn memory_evolves_projected_successors_use_query_runtime_plan_cache() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Memory {id: 'evolves-project-cache-old-a'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'evolves-project-cache-old-b'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'evolves-project-cache-new-a', title: 'A', updated_at: 10})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'evolves-project-cache-new-b', title: 'B', updated_at: 30})")
-        .unwrap();
-    db.query("CREATE (:Source {id: 'evolves-project-cache-source'})")
-        .unwrap();
-    db.query("MATCH (old:Memory {id: 'evolves-project-cache-old-a'}), (new:Memory {id: 'evolves-project-cache-new-a'}) CREATE (old)-[:EVOLVES {content_relation: 'replaces'}]->(new)")
-        .unwrap();
-    db.query("MATCH (old:Memory {id: 'evolves-project-cache-old-a'}), (new:Memory {id: 'evolves-project-cache-new-b'}) CREATE (old)-[:EVOLVES {content_relation: 'supersedes'}]->(new)")
-        .unwrap();
-    db.query("MATCH (old:Memory {id: 'evolves-project-cache-old-b'}), (source:Source {id: 'evolves-project-cache-source'}) CREATE (old)-[:EVOLVES {content_relation: 'ignored'}]->(source)")
-        .unwrap();
-    let request = KnowledgeMemoryEvolvesProjectedSuccessorRequest {
-        old_memory_ids: vec![
-            "evolves-project-cache-old-a".to_string(),
-            "missing-evolves-project-cache".to_string(),
-            "evolves-project-cache-old-b".to_string(),
-            "evolves-project-cache-old-a".to_string(),
-        ],
-        limit_per_old_memory: 1,
-        order: KnowledgeMemoryEvolvesProjectedSuccessorOrder::UpdatedAtDesc,
-        page_cursors: Vec::new(),
-        new_memory_property_names: vec!["title".to_string(), "updated_at".to_string()],
-        relationship_property_names: vec!["content_relation".to_string()],
-    };
-
-    let first = db
-        .knowledge_memory_evolves_projected_successors(&request)
-        .unwrap();
-    let second = db
-        .knowledge_memory_evolves_projected_successors(&request)
-        .unwrap();
-
-    assert_eq!(first, second);
-    assert_eq!(first.found_old_memory_count, 3);
-    assert_eq!(first.missing_old_memory_count, 1);
-    assert_eq!(first.matched_relationship_count, 4);
-    assert_eq!(first.returned_count, 2);
-    assert_eq!(first.groups[0].matched_relationship_count, 2);
-    assert_eq!(
-        first.groups[0].rows[0].new_memory_id.as_deref(),
-        Some("evolves-project-cache-new-b")
-    );
-    assert_eq!(
-        first.groups[0].rows[0].new_memory_properties.get("title"),
-        Some(&Value::String("B".to_string()))
-    );
-    assert_eq!(
-        first.groups[0].rows[0]
-            .relationship_properties
-            .get("content_relation"),
-        Some(&Value::String("supersedes".to_string()))
-    );
-    assert!(!first.groups[1].found_old_memory);
-    assert_eq!(first.groups[2].matched_relationship_count, 0);
-    assert_eq!(first.groups[3].matched_relationship_count, 2);
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, 2);
-    assert_eq!(stats.misses, 2);
-    assert_eq!(stats.hits, 2);
-}
-
-#[test]
-fn memory_evolves_projected_successors_rejects_empty_fields_without_wal() {
-    let path = unique_test_dir("memory_evolves_projected_successors_empty_without_wal");
-    let mut db = Database::open(&path).unwrap();
-    db.query("CREATE (:Memory {id: 'evolves_old_wal'})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let wal_before = read_test_wal(&path).unwrap();
-
-    let memory_id_error = db
-        .knowledge_memory_evolves_projected_successors(
-            &KnowledgeMemoryEvolvesProjectedSuccessorRequest {
-                old_memory_ids: vec![String::new()],
-                limit_per_old_memory: 10,
-                order: KnowledgeMemoryEvolvesProjectedSuccessorOrder::StableMemoryIdAsc,
-                page_cursors: Vec::new(),
-                new_memory_property_names: Vec::new(),
-                relationship_property_names: Vec::new(),
-            },
-        )
-        .unwrap_err();
-    assert!(memory_id_error.to_string().contains("non-empty memory ids"));
-
-    let property_error = db
-        .knowledge_memory_evolves_projected_successors(
-            &KnowledgeMemoryEvolvesProjectedSuccessorRequest {
-                old_memory_ids: vec!["evolves_old_wal".to_string()],
-                limit_per_old_memory: 10,
-                order: KnowledgeMemoryEvolvesProjectedSuccessorOrder::StableMemoryIdAsc,
-                page_cursors: Vec::new(),
-                new_memory_property_names: vec![String::new()],
-                relationship_property_names: Vec::new(),
-            },
-        )
-        .unwrap_err();
-    assert!(property_error
-        .to_string()
-        .contains("non-empty property names"));
-
-    let cursor_error = db
-        .knowledge_memory_evolves_projected_successors(
-            &KnowledgeMemoryEvolvesProjectedSuccessorRequest {
-                old_memory_ids: vec!["evolves_old_wal".to_string()],
-                limit_per_old_memory: 10,
-                order: KnowledgeMemoryEvolvesProjectedSuccessorOrder::StableMemoryIdAsc,
-                page_cursors: vec![KnowledgeMemoryEvolvesProjectedSuccessorPageCursor {
-                    old_memory_id: String::new(),
-                    cursor: KnowledgeMemoryEvolvesProjectedSuccessorCursor {
-                        new_memory_id: None,
-                        new_node_id: 0,
-                        relationship_id: 0,
-                        updated_at: None,
-                    },
-                }],
-                new_memory_property_names: Vec::new(),
-                relationship_property_names: Vec::new(),
-            },
-        )
-        .unwrap_err();
-    assert!(cursor_error
-        .to_string()
-        .contains("non-empty cursor memory ids"));
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
-}
-
-#[test]
 fn reads_crystals_for_wiki_and_okf_shapes() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 'crystal-alpha', is_crystal: true, crystal_title: 'Alpha Crystal', title: 'Alpha Title', content: 'Alpha content', importance: 0.8, unit_type: 'fact', created_at: 10, updated_at: 20, metadata: '{\"a\":1}', is_latest: true})")
@@ -1067,7 +334,7 @@ fn reads_crystals_for_wiki_and_okf_shapes() {
     let graph_commit_epoch = db.store.commit_epoch();
 
     let wiki_detail = db
-        .knowledge_crystals(&KnowledgeCrystalListRequest {
+        .test_query_crystals(&KnowledgeCrystalListRequest {
             key_match: Some("crystal-a".to_string()),
             after_id: None,
             limit: 1,
@@ -1097,7 +364,7 @@ fn reads_crystals_for_wiki_and_okf_shapes() {
     assert_eq!(wiki_detail.rows[0].created_at, Some(Value::Int(10)));
 
     let page = db
-        .knowledge_crystals(&KnowledgeCrystalListRequest {
+        .test_query_crystals(&KnowledgeCrystalListRequest {
             key_match: None,
             after_id: Some("crystal-alpha".to_string()),
             limit: 10,
@@ -1119,7 +386,7 @@ fn reads_crystals_for_wiki_and_okf_shapes() {
     db.query("CREATE (:Memory {id: 'crystal-top', is_crystal: true, crystal_title: 'Top Crystal', importance: 9.0, created_at: 100})")
         .unwrap();
     let okf = tx
-        .knowledge_crystals(&KnowledgeCrystalListRequest {
+        .test_query_crystals(&KnowledgeCrystalListRequest {
             key_match: None,
             after_id: None,
             limit: 0,
@@ -1139,7 +406,7 @@ fn crystal_read_rejects_invalid_filters() {
     let db = Database::new();
 
     let empty_key_error = db
-        .knowledge_crystals(&KnowledgeCrystalListRequest {
+        .test_query_crystals(&KnowledgeCrystalListRequest {
             key_match: Some(String::new()),
             after_id: None,
             limit: 1,
@@ -1149,7 +416,7 @@ fn crystal_read_rejects_invalid_filters() {
     assert!(empty_key_error.to_string().contains("non-empty key match"));
 
     let empty_after_error = db
-        .knowledge_crystals(&KnowledgeCrystalListRequest {
+        .test_query_crystals(&KnowledgeCrystalListRequest {
             key_match: None,
             after_id: Some(String::new()),
             limit: 1,
@@ -1159,7 +426,7 @@ fn crystal_read_rejects_invalid_filters() {
     assert!(empty_after_error.to_string().contains("non-empty after id"));
 
     let mixed_filter_error = db
-        .knowledge_crystals(&KnowledgeCrystalListRequest {
+        .test_query_crystals(&KnowledgeCrystalListRequest {
             key_match: Some("crystal".to_string()),
             after_id: Some("crystal-alpha".to_string()),
             limit: 1,
@@ -1191,8 +458,8 @@ fn crystal_reads_use_query_runtime_plan_cache() {
         order: KnowledgeCrystalListOrder::ImportanceDescCreatedAtDesc,
     };
 
-    let first = db.knowledge_crystals(&request).unwrap();
-    let second = db.knowledge_crystals(&request).unwrap();
+    let first = db.test_query_crystals(&request).unwrap();
+    let second = db.test_query_crystals(&request).unwrap();
 
     assert_eq!(first, second);
     assert_eq!(first.matched_count, 2);
@@ -1431,7 +698,7 @@ fn reads_crystal_communities_for_topic_ranking_and_okf_mapping() {
     let graph_commit_epoch = db.store.commit_epoch();
 
     let topic = db
-        .knowledge_crystal_communities(&KnowledgeCrystalCommunityListRequest {
+        .test_query_crystal_communities(&KnowledgeCrystalCommunityListRequest {
             scope: KnowledgeCrystalCommunityScope::CommunityIds(vec![Value::Int(7)]),
             limit: 10,
             order: KnowledgeCrystalCommunityListOrder::HitsDescImportanceDesc,
@@ -1471,7 +738,7 @@ fn reads_crystal_communities_for_topic_ranking_and_okf_mapping() {
     )
     .unwrap();
     let okf = tx
-        .knowledge_crystal_communities(&KnowledgeCrystalCommunityListRequest {
+        .test_query_crystal_communities(&KnowledgeCrystalCommunityListRequest {
             scope: KnowledgeCrystalCommunityScope::NonNullCommunity,
             limit: 0,
             order: KnowledgeCrystalCommunityListOrder::CommunityIdAscCrystalIdAsc,
@@ -1506,7 +773,7 @@ fn crystal_community_read_rejects_invalid_scope() {
     let db = Database::new();
 
     let empty_ids_error = db
-        .knowledge_crystal_communities(&KnowledgeCrystalCommunityListRequest {
+        .test_query_crystal_communities(&KnowledgeCrystalCommunityListRequest {
             scope: KnowledgeCrystalCommunityScope::CommunityIds(Vec::new()),
             limit: 10,
             order: KnowledgeCrystalCommunityListOrder::HitsDescImportanceDesc,
@@ -1517,7 +784,7 @@ fn crystal_community_read_rejects_invalid_scope() {
         .contains("non-empty community ids"));
 
     let null_id_error = db
-        .knowledge_crystal_communities(&KnowledgeCrystalCommunityListRequest {
+        .test_query_crystal_communities(&KnowledgeCrystalCommunityListRequest {
             scope: KnowledgeCrystalCommunityScope::CommunityIds(vec![Value::Null]),
             limit: 10,
             order: KnowledgeCrystalCommunityListOrder::HitsDescImportanceDesc,
@@ -1559,8 +826,8 @@ fn crystal_community_reads_use_query_runtime_plan_cache() {
         order: KnowledgeCrystalCommunityListOrder::HitsDescImportanceDesc,
     };
 
-    let first = db.knowledge_crystal_communities(&request).unwrap();
-    let second = db.knowledge_crystal_communities(&request).unwrap();
+    let first = db.test_query_crystal_communities(&request).unwrap();
+    let second = db.test_query_crystal_communities(&request).unwrap();
 
     assert_eq!(first, second);
     assert_eq!(first.matched_path_count, 3);
@@ -1639,7 +906,7 @@ fn reads_crystal_source_visibility_for_wiki_community_rows() {
     let graph_commit_epoch = db.store.commit_epoch();
 
     let visibility = db
-        .knowledge_crystal_source_visibility(&KnowledgeCrystalSourceVisibilityRequest {
+        .test_query_crystal_source_visibility(&KnowledgeCrystalSourceVisibilityRequest {
             community_ids: vec![Value::Int(7), Value::Int(8)],
             limit: 0,
         })
@@ -1704,7 +971,7 @@ fn reads_crystal_source_visibility_for_wiki_community_rows() {
     )
     .unwrap();
     let snapshot = tx
-        .knowledge_crystal_source_visibility(&KnowledgeCrystalSourceVisibilityRequest {
+        .test_query_crystal_source_visibility(&KnowledgeCrystalSourceVisibilityRequest {
             community_ids: vec![Value::Int(7)],
             limit: 2,
         })
@@ -1723,7 +990,7 @@ fn crystal_source_visibility_rejects_invalid_scope() {
     let db = Database::new();
 
     let empty_ids_error = db
-        .knowledge_crystal_source_visibility(&KnowledgeCrystalSourceVisibilityRequest {
+        .test_query_crystal_source_visibility(&KnowledgeCrystalSourceVisibilityRequest {
             community_ids: Vec::new(),
             limit: 0,
         })
@@ -1733,7 +1000,7 @@ fn crystal_source_visibility_rejects_invalid_scope() {
         .contains("non-empty community ids"));
 
     let null_id_error = db
-        .knowledge_crystal_source_visibility(&KnowledgeCrystalSourceVisibilityRequest {
+        .test_query_crystal_source_visibility(&KnowledgeCrystalSourceVisibilityRequest {
             community_ids: vec![Value::Null],
             limit: 0,
         })
@@ -1765,8 +1032,8 @@ fn crystal_source_visibility_uses_query_runtime_plan_cache() {
         limit: 0,
     };
 
-    let first = db.knowledge_crystal_source_visibility(&request).unwrap();
-    let second = db.knowledge_crystal_source_visibility(&request).unwrap();
+    let first = db.test_query_crystal_source_visibility(&request).unwrap();
+    let second = db.test_query_crystal_source_visibility(&request).unwrap();
 
     assert_eq!(first, second);
     assert_eq!(first.matched_path_count, 1);
@@ -1782,340 +1049,6 @@ fn crystal_source_visibility_uses_query_runtime_plan_cache() {
 }
 
 #[test]
-fn reads_synthesized_source_coverage_for_existing_crystal_lookup_shapes() {
-    let mut db = Database::new();
-    db.query("CREATE (:Memory {id: 'coverage-crystal-alpha', is_crystal: true, crystal_title: 'Coverage Alpha'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'coverage-crystal-beta', is_crystal: true, crystal_title: 'Coverage Beta'})")
-        .unwrap();
-    db.query(
-        "CREATE (:Memory {id: 'coverage-plain', is_crystal: false, crystal_title: 'Plain Skip'})",
-    )
-    .unwrap();
-    db.query("CREATE (:Memory {id: 'coverage-source-one'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'coverage-source-two'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'coverage-source-three'})")
-        .unwrap();
-    db.query("CREATE (:Source {id: 'coverage-source-node-skip'})")
-        .unwrap();
-    db.query("MATCH (c:Memory {id: 'coverage-crystal-alpha'}), (s:Memory {id: 'coverage-source-one'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
-        .unwrap();
-    db.query("MATCH (c:Memory {id: 'coverage-crystal-alpha'}), (s:Memory {id: 'coverage-source-two'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
-        .unwrap();
-    db.query("MATCH (c:Memory {id: 'coverage-crystal-alpha'}), (s:Memory {id: 'coverage-source-two'}) CREATE (c)-[:SYNTHESIZED_FROM {source: 'duplicate'}]->(s)")
-        .unwrap();
-    db.query("MATCH (c:Memory {id: 'coverage-crystal-alpha'}), (s:Memory {id: 'coverage-source-three'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
-        .unwrap();
-    db.query("MATCH (c:Memory {id: 'coverage-crystal-beta'}), (s:Memory {id: 'coverage-source-one'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
-        .unwrap();
-    db.query("MATCH (c:Memory {id: 'coverage-plain'}), (s:Memory {id: 'coverage-source-one'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
-        .unwrap();
-    db.query("MATCH (c:Memory {id: 'coverage-crystal-beta'}), (s:Source {id: 'coverage-source-node-skip'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let exact = db
-        .knowledge_synthesized_source_coverage(&KnowledgeSynthesizedSourceCoverageRequest {
-            source_memory_ids: vec![
-                "coverage-source-one".to_string(),
-                "coverage-source-two".to_string(),
-            ],
-            required_covered_count: 2,
-            limit: 1,
-        })
-        .unwrap();
-
-    assert_eq!(exact.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(exact.matched_candidate_count, 1);
-    assert_eq!(exact.returned_count, 1);
-    assert_eq!(
-        exact.rows[0].crystal_memory_id.as_deref(),
-        Some("coverage-crystal-alpha")
-    );
-    assert_eq!(
-        exact.rows[0].crystal_title.as_deref(),
-        Some("Coverage Alpha")
-    );
-    assert_eq!(exact.rows[0].covered_count, 2);
-    assert_eq!(
-        exact.rows[0].matched_source_memory_ids,
-        vec![
-            "coverage-source-one".to_string(),
-            "coverage-source-two".to_string()
-        ]
-    );
-
-    let one_source = db
-        .knowledge_synthesized_source_coverage(&KnowledgeSynthesizedSourceCoverageRequest {
-            source_memory_ids: vec![
-                "coverage-source-one".to_string(),
-                "coverage-source-two".to_string(),
-            ],
-            required_covered_count: 1,
-            limit: 0,
-        })
-        .unwrap();
-    assert_eq!(one_source.matched_candidate_count, 1);
-    assert_eq!(one_source.returned_count, 1);
-    assert_eq!(
-        one_source.rows[0].crystal_memory_id.as_deref(),
-        Some("coverage-crystal-beta")
-    );
-    assert_eq!(
-        one_source.rows[0].matched_source_memory_ids,
-        vec!["coverage-source-one".to_string()]
-    );
-
-    let tx = db.begin_read_transaction();
-    db.query(
-        "CREATE (:Memory {id: 'coverage-crystal-after', is_crystal: true, crystal_title: 'After'})",
-    )
-    .unwrap();
-    db.query("MATCH (c:Memory {id: 'coverage-crystal-after'}), (s:Memory {id: 'coverage-source-one'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
-        .unwrap();
-    let snapshot = tx
-        .knowledge_synthesized_source_coverage(&KnowledgeSynthesizedSourceCoverageRequest {
-            source_memory_ids: vec!["coverage-source-one".to_string()],
-            required_covered_count: 1,
-            limit: 0,
-        })
-        .unwrap();
-    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot.matched_candidate_count, 2);
-    assert_eq!(
-        snapshot
-            .rows
-            .iter()
-            .map(|row| row.crystal_memory_id.as_deref().unwrap())
-            .collect::<Vec<_>>(),
-        vec!["coverage-crystal-alpha", "coverage-crystal-beta"]
-    );
-}
-
-#[test]
-fn synthesized_source_coverage_uses_query_runtime_plan_cache() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query(
-        "CREATE (:Memory {id: 'coverage-cache-crystal-a', is_crystal: true, crystal_title: 'A'})",
-    )
-    .unwrap();
-    db.query(
-        "CREATE (:Memory {id: 'coverage-cache-crystal-b', is_crystal: true, crystal_title: 'B'})",
-    )
-    .unwrap();
-    db.query("CREATE (:Memory {id: 'coverage-cache-source'})")
-        .unwrap();
-    db.query("MATCH (c:Memory {id: 'coverage-cache-crystal-a'}), (s:Memory {id: 'coverage-cache-source'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
-        .unwrap();
-    db.query("MATCH (c:Memory {id: 'coverage-cache-crystal-b'}), (s:Memory {id: 'coverage-cache-source'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
-        .unwrap();
-    let request = KnowledgeSynthesizedSourceCoverageRequest {
-        source_memory_ids: vec!["coverage-cache-source".to_string()],
-        required_covered_count: 1,
-        limit: 1,
-    };
-
-    let first = db.knowledge_synthesized_source_coverage(&request).unwrap();
-    let second = db.knowledge_synthesized_source_coverage(&request).unwrap();
-
-    assert_eq!(first, second);
-    assert_eq!(first.matched_candidate_count, 2);
-    assert_eq!(first.returned_count, 1);
-    assert_eq!(
-        first.rows[0].crystal_memory_id.as_deref(),
-        Some("coverage-cache-crystal-a")
-    );
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, 2);
-    assert_eq!(stats.misses, 2);
-    assert_eq!(stats.hits, 2);
-}
-
-#[test]
-fn synthesized_source_coverage_rejects_invalid_request() {
-    let db = Database::new();
-
-    let empty_sources_error = db
-        .knowledge_synthesized_source_coverage(&KnowledgeSynthesizedSourceCoverageRequest {
-            source_memory_ids: Vec::new(),
-            required_covered_count: 1,
-            limit: 1,
-        })
-        .unwrap_err();
-    assert!(empty_sources_error
-        .to_string()
-        .contains("non-empty source memory ids"));
-
-    let empty_source_error = db
-        .knowledge_synthesized_source_coverage(&KnowledgeSynthesizedSourceCoverageRequest {
-            source_memory_ids: vec![String::new()],
-            required_covered_count: 1,
-            limit: 1,
-        })
-        .unwrap_err();
-    assert!(empty_source_error
-        .to_string()
-        .contains("non-empty source memory ids"));
-
-    let zero_covered_error = db
-        .knowledge_synthesized_source_coverage(&KnowledgeSynthesizedSourceCoverageRequest {
-            source_memory_ids: vec!["source".to_string()],
-            required_covered_count: 0,
-            limit: 1,
-        })
-        .unwrap_err();
-    assert!(zero_covered_error
-        .to_string()
-        .contains("positive covered count"));
-}
-
-#[test]
-fn reads_synthesized_source_ids_for_feed_collection_shape() {
-    let mut db = Database::new();
-    db.query("CREATE (:Memory {id: 'collect-crystal-alpha', is_crystal: true})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'collect-crystal-beta', is_crystal: true})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'collect-source-one'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'collect-source-two'})")
-        .unwrap();
-    db.query("CREATE (:Source {id: 'collect-source-node-skip'})")
-        .unwrap();
-    db.query("MATCH (c:Memory {id: 'collect-crystal-alpha'}), (s:Memory {id: 'collect-source-two'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
-        .unwrap();
-    db.query("MATCH (c:Memory {id: 'collect-crystal-alpha'}), (s:Memory {id: 'collect-source-one'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
-        .unwrap();
-    db.query("MATCH (c:Memory {id: 'collect-crystal-alpha'}), (s:Memory {id: 'collect-source-two'}) CREATE (c)-[:SYNTHESIZED_FROM {duplicate: true}]->(s)")
-        .unwrap();
-    db.query("MATCH (c:Memory {id: 'collect-crystal-alpha'}), (s:Source {id: 'collect-source-node-skip'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
-        .unwrap();
-    db.query("MATCH (c:Memory {id: 'collect-crystal-beta'}), (s:Memory {id: 'collect-source-two'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let output = db
-        .knowledge_synthesized_source_ids(&KnowledgeSynthesizedSourceIdsRequest {
-            crystal_memory_ids: vec![
-                "missing-crystal".to_string(),
-                "collect-crystal-alpha".to_string(),
-                "collect-crystal-beta".to_string(),
-            ],
-        })
-        .unwrap();
-
-    assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(output.found_crystal_count, 2);
-    assert_eq!(output.missing_crystal_count, 1);
-    assert_eq!(output.returned_count, 3);
-    assert!(!output.rows[0].found_crystal);
-    assert_eq!(output.rows[0].crystal_memory_id, "missing-crystal");
-    assert_eq!(output.rows[0].crystal_node_id, None);
-    assert!(output.rows[0].source_memory_ids.is_empty());
-    assert_eq!(output.rows[1].crystal_memory_id, "collect-crystal-alpha");
-    assert!(output.rows[1].found_crystal);
-    assert_eq!(
-        output.rows[1].source_memory_ids,
-        vec![
-            "collect-source-one".to_string(),
-            "collect-source-two".to_string()
-        ]
-    );
-    assert_eq!(output.rows[2].crystal_memory_id, "collect-crystal-beta");
-    assert_eq!(
-        output.rows[2].source_memory_ids,
-        vec!["collect-source-two".to_string()]
-    );
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-
-    let tx = db.begin_read_transaction();
-    db.query("MATCH (c:Memory {id: 'collect-crystal-beta'}), (s:Memory {id: 'collect-source-one'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
-        .unwrap();
-    let snapshot = tx
-        .knowledge_synthesized_source_ids(&KnowledgeSynthesizedSourceIdsRequest {
-            crystal_memory_ids: vec!["collect-crystal-beta".to_string()],
-        })
-        .unwrap();
-    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(
-        snapshot.rows[0].source_memory_ids,
-        vec!["collect-source-two".to_string()]
-    );
-}
-
-#[test]
-fn synthesized_source_ids_use_query_runtime_plan_cache() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Memory {id: 'collect-cache-crystal-with-source', is_crystal: true})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'collect-cache-crystal-empty', is_crystal: true})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'collect-cache-source'})")
-        .unwrap();
-    db.query("MATCH (c:Memory {id: 'collect-cache-crystal-with-source'}), (s:Memory {id: 'collect-cache-source'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
-        .unwrap();
-    let request = KnowledgeSynthesizedSourceIdsRequest {
-        crystal_memory_ids: vec![
-            "collect-cache-crystal-with-source".to_string(),
-            "collect-cache-crystal-empty".to_string(),
-            "collect-cache-missing".to_string(),
-        ],
-    };
-
-    let first = db.knowledge_synthesized_source_ids(&request).unwrap();
-    let second = db.knowledge_synthesized_source_ids(&request).unwrap();
-
-    assert_eq!(first, second);
-    assert_eq!(first.found_crystal_count, 2);
-    assert_eq!(first.missing_crystal_count, 1);
-    assert_eq!(
-        first.rows[0].source_memory_ids,
-        vec!["collect-cache-source"]
-    );
-    assert!(first.rows[1].found_crystal);
-    assert!(first.rows[1].source_memory_ids.is_empty());
-    assert!(!first.rows[2].found_crystal);
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, 2);
-    assert_eq!(stats.misses, 2);
-    assert_eq!(stats.hits, 2);
-}
-
-#[test]
-fn synthesized_source_ids_rejects_invalid_request() {
-    let db = Database::new();
-
-    let empty_ids_error = db
-        .knowledge_synthesized_source_ids(&KnowledgeSynthesizedSourceIdsRequest {
-            crystal_memory_ids: Vec::new(),
-        })
-        .unwrap_err();
-    assert!(empty_ids_error
-        .to_string()
-        .contains("non-empty crystal memory ids"));
-
-    let empty_id_error = db
-        .knowledge_synthesized_source_ids(&KnowledgeSynthesizedSourceIdsRequest {
-            crystal_memory_ids: vec![String::new()],
-        })
-        .unwrap_err();
-    assert!(empty_id_error
-        .to_string()
-        .contains("non-empty crystal memory ids"));
-}
-
-#[test]
 fn scoped_knowledge_entity_batch_reports_filtered_and_missing_items() {
     let mut db = Database::new();
     db.query(
@@ -2126,7 +1059,7 @@ fn scoped_knowledge_entity_batch_reports_filtered_and_missing_items() {
         .unwrap();
 
     let output = db
-        .knowledge_scoped_entity_batch(&KnowledgeScopedEntityBatchRequest {
+        .test_query_scoped_entity_batch(&KnowledgeScopedEntityBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -2195,8 +1128,8 @@ fn scoped_knowledge_entity_batch_uses_query_runtime_plan_cache() {
         ]),
     };
 
-    let first = db.knowledge_scoped_entity_batch(&request).unwrap();
-    let second = db.knowledge_scoped_entity_batch(&request).unwrap();
+    let first = db.test_query_scoped_entity_batch(&request).unwrap();
+    let second = db.test_query_scoped_entity_batch(&request).unwrap();
 
     assert_eq!(first, second);
     assert_eq!(first.found_count, 1);
@@ -2233,7 +1166,7 @@ fn creates_knowledge_entity_through_typed_api() {
     assert!(!output.already_exists);
     assert_eq!(output.created_node_count, 1);
     let entity = db
-        .knowledge_entity(&KnowledgeEntityRequest {
+        .test_query_entity(&KnowledgeEntityRequest {
             label: "Memory".to_string(),
             external_id: "memory_1".to_string(),
         })
@@ -2271,7 +1204,7 @@ fn create_knowledge_entity_reports_existing_identity_without_writing() {
     assert!(output.already_exists);
     assert_eq!(output.created_node_count, 0);
     let entity = db
-        .knowledge_entity(&KnowledgeEntityRequest {
+        .test_query_entity(&KnowledgeEntityRequest {
             label: "Memory".to_string(),
             external_id: "memory_1".to_string(),
         })
@@ -2333,7 +1266,7 @@ fn creates_knowledge_entity_batch_through_typed_api() {
     assert_eq!(output.rows[1].node_id, Some(0));
     assert!(output.rows[2].created);
     let created = db
-        .knowledge_entity_batch(&KnowledgeEntityBatchRequest {
+        .test_query_entity_batch(&KnowledgeEntityBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -2384,7 +1317,7 @@ fn create_knowledge_entity_batch_deduplicates_pending_identity() {
     assert!(output.rows[1].already_exists);
     assert_eq!(output.rows[1].node_id, None);
     let entities = db
-        .knowledge_entity_batch(&KnowledgeEntityBatchRequest {
+        .test_query_entity_batch(&KnowledgeEntityBatchRequest {
             entities: vec![KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "memory_1".to_string(),
@@ -2486,7 +1419,7 @@ fn typed_knowledge_entity_batch_create_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let output = db
-            .knowledge_entity_batch(&KnowledgeEntityBatchRequest {
+            .test_query_entity_batch(&KnowledgeEntityBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),
@@ -2554,7 +1487,7 @@ fn upserts_knowledge_entity_through_typed_api() {
     assert_eq!(existing.node_id, Some(0));
     assert_eq!(existing.updated_property_count, 1);
     let entity = db
-        .knowledge_entity(&KnowledgeEntityRequest {
+        .test_query_entity(&KnowledgeEntityRequest {
             label: "Memory".to_string(),
             external_id: "memory_1".to_string(),
         })
@@ -2619,7 +1552,7 @@ fn knowledge_entity_upsert_does_not_write_projected_idless_identity() {
     assert!(output.non_writable);
     assert!(!output.updated);
     let entity = db
-        .knowledge_entity(&KnowledgeEntityRequest {
+        .test_query_entity(&KnowledgeEntityRequest {
             label: "Entity".to_string(),
             external_id: "0".to_string(),
         })
@@ -2690,7 +1623,7 @@ fn upserts_knowledge_entity_batch_through_typed_api() {
     assert_eq!(output.rows[2].node_id, None);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -2782,7 +1715,7 @@ fn typed_knowledge_entity_batch_upsert_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),
@@ -2818,7 +1751,7 @@ fn retrieves_knowledge_property_batch_without_hydrating_full_entities() {
         .unwrap();
 
     let output = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -2897,8 +1830,8 @@ fn knowledge_property_batch_uses_query_runtime_plan_cache() {
         property_names: vec!["title".to_string(), "source_id".to_string()],
     };
 
-    let first = db.knowledge_property_batch(&request).unwrap();
-    let second = db.knowledge_property_batch(&request).unwrap();
+    let first = db.test_query_property_batch(&request).unwrap();
+    let second = db.test_query_property_batch(&request).unwrap();
 
     assert_eq!(first, second);
     assert_eq!(first.found_count, 2);
@@ -2924,7 +1857,7 @@ fn scoped_knowledge_property_batch_reports_filtered_rows() {
         .unwrap();
 
     let output = db
-        .knowledge_scoped_property_batch(&KnowledgeScopedPropertyBatchRequest {
+        .test_query_scoped_property_batch(&KnowledgeScopedPropertyBatchRequest {
             projection: KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
@@ -2993,8 +1926,8 @@ fn scoped_knowledge_property_batch_uses_query_runtime_plan_cache() {
         ]),
     };
 
-    let first = db.knowledge_scoped_property_batch(&request).unwrap();
-    let second = db.knowledge_scoped_property_batch(&request).unwrap();
+    let first = db.test_query_scoped_property_batch(&request).unwrap();
+    let second = db.test_query_scoped_property_batch(&request).unwrap();
 
     assert_eq!(first, second);
     assert_eq!(first.found_count, 1);
@@ -3040,7 +1973,7 @@ fn updates_knowledge_properties_through_typed_api() {
     assert!(!output.filtered_out);
     assert_eq!(output.updated_property_count, 2);
     let row = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "memory_1".to_string(),
@@ -3092,7 +2025,7 @@ fn scoped_knowledge_property_update_does_not_write_filtered_seed() {
     assert!(output.filtered_out);
     assert_eq!(output.updated_property_count, 0);
     let row = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "memory_1".to_string(),
@@ -3184,7 +2117,7 @@ fn typed_knowledge_property_update_persists_and_replays_from_wal() {
     {
         let db = Database::open(&path).unwrap();
         let output = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![KnowledgeEntityRequest {
                     label: "Memory".to_string(),
                     external_id: "memory_1".to_string(),
@@ -3261,7 +2194,7 @@ fn updates_knowledge_properties_batch_through_typed_api() {
     assert_eq!(output.rows[2].node_id, None);
 
     let row = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -3400,7 +2333,7 @@ fn typed_knowledge_normalized_space_move_persists_as_one_wal_batch_and_replays()
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),
@@ -3475,7 +2408,7 @@ fn touches_memory_access_batch_with_incremental_counters() {
     assert!(!output.rows[3].matched);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -3581,7 +2514,7 @@ fn typed_knowledge_memory_access_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),
@@ -3681,7 +2614,7 @@ fn updates_memory_content_batch_for_nowledge_full_update_shape() {
     assert!(output.rows[3].duplicate);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "memory_1".to_string(),
@@ -3823,7 +2756,7 @@ fn updates_memory_metadata_batch_for_nowledge_replace_shapes() {
     assert!(output.rows[4].duplicate);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -3911,7 +2844,7 @@ fn typed_memory_metadata_update_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),
@@ -4005,7 +2938,7 @@ fn typed_memory_content_update_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),
@@ -4080,7 +3013,7 @@ fn updates_memory_dedup_reviewed_batch_for_scheduler_shape() {
     assert!(output.rows[4].duplicate);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -4144,7 +3077,7 @@ fn typed_memory_dedup_reviewed_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),
@@ -4241,7 +3174,7 @@ fn updates_memory_decay_refresh_batch_for_scheduler_shapes() {
     assert!(output.rows[4].duplicate);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -4354,7 +3287,7 @@ fn typed_memory_decay_refresh_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),
@@ -4450,7 +3383,7 @@ fn adjusts_source_memory_count_batch_with_floor_decrements() {
     assert!(output.rows[6].invalid_current_count);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Source".to_string(),
@@ -4525,7 +3458,7 @@ fn typed_source_memory_count_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Source".to_string(),
@@ -4622,7 +3555,7 @@ fn updates_source_lifecycle_batch_for_nowledge_shapes() {
     assert!(!output.rows[4].matched);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Source".to_string(),
@@ -4730,7 +3663,7 @@ fn typed_source_lifecycle_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Source".to_string(),
@@ -4824,7 +3757,7 @@ fn updates_source_metadata_batch_for_nowledge_auto_ocr_shape() {
     assert!(output.rows[4].duplicate);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Source".to_string(),
@@ -4910,7 +3843,7 @@ fn typed_source_metadata_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Source".to_string(),
@@ -4979,21 +3912,16 @@ fn deletes_sources_for_nowledge_detach_delete_shape() {
     assert!(output.rows[3].matched);
     assert!(output.rows[4].matched);
 
-    for source_id in ["source_1", "source_2"] {
-        assert!(
-            !db.knowledge_source(&KnowledgeSourceRequest {
-                source_id: source_id.to_string(),
-            })
-            .unwrap()
-            .found
-        );
-    }
-    assert!(
-        db.knowledge_source(&KnowledgeSourceRequest {
-            source_id: "source_3".to_string(),
-        })
-        .unwrap()
-        .found
+    let sources = db
+        .query(
+            "MATCH (s:Source) WHERE s.id IS NOT NULL \
+             RETURN s.id AS source_id ORDER BY source_id ASC",
+        )
+        .unwrap();
+    assert_eq!(sources.rows.len(), 1);
+    assert_eq!(
+        sources.rows[0].get("source_id"),
+        Some(&Value::String("source_3".to_string()))
     );
     assert_eq!(
         db.query("MATCH (m:Memory)-[r:SOURCED_FROM]->(s:Source) RETURN count(r) AS relationships")
@@ -5047,17 +3975,22 @@ fn typed_source_delete_persists_as_one_wal_batch_and_replays() {
     assert!(wal.contains("delete_node"));
     {
         let db = Database::open(&path).unwrap();
-        for source_id in ["source_1", "source_2"] {
-            assert!(
-                !db.knowledge_source(&KnowledgeSourceRequest {
-                    source_id: source_id.to_string(),
-                })
-                .unwrap()
-                .found
-            );
-        }
+        let sources = db
+            .query_read_only_with_params_bounded(
+                "MATCH (s:Source) WHERE s.id IN $source_ids RETURN count(s) AS total",
+                &BTreeMap::from([(
+                    "source_ids".to_string(),
+                    Value::List(vec![
+                        Value::String("source_1".to_string()),
+                        Value::String("source_2".to_string()),
+                    ]),
+                )]),
+                Some(1),
+            )
+            .unwrap();
+        assert_eq!(sources.rows[0].get("total"), Some(&Value::Int(0)));
         assert!(db
-            .knowledge_entity(&KnowledgeEntityRequest {
+            .test_query_entity(&KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "memory_1".to_string(),
             })
@@ -5482,7 +4415,7 @@ fn updates_source_parsed_metadata_batch_for_nowledge_parser_shapes() {
     assert!(output.rows[4].duplicate);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Source".to_string(),
@@ -5620,7 +4553,7 @@ fn typed_source_parsed_metadata_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Source".to_string(),
@@ -5734,7 +4667,7 @@ fn creates_source_parsed_batch_for_nowledge_ingest_shapes() {
     assert!(output.rows[0].node_id.is_some());
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Source".to_string(),
@@ -5867,7 +4800,7 @@ fn typed_source_parsed_create_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Source".to_string(),
@@ -5906,8 +4839,24 @@ fn typed_source_parsed_create_batch_persists_as_one_wal_batch_and_replays() {
     std::fs::remove_dir_all(path).unwrap();
 }
 
+const SOURCE_LATEST_BY_NAME_QUERY: &str = "MATCH (s:Source) \
+     WHERE s.space_id = $space_id AND s.original_name = $original_name \
+     OPTIONAL MATCH (m:Memory)-[r:SOURCED_FROM]->(s) \
+     WITH s, count(r) AS sourced_memory_count \
+     RETURN s.id AS source_id, id(s) AS node_id, s.original_name AS original_name, \
+     COALESCE(s.version, 1) AS version, sourced_memory_count AS sourced_memory_count \
+     ORDER BY version DESC, source_id ASC, node_id ASC LIMIT 1";
+
+const SOURCE_LATEST_BY_SHA_QUERY: &str = "MATCH (s:Source) \
+     WHERE s.space_id = $space_id AND s.sha256 = $sha256 \
+     OPTIONAL MATCH (m:Memory)-[r:SOURCED_FROM]->(s) \
+     WITH s, count(r) AS sourced_memory_count \
+     RETURN s.id AS source_id, id(s) AS node_id, s.original_name AS original_name, \
+     COALESCE(s.version, 1) AS version, sourced_memory_count AS sourced_memory_count \
+     ORDER BY version DESC, source_id ASC, node_id ASC LIMIT 1";
+
 #[test]
-fn reads_source_latest_version_for_nowledge_version_lookups() {
+fn reads_source_latest_version_with_fixed_parameterized_queries() {
     let mut db = Database::new();
     db.query("CREATE (:Source {id: 'source-v1', original_name: 'Doc.md', sha256: 'sha-a', space_id: 'default', version: 1, created_at: 10})")
         .unwrap();
@@ -5917,64 +4866,77 @@ fn reads_source_latest_version_for_nowledge_version_lookups() {
         .unwrap();
     db.query("CREATE (:Source {id: 'source-sha-v4', original_name: 'Other.md', sha256: 'sha-a', space_id: 'default', version: 4, created_at: 40})")
         .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let by_name = db
-        .knowledge_source_latest_version(&KnowledgeSourceVersionLookupRequest {
-            original_name: Some("Doc.md".to_string()),
-            sha256: None,
-            space_id: "default".to_string(),
-        })
+    let graph_commit_epoch = db.commit_epoch();
+    let mut read = db.begin_read_transaction();
+    let by_name_parameters = BTreeMap::from([
+        (
+            "original_name".to_string(),
+            Value::String("Doc.md".to_string()),
+        ),
+        ("space_id".to_string(), Value::String("default".to_string())),
+    ]);
+    let by_name = read
+        .query_with_params_bounded(SOURCE_LATEST_BY_NAME_QUERY, &by_name_parameters, Some(1))
         .unwrap();
-    assert_eq!(by_name.graph_commit_epoch, graph_commit_epoch);
-    assert!(by_name.found);
-    assert_eq!(by_name.source_id.as_deref(), Some("source-v3"));
-    assert_eq!(by_name.version, Some(3));
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-
-    let by_sha = db
-        .knowledge_source_latest_version(&KnowledgeSourceVersionLookupRequest {
-            original_name: None,
-            sha256: Some("sha-a".to_string()),
-            space_id: "default".to_string(),
-        })
-        .unwrap();
-    assert!(by_sha.found);
-    assert_eq!(by_sha.source_id.as_deref(), Some("source-sha-v4"));
-    assert_eq!(by_sha.version, Some(4));
+    assert_eq!(read.commit_epoch(), graph_commit_epoch);
     assert_eq!(
-        by_sha.row.unwrap().original_name.as_deref(),
-        Some("Other.md")
+        by_name.rows[0].get("source_id"),
+        Some(&Value::String("source-v3".to_string()))
+    );
+    assert_eq!(by_name.rows[0].get("version"), Some(&Value::Int(3)));
+
+    let by_sha_parameters = BTreeMap::from([
+        ("sha256".to_string(), Value::String("sha-a".to_string())),
+        ("space_id".to_string(), Value::String("default".to_string())),
+    ]);
+    let by_sha = read
+        .query_with_params_bounded(SOURCE_LATEST_BY_SHA_QUERY, &by_sha_parameters, Some(1))
+        .unwrap();
+    assert_eq!(
+        by_sha.rows[0].get("source_id"),
+        Some(&Value::String("source-sha-v4".to_string()))
+    );
+    assert_eq!(by_sha.rows[0].get("version"), Some(&Value::Int(4)));
+    assert_eq!(
+        by_sha.rows[0].get("original_name"),
+        Some(&Value::String("Other.md".to_string()))
     );
 
-    let missing = db
-        .knowledge_source_latest_version(&KnowledgeSourceVersionLookupRequest {
-            original_name: Some("Missing.md".to_string()),
-            sha256: None,
-            space_id: "default".to_string(),
-        })
+    let missing_parameters = BTreeMap::from([
+        (
+            "original_name".to_string(),
+            Value::String("Missing.md".to_string()),
+        ),
+        ("space_id".to_string(), Value::String("default".to_string())),
+    ]);
+    let missing = read
+        .query_with_params_bounded(SOURCE_LATEST_BY_NAME_QUERY, &missing_parameters, Some(1))
         .unwrap();
-    assert!(!missing.found);
-    assert_eq!(missing.source_id, None);
+    assert!(missing.rows.is_empty());
 }
 
 #[test]
-fn source_latest_version_rejects_ambiguous_lookup() {
-    let db = Database::new();
-    let error = db
-        .knowledge_source_latest_version(&KnowledgeSourceVersionLookupRequest {
-            original_name: Some("Doc.md".to_string()),
-            sha256: Some("sha-a".to_string()),
-            space_id: "default".to_string(),
-        })
-        .unwrap_err();
-
-    assert!(error.to_string().contains("exactly one"));
-    assert_eq!(db.store.commit_epoch(), 0);
+fn source_latest_version_values_remain_parameters() {
+    let mut db = Database::new();
+    db.query("CREATE (:Source {id: 'source-v1', original_name: 'Doc.md', space_id: 'default', version: 1})")
+        .unwrap();
+    let mut read = db.begin_read_transaction();
+    let parameters = BTreeMap::from([
+        (
+            "original_name".to_string(),
+            Value::String("Doc.md') MATCH (n) RETURN n //".to_string()),
+        ),
+        ("space_id".to_string(), Value::String("default".to_string())),
+    ]);
+    assert!(read
+        .query_with_params_bounded(SOURCE_LATEST_BY_NAME_QUERY, &parameters, Some(1))
+        .unwrap()
+        .rows
+        .is_empty());
 }
 
 #[test]
-fn knowledge_source_latest_version_uses_query_runtime_plan_cache() {
+fn source_latest_version_query_uses_plan_cache() {
     let mut db = Database::new_with_config(DatabaseConfig {
         max_plan_cache_entries: Some(8),
         statement_summary_capacity: 8,
@@ -5988,19 +4950,26 @@ fn knowledge_source_latest_version_uses_query_runtime_plan_cache() {
         "CREATE (:Source {id: 'source-unversioned', original_name: 'Doc.md', space_id: 'default'})",
     )
     .unwrap();
-    let request = KnowledgeSourceVersionLookupRequest {
-        original_name: Some("Doc.md".to_string()),
-        sha256: None,
-        space_id: "default".to_string(),
-    };
-
-    let first = db.knowledge_source_latest_version(&request).unwrap();
-    let second = db.knowledge_source_latest_version(&request).unwrap();
+    let parameters = BTreeMap::from([
+        (
+            "original_name".to_string(),
+            Value::String("Doc.md".to_string()),
+        ),
+        ("space_id".to_string(), Value::String("default".to_string())),
+    ]);
+    let first = db
+        .query_read_only_with_params_bounded(SOURCE_LATEST_BY_NAME_QUERY, &parameters, Some(1))
+        .unwrap();
+    let second = db
+        .query_read_only_with_params_bounded(SOURCE_LATEST_BY_NAME_QUERY, &parameters, Some(1))
+        .unwrap();
 
     assert_eq!(first, second);
-    assert!(first.found);
-    assert_eq!(first.source_id.as_deref(), Some("source-v2"));
-    assert_eq!(first.version, Some(2));
+    assert_eq!(
+        first.rows[0].get("source_id"),
+        Some(&Value::String("source-v2".to_string()))
+    );
+    assert_eq!(first.rows[0].get("version"), Some(&Value::Int(2)));
     let stats = db.plan_cache_stats();
     assert_eq!(stats.entries, 1);
     assert_eq!(stats.misses, 1);
@@ -6169,897 +5138,6 @@ fn typed_source_revision_batch_persists_as_one_wal_batch_and_replays() {
 }
 
 #[test]
-fn counts_source_sourced_memory_fan_in_for_nowledge_shape() {
-    let mut db = Database::new();
-    db.query("CREATE (:Source {id: 'source_a'})").unwrap();
-    db.query("CREATE (:Source {id: 'source_b'})").unwrap();
-    db.query("CREATE (:Memory {id: 'memory_a'})").unwrap();
-    db.query("CREATE (:Memory {id: 'memory_b'})").unwrap();
-    db.query("CREATE (:Entity {id: 'entity_a'})").unwrap();
-    db.query("MATCH (m:Memory {id: 'memory_a'}), (s:Source {id: 'source_a'}) CREATE (m)-[:SOURCED_FROM]->(s)")
-        .unwrap();
-    db.query("MATCH (m:Memory {id: 'memory_b'}), (s:Source {id: 'source_a'}) CREATE (m)-[:SOURCED_FROM]->(s)")
-        .unwrap();
-    db.query("MATCH (e:Entity {id: 'entity_a'}), (s:Source {id: 'source_a'}) CREATE (e)-[:SOURCED_FROM]->(s)")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let output = db
-        .knowledge_source_sourced_memory_count(&KnowledgeSourceSourcedMemoryCountRequest {
-            source_id: "source_a".to_string(),
-        })
-        .unwrap();
-
-    assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(output.source_id, "source_a");
-    assert!(output.found);
-    assert_eq!(output.source_node_id, Some(0));
-    assert_eq!(output.sourced_memory_count, 2);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-
-    let snapshot = db.begin_read_transaction();
-    db.query("MATCH (m:Memory {id: 'memory_a'}), (s:Source {id: 'source_b'}) CREATE (m)-[:SOURCED_FROM]->(s)")
-        .unwrap();
-    let snapshot_output = snapshot
-        .knowledge_source_sourced_memory_count(&KnowledgeSourceSourcedMemoryCountRequest {
-            source_id: "source_b".to_string(),
-        })
-        .unwrap();
-    assert!(snapshot_output.found);
-    assert_eq!(snapshot_output.sourced_memory_count, 0);
-
-    let missing = db
-        .knowledge_source_sourced_memory_count(&KnowledgeSourceSourcedMemoryCountRequest {
-            source_id: "missing".to_string(),
-        })
-        .unwrap();
-    assert!(!missing.found);
-    assert_eq!(missing.sourced_memory_count, 0);
-}
-
-#[test]
-fn source_sourced_memory_count_rejects_empty_source_id_without_wal() {
-    let path = unique_test_dir("source_sourced_memory_count_empty_id");
-    let mut db = Database::open(&path).unwrap();
-    db.query("CREATE (:Source {id: 'source_a'})").unwrap();
-    let graph_commit_epoch_before = db.store.commit_epoch();
-    let wal_before = read_test_wal(&path).unwrap();
-
-    let error = db
-        .knowledge_source_sourced_memory_count(&KnowledgeSourceSourcedMemoryCountRequest {
-            source_id: String::new(),
-        })
-        .unwrap_err();
-
-    assert!(error.to_string().contains("non-empty source id"));
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
-    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
-    std::fs::remove_dir_all(path).unwrap();
-}
-
-#[test]
-fn reads_source_detail_count_and_id_lists_for_nowledge_shapes() {
-    let mut db = Database::new();
-    db.query("CREATE (:Source {id: 'source_a', original_name: 'Alpha', title: 'Alpha Title', source_type: 'file', lifecycle_state: 'extracted', space_id: '', parsed_path: '/parsed/a', file_path: '/tmp/a.md', mime_type: 'text/markdown', memory_count: 2, chunk_count: 4, size_bytes: 128, created_at: 10, updated_at: 20})")
-        .unwrap();
-    db.query("CREATE (:Source {id: 'source_b', original_name: 'Beta', source_type: 'url', lifecycle_state: 'indexed', space_id: 'team', memory_count: 1, created_at: 30})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'memory_a', title: 'Memory A', content: 'Alpha content', unit_type: 'fact', confidence: 0.8})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'memory_b', title: 'Memory B', content: 'Beta content', unit_type: 'note', confidence: 0.6})")
-        .unwrap();
-    db.query("MATCH (m:Memory {id: 'memory_a'}), (s:Source {id: 'source_a'}) CREATE (m)-[:SOURCED_FROM {chunk_index: 2, chunk_range: '10..20', source_version: 'v1', created_at: 200}]->(s)")
-        .unwrap();
-    db.query("MATCH (m:Memory {id: 'memory_b'}), (s:Source {id: 'source_a'}) CREATE (m)-[:SOURCED_FROM {chunk_index: 1, chunk_range: '0..10', source_version: 'v1', created_at: 100}]->(s)")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let count = db.knowledge_source_count();
-    assert_eq!(count.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(count.count, 2);
-
-    let detail = db
-        .knowledge_source(&KnowledgeSourceRequest {
-            source_id: "source_a".to_string(),
-        })
-        .unwrap();
-    assert_eq!(detail.graph_commit_epoch, graph_commit_epoch);
-    assert!(detail.found);
-    let row = detail.row.unwrap();
-    assert_eq!(row.source_id.as_deref(), Some("source_a"));
-    assert_eq!(row.original_name.as_deref(), Some("Alpha"));
-    assert_eq!(row.title.as_deref(), Some("Alpha Title"));
-    assert_eq!(row.source_type.as_deref(), Some("file"));
-    assert_eq!(row.lifecycle_state.as_deref(), Some("extracted"));
-    assert_eq!(row.normalized_space_id, "default");
-    assert_eq!(row.parsed_path.as_deref(), Some("/parsed/a"));
-    assert_eq!(row.file_path.as_deref(), Some("/tmp/a.md"));
-    assert_eq!(row.mime_type.as_deref(), Some("text/markdown"));
-    assert_eq!(row.memory_count, Some(2));
-    assert_eq!(row.chunk_count, Some(4));
-    assert_eq!(row.size_bytes, Some(128));
-    assert_eq!(row.sourced_memory_count, 2);
-
-    let extracted = db
-        .knowledge_source_ids(&KnowledgeSourceIdListRequest {
-            lifecycle_state: Some("extracted".to_string()),
-            normalized_space_id: None,
-            limit: 10,
-        })
-        .unwrap();
-    assert_eq!(extracted.source_ids, vec!["source_a".to_string()]);
-    assert_eq!(extracted.matched_count, 1);
-    assert_eq!(extracted.returned_count, 1);
-
-    let default_sources = db
-        .knowledge_source_ids(&KnowledgeSourceIdListRequest {
-            lifecycle_state: None,
-            normalized_space_id: Some("default".to_string()),
-            limit: 10,
-        })
-        .unwrap();
-    assert_eq!(default_sources.source_ids, vec!["source_a".to_string()]);
-
-    let limited = db
-        .knowledge_source_ids(&KnowledgeSourceIdListRequest {
-            lifecycle_state: None,
-            normalized_space_id: None,
-            limit: 1,
-        })
-        .unwrap();
-    assert_eq!(limited.matched_count, 2);
-    assert_eq!(limited.returned_count, 1);
-
-    let memories = db
-        .knowledge_source_memories(&KnowledgeSourceMemoryListRequest {
-            source_id: "source_a".to_string(),
-            limit: 0,
-        })
-        .unwrap();
-    assert_eq!(memories.graph_commit_epoch, graph_commit_epoch);
-    assert!(memories.found);
-    assert_eq!(memories.source_id, "source_a");
-    assert!(memories.source_node_id.is_some());
-    assert_eq!(memories.matched_count, 2);
-    assert_eq!(memories.returned_count, 2);
-    assert_eq!(memories.rows[0].memory_id.as_deref(), Some("memory_b"));
-    assert_eq!(memories.rows[0].title.as_deref(), Some("Memory B"));
-    assert_eq!(memories.rows[0].content.as_deref(), Some("Beta content"));
-    assert_eq!(memories.rows[0].unit_type.as_deref(), Some("note"));
-    assert_eq!(memories.rows[0].confidence, Some(Value::Float(0.6)));
-    assert_eq!(memories.rows[0].chunk_index, Some(1));
-    assert_eq!(memories.rows[0].chunk_range.as_deref(), Some("0..10"));
-    assert_eq!(memories.rows[0].source_version.as_deref(), Some("v1"));
-    assert_eq!(memories.rows[0].created_at, Some(Value::Int(100)));
-    assert_eq!(memories.rows[1].memory_id.as_deref(), Some("memory_a"));
-    assert_eq!(memories.rows[1].chunk_index, Some(2));
-
-    let limited_memories = db
-        .knowledge_source_memories(&KnowledgeSourceMemoryListRequest {
-            source_id: "source_a".to_string(),
-            limit: 1,
-        })
-        .unwrap();
-    assert_eq!(limited_memories.matched_count, 2);
-    assert_eq!(limited_memories.returned_count, 1);
-    assert_eq!(
-        limited_memories.rows[0].memory_id.as_deref(),
-        Some("memory_b")
-    );
-
-    let missing_memories = db
-        .knowledge_source_memories(&KnowledgeSourceMemoryListRequest {
-            source_id: "missing".to_string(),
-            limit: 10,
-        })
-        .unwrap();
-    assert!(!missing_memories.found);
-    assert_eq!(missing_memories.source_node_id, None);
-    assert_eq!(missing_memories.matched_count, 0);
-    assert_eq!(missing_memories.returned_count, 0);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-}
-
-#[test]
-fn source_read_requests_validate_nowledge_inputs() {
-    let db = Database::new();
-
-    let source_error = db
-        .knowledge_source(&KnowledgeSourceRequest {
-            source_id: String::new(),
-        })
-        .unwrap_err();
-    assert!(source_error.to_string().contains("non-empty source id"));
-
-    let lifecycle_error = db
-        .knowledge_source_ids(&KnowledgeSourceIdListRequest {
-            lifecycle_state: Some(String::new()),
-            normalized_space_id: None,
-            limit: 10,
-        })
-        .unwrap_err();
-    assert!(lifecycle_error
-        .to_string()
-        .contains("non-empty lifecycle state"));
-
-    let space_error = db
-        .knowledge_source_ids(&KnowledgeSourceIdListRequest {
-            lifecycle_state: None,
-            normalized_space_id: Some(String::new()),
-            limit: 10,
-        })
-        .unwrap_err();
-    assert!(space_error
-        .to_string()
-        .contains("non-empty normalized space id"));
-
-    let source_memories_error = db
-        .knowledge_source_memories(&KnowledgeSourceMemoryListRequest {
-            source_id: String::new(),
-            limit: 10,
-        })
-        .unwrap_err();
-    assert!(source_memories_error
-        .to_string()
-        .contains("non-empty source id"));
-}
-
-#[test]
-fn projects_source_memories_for_nowledge_growth() {
-    let mut db = Database::new();
-    db.query("CREATE (:Source {id: 'projected_source_a', original_name: 'Projected Source'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'projected_source_memory_a', title: 'Alpha', content: 'alpha body', confidence: 0.8, space_id: '', future_memory_field: 'memory-a'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'projected_source_memory_b', title: 'Beta', content: 'beta body', confidence: 0.6, space_id: 'team', future_memory_field: 'memory-b'})")
-        .unwrap();
-    db.query("MATCH (m:Memory {id: 'projected_source_memory_a'}), (s:Source {id: 'projected_source_a'}) CREATE (m)-[:SOURCED_FROM {chunk_index: 2, chunk_range: '10..20', source_version: 'v1', created_at: 200, future_edge_field: 'edge-a'}]->(s)")
-        .unwrap();
-    db.query("MATCH (m:Memory {id: 'projected_source_memory_b'}), (s:Source {id: 'projected_source_a'}) CREATE (m)-[:SOURCED_FROM {chunk_index: 1, chunk_range: '0..10', source_version: 'v1', created_at: 100, future_edge_field: 'edge-b'}]->(s)")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let snapshot = db.begin_read_transaction();
-
-    db.query("CREATE (:Memory {id: 'projected_source_memory_c', title: 'Gamma', confidence: 1.0, future_memory_field: 'memory-c'})")
-        .unwrap();
-    db.query("MATCH (m:Memory {id: 'projected_source_memory_c'}), (s:Source {id: 'projected_source_a'}) CREATE (m)-[:SOURCED_FROM {chunk_index: 0, future_edge_field: 'edge-c'}]->(s)")
-        .unwrap();
-
-    let projected = db
-        .knowledge_source_memory_projected_list(&KnowledgeSourceMemoryProjectedListRequest {
-            list: KnowledgeSourceMemoryListRequest {
-                source_id: "projected_source_a".to_string(),
-                limit: 2,
-            },
-            memory_property_names: vec![
-                "title".to_string(),
-                "future_memory_field".to_string(),
-                "space_id".to_string(),
-                "title".to_string(),
-            ],
-            relationship_property_names: vec![
-                "chunk_index".to_string(),
-                "future_edge_field".to_string(),
-            ],
-        })
-        .unwrap();
-    assert!(projected.found);
-    assert_eq!(projected.source_id, "projected_source_a");
-    assert!(projected.source_node_id.is_some());
-    assert_eq!(projected.matched_count, 3);
-    assert_eq!(projected.returned_count, 2);
-    assert_eq!(
-        projected
-            .rows
-            .iter()
-            .map(|row| row.memory_id.as_deref())
-            .collect::<Vec<_>>(),
-        vec![
-            Some("projected_source_memory_c"),
-            Some("projected_source_memory_b")
-        ]
-    );
-    assert_eq!(projected.rows[0].normalized_space_id, "default");
-    assert_eq!(
-        projected.rows[0]
-            .memory_properties
-            .get("future_memory_field"),
-        Some(&Value::String("memory-c".to_string()))
-    );
-    assert_eq!(
-        projected.rows[0].relationship_properties.get("chunk_index"),
-        Some(&Value::Int(0))
-    );
-    assert_eq!(
-        projected.rows[1]
-            .relationship_properties
-            .get("future_edge_field"),
-        Some(&Value::String("edge-b".to_string()))
-    );
-    assert_eq!(projected.rows[1].normalized_space_id, "team");
-    assert!(!projected.rows[1]
-        .memory_properties
-        .contains_key("confidence"));
-    assert!(!projected.rows[1]
-        .relationship_properties
-        .contains_key("source_version"));
-
-    let snapshot_projected = snapshot
-        .knowledge_source_memory_projected_list(&KnowledgeSourceMemoryProjectedListRequest {
-            list: KnowledgeSourceMemoryListRequest {
-                source_id: "projected_source_a".to_string(),
-                limit: 0,
-            },
-            memory_property_names: vec!["title".to_string()],
-            relationship_property_names: vec!["future_edge_field".to_string()],
-        })
-        .unwrap();
-    assert_eq!(snapshot_projected.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot_projected.matched_count, 2);
-    assert_eq!(
-        snapshot_projected
-            .rows
-            .iter()
-            .map(|row| row.memory_id.as_deref())
-            .collect::<Vec<_>>(),
-        vec![
-            Some("projected_source_memory_b"),
-            Some("projected_source_memory_a")
-        ]
-    );
-
-    let missing_projected = db
-        .knowledge_source_memory_projected_list(&KnowledgeSourceMemoryProjectedListRequest {
-            list: KnowledgeSourceMemoryListRequest {
-                source_id: "missing_projected_source".to_string(),
-                limit: 10,
-            },
-            memory_property_names: vec!["title".to_string()],
-            relationship_property_names: vec!["chunk_index".to_string()],
-        })
-        .unwrap();
-    assert!(!missing_projected.found);
-    assert_eq!(missing_projected.source_node_id, None);
-    assert_eq!(missing_projected.matched_count, 0);
-    assert_eq!(missing_projected.returned_count, 0);
-}
-
-#[test]
-fn source_memory_projected_read_rejects_empty_property_names_without_wal() {
-    let path = unique_test_dir("source_memory_projected_empty_property_without_wal");
-    let mut db = Database::open(&path).unwrap();
-    db.query("CREATE (:Source {id: 'projected_source_wal'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'projected_source_memory_wal'})")
-        .unwrap();
-    db.query("MATCH (m:Memory {id: 'projected_source_memory_wal'}), (s:Source {id: 'projected_source_wal'}) CREATE (m)-[:SOURCED_FROM]->(s)")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let wal_before = read_test_wal(&path).unwrap();
-
-    let memory_property_error = db
-        .knowledge_source_memory_projected_list(&KnowledgeSourceMemoryProjectedListRequest {
-            list: KnowledgeSourceMemoryListRequest {
-                source_id: "projected_source_wal".to_string(),
-                limit: 10,
-            },
-            memory_property_names: vec![String::new()],
-            relationship_property_names: Vec::new(),
-        })
-        .unwrap_err();
-    assert!(memory_property_error
-        .to_string()
-        .contains("non-empty property names"));
-
-    let relationship_property_error = db
-        .knowledge_source_memory_projected_list(&KnowledgeSourceMemoryProjectedListRequest {
-            list: KnowledgeSourceMemoryListRequest {
-                source_id: "projected_source_wal".to_string(),
-                limit: 10,
-            },
-            memory_property_names: Vec::new(),
-            relationship_property_names: vec![String::new()],
-        })
-        .unwrap_err();
-    assert!(relationship_property_error
-        .to_string()
-        .contains("non-empty property names"));
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
-}
-
-#[test]
-fn lists_sources_for_nowledge_summary_page_and_ranking_shapes() {
-    let mut db = Database::new();
-    db.query("CREATE (:Source {id: 'source_a', original_name: 'Alpha', title: 'Alpha Title', summary: 'Alpha summary', source_type: 'file', lifecycle_state: 'parsed', space_id: '', parsed_path: '/parsed/a', file_path: '/tmp/a.md', mime_type: 'text/markdown', source_url: 'file:///tmp/a.md', memory_count: 2, chunk_count: 4, size_bytes: 128, version: 3, created_at: 10, updated_at: 20, metadata: 'generated:yes'})")
-        .unwrap();
-    db.query("CREATE (:Source {id: 'source_b', original_name: 'Beta', summary: 'Beta summary', source_type: 'web', lifecycle_state: 'indexed', space_id: 'archive', file_path: '/tmp/b.html', mime_type: 'text/html', memory_count: 5, chunk_count: 1, size_bytes: 256, created_at: 30, updated_at: 40})")
-        .unwrap();
-    db.query("CREATE (:Source {id: 'source_c', source_type: 'pdf', lifecycle_state: 'ingested', space_id: 'default', created_at: 50})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let bulk = db
-        .knowledge_sources(&KnowledgeSourceListRequest {
-            source_ids: vec![
-                "source_b".to_string(),
-                "missing".to_string(),
-                "source_a".to_string(),
-            ],
-            limit: 0,
-            order: KnowledgeSourceListOrder::SourceIdAsc,
-            ..KnowledgeSourceListRequest::default()
-        })
-        .unwrap();
-    assert_eq!(bulk.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(bulk.matched_count, 2);
-    assert_eq!(bulk.returned_count, 2);
-    assert_eq!(bulk.missing_source_ids, vec!["missing".to_string()]);
-    assert_eq!(bulk.rows[0].source_id.as_deref(), Some("source_a"));
-    assert_eq!(bulk.rows[0].display_name, "Alpha");
-    assert_eq!(bulk.rows[0].summary.as_deref(), Some("Alpha summary"));
-    assert_eq!(bulk.rows[0].source_type.as_deref(), Some("file"));
-    assert_eq!(bulk.rows[0].lifecycle_state.as_deref(), Some("parsed"));
-    assert_eq!(bulk.rows[0].raw_space_id, None);
-    assert_eq!(bulk.rows[0].normalized_space_id, "default");
-    assert_eq!(bulk.rows[0].parsed_path.as_deref(), Some("/parsed/a"));
-    assert_eq!(bulk.rows[0].file_path.as_deref(), Some("/tmp/a.md"));
-    assert_eq!(bulk.rows[0].mime_type.as_deref(), Some("text/markdown"));
-    assert_eq!(bulk.rows[0].source_url.as_deref(), Some("file:///tmp/a.md"));
-    assert_eq!(
-        bulk.rows[0].metadata,
-        Some(Value::String("generated:yes".to_string()))
-    );
-    assert_eq!(bulk.rows[0].memory_count, 2);
-    assert_eq!(bulk.rows[0].chunk_count, 4);
-    assert_eq!(bulk.rows[0].size_bytes, 128);
-    assert_eq!(bulk.rows[0].version, 3);
-    assert_eq!(bulk.rows[1].source_id.as_deref(), Some("source_b"));
-
-    let ranked = db
-        .knowledge_sources(&KnowledgeSourceListRequest {
-            limit: 1,
-            order: KnowledgeSourceListOrder::MemoryCountDesc,
-            ..KnowledgeSourceListRequest::default()
-        })
-        .unwrap();
-    assert_eq!(ranked.matched_count, 3);
-    assert_eq!(ranked.returned_count, 1);
-    assert_eq!(ranked.rows[0].source_id.as_deref(), Some("source_b"));
-    assert_eq!(ranked.rows[0].memory_count, 5);
-
-    let parsed = db
-        .knowledge_sources(&KnowledgeSourceListRequest {
-            parsed_path_required: true,
-            limit: 12,
-            order: KnowledgeSourceListOrder::CreatedAtDesc,
-            ..KnowledgeSourceListRequest::default()
-        })
-        .unwrap();
-    assert_eq!(parsed.matched_count, 1);
-    assert_eq!(parsed.rows[0].source_id.as_deref(), Some("source_a"));
-
-    let attention = db
-        .knowledge_sources(&KnowledgeSourceListRequest {
-            lifecycle_states: vec![
-                "ingested".to_string(),
-                "parsed".to_string(),
-                "chunked".to_string(),
-                "error".to_string(),
-            ],
-            limit: 15,
-            order: KnowledgeSourceListOrder::CreatedAtDesc,
-            ..KnowledgeSourceListRequest::default()
-        })
-        .unwrap();
-    assert_eq!(attention.matched_count, 2);
-    assert_eq!(attention.rows[0].source_id.as_deref(), Some("source_c"));
-    assert_eq!(attention.rows[1].source_id.as_deref(), Some("source_a"));
-
-    let page = db
-        .knowledge_sources(&KnowledgeSourceListRequest {
-            after_source_id: Some("source_a".to_string()),
-            limit: 10,
-            order: KnowledgeSourceListOrder::SourceIdAsc,
-            ..KnowledgeSourceListRequest::default()
-        })
-        .unwrap();
-    assert_eq!(
-        page.rows
-            .iter()
-            .map(|row| row.source_id.as_deref().unwrap())
-            .collect::<Vec<_>>(),
-        vec!["source_b", "source_c"]
-    );
-
-    let generated = db
-        .knowledge_sources(&KnowledgeSourceListRequest {
-            metadata_contains: Some("generated".to_string()),
-            limit: 10,
-            order: KnowledgeSourceListOrder::SourceIdAsc,
-            ..KnowledgeSourceListRequest::default()
-        })
-        .unwrap();
-    assert_eq!(generated.matched_count, 1);
-    assert_eq!(generated.rows[0].source_id.as_deref(), Some("source_a"));
-
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-}
-
-#[test]
-fn projects_source_list_fields_for_rest_fs_growth() {
-    let mut db = Database::new();
-    db.query("CREATE (:Source {id: 'source_a', original_name: 'Alpha', summary: 'Alpha summary', source_type: 'file', lifecycle_state: 'parsed', space_id: '', parsed_path: '/parsed/a', mime_type: 'text/markdown', memory_count: 2, chunk_count: 4, size_bytes: 128, created_at: 10, updated_at: 20, future_field: 'future-a'})")
-        .unwrap();
-    db.query("CREATE (:Source {id: 'source_b', original_name: 'Beta', summary: 'Beta summary', source_type: 'web', lifecycle_state: 'indexed', space_id: 'team', mime_type: 'text/html', memory_count: 5, chunk_count: 1, size_bytes: 256, created_at: 30, updated_at: 40, future_field: 'future-b'})")
-        .unwrap();
-    db.query("CREATE (:Source {id: 'source_c', original_name: 'Gamma', lifecycle_state: 'indexed', memory_count: 1, created_at: 50, updated_at: 60})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let projected = db
-        .knowledge_source_projected_list(&KnowledgeSourceProjectedListRequest {
-            list: KnowledgeSourceListRequest {
-                after_source_id: Some("source_a".to_string()),
-                limit: 1,
-                order: KnowledgeSourceListOrder::SourceIdAsc,
-                ..KnowledgeSourceListRequest::default()
-            },
-            property_names: vec![
-                "original_name".to_string(),
-                "summary".to_string(),
-                "mime_type".to_string(),
-                "size_bytes".to_string(),
-                "space_id".to_string(),
-                "future_field".to_string(),
-                "updated_at".to_string(),
-                "original_name".to_string(),
-            ],
-        })
-        .unwrap();
-
-    assert_eq!(projected.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(projected.matched_count, 2);
-    assert_eq!(projected.returned_count, 1);
-    assert_eq!(projected.rows[0].source_id.as_deref(), Some("source_b"));
-    assert_eq!(projected.rows[0].normalized_space_id, "team");
-    assert_eq!(
-        projected.rows[0].properties.get("original_name"),
-        Some(&Value::String("Beta".to_string()))
-    );
-    assert_eq!(
-        projected.rows[0].properties.get("future_field"),
-        Some(&Value::String("future-b".to_string()))
-    );
-    assert_eq!(
-        projected.rows[0].properties.get("updated_at"),
-        Some(&Value::Int(40))
-    );
-    assert!(!projected.rows[0].properties.contains_key("memory_count"));
-
-    let ranked = db
-        .knowledge_source_projected_list(&KnowledgeSourceProjectedListRequest {
-            list: KnowledgeSourceListRequest {
-                limit: 2,
-                order: KnowledgeSourceListOrder::MemoryCountDesc,
-                ..KnowledgeSourceListRequest::default()
-            },
-            property_names: vec!["original_name".to_string()],
-        })
-        .unwrap();
-    assert_eq!(
-        ranked
-            .rows
-            .iter()
-            .map(|row| row.source_id.as_deref().unwrap())
-            .collect::<Vec<_>>(),
-        vec!["source_b", "source_a"]
-    );
-    assert!(!ranked.rows[0].properties.contains_key("memory_count"));
-
-    let snapshot = db.begin_read_transaction();
-    db.query("CREATE (:Source {id: 'source_late', original_name: 'Late', memory_count: 99})")
-        .unwrap();
-    let snapshot_output = snapshot
-        .knowledge_source_projected_list(&KnowledgeSourceProjectedListRequest {
-            list: KnowledgeSourceListRequest {
-                limit: 10,
-                order: KnowledgeSourceListOrder::MemoryCountDesc,
-                ..KnowledgeSourceListRequest::default()
-            },
-            property_names: vec!["original_name".to_string(), "memory_count".to_string()],
-        })
-        .unwrap();
-    assert_eq!(snapshot_output.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot_output.matched_count, 3);
-    assert!(snapshot_output
-        .rows
-        .iter()
-        .all(|row| row.source_id.as_deref() != Some("source_late")));
-}
-
-#[test]
-fn source_list_rejects_unbounded_or_empty_filters() {
-    let db = Database::new();
-
-    let unbounded = db
-        .knowledge_sources(&KnowledgeSourceListRequest::default())
-        .unwrap_err();
-    assert!(unbounded.to_string().contains("bounded limit or a filter"));
-
-    let empty_id = db
-        .knowledge_sources(&KnowledgeSourceListRequest {
-            source_ids: vec![String::new()],
-            limit: 10,
-            ..KnowledgeSourceListRequest::default()
-        })
-        .unwrap_err();
-    assert!(empty_id.to_string().contains("non-empty source ids"));
-
-    let empty_state = db
-        .knowledge_sources(&KnowledgeSourceListRequest {
-            lifecycle_states: vec![String::new()],
-            limit: 10,
-            ..KnowledgeSourceListRequest::default()
-        })
-        .unwrap_err();
-    assert!(empty_state
-        .to_string()
-        .contains("non-empty lifecycle states"));
-
-    let empty_marker = db
-        .knowledge_sources(&KnowledgeSourceListRequest {
-            metadata_contains: Some(String::new()),
-            limit: 10,
-            ..KnowledgeSourceListRequest::default()
-        })
-        .unwrap_err();
-    assert!(empty_marker
-        .to_string()
-        .contains("non-empty metadata marker"));
-}
-
-#[test]
-fn projected_source_list_rejects_empty_property_names_without_wal() {
-    let path = unique_test_dir("projected_source_list_empty_property_without_wal");
-    let mut db = Database::open(&path).unwrap();
-    db.query("CREATE (:Source {id: 'source_a', lifecycle_state: 'indexed'})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let wal_before = read_test_wal(&path).unwrap();
-
-    let error = db
-        .knowledge_source_projected_list(&KnowledgeSourceProjectedListRequest {
-            list: KnowledgeSourceListRequest {
-                lifecycle_states: vec!["indexed".to_string()],
-                limit: 10,
-                ..KnowledgeSourceListRequest::default()
-            },
-            property_names: vec![String::new()],
-        })
-        .unwrap_err();
-
-    assert!(error.to_string().contains("non-empty property names"));
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
-}
-
-#[test]
-fn reads_memory_source_attributions_for_nowledge_bulk_shapes() {
-    let mut db = Database::new();
-    db.query("CREATE (:Source {id: 'source_a', original_name: 'Alpha Source', source_type: 'file', file_path: '/tmp/a.md'})")
-        .unwrap();
-    db.query("CREATE (:Source {id: 'source_b', original_name: 'Beta Source', source_type: 'web'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'memory_a', title: 'Memory Alpha', content: 'Alpha content for source attribution detail', unit_type: 'fact', importance: 0.7, pagerank_score: 0.9, community_id: 'c1', space_id: '', source: 'agent', created_at: 10, updated_at: 20, event_start: 1, event_end: 2})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'memory_b', content: 'Beta content without title', unit_type: 'note', importance: 0.4, space_id: 'archive', created_at: 30})")
-        .unwrap();
-    db.query("MATCH (m:Memory {id: 'memory_a'}), (s:Source {id: 'source_a'}) CREATE (m)-[:SOURCED_FROM {chunk_index: 2, chunk_range: '10..20', source_version: 'v1', created_at: 100}]->(s)")
-        .unwrap();
-    db.query("MATCH (m:Memory {id: 'memory_b'}), (s:Source {id: 'source_a'}) CREATE (m)-[:SOURCED_FROM {chunk_index: 1, chunk_range: '0..10', source_version: 'v1', created_at: 90}]->(s)")
-        .unwrap();
-    db.query("MATCH (m:Memory {id: 'memory_a'}), (s:Source {id: 'source_b'}) CREATE (m)-[:SOURCED_FROM {chunk_index: 3}]->(s)")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let by_memory = db
-        .knowledge_memory_source_attributions(&KnowledgeMemorySourceAttributionRequest {
-            memory_ids: vec!["memory_a".to_string(), "missing".to_string()],
-            source_ids: Vec::new(),
-            limit: 0,
-        })
-        .unwrap();
-    assert_eq!(by_memory.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(by_memory.matched_count, 2);
-    assert_eq!(by_memory.returned_count, 2);
-    assert_eq!(by_memory.missing_memory_ids, vec!["missing".to_string()]);
-    assert_eq!(by_memory.missing_source_ids, Vec::<String>::new());
-    assert_eq!(by_memory.rows[0].source_id.as_deref(), Some("source_a"));
-    assert_eq!(by_memory.rows[0].memory_id.as_deref(), Some("memory_a"));
-    assert_eq!(by_memory.rows[0].memory_display_title, "Memory Alpha");
-    assert_eq!(
-        by_memory.rows[0].memory_title.as_deref(),
-        Some("Memory Alpha")
-    );
-    assert_eq!(
-        by_memory.rows[0].memory_content.as_deref(),
-        Some("Alpha content for source attribution detail")
-    );
-    assert_eq!(
-        by_memory.rows[0].memory_content_preview.as_deref(),
-        Some("Alpha content for source attribution detail")
-    );
-    assert_eq!(by_memory.rows[0].memory_unit_type.as_deref(), Some("fact"));
-    assert_eq!(by_memory.rows[0].memory_importance, Some(Value::Float(0.7)));
-    assert_eq!(
-        by_memory.rows[0].memory_pagerank_score,
-        Some(Value::Float(0.9))
-    );
-    assert_eq!(
-        by_memory.rows[0].memory_community_id,
-        Some(Value::String("c1".to_string()))
-    );
-    assert_eq!(by_memory.rows[0].memory_raw_space_id, None);
-    assert_eq!(by_memory.rows[0].memory_normalized_space_id, "default");
-    assert_eq!(by_memory.rows[0].memory_source.as_deref(), Some("agent"));
-    assert_eq!(by_memory.rows[0].memory_created_at, Some(Value::Int(10)));
-    assert_eq!(by_memory.rows[0].memory_updated_at, Some(Value::Int(20)));
-    assert_eq!(by_memory.rows[0].memory_event_start, Some(Value::Int(1)));
-    assert_eq!(by_memory.rows[0].memory_event_end, Some(Value::Int(2)));
-    assert_eq!(
-        by_memory.rows[0].source_original_name.as_deref(),
-        Some("Alpha Source")
-    );
-    assert_eq!(by_memory.rows[0].source_type.as_deref(), Some("file"));
-    assert_eq!(
-        by_memory.rows[0].source_file_path.as_deref(),
-        Some("/tmp/a.md")
-    );
-    assert_eq!(by_memory.rows[0].chunk_index, Some(2));
-    assert_eq!(by_memory.rows[0].chunk_range.as_deref(), Some("10..20"));
-    assert_eq!(by_memory.rows[0].source_version.as_deref(), Some("v1"));
-    assert_eq!(
-        by_memory.rows[0].relationship_created_at,
-        Some(Value::Int(100))
-    );
-    assert_eq!(by_memory.rows[1].source_id.as_deref(), Some("source_b"));
-
-    let by_source = db
-        .knowledge_memory_source_attributions(&KnowledgeMemorySourceAttributionRequest {
-            memory_ids: Vec::new(),
-            source_ids: vec!["source_a".to_string(), "missing_source".to_string()],
-            limit: 1,
-        })
-        .unwrap();
-    assert_eq!(by_source.matched_count, 2);
-    assert_eq!(by_source.returned_count, 1);
-    assert_eq!(
-        by_source.missing_source_ids,
-        vec!["missing_source".to_string()]
-    );
-    assert_eq!(by_source.rows[0].source_id.as_deref(), Some("source_a"));
-    assert_eq!(by_source.rows[0].memory_id.as_deref(), Some("memory_a"));
-
-    let combined = db
-        .knowledge_memory_source_attributions(&KnowledgeMemorySourceAttributionRequest {
-            memory_ids: vec!["memory_b".to_string()],
-            source_ids: vec!["source_a".to_string()],
-            limit: 10,
-        })
-        .unwrap();
-    assert_eq!(combined.matched_count, 1);
-    assert_eq!(combined.rows[0].memory_id.as_deref(), Some("memory_b"));
-    assert_eq!(
-        combined.rows[0].memory_display_title,
-        "Beta content without title"
-    );
-    assert_eq!(
-        combined.rows[0].memory_raw_space_id.as_deref(),
-        Some("archive")
-    );
-    assert_eq!(combined.rows[0].memory_normalized_space_id, "archive");
-    assert_eq!(combined.rows[0].chunk_index, Some(1));
-
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-}
-
-#[test]
-fn memory_source_attribution_rejects_unbounded_or_empty_filters() {
-    let db = Database::new();
-
-    let unbounded = db
-        .knowledge_memory_source_attributions(&KnowledgeMemorySourceAttributionRequest::default())
-        .unwrap_err();
-    assert!(unbounded
-        .to_string()
-        .contains("requires memory ids or source ids"));
-
-    let empty_memory_id = db
-        .knowledge_memory_source_attributions(&KnowledgeMemorySourceAttributionRequest {
-            memory_ids: vec![String::new()],
-            source_ids: Vec::new(),
-            limit: 10,
-        })
-        .unwrap_err();
-    assert!(empty_memory_id.to_string().contains("non-empty memory ids"));
-
-    let empty_source_id = db
-        .knowledge_memory_source_attributions(&KnowledgeMemorySourceAttributionRequest {
-            memory_ids: Vec::new(),
-            source_ids: vec![String::new()],
-            limit: 10,
-        })
-        .unwrap_err();
-    assert!(empty_source_id.to_string().contains("non-empty source ids"));
-}
-
-#[test]
-fn memory_source_attributions_use_query_runtime_plan_cache() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Source {id: 'source-attribution-cache-a', original_name: 'Source A'})")
-        .unwrap();
-    db.query("CREATE (:Source {id: 'source-attribution-cache-b', original_name: 'Source B'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'memory-attribution-cache-a', title: 'Memory A', content: 'Content A', space_id: ''})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'memory-attribution-cache-b', content: 'Content B'})")
-        .unwrap();
-    db.query("MATCH (m:Memory {id: 'memory-attribution-cache-a'}), (s:Source {id: 'source-attribution-cache-a'}) CREATE (m)-[:SOURCED_FROM {chunk_index: 2, chunk_range: '20..30'}]->(s)")
-        .unwrap();
-    db.query("MATCH (m:Memory {id: 'memory-attribution-cache-b'}), (s:Source {id: 'source-attribution-cache-a'}) CREATE (m)-[:SOURCED_FROM {chunk_index: 1, chunk_range: '10..20'}]->(s)")
-        .unwrap();
-    db.query("MATCH (m:Memory {id: 'memory-attribution-cache-a'}), (s:Source {id: 'source-attribution-cache-b'}) CREATE (m)-[:SOURCED_FROM {chunk_index: 3}]->(s)")
-        .unwrap();
-    let request = KnowledgeMemorySourceAttributionRequest {
-        memory_ids: vec![
-            "memory-attribution-cache-a".to_string(),
-            "missing-memory-attribution-cache".to_string(),
-        ],
-        source_ids: vec![
-            "source-attribution-cache-a".to_string(),
-            "missing-source-attribution-cache".to_string(),
-        ],
-        limit: 0,
-    };
-
-    let first = db.knowledge_memory_source_attributions(&request).unwrap();
-    let second = db.knowledge_memory_source_attributions(&request).unwrap();
-
-    assert_eq!(first, second);
-    assert_eq!(first.matched_count, 1);
-    assert_eq!(first.returned_count, 1);
-    assert_eq!(
-        first.missing_memory_ids,
-        vec!["missing-memory-attribution-cache".to_string()]
-    );
-    assert_eq!(
-        first.missing_source_ids,
-        vec!["missing-source-attribution-cache".to_string()]
-    );
-    assert_eq!(
-        first.rows[0].memory_id.as_deref(),
-        Some("memory-attribution-cache-a")
-    );
-    assert_eq!(
-        first.rows[0].source_id.as_deref(),
-        Some("source-attribution-cache-a")
-    );
-    assert_eq!(first.rows[0].memory_display_title, "Memory A");
-    assert_eq!(first.rows[0].memory_normalized_space_id, "default");
-    assert_eq!(first.rows[0].chunk_index, Some(2));
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, 1);
-    assert_eq!(stats.misses, 1);
-    assert_eq!(stats.hits, 1);
-}
-
-#[test]
 fn updates_memory_lifecycle_batch_for_metadata_state() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 'memory_1', metadata: '{}', is_latest: true, lifecycle_state: 'active', updated_at: 1})")
@@ -7117,7 +5195,7 @@ fn updates_memory_lifecycle_batch_for_metadata_state() {
     assert!(!output.rows[3].matched);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -7218,7 +5296,7 @@ fn typed_memory_lifecycle_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),
@@ -7302,7 +5380,7 @@ fn updates_memory_latest_batch_for_nowledge_evolution_shapes() {
     assert!(output.rows[3].duplicate);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -7404,7 +5482,7 @@ fn typed_memory_latest_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),
@@ -7759,7 +5837,7 @@ fn updates_skill_usage_stats_batch_for_nowledge_shapes() {
     assert!(!output.rows[3].matched);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Skill".to_string(),
@@ -7871,7 +5949,7 @@ fn typed_skill_usage_stats_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Skill".to_string(),
@@ -7975,7 +6053,7 @@ fn updates_skill_metadata_batch_for_nowledge_shape() {
     assert!(output.rows[4].duplicate);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Skill".to_string(),
@@ -8061,7 +6139,7 @@ fn typed_skill_metadata_update_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Skill".to_string(),
@@ -8205,7 +6283,7 @@ fn updates_skill_lifecycle_batch_for_nowledge_shapes() {
     assert!(!output.rows[6].matched);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Skill".to_string(),
@@ -8352,7 +6430,7 @@ fn typed_skill_lifecycle_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Skill".to_string(),
@@ -8433,21 +6511,16 @@ fn deletes_skills_for_nowledge_detach_delete_shape() {
     assert!(output.rows[3].matched);
     assert!(output.rows[4].matched);
 
-    for skill_id in ["skill_1", "skill_2"] {
-        assert!(
-            !db.knowledge_skill_state(&KnowledgeSkillStateRequest {
-                skill_id: skill_id.to_string(),
-            })
-            .unwrap()
-            .found_skill
-        );
-    }
-    assert!(
-        db.knowledge_skill_state(&KnowledgeSkillStateRequest {
-            skill_id: "skill_3".to_string(),
-        })
-        .unwrap()
-        .found_skill
+    let skills = db
+        .query(
+            "MATCH (s:Skill) WHERE s.id IS NOT NULL \
+             RETURN s.id AS skill_id ORDER BY skill_id ASC",
+        )
+        .unwrap();
+    assert_eq!(skills.rows.len(), 1);
+    assert_eq!(
+        skills.rows[0].get("skill_id"),
+        Some(&Value::String("skill_3".to_string()))
     );
     assert_eq!(
         db.query(
@@ -8503,17 +6576,22 @@ fn typed_skill_delete_persists_as_one_wal_batch_and_replays() {
     assert!(wal.contains("delete_node"));
     {
         let db = Database::open(&path).unwrap();
-        for skill_id in ["skill_1", "skill_2"] {
-            assert!(
-                !db.knowledge_skill_state(&KnowledgeSkillStateRequest {
-                    skill_id: skill_id.to_string(),
-                })
-                .unwrap()
-                .found_skill
-            );
-        }
+        let skills = db
+            .query_read_only_with_params_bounded(
+                "MATCH (s:Skill) WHERE s.id IN $skill_ids RETURN count(s) AS total",
+                &BTreeMap::from([(
+                    "skill_ids".to_string(),
+                    Value::List(vec![
+                        Value::String("skill_1".to_string()),
+                        Value::String("skill_2".to_string()),
+                    ]),
+                )]),
+                Some(1),
+            )
+            .unwrap();
+        assert_eq!(skills.rows[0].get("total"), Some(&Value::Int(0)));
         assert!(db
-            .knowledge_entity(&KnowledgeEntityRequest {
+            .test_query_entity(&KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "memory_1".to_string(),
             })
@@ -8522,637 +6600,6 @@ fn typed_skill_delete_persists_as_one_wal_batch_and_replays() {
             .is_some());
     }
     std::fs::remove_dir_all(path).unwrap();
-}
-
-#[test]
-fn lists_skills_for_nowledge_catalog_lookup_and_fs_shapes() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(64),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Skill {id: 'skill_active_a', title: 'Active A', name: 'active-a', description: 'first active', triggers: '[\"a\"]', stage: 'active', version: 1, use_count: 7, success_rate: 0.8, metadata: '{\"rank\":1}', bundle_path: '/tmp/a', content_hash: 'hash-a', space_id: '', created_at: 1, updated_at: 20, evidence_count: 3, scope: 'workspace', rationale: 'test', kind: 'procedure', confidence: 0.9})")
-        .unwrap();
-    db.query("CREATE (:Skill {id: 'skill_active_b', title: 'Active B', name: 'active-b', description: 'second active', triggers: '[\"b\"]', stage: 'active', version: 2, use_count: 9, metadata: '{\"rank\":2}', bundle_path: '/tmp/b', space_id: 'research', updated_at: 30})")
-        .unwrap();
-    db.query("CREATE (:Skill {id: 'skill_draft', title: 'Draft Skill', name: 'draft', stage: 'draft', updated_at: 40})")
-        .unwrap();
-    db.query("CREATE (:Skill {id: 'skill_archived', title: 'Archived Skill', stage: 'archived', updated_at: 50})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let active_request = KnowledgeSkillListRequest {
-        stages: vec!["active".to_string()],
-        limit: 10,
-        order: KnowledgeSkillListOrder::UpdatedAtDesc,
-        ..KnowledgeSkillListRequest::default()
-    };
-    let active = db.knowledge_skills(&active_request).unwrap();
-    assert_eq!(active.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(active.matched_count, 2);
-    assert_eq!(active.returned_count, 2);
-    assert_eq!(
-        active
-            .rows
-            .iter()
-            .map(|row| row.id.as_deref().unwrap())
-            .collect::<Vec<_>>(),
-        vec!["skill_active_b", "skill_active_a"]
-    );
-    assert_eq!(active.rows[1].title.as_deref(), Some("Active A"));
-    assert_eq!(active.rows[1].name.as_deref(), Some("active-a"));
-    assert_eq!(active.rows[1].description.as_deref(), Some("first active"));
-    assert_eq!(active.rows[1].version, Some(Value::Int(1)));
-    assert_eq!(active.rows[1].use_count, 7);
-    assert_eq!(active.rows[1].success_rate, Some(Value::Float(0.8)));
-    assert_eq!(
-        active.rows[1].metadata,
-        Some(Value::String("{\"rank\":1}".to_string()))
-    );
-    assert_eq!(active.rows[1].bundle_path.as_deref(), Some("/tmp/a"));
-    assert_eq!(
-        active.rows[1].triggers,
-        Some(Value::String("[\"a\"]".to_string()))
-    );
-    assert_eq!(active.rows[1].content_hash.as_deref(), Some("hash-a"));
-    assert_eq!(active.rows[1].raw_space_id, None);
-    assert_eq!(active.rows[1].normalized_space_id, "default");
-    assert_eq!(active.rows[1].evidence_count, 3);
-    assert_eq!(active.rows[1].scope.as_deref(), Some("workspace"));
-    assert_eq!(active.rows[1].rationale.as_deref(), Some("test"));
-    assert_eq!(active.rows[1].kind.as_deref(), Some("procedure"));
-    assert_eq!(active.rows[1].confidence, Some(Value::Float(0.9)));
-
-    let stats = db.plan_cache_stats();
-    let repeated = db.knowledge_skills(&active_request).unwrap();
-    assert_eq!(repeated, active);
-    let repeated_stats = db.plan_cache_stats();
-    assert_eq!(repeated_stats.entries, stats.entries);
-    assert_eq!(repeated_stats.misses, stats.misses);
-    assert_eq!(repeated_stats.hits, stats.hits + 1);
-
-    let fs_page = db
-        .knowledge_skills(&KnowledgeSkillListRequest {
-            stages: vec!["active".to_string()],
-            after_id: Some("skill_active_a".to_string()),
-            limit: 10,
-            order: KnowledgeSkillListOrder::IdAsc,
-            ..KnowledgeSkillListRequest::default()
-        })
-        .unwrap();
-    assert_eq!(fs_page.matched_count, 1);
-    assert_eq!(fs_page.rows[0].id.as_deref(), Some("skill_active_b"));
-
-    let catalog = db
-        .knowledge_skills(&KnowledgeSkillListRequest {
-            stages: vec![
-                "active".to_string(),
-                "draft".to_string(),
-                "candidate".to_string(),
-                "promotable".to_string(),
-                "rejected".to_string(),
-                "stale".to_string(),
-            ],
-            limit: 1500,
-            order: KnowledgeSkillListOrder::UpdatedAtDesc,
-            ..KnowledgeSkillListRequest::default()
-        })
-        .unwrap();
-    assert_eq!(
-        catalog
-            .rows
-            .iter()
-            .map(|row| row.id.as_deref().unwrap())
-            .collect::<Vec<_>>(),
-        vec!["skill_draft", "skill_active_b", "skill_active_a"]
-    );
-
-    let prefix = db
-        .knowledge_skills(&KnowledgeSkillListRequest {
-            lookup_key: Some("skill_active".to_string()),
-            limit: 1,
-            order: KnowledgeSkillListOrder::UpdatedAtDesc,
-            ..KnowledgeSkillListRequest::default()
-        })
-        .unwrap();
-    assert_eq!(prefix.matched_count, 2);
-    assert_eq!(prefix.returned_count, 1);
-    assert_eq!(prefix.rows[0].id.as_deref(), Some("skill_active_b"));
-
-    let exact = db
-        .knowledge_skills(&KnowledgeSkillListRequest {
-            ids: vec!["skill_active_a".to_string(), "missing".to_string()],
-            limit: 0,
-            order: KnowledgeSkillListOrder::IdAsc,
-            ..KnowledgeSkillListRequest::default()
-        })
-        .unwrap();
-    assert_eq!(exact.matched_count, 1);
-    assert_eq!(exact.returned_count, 1);
-    assert_eq!(exact.rows[0].id.as_deref(), Some("skill_active_a"));
-    assert_eq!(exact.missing_ids, vec!["missing".to_string()]);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-
-    let tx = db.begin_read_transaction();
-    db.query("CREATE (:Skill {id: 'skill_active_after', stage: 'active', updated_at: 100})")
-        .unwrap();
-    let snapshot = tx
-        .knowledge_skills(&KnowledgeSkillListRequest {
-            stages: vec!["active".to_string()],
-            limit: 10,
-            order: KnowledgeSkillListOrder::UpdatedAtDesc,
-            ..KnowledgeSkillListRequest::default()
-        })
-        .unwrap();
-    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot.matched_count, 2);
-    assert!(snapshot
-        .rows
-        .iter()
-        .all(|row| row.id.as_deref() != Some("skill_active_after")));
-}
-
-#[test]
-fn projects_skill_list_fields_for_mcp_catalog_growth() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(64),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Skill {id: 'mcp-skill-catalog-active', stage: 'active', name: 'catalog-active', title: 'Catalog Active', description: 'active catalog skill', triggers: '[\"catalog\"]', content_hash: 'hash-active', metadata: '{\"stage\":\"active\"}', space_id: '', updated_at: 20, future_field: 'future-active'})")
-        .unwrap();
-    db.query("CREATE (:Skill {id: 'mcp-skill-catalog-draft', stage: 'draft', name: 'catalog-draft', title: 'Catalog Draft', description: 'draft catalog skill', triggers: '[\"draft\"]', content_hash: 'hash-draft', metadata: '{\"stage\":\"draft\"}', space_id: 'team', updated_at: 10, future_field: 'future-draft'})")
-        .unwrap();
-    db.query("CREATE (:Skill {id: 'mcp-skill-catalog-archived', stage: 'archived', title: 'Archived', updated_at: 30})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let request = KnowledgeSkillProjectedListRequest {
-        list: KnowledgeSkillListRequest {
-            stages: vec![
-                "active".to_string(),
-                "draft".to_string(),
-                "stale".to_string(),
-                "candidate".to_string(),
-                "promotable".to_string(),
-                "rejected".to_string(),
-            ],
-            limit: 1500,
-            order: KnowledgeSkillListOrder::UpdatedAtDesc,
-            ..KnowledgeSkillListRequest::default()
-        },
-        property_names: vec![
-            "stage".to_string(),
-            "name".to_string(),
-            "title".to_string(),
-            "description".to_string(),
-            "triggers".to_string(),
-            "content_hash".to_string(),
-            "metadata".to_string(),
-            "space_id".to_string(),
-            "future_field".to_string(),
-            "stage".to_string(),
-        ],
-    };
-    let projected = db.knowledge_skill_projected_list(&request).unwrap();
-
-    assert_eq!(projected.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(projected.matched_count, 2);
-    assert_eq!(projected.returned_count, 2);
-    assert_eq!(
-        projected
-            .rows
-            .iter()
-            .map(|row| row.id.as_deref().unwrap())
-            .collect::<Vec<_>>(),
-        vec!["mcp-skill-catalog-active", "mcp-skill-catalog-draft"]
-    );
-    assert_eq!(projected.rows[0].normalized_space_id, "default");
-    assert_eq!(projected.rows[1].normalized_space_id, "team");
-    assert_eq!(
-        projected.rows[0].properties.get("future_field"),
-        Some(&Value::String("future-active".to_string()))
-    );
-    assert_eq!(
-        projected.rows[0].properties.get("stage"),
-        Some(&Value::String("active".to_string()))
-    );
-    assert_eq!(
-        projected.rows[0].properties.get("space_id"),
-        Some(&Value::String(String::new()))
-    );
-    assert!(!projected.rows[0].properties.contains_key("updated_at"));
-
-    let stats = db.plan_cache_stats();
-    let repeated = db.knowledge_skill_projected_list(&request).unwrap();
-    assert_eq!(repeated, projected);
-    let repeated_stats = db.plan_cache_stats();
-    assert_eq!(repeated_stats.entries, stats.entries);
-    assert_eq!(repeated_stats.misses, stats.misses);
-    assert_eq!(repeated_stats.hits, stats.hits + 1);
-
-    let snapshot = db.begin_read_transaction();
-    db.query("CREATE (:Skill {id: 'mcp-skill-catalog-late', stage: 'active', updated_at: 100})")
-        .unwrap();
-    let snapshot_output = snapshot
-        .knowledge_skill_projected_list(&KnowledgeSkillProjectedListRequest {
-            list: KnowledgeSkillListRequest {
-                stages: vec!["active".to_string()],
-                limit: 10,
-                order: KnowledgeSkillListOrder::UpdatedAtDesc,
-                ..KnowledgeSkillListRequest::default()
-            },
-            property_names: vec!["stage".to_string(), "updated_at".to_string()],
-        })
-        .unwrap();
-    assert_eq!(snapshot_output.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot_output.matched_count, 1);
-    assert_eq!(
-        snapshot_output.rows[0].id.as_deref(),
-        Some("mcp-skill-catalog-active")
-    );
-}
-
-#[test]
-fn skill_list_rejects_unbounded_or_empty_filters() {
-    let db = Database::new();
-
-    let unbounded = db
-        .knowledge_skills(&KnowledgeSkillListRequest::default())
-        .unwrap_err();
-    assert!(unbounded.to_string().contains("bounded limit or a filter"));
-
-    let empty_id = db
-        .knowledge_skills(&KnowledgeSkillListRequest {
-            ids: vec![String::new()],
-            limit: 10,
-            ..KnowledgeSkillListRequest::default()
-        })
-        .unwrap_err();
-    assert!(empty_id.to_string().contains("non-empty ids"));
-
-    let empty_lookup = db
-        .knowledge_skills(&KnowledgeSkillListRequest {
-            lookup_key: Some(String::new()),
-            limit: 10,
-            ..KnowledgeSkillListRequest::default()
-        })
-        .unwrap_err();
-    assert!(empty_lookup.to_string().contains("non-empty lookup key"));
-
-    let empty_stage = db
-        .knowledge_skills(&KnowledgeSkillListRequest {
-            stages: vec![String::new()],
-            limit: 10,
-            ..KnowledgeSkillListRequest::default()
-        })
-        .unwrap_err();
-    assert!(empty_stage.to_string().contains("non-empty stages"));
-
-    let empty_after = db
-        .knowledge_skills(&KnowledgeSkillListRequest {
-            after_id: Some(String::new()),
-            limit: 10,
-            ..KnowledgeSkillListRequest::default()
-        })
-        .unwrap_err();
-    assert!(empty_after.to_string().contains("non-empty after id"));
-}
-
-#[test]
-fn projected_skill_list_rejects_empty_property_names_without_wal() {
-    let path = unique_test_dir("projected_skill_list_empty_property_without_wal");
-    let mut db = Database::open(&path).unwrap();
-    db.query("CREATE (:Skill {id: 'skill-active', stage: 'active'})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let wal_before = read_test_wal(&path).unwrap();
-
-    let error = db
-        .knowledge_skill_projected_list(&KnowledgeSkillProjectedListRequest {
-            list: KnowledgeSkillListRequest {
-                stages: vec!["active".to_string()],
-                limit: 10,
-                ..KnowledgeSkillListRequest::default()
-            },
-            property_names: vec![String::new()],
-        })
-        .unwrap_err();
-
-    assert!(error.to_string().contains("non-empty property names"));
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
-}
-
-#[test]
-fn reads_skill_detail_lookup_for_rest_fs_shape() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Skill {id: 'rest-fs-skill-detail-1', name: 'rest-fs-detail', title: 'REST FS Detail Skill', stage: 'active', version: 3, created_at: 1700000102, updated_at: 1700000103})")
-        .unwrap();
-    db.query("CREATE (:Skill {id: 'rest-fs-skill-detail-2', name: 'rest-fs-detail-two', title: 'REST FS Detail Two', stage: 'draft', version: 4, created_at: 1700000202, updated_at: 1700000203})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'rest-fs-skill-detail-1', name: 'memory-match'})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let exact = db
-        .knowledge_skill_detail_lookup(&KnowledgeSkillDetailLookupRequest {
-            key: "rest-fs-skill-detail-1".to_string(),
-        })
-        .unwrap();
-    assert_eq!(exact.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(exact.key, "rest-fs-skill-detail-1");
-    assert!(exact.skill_node_id.is_some());
-    assert!(exact.found_skill);
-    assert_eq!(exact.id.as_deref(), Some("rest-fs-skill-detail-1"));
-    assert_eq!(exact.name.as_deref(), Some("rest-fs-detail"));
-    assert_eq!(exact.title.as_deref(), Some("REST FS Detail Skill"));
-    assert_eq!(exact.stage.as_deref(), Some("active"));
-    assert_eq!(exact.version, Some(Value::Int(3)));
-    assert_eq!(exact.created_at, Some(Value::Int(1700000102)));
-    assert_eq!(exact.updated_at, Some(Value::Int(1700000103)));
-    assert_eq!(exact.matched_count, 1);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-
-    let prefix = db
-        .knowledge_skill_detail_lookup(&KnowledgeSkillDetailLookupRequest {
-            key: "rest-fs-skill-detail".to_string(),
-        })
-        .unwrap();
-    assert_eq!(prefix.id.as_deref(), Some("rest-fs-skill-detail-1"));
-    assert_eq!(prefix.matched_count, 2);
-
-    let contains = db
-        .knowledge_skill_detail_lookup(&KnowledgeSkillDetailLookupRequest {
-            key: "skill-detail-2".to_string(),
-        })
-        .unwrap();
-    assert_eq!(contains.id.as_deref(), Some("rest-fs-skill-detail-2"));
-    assert_eq!(contains.matched_count, 1);
-
-    let missing = db
-        .knowledge_skill_detail_lookup(&KnowledgeSkillDetailLookupRequest {
-            key: "missing".to_string(),
-        })
-        .unwrap();
-    assert!(!missing.found_skill);
-    assert_eq!(missing.skill_node_id, None);
-    assert_eq!(missing.matched_count, 0);
-
-    let cache_before_lookup = db.plan_cache_stats();
-    let cached_request = KnowledgeSkillDetailLookupRequest {
-        key: "rest-fs-skill-detail-2".to_string(),
-    };
-    db.knowledge_skill_detail_lookup(&cached_request).unwrap();
-    db.knowledge_skill_detail_lookup(&cached_request).unwrap();
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, cache_before_lookup.entries + 1);
-    assert_eq!(stats.misses, cache_before_lookup.misses + 1);
-    assert_eq!(stats.hits, cache_before_lookup.hits + 1);
-
-    let tx = db.begin_read_transaction();
-    db.query("MATCH (s:Skill {id: 'rest-fs-skill-detail-1'}) SET s.title = 'Changed'")
-        .unwrap();
-    let snapshot = tx
-        .knowledge_skill_detail_lookup(&KnowledgeSkillDetailLookupRequest {
-            key: "rest-fs-skill-detail-1".to_string(),
-        })
-        .unwrap();
-    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot.title.as_deref(), Some("REST FS Detail Skill"));
-}
-
-#[test]
-fn skill_detail_lookup_rejects_empty_key() {
-    let db = Database::new();
-    let empty_key = db
-        .knowledge_skill_detail_lookup(&KnowledgeSkillDetailLookupRequest { key: String::new() })
-        .unwrap_err();
-    assert!(empty_key.to_string().contains("non-empty key"));
-}
-
-#[test]
-fn reads_skill_state_for_rest_skills_write_shapes() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Skill {id: 'skill-state-1', stage: 'candidate', metadata: '{\"phase\":\"candidate\"}', version: 3, use_count: 7, bundle_path: '/tmp/skill', content_hash: 'hash-1', name: 'state-skill', description: 'state desc', title: 'State Skill'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'skill-state-1', stage: 'memory-stage'})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let state = db
-        .knowledge_skill_state(&KnowledgeSkillStateRequest {
-            skill_id: "skill-state-1".to_string(),
-        })
-        .unwrap();
-    assert_eq!(state.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert!(state.found_skill);
-    assert!(state.skill_node_id.is_some());
-    assert_eq!(state.skill_id, "skill-state-1");
-    assert_eq!(state.id.as_deref(), Some("skill-state-1"));
-    assert_eq!(state.stage.as_deref(), Some("candidate"));
-    assert_eq!(
-        state.metadata,
-        Some(Value::String("{\"phase\":\"candidate\"}".to_string()))
-    );
-    assert_eq!(state.version, Some(Value::Int(3)));
-    assert_eq!(state.use_count, Some(Value::Int(7)));
-    assert_eq!(state.bundle_path.as_deref(), Some("/tmp/skill"));
-    assert_eq!(state.content_hash.as_deref(), Some("hash-1"));
-    assert_eq!(state.name.as_deref(), Some("state-skill"));
-    assert_eq!(state.description.as_deref(), Some("state desc"));
-    assert_eq!(state.title.as_deref(), Some("State Skill"));
-
-    let missing = db
-        .knowledge_skill_state(&KnowledgeSkillStateRequest {
-            skill_id: "missing".to_string(),
-        })
-        .unwrap();
-    assert!(!missing.found_skill);
-    assert_eq!(missing.skill_node_id, None);
-    assert_eq!(missing.id, None);
-
-    let cache_before_lookup = db.plan_cache_stats();
-    let cached_request = KnowledgeSkillStateRequest {
-        skill_id: "missing-cache".to_string(),
-    };
-    db.knowledge_skill_state(&cached_request).unwrap();
-    db.knowledge_skill_state(&cached_request).unwrap();
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, cache_before_lookup.entries);
-    assert_eq!(stats.misses, cache_before_lookup.misses);
-    assert_eq!(stats.hits, cache_before_lookup.hits + 2);
-
-    let tx = db.begin_read_transaction();
-    db.query("MATCH (s:Skill {id: 'skill-state-1'}) SET s.stage = 'draft', s.metadata = '{\"phase\":\"draft\"}'")
-        .unwrap();
-    let snapshot = tx
-        .knowledge_skill_state(&KnowledgeSkillStateRequest {
-            skill_id: "skill-state-1".to_string(),
-        })
-        .unwrap();
-    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot.stage.as_deref(), Some("candidate"));
-    assert_eq!(
-        snapshot.metadata,
-        Some(Value::String("{\"phase\":\"candidate\"}".to_string()))
-    );
-}
-
-#[test]
-fn skill_state_rejects_empty_id() {
-    let db = Database::new();
-    let empty_id = db
-        .knowledge_skill_state(&KnowledgeSkillStateRequest {
-            skill_id: String::new(),
-        })
-        .unwrap_err();
-    assert!(empty_id.to_string().contains("non-empty skill id"));
-}
-
-#[test]
-fn reads_skill_thread_sources_for_context_wiring_shape() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Skill {id: 'skill_context', stage: 'active'})")
-        .unwrap();
-    db.query("CREATE (:Skill {id: 'skill_other', stage: 'active'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'memory_a', title: 'Memory A'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'memory_b', title: 'Memory B'})")
-        .unwrap();
-    db.query("CREATE (:Source {id: 'source_skip'})").unwrap();
-    db.query("CREATE (:Thread {id: 'thread_a', thread_id: 'logical_a', title: 'Alpha Thread', source: 'codex'})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_b', thread_id: 'logical_b', title: 'Beta Thread', source: 'slack'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'thread_skip', title: 'Not a Thread'})")
-        .unwrap();
-    db.query("MATCH (s:Skill {id: 'skill_context'}), (m:Memory {id: 'memory_b'}) CREATE (s)-[:SYNTHESIZED_FROM]->(m)")
-        .unwrap();
-    db.query("MATCH (s:Skill {id: 'skill_context'}), (m:Memory {id: 'memory_a'}) CREATE (s)-[:SYNTHESIZED_FROM]->(m)")
-        .unwrap();
-    db.query("MATCH (s:Skill {id: 'skill_context'}), (m:Memory {id: 'memory_a'}) CREATE (s)-[:SYNTHESIZED_FROM {duplicate: true}]->(m)")
-        .unwrap();
-    db.query("MATCH (s:Skill {id: 'skill_context'}), (x:Source {id: 'source_skip'}) CREATE (s)-[:SYNTHESIZED_FROM]->(x)")
-        .unwrap();
-    db.query("MATCH (s:Skill {id: 'skill_other'}), (m:Memory {id: 'memory_a'}) CREATE (s)-[:SYNTHESIZED_FROM]->(m)")
-        .unwrap();
-    db.query("MATCH (t:Thread {id: 'thread_a'}), (m:Memory {id: 'memory_a'}) CREATE (t)-[:COMPACTS_TO]->(m)")
-        .unwrap();
-    db.query("MATCH (t:Thread {id: 'thread_a'}), (m:Memory {id: 'memory_a'}) CREATE (t)-[:COMPACTS_TO {duplicate: true}]->(m)")
-        .unwrap();
-    db.query("MATCH (t:Thread {id: 'thread_b'}), (m:Memory {id: 'memory_b'}) CREATE (t)-[:COMPACTS_TO]->(m)")
-        .unwrap();
-    db.query("MATCH (t:Memory {id: 'thread_skip'}), (m:Memory {id: 'memory_b'}) CREATE (t)-[:COMPACTS_TO]->(m)")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let output = db
-        .knowledge_skill_thread_sources(&KnowledgeSkillThreadSourceListRequest {
-            skill_id: "skill_context".to_string(),
-            limit: 0,
-        })
-        .unwrap();
-    assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(output.skill_id, "skill_context");
-    assert!(output.skill_node_id.is_some());
-    assert!(output.found_skill);
-    assert_eq!(output.matched_count, 2);
-    assert_eq!(output.returned_count, 2);
-    assert_eq!(output.rows[0].skill_id.as_deref(), Some("skill_context"));
-    assert_eq!(output.rows[0].memory_id.as_deref(), Some("memory_a"));
-    assert_eq!(output.rows[0].thread_id.as_deref(), Some("thread_a"));
-    assert_eq!(
-        output.rows[0].thread_logical_id.as_deref(),
-        Some("logical_a")
-    );
-    assert_eq!(output.rows[0].title.as_deref(), Some("Alpha Thread"));
-    assert_eq!(output.rows[0].source.as_deref(), Some("codex"));
-    assert_ne!(output.rows[0].skill_node_id, output.rows[0].memory_node_id);
-    assert_ne!(output.rows[0].thread_node_id, output.rows[0].memory_node_id);
-    assert!(output.rows[0].skill_memory_relationship_id > 0);
-    assert!(output.rows[0].compacts_to_relationship_id > 0);
-    assert_eq!(output.rows[1].memory_id.as_deref(), Some("memory_b"));
-    assert_eq!(output.rows[1].thread_id.as_deref(), Some("thread_b"));
-
-    let limited = db
-        .knowledge_skill_thread_sources(&KnowledgeSkillThreadSourceListRequest {
-            skill_id: "skill_context".to_string(),
-            limit: 1,
-        })
-        .unwrap();
-    assert_eq!(limited.matched_count, 2);
-    assert_eq!(limited.returned_count, 1);
-    assert_eq!(limited.rows[0].thread_id.as_deref(), Some("thread_a"));
-
-    let missing = db
-        .knowledge_skill_thread_sources(&KnowledgeSkillThreadSourceListRequest {
-            skill_id: "missing_skill".to_string(),
-            limit: 10,
-        })
-        .unwrap();
-    assert!(!missing.found_skill);
-    assert_eq!(missing.skill_node_id, None);
-    assert_eq!(missing.matched_count, 0);
-    assert!(missing.rows.is_empty());
-
-    let cache_before_lookup = db.plan_cache_stats();
-    let cached_request = KnowledgeSkillThreadSourceListRequest {
-        skill_id: "missing_skill_cache".to_string(),
-        limit: 10,
-    };
-    db.knowledge_skill_thread_sources(&cached_request).unwrap();
-    db.knowledge_skill_thread_sources(&cached_request).unwrap();
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, cache_before_lookup.entries);
-    assert_eq!(stats.misses, cache_before_lookup.misses);
-    assert_eq!(stats.hits, cache_before_lookup.hits + 2);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-
-    let tx = db.begin_read_transaction();
-    db.query("CREATE (:Thread {id: 'thread_after', title: 'After Thread', source: 'after'})")
-        .unwrap();
-    db.query("MATCH (t:Thread {id: 'thread_after'}), (m:Memory {id: 'memory_a'}) CREATE (t)-[:COMPACTS_TO]->(m)")
-        .unwrap();
-    let snapshot = tx
-        .knowledge_skill_thread_sources(&KnowledgeSkillThreadSourceListRequest {
-            skill_id: "skill_context".to_string(),
-            limit: 0,
-        })
-        .unwrap();
-    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot.matched_count, 2);
-    assert!(snapshot
-        .rows
-        .iter()
-        .all(|row| row.thread_id.as_deref() != Some("thread_after")));
-}
-
-#[test]
-fn skill_thread_source_read_rejects_empty_skill_id() {
-    let db = Database::new();
-    let error = db
-        .knowledge_skill_thread_sources(&KnowledgeSkillThreadSourceListRequest {
-            skill_id: String::new(),
-            limit: 10,
-        })
-        .unwrap_err();
-    assert!(error.to_string().contains("non-empty skill id"));
 }
 
 #[test]
@@ -9298,158 +6745,6 @@ fn skill_source_merge_reports_missing_endpoint_and_rejects_empty_ids() {
 }
 
 #[test]
-fn reads_skill_memories_for_nowledge_evidence_shapes() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Skill {id: 'skill_active', stage: 'active'})")
-        .unwrap();
-    db.query("CREATE (:Skill {id: 'skill_draft', stage: 'draft'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'memory_a', title: 'Memory A', content: 'Alpha', unit_type: 'note', created_at: 20})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'memory_b', title: 'Memory B', content: 'Beta', unit_type: 'fact', created_at: 10})")
-        .unwrap();
-    db.query(
-        "CREATE (:Memory {id: 'memory_c', title: 'Memory C', content: 'Gamma', created_at: 30})",
-    )
-    .unwrap();
-    db.query("MATCH (s:Skill {id: 'skill_active'}), (m:Memory {id: 'memory_a'}) CREATE (s)-[:SYNTHESIZED_FROM]->(m)")
-        .unwrap();
-    db.query("MATCH (s:Skill {id: 'skill_active'}), (m:Memory {id: 'memory_b'}) CREATE (s)-[:SYNTHESIZED_FROM]->(m)")
-        .unwrap();
-    db.query("MATCH (s:Skill {id: 'skill_draft'}), (m:Memory {id: 'memory_c'}) CREATE (s)-[:SYNTHESIZED_FROM]->(m)")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let asc = db
-        .knowledge_skill_memories(&KnowledgeSkillMemoryListRequest {
-            skill_id: Some("skill_active".to_string()),
-            stages: Vec::new(),
-            limit: 0,
-            order: KnowledgeSkillMemoryListOrder::CreatedAtAsc,
-        })
-        .unwrap();
-
-    assert_eq!(asc.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(asc.matched_skill_count, 1);
-    assert_eq!(asc.missing_skill_count, 0);
-    assert_eq!(asc.matched_count, 2);
-    assert_eq!(asc.returned_count, 2);
-    assert_eq!(asc.rows[0].skill_id.as_deref(), Some("skill_active"));
-    assert_eq!(asc.rows[0].memory_id.as_deref(), Some("memory_b"));
-    assert_ne!(asc.rows[0].skill_node_id, asc.rows[0].memory_node_id);
-    assert_eq!(asc.rows[0].title.as_deref(), Some("Memory B"));
-    assert_eq!(asc.rows[0].content.as_deref(), Some("Beta"));
-    assert_eq!(asc.rows[0].unit_type.as_deref(), Some("fact"));
-    assert_eq!(asc.rows[0].created_at, Some(Value::Int(10)));
-    assert_eq!(asc.rows[1].memory_id.as_deref(), Some("memory_a"));
-
-    let desc_limited = db
-        .knowledge_skill_memories(&KnowledgeSkillMemoryListRequest {
-            skill_id: Some("skill_active".to_string()),
-            stages: Vec::new(),
-            limit: 1,
-            order: KnowledgeSkillMemoryListOrder::CreatedAtDesc,
-        })
-        .unwrap();
-    assert_eq!(desc_limited.matched_count, 2);
-    assert_eq!(desc_limited.returned_count, 1);
-    assert_eq!(desc_limited.rows[0].memory_id.as_deref(), Some("memory_a"));
-
-    let active_stage = db
-        .knowledge_skill_memories(&KnowledgeSkillMemoryListRequest {
-            skill_id: None,
-            stages: vec!["active".to_string()],
-            limit: 0,
-            order: KnowledgeSkillMemoryListOrder::CreatedAtAsc,
-        })
-        .unwrap();
-    assert_eq!(active_stage.matched_skill_count, 1);
-    assert_eq!(active_stage.matched_count, 2);
-    assert!(active_stage
-        .rows
-        .iter()
-        .all(|row| row.skill_id.as_deref() == Some("skill_active")));
-
-    let missing = db
-        .knowledge_skill_memories(&KnowledgeSkillMemoryListRequest {
-            skill_id: Some("missing".to_string()),
-            stages: Vec::new(),
-            limit: 10,
-            order: KnowledgeSkillMemoryListOrder::CreatedAtAsc,
-        })
-        .unwrap();
-    assert_eq!(missing.matched_skill_count, 0);
-    assert_eq!(missing.missing_skill_count, 1);
-    assert_eq!(missing.matched_count, 0);
-    assert_eq!(missing.returned_count, 0);
-    assert!(missing.rows.is_empty());
-
-    let cache_before_lookup = db.plan_cache_stats();
-    let cached_request = KnowledgeSkillMemoryListRequest {
-        skill_id: None,
-        stages: vec!["draft".to_string()],
-        limit: 10,
-        order: KnowledgeSkillMemoryListOrder::CreatedAtAsc,
-    };
-    db.knowledge_skill_memories(&cached_request).unwrap();
-    db.knowledge_skill_memories(&cached_request).unwrap();
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, cache_before_lookup.entries);
-    assert_eq!(stats.misses, cache_before_lookup.misses);
-    assert_eq!(stats.hits, cache_before_lookup.hits + 4);
-}
-
-#[test]
-fn skill_memory_read_rejects_invalid_filters() {
-    let db = Database::new();
-
-    let empty_skill_error = db
-        .knowledge_skill_memories(&KnowledgeSkillMemoryListRequest {
-            skill_id: Some(String::new()),
-            stages: Vec::new(),
-            limit: 10,
-            order: KnowledgeSkillMemoryListOrder::CreatedAtAsc,
-        })
-        .unwrap_err();
-    assert!(empty_skill_error.to_string().contains("non-empty skill id"));
-
-    let empty_stage_error = db
-        .knowledge_skill_memories(&KnowledgeSkillMemoryListRequest {
-            skill_id: None,
-            stages: vec![String::new()],
-            limit: 10,
-            order: KnowledgeSkillMemoryListOrder::CreatedAtAsc,
-        })
-        .unwrap_err();
-    assert!(empty_stage_error.to_string().contains("non-empty stages"));
-
-    let broad_error = db
-        .knowledge_skill_memories(&KnowledgeSkillMemoryListRequest {
-            skill_id: None,
-            stages: Vec::new(),
-            limit: 10,
-            order: KnowledgeSkillMemoryListOrder::CreatedAtAsc,
-        })
-        .unwrap_err();
-    assert!(broad_error.to_string().contains("exactly one"));
-
-    let mixed_error = db
-        .knowledge_skill_memories(&KnowledgeSkillMemoryListRequest {
-            skill_id: Some("skill_1".to_string()),
-            stages: vec!["active".to_string()],
-            limit: 10,
-            order: KnowledgeSkillMemoryListOrder::CreatedAtAsc,
-        })
-        .unwrap_err();
-    assert!(mixed_error.to_string().contains("exactly one"));
-}
-
-#[test]
 fn updates_thread_metadata_batch_for_nowledge_shapes() {
     let mut db = Database::new();
     db.query("CREATE (:Thread {id: 'thread_1', metadata: '{}', updated_at: 1})")
@@ -9499,7 +6794,7 @@ fn updates_thread_metadata_batch_for_nowledge_shapes() {
     assert!(!output.rows[3].matched);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Thread".to_string(),
@@ -9587,7 +6882,7 @@ fn typed_thread_metadata_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Thread".to_string(),
@@ -9689,7 +6984,7 @@ fn updates_thread_message_count_batch_with_preserve_newer_timestamp() {
     assert!(!output.rows[4].matched);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Thread".to_string(),
@@ -9790,7 +7085,7 @@ fn typed_thread_message_count_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Thread".to_string(),
@@ -9868,21 +7163,9 @@ fn deletes_threads_for_nowledge_compensation_delete_shape() {
     assert!(output.rows[4].matched);
 
     for thread_id in ["thread_1", "thread_2"] {
-        assert!(
-            !db.knowledge_thread_sync_metadata(&KnowledgeThreadSyncMetadataRequest {
-                id: thread_id.to_string(),
-            })
-            .unwrap()
-            .found_thread
-        );
+        assert!(!test_thread_exists(&db, thread_id));
     }
-    assert!(
-        db.knowledge_thread_sync_metadata(&KnowledgeThreadSyncMetadataRequest {
-            id: "thread_3".to_string(),
-        })
-        .unwrap()
-        .found_thread
-    );
+    assert!(test_thread_exists(&db, "thread_3"));
     assert_eq!(
         db.query("MATCH (t:Thread)-[r:CONTAINS]->(m:Message) RETURN count(r) AS relationships")
             .unwrap()
@@ -9950,16 +7233,10 @@ fn typed_thread_delete_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         for thread_id in ["thread_1", "thread_2"] {
-            assert!(
-                !db.knowledge_thread_sync_metadata(&KnowledgeThreadSyncMetadataRequest {
-                    id: thread_id.to_string(),
-                })
-                .unwrap()
-                .found_thread
-            );
+            assert!(!test_thread_exists(&db, thread_id));
         }
         assert!(db
-            .knowledge_entity(&KnowledgeEntityRequest {
+            .test_query_entity(&KnowledgeEntityRequest {
                 label: "Message".to_string(),
                 external_id: "message_1".to_string(),
             })
@@ -10000,13 +7277,7 @@ fn deletes_thread_messages_for_nowledge_cleanup_shape() {
     assert!(output.thread_node_id.is_some());
     assert_eq!(output.matched_relationship_count, 3);
     assert_eq!(output.deleted_message_count, 2);
-    assert!(
-        db.knowledge_thread_sync_metadata(&KnowledgeThreadSyncMetadataRequest {
-            id: "thread_1".to_string(),
-        })
-        .unwrap()
-        .found_thread
-    );
+    assert!(test_thread_exists(&db, "thread_1"));
     assert_eq!(
         db.query("MATCH (m:Message) RETURN m.id AS id ORDER BY id")
             .unwrap()
@@ -10016,15 +7287,7 @@ fn deletes_thread_messages_for_nowledge_cleanup_shape() {
             .collect::<Vec<_>>(),
         vec![Value::String("message_other".to_string())]
     );
-    assert_eq!(
-        db.knowledge_thread_messages(&KnowledgeThreadMessageListRequest {
-            thread_id: "thread_1".to_string(),
-            limit: 0,
-        })
-        .unwrap()
-        .matched_count,
-        0
-    );
+    assert_eq!(test_thread_message_count(&db, "thread_1"), 0);
 
     let missing = db
         .delete_knowledge_thread_messages(&KnowledgeThreadMessageDeleteRequest {
@@ -10091,13 +7354,7 @@ fn typed_thread_message_delete_persists_as_one_wal_batch_and_replays() {
     assert!(wal.contains("delete_node"));
     {
         let mut db = Database::open(&path).unwrap();
-        assert!(
-            db.knowledge_thread_sync_metadata(&KnowledgeThreadSyncMetadataRequest {
-                id: "thread_1".to_string(),
-            })
-            .unwrap()
-            .found_thread
-        );
+        assert!(test_thread_exists(&db, "thread_1"));
         assert_eq!(
             db.query("MATCH (m:Message) RETURN count(m) AS messages")
                 .unwrap()
@@ -10149,26 +7406,23 @@ fn creates_thread_compaction_link_for_nowledge_distill_shape() {
     assert!(created.memory_node_id.is_some());
     assert_eq!(created.created_relationship_count, 1);
 
-    let compacted = db
-        .knowledge_thread_compacted_memories(&KnowledgeThreadCompactedMemoryListRequest {
-            thread_id: "thread_1".to_string(),
-            identity_property: "id".to_string(),
-            limit: 10,
-        })
-        .unwrap();
-    assert_eq!(compacted.matched_count, 1);
-    assert_eq!(compacted.rows[0].memory_id.as_deref(), Some("memory_1"));
+    let compacted = test_thread_compaction_links(&db, "thread_1");
+    assert_eq!(compacted.rows.len(), 1);
     assert_eq!(
-        compacted.rows[0].compaction_method.as_deref(),
-        Some("manual_distillation")
+        compacted.rows[0].get("memory_id"),
+        Some(&Value::String("memory_1".to_string()))
     );
     assert_eq!(
-        compacted.rows[0].relationship_created_at,
-        Some(Value::Int(1_700_000_070))
+        compacted.rows[0].get("compaction_method"),
+        Some(&Value::String("manual_distillation".to_string()))
     );
     assert_eq!(
-        compacted.rows[0].relationship_properties,
-        Some(Value::String("{\"mode\":\"manual\"}".to_string()))
+        compacted.rows[0].get("created_at"),
+        Some(&Value::Int(1_700_000_070))
+    );
+    assert_eq!(
+        compacted.rows[0].get("properties"),
+        Some(&Value::String("{\"mode\":\"manual\"}".to_string()))
     );
 
     let missing = db
@@ -10275,1780 +7529,18 @@ fn typed_thread_compaction_link_persists_as_one_wal_batch_and_replays() {
     assert!(wal.contains("create_rel"));
     {
         let db = Database::open(&path).unwrap();
-        let output = db
-            .knowledge_thread_compacted_memories(&KnowledgeThreadCompactedMemoryListRequest {
-                thread_id: "thread_1".to_string(),
-                identity_property: "id".to_string(),
-                limit: 10,
-            })
-            .unwrap();
-        assert_eq!(output.matched_count, 1);
-        assert_eq!(output.rows[0].memory_id.as_deref(), Some("memory_1"));
+        let output = test_thread_compaction_links(&db, "thread_1");
+        assert_eq!(output.rows.len(), 1);
         assert_eq!(
-            output.rows[0].compaction_method.as_deref(),
-            Some("manual_distillation")
+            output.rows[0].get("memory_id"),
+            Some(&Value::String("memory_1".to_string()))
+        );
+        assert_eq!(
+            output.rows[0].get("compaction_method"),
+            Some(&Value::String("manual_distillation".to_string()))
         );
     }
     std::fs::remove_dir_all(path).unwrap();
-}
-
-#[test]
-fn reads_thread_compacted_memories_for_nowledge_summary_and_full_shapes() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Thread {id: 'thread_a', thread_id: 'logical_a', title: 'Thread A'})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_b', thread_id: 'logical_b'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'memory_a', title: 'Memory Alpha', content: 'Alpha compacted memory content', importance: 0.8, pagerank_score: 0.9, confidence: 0.7, source_range: '1..2', source: 'agent', created_at: 10, updated_at: 20, metadata: '{}', space_id: '', last_reindexed_at: 21, reindex_needed: true, unit_type: 'decision', is_latest: false, version: 4, is_crystal: true, crystal_title: 'Crystal Alpha', source_unit_count: 3, extraction_method: 'agent', access_count: 5, appearances: 6, clicks: 7, decay_score_cached: 0.2, event_end: 30, event_start: 25, last_accessed_at: 31, last_clicked_at: 32, last_evaluated_at: 33, review_status: 'reviewed', temporal_confidence: 0.6, temporal_context: 'past', temporal_precision: 'day', temporal_type: 'event', total_dwell_time_ms: 800})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'memory_b', content: 'Beta compacted memory content', importance: 0.4, created_at: 30})")
-        .unwrap();
-    db.query("MATCH (t:Thread {id: 'thread_a'}), (m:Memory {id: 'memory_a'}) CREATE (t)-[:COMPACTS_TO {compaction_method: 'manual', created_at: 100, properties: '{}'}]->(m)")
-        .unwrap();
-    db.query("MATCH (t:Thread {id: 'thread_a'}), (m:Memory {id: 'memory_b'}) CREATE (t)-[:COMPACTS_TO {compaction_method: 'auto', created_at: 90}]->(m)")
-        .unwrap();
-    db.query("MATCH (t:Thread {id: 'thread_b'}), (m:Memory {id: 'memory_b'}) CREATE (t)-[:COMPACTS_TO]->(m)")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let request = KnowledgeThreadCompactedMemoryListRequest {
-        thread_id: "thread_a".to_string(),
-        identity_property: "id".to_string(),
-        limit: 0,
-    };
-    let output = db.knowledge_thread_compacted_memories(&request).unwrap();
-    assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
-    assert!(output.found);
-    assert_eq!(output.thread_id, "thread_a");
-    assert!(output.thread_node_id.is_some());
-    assert_eq!(output.matched_count, 2);
-    assert_eq!(output.returned_count, 2);
-    assert_eq!(output.rows[0].thread_id.as_deref(), Some("thread_a"));
-    assert_eq!(
-        output.rows[0].thread_logical_id.as_deref(),
-        Some("logical_a")
-    );
-    assert_eq!(output.rows[0].memory_id.as_deref(), Some("memory_a"));
-    assert_eq!(output.rows[0].display_title, "Memory Alpha");
-    assert_eq!(output.rows[0].title.as_deref(), Some("Memory Alpha"));
-    assert_eq!(
-        output.rows[0].content.as_deref(),
-        Some("Alpha compacted memory content")
-    );
-    assert_eq!(
-        output.rows[0].content_preview.as_deref(),
-        Some("Alpha compacted memory content")
-    );
-    assert_eq!(output.rows[0].importance, Some(Value::Float(0.8)));
-    assert_eq!(output.rows[0].pagerank_score, Some(Value::Float(0.9)));
-    assert_eq!(output.rows[0].confidence, Some(Value::Float(0.7)));
-    assert_eq!(
-        output.rows[0].source_range,
-        Some(Value::String("1..2".to_string()))
-    );
-    assert_eq!(output.rows[0].source.as_deref(), Some("agent"));
-    assert_eq!(output.rows[0].created_at, Some(Value::Int(10)));
-    assert_eq!(output.rows[0].updated_at, Some(Value::Int(20)));
-    assert_eq!(
-        output.rows[0].metadata,
-        Some(Value::String("{}".to_string()))
-    );
-    assert_eq!(output.rows[0].raw_space_id, None);
-    assert_eq!(output.rows[0].normalized_space_id, "default");
-    assert_eq!(output.rows[0].last_reindexed_at, Some(Value::Int(21)));
-    assert_eq!(output.rows[0].reindex_needed, Some(true));
-    assert_eq!(output.rows[0].unit_type, "decision");
-    assert!(!output.rows[0].is_latest);
-    assert_eq!(output.rows[0].version, 4);
-    assert!(output.rows[0].is_crystal);
-    assert_eq!(
-        output.rows[0].crystal_title.as_deref(),
-        Some("Crystal Alpha")
-    );
-    assert_eq!(output.rows[0].source_unit_count, Some(3));
-    assert_eq!(output.rows[0].extraction_method, "agent");
-    assert_eq!(output.rows[0].access_count, 5);
-    assert_eq!(output.rows[0].appearances, 6);
-    assert_eq!(output.rows[0].clicks, 7);
-    assert_eq!(output.rows[0].decay_score_cached, Some(Value::Float(0.2)));
-    assert_eq!(output.rows[0].event_end, Some(Value::Int(30)));
-    assert_eq!(output.rows[0].event_start, Some(Value::Int(25)));
-    assert_eq!(output.rows[0].last_accessed_at, Some(Value::Int(31)));
-    assert_eq!(output.rows[0].last_clicked_at, Some(Value::Int(32)));
-    assert_eq!(output.rows[0].last_evaluated_at, Some(Value::Int(33)));
-    assert_eq!(output.rows[0].review_status, "reviewed");
-    assert_eq!(output.rows[0].temporal_confidence, Some(Value::Float(0.6)));
-    assert_eq!(output.rows[0].temporal_context.as_deref(), Some("past"));
-    assert_eq!(output.rows[0].temporal_precision.as_deref(), Some("day"));
-    assert_eq!(output.rows[0].temporal_type.as_deref(), Some("event"));
-    assert_eq!(output.rows[0].total_dwell_time_ms, 800);
-    assert_eq!(output.rows[0].compaction_method.as_deref(), Some("manual"));
-    assert_eq!(
-        output.rows[0].relationship_created_at,
-        Some(Value::Int(100))
-    );
-    assert_eq!(
-        output.rows[0].relationship_properties,
-        Some(Value::String("{}".to_string()))
-    );
-    assert_eq!(output.rows[1].memory_id.as_deref(), Some("memory_b"));
-    assert_eq!(
-        output.rows[1].display_title,
-        "Beta compacted memory content"
-    );
-    assert_eq!(output.rows[1].unit_type, "fact");
-    assert!(output.rows[1].is_latest);
-    assert_eq!(output.rows[1].version, 1);
-    assert!(!output.rows[1].is_crystal);
-    assert_eq!(output.rows[1].extraction_method, "manual");
-
-    let stats = db.plan_cache_stats();
-    let repeated = db.knowledge_thread_compacted_memories(&request).unwrap();
-    assert_eq!(repeated, output);
-    let repeated_stats = db.plan_cache_stats();
-    assert_eq!(repeated_stats.entries, stats.entries);
-    assert_eq!(repeated_stats.misses, stats.misses);
-    assert_eq!(repeated_stats.hits, stats.hits + 2);
-
-    let by_logical_thread = db
-        .knowledge_thread_compacted_memories(&KnowledgeThreadCompactedMemoryListRequest {
-            thread_id: "logical_b".to_string(),
-            identity_property: "thread_id".to_string(),
-            limit: 10,
-        })
-        .unwrap();
-    assert!(by_logical_thread.found);
-    assert_eq!(by_logical_thread.matched_count, 1);
-    assert_eq!(
-        by_logical_thread.rows[0].thread_logical_id.as_deref(),
-        Some("logical_b")
-    );
-
-    let limited = db
-        .knowledge_thread_compacted_memories(&KnowledgeThreadCompactedMemoryListRequest {
-            thread_id: "thread_a".to_string(),
-            identity_property: "id".to_string(),
-            limit: 1,
-        })
-        .unwrap();
-    assert_eq!(limited.matched_count, 2);
-    assert_eq!(limited.returned_count, 1);
-
-    let missing = db
-        .knowledge_thread_compacted_memories(&KnowledgeThreadCompactedMemoryListRequest {
-            thread_id: "missing".to_string(),
-            identity_property: "id".to_string(),
-            limit: 10,
-        })
-        .unwrap();
-    assert!(!missing.found);
-    assert_eq!(missing.thread_node_id, None);
-    assert_eq!(missing.matched_count, 0);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-}
-
-#[test]
-fn reads_memory_decay_detail_for_scheduler_shape() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Memory {id: 'scheduler-memory-decay-detail', title: 'Decay Detail', content: 'content', unit_type: 'fact', source: 'agent', space_id: 'default', created_at: 12, decay_score_cached: 0.4, metadata: '{}', is_latest: true, lifecycle_state: 'active', future_decay_field: 'future'})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let snapshot = db.begin_read_transaction();
-
-    db.query("MATCH (m:Memory {id: 'scheduler-memory-decay-detail'}) SET m.decay_score_cached = 0.9, m.future_decay_field = 'late'")
-        .unwrap();
-
-    let request = KnowledgeMemoryDecayDetailRequest {
-        memory_id: "scheduler-memory-decay-detail".to_string(),
-        property_names: Vec::new(),
-    };
-    let output = db.knowledge_memory_decay_detail(&request).unwrap();
-    assert!(output.found);
-    let memory = output.memory.as_ref().unwrap();
-    assert_eq!(
-        memory.memory_id.as_deref(),
-        Some("scheduler-memory-decay-detail")
-    );
-    assert_eq!(memory.title.as_deref(), Some("Decay Detail"));
-    assert_eq!(memory.content.as_deref(), Some("content"));
-    assert_eq!(memory.unit_type.as_deref(), Some("fact"));
-    assert_eq!(memory.source.as_deref(), Some("agent"));
-    assert_eq!(memory.raw_space_id.as_deref(), Some("default"));
-    assert_eq!(memory.normalized_space_id, "default");
-    assert_eq!(memory.created_at, Some(Value::Int(12)));
-    assert_eq!(memory.decay_score_cached, Some(Value::Float(0.9)));
-    assert_eq!(memory.metadata, Some(Value::String("{}".to_string())));
-    assert_eq!(memory.is_latest, Some(true));
-    assert_eq!(memory.lifecycle_state.as_deref(), Some("active"));
-    assert_eq!(
-        memory.properties.get("decay_score_cached"),
-        Some(&Value::Float(0.9))
-    );
-    assert!(!memory.properties.contains_key("future_decay_field"));
-
-    let projected_request = KnowledgeMemoryDecayDetailRequest {
-        memory_id: "scheduler-memory-decay-detail".to_string(),
-        property_names: vec![
-            "future_decay_field".to_string(),
-            "decay_score_cached".to_string(),
-            "future_decay_field".to_string(),
-        ],
-    };
-    let projected = db
-        .knowledge_memory_decay_detail(&projected_request)
-        .unwrap();
-    let projected_memory = projected.memory.as_ref().unwrap();
-    assert_eq!(projected_memory.properties.len(), 2);
-    assert_eq!(
-        projected_memory.properties.get("future_decay_field"),
-        Some(&Value::String("late".to_string()))
-    );
-
-    let stats = db.plan_cache_stats();
-    let repeated = db.knowledge_memory_decay_detail(&request).unwrap();
-    assert_eq!(repeated, output);
-    let repeated_stats = db.plan_cache_stats();
-    assert_eq!(repeated_stats.entries, stats.entries);
-    assert_eq!(repeated_stats.misses, stats.misses);
-    assert_eq!(repeated_stats.hits, stats.hits + 1);
-
-    let snapshot_output = snapshot
-        .knowledge_memory_decay_detail(&KnowledgeMemoryDecayDetailRequest {
-            memory_id: "scheduler-memory-decay-detail".to_string(),
-            property_names: Vec::new(),
-        })
-        .unwrap();
-    assert_eq!(snapshot_output.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(
-        snapshot_output.memory.unwrap().decay_score_cached,
-        Some(Value::Float(0.4))
-    );
-
-    let missing = db
-        .knowledge_memory_decay_detail(&KnowledgeMemoryDecayDetailRequest {
-            memory_id: "missing".to_string(),
-            property_names: Vec::new(),
-        })
-        .unwrap();
-    assert!(!missing.found);
-    assert_eq!(missing.memory, None);
-}
-
-#[test]
-fn memory_decay_detail_rejects_empty_inputs_without_wal() {
-    let path = unique_test_dir("memory_decay_detail_rejects_empty_inputs_without_wal");
-    let mut db = Database::open(&path).unwrap();
-    db.query("CREATE (:Memory {id: 'scheduler-memory-decay-detail', decay_score_cached: 0.4})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let wal_before = read_test_wal(&path).unwrap();
-
-    let err = db
-        .knowledge_memory_decay_detail(&KnowledgeMemoryDecayDetailRequest {
-            memory_id: String::new(),
-            property_names: Vec::new(),
-        })
-        .unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("knowledge memory decay detail read requires a non-empty memory id"));
-
-    let err = db
-        .knowledge_memory_decay_detail(&KnowledgeMemoryDecayDetailRequest {
-            memory_id: "scheduler-memory-decay-detail".to_string(),
-            property_names: vec![String::new()],
-        })
-        .unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("knowledge memory decay detail read requires non-empty property names"));
-
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
-    std::fs::remove_dir_all(path).unwrap();
-}
-
-#[test]
-fn reads_memory_cleanup_fingerprints_for_scheduler_shape() {
-    let mut db = Database::new();
-    db.query("CREATE (:Memory {id: 'cleanup-fingerprint-a', title: 'Cleanup A', metadata: '{\"state\":\"active\"}', is_latest: true, decay_score_cached: 0.6, created_at: '2026-07-01T00:00:00', last_accessed_at: '2026-07-02T00:00:00', last_clicked_at: '2026-07-03T00:00:00', access_count: 4, appearances: 1, clicks: 2, total_dwell_time_ms: 300, importance: 0.8, unit_type: 'fact', semantic_field: 'cleanup text', future_cleanup_field: 'future-a'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'cleanup-fingerprint-b', title: 'Cleanup B', metadata: '{}', decay_score_cached: 0.2, created_at: '2026-07-04T00:00:00', future_cleanup_field: 'future-b'})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let snapshot = db.begin_read_transaction();
-
-    db.query("MATCH (m:Memory {id: 'cleanup-fingerprint-a'}) SET m.decay_score_cached = 0.9, m.future_cleanup_field = 'late-a'")
-        .unwrap();
-
-    let output = db
-        .knowledge_memory_cleanup_fingerprints(&KnowledgeMemoryCleanupFingerprintRequest {
-            memory_ids: vec![
-                "cleanup-fingerprint-b".to_string(),
-                "cleanup-fingerprint-a".to_string(),
-                "cleanup-fingerprint-b".to_string(),
-                "missing".to_string(),
-            ],
-            property_names: Vec::new(),
-        })
-        .unwrap();
-    assert_eq!(output.matched_count, 2);
-    assert_eq!(output.returned_count, 2);
-    assert_eq!(output.missing_memory_ids, vec!["missing".to_string()]);
-    assert_eq!(
-        output.rows[0].memory_id.as_deref(),
-        Some("cleanup-fingerprint-b")
-    );
-    assert_eq!(
-        output.rows[1].memory_id.as_deref(),
-        Some("cleanup-fingerprint-a")
-    );
-    let row = &output.rows[1];
-    assert_eq!(row.title.as_deref(), Some("Cleanup A"));
-    assert_eq!(
-        row.metadata,
-        Some(Value::String("{\"state\":\"active\"}".to_string()))
-    );
-    assert_eq!(row.is_latest, Some(true));
-    assert_eq!(row.decay_score_cached, Some(Value::Float(0.9)));
-    assert_eq!(
-        row.created_at,
-        Some(Value::String("2026-07-01T00:00:00".to_string()))
-    );
-    assert_eq!(
-        row.last_accessed_at,
-        Some(Value::String("2026-07-02T00:00:00".to_string()))
-    );
-    assert_eq!(
-        row.last_clicked_at,
-        Some(Value::String("2026-07-03T00:00:00".to_string()))
-    );
-    assert_eq!(row.access_count, Some(Value::Int(4)));
-    assert_eq!(row.appearances, Some(Value::Int(1)));
-    assert_eq!(row.clicks, Some(Value::Int(2)));
-    assert_eq!(row.total_dwell_time_ms, Some(Value::Int(300)));
-    assert_eq!(row.importance, Some(Value::Float(0.8)));
-    assert_eq!(row.unit_type.as_deref(), Some("fact"));
-    assert_eq!(row.semantic_field.as_deref(), Some("cleanup text"));
-    assert!(row.properties.contains_key("decay_score_cached"));
-    assert!(!row.properties.contains_key("future_cleanup_field"));
-
-    let projected = db
-        .knowledge_memory_cleanup_fingerprints(&KnowledgeMemoryCleanupFingerprintRequest {
-            memory_ids: vec!["cleanup-fingerprint-a".to_string()],
-            property_names: vec![
-                "future_cleanup_field".to_string(),
-                "decay_score_cached".to_string(),
-                "future_cleanup_field".to_string(),
-            ],
-        })
-        .unwrap();
-    assert_eq!(projected.rows[0].properties.len(), 2);
-    assert_eq!(
-        projected.rows[0].properties.get("future_cleanup_field"),
-        Some(&Value::String("late-a".to_string()))
-    );
-
-    let snapshot_output = snapshot
-        .knowledge_memory_cleanup_fingerprints(&KnowledgeMemoryCleanupFingerprintRequest {
-            memory_ids: vec!["cleanup-fingerprint-a".to_string()],
-            property_names: Vec::new(),
-        })
-        .unwrap();
-    assert_eq!(snapshot_output.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(
-        snapshot_output.rows[0].decay_score_cached,
-        Some(Value::Float(0.6))
-    );
-
-    let empty = db
-        .knowledge_memory_cleanup_fingerprints(&KnowledgeMemoryCleanupFingerprintRequest {
-            memory_ids: Vec::new(),
-            property_names: Vec::new(),
-        })
-        .unwrap();
-    assert_eq!(empty.matched_count, 0);
-    assert!(empty.rows.is_empty());
-    assert!(empty.missing_memory_ids.is_empty());
-}
-
-#[test]
-fn memory_cleanup_fingerprints_uses_query_runtime_plan_cache() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Memory {id: 'cleanup-cache-a', title: 'Cleanup A', decay_score_cached: 0.6, future_cleanup_field: 'future-a'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'cleanup-cache-b', title: 'Cleanup B', decay_score_cached: 0.2, future_cleanup_field: 'future-b'})")
-        .unwrap();
-    let request = KnowledgeMemoryCleanupFingerprintRequest {
-        memory_ids: vec![
-            "cleanup-cache-b".to_string(),
-            "cleanup-cache-a".to_string(),
-            "cleanup-cache-missing".to_string(),
-        ],
-        property_names: vec!["future_cleanup_field".to_string()],
-    };
-
-    let first = db.knowledge_memory_cleanup_fingerprints(&request).unwrap();
-    let second = db.knowledge_memory_cleanup_fingerprints(&request).unwrap();
-
-    assert_eq!(first, second);
-    assert_eq!(first.matched_count, 2);
-    assert_eq!(first.returned_count, 2);
-    assert_eq!(
-        first.missing_memory_ids,
-        vec!["cleanup-cache-missing".to_string()]
-    );
-    assert_eq!(first.rows[0].memory_id.as_deref(), Some("cleanup-cache-b"));
-    assert_eq!(
-        first.rows[0].properties.get("future_cleanup_field"),
-        Some(&Value::String("future-b".to_string()))
-    );
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, 1);
-    assert_eq!(stats.misses, 1);
-    assert_eq!(stats.hits, 1);
-}
-
-#[test]
-fn memory_cleanup_fingerprints_reject_empty_inputs_without_wal() {
-    let path = unique_test_dir("memory_cleanup_fingerprints_reject_empty_inputs_without_wal");
-    let mut db = Database::open(&path).unwrap();
-    db.query("CREATE (:Memory {id: 'cleanup-fingerprint', decay_score_cached: 0.4})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let wal_before = read_test_wal(&path).unwrap();
-
-    let err = db
-        .knowledge_memory_cleanup_fingerprints(&KnowledgeMemoryCleanupFingerprintRequest {
-            memory_ids: vec![String::new()],
-            property_names: Vec::new(),
-        })
-        .unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("knowledge memory cleanup fingerprint read requires non-empty memory ids"));
-
-    let err = db
-        .knowledge_memory_cleanup_fingerprints(&KnowledgeMemoryCleanupFingerprintRequest {
-            memory_ids: vec!["cleanup-fingerprint".to_string()],
-            property_names: vec![String::new()],
-        })
-        .unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("knowledge memory cleanup fingerprint read requires non-empty property names"));
-
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
-    std::fs::remove_dir_all(path).unwrap();
-}
-
-#[test]
-fn projects_thread_compacted_memory_fields_for_nowledge_growth() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Thread {id: 'projected_thread_a', thread_id: 'projected_logical_a'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'projected_memory_a', title: 'Projected Alpha', content: 'alpha body', importance: 0.8, created_at: 10, space_id: '', future_field: 'future-a'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'projected_memory_b', title: 'Projected Beta', content: 'beta body', importance: 0.4, created_at: 20, space_id: 'team', future_field: 'future-b'})")
-        .unwrap();
-    db.query("MATCH (t:Thread {id: 'projected_thread_a'}), (m:Memory {id: 'projected_memory_a'}) CREATE (t)-[:COMPACTS_TO {compaction_method: 'manual', created_at: 100, future_edge_field: 'edge-a'}]->(m)")
-        .unwrap();
-    db.query("MATCH (t:Thread {id: 'projected_thread_a'}), (m:Memory {id: 'projected_memory_b'}) CREATE (t)-[:COMPACTS_TO {compaction_method: 'auto', created_at: 90, future_edge_field: 'edge-b'}]->(m)")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let snapshot = db.begin_read_transaction();
-
-    db.query("CREATE (:Memory {id: 'projected_memory_c', title: 'Projected Gamma', importance: 2.0, created_at: 30, future_field: 'future-c'})")
-        .unwrap();
-    db.query("MATCH (t:Thread {id: 'projected_thread_a'}), (m:Memory {id: 'projected_memory_c'}) CREATE (t)-[:COMPACTS_TO {compaction_method: 'late', created_at: 110, future_edge_field: 'edge-c'}]->(m)")
-        .unwrap();
-
-    let request = KnowledgeThreadCompactedMemoryProjectedListRequest {
-        list: KnowledgeThreadCompactedMemoryListRequest {
-            thread_id: "projected_thread_a".to_string(),
-            identity_property: "id".to_string(),
-            limit: 2,
-        },
-        memory_property_names: vec![
-            "title".to_string(),
-            "future_field".to_string(),
-            "space_id".to_string(),
-            "title".to_string(),
-        ],
-        relationship_property_names: vec![
-            "compaction_method".to_string(),
-            "future_edge_field".to_string(),
-            "_id".to_string(),
-        ],
-    };
-    let projected = db
-        .knowledge_thread_compacted_memory_projected_list(&request)
-        .unwrap();
-
-    assert!(projected.found);
-    assert_eq!(projected.thread_node_id, Some(0));
-    assert_eq!(projected.matched_count, 3);
-    assert_eq!(projected.returned_count, 2);
-    assert_eq!(
-        projected
-            .rows
-            .iter()
-            .map(|row| row.memory_id.as_deref())
-            .collect::<Vec<_>>(),
-        vec![Some("projected_memory_c"), Some("projected_memory_a")]
-    );
-    assert_eq!(
-        projected.rows[0].memory_properties.get("future_field"),
-        Some(&Value::String("future-c".to_string()))
-    );
-    assert_eq!(
-        projected.rows[1].memory_properties.get("title"),
-        Some(&Value::String("Projected Alpha".to_string()))
-    );
-    assert_eq!(projected.rows[1].normalized_space_id, "default");
-    assert!(!projected.rows[1]
-        .memory_properties
-        .contains_key("importance"));
-    assert_eq!(
-        projected.rows[1]
-            .relationship_properties
-            .get("future_edge_field"),
-        Some(&Value::String("edge-a".to_string()))
-    );
-    assert!(!projected.rows[1]
-        .relationship_properties
-        .contains_key("_id"));
-
-    let stats = db.plan_cache_stats();
-    let repeated = db
-        .knowledge_thread_compacted_memory_projected_list(&request)
-        .unwrap();
-    assert_eq!(repeated, projected);
-    let repeated_stats = db.plan_cache_stats();
-    assert_eq!(repeated_stats.entries, stats.entries);
-    assert_eq!(repeated_stats.misses, stats.misses);
-    assert_eq!(repeated_stats.hits, stats.hits + 2);
-
-    let snapshot_projected = snapshot
-        .knowledge_thread_compacted_memory_projected_list(
-            &KnowledgeThreadCompactedMemoryProjectedListRequest {
-                list: KnowledgeThreadCompactedMemoryListRequest {
-                    thread_id: "projected_logical_a".to_string(),
-                    identity_property: "thread_id".to_string(),
-                    limit: 10,
-                },
-                memory_property_names: vec!["title".to_string()],
-                relationship_property_names: vec!["compaction_method".to_string()],
-            },
-        )
-        .unwrap();
-    assert_eq!(snapshot_projected.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot_projected.matched_count, 2);
-    assert_eq!(
-        snapshot_projected
-            .rows
-            .iter()
-            .map(|row| row.memory_id.as_deref())
-            .collect::<Vec<_>>(),
-        vec![Some("projected_memory_a"), Some("projected_memory_b")]
-    );
-    assert!(!snapshot_projected.rows[0]
-        .memory_properties
-        .contains_key("created_at"));
-}
-
-#[test]
-fn thread_compacted_memory_projected_read_rejects_empty_property_names_without_wal() {
-    let path = unique_test_dir("thread_compacted_memory_projected_empty_property_without_wal");
-    let mut db = Database::open(&path).unwrap();
-    db.query("CREATE (:Thread {id: 'projected_thread_wal'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'projected_memory_wal'})")
-        .unwrap();
-    db.query("MATCH (t:Thread {id: 'projected_thread_wal'}), (m:Memory {id: 'projected_memory_wal'}) CREATE (t)-[:COMPACTS_TO]->(m)")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let wal_before = read_test_wal(&path).unwrap();
-
-    let memory_property_error = db
-        .knowledge_thread_compacted_memory_projected_list(
-            &KnowledgeThreadCompactedMemoryProjectedListRequest {
-                list: KnowledgeThreadCompactedMemoryListRequest {
-                    thread_id: "projected_thread_wal".to_string(),
-                    identity_property: "id".to_string(),
-                    limit: 10,
-                },
-                memory_property_names: vec![String::new()],
-                relationship_property_names: Vec::new(),
-            },
-        )
-        .unwrap_err();
-    assert!(memory_property_error
-        .to_string()
-        .contains("non-empty property names"));
-
-    let relationship_property_error = db
-        .knowledge_thread_compacted_memory_projected_list(
-            &KnowledgeThreadCompactedMemoryProjectedListRequest {
-                list: KnowledgeThreadCompactedMemoryListRequest {
-                    thread_id: "projected_thread_wal".to_string(),
-                    identity_property: "id".to_string(),
-                    limit: 10,
-                },
-                memory_property_names: Vec::new(),
-                relationship_property_names: vec![String::new()],
-            },
-        )
-        .unwrap_err();
-    assert!(relationship_property_error
-        .to_string()
-        .contains("non-empty property names"));
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
-}
-
-#[test]
-fn thread_compacted_memory_read_rejects_invalid_identity() {
-    let db = Database::new();
-    let empty_thread = db
-        .knowledge_thread_compacted_memories(&KnowledgeThreadCompactedMemoryListRequest {
-            thread_id: String::new(),
-            identity_property: "id".to_string(),
-            limit: 10,
-        })
-        .unwrap_err();
-    assert!(empty_thread.to_string().contains("non-empty thread id"));
-
-    let invalid_identity = db
-        .knowledge_thread_compacted_memories(&KnowledgeThreadCompactedMemoryListRequest {
-            thread_id: "thread_a".to_string(),
-            identity_property: "metadata".to_string(),
-            limit: 10,
-        })
-        .unwrap_err();
-    assert!(invalid_identity
-        .to_string()
-        .contains("id or thread_id identity"));
-}
-
-#[test]
-fn reads_memory_compacting_threads_for_nowledge_metadata_and_source_shapes() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(64),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Memory {id: 'memory_a'})").unwrap();
-    db.query("CREATE (:Memory {id: 'memory_b'})").unwrap();
-    db.query("CREATE (:Thread {id: 'thread_a', thread_id: 'logical_a', title: 'Thread A', source: 'slack', metadata: '{\"source\":\"rest\"}', space_id: ''})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_b', thread_id: 'logical_b', title: 'Thread B', source: 'email', metadata: '{\"thread\":true}', space_id: 'archive'})")
-        .unwrap();
-    db.query("MATCH (t:Thread {id: 'thread_a'}), (m:Memory {id: 'memory_a'}) CREATE (t)-[:COMPACTS_TO {created_at: 10}]->(m)")
-        .unwrap();
-    db.query("MATCH (t:Thread {id: 'thread_b'}), (m:Memory {id: 'memory_a'}) CREATE (t)-[:COMPACTS_TO {created_at: 20}]->(m)")
-        .unwrap();
-    db.query("MATCH (t:Thread {id: 'thread_b'}), (m:Memory {id: 'memory_b'}) CREATE (t)-[:COMPACTS_TO {created_at: 30}]->(m)")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let request = KnowledgeMemoryCompactingThreadListRequest {
-        memory_ids: vec![
-            "memory_a".to_string(),
-            "missing".to_string(),
-            "memory_b".to_string(),
-        ],
-        limit_per_memory: 0,
-    };
-    let output = db.knowledge_memory_compacting_threads(&request).unwrap();
-    assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(output.found_memory_count, 2);
-    assert_eq!(output.missing_memory_count, 1);
-    assert_eq!(output.returned_thread_count, 3);
-    assert_eq!(output.rows[0].memory_id, "memory_a");
-    assert!(output.rows[0].found_memory);
-    assert!(output.rows[0].memory_node_id.is_some());
-    assert_eq!(output.rows[0].thread_id.as_deref(), Some("thread_a"));
-    assert!(output.rows[0].thread_node_id.is_some());
-    assert_eq!(
-        output.rows[0].thread_logical_id.as_deref(),
-        Some("logical_a")
-    );
-    assert_eq!(output.rows[0].title.as_deref(), Some("Thread A"));
-    assert_eq!(output.rows[0].source.as_deref(), Some("slack"));
-    assert_eq!(
-        output.rows[0].metadata,
-        Some(Value::String("{\"source\":\"rest\"}".to_string()))
-    );
-    assert_eq!(output.rows[0].raw_space_id, None);
-    assert_eq!(
-        output.rows[0].normalized_space_id.as_deref(),
-        Some("default")
-    );
-    assert!(output.rows[0].relationship_id.is_some());
-    assert_eq!(output.rows[1].thread_id.as_deref(), Some("thread_b"));
-    assert_eq!(output.rows[1].raw_space_id.as_deref(), Some("archive"));
-    assert_eq!(
-        output.rows[1].normalized_space_id.as_deref(),
-        Some("archive")
-    );
-    assert_eq!(output.rows[2].memory_id, "missing");
-    assert!(!output.rows[2].found_memory);
-    assert_eq!(output.rows[2].thread_id, None);
-    assert_eq!(output.rows[3].memory_id, "memory_b");
-    assert_eq!(output.rows[3].thread_id.as_deref(), Some("thread_b"));
-
-    let stats = db.plan_cache_stats();
-    let repeated = db.knowledge_memory_compacting_threads(&request).unwrap();
-    assert_eq!(repeated, output);
-    let repeated_stats = db.plan_cache_stats();
-    assert_eq!(repeated_stats.entries, stats.entries);
-    assert_eq!(repeated_stats.misses, stats.misses);
-    assert_eq!(repeated_stats.hits, stats.hits + 5);
-
-    let limited = db
-        .knowledge_memory_compacting_threads(&KnowledgeMemoryCompactingThreadListRequest {
-            memory_ids: vec!["memory_a".to_string()],
-            limit_per_memory: 1,
-        })
-        .unwrap();
-    assert_eq!(limited.found_memory_count, 1);
-    assert_eq!(limited.returned_thread_count, 1);
-    assert_eq!(limited.rows[0].thread_id.as_deref(), Some("thread_a"));
-
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-}
-
-#[test]
-fn projects_memory_compacting_thread_fields_for_nowledge_growth() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(64),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Memory {id: 'projected_compacting_memory_a'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'projected_compacting_memory_b'})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'projected_compacting_thread_a', thread_id: 'logical_a', title: 'Thread A', source: 'slack', metadata: '{\"source\":\"rest\"}', space_id: '', future_thread_field: 'future-a'})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'projected_compacting_thread_b', thread_id: 'logical_b', title: 'Thread B', source: 'email', metadata: '{\"thread\":true}', space_id: 'archive', future_thread_field: 'future-b'})")
-        .unwrap();
-    db.query("MATCH (t:Thread {id: 'projected_compacting_thread_a'}), (m:Memory {id: 'projected_compacting_memory_a'}) CREATE (t)-[:COMPACTS_TO {created_at: 10, future_edge_field: 'edge-a'}]->(m)")
-        .unwrap();
-    db.query("MATCH (t:Thread {id: 'projected_compacting_thread_b'}), (m:Memory {id: 'projected_compacting_memory_a'}) CREATE (t)-[:COMPACTS_TO {created_at: 20, future_edge_field: 'edge-b'}]->(m)")
-        .unwrap();
-    db.query("MATCH (t:Thread {id: 'projected_compacting_thread_b'}), (m:Memory {id: 'projected_compacting_memory_b'}) CREATE (t)-[:COMPACTS_TO {created_at: 30, future_edge_field: 'edge-c'}]->(m)")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let snapshot = db.begin_read_transaction();
-
-    db.query("CREATE (:Thread {id: 'projected_compacting_thread_c', thread_id: 'logical_c', title: 'Thread C', future_thread_field: 'future-c'})")
-        .unwrap();
-    db.query("MATCH (t:Thread {id: 'projected_compacting_thread_c'}), (m:Memory {id: 'projected_compacting_memory_a'}) CREATE (t)-[:COMPACTS_TO {created_at: 40, future_edge_field: 'edge-d'}]->(m)")
-        .unwrap();
-
-    let request = KnowledgeMemoryCompactingThreadProjectedListRequest {
-        list: KnowledgeMemoryCompactingThreadListRequest {
-            memory_ids: vec![
-                "projected_compacting_memory_a".to_string(),
-                "missing_projected_compacting_memory".to_string(),
-                "projected_compacting_memory_b".to_string(),
-            ],
-            limit_per_memory: 1,
-        },
-        thread_property_names: vec![
-            "title".to_string(),
-            "future_thread_field".to_string(),
-            "space_id".to_string(),
-            "title".to_string(),
-        ],
-        relationship_property_names: vec![
-            "created_at".to_string(),
-            "future_edge_field".to_string(),
-            "_id".to_string(),
-        ],
-    };
-    let projected = db
-        .knowledge_memory_compacting_thread_projected_list(&request)
-        .unwrap();
-
-    assert_eq!(projected.found_memory_count, 2);
-    assert_eq!(projected.missing_memory_count, 1);
-    assert_eq!(projected.returned_thread_count, 2);
-    assert_eq!(projected.rows[0].memory_id, "projected_compacting_memory_a");
-    assert!(projected.rows[0].found_memory);
-    assert_eq!(
-        projected.rows[0].thread_id.as_deref(),
-        Some("projected_compacting_thread_a")
-    );
-    assert_eq!(
-        projected.rows[0]
-            .thread_properties
-            .get("future_thread_field"),
-        Some(&Value::String("future-a".to_string()))
-    );
-    assert_eq!(
-        projected.rows[0].normalized_space_id.as_deref(),
-        Some("default")
-    );
-    assert!(!projected.rows[0]
-        .thread_properties
-        .contains_key("thread_id"));
-    assert_eq!(
-        projected.rows[0]
-            .relationship_properties
-            .get("future_edge_field"),
-        Some(&Value::String("edge-a".to_string()))
-    );
-    assert!(!projected.rows[0]
-        .relationship_properties
-        .contains_key("_id"));
-    assert_eq!(
-        projected.rows[1].memory_id,
-        "missing_projected_compacting_memory"
-    );
-    assert!(!projected.rows[1].found_memory);
-    assert!(projected.rows[1].thread_properties.is_empty());
-    assert_eq!(projected.rows[2].memory_id, "projected_compacting_memory_b");
-    assert_eq!(
-        projected.rows[2].thread_id.as_deref(),
-        Some("projected_compacting_thread_b")
-    );
-
-    let stats = db.plan_cache_stats();
-    let repeated = db
-        .knowledge_memory_compacting_thread_projected_list(&request)
-        .unwrap();
-    assert_eq!(repeated, projected);
-    let repeated_stats = db.plan_cache_stats();
-    assert_eq!(repeated_stats.entries, stats.entries);
-    assert_eq!(repeated_stats.misses, stats.misses);
-    assert_eq!(repeated_stats.hits, stats.hits + 5);
-
-    let snapshot_projected = snapshot
-        .knowledge_memory_compacting_thread_projected_list(
-            &KnowledgeMemoryCompactingThreadProjectedListRequest {
-                list: KnowledgeMemoryCompactingThreadListRequest {
-                    memory_ids: vec!["projected_compacting_memory_a".to_string()],
-                    limit_per_memory: 0,
-                },
-                thread_property_names: vec!["title".to_string()],
-                relationship_property_names: vec!["future_edge_field".to_string()],
-            },
-        )
-        .unwrap();
-    assert_eq!(snapshot_projected.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot_projected.returned_thread_count, 2);
-    assert_eq!(
-        snapshot_projected
-            .rows
-            .iter()
-            .map(|row| row.thread_id.as_deref())
-            .collect::<Vec<_>>(),
-        vec![
-            Some("projected_compacting_thread_a"),
-            Some("projected_compacting_thread_b")
-        ]
-    );
-}
-
-#[test]
-fn memory_compacting_thread_projected_read_rejects_empty_property_names_without_wal() {
-    let path = unique_test_dir("memory_compacting_thread_projected_empty_property_without_wal");
-    let mut db = Database::open(&path).unwrap();
-    db.query("CREATE (:Memory {id: 'projected_compacting_wal_memory'})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'projected_compacting_wal_thread'})")
-        .unwrap();
-    db.query("MATCH (t:Thread {id: 'projected_compacting_wal_thread'}), (m:Memory {id: 'projected_compacting_wal_memory'}) CREATE (t)-[:COMPACTS_TO]->(m)")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let wal_before = read_test_wal(&path).unwrap();
-
-    let thread_property_error = db
-        .knowledge_memory_compacting_thread_projected_list(
-            &KnowledgeMemoryCompactingThreadProjectedListRequest {
-                list: KnowledgeMemoryCompactingThreadListRequest {
-                    memory_ids: vec!["projected_compacting_wal_memory".to_string()],
-                    limit_per_memory: 10,
-                },
-                thread_property_names: vec![String::new()],
-                relationship_property_names: Vec::new(),
-            },
-        )
-        .unwrap_err();
-    assert!(thread_property_error
-        .to_string()
-        .contains("non-empty property names"));
-
-    let relationship_property_error = db
-        .knowledge_memory_compacting_thread_projected_list(
-            &KnowledgeMemoryCompactingThreadProjectedListRequest {
-                list: KnowledgeMemoryCompactingThreadListRequest {
-                    memory_ids: vec!["projected_compacting_wal_memory".to_string()],
-                    limit_per_memory: 10,
-                },
-                thread_property_names: Vec::new(),
-                relationship_property_names: vec![String::new()],
-            },
-        )
-        .unwrap_err();
-    assert!(relationship_property_error
-        .to_string()
-        .contains("non-empty property names"));
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
-}
-
-#[test]
-fn memory_compacting_thread_read_rejects_empty_memory_ids() {
-    let db = Database::new();
-    let empty = db
-        .knowledge_memory_compacting_threads(&KnowledgeMemoryCompactingThreadListRequest {
-            memory_ids: Vec::new(),
-            limit_per_memory: 10,
-        })
-        .unwrap_err();
-    assert!(empty.to_string().contains("non-empty memory ids"));
-
-    let empty_item = db
-        .knowledge_memory_compacting_threads(&KnowledgeMemoryCompactingThreadListRequest {
-            memory_ids: vec![String::new()],
-            limit_per_memory: 10,
-        })
-        .unwrap_err();
-    assert!(empty_item.to_string().contains("non-empty memory ids"));
-}
-
-#[test]
-fn reads_thread_messages_for_nowledge_ordered_transcript_shapes() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Thread {id: 'thread_1'})").unwrap();
-    db.query("CREATE (:Message {id: 'msg_1', role: 'user', content: 'first', order_index: 2, timestamp: 20, token_count: 3, created_at: 21, updated_at: 22, metadata: '{\"a\":1}'})")
-        .unwrap();
-    db.query("CREATE (:Message {id: 'msg_2', role: 'assistant', content: 'second', order_index: 1, timestamp: 10, token_count: 5, created_at: 11})")
-        .unwrap();
-    db.query("MATCH (t:Thread {id: 'thread_1'}), (m:Message {id: 'msg_1'}) CREATE (t)-[:CONTAINS {order_index: 1}]->(m)")
-        .unwrap();
-    db.query(
-        "MATCH (t:Thread {id: 'thread_1'}), (m:Message {id: 'msg_2'}) CREATE (t)-[:CONTAINS]->(m)",
-    )
-    .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let request = KnowledgeThreadMessageListRequest {
-        thread_id: "thread_1".to_string(),
-        limit: 0,
-    };
-    let output = db.knowledge_thread_messages(&request).unwrap();
-
-    assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert!(output.found);
-    assert_eq!(output.thread_id, "thread_1");
-    assert!(output.thread_node_id.is_some());
-    assert_eq!(output.matched_count, 2);
-    assert_eq!(output.returned_count, 2);
-    assert_eq!(output.rows[0].message_id.as_deref(), Some("msg_1"));
-    assert_eq!(output.rows[0].role.as_deref(), Some("user"));
-    assert_eq!(output.rows[0].content.as_deref(), Some("first"));
-    assert_eq!(output.rows[0].order_index, Some(1));
-    assert_eq!(output.rows[0].relationship_order_index, Some(1));
-    assert_eq!(output.rows[0].message_order_index, Some(2));
-    assert_eq!(output.rows[0].timestamp, Some(Value::Int(20)));
-    assert_eq!(output.rows[0].token_count, Some(3));
-    assert_eq!(output.rows[0].created_at, Some(Value::Int(21)));
-    assert_eq!(output.rows[0].updated_at, Some(Value::Int(22)));
-    assert_eq!(
-        output.rows[0].metadata,
-        Some(Value::String("{\"a\":1}".to_string()))
-    );
-    assert_eq!(output.rows[1].message_id.as_deref(), Some("msg_2"));
-    assert_eq!(output.rows[1].order_index, Some(1));
-    assert_eq!(output.rows[1].relationship_order_index, None);
-    assert_eq!(output.rows[1].message_order_index, Some(1));
-
-    let stats = db.plan_cache_stats();
-    let repeated = db.knowledge_thread_messages(&request).unwrap();
-    assert_eq!(repeated, output);
-    let repeated_stats = db.plan_cache_stats();
-    assert_eq!(repeated_stats.entries, stats.entries);
-    assert_eq!(repeated_stats.misses, stats.misses);
-    assert_eq!(repeated_stats.hits, stats.hits + 2);
-
-    let limited = db
-        .knowledge_thread_messages(&KnowledgeThreadMessageListRequest {
-            thread_id: "thread_1".to_string(),
-            limit: 1,
-        })
-        .unwrap();
-    assert_eq!(limited.matched_count, 2);
-    assert_eq!(limited.returned_count, 1);
-
-    let missing = db
-        .knowledge_thread_messages(&KnowledgeThreadMessageListRequest {
-            thread_id: "missing".to_string(),
-            limit: 10,
-        })
-        .unwrap();
-    assert!(!missing.found);
-    assert_eq!(missing.thread_node_id, None);
-    assert_eq!(missing.matched_count, 0);
-    assert_eq!(missing.returned_count, 0);
-}
-
-#[test]
-fn thread_message_read_rejects_empty_thread_id() {
-    let db = Database::new();
-    let error = db
-        .knowledge_thread_messages(&KnowledgeThreadMessageListRequest {
-            thread_id: String::new(),
-            limit: 10,
-        })
-        .unwrap_err();
-    assert!(error.to_string().contains("non-empty thread id"));
-}
-
-#[test]
-fn lists_threads_for_nowledge_source_page_space_and_lookup_shapes() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Thread {id: 'thread_a', thread_id: 'logical_a', title: 'Alpha Thread', summary: 'Alpha summary', source: 'slack', project: 'graph', workspace: 'local', space_id: '', metadata: 'is_favorite:true', message_count: 5, created_at: 10, updated_at: 30})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_b', thread_id: 'logical_b', title: 'Beta Thread', source: 'slack', space_id: 'archive', message_count: 2, created_at: 20, updated_at: 40})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_c', thread_id: 'logical_c', source: 'email', space_id: 'default', message_count: 9, created_at: 30, import_date: 50})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_d', source: '', space_id: 'default', created_at: 1})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let bulk = db
-        .knowledge_threads(&KnowledgeThreadListRequest {
-            ids: vec![
-                "thread_b".to_string(),
-                "missing".to_string(),
-                "thread_a".to_string(),
-            ],
-            limit: 0,
-            order: KnowledgeThreadListOrder::IdAsc,
-            ..KnowledgeThreadListRequest::default()
-        })
-        .unwrap();
-    assert_eq!(bulk.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(bulk.matched_count, 2);
-    assert_eq!(bulk.returned_count, 2);
-    assert_eq!(bulk.missing_ids, vec!["missing".to_string()]);
-    assert_eq!(bulk.rows[0].id.as_deref(), Some("thread_a"));
-    assert_eq!(bulk.rows[0].thread_id.as_deref(), Some("logical_a"));
-    assert_eq!(bulk.rows[0].display_title, "Alpha Thread");
-    assert_eq!(bulk.rows[0].summary.as_deref(), Some("Alpha summary"));
-    assert_eq!(bulk.rows[0].source.as_deref(), Some("slack"));
-    assert_eq!(bulk.rows[0].project.as_deref(), Some("graph"));
-    assert_eq!(bulk.rows[0].workspace.as_deref(), Some("local"));
-    assert_eq!(bulk.rows[0].raw_space_id, None);
-    assert_eq!(bulk.rows[0].normalized_space_id, "default");
-    assert_eq!(bulk.rows[0].message_count, 5);
-    assert_eq!(
-        bulk.rows[0].metadata,
-        Some(Value::String("is_favorite:true".to_string()))
-    );
-
-    let lookup = db
-        .knowledge_threads(&KnowledgeThreadListRequest {
-            lookup_key: Some("logical_b".to_string()),
-            limit: 1,
-            order: KnowledgeThreadListOrder::IdAsc,
-            ..KnowledgeThreadListRequest::default()
-        })
-        .unwrap();
-    assert_eq!(lookup.matched_count, 1);
-    assert_eq!(lookup.rows[0].id.as_deref(), Some("thread_b"));
-
-    let source_page = db
-        .knowledge_threads(&KnowledgeThreadListRequest {
-            source: Some("slack".to_string()),
-            after_id: Some("thread_a".to_string()),
-            limit: 10,
-            order: KnowledgeThreadListOrder::IdAsc,
-            ..KnowledgeThreadListRequest::default()
-        })
-        .unwrap();
-    assert_eq!(source_page.matched_count, 1);
-    assert_eq!(source_page.rows[0].id.as_deref(), Some("thread_b"));
-
-    let default_space = db
-        .knowledge_threads(&KnowledgeThreadListRequest {
-            normalized_space_id: Some("default".to_string()),
-            require_thread_id: true,
-            limit: 10,
-            order: KnowledgeThreadListOrder::UpdatedAtDesc,
-            ..KnowledgeThreadListRequest::default()
-        })
-        .unwrap();
-    assert_eq!(default_space.matched_count, 2);
-    assert_eq!(
-        default_space
-            .rows
-            .iter()
-            .map(|row| row.thread_id.as_deref().unwrap())
-            .collect::<Vec<_>>(),
-        vec!["logical_c", "logical_a"]
-    );
-
-    let favorite = db
-        .knowledge_threads(&KnowledgeThreadListRequest {
-            metadata_contains: Some("is_favorite".to_string()),
-            limit: 10,
-            order: KnowledgeThreadListOrder::UpdatedAtDesc,
-            ..KnowledgeThreadListRequest::default()
-        })
-        .unwrap();
-    assert_eq!(favorite.matched_count, 1);
-    assert_eq!(favorite.rows[0].thread_id.as_deref(), Some("logical_a"));
-
-    let ranked = db
-        .knowledge_threads(&KnowledgeThreadListRequest {
-            limit: 1,
-            order: KnowledgeThreadListOrder::MessageCountDesc,
-            ..KnowledgeThreadListRequest::default()
-        })
-        .unwrap();
-    assert_eq!(ranked.matched_count, 4);
-    assert_eq!(ranked.rows[0].thread_id.as_deref(), Some("logical_c"));
-
-    let cache_before_lookup = db.plan_cache_stats();
-    let cached_request = KnowledgeThreadListRequest {
-        thread_ids: vec!["logical_a".to_string()],
-        limit: 10,
-        order: KnowledgeThreadListOrder::IdAsc,
-        ..KnowledgeThreadListRequest::default()
-    };
-    db.knowledge_threads(&cached_request).unwrap();
-    db.knowledge_threads(&cached_request).unwrap();
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, cache_before_lookup.entries + 1);
-    assert_eq!(stats.misses, cache_before_lookup.misses + 1);
-    assert_eq!(stats.hits, cache_before_lookup.hits + 1);
-
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-}
-
-#[test]
-fn thread_list_rejects_unbounded_or_empty_filters() {
-    let db = Database::new();
-
-    let unbounded = db
-        .knowledge_threads(&KnowledgeThreadListRequest::default())
-        .unwrap_err();
-    assert!(unbounded.to_string().contains("bounded limit or a filter"));
-
-    let empty_id = db
-        .knowledge_threads(&KnowledgeThreadListRequest {
-            ids: vec![String::new()],
-            limit: 10,
-            ..KnowledgeThreadListRequest::default()
-        })
-        .unwrap_err();
-    assert!(empty_id.to_string().contains("non-empty ids"));
-
-    let empty_thread_id = db
-        .knowledge_threads(&KnowledgeThreadListRequest {
-            thread_ids: vec![String::new()],
-            limit: 10,
-            ..KnowledgeThreadListRequest::default()
-        })
-        .unwrap_err();
-    assert!(empty_thread_id.to_string().contains("non-empty thread ids"));
-
-    let empty_source = db
-        .knowledge_threads(&KnowledgeThreadListRequest {
-            source: Some(String::new()),
-            limit: 10,
-            ..KnowledgeThreadListRequest::default()
-        })
-        .unwrap_err();
-    assert!(empty_source.to_string().contains("non-empty source"));
-}
-
-#[test]
-fn lists_distinct_thread_sources_for_rest_fs_shape() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Thread {id: 'thread_a', source: 'slack'})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_b', source: 'codex'})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_c', source: 'slack'})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_d', source: ''})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_e'})").unwrap();
-    db.query("CREATE (:Memory {id: 'memory_source', source: 'ignored'})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let cache_before_lookup = db.plan_cache_stats();
-
-    let output = db
-        .knowledge_thread_sources(&KnowledgeThreadSourceListRequest { limit: 0 })
-        .unwrap();
-    assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(output.matched_count, 2);
-    assert_eq!(output.returned_count, 2);
-    assert_eq!(
-        output.sources,
-        vec!["codex".to_string(), "slack".to_string()]
-    );
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    let repeated = db
-        .knowledge_thread_sources(&KnowledgeThreadSourceListRequest { limit: 0 })
-        .unwrap();
-    assert_eq!(output, repeated);
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, cache_before_lookup.entries + 1);
-    assert_eq!(stats.misses, cache_before_lookup.misses + 1);
-    assert_eq!(stats.hits, cache_before_lookup.hits + 1);
-
-    let limited = db
-        .knowledge_thread_sources(&KnowledgeThreadSourceListRequest { limit: 1 })
-        .unwrap();
-    assert_eq!(limited.matched_count, 2);
-    assert_eq!(limited.returned_count, 1);
-    assert_eq!(limited.sources, vec!["codex".to_string()]);
-
-    let tx = db.begin_read_transaction();
-    db.query("CREATE (:Thread {id: 'thread_after', source: 'after'})")
-        .unwrap();
-    let snapshot = tx
-        .knowledge_thread_sources(&KnowledgeThreadSourceListRequest { limit: 0 })
-        .unwrap();
-    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(
-        snapshot.sources,
-        vec!["codex".to_string(), "slack".to_string()]
-    );
-}
-
-#[test]
-fn reads_thread_title_for_rest_agent_attachment_shape() {
-    let mut db = Database::new();
-    db.query("CREATE (:Thread {id: 'thread_a', thread_id: 'logical_a', title: 'Alpha Thread'})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_b', thread_id: 'logical_b', title: 'Beta Thread'})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_c', thread_id: 'logical_a', title: 'Later Duplicate'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'logical_a', title: 'Ignored Memory'})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let by_logical = db
-        .knowledge_thread_title(&KnowledgeThreadTitleLookupRequest {
-            id: "logical_a".to_string(),
-        })
-        .unwrap();
-    assert_eq!(by_logical.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(by_logical.id, "logical_a");
-    assert!(by_logical.thread_node_id.is_some());
-    assert!(by_logical.found_thread);
-    assert_eq!(by_logical.title.as_deref(), Some("Alpha Thread"));
-    assert_eq!(by_logical.matched_count, 2);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-
-    let by_physical = db
-        .knowledge_thread_title(&KnowledgeThreadTitleLookupRequest {
-            id: "thread_b".to_string(),
-        })
-        .unwrap();
-    assert_eq!(by_physical.title.as_deref(), Some("Beta Thread"));
-    assert_eq!(by_physical.matched_count, 1);
-
-    let missing = db
-        .knowledge_thread_title(&KnowledgeThreadTitleLookupRequest {
-            id: "missing_thread".to_string(),
-        })
-        .unwrap();
-    assert!(!missing.found_thread);
-    assert_eq!(missing.thread_node_id, None);
-    assert_eq!(missing.title, None);
-    assert_eq!(missing.matched_count, 0);
-
-    let tx = db.begin_read_transaction();
-    db.query("MATCH (t:Thread {id: 'thread_a'}) SET t.title = 'Changed'")
-        .unwrap();
-    let snapshot = tx
-        .knowledge_thread_title(&KnowledgeThreadTitleLookupRequest {
-            id: "logical_a".to_string(),
-        })
-        .unwrap();
-    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot.title.as_deref(), Some("Alpha Thread"));
-}
-
-#[test]
-fn thread_title_read_rejects_empty_id() {
-    let db = Database::new();
-    let error = db
-        .knowledge_thread_title(&KnowledgeThreadTitleLookupRequest { id: String::new() })
-        .unwrap_err();
-    assert!(error.to_string().contains("non-empty thread id"));
-}
-
-#[test]
-fn reads_thread_source_summary_for_rest_export_memory_shape() {
-    let mut db = Database::new();
-    db.query("CREATE (:Thread {id: 'thread_a', thread_id: 'logical_a', title: 'Alpha Thread', source: 'codex', created_at: 10})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_b', thread_id: 'logical_b', title: 'Beta Thread', source: 'slack', created_at: 20})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_c', thread_id: 'logical_a', title: 'Later Duplicate', source: 'email', created_at: 30})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'logical_a', title: 'Ignored Memory', source: 'ignored'})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let by_logical = db
-        .knowledge_thread_source(&KnowledgeThreadSourceLookupRequest {
-            sid: "logical_a".to_string(),
-        })
-        .unwrap();
-    assert_eq!(by_logical.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(by_logical.sid, "logical_a");
-    assert!(by_logical.thread_node_id.is_some());
-    assert!(by_logical.found_thread);
-    assert_eq!(by_logical.thread_id.as_deref(), Some("logical_a"));
-    assert_eq!(by_logical.title.as_deref(), Some("Alpha Thread"));
-    assert_eq!(by_logical.source.as_deref(), Some("codex"));
-    assert_eq!(by_logical.created_at, Some(Value::Int(10)));
-    assert_eq!(by_logical.matched_count, 2);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-
-    let by_physical = db
-        .knowledge_thread_source(&KnowledgeThreadSourceLookupRequest {
-            sid: "thread_b".to_string(),
-        })
-        .unwrap();
-    assert_eq!(by_physical.thread_id.as_deref(), Some("logical_b"));
-    assert_eq!(by_physical.title.as_deref(), Some("Beta Thread"));
-    assert_eq!(by_physical.source.as_deref(), Some("slack"));
-    assert_eq!(by_physical.created_at, Some(Value::Int(20)));
-    assert_eq!(by_physical.matched_count, 1);
-
-    let missing = db
-        .knowledge_thread_source(&KnowledgeThreadSourceLookupRequest {
-            sid: "missing_thread".to_string(),
-        })
-        .unwrap();
-    assert!(!missing.found_thread);
-    assert_eq!(missing.thread_node_id, None);
-    assert_eq!(missing.thread_id, None);
-    assert_eq!(missing.matched_count, 0);
-
-    let tx = db.begin_read_transaction();
-    db.query("MATCH (t:Thread {id: 'thread_a'}) SET t.source = 'changed'")
-        .unwrap();
-    let snapshot = tx
-        .knowledge_thread_source(&KnowledgeThreadSourceLookupRequest {
-            sid: "logical_a".to_string(),
-        })
-        .unwrap();
-    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot.source.as_deref(), Some("codex"));
-}
-
-#[test]
-fn thread_source_read_rejects_empty_sid() {
-    let db = Database::new();
-    let error = db
-        .knowledge_thread_source(&KnowledgeThreadSourceLookupRequest { sid: String::new() })
-        .unwrap_err();
-    assert!(error.to_string().contains("non-empty thread id"));
-}
-
-#[test]
-fn thread_title_and_source_reads_use_query_runtime_plan_cache() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Thread {id: 'thread-cache-a', thread_id: 'logical-cache-a', title: 'Alpha Thread', source: 'codex', created_at: 10})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread-cache-b', thread_id: 'logical-cache-b', title: 'Beta Thread', source: 'slack', created_at: 20})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread-cache-c', thread_id: 'logical-cache-a', title: 'Later Duplicate', source: 'email', created_at: 30})")
-        .unwrap();
-    db.query(
-        "CREATE (:Memory {id: 'logical-cache-a', title: 'Ignored Memory', source: 'ignored'})",
-    )
-    .unwrap();
-    let title_request = KnowledgeThreadTitleLookupRequest {
-        id: "logical-cache-a".to_string(),
-    };
-    let source_request = KnowledgeThreadSourceLookupRequest {
-        sid: "logical-cache-a".to_string(),
-    };
-
-    let first_title = db.knowledge_thread_title(&title_request).unwrap();
-    let first_source = db.knowledge_thread_source(&source_request).unwrap();
-    let second_title = db.knowledge_thread_title(&title_request).unwrap();
-    let second_source = db.knowledge_thread_source(&source_request).unwrap();
-
-    assert_eq!(first_title, second_title);
-    assert_eq!(first_source, second_source);
-    assert!(first_title.found_thread);
-    assert_eq!(first_title.title.as_deref(), Some("Alpha Thread"));
-    assert_eq!(first_title.matched_count, 2);
-    assert!(first_source.found_thread);
-    assert_eq!(first_source.thread_id.as_deref(), Some("logical-cache-a"));
-    assert_eq!(first_source.title.as_deref(), Some("Alpha Thread"));
-    assert_eq!(first_source.source.as_deref(), Some("codex"));
-    assert_eq!(first_source.created_at, Some(Value::Int(10)));
-    assert_eq!(first_source.matched_count, 2);
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, 2);
-    assert_eq!(stats.misses, 2);
-    assert_eq!(stats.hits, 2);
-
-    let by_physical = db
-        .knowledge_thread_title(&KnowledgeThreadTitleLookupRequest {
-            id: "thread-cache-b".to_string(),
-        })
-        .unwrap();
-    assert_eq!(by_physical.title.as_deref(), Some("Beta Thread"));
-    assert_eq!(by_physical.matched_count, 1);
-}
-
-#[test]
-fn reads_thread_message_lookup_for_rest_fs_shape() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Thread {id: 'alpha-thread-1', thread_id: 'logical_a', source: 'codex', message_count: 3, space_id: 'team'})")
-        .unwrap();
-    db.query(
-        "CREATE (:Thread {id: 'beta-thread-1', source: 'codex', message_count: 5, space_id: ''})",
-    )
-    .unwrap();
-    db.query("CREATE (:Thread {id: 'alpha-thread-2', source: 'slack', message_count: 7, space_id: 'other'})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'gamma-thread-1', source: 'codex'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'alpha-thread-1', source: 'codex', message_count: 99})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let cache_before_lookup = db.plan_cache_stats();
-
-    let exact = db
-        .knowledge_thread_message_lookup(&KnowledgeThreadMessageLookupRequest {
-            key: "alpha-thread-1".to_string(),
-            source: "codex".to_string(),
-        })
-        .unwrap();
-    assert_eq!(exact.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(exact.key, "alpha-thread-1");
-    assert_eq!(exact.source_filter, "codex");
-    assert!(exact.thread_node_id.is_some());
-    assert!(exact.found_thread);
-    assert_eq!(exact.id.as_deref(), Some("alpha-thread-1"));
-    assert_eq!(exact.message_count, Some(Value::Int(3)));
-    assert_eq!(exact.raw_space_id.as_deref(), Some("team"));
-    assert_eq!(exact.matched_count, 1);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    let repeated_exact = db
-        .knowledge_thread_message_lookup(&KnowledgeThreadMessageLookupRequest {
-            key: "alpha-thread-1".to_string(),
-            source: "codex".to_string(),
-        })
-        .unwrap();
-    assert_eq!(exact, repeated_exact);
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, cache_before_lookup.entries + 1);
-    assert_eq!(stats.misses, cache_before_lookup.misses + 1);
-    assert_eq!(stats.hits, cache_before_lookup.hits + 1);
-
-    let prefix = db
-        .knowledge_thread_message_lookup(&KnowledgeThreadMessageLookupRequest {
-            key: "beta".to_string(),
-            source: "codex".to_string(),
-        })
-        .unwrap();
-    assert_eq!(prefix.id.as_deref(), Some("beta-thread-1"));
-    assert_eq!(prefix.message_count, Some(Value::Int(5)));
-    assert_eq!(prefix.raw_space_id.as_deref(), Some(""));
-
-    let contains = db
-        .knowledge_thread_message_lookup(&KnowledgeThreadMessageLookupRequest {
-            key: "thread".to_string(),
-            source: "codex".to_string(),
-        })
-        .unwrap();
-    assert_eq!(contains.id.as_deref(), Some("alpha-thread-1"));
-    assert_eq!(contains.matched_count, 3);
-
-    let missing = db
-        .knowledge_thread_message_lookup(&KnowledgeThreadMessageLookupRequest {
-            key: "alpha".to_string(),
-            source: "email".to_string(),
-        })
-        .unwrap();
-    assert!(!missing.found_thread);
-    assert_eq!(missing.thread_node_id, None);
-    assert_eq!(missing.matched_count, 0);
-
-    let tx = db.begin_read_transaction();
-    db.query("MATCH (t:Thread {id: 'alpha-thread-1'}) SET t.message_count = 42")
-        .unwrap();
-    let snapshot = tx
-        .knowledge_thread_message_lookup(&KnowledgeThreadMessageLookupRequest {
-            key: "alpha-thread-1".to_string(),
-            source: "codex".to_string(),
-        })
-        .unwrap();
-    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot.message_count, Some(Value::Int(3)));
-}
-
-#[test]
-fn thread_message_lookup_rejects_empty_filters() {
-    let db = Database::new();
-    let empty_key = db
-        .knowledge_thread_message_lookup(&KnowledgeThreadMessageLookupRequest {
-            key: String::new(),
-            source: "codex".to_string(),
-        })
-        .unwrap_err();
-    assert!(empty_key.to_string().contains("non-empty key"));
-
-    let empty_source = db
-        .knowledge_thread_message_lookup(&KnowledgeThreadMessageLookupRequest {
-            key: "thread".to_string(),
-            source: String::new(),
-        })
-        .unwrap_err();
-    assert!(empty_source.to_string().contains("non-empty source"));
-}
-
-#[test]
-fn reads_thread_meta_lookup_for_rest_fs_shape() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Thread {id: 'alpha-thread-1', thread_id: 'logical_a', title: 'Alpha Thread', summary: 'Alpha Summary', message_count: 3, source: 'codex', created_at: 10, updated_at: 20, space_id: 'team', project: 'graph', workspace: 'local'})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'beta-thread-1', title: 'Beta Thread', message_count: 5, source: 'codex', space_id: '', project: '', workspace: 'remote'})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'alpha-thread-2', title: 'Other Source', source: 'slack', message_count: 7, space_id: 'other'})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'gamma-thread-1', source: 'codex'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'alpha-thread-1', source: 'codex', message_count: 99})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let cache_before_lookup = db.plan_cache_stats();
-
-    let exact = db
-        .knowledge_thread_meta_lookup(&KnowledgeThreadMetaLookupRequest {
-            key: "alpha-thread-1".to_string(),
-            source: "codex".to_string(),
-        })
-        .unwrap();
-    assert_eq!(exact.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(exact.key, "alpha-thread-1");
-    assert_eq!(exact.source_filter, "codex");
-    assert!(exact.thread_node_id.is_some());
-    assert!(exact.found_thread);
-    assert_eq!(exact.id.as_deref(), Some("alpha-thread-1"));
-    assert_eq!(exact.thread_id.as_deref(), Some("logical_a"));
-    assert_eq!(exact.title.as_deref(), Some("Alpha Thread"));
-    assert_eq!(exact.summary.as_deref(), Some("Alpha Summary"));
-    assert_eq!(exact.message_count, Some(Value::Int(3)));
-    assert_eq!(exact.source.as_deref(), Some("codex"));
-    assert_eq!(exact.created_at, Some(Value::Int(10)));
-    assert_eq!(exact.updated_at, Some(Value::Int(20)));
-    assert_eq!(exact.raw_space_id.as_deref(), Some("team"));
-    assert_eq!(exact.project.as_deref(), Some("graph"));
-    assert_eq!(exact.workspace.as_deref(), Some("local"));
-    assert_eq!(exact.matched_count, 1);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    let repeated_exact = db
-        .knowledge_thread_meta_lookup(&KnowledgeThreadMetaLookupRequest {
-            key: "alpha-thread-1".to_string(),
-            source: "codex".to_string(),
-        })
-        .unwrap();
-    assert_eq!(exact, repeated_exact);
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, cache_before_lookup.entries + 1);
-    assert_eq!(stats.misses, cache_before_lookup.misses + 1);
-    assert_eq!(stats.hits, cache_before_lookup.hits + 1);
-
-    let prefix = db
-        .knowledge_thread_meta_lookup(&KnowledgeThreadMetaLookupRequest {
-            key: "beta".to_string(),
-            source: "codex".to_string(),
-        })
-        .unwrap();
-    assert_eq!(prefix.id.as_deref(), Some("beta-thread-1"));
-    assert_eq!(prefix.raw_space_id.as_deref(), Some(""));
-    assert_eq!(prefix.project, None);
-    assert_eq!(prefix.workspace.as_deref(), Some("remote"));
-
-    let contains = db
-        .knowledge_thread_meta_lookup(&KnowledgeThreadMetaLookupRequest {
-            key: "thread".to_string(),
-            source: "codex".to_string(),
-        })
-        .unwrap();
-    assert_eq!(contains.id.as_deref(), Some("alpha-thread-1"));
-    assert_eq!(contains.matched_count, 3);
-
-    let missing = db
-        .knowledge_thread_meta_lookup(&KnowledgeThreadMetaLookupRequest {
-            key: "alpha".to_string(),
-            source: "email".to_string(),
-        })
-        .unwrap();
-    assert!(!missing.found_thread);
-    assert_eq!(missing.thread_node_id, None);
-    assert_eq!(missing.matched_count, 0);
-
-    let tx = db.begin_read_transaction();
-    db.query("MATCH (t:Thread {id: 'alpha-thread-1'}) SET t.summary = 'Changed'")
-        .unwrap();
-    let snapshot = tx
-        .knowledge_thread_meta_lookup(&KnowledgeThreadMetaLookupRequest {
-            key: "alpha-thread-1".to_string(),
-            source: "codex".to_string(),
-        })
-        .unwrap();
-    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot.summary.as_deref(), Some("Alpha Summary"));
-}
-
-#[test]
-fn thread_meta_lookup_rejects_empty_filters() {
-    let db = Database::new();
-    let empty_key = db
-        .knowledge_thread_meta_lookup(&KnowledgeThreadMetaLookupRequest {
-            key: String::new(),
-            source: "codex".to_string(),
-        })
-        .unwrap_err();
-    assert!(empty_key.to_string().contains("non-empty key"));
-
-    let empty_source = db
-        .knowledge_thread_meta_lookup(&KnowledgeThreadMetaLookupRequest {
-            key: "thread".to_string(),
-            source: String::new(),
-        })
-        .unwrap_err();
-    assert!(empty_source.to_string().contains("non-empty source"));
-}
-
-#[test]
-fn resolves_thread_identity_for_nowledge_repo_shape() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:ThreadIdentity {id: 'identity_public', thread_node_id: 'thread_uuid', thread_id: 'logical_a', space_id: '', source: 'codex'})")
-        .unwrap();
-    db.query("CREATE (:ThreadIdentity {id: 'identity_other', thread_node_id: 'other_uuid', thread_id: 'logical_b', space_id: 'team', source: 'slack'})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let cache_before_lookup = db.plan_cache_stats();
-
-    let output = db
-        .knowledge_thread_identity(&KnowledgeThreadIdentityRequest {
-            identity_key: "identity_public".to_string(),
-        })
-        .unwrap();
-    assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(output.identity_key, "identity_public");
-    assert!(output.identity_node_id.is_some());
-    assert!(output.found_identity);
-    assert_eq!(output.thread_node_id.as_deref(), Some("thread_uuid"));
-    assert_eq!(output.thread_id.as_deref(), Some("logical_a"));
-    assert_eq!(output.raw_space_id, None);
-    assert_eq!(output.normalized_space_id.as_deref(), Some("default"));
-    assert_eq!(output.source.as_deref(), Some("codex"));
-    let repeated = db
-        .knowledge_thread_identity(&KnowledgeThreadIdentityRequest {
-            identity_key: "identity_public".to_string(),
-        })
-        .unwrap();
-    assert_eq!(output, repeated);
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, cache_before_lookup.entries + 1);
-    assert_eq!(stats.misses, cache_before_lookup.misses + 1);
-    assert_eq!(stats.hits, cache_before_lookup.hits + 1);
-
-    let missing = db
-        .knowledge_thread_identity(&KnowledgeThreadIdentityRequest {
-            identity_key: "missing_identity".to_string(),
-        })
-        .unwrap();
-    assert_eq!(missing.graph_commit_epoch, graph_commit_epoch);
-    assert!(!missing.found_identity);
-    assert_eq!(missing.identity_node_id, None);
-    assert_eq!(missing.thread_node_id, None);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-
-    let tx = db.begin_read_transaction();
-    db.query("MATCH (ti:ThreadIdentity {id: 'identity_public'}) SET ti.source = 'changed'")
-        .unwrap();
-    let snapshot = tx
-        .knowledge_thread_identity(&KnowledgeThreadIdentityRequest {
-            identity_key: "identity_public".to_string(),
-        })
-        .unwrap();
-    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot.source.as_deref(), Some("codex"));
-}
-
-#[test]
-fn thread_identity_read_rejects_empty_key() {
-    let db = Database::new();
-    let error = db
-        .knowledge_thread_identity(&KnowledgeThreadIdentityRequest {
-            identity_key: String::new(),
-        })
-        .unwrap_err();
-    assert!(error.to_string().contains("non-empty identity key"));
 }
 
 #[test]
@@ -12115,21 +7607,9 @@ fn deletes_thread_identities_for_nowledge_compensation_and_cascade_shapes() {
         "identity_by_node",
         "identity_duplicate",
     ] {
-        assert!(
-            !db.knowledge_thread_identity(&KnowledgeThreadIdentityRequest {
-                identity_key: identity_key.to_string(),
-            })
-            .unwrap()
-            .found_identity
-        );
+        assert!(!test_thread_identity_exists(&db, identity_key));
     }
-    assert!(
-        db.knowledge_thread_identity(&KnowledgeThreadIdentityRequest {
-            identity_key: "identity_survivor".to_string(),
-        })
-        .unwrap()
-        .found_identity
-    );
+    assert!(test_thread_identity_exists(&db, "identity_survivor"));
 
     let missing = db
         .delete_knowledge_thread_identities(&KnowledgeThreadIdentityDeleteRequest {
@@ -12223,232 +7703,10 @@ fn typed_thread_identity_delete_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         for identity_key in ["identity_public", "identity_by_node"] {
-            assert!(
-                !db.knowledge_thread_identity(&KnowledgeThreadIdentityRequest {
-                    identity_key: identity_key.to_string(),
-                })
-                .unwrap()
-                .found_identity
-            );
+            assert!(!test_thread_identity_exists(&db, identity_key));
         }
     }
     std::fs::remove_dir_all(path).unwrap();
-}
-
-#[test]
-fn reads_thread_sync_metadata_for_nowledge_repo_shape() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Thread {id: 'thread_a', title: 'Alpha', source: 'codex', project: 'graph', workspace: 'local', space_id: ''})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_b'})").unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let cache_before_lookup = db.plan_cache_stats();
-
-    let output = db
-        .knowledge_thread_sync_metadata(&KnowledgeThreadSyncMetadataRequest {
-            id: "thread_a".to_string(),
-        })
-        .unwrap();
-    assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(output.id, "thread_a");
-    assert!(output.thread_node_id.is_some());
-    assert!(output.found_thread);
-    assert_eq!(output.title, "Alpha");
-    assert_eq!(output.source, "codex");
-    assert_eq!(output.project, "graph");
-    assert_eq!(output.workspace, "local");
-    assert_eq!(output.space_id, "");
-    let repeated = db
-        .knowledge_thread_sync_metadata(&KnowledgeThreadSyncMetadataRequest {
-            id: "thread_a".to_string(),
-        })
-        .unwrap();
-    assert_eq!(output, repeated);
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, cache_before_lookup.entries + 1);
-    assert_eq!(stats.misses, cache_before_lookup.misses + 1);
-    assert_eq!(stats.hits, cache_before_lookup.hits + 1);
-
-    let defaults = db
-        .knowledge_thread_sync_metadata(&KnowledgeThreadSyncMetadataRequest {
-            id: "thread_b".to_string(),
-        })
-        .unwrap();
-    assert!(defaults.found_thread);
-    assert_eq!(defaults.title, "");
-    assert_eq!(defaults.source, "");
-    assert_eq!(defaults.project, "");
-    assert_eq!(defaults.workspace, "");
-    assert_eq!(defaults.space_id, "default");
-
-    let missing = db
-        .knowledge_thread_sync_metadata(&KnowledgeThreadSyncMetadataRequest {
-            id: "missing_thread".to_string(),
-        })
-        .unwrap();
-    assert!(!missing.found_thread);
-    assert_eq!(missing.thread_node_id, None);
-    assert_eq!(missing.space_id, "default");
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-
-    let tx = db.begin_read_transaction();
-    db.query("MATCH (t:Thread {id: 'thread_a'}) SET t.title = 'Changed'")
-        .unwrap();
-    let snapshot = tx
-        .knowledge_thread_sync_metadata(&KnowledgeThreadSyncMetadataRequest {
-            id: "thread_a".to_string(),
-        })
-        .unwrap();
-    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot.title, "Alpha");
-}
-
-#[test]
-fn thread_sync_metadata_read_rejects_empty_thread_id() {
-    let db = Database::new();
-    let error = db
-        .knowledge_thread_sync_metadata(&KnowledgeThreadSyncMetadataRequest { id: String::new() })
-        .unwrap_err();
-    assert!(error.to_string().contains("non-empty thread id"));
-}
-
-#[test]
-fn reads_thread_distillation_candidates_for_optional_source_shapes() {
-    let mut db = Database::new();
-    db.query("CREATE (:Thread {id: 'thread_a', thread_id: 'logical_a', source: 'slack', space_id: '', created_at: 10, updated_at: 40})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_b', thread_id: 'logical_b', source: 'email', space_id: 'default', created_at: 30, import_date: 50})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_c', thread_id: 'logical_c', source: 'slack', space_id: 'default', created_at: 20})")
-        .unwrap();
-    db.query(
-        "CREATE (:Thread {id: 'thread_d', source: 'slack', space_id: 'default', updated_at: 100})",
-    )
-    .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_e', thread_id: 'logical_e', source: 'slack', space_id: 'archive', updated_at: 90})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let count_only = db
-        .knowledge_thread_distillation_candidates(&KnowledgeThreadDistillationCandidateRequest {
-            normalized_space_id: "default".to_string(),
-            source: None,
-            limit: 0,
-            offset: 0,
-        })
-        .unwrap();
-    assert_eq!(count_only.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(count_only.matched_count, 3);
-    assert_eq!(count_only.returned_count, 0);
-    assert!(count_only.rows.is_empty());
-
-    let filtered = db
-        .knowledge_thread_distillation_candidates(&KnowledgeThreadDistillationCandidateRequest {
-            normalized_space_id: "default".to_string(),
-            source: Some("slack".to_string()),
-            limit: 10,
-            offset: 0,
-        })
-        .unwrap();
-    assert_eq!(filtered.matched_count, 2);
-    assert_eq!(filtered.returned_count, 2);
-    assert_eq!(
-        filtered
-            .rows
-            .iter()
-            .map(|row| row.thread_id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["logical_a", "logical_c"]
-    );
-    assert_eq!(filtered.rows[0].id.as_deref(), Some("thread_a"));
-    assert_eq!(filtered.rows[0].source.as_deref(), Some("slack"));
-    assert_eq!(filtered.rows[0].raw_space_id, None);
-    assert_eq!(filtered.rows[0].normalized_space_id, "default");
-
-    let paged = db
-        .knowledge_thread_distillation_candidates(&KnowledgeThreadDistillationCandidateRequest {
-            normalized_space_id: "default".to_string(),
-            source: None,
-            limit: 1,
-            offset: 1,
-        })
-        .unwrap();
-    assert_eq!(paged.matched_count, 3);
-    assert_eq!(paged.returned_count, 1);
-    assert_eq!(paged.rows[0].thread_id, "logical_a");
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-}
-
-#[test]
-fn thread_distillation_candidates_use_query_runtime_plan_cache() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Thread {id: 'distill-cache-a', thread_id: 'logical_a', source: 'codex', space_id: '', updated_at: 40})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'distill-cache-b', thread_id: 'logical_b', source: 'codex', space_id: 'default', import_date: 50})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'distill-cache-c', thread_id: 'logical_c', source: 'email', space_id: 'default', created_at: 60})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'distill-cache-skip', source: 'codex', space_id: 'default', updated_at: 90})")
-        .unwrap();
-    let request = KnowledgeThreadDistillationCandidateRequest {
-        normalized_space_id: "default".to_string(),
-        source: Some("codex".to_string()),
-        limit: 1,
-        offset: 1,
-    };
-
-    let first = db
-        .knowledge_thread_distillation_candidates(&request)
-        .unwrap();
-    let second = db
-        .knowledge_thread_distillation_candidates(&request)
-        .unwrap();
-
-    assert_eq!(first, second);
-    assert_eq!(first.matched_count, 2);
-    assert_eq!(first.returned_count, 1);
-    assert_eq!(first.rows[0].thread_id, "logical_a");
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, 1);
-    assert_eq!(stats.misses, 1);
-    assert_eq!(stats.hits, 1);
-}
-
-#[test]
-fn thread_distillation_candidate_read_rejects_empty_filters() {
-    let db = Database::new();
-
-    let empty_space = db
-        .knowledge_thread_distillation_candidates(&KnowledgeThreadDistillationCandidateRequest {
-            normalized_space_id: String::new(),
-            source: None,
-            limit: 10,
-            offset: 0,
-        })
-        .unwrap_err();
-    assert!(empty_space
-        .to_string()
-        .contains("non-empty normalized space id"));
-
-    let empty_source =
-        db.knowledge_thread_distillation_candidates(&KnowledgeThreadDistillationCandidateRequest {
-            normalized_space_id: "default".to_string(),
-            source: Some(String::new()),
-            limit: 10,
-            offset: 0,
-        });
-    assert!(empty_source
-        .unwrap_err()
-        .to_string()
-        .contains("non-empty source"));
 }
 
 #[test]
@@ -12521,7 +7779,7 @@ fn updates_label_lifecycle_batch_for_nowledge_shapes() {
     assert!(!output.rows[4].matched);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Label".to_string(),
@@ -12630,7 +7888,7 @@ fn typed_label_lifecycle_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Label".to_string(),
@@ -12667,402 +7925,6 @@ fn typed_label_lifecycle_batch_persists_as_one_wal_batch_and_replays() {
         );
     }
     std::fs::remove_dir_all(path).unwrap();
-}
-
-#[test]
-fn reads_labels_by_canonical_name_for_nowledge_collision_checks() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Label {id: 'source', name: 'Source', canonical_name: 'canonical_source'})")
-        .unwrap();
-    db.query("CREATE (:Label {id: 'target', name: 'Target', canonical_name: 'canonical_target'})")
-        .unwrap();
-    db.query(
-        "CREATE (:Label {id: 'target_2', name: 'Target 2', canonical_name: 'canonical_target'})",
-    )
-    .unwrap();
-
-    let request = KnowledgeLabelCanonicalLookupRequest {
-        canonical_name: "canonical_target".to_string(),
-        exclude_label_id: Some("source".to_string()),
-        limit: 1,
-    };
-    let output = db
-        .lookup_knowledge_labels_by_canonical_name(&request)
-        .unwrap();
-
-    assert_eq!(output.graph_commit_epoch, 3);
-    assert_eq!(output.matched_count, 2);
-    assert_eq!(output.returned_count, 1);
-    assert_eq!(output.rows[0].label_id.as_deref(), Some("target"));
-    assert_eq!(
-        output.rows[0].canonical_name.as_deref(),
-        Some("canonical_target")
-    );
-
-    let stats = db.plan_cache_stats();
-    let repeated = db
-        .lookup_knowledge_labels_by_canonical_name(&request)
-        .unwrap();
-    assert_eq!(repeated, output);
-    let repeated_stats = db.plan_cache_stats();
-    assert_eq!(repeated_stats.entries, stats.entries);
-    assert_eq!(repeated_stats.misses, stats.misses);
-    assert_eq!(repeated_stats.hits, stats.hits + 1);
-}
-
-#[test]
-fn scans_labels_missing_canonical_name_for_nowledge_backfill() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Label {id: 'missing_1', name: 'Missing 1', canonical_name: NULL})")
-        .unwrap();
-    db.query("CREATE (:Label {id: 'missing_2', name: 'Missing 2'})")
-        .unwrap();
-    db.query("CREATE (:Label {id: 'present', name: 'Present', canonical_name: 'present'})")
-        .unwrap();
-
-    let request = KnowledgeLabelBackfillScanRequest {
-        exclude_label_id: Some("missing_1".to_string()),
-        limit: 10,
-    };
-    let output = db
-        .scan_knowledge_labels_missing_canonical_name(&request)
-        .unwrap();
-
-    assert_eq!(output.matched_count, 1);
-    assert_eq!(output.returned_count, 1);
-    assert_eq!(output.rows[0].label_id.as_deref(), Some("missing_2"));
-    assert_eq!(output.rows[0].name.as_deref(), Some("Missing 2"));
-    assert_eq!(output.rows[0].canonical_name, None);
-
-    let stats = db.plan_cache_stats();
-    let repeated = db
-        .scan_knowledge_labels_missing_canonical_name(&request)
-        .unwrap();
-    assert_eq!(repeated, output);
-    let repeated_stats = db.plan_cache_stats();
-    assert_eq!(repeated_stats.entries, stats.entries);
-    assert_eq!(repeated_stats.misses, stats.misses);
-    assert_eq!(repeated_stats.hits, stats.hits + 1);
-}
-
-#[test]
-fn reads_label_usage_rows_for_nowledge_label_apis() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Label {id: 'alpha', name: 'Alpha', canonical_name: 'alpha', color: '#fff', description: 'Alpha label', created_at: 10, updated_at: 20})")
-        .unwrap();
-    db.query("CREATE (:Label {id: 'beta', name: 'Beta', canonical_name: 'beta'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'memory_1'})").unwrap();
-    db.query("CREATE (:Entity {id: 'entity_1'})").unwrap();
-    db.query(
-        "MATCH (m:Memory {id: 'memory_1'}), (l:Label {id: 'alpha'}) CREATE (m)-[:HAS_LABEL]->(l)",
-    )
-    .unwrap();
-    db.query(
-        "MATCH (e:Entity {id: 'entity_1'}), (l:Label {id: 'alpha'}) CREATE (e)-[:HAS_LABEL]->(l)",
-    )
-    .unwrap();
-
-    let usage_request = KnowledgeLabelUsageRequest {
-        label_id: "alpha".to_string(),
-    };
-    let row = db.knowledge_label_usage(&usage_request).unwrap();
-    assert_eq!(row.graph_commit_epoch, 6);
-    assert!(row.found);
-    let alpha = row.row.as_ref().unwrap();
-    assert_eq!(alpha.label_id.as_deref(), Some("alpha"));
-    assert_eq!(alpha.name.as_deref(), Some("Alpha"));
-    assert_eq!(alpha.canonical_name.as_deref(), Some("alpha"));
-    assert_eq!(alpha.color, Some(Value::String("#fff".to_string())));
-    assert_eq!(
-        alpha.description,
-        Some(Value::String("Alpha label".to_string()))
-    );
-    assert_eq!(alpha.created_at, Some(Value::Int(10)));
-    assert_eq!(alpha.updated_at, Some(Value::Int(20)));
-    assert_eq!(alpha.usage_count, 2);
-
-    let canonical_request = KnowledgeLabelUsageListRequest {
-        canonical_only: true,
-        limit: 10,
-    };
-    let list = db
-        .knowledge_label_canonical_usage(&canonical_request)
-        .unwrap();
-    assert_eq!(list.matched_count, 2);
-    assert_eq!(list.returned_count, 2);
-    assert_eq!(list.rows[0].label_id.as_deref(), Some("alpha"));
-    assert_eq!(list.rows[0].usage_count, 2);
-    assert_eq!(list.rows[1].label_id.as_deref(), Some("beta"));
-    assert_eq!(list.rows[1].usage_count, 0);
-
-    let stats = db.plan_cache_stats();
-    let repeated_usage = db.knowledge_label_usage(&usage_request).unwrap();
-    assert_eq!(repeated_usage, row);
-    let usage_stats = db.plan_cache_stats();
-    assert_eq!(usage_stats.entries, stats.entries);
-    assert_eq!(usage_stats.misses, stats.misses);
-    assert_eq!(usage_stats.hits, stats.hits + 1);
-
-    let repeated_list = db
-        .knowledge_label_canonical_usage(&canonical_request)
-        .unwrap();
-    assert_eq!(repeated_list, list);
-    let list_stats = db.plan_cache_stats();
-    assert_eq!(list_stats.entries, usage_stats.entries);
-    assert_eq!(list_stats.misses, usage_stats.misses);
-    assert_eq!(list_stats.hits, usage_stats.hits + 1);
-}
-
-#[test]
-fn reads_label_memory_distribution_for_nowledge_label_stats_shapes() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Label {id: 'alpha', name: 'Alpha'})")
-        .unwrap();
-    db.query("CREATE (:Label {id: 'beta', name: 'Beta'})")
-        .unwrap();
-    db.query("CREATE (:Label {id: 'gamma', name: 'Gamma'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'memory_one'})").unwrap();
-    db.query("CREATE (:Memory {id: 'memory_two'})").unwrap();
-    db.query("CREATE (:Memory {id: 'memory_three'})").unwrap();
-    db.query("CREATE (:Source {id: 'source_one'})").unwrap();
-    db.query(
-        "MATCH (m:Memory {id: 'memory_one'}), (l:Label {id: 'alpha'}) CREATE (m)-[:HAS_LABEL]->(l)",
-    )
-    .unwrap();
-    db.query("MATCH (m:Memory {id: 'memory_one'}), (l:Label {id: 'alpha'}) CREATE (m)-[:HAS_LABEL {source: 'duplicate'}]->(l)")
-        .unwrap();
-    db.query(
-        "MATCH (m:Memory {id: 'memory_two'}), (l:Label {id: 'alpha'}) CREATE (m)-[:HAS_LABEL]->(l)",
-    )
-    .unwrap();
-    db.query("MATCH (m:Memory {id: 'memory_three'}), (l:Label {id: 'beta'}) CREATE (m)-[:HAS_LABEL]->(l)")
-        .unwrap();
-    db.query(
-        "MATCH (s:Source {id: 'source_one'}), (l:Label {id: 'gamma'}) CREATE (s)-[:HAS_LABEL]->(l)",
-    )
-    .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let all = db
-        .knowledge_label_memory_distribution(&KnowledgeLabelMemoryDistributionRequest {
-            offset: 0,
-            limit: 0,
-        })
-        .unwrap();
-
-    assert_eq!(all.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(all.matched_count, 2);
-    assert_eq!(all.returned_count, 2);
-    assert_eq!(
-        all.rows
-            .iter()
-            .map(|row| (
-                row.label_id.as_deref().unwrap(),
-                row.label_name.as_deref().unwrap(),
-                row.memory_count
-            ))
-            .collect::<Vec<_>>(),
-        vec![("alpha", "Alpha", 2), ("beta", "Beta", 1)]
-    );
-
-    let page_request = KnowledgeLabelMemoryDistributionRequest {
-        offset: 1,
-        limit: 1,
-    };
-    let page = db
-        .knowledge_label_memory_distribution(&page_request)
-        .unwrap();
-
-    assert_eq!(page.matched_count, 2);
-    assert_eq!(page.returned_count, 1);
-    assert_eq!(page.rows[0].label_id.as_deref(), Some("beta"));
-    assert_eq!(page.rows[0].label_name.as_deref(), Some("Beta"));
-    assert_eq!(page.rows[0].memory_count, 1);
-
-    let stats = db.plan_cache_stats();
-    let repeated_page = db
-        .knowledge_label_memory_distribution(&page_request)
-        .unwrap();
-    assert_eq!(repeated_page, page);
-    let repeated_stats = db.plan_cache_stats();
-    assert!(repeated_stats.entries >= stats.entries);
-    assert_eq!(
-        repeated_stats.hits + repeated_stats.misses,
-        stats.hits + stats.misses + 1
-    );
-}
-
-#[test]
-fn reads_label_regex_memory_connections_for_nowledge_label_stats_shapes() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Memory {id: 'memory_alpha', title: 'Alpha Memory', importance: 0.9})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'memory_beta', title: 'Beta Memory', importance: 0.8})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'memory_gamma', title: 'Gamma Memory', importance: 0.7})")
-        .unwrap();
-    db.query("CREATE (:Source {id: 'source_alpha', title: 'Not a memory'})")
-        .unwrap();
-    db.query("CREATE (:Label {id: 'label_alpha', name: 'regex-alpha'})")
-        .unwrap();
-    db.query("CREATE (:Label {id: 'label_beta', name: 'regex-beta'})")
-        .unwrap();
-    db.query("CREATE (:Label {id: 'label_gamma', name: 'regex-gamma'})")
-        .unwrap();
-    db.query("MATCH (m:Memory {id: 'memory_alpha'}), (l:Label {id: 'label_alpha'}) CREATE (m)-[:HAS_LABEL {source: 'first'}]->(l)")
-        .unwrap();
-    db.query("MATCH (m:Memory {id: 'memory_alpha'}), (l:Label {id: 'label_alpha'}) CREATE (m)-[:HAS_LABEL {source: 'duplicate'}]->(l)")
-        .unwrap();
-    db.query("MATCH (m:Memory {id: 'memory_beta'}), (l:Label {id: 'label_beta'}) CREATE (m)-[:HAS_LABEL]->(l)")
-        .unwrap();
-    db.query("MATCH (m:Memory {id: 'memory_gamma'}), (l:Label {id: 'label_gamma'}) CREATE (m)-[:HAS_LABEL]->(l)")
-        .unwrap();
-    db.query("MATCH (s:Source {id: 'source_alpha'}), (l:Label {id: 'label_alpha'}) CREATE (s)-[:HAS_LABEL]->(l)")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let output = db
-        .knowledge_label_regex_memory_connections(&KnowledgeLabelRegexMemoryConnectionsRequest {
-            label_name_pattern: "^regex-(alpha|beta)$".to_string(),
-            memory_property_names: vec!["title".to_string(), "importance".to_string()],
-            offset: 0,
-            limit: 10,
-        })
-        .unwrap();
-
-    assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(output.matched_count, 2);
-    assert_eq!(output.returned_count, 2);
-    assert_eq!(output.rows[0].memory_id.as_deref(), Some("memory_alpha"));
-    assert_eq!(output.rows[0].label_id.as_deref(), Some("label_alpha"));
-    assert_eq!(output.rows[0].label_name.as_deref(), Some("regex-alpha"));
-    assert_eq!(output.rows[0].label_connections, 2);
-    assert_eq!(
-        output.rows[0].memory_properties.get("title"),
-        Some(&Value::String("Alpha Memory".to_string()))
-    );
-    assert_eq!(
-        output.rows[0].memory_properties.get("importance"),
-        Some(&Value::Float(0.9))
-    );
-    assert_eq!(output.rows[1].memory_id.as_deref(), Some("memory_beta"));
-    assert_eq!(output.rows[1].label_connections, 1);
-
-    let page = db
-        .knowledge_label_regex_memory_connections(&KnowledgeLabelRegexMemoryConnectionsRequest {
-            label_name_pattern: "^regex-(alpha|beta)$".to_string(),
-            memory_property_names: vec!["title".to_string()],
-            offset: 1,
-            limit: 1,
-        })
-        .unwrap();
-    assert_eq!(page.matched_count, 2);
-    assert_eq!(page.returned_count, 1);
-    assert_eq!(page.rows[0].memory_id.as_deref(), Some("memory_beta"));
-
-    let stats = db.plan_cache_stats();
-    let repeated_page = db
-        .knowledge_label_regex_memory_connections(&KnowledgeLabelRegexMemoryConnectionsRequest {
-            label_name_pattern: "^regex-(alpha|beta)$".to_string(),
-            memory_property_names: vec!["title".to_string()],
-            offset: 1,
-            limit: 1,
-        })
-        .unwrap();
-    assert_eq!(repeated_page, page);
-    let repeated_stats = db.plan_cache_stats();
-    assert_eq!(
-        repeated_stats.entries, stats.entries,
-        "{stats:?} {repeated_stats:?}"
-    );
-    assert_eq!(
-        repeated_stats.misses, stats.misses,
-        "{stats:?} {repeated_stats:?}"
-    );
-    assert_eq!(
-        repeated_stats.hits,
-        stats.hits + 2,
-        "{stats:?} {repeated_stats:?}"
-    );
-}
-
-#[test]
-fn label_regex_memory_connections_support_snapshots_and_validate_requests() {
-    let mut db = Database::new();
-    db.query("CREATE (:Memory {id: 'snapshot_memory', title: 'Before'})")
-        .unwrap();
-    db.query("CREATE (:Label {id: 'snapshot_label', name: 'regex-snapshot'})")
-        .unwrap();
-    db.query("MATCH (m:Memory {id: 'snapshot_memory'}), (l:Label {id: 'snapshot_label'}) CREATE (m)-[:HAS_LABEL]->(l)")
-        .unwrap();
-    let read_tx = db.begin_read_transaction();
-    db.query("CREATE (:Memory {id: 'live_memory', title: 'After'})")
-        .unwrap();
-    db.query("MATCH (m:Memory {id: 'live_memory'}), (l:Label {id: 'snapshot_label'}) CREATE (m)-[:HAS_LABEL]->(l)")
-        .unwrap();
-
-    let snapshot = read_tx
-        .knowledge_label_regex_memory_connections(&KnowledgeLabelRegexMemoryConnectionsRequest {
-            label_name_pattern: "^regex-snapshot$".to_string(),
-            memory_property_names: vec!["title".to_string()],
-            offset: 0,
-            limit: 0,
-        })
-        .unwrap();
-    assert_eq!(snapshot.graph_commit_epoch, 3);
-    assert_eq!(snapshot.matched_count, 1);
-    assert_eq!(
-        snapshot.rows[0].memory_id.as_deref(),
-        Some("snapshot_memory")
-    );
-
-    let invalid_pattern =
-        db.knowledge_label_regex_memory_connections(&KnowledgeLabelRegexMemoryConnectionsRequest {
-            label_name_pattern: "(".to_string(),
-            memory_property_names: Vec::new(),
-            offset: 0,
-            limit: 10,
-        });
-    assert!(invalid_pattern
-        .unwrap_err()
-        .to_string()
-        .contains("invalid regex pattern"));
-
-    let empty_property =
-        db.knowledge_label_regex_memory_connections(&KnowledgeLabelRegexMemoryConnectionsRequest {
-            label_name_pattern: "^regex-snapshot$".to_string(),
-            memory_property_names: vec![String::new()],
-            offset: 0,
-            limit: 10,
-        });
-    assert!(empty_property
-        .unwrap_err()
-        .to_string()
-        .contains("non-empty memory property names"));
 }
 
 #[test]
@@ -13124,7 +7986,7 @@ fn projects_entity_labels_for_nowledge_growth() {
         ],
     };
     let projected = db
-        .knowledge_entity_label_projected_list(&projected_request)
+        .test_query_entity_label_projected_list(&projected_request)
         .unwrap();
     assert_eq!(projected.found_entity_count, 2);
     assert_eq!(projected.missing_entity_count, 1);
@@ -13162,7 +8024,7 @@ fn projects_entity_labels_for_nowledge_growth() {
 
     let stats = db.plan_cache_stats();
     let repeated_projected = db
-        .knowledge_entity_label_projected_list(&projected_request)
+        .test_query_entity_label_projected_list(&projected_request)
         .unwrap();
     assert_eq!(repeated_projected, projected);
     let repeated_stats = db.plan_cache_stats();
@@ -13171,7 +8033,7 @@ fn projects_entity_labels_for_nowledge_growth() {
     assert_eq!(repeated_stats.hits, stats.hits + 3);
 
     let source_projected = db
-        .knowledge_entity_label_projected_list(&KnowledgeEntityLabelProjectedListRequest {
+        .test_query_entity_label_projected_list(&KnowledgeEntityLabelProjectedListRequest {
             list: KnowledgeEntityLabelListRequest {
                 entity_label: "Source".to_string(),
                 external_ids: vec!["projected_label_source_a".to_string()],
@@ -13189,7 +8051,7 @@ fn projects_entity_labels_for_nowledge_growth() {
     );
 
     let snapshot_projected = snapshot
-        .knowledge_entity_label_projected_list(&KnowledgeEntityLabelProjectedListRequest {
+        .test_query_entity_label_projected_list(&KnowledgeEntityLabelProjectedListRequest {
             list: KnowledgeEntityLabelListRequest {
                 entity_label: "Memory".to_string(),
                 external_ids: vec!["projected_label_memory_a".to_string()],
@@ -13225,7 +8087,7 @@ fn entity_label_projected_read_rejects_empty_property_names_without_wal() {
     let wal_before = read_test_wal(&path).unwrap();
 
     let label_property_error = db
-        .knowledge_entity_label_projected_list(&KnowledgeEntityLabelProjectedListRequest {
+        .test_query_entity_label_projected_list(&KnowledgeEntityLabelProjectedListRequest {
             list: KnowledgeEntityLabelListRequest {
                 entity_label: "Memory".to_string(),
                 external_ids: vec!["projected_label_wal_memory".to_string()],
@@ -13240,7 +8102,7 @@ fn entity_label_projected_read_rejects_empty_property_names_without_wal() {
         .contains("non-empty property names"));
 
     let relationship_property_error = db
-        .knowledge_entity_label_projected_list(&KnowledgeEntityLabelProjectedListRequest {
+        .test_query_entity_label_projected_list(&KnowledgeEntityLabelProjectedListRequest {
             list: KnowledgeEntityLabelListRequest {
                 entity_label: "Memory".to_string(),
                 external_ids: vec!["projected_label_wal_memory".to_string()],
@@ -13859,7 +8721,7 @@ fn reads_entity_labels_for_nowledge_has_label_shapes() {
         ],
         limit_per_entity: 0,
     };
-    let memories = db.knowledge_entity_labels(&memories_request).unwrap();
+    let memories = db.test_query_entity_labels(&memories_request).unwrap();
 
     assert_eq!(memories.graph_commit_epoch, graph_commit_epoch);
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
@@ -13897,7 +8759,7 @@ fn reads_entity_labels_for_nowledge_has_label_shapes() {
     assert_eq!(memories.groups[2].node_id, None);
 
     let stats = db.plan_cache_stats();
-    let repeated_memories = db.knowledge_entity_labels(&memories_request).unwrap();
+    let repeated_memories = db.test_query_entity_labels(&memories_request).unwrap();
     assert_eq!(repeated_memories, memories);
     let repeated_stats = db.plan_cache_stats();
     assert_eq!(repeated_stats.entries, stats.entries);
@@ -13905,7 +8767,7 @@ fn reads_entity_labels_for_nowledge_has_label_shapes() {
     assert_eq!(repeated_stats.hits, stats.hits + 3);
 
     let sources = db
-        .knowledge_entity_labels(&KnowledgeEntityLabelListRequest {
+        .test_query_entity_labels(&KnowledgeEntityLabelListRequest {
             entity_label: "Source".to_string(),
             external_ids: vec!["source_1".to_string()],
             limit_per_entity: 1,
@@ -13925,38 +8787,10 @@ fn reads_entity_labels_for_nowledge_has_label_shapes() {
 }
 
 #[test]
-fn label_read_requests_validate_non_empty_filters() {
+fn entity_label_read_requests_validate_non_empty_filters() {
     let db = Database::new();
-    let canonical_error = db
-        .lookup_knowledge_labels_by_canonical_name(&KnowledgeLabelCanonicalLookupRequest {
-            canonical_name: String::new(),
-            exclude_label_id: None,
-            limit: 10,
-        })
-        .unwrap_err();
-    assert!(canonical_error
-        .to_string()
-        .contains("non-empty canonical name"));
-
-    let exclude_error = db
-        .scan_knowledge_labels_missing_canonical_name(&KnowledgeLabelBackfillScanRequest {
-            exclude_label_id: Some(String::new()),
-            limit: 10,
-        })
-        .unwrap_err();
-    assert!(exclude_error
-        .to_string()
-        .contains("non-empty excluded label id"));
-
-    let usage_error = db
-        .knowledge_label_usage(&KnowledgeLabelUsageRequest {
-            label_id: String::new(),
-        })
-        .unwrap_err();
-    assert!(usage_error.to_string().contains("non-empty label id"));
-
     let entity_label_error = db
-        .knowledge_entity_labels(&KnowledgeEntityLabelListRequest {
+        .test_query_entity_labels(&KnowledgeEntityLabelListRequest {
             entity_label: "Bad Label".to_string(),
             external_ids: vec!["memory_1".to_string()],
             limit_per_entity: 10,
@@ -13967,7 +8801,7 @@ fn label_read_requests_validate_non_empty_filters() {
         .contains("knowledge entity label"));
 
     let external_ids_error = db
-        .knowledge_entity_labels(&KnowledgeEntityLabelListRequest {
+        .test_query_entity_labels(&KnowledgeEntityLabelListRequest {
             entity_label: "Memory".to_string(),
             external_ids: Vec::new(),
             limit_per_entity: 10,
@@ -13976,6 +8810,68 @@ fn label_read_requests_validate_non_empty_filters() {
     assert!(external_ids_error
         .to_string()
         .contains("non-empty external ids"));
+}
+
+fn test_thread_exists(db: &Database, thread_id: &str) -> bool {
+    let parameters = BTreeMap::from([(
+        "thread_id".to_string(),
+        Value::String(thread_id.to_string()),
+    )]);
+    !db.query_read_only_with_params_bounded(
+        "MATCH (t:Thread {id: $thread_id}) RETURN id(t) AS node_id LIMIT 1",
+        &parameters,
+        Some(1),
+    )
+    .unwrap()
+    .rows
+    .is_empty()
+}
+
+fn test_thread_identity_exists(db: &Database, identity_key: &str) -> bool {
+    let parameters = BTreeMap::from([(
+        "identity_key".to_string(),
+        Value::String(identity_key.to_string()),
+    )]);
+    !db.query_read_only_with_params_bounded(
+        "MATCH (ti:ThreadIdentity {id: $identity_key}) RETURN id(ti) AS node_id LIMIT 1",
+        &parameters,
+        Some(1),
+    )
+    .unwrap()
+    .rows
+    .is_empty()
+}
+
+fn test_thread_message_count(db: &Database, thread_id: &str) -> usize {
+    let parameters = BTreeMap::from([(
+        "thread_id".to_string(),
+        Value::String(thread_id.to_string()),
+    )]);
+    db.query_read_only_with_params_bounded(
+        "MATCH (t:Thread {id: $thread_id})-[:CONTAINS]->(m:Message) \
+         RETURN id(m) AS message_node_id",
+        &parameters,
+        None,
+    )
+    .unwrap()
+    .rows
+    .len()
+}
+
+fn test_thread_compaction_links(db: &Database, thread_id: &str) -> QueryOutput {
+    let parameters = BTreeMap::from([(
+        "thread_id".to_string(),
+        Value::String(thread_id.to_string()),
+    )]);
+    db.query_read_only_with_params_bounded(
+        "MATCH (t:Thread {id: $thread_id})-[r:COMPACTS_TO]->(m:Memory) \
+         RETURN m.id AS memory_id, r.compaction_method AS compaction_method, \
+         r.created_at AS created_at, r.properties AS properties \
+         ORDER BY id(r) ASC",
+        &parameters,
+        None,
+    )
+    .unwrap()
 }
 
 fn unique_test_dir(name: &str) -> std::path::PathBuf {
@@ -14005,6 +8901,22 @@ fn read_test_wal(path: impl AsRef<std::path::Path>) -> std::io::Result<String> {
     Ok(wal
         .split_once('\n')
         .map_or_else(String::new, |(_, records)| records.to_string()))
+}
+
+fn read_test_plan_cache_metric(read: &DatabaseReadTransaction, metric: &str) -> i64 {
+    let output = read
+        .query_sql("SELECT metric, value FROM system.plan_cache")
+        .unwrap();
+    output
+        .rows
+        .iter()
+        .find(|row| row.get("metric") == Some(&Value::String(metric.to_string())))
+        .and_then(|row| row.get("value"))
+        .and_then(|value| match value {
+            Value::Int(value) => Some(*value),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("missing plan-cache metric {metric}"))
 }
 
 fn active_generation_path(
