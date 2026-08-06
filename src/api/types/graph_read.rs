@@ -499,28 +499,6 @@ pub struct KnowledgeContextMemoryPreviewOutput {
     pub returned_count: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryEvolvesLatestRequest {
-    pub old_memory_ids: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryEvolvesLatestRow {
-    pub new_memory_id: Option<String>,
-    pub new_node_id: u64,
-    pub new_is_latest: Option<bool>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryEvolvesLatestOutput {
-    pub graph_commit_epoch: u64,
-    pub rows: Vec<KnowledgeMemoryEvolvesLatestRow>,
-    pub matched_old_memory_count: usize,
-    pub missing_old_memory_ids: Vec<String>,
-    pub matched_relationship_count: usize,
-    pub returned_count: usize,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnowledgeCrystalListOrder {
     ExternalIdAsc,

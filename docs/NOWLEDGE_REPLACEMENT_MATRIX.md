@@ -364,12 +364,11 @@ Memory title/content id-list reads use one fixed parameterized, id-bounded
 Cypher statement with explicit projection, created-at ordering, `LIMIT`, row
 budget, and a pinned snapshot. Host code derives missing ids and shapes the
 response; no route-specific typed database API is exposed.
-Memory EVOLVES latest reads are covered by
-`Database::knowledge_memory_evolves_latest`. The typed read accepts old Memory
-ids, follows outgoing `EVOLVES` edges to Memory targets, returns distinct
-new-memory id/latest-state rows for the REST Skills successor check, reports
-matched/missing old Memory ids and relationship counts, supports pinned read
-snapshots, and does not write WAL.
+Memory EVOLVES latest reads use a fixed parameterized successor Cypher
+statement with explicit target projection, deterministic ordering, `LIMIT`, a
+matching row budget, and a pinned snapshot. Optional source-existence and
+relationship-count phases are separate bounded queries owned by the host; no
+REST-specific typed database API is exposed.
 Memory EVOLVES relation count reads are covered by
 `Database::knowledge_memory_evolves_relation_counts`. The typed read covers the
 decay scheduler's `content_relation IN [...]` count shape over requested Memory

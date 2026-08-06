@@ -516,10 +516,10 @@ shaping.
 Memory title/content reads use one fixed parameterized, id-bounded Cypher
 statement with explicit projection, created-at ordering, `LIMIT`, and pinned
 snapshot semantics; host code shapes missing ids.
-Memory EVOLVES latest reads are available as
-`Database::knowledge_memory_evolves_latest`, covering REST Skills successor
-checks over old Memory id lists with distinct latest-state rows and no WAL
-writes.
+Memory EVOLVES latest reads use one fixed parameterized successor Cypher
+statement with deterministic ordering, `LIMIT`, a matching row budget, and a
+pinned snapshot. Source-existence and relationship-count response shaping
+remain in separate host-owned bounded query phases.
 Memory EVOLVES relation count reads are available as
 `Database::knowledge_memory_evolves_relation_counts`, covering the decay
 scheduler's bounded `content_relation IN [...]` count shape over requested
