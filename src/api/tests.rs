@@ -69,39 +69,35 @@ use super::{
     KnowledgeScopedRelationshipDeleteRequest, KnowledgeScopedRelationshipUpdateBatchRequest,
     KnowledgeScopedRelationshipUpdateRequest, KnowledgeScopedRelationshipsRequest,
     KnowledgeScopedSubgraphRequest, KnowledgeSkillDeleteBatchRequest,
-    KnowledgeSkillDetailLookupRequest, KnowledgeSkillLifecycleBatchRequest,
-    KnowledgeSkillLifecycleUpdate, KnowledgeSkillListOrder, KnowledgeSkillListRequest,
-    KnowledgeSkillMemoryListOrder, KnowledgeSkillMemoryListRequest,
+    KnowledgeSkillLifecycleBatchRequest, KnowledgeSkillLifecycleUpdate,
     KnowledgeSkillMetadataBatchRequest, KnowledgeSkillMetadataUpdate,
-    KnowledgeSkillProjectedListRequest, KnowledgeSkillSourceMergeRequest,
-    KnowledgeSkillStateRequest, KnowledgeSkillThreadSourceListRequest,
-    KnowledgeSkillUsageStatsBatchRequest, KnowledgeSkillUsageStatsUpdate,
-    KnowledgeSourceDeleteBatchRequest, KnowledgeSourceLabelAssignment,
-    KnowledgeSourceLabelAssignmentBatchRequest, KnowledgeSourceLabelDelete,
-    KnowledgeSourceLabelDeleteBatchRequest, KnowledgeSourceLifecycleBatchRequest,
-    KnowledgeSourceLifecycleUpdate, KnowledgeSourceMemoryCountAdjustment,
-    KnowledgeSourceMemoryCountBatchRequest, KnowledgeSourceMetadataBatchRequest,
-    KnowledgeSourceMetadataUpdate, KnowledgeSourceParsedCreate,
-    KnowledgeSourceParsedCreateBatchRequest, KnowledgeSourceParsedMetadataBatchRequest,
-    KnowledgeSourceParsedMetadataUpdate, KnowledgeSourceReferenceRelationshipCleanupRequest,
-    KnowledgeSourceRevisionCreate, KnowledgeSourceRevisionCreateBatchRequest,
-    KnowledgeSubgraphRequest, KnowledgeThreadCompactedMemoryListRequest,
-    KnowledgeThreadCompactedMemoryProjectedListRequest, KnowledgeThreadCompactionLinkRequest,
-    KnowledgeThreadDeleteBatchRequest, KnowledgeThreadDistillationCandidateRequest,
-    KnowledgeThreadIdentityCascadeDeleteKeys, KnowledgeThreadIdentityDeleteRequest,
-    KnowledgeThreadIdentityRequest, KnowledgeThreadListOrder, KnowledgeThreadListRequest,
-    KnowledgeThreadMessageCountBatchRequest, KnowledgeThreadMessageCountUpdate,
-    KnowledgeThreadMessageDeleteRequest, KnowledgeThreadMessageListRequest,
-    KnowledgeThreadMessageLookupRequest, KnowledgeThreadMetaLookupRequest,
-    KnowledgeThreadMetadataBatchRequest, KnowledgeThreadMetadataUpdate,
-    KnowledgeThreadSourceListRequest, KnowledgeThreadSourceLookupRequest,
-    KnowledgeThreadSyncMetadataRequest, KnowledgeThreadTitleLookupRequest,
-    KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
-    NowledgeGraphStatement, PlanCacheBypassReason, PlanCacheLookup, QueryOutput,
-    QueryStreamOptions, RecoveryMode, SearchProjectionGraphDeltaRequest,
-    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION, NOWLEDGE_DEEP_SEARCH_FILTERED_RANK_WINDOW,
-    NOWLEDGE_DEEP_SEARCH_GRAPH_CONTEXT_MAX_HOPS, NOWLEDGE_DEEP_SEARCH_MIN_GRAPH_SEED_LIMIT,
-    NOWLEDGE_DEEP_SEARCH_MIN_RANK_WINDOW,
+    KnowledgeSkillSourceMergeRequest, KnowledgeSkillUsageStatsBatchRequest,
+    KnowledgeSkillUsageStatsUpdate, KnowledgeSourceDeleteBatchRequest,
+    KnowledgeSourceLabelAssignment, KnowledgeSourceLabelAssignmentBatchRequest,
+    KnowledgeSourceLabelDelete, KnowledgeSourceLabelDeleteBatchRequest,
+    KnowledgeSourceLifecycleBatchRequest, KnowledgeSourceLifecycleUpdate,
+    KnowledgeSourceMemoryCountAdjustment, KnowledgeSourceMemoryCountBatchRequest,
+    KnowledgeSourceMetadataBatchRequest, KnowledgeSourceMetadataUpdate,
+    KnowledgeSourceParsedCreate, KnowledgeSourceParsedCreateBatchRequest,
+    KnowledgeSourceParsedMetadataBatchRequest, KnowledgeSourceParsedMetadataUpdate,
+    KnowledgeSourceReferenceRelationshipCleanupRequest, KnowledgeSourceRevisionCreate,
+    KnowledgeSourceRevisionCreateBatchRequest, KnowledgeSubgraphRequest,
+    KnowledgeThreadCompactedMemoryListRequest, KnowledgeThreadCompactedMemoryProjectedListRequest,
+    KnowledgeThreadCompactionLinkRequest, KnowledgeThreadDeleteBatchRequest,
+    KnowledgeThreadDistillationCandidateRequest, KnowledgeThreadIdentityCascadeDeleteKeys,
+    KnowledgeThreadIdentityDeleteRequest, KnowledgeThreadIdentityRequest, KnowledgeThreadListOrder,
+    KnowledgeThreadListRequest, KnowledgeThreadMessageCountBatchRequest,
+    KnowledgeThreadMessageCountUpdate, KnowledgeThreadMessageDeleteRequest,
+    KnowledgeThreadMessageListRequest, KnowledgeThreadMessageLookupRequest,
+    KnowledgeThreadMetaLookupRequest, KnowledgeThreadMetadataBatchRequest,
+    KnowledgeThreadMetadataUpdate, KnowledgeThreadSourceListRequest,
+    KnowledgeThreadSourceLookupRequest, KnowledgeThreadSyncMetadataRequest,
+    KnowledgeThreadTitleLookupRequest, KnowledgeTraversalFallbackReasonCode,
+    KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphStatement,
+    PlanCacheBypassReason, PlanCacheLookup, QueryOutput, QueryStreamOptions, RecoveryMode,
+    SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    NOWLEDGE_DEEP_SEARCH_FILTERED_RANK_WINDOW, NOWLEDGE_DEEP_SEARCH_GRAPH_CONTEXT_MAX_HOPS,
+    NOWLEDGE_DEEP_SEARCH_MIN_GRAPH_SEED_LIMIT, NOWLEDGE_DEEP_SEARCH_MIN_RANK_WINDOW,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{
@@ -191,6 +187,7 @@ mod search_projection_delta_facade;
 mod search_projection_graph_delta;
 mod search_projection_rebuild_facade;
 mod set_mutations;
+mod skill_reads;
 mod source_reads;
 mod source_reference;
 mod statistics;
@@ -4636,7 +4633,10 @@ fn deletes_sources_for_nowledge_detach_delete_shape() {
     assert!(output.rows[4].matched);
 
     let sources = db
-        .query("MATCH (s:Source) RETURN s.id AS source_id ORDER BY source_id ASC")
+        .query(
+            "MATCH (s:Source) WHERE s.id IS NOT NULL \
+             RETURN s.id AS source_id ORDER BY source_id ASC",
+        )
         .unwrap();
     assert_eq!(sources.rows.len(), 1);
     assert_eq!(
@@ -7231,21 +7231,16 @@ fn deletes_skills_for_nowledge_detach_delete_shape() {
     assert!(output.rows[3].matched);
     assert!(output.rows[4].matched);
 
-    for skill_id in ["skill_1", "skill_2"] {
-        assert!(
-            !db.knowledge_skill_state(&KnowledgeSkillStateRequest {
-                skill_id: skill_id.to_string(),
-            })
-            .unwrap()
-            .found_skill
-        );
-    }
-    assert!(
-        db.knowledge_skill_state(&KnowledgeSkillStateRequest {
-            skill_id: "skill_3".to_string(),
-        })
-        .unwrap()
-        .found_skill
+    let skills = db
+        .query(
+            "MATCH (s:Skill) WHERE s.id IS NOT NULL \
+             RETURN s.id AS skill_id ORDER BY skill_id ASC",
+        )
+        .unwrap();
+    assert_eq!(skills.rows.len(), 1);
+    assert_eq!(
+        skills.rows[0].get("skill_id"),
+        Some(&Value::String("skill_3".to_string()))
     );
     assert_eq!(
         db.query(
@@ -7301,15 +7296,20 @@ fn typed_skill_delete_persists_as_one_wal_batch_and_replays() {
     assert!(wal.contains("delete_node"));
     {
         let db = Database::open(&path).unwrap();
-        for skill_id in ["skill_1", "skill_2"] {
-            assert!(
-                !db.knowledge_skill_state(&KnowledgeSkillStateRequest {
-                    skill_id: skill_id.to_string(),
-                })
-                .unwrap()
-                .found_skill
-            );
-        }
+        let skills = db
+            .query_read_only_with_params_bounded(
+                "MATCH (s:Skill) WHERE s.id IN $skill_ids RETURN count(s) AS total",
+                &BTreeMap::from([(
+                    "skill_ids".to_string(),
+                    Value::List(vec![
+                        Value::String("skill_1".to_string()),
+                        Value::String("skill_2".to_string()),
+                    ]),
+                )]),
+                Some(1),
+            )
+            .unwrap();
+        assert_eq!(skills.rows[0].get("total"), Some(&Value::Int(0)));
         assert!(db
             .knowledge_entity(&KnowledgeEntityRequest {
                 label: "Memory".to_string(),
@@ -7320,637 +7320,6 @@ fn typed_skill_delete_persists_as_one_wal_batch_and_replays() {
             .is_some());
     }
     std::fs::remove_dir_all(path).unwrap();
-}
-
-#[test]
-fn lists_skills_for_nowledge_catalog_lookup_and_fs_shapes() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(64),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Skill {id: 'skill_active_a', title: 'Active A', name: 'active-a', description: 'first active', triggers: '[\"a\"]', stage: 'active', version: 1, use_count: 7, success_rate: 0.8, metadata: '{\"rank\":1}', bundle_path: '/tmp/a', content_hash: 'hash-a', space_id: '', created_at: 1, updated_at: 20, evidence_count: 3, scope: 'workspace', rationale: 'test', kind: 'procedure', confidence: 0.9})")
-        .unwrap();
-    db.query("CREATE (:Skill {id: 'skill_active_b', title: 'Active B', name: 'active-b', description: 'second active', triggers: '[\"b\"]', stage: 'active', version: 2, use_count: 9, metadata: '{\"rank\":2}', bundle_path: '/tmp/b', space_id: 'research', updated_at: 30})")
-        .unwrap();
-    db.query("CREATE (:Skill {id: 'skill_draft', title: 'Draft Skill', name: 'draft', stage: 'draft', updated_at: 40})")
-        .unwrap();
-    db.query("CREATE (:Skill {id: 'skill_archived', title: 'Archived Skill', stage: 'archived', updated_at: 50})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let active_request = KnowledgeSkillListRequest {
-        stages: vec!["active".to_string()],
-        limit: 10,
-        order: KnowledgeSkillListOrder::UpdatedAtDesc,
-        ..KnowledgeSkillListRequest::default()
-    };
-    let active = db.knowledge_skills(&active_request).unwrap();
-    assert_eq!(active.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(active.matched_count, 2);
-    assert_eq!(active.returned_count, 2);
-    assert_eq!(
-        active
-            .rows
-            .iter()
-            .map(|row| row.id.as_deref().unwrap())
-            .collect::<Vec<_>>(),
-        vec!["skill_active_b", "skill_active_a"]
-    );
-    assert_eq!(active.rows[1].title.as_deref(), Some("Active A"));
-    assert_eq!(active.rows[1].name.as_deref(), Some("active-a"));
-    assert_eq!(active.rows[1].description.as_deref(), Some("first active"));
-    assert_eq!(active.rows[1].version, Some(Value::Int(1)));
-    assert_eq!(active.rows[1].use_count, 7);
-    assert_eq!(active.rows[1].success_rate, Some(Value::Float(0.8)));
-    assert_eq!(
-        active.rows[1].metadata,
-        Some(Value::String("{\"rank\":1}".to_string()))
-    );
-    assert_eq!(active.rows[1].bundle_path.as_deref(), Some("/tmp/a"));
-    assert_eq!(
-        active.rows[1].triggers,
-        Some(Value::String("[\"a\"]".to_string()))
-    );
-    assert_eq!(active.rows[1].content_hash.as_deref(), Some("hash-a"));
-    assert_eq!(active.rows[1].raw_space_id, None);
-    assert_eq!(active.rows[1].normalized_space_id, "default");
-    assert_eq!(active.rows[1].evidence_count, 3);
-    assert_eq!(active.rows[1].scope.as_deref(), Some("workspace"));
-    assert_eq!(active.rows[1].rationale.as_deref(), Some("test"));
-    assert_eq!(active.rows[1].kind.as_deref(), Some("procedure"));
-    assert_eq!(active.rows[1].confidence, Some(Value::Float(0.9)));
-
-    let stats = db.plan_cache_stats();
-    let repeated = db.knowledge_skills(&active_request).unwrap();
-    assert_eq!(repeated, active);
-    let repeated_stats = db.plan_cache_stats();
-    assert_eq!(repeated_stats.entries, stats.entries);
-    assert_eq!(repeated_stats.misses, stats.misses);
-    assert_eq!(repeated_stats.hits, stats.hits + 1);
-
-    let fs_page = db
-        .knowledge_skills(&KnowledgeSkillListRequest {
-            stages: vec!["active".to_string()],
-            after_id: Some("skill_active_a".to_string()),
-            limit: 10,
-            order: KnowledgeSkillListOrder::IdAsc,
-            ..KnowledgeSkillListRequest::default()
-        })
-        .unwrap();
-    assert_eq!(fs_page.matched_count, 1);
-    assert_eq!(fs_page.rows[0].id.as_deref(), Some("skill_active_b"));
-
-    let catalog = db
-        .knowledge_skills(&KnowledgeSkillListRequest {
-            stages: vec![
-                "active".to_string(),
-                "draft".to_string(),
-                "candidate".to_string(),
-                "promotable".to_string(),
-                "rejected".to_string(),
-                "stale".to_string(),
-            ],
-            limit: 1500,
-            order: KnowledgeSkillListOrder::UpdatedAtDesc,
-            ..KnowledgeSkillListRequest::default()
-        })
-        .unwrap();
-    assert_eq!(
-        catalog
-            .rows
-            .iter()
-            .map(|row| row.id.as_deref().unwrap())
-            .collect::<Vec<_>>(),
-        vec!["skill_draft", "skill_active_b", "skill_active_a"]
-    );
-
-    let prefix = db
-        .knowledge_skills(&KnowledgeSkillListRequest {
-            lookup_key: Some("skill_active".to_string()),
-            limit: 1,
-            order: KnowledgeSkillListOrder::UpdatedAtDesc,
-            ..KnowledgeSkillListRequest::default()
-        })
-        .unwrap();
-    assert_eq!(prefix.matched_count, 2);
-    assert_eq!(prefix.returned_count, 1);
-    assert_eq!(prefix.rows[0].id.as_deref(), Some("skill_active_b"));
-
-    let exact = db
-        .knowledge_skills(&KnowledgeSkillListRequest {
-            ids: vec!["skill_active_a".to_string(), "missing".to_string()],
-            limit: 0,
-            order: KnowledgeSkillListOrder::IdAsc,
-            ..KnowledgeSkillListRequest::default()
-        })
-        .unwrap();
-    assert_eq!(exact.matched_count, 1);
-    assert_eq!(exact.returned_count, 1);
-    assert_eq!(exact.rows[0].id.as_deref(), Some("skill_active_a"));
-    assert_eq!(exact.missing_ids, vec!["missing".to_string()]);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-
-    let tx = db.begin_read_transaction();
-    db.query("CREATE (:Skill {id: 'skill_active_after', stage: 'active', updated_at: 100})")
-        .unwrap();
-    let snapshot = tx
-        .knowledge_skills(&KnowledgeSkillListRequest {
-            stages: vec!["active".to_string()],
-            limit: 10,
-            order: KnowledgeSkillListOrder::UpdatedAtDesc,
-            ..KnowledgeSkillListRequest::default()
-        })
-        .unwrap();
-    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot.matched_count, 2);
-    assert!(snapshot
-        .rows
-        .iter()
-        .all(|row| row.id.as_deref() != Some("skill_active_after")));
-}
-
-#[test]
-fn projects_skill_list_fields_for_mcp_catalog_growth() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(64),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Skill {id: 'mcp-skill-catalog-active', stage: 'active', name: 'catalog-active', title: 'Catalog Active', description: 'active catalog skill', triggers: '[\"catalog\"]', content_hash: 'hash-active', metadata: '{\"stage\":\"active\"}', space_id: '', updated_at: 20, future_field: 'future-active'})")
-        .unwrap();
-    db.query("CREATE (:Skill {id: 'mcp-skill-catalog-draft', stage: 'draft', name: 'catalog-draft', title: 'Catalog Draft', description: 'draft catalog skill', triggers: '[\"draft\"]', content_hash: 'hash-draft', metadata: '{\"stage\":\"draft\"}', space_id: 'team', updated_at: 10, future_field: 'future-draft'})")
-        .unwrap();
-    db.query("CREATE (:Skill {id: 'mcp-skill-catalog-archived', stage: 'archived', title: 'Archived', updated_at: 30})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let request = KnowledgeSkillProjectedListRequest {
-        list: KnowledgeSkillListRequest {
-            stages: vec![
-                "active".to_string(),
-                "draft".to_string(),
-                "stale".to_string(),
-                "candidate".to_string(),
-                "promotable".to_string(),
-                "rejected".to_string(),
-            ],
-            limit: 1500,
-            order: KnowledgeSkillListOrder::UpdatedAtDesc,
-            ..KnowledgeSkillListRequest::default()
-        },
-        property_names: vec![
-            "stage".to_string(),
-            "name".to_string(),
-            "title".to_string(),
-            "description".to_string(),
-            "triggers".to_string(),
-            "content_hash".to_string(),
-            "metadata".to_string(),
-            "space_id".to_string(),
-            "future_field".to_string(),
-            "stage".to_string(),
-        ],
-    };
-    let projected = db.knowledge_skill_projected_list(&request).unwrap();
-
-    assert_eq!(projected.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(projected.matched_count, 2);
-    assert_eq!(projected.returned_count, 2);
-    assert_eq!(
-        projected
-            .rows
-            .iter()
-            .map(|row| row.id.as_deref().unwrap())
-            .collect::<Vec<_>>(),
-        vec!["mcp-skill-catalog-active", "mcp-skill-catalog-draft"]
-    );
-    assert_eq!(projected.rows[0].normalized_space_id, "default");
-    assert_eq!(projected.rows[1].normalized_space_id, "team");
-    assert_eq!(
-        projected.rows[0].properties.get("future_field"),
-        Some(&Value::String("future-active".to_string()))
-    );
-    assert_eq!(
-        projected.rows[0].properties.get("stage"),
-        Some(&Value::String("active".to_string()))
-    );
-    assert_eq!(
-        projected.rows[0].properties.get("space_id"),
-        Some(&Value::String(String::new()))
-    );
-    assert!(!projected.rows[0].properties.contains_key("updated_at"));
-
-    let stats = db.plan_cache_stats();
-    let repeated = db.knowledge_skill_projected_list(&request).unwrap();
-    assert_eq!(repeated, projected);
-    let repeated_stats = db.plan_cache_stats();
-    assert_eq!(repeated_stats.entries, stats.entries);
-    assert_eq!(repeated_stats.misses, stats.misses);
-    assert_eq!(repeated_stats.hits, stats.hits + 1);
-
-    let snapshot = db.begin_read_transaction();
-    db.query("CREATE (:Skill {id: 'mcp-skill-catalog-late', stage: 'active', updated_at: 100})")
-        .unwrap();
-    let snapshot_output = snapshot
-        .knowledge_skill_projected_list(&KnowledgeSkillProjectedListRequest {
-            list: KnowledgeSkillListRequest {
-                stages: vec!["active".to_string()],
-                limit: 10,
-                order: KnowledgeSkillListOrder::UpdatedAtDesc,
-                ..KnowledgeSkillListRequest::default()
-            },
-            property_names: vec!["stage".to_string(), "updated_at".to_string()],
-        })
-        .unwrap();
-    assert_eq!(snapshot_output.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot_output.matched_count, 1);
-    assert_eq!(
-        snapshot_output.rows[0].id.as_deref(),
-        Some("mcp-skill-catalog-active")
-    );
-}
-
-#[test]
-fn skill_list_rejects_unbounded_or_empty_filters() {
-    let db = Database::new();
-
-    let unbounded = db
-        .knowledge_skills(&KnowledgeSkillListRequest::default())
-        .unwrap_err();
-    assert!(unbounded.to_string().contains("bounded limit or a filter"));
-
-    let empty_id = db
-        .knowledge_skills(&KnowledgeSkillListRequest {
-            ids: vec![String::new()],
-            limit: 10,
-            ..KnowledgeSkillListRequest::default()
-        })
-        .unwrap_err();
-    assert!(empty_id.to_string().contains("non-empty ids"));
-
-    let empty_lookup = db
-        .knowledge_skills(&KnowledgeSkillListRequest {
-            lookup_key: Some(String::new()),
-            limit: 10,
-            ..KnowledgeSkillListRequest::default()
-        })
-        .unwrap_err();
-    assert!(empty_lookup.to_string().contains("non-empty lookup key"));
-
-    let empty_stage = db
-        .knowledge_skills(&KnowledgeSkillListRequest {
-            stages: vec![String::new()],
-            limit: 10,
-            ..KnowledgeSkillListRequest::default()
-        })
-        .unwrap_err();
-    assert!(empty_stage.to_string().contains("non-empty stages"));
-
-    let empty_after = db
-        .knowledge_skills(&KnowledgeSkillListRequest {
-            after_id: Some(String::new()),
-            limit: 10,
-            ..KnowledgeSkillListRequest::default()
-        })
-        .unwrap_err();
-    assert!(empty_after.to_string().contains("non-empty after id"));
-}
-
-#[test]
-fn projected_skill_list_rejects_empty_property_names_without_wal() {
-    let path = unique_test_dir("projected_skill_list_empty_property_without_wal");
-    let mut db = Database::open(&path).unwrap();
-    db.query("CREATE (:Skill {id: 'skill-active', stage: 'active'})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let wal_before = read_test_wal(&path).unwrap();
-
-    let error = db
-        .knowledge_skill_projected_list(&KnowledgeSkillProjectedListRequest {
-            list: KnowledgeSkillListRequest {
-                stages: vec!["active".to_string()],
-                limit: 10,
-                ..KnowledgeSkillListRequest::default()
-            },
-            property_names: vec![String::new()],
-        })
-        .unwrap_err();
-
-    assert!(error.to_string().contains("non-empty property names"));
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
-}
-
-#[test]
-fn reads_skill_detail_lookup_for_rest_fs_shape() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Skill {id: 'rest-fs-skill-detail-1', name: 'rest-fs-detail', title: 'REST FS Detail Skill', stage: 'active', version: 3, created_at: 1700000102, updated_at: 1700000103})")
-        .unwrap();
-    db.query("CREATE (:Skill {id: 'rest-fs-skill-detail-2', name: 'rest-fs-detail-two', title: 'REST FS Detail Two', stage: 'draft', version: 4, created_at: 1700000202, updated_at: 1700000203})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'rest-fs-skill-detail-1', name: 'memory-match'})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let exact = db
-        .knowledge_skill_detail_lookup(&KnowledgeSkillDetailLookupRequest {
-            key: "rest-fs-skill-detail-1".to_string(),
-        })
-        .unwrap();
-    assert_eq!(exact.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(exact.key, "rest-fs-skill-detail-1");
-    assert!(exact.skill_node_id.is_some());
-    assert!(exact.found_skill);
-    assert_eq!(exact.id.as_deref(), Some("rest-fs-skill-detail-1"));
-    assert_eq!(exact.name.as_deref(), Some("rest-fs-detail"));
-    assert_eq!(exact.title.as_deref(), Some("REST FS Detail Skill"));
-    assert_eq!(exact.stage.as_deref(), Some("active"));
-    assert_eq!(exact.version, Some(Value::Int(3)));
-    assert_eq!(exact.created_at, Some(Value::Int(1700000102)));
-    assert_eq!(exact.updated_at, Some(Value::Int(1700000103)));
-    assert_eq!(exact.matched_count, 1);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-
-    let prefix = db
-        .knowledge_skill_detail_lookup(&KnowledgeSkillDetailLookupRequest {
-            key: "rest-fs-skill-detail".to_string(),
-        })
-        .unwrap();
-    assert_eq!(prefix.id.as_deref(), Some("rest-fs-skill-detail-1"));
-    assert_eq!(prefix.matched_count, 2);
-
-    let contains = db
-        .knowledge_skill_detail_lookup(&KnowledgeSkillDetailLookupRequest {
-            key: "skill-detail-2".to_string(),
-        })
-        .unwrap();
-    assert_eq!(contains.id.as_deref(), Some("rest-fs-skill-detail-2"));
-    assert_eq!(contains.matched_count, 1);
-
-    let missing = db
-        .knowledge_skill_detail_lookup(&KnowledgeSkillDetailLookupRequest {
-            key: "missing".to_string(),
-        })
-        .unwrap();
-    assert!(!missing.found_skill);
-    assert_eq!(missing.skill_node_id, None);
-    assert_eq!(missing.matched_count, 0);
-
-    let cache_before_lookup = db.plan_cache_stats();
-    let cached_request = KnowledgeSkillDetailLookupRequest {
-        key: "rest-fs-skill-detail-2".to_string(),
-    };
-    db.knowledge_skill_detail_lookup(&cached_request).unwrap();
-    db.knowledge_skill_detail_lookup(&cached_request).unwrap();
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, cache_before_lookup.entries + 1);
-    assert_eq!(stats.misses, cache_before_lookup.misses + 1);
-    assert_eq!(stats.hits, cache_before_lookup.hits + 1);
-
-    let tx = db.begin_read_transaction();
-    db.query("MATCH (s:Skill {id: 'rest-fs-skill-detail-1'}) SET s.title = 'Changed'")
-        .unwrap();
-    let snapshot = tx
-        .knowledge_skill_detail_lookup(&KnowledgeSkillDetailLookupRequest {
-            key: "rest-fs-skill-detail-1".to_string(),
-        })
-        .unwrap();
-    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot.title.as_deref(), Some("REST FS Detail Skill"));
-}
-
-#[test]
-fn skill_detail_lookup_rejects_empty_key() {
-    let db = Database::new();
-    let empty_key = db
-        .knowledge_skill_detail_lookup(&KnowledgeSkillDetailLookupRequest { key: String::new() })
-        .unwrap_err();
-    assert!(empty_key.to_string().contains("non-empty key"));
-}
-
-#[test]
-fn reads_skill_state_for_rest_skills_write_shapes() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Skill {id: 'skill-state-1', stage: 'candidate', metadata: '{\"phase\":\"candidate\"}', version: 3, use_count: 7, bundle_path: '/tmp/skill', content_hash: 'hash-1', name: 'state-skill', description: 'state desc', title: 'State Skill'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'skill-state-1', stage: 'memory-stage'})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let state = db
-        .knowledge_skill_state(&KnowledgeSkillStateRequest {
-            skill_id: "skill-state-1".to_string(),
-        })
-        .unwrap();
-    assert_eq!(state.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert!(state.found_skill);
-    assert!(state.skill_node_id.is_some());
-    assert_eq!(state.skill_id, "skill-state-1");
-    assert_eq!(state.id.as_deref(), Some("skill-state-1"));
-    assert_eq!(state.stage.as_deref(), Some("candidate"));
-    assert_eq!(
-        state.metadata,
-        Some(Value::String("{\"phase\":\"candidate\"}".to_string()))
-    );
-    assert_eq!(state.version, Some(Value::Int(3)));
-    assert_eq!(state.use_count, Some(Value::Int(7)));
-    assert_eq!(state.bundle_path.as_deref(), Some("/tmp/skill"));
-    assert_eq!(state.content_hash.as_deref(), Some("hash-1"));
-    assert_eq!(state.name.as_deref(), Some("state-skill"));
-    assert_eq!(state.description.as_deref(), Some("state desc"));
-    assert_eq!(state.title.as_deref(), Some("State Skill"));
-
-    let missing = db
-        .knowledge_skill_state(&KnowledgeSkillStateRequest {
-            skill_id: "missing".to_string(),
-        })
-        .unwrap();
-    assert!(!missing.found_skill);
-    assert_eq!(missing.skill_node_id, None);
-    assert_eq!(missing.id, None);
-
-    let cache_before_lookup = db.plan_cache_stats();
-    let cached_request = KnowledgeSkillStateRequest {
-        skill_id: "missing-cache".to_string(),
-    };
-    db.knowledge_skill_state(&cached_request).unwrap();
-    db.knowledge_skill_state(&cached_request).unwrap();
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, cache_before_lookup.entries);
-    assert_eq!(stats.misses, cache_before_lookup.misses);
-    assert_eq!(stats.hits, cache_before_lookup.hits + 2);
-
-    let tx = db.begin_read_transaction();
-    db.query("MATCH (s:Skill {id: 'skill-state-1'}) SET s.stage = 'draft', s.metadata = '{\"phase\":\"draft\"}'")
-        .unwrap();
-    let snapshot = tx
-        .knowledge_skill_state(&KnowledgeSkillStateRequest {
-            skill_id: "skill-state-1".to_string(),
-        })
-        .unwrap();
-    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot.stage.as_deref(), Some("candidate"));
-    assert_eq!(
-        snapshot.metadata,
-        Some(Value::String("{\"phase\":\"candidate\"}".to_string()))
-    );
-}
-
-#[test]
-fn skill_state_rejects_empty_id() {
-    let db = Database::new();
-    let empty_id = db
-        .knowledge_skill_state(&KnowledgeSkillStateRequest {
-            skill_id: String::new(),
-        })
-        .unwrap_err();
-    assert!(empty_id.to_string().contains("non-empty skill id"));
-}
-
-#[test]
-fn reads_skill_thread_sources_for_context_wiring_shape() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Skill {id: 'skill_context', stage: 'active'})")
-        .unwrap();
-    db.query("CREATE (:Skill {id: 'skill_other', stage: 'active'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'memory_a', title: 'Memory A'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'memory_b', title: 'Memory B'})")
-        .unwrap();
-    db.query("CREATE (:Source {id: 'source_skip'})").unwrap();
-    db.query("CREATE (:Thread {id: 'thread_a', thread_id: 'logical_a', title: 'Alpha Thread', source: 'codex'})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_b', thread_id: 'logical_b', title: 'Beta Thread', source: 'slack'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'thread_skip', title: 'Not a Thread'})")
-        .unwrap();
-    db.query("MATCH (s:Skill {id: 'skill_context'}), (m:Memory {id: 'memory_b'}) CREATE (s)-[:SYNTHESIZED_FROM]->(m)")
-        .unwrap();
-    db.query("MATCH (s:Skill {id: 'skill_context'}), (m:Memory {id: 'memory_a'}) CREATE (s)-[:SYNTHESIZED_FROM]->(m)")
-        .unwrap();
-    db.query("MATCH (s:Skill {id: 'skill_context'}), (m:Memory {id: 'memory_a'}) CREATE (s)-[:SYNTHESIZED_FROM {duplicate: true}]->(m)")
-        .unwrap();
-    db.query("MATCH (s:Skill {id: 'skill_context'}), (x:Source {id: 'source_skip'}) CREATE (s)-[:SYNTHESIZED_FROM]->(x)")
-        .unwrap();
-    db.query("MATCH (s:Skill {id: 'skill_other'}), (m:Memory {id: 'memory_a'}) CREATE (s)-[:SYNTHESIZED_FROM]->(m)")
-        .unwrap();
-    db.query("MATCH (t:Thread {id: 'thread_a'}), (m:Memory {id: 'memory_a'}) CREATE (t)-[:COMPACTS_TO]->(m)")
-        .unwrap();
-    db.query("MATCH (t:Thread {id: 'thread_a'}), (m:Memory {id: 'memory_a'}) CREATE (t)-[:COMPACTS_TO {duplicate: true}]->(m)")
-        .unwrap();
-    db.query("MATCH (t:Thread {id: 'thread_b'}), (m:Memory {id: 'memory_b'}) CREATE (t)-[:COMPACTS_TO]->(m)")
-        .unwrap();
-    db.query("MATCH (t:Memory {id: 'thread_skip'}), (m:Memory {id: 'memory_b'}) CREATE (t)-[:COMPACTS_TO]->(m)")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let output = db
-        .knowledge_skill_thread_sources(&KnowledgeSkillThreadSourceListRequest {
-            skill_id: "skill_context".to_string(),
-            limit: 0,
-        })
-        .unwrap();
-    assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(output.skill_id, "skill_context");
-    assert!(output.skill_node_id.is_some());
-    assert!(output.found_skill);
-    assert_eq!(output.matched_count, 2);
-    assert_eq!(output.returned_count, 2);
-    assert_eq!(output.rows[0].skill_id.as_deref(), Some("skill_context"));
-    assert_eq!(output.rows[0].memory_id.as_deref(), Some("memory_a"));
-    assert_eq!(output.rows[0].thread_id.as_deref(), Some("thread_a"));
-    assert_eq!(
-        output.rows[0].thread_logical_id.as_deref(),
-        Some("logical_a")
-    );
-    assert_eq!(output.rows[0].title.as_deref(), Some("Alpha Thread"));
-    assert_eq!(output.rows[0].source.as_deref(), Some("codex"));
-    assert_ne!(output.rows[0].skill_node_id, output.rows[0].memory_node_id);
-    assert_ne!(output.rows[0].thread_node_id, output.rows[0].memory_node_id);
-    assert!(output.rows[0].skill_memory_relationship_id > 0);
-    assert!(output.rows[0].compacts_to_relationship_id > 0);
-    assert_eq!(output.rows[1].memory_id.as_deref(), Some("memory_b"));
-    assert_eq!(output.rows[1].thread_id.as_deref(), Some("thread_b"));
-
-    let limited = db
-        .knowledge_skill_thread_sources(&KnowledgeSkillThreadSourceListRequest {
-            skill_id: "skill_context".to_string(),
-            limit: 1,
-        })
-        .unwrap();
-    assert_eq!(limited.matched_count, 2);
-    assert_eq!(limited.returned_count, 1);
-    assert_eq!(limited.rows[0].thread_id.as_deref(), Some("thread_a"));
-
-    let missing = db
-        .knowledge_skill_thread_sources(&KnowledgeSkillThreadSourceListRequest {
-            skill_id: "missing_skill".to_string(),
-            limit: 10,
-        })
-        .unwrap();
-    assert!(!missing.found_skill);
-    assert_eq!(missing.skill_node_id, None);
-    assert_eq!(missing.matched_count, 0);
-    assert!(missing.rows.is_empty());
-
-    let cache_before_lookup = db.plan_cache_stats();
-    let cached_request = KnowledgeSkillThreadSourceListRequest {
-        skill_id: "missing_skill_cache".to_string(),
-        limit: 10,
-    };
-    db.knowledge_skill_thread_sources(&cached_request).unwrap();
-    db.knowledge_skill_thread_sources(&cached_request).unwrap();
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, cache_before_lookup.entries);
-    assert_eq!(stats.misses, cache_before_lookup.misses);
-    assert_eq!(stats.hits, cache_before_lookup.hits + 2);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-
-    let tx = db.begin_read_transaction();
-    db.query("CREATE (:Thread {id: 'thread_after', title: 'After Thread', source: 'after'})")
-        .unwrap();
-    db.query("MATCH (t:Thread {id: 'thread_after'}), (m:Memory {id: 'memory_a'}) CREATE (t)-[:COMPACTS_TO]->(m)")
-        .unwrap();
-    let snapshot = tx
-        .knowledge_skill_thread_sources(&KnowledgeSkillThreadSourceListRequest {
-            skill_id: "skill_context".to_string(),
-            limit: 0,
-        })
-        .unwrap();
-    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot.matched_count, 2);
-    assert!(snapshot
-        .rows
-        .iter()
-        .all(|row| row.thread_id.as_deref() != Some("thread_after")));
-}
-
-#[test]
-fn skill_thread_source_read_rejects_empty_skill_id() {
-    let db = Database::new();
-    let error = db
-        .knowledge_skill_thread_sources(&KnowledgeSkillThreadSourceListRequest {
-            skill_id: String::new(),
-            limit: 10,
-        })
-        .unwrap_err();
-    assert!(error.to_string().contains("non-empty skill id"));
 }
 
 #[test]
@@ -8093,158 +7462,6 @@ fn skill_source_merge_reports_missing_endpoint_and_rejects_empty_ids() {
     assert_eq!(missing.graph_commit_epoch_before, graph_commit_epoch);
     assert_eq!(missing.graph_commit_epoch_after, graph_commit_epoch);
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-}
-
-#[test]
-fn reads_skill_memories_for_nowledge_evidence_shapes() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Skill {id: 'skill_active', stage: 'active'})")
-        .unwrap();
-    db.query("CREATE (:Skill {id: 'skill_draft', stage: 'draft'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'memory_a', title: 'Memory A', content: 'Alpha', unit_type: 'note', created_at: 20})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'memory_b', title: 'Memory B', content: 'Beta', unit_type: 'fact', created_at: 10})")
-        .unwrap();
-    db.query(
-        "CREATE (:Memory {id: 'memory_c', title: 'Memory C', content: 'Gamma', created_at: 30})",
-    )
-    .unwrap();
-    db.query("MATCH (s:Skill {id: 'skill_active'}), (m:Memory {id: 'memory_a'}) CREATE (s)-[:SYNTHESIZED_FROM]->(m)")
-        .unwrap();
-    db.query("MATCH (s:Skill {id: 'skill_active'}), (m:Memory {id: 'memory_b'}) CREATE (s)-[:SYNTHESIZED_FROM]->(m)")
-        .unwrap();
-    db.query("MATCH (s:Skill {id: 'skill_draft'}), (m:Memory {id: 'memory_c'}) CREATE (s)-[:SYNTHESIZED_FROM]->(m)")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let asc = db
-        .knowledge_skill_memories(&KnowledgeSkillMemoryListRequest {
-            skill_id: Some("skill_active".to_string()),
-            stages: Vec::new(),
-            limit: 0,
-            order: KnowledgeSkillMemoryListOrder::CreatedAtAsc,
-        })
-        .unwrap();
-
-    assert_eq!(asc.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(asc.matched_skill_count, 1);
-    assert_eq!(asc.missing_skill_count, 0);
-    assert_eq!(asc.matched_count, 2);
-    assert_eq!(asc.returned_count, 2);
-    assert_eq!(asc.rows[0].skill_id.as_deref(), Some("skill_active"));
-    assert_eq!(asc.rows[0].memory_id.as_deref(), Some("memory_b"));
-    assert_ne!(asc.rows[0].skill_node_id, asc.rows[0].memory_node_id);
-    assert_eq!(asc.rows[0].title.as_deref(), Some("Memory B"));
-    assert_eq!(asc.rows[0].content.as_deref(), Some("Beta"));
-    assert_eq!(asc.rows[0].unit_type.as_deref(), Some("fact"));
-    assert_eq!(asc.rows[0].created_at, Some(Value::Int(10)));
-    assert_eq!(asc.rows[1].memory_id.as_deref(), Some("memory_a"));
-
-    let desc_limited = db
-        .knowledge_skill_memories(&KnowledgeSkillMemoryListRequest {
-            skill_id: Some("skill_active".to_string()),
-            stages: Vec::new(),
-            limit: 1,
-            order: KnowledgeSkillMemoryListOrder::CreatedAtDesc,
-        })
-        .unwrap();
-    assert_eq!(desc_limited.matched_count, 2);
-    assert_eq!(desc_limited.returned_count, 1);
-    assert_eq!(desc_limited.rows[0].memory_id.as_deref(), Some("memory_a"));
-
-    let active_stage = db
-        .knowledge_skill_memories(&KnowledgeSkillMemoryListRequest {
-            skill_id: None,
-            stages: vec!["active".to_string()],
-            limit: 0,
-            order: KnowledgeSkillMemoryListOrder::CreatedAtAsc,
-        })
-        .unwrap();
-    assert_eq!(active_stage.matched_skill_count, 1);
-    assert_eq!(active_stage.matched_count, 2);
-    assert!(active_stage
-        .rows
-        .iter()
-        .all(|row| row.skill_id.as_deref() == Some("skill_active")));
-
-    let missing = db
-        .knowledge_skill_memories(&KnowledgeSkillMemoryListRequest {
-            skill_id: Some("missing".to_string()),
-            stages: Vec::new(),
-            limit: 10,
-            order: KnowledgeSkillMemoryListOrder::CreatedAtAsc,
-        })
-        .unwrap();
-    assert_eq!(missing.matched_skill_count, 0);
-    assert_eq!(missing.missing_skill_count, 1);
-    assert_eq!(missing.matched_count, 0);
-    assert_eq!(missing.returned_count, 0);
-    assert!(missing.rows.is_empty());
-
-    let cache_before_lookup = db.plan_cache_stats();
-    let cached_request = KnowledgeSkillMemoryListRequest {
-        skill_id: None,
-        stages: vec!["draft".to_string()],
-        limit: 10,
-        order: KnowledgeSkillMemoryListOrder::CreatedAtAsc,
-    };
-    db.knowledge_skill_memories(&cached_request).unwrap();
-    db.knowledge_skill_memories(&cached_request).unwrap();
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, cache_before_lookup.entries);
-    assert_eq!(stats.misses, cache_before_lookup.misses);
-    assert_eq!(stats.hits, cache_before_lookup.hits + 4);
-}
-
-#[test]
-fn skill_memory_read_rejects_invalid_filters() {
-    let db = Database::new();
-
-    let empty_skill_error = db
-        .knowledge_skill_memories(&KnowledgeSkillMemoryListRequest {
-            skill_id: Some(String::new()),
-            stages: Vec::new(),
-            limit: 10,
-            order: KnowledgeSkillMemoryListOrder::CreatedAtAsc,
-        })
-        .unwrap_err();
-    assert!(empty_skill_error.to_string().contains("non-empty skill id"));
-
-    let empty_stage_error = db
-        .knowledge_skill_memories(&KnowledgeSkillMemoryListRequest {
-            skill_id: None,
-            stages: vec![String::new()],
-            limit: 10,
-            order: KnowledgeSkillMemoryListOrder::CreatedAtAsc,
-        })
-        .unwrap_err();
-    assert!(empty_stage_error.to_string().contains("non-empty stages"));
-
-    let broad_error = db
-        .knowledge_skill_memories(&KnowledgeSkillMemoryListRequest {
-            skill_id: None,
-            stages: Vec::new(),
-            limit: 10,
-            order: KnowledgeSkillMemoryListOrder::CreatedAtAsc,
-        })
-        .unwrap_err();
-    assert!(broad_error.to_string().contains("exactly one"));
-
-    let mixed_error = db
-        .knowledge_skill_memories(&KnowledgeSkillMemoryListRequest {
-            skill_id: Some("skill_1".to_string()),
-            stages: vec!["active".to_string()],
-            limit: 10,
-            order: KnowledgeSkillMemoryListOrder::CreatedAtAsc,
-        })
-        .unwrap_err();
-    assert!(mixed_error.to_string().contains("exactly one"));
 }
 
 #[test]

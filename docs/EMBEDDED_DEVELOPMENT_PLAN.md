@@ -202,22 +202,13 @@ Nowledge stage changes, rejections, promotions, compiled metadata, draft bundle
 writes, content hashes, and `updated_at` stamping. REST Skills source merges
 are exposed as a typed `merge_knowledge_skill_source` API for
 `(:Skill)-[:SYNTHESIZED_FROM]->(:Memory)` writes with create-only `weight`,
-`occasion_key`, and `created_at` relationship properties. Skill
-synthesized-memory evidence reads are exposed
-as a typed `knowledge_skill_memories` API for id-filtered and stage-filtered
-`SYNTHESIZED_FROM` Memory lists with explicit created-at ordering. Skill node
-catalog/detail reads are exposed as a typed `knowledge_skills` API for
-stage-filtered lists, exact id lookup, key prefix/contains lookup, active
-after-id pagination, and updated-at/id ordering without WAL writes. Skill
-projected catalog reads are also exposed as
-`knowledge_skill_projected_list`, reusing the same bounded filters and ordering
-while returning only caller-selected Skill properties through an explicit
-allowlist for future field growth. Skill
-context thread-source reads are exposed as a typed
-`knowledge_skill_thread_sources` API for the Nowledge business shape
-`(:Skill)-[:SYNTHESIZED_FROM]->(:Memory)<-[:COMPACTS_TO]-(:Thread)`,
-returning Thread title/source rows without treating Skill as a graph-kernel
-builtin. Skill rollback and cleanup deletes are exposed as a typed
+`occasion_key`, and `created_at` relationship properties. Skill catalog,
+detail, state, synthesized-memory evidence, and thread-source reads use fixed
+parameterized Cypher with explicit query row and payload budgets. Host code may
+coordinate multiple named statements and shape legacy responses, but graph
+filtering, joins, ordering, and per-phase limits remain in the query runtime.
+These reads do not expose route-specific typed database APIs. Skill rollback
+and cleanup deletes are exposed as a typed
 `delete_knowledge_skills` API for exact `(:Skill {id})` detach deletes,
 including `SYNTHESIZED_FROM` cascade cleanup through the shared WAL-backed
 typed entity delete path. Thread compensation deletes are exposed as a typed
@@ -250,11 +241,6 @@ without WAL writes. Thread distilled-memory links are exposed as a typed
 Thread-owned Message cleanup is exposed as a typed `delete_knowledge_thread_messages`
 API for exact Thread `CONTAINS` Message target-node detach deletes while
 preserving the Thread node.
-REST FS Skill detail lookup is exposed as a typed
-`knowledge_skill_detail_lookup` API for physical Skill id lookup without WAL
-writes.
-REST Skills exact state reads are exposed as a typed `knowledge_skill_state`
-API for write-path metadata/version/title/stage checks without WAL writes.
 Label lifecycle writes are exposed as a typed batch for Nowledge metadata
 updates, canonical-name backfill, and rename/canonical-name updates.
 PageRank score persistence and clear operations are exposed as typed batches

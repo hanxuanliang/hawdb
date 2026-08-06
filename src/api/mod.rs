@@ -2949,48 +2949,6 @@ impl Database {
         delete_knowledge_skills_for(self, request)
     }
 
-    pub fn knowledge_skill_memories(
-        &self,
-        request: &KnowledgeSkillMemoryListRequest,
-    ) -> Result<KnowledgeSkillMemoryListOutput> {
-        knowledge_skill_memories_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_skill_thread_sources(
-        &self,
-        request: &KnowledgeSkillThreadSourceListRequest,
-    ) -> Result<KnowledgeSkillThreadSourceListOutput> {
-        knowledge_skill_thread_sources_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_skill_detail_lookup(
-        &self,
-        request: &KnowledgeSkillDetailLookupRequest,
-    ) -> Result<KnowledgeSkillDetailLookupOutput> {
-        knowledge_skill_detail_lookup_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_skill_state(
-        &self,
-        request: &KnowledgeSkillStateRequest,
-    ) -> Result<KnowledgeSkillStateOutput> {
-        knowledge_skill_state_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_skills(
-        &self,
-        request: &KnowledgeSkillListRequest,
-    ) -> Result<KnowledgeSkillListOutput> {
-        knowledge_skills_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_skill_projected_list(
-        &self,
-        request: &KnowledgeSkillProjectedListRequest,
-    ) -> Result<KnowledgeSkillProjectedListOutput> {
-        knowledge_skill_projected_list_via_query_runtime(self, request)
-    }
-
     pub fn update_knowledge_thread_metadata_batch(
         &mut self,
         request: &KnowledgeThreadMetadataBatchRequest,
@@ -6709,10 +6667,10 @@ fn sort_community_memory_rows(
             .then_with(|| right.mention_breadth.cmp(&left.mention_breadth))
             .then_with(|| compare_community_memory_importance_desc(left, right))
             .then_with(|| {
-                compare_skill_memory_created_at(
+                compare_knowledge_created_at(
                     &left.created_at,
                     &right.created_at,
-                    KnowledgeSkillMemoryListOrder::CreatedAtDesc,
+                    KnowledgeCreatedAtOrder::Descending,
                 )
             })
             .then_with(|| compare_community_memory_ids(left, right)),
@@ -6732,10 +6690,10 @@ fn sort_community_memory_rows(
             .cmp(&right.community_id)
             .then_with(|| compare_community_memory_importance_desc(left, right))
             .then_with(|| {
-                compare_skill_memory_created_at(
+                compare_knowledge_created_at(
                     &left.created_at,
                     &right.created_at,
-                    KnowledgeSkillMemoryListOrder::CreatedAtDesc,
+                    KnowledgeCreatedAtOrder::Descending,
                 )
             })
             .then_with(|| compare_community_memory_ids(left, right)),
@@ -6748,7 +6706,7 @@ fn compare_community_memory_importance_desc(
 ) -> std::cmp::Ordering {
     let left_importance = left.importance.clone().unwrap_or(Value::Float(0.5));
     let right_importance = right.importance.clone().unwrap_or(Value::Float(0.5));
-    compare_skill_memory_values(&right_importance, &left_importance)
+    compare_knowledge_values(&right_importance, &left_importance)
 }
 
 fn compare_community_memory_ids(
@@ -7226,10 +7184,10 @@ fn context_memory_preview_label_row_from_query(row: &Row) -> Result<ContextMemor
 
 fn sort_context_memory_preview_memory_rows(rows: &mut [ContextMemoryPreviewMemoryRow]) {
     rows.sort_by(|left, right| {
-        compare_skill_memory_created_at(
+        compare_knowledge_created_at(
             &left.created_at,
             &right.created_at,
-            KnowledgeSkillMemoryListOrder::CreatedAtDesc,
+            KnowledgeCreatedAtOrder::Descending,
         )
         .then_with(|| left.memory_id.cmp(&right.memory_id))
         .then_with(|| left.memory_node_id.cmp(&right.memory_node_id))
@@ -7720,12 +7678,8 @@ fn knowledge_memory_metadata_related_projected_list_for(
         crate::store::GraphScanControl::Continue
     })?;
     rows.sort_by(|left, right| {
-        compare_skill_memory_created_at(
-            &left.1,
-            &right.1,
-            KnowledgeSkillMemoryListOrder::CreatedAtDesc,
-        )
-        .then_with(|| compare_memory_projected_ids(&left.0, &right.0))
+        compare_knowledge_created_at(&left.1, &right.1, KnowledgeCreatedAtOrder::Descending)
+            .then_with(|| compare_memory_projected_ids(&left.0, &right.0))
     });
     let matched_count = rows.len();
     rows.truncate(request.limit);
@@ -7804,12 +7758,8 @@ fn knowledge_memory_metadata_related_projected_list_via_query_runtime(
         })
         .collect::<Vec<_>>();
     rows.sort_by(|left, right| {
-        compare_skill_memory_created_at(
-            &left.1,
-            &right.1,
-            KnowledgeSkillMemoryListOrder::CreatedAtDesc,
-        )
-        .then_with(|| compare_memory_projected_ids(&left.0, &right.0))
+        compare_knowledge_created_at(&left.1, &right.1, KnowledgeCreatedAtOrder::Descending)
+            .then_with(|| compare_memory_projected_ids(&left.0, &right.0))
     });
     let matched_count = rows.len();
     rows.truncate(request.limit);
@@ -8124,10 +8074,10 @@ fn knowledge_memory_title_contents_for(
         crate::store::GraphScanControl::Continue
     })?;
     rows.sort_by(|left, right| {
-        compare_skill_memory_created_at(
+        compare_knowledge_created_at(
             &left.created_at,
             &right.created_at,
-            KnowledgeSkillMemoryListOrder::CreatedAtAsc,
+            KnowledgeCreatedAtOrder::Ascending,
         )
         .then_with(|| left.memory_id.cmp(&right.memory_id))
         .then_with(|| left.node_id.cmp(&right.node_id))
@@ -8191,10 +8141,10 @@ fn knowledge_memory_title_contents_via_query_runtime(
         })
         .collect::<Vec<_>>();
     rows.sort_by(|left, right| {
-        compare_skill_memory_created_at(
+        compare_knowledge_created_at(
             &left.created_at,
             &right.created_at,
-            KnowledgeSkillMemoryListOrder::CreatedAtAsc,
+            KnowledgeCreatedAtOrder::Ascending,
         )
         .then_with(|| left.memory_id.cmp(&right.memory_id))
         .then_with(|| left.node_id.cmp(&right.node_id))
@@ -9862,18 +9812,18 @@ fn integer_property_value(properties: &BTreeMap<String, Value>, property: &str) 
 fn sort_memory_list_rows(rows: &mut [KnowledgeMemoryListRow], order: KnowledgeMemoryListOrder) {
     rows.sort_by(|left, right| match order {
         KnowledgeMemoryListOrder::ExternalIdAsc => compare_memory_ids(left, right),
-        KnowledgeMemoryListOrder::CreatedAtDesc => compare_skill_memory_created_at(
+        KnowledgeMemoryListOrder::CreatedAtDesc => compare_knowledge_created_at(
             &left.created_at,
             &right.created_at,
-            KnowledgeSkillMemoryListOrder::CreatedAtDesc,
+            KnowledgeCreatedAtOrder::Descending,
         )
         .then_with(|| compare_memory_ids(left, right)),
         KnowledgeMemoryListOrder::ScoreDesc => compare_memory_scores(left, right)
             .then_with(|| {
-                compare_skill_memory_created_at(
+                compare_knowledge_created_at(
                     &left.created_at,
                     &right.created_at,
-                    KnowledgeSkillMemoryListOrder::CreatedAtDesc,
+                    KnowledgeCreatedAtOrder::Descending,
                 )
             })
             .then_with(|| compare_memory_ids(left, right)),
@@ -9895,19 +9845,13 @@ fn sort_memory_projected_rows(
 ) {
     rows.sort_by(|left, right| match order {
         KnowledgeMemoryListOrder::ExternalIdAsc => compare_memory_projected_ids(&left.0, &right.0),
-        KnowledgeMemoryListOrder::CreatedAtDesc => compare_skill_memory_created_at(
-            &left.1,
-            &right.1,
-            KnowledgeSkillMemoryListOrder::CreatedAtDesc,
-        )
-        .then_with(|| compare_memory_projected_ids(&left.0, &right.0)),
-        KnowledgeMemoryListOrder::ScoreDesc => compare_skill_memory_values(&right.2, &left.2)
+        KnowledgeMemoryListOrder::CreatedAtDesc => {
+            compare_knowledge_created_at(&left.1, &right.1, KnowledgeCreatedAtOrder::Descending)
+                .then_with(|| compare_memory_projected_ids(&left.0, &right.0))
+        }
+        KnowledgeMemoryListOrder::ScoreDesc => compare_knowledge_values(&right.2, &left.2)
             .then_with(|| {
-                compare_skill_memory_created_at(
-                    &left.1,
-                    &right.1,
-                    KnowledgeSkillMemoryListOrder::CreatedAtDesc,
-                )
+                compare_knowledge_created_at(&left.1, &right.1, KnowledgeCreatedAtOrder::Descending)
             })
             .then_with(|| compare_memory_projected_ids(&left.0, &right.0)),
     });
@@ -9926,7 +9870,7 @@ fn compare_memory_scores(
     left: &KnowledgeMemoryListRow,
     right: &KnowledgeMemoryListRow,
 ) -> std::cmp::Ordering {
-    compare_skill_memory_values(&memory_score(right), &memory_score(left))
+    compare_knowledge_values(&memory_score(right), &memory_score(left))
 }
 
 fn memory_score(row: &KnowledgeMemoryListRow) -> Value {
@@ -10228,10 +10172,10 @@ fn compare_crystal_importance_created_at(
 ) -> std::cmp::Ordering {
     compare_optional_values_desc(left.importance.as_ref(), right.importance.as_ref()).then_with(
         || {
-            compare_skill_memory_created_at(
+            compare_knowledge_created_at(
                 &left.created_at,
                 &right.created_at,
-                KnowledgeSkillMemoryListOrder::CreatedAtDesc,
+                KnowledgeCreatedAtOrder::Descending,
             )
         },
     )
@@ -15124,1131 +15068,26 @@ fn value_is_greater(left: &Value, right: &Value) -> bool {
     }
 }
 
-fn knowledge_skills_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeSkillListRequest,
-) -> Result<KnowledgeSkillListOutput> {
-    validate_knowledge_skill_list_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(label_id) = catalog.label_id("Skill") else {
-        return Ok(KnowledgeSkillListOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-            missing_ids: request.ids.clone(),
-        });
-    };
-
-    let requested_ids = request.ids.iter().cloned().collect::<BTreeSet<_>>();
-    let mut matched_ids = BTreeSet::new();
-    let mut rows = Vec::new();
-    store.visit_nodes_owned(Some(label_id), |node| {
-        if skill_matches_list_request(&node, request, &requested_ids) {
-            if let Some(id) = node_external_id(&node) {
-                matched_ids.insert(id);
-            }
-            rows.push(knowledge_skill_row(&node));
-        }
-        crate::store::GraphScanControl::Continue
-    })?;
-
-    sort_skill_rows(&mut rows, request.order);
-    let matched_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-    let missing_ids = request
-        .ids
-        .iter()
-        .filter(|id| !matched_ids.contains(*id))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    Ok(KnowledgeSkillListOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        returned_count,
-        missing_ids,
-    })
+#[derive(Clone, Copy)]
+enum KnowledgeCreatedAtOrder {
+    Ascending,
+    Descending,
 }
 
-fn knowledge_skills_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeSkillListRequest,
-) -> Result<KnowledgeSkillListOutput> {
-    validate_knowledge_skill_list_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let (query, parameters) = knowledge_skill_list_query(request);
-    let output = db.query_read_only_with_params_bounded(&query, &parameters, None)?;
-    let mut matched_ids = BTreeSet::new();
-    let mut rows = output
-        .rows
-        .iter()
-        .map(|row| {
-            let skill = row
-                .get("skill")
-                .and_then(knowledge_entity_from_value)
-                .ok_or_else(|| {
-                    SkeinError::Execution(
-                        "knowledge skill list row is missing skill map".to_string(),
-                    )
-                })?;
-            if let Some(id) = knowledge_entity_id_property(&skill) {
-                matched_ids.insert(id);
-            }
-            Ok(knowledge_skill_row_from_entity(&skill))
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    sort_skill_rows(&mut rows, request.order);
-    let matched_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-    let missing_ids = request
-        .ids
-        .iter()
-        .filter(|id| !matched_ids.contains(*id))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    Ok(KnowledgeSkillListOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        returned_count,
-        missing_ids,
-    })
-}
-
-fn knowledge_skill_projected_list_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeSkillProjectedListRequest,
-) -> Result<KnowledgeSkillProjectedListOutput> {
-    validate_knowledge_skill_projected_list_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(label_id) = catalog.label_id("Skill") else {
-        return Ok(KnowledgeSkillProjectedListOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-            missing_ids: request.list.ids.clone(),
-        });
-    };
-
-    let requested_ids = request.list.ids.iter().cloned().collect::<BTreeSet<_>>();
-    let mut matched_ids = BTreeSet::new();
-    let mut rows = Vec::new();
-    store.visit_nodes_owned(Some(label_id), |node| {
-        if skill_matches_list_request(&node, &request.list, &requested_ids) {
-            if let Some(id) = node_external_id(&node) {
-                matched_ids.insert(id);
-            }
-            rows.push((
-                knowledge_skill_projected_row(&node, &request.property_names),
-                node.properties.get("updated_at").cloned(),
-            ));
-        }
-        crate::store::GraphScanControl::Continue
-    })?;
-
-    sort_skill_projected_rows(&mut rows, request.list.order);
-    let matched_count = rows.len();
-    if request.list.limit > 0 {
-        rows.truncate(request.list.limit);
-    }
-    let returned_count = rows.len();
-    let rows = rows
-        .into_iter()
-        .map(|(row, _updated_at)| row)
-        .collect::<Vec<_>>();
-    let missing_ids = request
-        .list
-        .ids
-        .iter()
-        .filter(|id| !matched_ids.contains(*id))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    Ok(KnowledgeSkillProjectedListOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        returned_count,
-        missing_ids,
-    })
-}
-
-fn knowledge_skill_projected_list_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeSkillProjectedListRequest,
-) -> Result<KnowledgeSkillProjectedListOutput> {
-    validate_knowledge_skill_projected_list_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let (query, parameters) = knowledge_skill_list_query(&request.list);
-    let output = db.query_read_only_with_params_bounded(&query, &parameters, None)?;
-    let mut matched_ids = BTreeSet::new();
-    let mut rows = output
-        .rows
-        .iter()
-        .map(|row| {
-            let skill = row
-                .get("skill")
-                .and_then(knowledge_entity_from_value)
-                .ok_or_else(|| {
-                    SkeinError::Execution(
-                        "knowledge skill projected list row is missing skill map".to_string(),
-                    )
-                })?;
-            if let Some(id) = knowledge_entity_id_property(&skill) {
-                matched_ids.insert(id);
-            }
-            Ok((
-                knowledge_skill_projected_row_from_entity(&skill, &request.property_names),
-                skill.properties.get("updated_at").cloned(),
-            ))
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    sort_skill_projected_rows(&mut rows, request.list.order);
-    let matched_count = rows.len();
-    if request.list.limit > 0 {
-        rows.truncate(request.list.limit);
-    }
-    let returned_count = rows.len();
-    let rows = rows
-        .into_iter()
-        .map(|(row, _updated_at)| row)
-        .collect::<Vec<_>>();
-    let missing_ids = request
-        .list
-        .ids
-        .iter()
-        .filter(|id| !matched_ids.contains(*id))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    Ok(KnowledgeSkillProjectedListOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        returned_count,
-        missing_ids,
-    })
-}
-
-fn validate_knowledge_skill_projected_list_request(
-    request: &KnowledgeSkillProjectedListRequest,
-) -> Result<()> {
-    validate_knowledge_skill_list_request(&request.list)?;
-    if request.property_names.iter().any(String::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge skill projected list requires non-empty property names".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_knowledge_skill_list_request(request: &KnowledgeSkillListRequest) -> Result<()> {
-    if request.ids.iter().any(String::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge skill list requires non-empty ids".to_string(),
-        ));
-    }
-    if request.lookup_key.as_deref().is_some_and(str::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge skill list requires a non-empty lookup key".to_string(),
-        ));
-    }
-    if request.stages.iter().any(String::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge skill list requires non-empty stages".to_string(),
-        ));
-    }
-    if request.after_id.as_deref().is_some_and(str::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge skill list requires a non-empty after id".to_string(),
-        ));
-    }
-    if request.ids.is_empty()
-        && request.lookup_key.is_none()
-        && request.stages.is_empty()
-        && request.after_id.is_none()
-        && request.limit == 0
-    {
-        return Err(SkeinError::Semantic(
-            "knowledge skill list requires a bounded limit or a filter".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn knowledge_skill_list_query(
-    request: &KnowledgeSkillListRequest,
-) -> (String, BTreeMap<String, Value>) {
-    let mut parameters = BTreeMap::new();
-    let mut predicates = Vec::new();
-    if !request.ids.is_empty() {
-        parameters.insert(
-            "ids".to_string(),
-            Value::List(request.ids.iter().cloned().map(Value::String).collect()),
-        );
-        predicates.push("skill.id IN $ids");
-    }
-    if let Some(lookup_key) = &request.lookup_key {
-        parameters.insert("lookup_key".to_string(), Value::String(lookup_key.clone()));
-        predicates.push(
-            "(skill.id = $lookup_key OR skill.id STARTS WITH $lookup_key OR skill.id CONTAINS $lookup_key)",
-        );
-    }
-    if !request.stages.is_empty() {
-        parameters.insert(
-            "stages".to_string(),
-            Value::List(request.stages.iter().cloned().map(Value::String).collect()),
-        );
-        predicates.push("skill.stage IN $stages");
-    }
-    if let Some(after_id) = &request.after_id {
-        parameters.insert("after_id".to_string(), Value::String(after_id.clone()));
-        predicates.push("skill.id > $after_id");
-    }
-    let predicate = if predicates.is_empty() {
-        String::new()
-    } else {
-        format!(" WHERE {}", predicates.join(" AND "))
-    };
-    (
-        format!("MATCH (skill:Skill){predicate} RETURN skill AS skill"),
-        parameters,
-    )
-}
-
-fn skill_matches_list_request(
-    node: &NodeRecord,
-    request: &KnowledgeSkillListRequest,
-    requested_ids: &BTreeSet<String>,
-) -> bool {
-    let id = node_external_id(node);
-    if !requested_ids.is_empty() && !id.as_ref().is_some_and(|id| requested_ids.contains(id)) {
-        return false;
-    }
-    if request.lookup_key.as_ref().is_some_and(|key| {
-        !id.as_ref()
-            .is_some_and(|id| id == key || id.starts_with(key) || id.contains(key))
-    }) {
-        return false;
-    }
-    if !request.stages.is_empty() {
-        let stages = request.stages.iter().collect::<BTreeSet<_>>();
-        if string_property(node, "stage")
-            .as_ref()
-            .is_none_or(|stage| !stages.contains(stage))
-        {
-            return false;
-        }
-    }
-    if request
-        .after_id
-        .as_ref()
-        .is_some_and(|after| id.as_ref().is_none_or(|id| id.as_str() <= after.as_str()))
-    {
-        return false;
-    }
-    true
-}
-
-fn knowledge_skill_projected_row(
-    node: &NodeRecord,
-    property_names: &[String],
-) -> KnowledgeSkillProjectedRow {
-    KnowledgeSkillProjectedRow {
-        id: node_external_id(node),
-        node_id: node.id.0,
-        properties: projected_properties(&node.properties, property_names),
-        normalized_space_id: normalized_node_space_id(node),
-    }
-}
-
-fn knowledge_skill_projected_row_from_entity(
-    skill: &KnowledgeEntity,
-    property_names: &[String],
-) -> KnowledgeSkillProjectedRow {
-    KnowledgeSkillProjectedRow {
-        id: knowledge_entity_id_property(skill),
-        node_id: skill.node_id,
-        properties: projected_properties(&skill.properties, property_names),
-        normalized_space_id: knowledge_entity_normalized_space_id(skill),
-    }
-}
-
-fn knowledge_skill_row(node: &NodeRecord) -> KnowledgeSkillRow {
-    KnowledgeSkillRow {
-        id: node_external_id(node),
-        node_id: node.id.0,
-        title: string_property(node, "title"),
-        name: string_property(node, "name"),
-        description: string_property(node, "description"),
-        stage: string_property(node, "stage"),
-        version: node.properties.get("version").cloned(),
-        use_count: integer_property(node, "use_count").unwrap_or(0),
-        success_rate: node.properties.get("success_rate").cloned(),
-        metadata: node.properties.get("metadata").cloned(),
-        bundle_path: string_property(node, "bundle_path"),
-        triggers: node.properties.get("triggers").cloned(),
-        content_hash: string_property(node, "content_hash"),
-        raw_space_id: string_property(node, "space_id"),
-        normalized_space_id: normalized_node_space_id(node),
-        created_at: node.properties.get("created_at").cloned(),
-        updated_at: node.properties.get("updated_at").cloned(),
-        evidence_count: integer_property(node, "evidence_count").unwrap_or(0),
-        scope: string_property(node, "scope"),
-        rationale: string_property(node, "rationale"),
-        kind: string_property(node, "kind"),
-        confidence: node.properties.get("confidence").cloned(),
-    }
-}
-
-fn knowledge_skill_row_from_entity(skill: &KnowledgeEntity) -> KnowledgeSkillRow {
-    KnowledgeSkillRow {
-        id: knowledge_entity_id_property(skill),
-        node_id: skill.node_id,
-        title: string_property_value(&skill.properties, "title"),
-        name: string_property_value(&skill.properties, "name"),
-        description: string_property_value(&skill.properties, "description"),
-        stage: string_property_value(&skill.properties, "stage"),
-        version: skill.properties.get("version").cloned(),
-        use_count: integer_property_value(&skill.properties, "use_count").unwrap_or(0),
-        success_rate: skill.properties.get("success_rate").cloned(),
-        metadata: skill.properties.get("metadata").cloned(),
-        bundle_path: string_property_value(&skill.properties, "bundle_path"),
-        triggers: skill.properties.get("triggers").cloned(),
-        content_hash: string_property_value(&skill.properties, "content_hash"),
-        raw_space_id: string_property_value(&skill.properties, "space_id"),
-        normalized_space_id: knowledge_entity_normalized_space_id(skill),
-        created_at: skill.properties.get("created_at").cloned(),
-        updated_at: skill.properties.get("updated_at").cloned(),
-        evidence_count: integer_property_value(&skill.properties, "evidence_count").unwrap_or(0),
-        scope: string_property_value(&skill.properties, "scope"),
-        rationale: string_property_value(&skill.properties, "rationale"),
-        kind: string_property_value(&skill.properties, "kind"),
-        confidence: skill.properties.get("confidence").cloned(),
-    }
-}
-
-fn sort_skill_rows(rows: &mut [KnowledgeSkillRow], order: KnowledgeSkillListOrder) {
-    rows.sort_by(|left, right| match order {
-        KnowledgeSkillListOrder::IdAsc => compare_skill_ids(left, right),
-        KnowledgeSkillListOrder::UpdatedAtDesc => {
-            compare_optional_values_desc(left.updated_at.as_ref(), right.updated_at.as_ref())
-                .then_with(|| compare_skill_ids(left, right))
-        }
-    });
-}
-
-fn compare_skill_ids(left: &KnowledgeSkillRow, right: &KnowledgeSkillRow) -> std::cmp::Ordering {
-    left.id
-        .cmp(&right.id)
-        .then_with(|| left.node_id.cmp(&right.node_id))
-}
-
-fn sort_skill_projected_rows(
-    rows: &mut [(KnowledgeSkillProjectedRow, Option<Value>)],
-    order: KnowledgeSkillListOrder,
-) {
-    rows.sort_by(|left, right| match order {
-        KnowledgeSkillListOrder::IdAsc => compare_skill_projected_ids(&left.0, &right.0),
-        KnowledgeSkillListOrder::UpdatedAtDesc => {
-            compare_optional_values_desc(left.1.as_ref(), right.1.as_ref())
-                .then_with(|| compare_skill_projected_ids(&left.0, &right.0))
-        }
-    });
-}
-
-fn compare_skill_projected_ids(
-    left: &KnowledgeSkillProjectedRow,
-    right: &KnowledgeSkillProjectedRow,
-) -> std::cmp::Ordering {
-    left.id
-        .cmp(&right.id)
-        .then_with(|| left.node_id.cmp(&right.node_id))
-}
-
-fn knowledge_skill_memories_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeSkillMemoryListRequest,
-) -> Result<KnowledgeSkillMemoryListOutput> {
-    validate_knowledge_skill_memory_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let mut parameters = BTreeMap::new();
-    let seed_predicate = knowledge_skill_memory_seed_predicate(request, &mut parameters);
-
-    let skill_query = format!(
-        "MATCH (s:Skill){seed_predicate} RETURN id(s) AS skill_node_id ORDER BY s.id ASC, id(s) ASC"
-    );
-    let skill_output = db.query_read_only_with_params_bounded(&skill_query, &parameters, None)?;
-    let matched_skill_count = skill_output.rows.len();
-    let missing_skill_count = usize::from(request.skill_id.is_some() && matched_skill_count == 0);
-
-    let memory_query = format!(
-        "MATCH (s:Skill){seed_predicate} \
-         MATCH (s)-[r:SYNTHESIZED_FROM]->(m:Memory) \
-         RETURN s.id AS skill_id, id(s) AS skill_node_id, \
-         m.id AS memory_id, id(m) AS memory_node_id, id(r) AS relationship_id, \
-         m.title AS title, m.content AS content, m.unit_type AS unit_type, m.created_at AS created_at"
-    );
-    let memory_output = db.query_read_only_with_params_bounded(&memory_query, &parameters, None)?;
-    let mut rows = memory_output
-        .rows
-        .iter()
-        .map(knowledge_skill_memory_row_from_query)
-        .collect::<Result<Vec<_>>>()?;
-    sort_skill_memory_rows(&mut rows, request.order);
-    let matched_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-
-    Ok(KnowledgeSkillMemoryListOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        returned_count,
-        matched_skill_count,
-        missing_skill_count,
-    })
-}
-
-fn knowledge_skill_memory_seed_predicate(
-    request: &KnowledgeSkillMemoryListRequest,
-    parameters: &mut BTreeMap<String, Value>,
-) -> String {
-    if let Some(skill_id) = &request.skill_id {
-        parameters.insert("skill_id".to_string(), Value::String(skill_id.clone()));
-        return " WHERE s.id = $skill_id".to_string();
-    }
-    parameters.insert(
-        "stages".to_string(),
-        Value::List(request.stages.iter().cloned().map(Value::String).collect()),
-    );
-    " WHERE s.stage IN $stages".to_string()
-}
-
-fn knowledge_skill_memory_row_from_query(row: &Row) -> Result<KnowledgeSkillMemoryRow> {
-    let skill_node_id = row
-        .get("skill_node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution("knowledge skill memory row is missing skill_node_id".to_string())
-        })?;
-    let memory_node_id = row
-        .get("memory_node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge skill memory row is missing memory_node_id".to_string(),
-            )
-        })?;
-    let relationship_id = row
-        .get("relationship_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge skill memory row is missing relationship_id".to_string(),
-            )
-        })?;
-
-    Ok(KnowledgeSkillMemoryRow {
-        skill_id: optional_string_cell(row, "skill_id"),
-        skill_node_id,
-        memory_id: optional_string_cell(row, "memory_id"),
-        memory_node_id,
-        relationship_id,
-        title: optional_string_cell(row, "title"),
-        content: optional_string_cell(row, "content"),
-        unit_type: optional_string_cell(row, "unit_type"),
-        created_at: optional_value_cell(row, "created_at"),
-    })
-}
-
-fn validate_knowledge_skill_memory_request(
-    request: &KnowledgeSkillMemoryListRequest,
-) -> Result<()> {
-    let has_skill_id = match request.skill_id.as_ref() {
-        Some(skill_id) if skill_id.is_empty() => {
-            return Err(SkeinError::Semantic(
-                "knowledge skill memory read requires a non-empty skill id".to_string(),
-            ));
-        }
-        Some(_) => true,
-        None => false,
-    };
-    if request.stages.iter().any(String::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge skill memory read requires non-empty stages".to_string(),
-        ));
-    }
-    let has_stages = !request.stages.is_empty();
-    if has_skill_id == has_stages {
-        return Err(SkeinError::Semantic(
-            "knowledge skill memory read requires exactly one skill id or stage filter".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn knowledge_skill_thread_sources_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeSkillThreadSourceListRequest,
-) -> Result<KnowledgeSkillThreadSourceListOutput> {
-    validate_knowledge_skill_thread_source_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(skill) =
-        try_seed_node_by_label_and_external_id(catalog, store, "Skill", &request.skill_id)?
-    else {
-        return Ok(KnowledgeSkillThreadSourceListOutput {
-            graph_commit_epoch,
-            skill_id: request.skill_id.clone(),
-            skill_node_id: None,
-            found_skill: false,
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-        });
-    };
-
-    let mut rows = skill_thread_source_rows(catalog, store, &skill)?;
-    sort_skill_thread_source_rows(&mut rows);
-    let matched_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-
-    Ok(KnowledgeSkillThreadSourceListOutput {
-        graph_commit_epoch,
-        skill_id: request.skill_id.clone(),
-        skill_node_id: Some(skill.id.0),
-        found_skill: true,
-        rows,
-        matched_count,
-        returned_count,
-    })
-}
-
-fn knowledge_skill_thread_sources_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeSkillThreadSourceListRequest,
-) -> Result<KnowledgeSkillThreadSourceListOutput> {
-    validate_knowledge_skill_thread_source_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let parameters = BTreeMap::from([(
-        "skill_id".to_string(),
-        Value::String(request.skill_id.clone()),
-    )]);
-    let skill_output = db.query_read_only_with_params_bounded(
-        "MATCH (s:Skill {id: $skill_id}) RETURN id(s) AS skill_node_id LIMIT 1",
-        &parameters,
-        Some(1),
-    )?;
-    let skill_node_id = skill_output
-        .rows
-        .first()
-        .and_then(|row| row.get("skill_node_id"))
-        .and_then(value_to_non_negative_u64);
-    let Some(skill_node_id) = skill_node_id else {
-        return Ok(KnowledgeSkillThreadSourceListOutput {
-            graph_commit_epoch,
-            skill_id: request.skill_id.clone(),
-            skill_node_id: None,
-            found_skill: false,
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-        });
-    };
-
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (s:Skill {id: $skill_id})-[sm:SYNTHESIZED_FROM]->(m:Memory)<-[ct:COMPACTS_TO]-(t:Thread) \
-         RETURN s.id AS skill_id, id(s) AS skill_node_id, \
-         m.id AS memory_id, id(m) AS memory_node_id, id(sm) AS skill_memory_relationship_id, \
-         t.id AS thread_id, id(t) AS thread_node_id, t.thread_id AS thread_logical_id, \
-         t.title AS title, t.source AS source, id(ct) AS compacts_to_relationship_id \
-         ORDER BY skill_memory_relationship_id ASC, compacts_to_relationship_id ASC",
-        &parameters,
-        None,
-    )?;
-    let mut seen = BTreeSet::new();
-    let mut rows = output
-        .rows
-        .iter()
-        .map(knowledge_skill_thread_source_row_from_query)
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .filter(|row| seen.insert((row.memory_node_id, row.thread_node_id)))
-        .collect::<Vec<_>>();
-    sort_skill_thread_source_rows(&mut rows);
-    let matched_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-
-    Ok(KnowledgeSkillThreadSourceListOutput {
-        graph_commit_epoch,
-        skill_id: request.skill_id.clone(),
-        skill_node_id: Some(skill_node_id),
-        found_skill: true,
-        rows,
-        matched_count,
-        returned_count,
-    })
-}
-
-fn validate_knowledge_skill_thread_source_request(
-    request: &KnowledgeSkillThreadSourceListRequest,
-) -> Result<()> {
-    if request.skill_id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge skill thread source read requires a non-empty skill id".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn knowledge_skill_thread_source_row_from_query(
-    row: &Row,
-) -> Result<KnowledgeSkillThreadSourceRow> {
-    let skill_node_id = row
-        .get("skill_node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge skill thread source row is missing skill_node_id".to_string(),
-            )
-        })?;
-    let memory_node_id = row
-        .get("memory_node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge skill thread source row is missing memory_node_id".to_string(),
-            )
-        })?;
-    let skill_memory_relationship_id = row
-        .get("skill_memory_relationship_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge skill thread source row is missing skill_memory_relationship_id"
-                    .to_string(),
-            )
-        })?;
-    let thread_node_id = row
-        .get("thread_node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge skill thread source row is missing thread_node_id".to_string(),
-            )
-        })?;
-    let compacts_to_relationship_id = row
-        .get("compacts_to_relationship_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge skill thread source row is missing compacts_to_relationship_id"
-                    .to_string(),
-            )
-        })?;
-
-    Ok(KnowledgeSkillThreadSourceRow {
-        skill_id: optional_string_cell(row, "skill_id"),
-        skill_node_id,
-        memory_id: optional_string_cell(row, "memory_id"),
-        memory_node_id,
-        skill_memory_relationship_id,
-        thread_id: optional_string_cell(row, "thread_id"),
-        thread_node_id,
-        thread_logical_id: optional_string_cell(row, "thread_logical_id"),
-        title: optional_string_cell(row, "title"),
-        source: optional_string_cell(row, "source"),
-        compacts_to_relationship_id,
-    })
-}
-
-fn knowledge_skill_detail_lookup_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeSkillDetailLookupRequest,
-) -> Result<KnowledgeSkillDetailLookupOutput> {
-    validate_knowledge_skill_detail_lookup_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(label_id) = catalog.label_id("Skill") else {
-        return Ok(KnowledgeSkillDetailLookupOutput {
-            graph_commit_epoch,
-            key: request.key.clone(),
-            skill_node_id: None,
-            found_skill: false,
-            id: None,
-            name: None,
-            title: None,
-            stage: None,
-            version: None,
-            created_at: None,
-            updated_at: None,
-            matched_count: 0,
-        });
-    };
-
-    let matched = skill_detail_lookup_candidates(store, label_id, &request.key)?;
-    let matched_count = matched.len();
-    let first = matched.into_iter().next();
-
-    Ok(KnowledgeSkillDetailLookupOutput {
-        graph_commit_epoch,
-        key: request.key.clone(),
-        skill_node_id: first.as_ref().map(|node| node.id.0),
-        found_skill: first.is_some(),
-        id: first.as_ref().and_then(node_external_id),
-        name: first
-            .as_ref()
-            .and_then(|node| string_property(node, "name")),
-        title: first
-            .as_ref()
-            .and_then(|node| string_property(node, "title")),
-        stage: first
-            .as_ref()
-            .and_then(|node| string_property(node, "stage")),
-        version: first
-            .as_ref()
-            .and_then(|node| node.properties.get("version").cloned()),
-        created_at: first
-            .as_ref()
-            .and_then(|node| node.properties.get("created_at").cloned()),
-        updated_at: first
-            .as_ref()
-            .and_then(|node| node.properties.get("updated_at").cloned()),
-        matched_count,
-    })
-}
-
-fn knowledge_skill_detail_lookup_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeSkillDetailLookupRequest,
-) -> Result<KnowledgeSkillDetailLookupOutput> {
-    validate_knowledge_skill_detail_lookup_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let parameters = BTreeMap::from([("key".to_string(), Value::String(request.key.clone()))]);
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (s:Skill) \
-         WHERE s.id = $key OR s.id STARTS WITH $key OR s.id CONTAINS $key \
-         RETURN s AS skill \
-         ORDER BY id(s) ASC",
-        &parameters,
-        None,
-    )?;
-    let matched = output
-        .rows
-        .iter()
-        .filter_map(|row| row.get("skill").and_then(knowledge_entity_from_value))
-        .collect::<Vec<_>>();
-    let matched_count = matched.len();
-    let first = matched.first();
-
-    Ok(KnowledgeSkillDetailLookupOutput {
-        graph_commit_epoch,
-        key: request.key.clone(),
-        skill_node_id: first.map(|skill| skill.node_id),
-        found_skill: first.is_some(),
-        id: first.and_then(|skill| string_property_value(&skill.properties, "id")),
-        name: first.and_then(|skill| string_property_value(&skill.properties, "name")),
-        title: first.and_then(|skill| string_property_value(&skill.properties, "title")),
-        stage: first.and_then(|skill| string_property_value(&skill.properties, "stage")),
-        version: first.and_then(|skill| skill.properties.get("version").cloned()),
-        created_at: first.and_then(|skill| skill.properties.get("created_at").cloned()),
-        updated_at: first.and_then(|skill| skill.properties.get("updated_at").cloned()),
-        matched_count,
-    })
-}
-
-fn validate_knowledge_skill_detail_lookup_request(
-    request: &KnowledgeSkillDetailLookupRequest,
-) -> Result<()> {
-    if request.key.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge skill detail lookup requires a non-empty key".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn skill_detail_lookup_candidates(
-    store: &GraphStore,
-    label_id: LabelId,
-    key: &str,
-) -> Result<Vec<NodeRecord>> {
-    let mut nodes = Vec::new();
-    store.visit_nodes_owned(Some(label_id), |node| {
-        if node_external_id(&node)
-            .is_some_and(|id| id.as_str() == key || id.starts_with(key) || id.contains(key))
-        {
-            nodes.push(node);
-        }
-        crate::store::GraphScanControl::Continue
-    })?;
-    nodes.sort_by_key(|node| node.id.0);
-    Ok(nodes)
-}
-
-fn knowledge_skill_state_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeSkillStateRequest,
-) -> Result<KnowledgeSkillStateOutput> {
-    validate_knowledge_skill_state_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let skill = try_seed_node_by_label_and_external_id(catalog, store, "Skill", &request.skill_id)?;
-
-    Ok(KnowledgeSkillStateOutput {
-        graph_commit_epoch,
-        skill_id: request.skill_id.clone(),
-        skill_node_id: skill.as_ref().map(|node| node.id.0),
-        found_skill: skill.is_some(),
-        id: skill.as_ref().and_then(node_external_id),
-        stage: skill
-            .as_ref()
-            .and_then(|node| string_property(node, "stage")),
-        metadata: skill
-            .as_ref()
-            .and_then(|node| node.properties.get("metadata").cloned()),
-        version: skill
-            .as_ref()
-            .and_then(|node| node.properties.get("version").cloned()),
-        use_count: skill
-            .as_ref()
-            .and_then(|node| node.properties.get("use_count").cloned()),
-        bundle_path: skill
-            .as_ref()
-            .and_then(|node| string_property(node, "bundle_path")),
-        content_hash: skill
-            .as_ref()
-            .and_then(|node| string_property(node, "content_hash")),
-        name: skill
-            .as_ref()
-            .and_then(|node| string_property(node, "name")),
-        description: skill
-            .as_ref()
-            .and_then(|node| string_property(node, "description")),
-        title: skill
-            .as_ref()
-            .and_then(|node| string_property(node, "title")),
-    })
-}
-
-fn knowledge_skill_state_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeSkillStateRequest,
-) -> Result<KnowledgeSkillStateOutput> {
-    validate_knowledge_skill_state_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let parameters = BTreeMap::from([(
-        "skill_id".to_string(),
-        Value::String(request.skill_id.clone()),
-    )]);
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (s:Skill {id: $skill_id}) RETURN s AS skill LIMIT 1",
-        &parameters,
-        Some(1),
-    )?;
-    let skill = output
-        .rows
-        .first()
-        .and_then(|row| row.get("skill"))
-        .and_then(knowledge_entity_from_value);
-
-    Ok(KnowledgeSkillStateOutput {
-        graph_commit_epoch,
-        skill_id: request.skill_id.clone(),
-        skill_node_id: skill.as_ref().map(|skill| skill.node_id),
-        found_skill: skill.is_some(),
-        id: skill
-            .as_ref()
-            .and_then(|skill| string_property_value(&skill.properties, "id")),
-        stage: skill
-            .as_ref()
-            .and_then(|skill| string_property_value(&skill.properties, "stage")),
-        metadata: skill
-            .as_ref()
-            .and_then(|skill| skill.properties.get("metadata").cloned()),
-        version: skill
-            .as_ref()
-            .and_then(|skill| skill.properties.get("version").cloned()),
-        use_count: skill
-            .as_ref()
-            .and_then(|skill| skill.properties.get("use_count").cloned()),
-        bundle_path: skill
-            .as_ref()
-            .and_then(|skill| string_property_value(&skill.properties, "bundle_path")),
-        content_hash: skill
-            .as_ref()
-            .and_then(|skill| string_property_value(&skill.properties, "content_hash")),
-        name: skill
-            .as_ref()
-            .and_then(|skill| string_property_value(&skill.properties, "name")),
-        description: skill
-            .as_ref()
-            .and_then(|skill| string_property_value(&skill.properties, "description")),
-        title: skill
-            .as_ref()
-            .and_then(|skill| string_property_value(&skill.properties, "title")),
-    })
-}
-
-fn validate_knowledge_skill_state_request(request: &KnowledgeSkillStateRequest) -> Result<()> {
-    if request.skill_id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge skill state read requires a non-empty skill id".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn skill_thread_source_rows(
-    catalog: &Catalog,
-    store: &GraphStore,
-    skill: &NodeRecord,
-) -> Result<Vec<KnowledgeSkillThreadSourceRow>> {
-    let Some(synthesized_from_type_id) = catalog.rel_type_id("SYNTHESIZED_FROM") else {
-        return Ok(Vec::new());
-    };
-    let Some(compacts_to_type_id) = catalog.rel_type_id("COMPACTS_TO") else {
-        return Ok(Vec::new());
-    };
-    let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Ok(Vec::new());
-    };
-    let Some(thread_label_id) = catalog.label_id("Thread") else {
-        return Ok(Vec::new());
-    };
-
-    let mut seen = BTreeSet::new();
-    let mut rows = Vec::new();
-    store.try_visit_adjacent_relationships_owned(
-        skill.id,
-        Some(synthesized_from_type_id),
-        AdjacencyDirection::Outgoing,
-        |skill_memory_rel| {
-            let Some(memory) = store
-                .node_owned(skill_memory_rel.target)?
-                .filter(|memory| memory.labels.contains(&memory_label_id))
-            else {
-                return Ok(crate::store::GraphScanControl::Continue);
-            };
-            store.try_visit_adjacent_relationships_owned(
-                memory.id,
-                Some(compacts_to_type_id),
-                AdjacencyDirection::Incoming,
-                |compact_rel| {
-                    let Some(thread) = store
-                        .node_owned(compact_rel.source)?
-                        .filter(|thread| thread.labels.contains(&thread_label_id))
-                    else {
-                        return Ok(crate::store::GraphScanControl::Continue);
-                    };
-                    if seen.insert((memory.id.0, thread.id.0)) {
-                        rows.push(skill_thread_source_row(
-                            skill,
-                            &memory,
-                            &skill_memory_rel,
-                            &thread,
-                            &compact_rel,
-                        ));
-                    }
-                    Ok(crate::store::GraphScanControl::Continue)
-                },
-            )?;
-            Ok(crate::store::GraphScanControl::Continue)
-        },
-    )?;
-    Ok(rows)
-}
-
-fn skill_thread_source_row(
-    skill: &NodeRecord,
-    memory: &NodeRecord,
-    skill_memory_relationship: &RelRecord,
-    thread: &NodeRecord,
-    compacts_to_relationship: &RelRecord,
-) -> KnowledgeSkillThreadSourceRow {
-    KnowledgeSkillThreadSourceRow {
-        skill_id: node_external_id(skill),
-        skill_node_id: skill.id.0,
-        memory_id: node_external_id(memory),
-        memory_node_id: memory.id.0,
-        skill_memory_relationship_id: skill_memory_relationship.id.0,
-        thread_id: node_external_id(thread),
-        thread_node_id: thread.id.0,
-        thread_logical_id: string_property(thread, "thread_id"),
-        title: string_property(thread, "title"),
-        source: string_property(thread, "source"),
-        compacts_to_relationship_id: compacts_to_relationship.id.0,
-    }
-}
-
-fn sort_skill_thread_source_rows(rows: &mut [KnowledgeSkillThreadSourceRow]) {
-    rows.sort_by(|left, right| {
-        left.title
-            .cmp(&right.title)
-            .then_with(|| left.source.cmp(&right.source))
-            .then_with(|| left.memory_id.cmp(&right.memory_id))
-            .then_with(|| left.thread_logical_id.cmp(&right.thread_logical_id))
-            .then_with(|| left.thread_id.cmp(&right.thread_id))
-            .then_with(|| {
-                left.skill_memory_relationship_id
-                    .cmp(&right.skill_memory_relationship_id)
-            })
-            .then_with(|| {
-                left.compacts_to_relationship_id
-                    .cmp(&right.compacts_to_relationship_id)
-            })
-    });
-}
-
-fn sort_skill_memory_rows(
-    rows: &mut [KnowledgeSkillMemoryRow],
-    order: KnowledgeSkillMemoryListOrder,
-) {
-    rows.sort_by(|left, right| {
-        compare_skill_memory_created_at(&left.created_at, &right.created_at, order)
-            .then_with(|| left.memory_id.cmp(&right.memory_id))
-            .then_with(|| left.skill_id.cmp(&right.skill_id))
-            .then_with(|| left.relationship_id.cmp(&right.relationship_id))
-    });
-}
-
-fn compare_skill_memory_created_at(
+fn compare_knowledge_created_at(
     left: &Option<Value>,
     right: &Option<Value>,
-    order: KnowledgeSkillMemoryListOrder,
+    order: KnowledgeCreatedAtOrder,
 ) -> std::cmp::Ordering {
     let base = match (left, right) {
-        (Some(left), Some(right)) => compare_skill_memory_values(left, right),
+        (Some(left), Some(right)) => compare_knowledge_values(left, right),
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => std::cmp::Ordering::Equal,
     };
     match order {
-        KnowledgeSkillMemoryListOrder::CreatedAtAsc => base,
-        KnowledgeSkillMemoryListOrder::CreatedAtDesc => {
+        KnowledgeCreatedAtOrder::Ascending => base,
+        KnowledgeCreatedAtOrder::Descending => {
             if left.is_some() && right.is_some() {
                 base.reverse()
             } else {
@@ -16258,7 +15097,7 @@ fn compare_skill_memory_created_at(
     }
 }
 
-fn compare_skill_memory_values(left: &Value, right: &Value) -> std::cmp::Ordering {
+fn compare_knowledge_values(left: &Value, right: &Value) -> std::cmp::Ordering {
     match (left, right) {
         (Value::Int(left), Value::Int(right)) => left.cmp(right),
         (Value::Float(left), Value::Float(right)) => left.total_cmp(right),
@@ -17857,10 +16696,10 @@ fn thread_compacted_memory_rows_via_query_runtime(
     rows.sort_by(|left, right| {
         compare_optional_values_desc(left.importance.as_ref(), right.importance.as_ref())
             .then_with(|| {
-                compare_skill_memory_created_at(
+                compare_knowledge_created_at(
                     &left.created_at,
                     &right.created_at,
-                    KnowledgeSkillMemoryListOrder::CreatedAtDesc,
+                    KnowledgeCreatedAtOrder::Descending,
                 )
             })
             .then_with(|| left.memory_id.cmp(&right.memory_id))
@@ -17913,11 +16752,7 @@ fn thread_compacted_memory_projected_rows(
     rows.sort_by(|left, right| {
         compare_optional_values_desc(left.1.as_ref(), right.1.as_ref())
             .then_with(|| {
-                compare_skill_memory_created_at(
-                    &left.2,
-                    &right.2,
-                    KnowledgeSkillMemoryListOrder::CreatedAtDesc,
-                )
+                compare_knowledge_created_at(&left.2, &right.2, KnowledgeCreatedAtOrder::Descending)
             })
             .then_with(|| left.0.memory_id.cmp(&right.0.memory_id))
             .then_with(|| left.0.relationship_id.cmp(&right.0.relationship_id))
@@ -17965,10 +16800,10 @@ fn thread_compacted_memory_projected_rows_via_query_runtime(
             right.1.properties.get("importance"),
         )
         .then_with(|| {
-            compare_skill_memory_created_at(
+            compare_knowledge_created_at(
                 &left.1.properties.get("created_at").cloned(),
                 &right.1.properties.get("created_at").cloned(),
-                KnowledgeSkillMemoryListOrder::CreatedAtDesc,
+                KnowledgeCreatedAtOrder::Descending,
             )
         })
         .then_with(|| left.0.memory_id.cmp(&right.0.memory_id))
@@ -29193,41 +28028,6 @@ impl DatabaseReadTransaction {
         request: &KnowledgeEntityLabelProjectedListRequest,
     ) -> Result<KnowledgeEntityLabelProjectedListOutput> {
         knowledge_entity_label_projected_list_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_skills(
-        &self,
-        request: &KnowledgeSkillListRequest,
-    ) -> Result<KnowledgeSkillListOutput> {
-        knowledge_skills_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_skill_projected_list(
-        &self,
-        request: &KnowledgeSkillProjectedListRequest,
-    ) -> Result<KnowledgeSkillProjectedListOutput> {
-        knowledge_skill_projected_list_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_skill_thread_sources(
-        &self,
-        request: &KnowledgeSkillThreadSourceListRequest,
-    ) -> Result<KnowledgeSkillThreadSourceListOutput> {
-        knowledge_skill_thread_sources_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_skill_detail_lookup(
-        &self,
-        request: &KnowledgeSkillDetailLookupRequest,
-    ) -> Result<KnowledgeSkillDetailLookupOutput> {
-        knowledge_skill_detail_lookup_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_skill_state(
-        &self,
-        request: &KnowledgeSkillStateRequest,
-    ) -> Result<KnowledgeSkillStateOutput> {
-        knowledge_skill_state_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_thread_identity(

@@ -472,42 +472,13 @@ physical `Skill.id` and `Memory.id` endpoints, merges the outgoing
 endpoints and idless endpoints without writing, preserves existing-edge
 properties for `MERGE ON CREATE SET` semantics, and uses the WAL-backed
 relationship write path.
-Skill catalog/detail reads are covered by `Database::knowledge_skills`.
-The typed read supports exact id lists, key lookup using exact/prefix/contains
-matching, stage-filtered catalog and active lists, active after-id pagination,
-updated-at or id ordering, missing-id reporting, and pinned read snapshots
-without WAL writes.
-Field-extensible Skill catalog reads are covered by
-`Database::knowledge_skill_projected_list`. The typed read reuses the same
-bounded Skill id/key/stage/after-id filters and ordering, but returns only
-caller-selected Skill properties through an explicit allowlist so MCP catalog
-fields can grow without cloning whole Skill nodes or adding raw-Cypher paths.
-REST FS Skill detail lookup is covered by
-`Database::knowledge_skill_detail_lookup`. The typed read applies the
-Nowledge REST FS physical `Skill.id` exact/prefix/contains lookup, returns the
-first stable node-id ordered id/name/title/stage/version/created-at/updated-at
-projection, reports total matched Skill rows for ambiguity diagnostics,
-supports pinned read snapshots, and does not write WAL.
-REST Skills exact write-state reads are covered by
-`Database::knowledge_skill_state`. The typed read resolves one physical
-`Skill.id` without prefix/contains fallback, returns stage/metadata/version/
-use-count/bundle-path/content-hash/name/description/title fields for metadata,
-version, title, and full write-state call sites, supports pinned read snapshots,
-and does not write WAL.
-Skill evidence-memory reads are covered by `Database::knowledge_skill_memories`.
-The typed read requires either one Skill id or a non-empty stage filter, scans
-outgoing `SYNTHESIZED_FROM` edges to Memory nodes, returns Memory id/title/
-content/unit type/created-at fields plus Skill and relationship identities,
-supports `created_at` ascending or descending ordering with bounded limits,
-reports matched/missing Skill counts and the graph commit epoch, and does not
-write WAL.
-Skill context thread-source reads are covered by
-`Database::knowledge_skill_thread_sources`. This is a Nowledge `(:Skill)`
-business-node facade, not a graph-kernel builtin: it resolves one Skill id,
-follows `SYNTHESIZED_FROM` evidence Memory nodes and incoming `COMPACTS_TO`
-Thread nodes, de-duplicates repeated Memory/Thread pairs, returns Thread
-title/source rows with stable ordering, supports pinned read snapshots, and
-does not write WAL.
+Skill catalog, detail, state, evidence-memory, and thread-source reads use
+fixed parameterized Cypher through `Database::query_with_params_bounded` or a
+pinned read transaction. Each business phase selects only the fields it needs,
+uses an explicit `LIMIT`, and supplies a matching row budget. Multi-phase host
+code retains request normalization, cross-statement budget accounting, and
+response shaping; it does not scan or join the graph outside the query runtime.
+These business reads intentionally have no route-specific typed database API.
 Skill detach deletes are covered by `Database::delete_knowledge_skills` for
 Nowledge Skill rollback and cleanup paths. This Skill-specific business facade
 validates Skill ids before WAL, reuses the typed entity `DETACH DELETE` path
