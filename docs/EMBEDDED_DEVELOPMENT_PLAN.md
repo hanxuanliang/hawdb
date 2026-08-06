@@ -646,17 +646,11 @@ Thread compacted-memory reads use fixed Thread identity and bounded outgoing
 `COMPACTS_TO` statements in one pinned read transaction. Each named business
 phase owns its projection and ordering, avoiding both route-specific typed APIs
 and the former wide fixed row.
-Memory compacting-Thread reads are available as
-`Database::knowledge_memory_compacting_threads`, covering Nowledge Memory id to
-Thread id/source/metadata reads over incoming `COMPACTS_TO` relationships with
-missing-Memory rows, per-Memory limits, normalized-space fallbacks, and no WAL
-writes.
-Field-extensible Memory compacting-Thread reads are available as
-`Database::knowledge_memory_compacting_thread_projected_list`, covering the
-same per-Memory incoming `COMPACTS_TO` attribution shape while projecting only
-caller-allowlisted Thread and relationship fields. It preserves missing-Memory
-rows, per-Memory limits, stable Thread identity, normalized-space fallback, and
-snapshot/no-WAL semantics without broadening the fixed attribution row.
+Memory compacting-Thread reads use fixed exact-Memory and per-Memory bounded
+incoming `COMPACTS_TO` statements in one pinned read transaction. Host code
+preserves requested-Memory ordering, missing rows, and the cross-statement
+budget while each statement owns its Thread/relationship projection and stable
+ordering.
 Source attribution memory reads use host-owned fixed parameterized Cypher over
 incoming `SOURCED_FROM`. Hosts run separate count and page statements, bind a
 bounded Source or Memory id set, project only required Memory/Source/edge

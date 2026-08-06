@@ -317,67 +317,6 @@ pub struct KnowledgeThreadCompactionLinkOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryCompactingThreadListRequest {
-    pub memory_ids: Vec<String>,
-    pub limit_per_memory: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryCompactingThreadRow {
-    pub memory_id: String,
-    pub memory_node_id: Option<u64>,
-    pub found_memory: bool,
-    pub thread_id: Option<String>,
-    pub thread_node_id: Option<u64>,
-    pub thread_logical_id: Option<String>,
-    pub title: Option<String>,
-    pub source: Option<String>,
-    pub metadata: Option<Value>,
-    pub raw_space_id: Option<String>,
-    pub normalized_space_id: Option<String>,
-    pub relationship_id: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryCompactingThreadListOutput {
-    pub graph_commit_epoch: u64,
-    pub rows: Vec<KnowledgeMemoryCompactingThreadRow>,
-    pub found_memory_count: usize,
-    pub missing_memory_count: usize,
-    pub returned_thread_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryCompactingThreadProjectedListRequest {
-    pub list: KnowledgeMemoryCompactingThreadListRequest,
-    pub thread_property_names: Vec<String>,
-    pub relationship_property_names: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryCompactingThreadProjectedRow {
-    pub memory_id: String,
-    pub memory_node_id: Option<u64>,
-    pub found_memory: bool,
-    pub thread_id: Option<String>,
-    pub thread_node_id: Option<u64>,
-    pub thread_logical_id: Option<String>,
-    pub thread_properties: BTreeMap<String, Value>,
-    pub normalized_space_id: Option<String>,
-    pub relationship_id: Option<u64>,
-    pub relationship_properties: BTreeMap<String, Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryCompactingThreadProjectedListOutput {
-    pub graph_commit_epoch: u64,
-    pub rows: Vec<KnowledgeMemoryCompactingThreadProjectedRow>,
-    pub found_memory_count: usize,
-    pub missing_memory_count: usize,
-    pub returned_thread_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeThreadMessageDeleteRequest {
     pub thread_id: String,
 }

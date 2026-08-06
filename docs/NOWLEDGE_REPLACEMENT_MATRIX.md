@@ -540,18 +540,12 @@ Nowledge-used `compaction_method`, `created_at`, and `properties`
 relationship fields, reports missing or projected-idless endpoints without
 writing, and routes eligible links through the WAL-backed relationship create
 path.
-Memory compacting-Thread reads are covered by
-`Database::knowledge_memory_compacting_threads`. The typed read resolves
-bounded Memory ids, scans incoming `COMPACTS_TO` Thread edges, returns Thread
-physical/logical ids, title, source, metadata, normalized space, relationship
-ids, missing-Memory rows, per-Memory limits, and no WAL writes.
-Field-extensible Memory compacting-Thread reads are covered by
-`Database::knowledge_memory_compacting_thread_projected_list`. The typed read
-reuses the same ordered Memory id input and per-Memory incoming `COMPACTS_TO`
-walk, but projects only caller-allowlisted Thread and relationship properties
-plus stable Memory/Thread/relationship identity and normalized Thread space. It
-preserves missing-Memory rows, supports pinned snapshots, and does not write
-WAL.
+Memory compacting-Thread reads use one fixed exact-Memory query and one fixed
+incoming `COMPACTS_TO` page query per requested Memory in a pinned read
+transaction. The host preserves input order, missing-Memory shaping, and the
+cross-statement budget; the statement owns Thread/relationship projection,
+stable ordering, and the per-Memory limit. These reads intentionally have no
+route-specific or caller-projection typed API.
 Thread list, distinct-source, attachment, source-summary, render metadata,
 identity, and sync metadata reads use fixed parameterized Cypher through the
 bounded query APIs. Predicates cover physical and logical ids, source, space,
