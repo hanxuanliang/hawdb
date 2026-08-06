@@ -788,41 +788,6 @@ pub struct KnowledgeSourceReferenceRelationshipCleanupOutput {
     pub deleted_relationship_count: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSourceReferenceEntityListRequest {
-    pub source_reference: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSourceReferenceEntityRow {
-    pub entity_id: Option<String>,
-    pub node_id: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSourceReferenceEntityListOutput {
-    pub graph_commit_epoch: u64,
-    pub source_reference: String,
-    pub rows: Vec<KnowledgeSourceReferenceEntityRow>,
-    pub matched_relationship_count: usize,
-    pub returned_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSourceReferenceRelationshipCountRequest {
-    pub entity_id: String,
-    pub excluded_source_reference: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSourceReferenceRelationshipCountOutput {
-    pub graph_commit_epoch: u64,
-    pub entity_id: String,
-    pub entity_node_id: Option<u64>,
-    pub found_entity: bool,
-    pub relationship_count: usize,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgeEntity {
     pub node_id: u64,

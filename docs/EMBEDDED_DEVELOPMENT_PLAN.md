@@ -742,12 +742,11 @@ is available as `Database::delete_knowledge_source_reference_relationships`.
 It is intentionally scoped to `RELATES_TO.source_reference`, rejects empty
 references before WAL, preserves endpoint Entity nodes, and commits eligible
 relationship deletes through one grouped WAL batch.
-The same delete flow also has typed read guards:
-`Database::knowledge_source_reference_entities` returns distinct Entity
-endpoints touched by one `RELATES_TO.source_reference`, and
-`Database::knowledge_source_reference_relationship_count` preserves the
-existing Nowledge delete-guard count shape for non-deleted incoming and
-incident `RELATES_TO` relationships without WAL writes.
+The same delete flow uses host-owned fixed parameterized Cypher for its read
+guards. Endpoint discovery returns bounded relationship and endpoint identity
+rows; the guard runs exact-entity, incident-count, and incoming-count statements
+through one pinned transaction. Only the relationship cleanup remains typed
+because it validates and commits the delete set through grouped WAL.
 Entity-to-Community membership writes used by entity lifecycle community
 assignment are available as `Database::create_knowledge_community_memberships_batch`.
 The wrapper is fixed to `Entity` -> `Community` `BELONGS_TO` creation, validates

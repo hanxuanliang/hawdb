@@ -1,198 +1,122 @@
 use super::*;
 
+const SOURCE_REFERENCE_ENTITIES_QUERY: &str =
+    "MATCH (source:Entity)-[r:RELATES_TO]->(target:Entity) \
+     WHERE r.source_reference = $source_reference \
+     RETURN id(r) AS relationship_id, \
+     source.id AS source_entity_id, id(source) AS source_node_id, \
+     target.id AS target_entity_id, id(target) AS target_node_id \
+     ORDER BY relationship_id ASC";
+
+const SOURCE_REFERENCE_ENTITY_QUERY: &str =
+    "MATCH (e:Entity) WHERE e.id = $entity_id RETURN id(e) AS entity_node_id LIMIT 1";
+
+const SOURCE_REFERENCE_INCIDENT_COUNT_QUERY: &str =
+    "MATCH (e:Entity {id: $entity_id})-[r:RELATES_TO]-(other:Entity) \
+     WHERE r.source_reference IS NULL OR r.source_reference = '' \
+        OR r.source_reference <> $excluded_source_reference \
+     RETURN count(r) AS relationship_count";
+
+const SOURCE_REFERENCE_INCOMING_COUNT_QUERY: &str =
+    "MATCH (other:Entity)-[r:RELATES_TO]->(e:Entity {id: $entity_id}) \
+     WHERE r.source_reference IS NULL OR r.source_reference = '' \
+        OR r.source_reference <> $excluded_source_reference \
+     RETURN count(r) AS relationship_count";
+
 #[test]
-fn reads_source_reference_entities_for_nowledge_delete_flow() {
-    let mut db = Database::new();
+fn source_reference_entities_use_parameterized_pinned_reads() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:Entity {id: 'entity_a'})").unwrap();
     db.query("CREATE (:Entity {id: 'entity_b'})").unwrap();
     db.query("CREATE (:Entity {id: 'entity_c'})").unwrap();
-    db.query("CREATE (:Entity {id: 'entity_d'})").unwrap();
     db.query("MATCH (a:Entity {id: 'entity_a'}), (b:Entity {id: 'entity_b'}) CREATE (a)-[:RELATES_TO {source_reference: 'source_1'}]->(b)")
         .unwrap();
     db.query("MATCH (c:Entity {id: 'entity_c'}), (a:Entity {id: 'entity_a'}) CREATE (c)-[:RELATES_TO {source_reference: 'source_1'}]->(a)")
         .unwrap();
-    db.query("MATCH (a:Entity {id: 'entity_a'}), (d:Entity {id: 'entity_d'}) CREATE (a)-[:RELATES_TO {source_reference: 'other'}]->(d)")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
+    let parameters = BTreeMap::from([(
+        "source_reference".to_string(),
+        Value::String("source_1".to_string()),
+    )]);
+    let mut snapshot = db.begin_read_transaction();
 
-    let output = db
-        .knowledge_source_reference_entities(&KnowledgeSourceReferenceEntityListRequest {
-            source_reference: "source_1".to_string(),
-        })
+    let first = snapshot
+        .query_with_params_bounded(SOURCE_REFERENCE_ENTITIES_QUERY, &parameters, Some(2))
         .unwrap();
+    let second = snapshot
+        .query_with_params_bounded(SOURCE_REFERENCE_ENTITIES_QUERY, &parameters, Some(2))
+        .unwrap();
+    assert_eq!(first, second);
+    assert_eq!(first.rows.len(), 2);
+    assert_eq!(read_test_plan_cache_metric(&snapshot, "entries"), 1);
+    assert_eq!(read_test_plan_cache_metric(&snapshot, "misses"), 1);
+    assert_eq!(read_test_plan_cache_metric(&snapshot, "hits"), 1);
 
-    assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(output.matched_relationship_count, 2);
-    assert_eq!(output.returned_count, 3);
-    assert_eq!(
-        output
-            .rows
-            .iter()
-            .map(|row| row.entity_id.as_deref().unwrap())
-            .collect::<Vec<_>>(),
-        vec!["entity_a", "entity_b", "entity_c"]
-    );
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+    db.query("CREATE (:Entity {id: 'entity_d'})").unwrap();
+    db.query("MATCH (d:Entity {id: 'entity_d'}), (a:Entity {id: 'entity_a'}) CREATE (d)-[:RELATES_TO {source_reference: 'source_1'}]->(a)")
+        .unwrap();
+    let pinned = snapshot
+        .query_with_params_bounded(SOURCE_REFERENCE_ENTITIES_QUERY, &parameters, Some(2))
+        .unwrap();
+    assert_eq!(pinned.rows.len(), 2);
 
-    let snapshot = db.begin_read_transaction();
-    db.query("CREATE (:Entity {id: 'entity_e'})").unwrap();
-    db.query("MATCH (e:Entity {id: 'entity_e'}), (a:Entity {id: 'entity_a'}) CREATE (e)-[:RELATES_TO {source_reference: 'source_1'}]->(a)")
+    let mut live = db.begin_read_transaction();
+    let current = live
+        .query_with_params_bounded(SOURCE_REFERENCE_ENTITIES_QUERY, &parameters, Some(3))
         .unwrap();
-    let snapshot_output = snapshot
-        .knowledge_source_reference_entities(&KnowledgeSourceReferenceEntityListRequest {
-            source_reference: "source_1".to_string(),
-        })
-        .unwrap();
-    assert_eq!(snapshot_output.returned_count, 3);
+    assert_eq!(current.rows.len(), 3);
 }
 
 #[test]
-fn counts_source_reference_relationships_for_nowledge_delete_guard() {
+fn source_reference_delete_guard_uses_named_count_queries() {
     let mut db = Database::new();
     db.query("CREATE (:Entity {id: 'entity'})").unwrap();
     db.query("CREATE (:Entity {id: 'out'})").unwrap();
     db.query("CREATE (:Entity {id: 'in-empty'})").unwrap();
-    db.query("CREATE (:Entity {id: 'in-excluded'})").unwrap();
-    db.query("CREATE (:Entity {id: 'null-source'})").unwrap();
     db.query("MATCH (e:Entity {id: 'entity'}), (out:Entity {id: 'out'}) CREATE (e)-[:RELATES_TO {source_reference: 'other-source'}]->(out)")
         .unwrap();
     db.query("MATCH (incoming:Entity {id: 'in-empty'}), (e:Entity {id: 'entity'}) CREATE (incoming)-[:RELATES_TO {source_reference: ''}]->(e)")
         .unwrap();
-    db.query("MATCH (incoming:Entity {id: 'in-excluded'}), (e:Entity {id: 'entity'}) CREATE (incoming)-[:RELATES_TO {source_reference: 'excluded-source'}]->(e)")
+    let parameters = BTreeMap::from([
+        ("entity_id".to_string(), Value::String("entity".to_string())),
+        (
+            "excluded_source_reference".to_string(),
+            Value::String("excluded-source".to_string()),
+        ),
+    ]);
+    let mut read = db.begin_read_transaction();
+
+    let entity = read
+        .query_with_params_bounded(SOURCE_REFERENCE_ENTITY_QUERY, &parameters, Some(1))
         .unwrap();
-    db.query("MATCH (e:Entity {id: 'entity'}), (target:Entity {id: 'null-source'}) CREATE (e)-[:RELATES_TO]->(target)")
+    assert_eq!(entity.rows.len(), 1);
+    let incident = read
+        .query_with_params_bounded(SOURCE_REFERENCE_INCIDENT_COUNT_QUERY, &parameters, Some(1))
         .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let output = db
-        .knowledge_source_reference_relationship_count(
-            &KnowledgeSourceReferenceRelationshipCountRequest {
-                entity_id: "entity".to_string(),
-                excluded_source_reference: "excluded-source".to_string(),
-            },
-        )
+    let incoming = read
+        .query_with_params_bounded(SOURCE_REFERENCE_INCOMING_COUNT_QUERY, &parameters, Some(1))
         .unwrap();
-
-    assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
-    assert!(output.found_entity);
-    assert_eq!(output.relationship_count, 4);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-
-    let missing = db
-        .knowledge_source_reference_relationship_count(
-            &KnowledgeSourceReferenceRelationshipCountRequest {
-                entity_id: "missing".to_string(),
-                excluded_source_reference: "excluded-source".to_string(),
-            },
-        )
-        .unwrap();
-    assert!(!missing.found_entity);
-    assert_eq!(missing.relationship_count, 0);
-}
-
-#[test]
-fn source_reference_entities_use_query_runtime_plan_cache() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Entity {id: 'entity_a'})").unwrap();
-    db.query("CREATE (:Entity {id: 'entity_b'})").unwrap();
-    db.query("MATCH (a:Entity {id: 'entity_a'}), (b:Entity {id: 'entity_b'}) CREATE (a)-[:RELATES_TO {source_reference: 'source_1'}]->(b)")
-        .unwrap();
-    let request = KnowledgeSourceReferenceEntityListRequest {
-        source_reference: "source_1".to_string(),
-    };
-
-    let first = db.knowledge_source_reference_entities(&request).unwrap();
-    let second = db.knowledge_source_reference_entities(&request).unwrap();
-
-    assert_eq!(first, second);
-    assert_eq!(first.matched_relationship_count, 1);
-    assert_eq!(first.returned_count, 2);
     assert_eq!(
-        first
-            .rows
-            .iter()
-            .map(|row| row.entity_id.as_deref().unwrap())
-            .collect::<Vec<_>>(),
-        vec!["entity_a", "entity_b"]
+        incident.rows[0].get("relationship_count"),
+        Some(&Value::Int(2))
     );
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, 1);
-    assert_eq!(stats.misses, 1);
-    assert_eq!(stats.hits, 1);
-}
+    assert_eq!(
+        incoming.rows[0].get("relationship_count"),
+        Some(&Value::Int(1))
+    );
 
-#[test]
-fn source_reference_relationship_count_uses_query_runtime_plan_cache() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Entity {id: 'entity'})").unwrap();
-    db.query("CREATE (:Entity {id: 'out'})").unwrap();
-    db.query("CREATE (:Entity {id: 'in-empty'})").unwrap();
-    db.query("MATCH (e:Entity {id: 'entity'}), (out:Entity {id: 'out'}) CREATE (e)-[:RELATES_TO {source_reference: 'other-source'}]->(out)")
-        .unwrap();
-    db.query("MATCH (incoming:Entity {id: 'in-empty'}), (e:Entity {id: 'entity'}) CREATE (incoming)-[:RELATES_TO {source_reference: ''}]->(e)")
-        .unwrap();
-    let request = KnowledgeSourceReferenceRelationshipCountRequest {
-        entity_id: "entity".to_string(),
-        excluded_source_reference: "excluded-source".to_string(),
-    };
-
-    let first = db
-        .knowledge_source_reference_relationship_count(&request)
-        .unwrap();
-    let second = db
-        .knowledge_source_reference_relationship_count(&request)
-        .unwrap();
-
-    assert_eq!(first, second);
-    assert!(first.found_entity);
-    assert_eq!(first.relationship_count, 3);
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, 3);
-    assert_eq!(stats.misses, 3);
-    assert_eq!(stats.hits, 3);
-}
-
-#[test]
-fn source_reference_delete_reads_reject_empty_inputs_without_wal() {
-    let path = unique_test_dir("source_reference_delete_reads_empty_inputs");
-    let mut db = Database::open(&path).unwrap();
-    db.query("CREATE (:Entity {id: 'entity_1'})-[:RELATES_TO {source_reference: 'source_1'}]->(:Entity {id: 'entity_2'})")
-        .unwrap();
-    let graph_commit_epoch_before = db.store.commit_epoch();
-    let wal_before = read_test_wal(&path).unwrap();
-
-    let entities_error = db
-        .knowledge_source_reference_entities(&KnowledgeSourceReferenceEntityListRequest {
-            source_reference: String::new(),
-        })
-        .unwrap_err();
-    assert!(entities_error
-        .to_string()
-        .contains("non-empty source_reference"));
-
-    let count_error = db
-        .knowledge_source_reference_relationship_count(
-            &KnowledgeSourceReferenceRelationshipCountRequest {
-                entity_id: "entity_1".to_string(),
-                excluded_source_reference: " ".to_string(),
-            },
-        )
-        .unwrap_err();
-    assert!(count_error
-        .to_string()
-        .contains("non-empty source_reference"));
-
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
-    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
-    std::fs::remove_dir_all(path).unwrap();
+    let hostile_parameters = BTreeMap::from([(
+        "entity_id".to_string(),
+        Value::String("entity'}) MATCH (n) RETURN n //".to_string()),
+    )]);
+    assert!(read
+        .query_with_params_bounded(SOURCE_REFERENCE_ENTITY_QUERY, &hostile_parameters, Some(1),)
+        .unwrap()
+        .rows
+        .is_empty());
 }
 
 #[test]
