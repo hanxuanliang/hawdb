@@ -465,6 +465,7 @@ pub struct KnowledgeMemoryLabelTransferOutput {
     pub duplicate_source_edge_count: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeEntityLabelListRequest {
     pub entity_label: String,
@@ -472,6 +473,7 @@ pub struct KnowledgeEntityLabelListRequest {
     pub limit_per_entity: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeEntityLabelRow {
     pub label_id: Option<String>,
@@ -482,6 +484,7 @@ pub struct KnowledgeEntityLabelRow {
     pub description: Option<Value>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeEntityLabelGroup {
     pub external_id: String,
@@ -491,6 +494,7 @@ pub struct KnowledgeEntityLabelGroup {
     pub returned_count: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeEntityLabelListOutput {
     pub graph_commit_epoch: u64,
@@ -500,6 +504,7 @@ pub struct KnowledgeEntityLabelListOutput {
     pub label_count: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeEntityLabelProjectedListRequest {
     pub list: KnowledgeEntityLabelListRequest,
@@ -507,6 +512,7 @@ pub struct KnowledgeEntityLabelProjectedListRequest {
     pub relationship_property_names: Vec<String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeEntityLabelProjectedRow {
     pub label_id: Option<String>,
@@ -516,6 +522,7 @@ pub struct KnowledgeEntityLabelProjectedRow {
     pub relationship_properties: BTreeMap<String, Value>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeEntityLabelProjectedGroup {
     pub external_id: String,
@@ -525,6 +532,7 @@ pub struct KnowledgeEntityLabelProjectedGroup {
     pub returned_count: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeEntityLabelProjectedListOutput {
     pub graph_commit_epoch: u64,

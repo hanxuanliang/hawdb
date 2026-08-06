@@ -72,12 +72,14 @@ pub struct KnowledgeRelationshipsOutput {
     pub relationship_count: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeInducedEdgeListRequest {
     pub external_ids: Vec<String>,
     pub limit: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeInducedEdgeRow {
     pub source_id: Option<String>,
@@ -89,6 +91,7 @@ pub struct KnowledgeInducedEdgeRow {
     pub strength: Value,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeInducedEdgeListOutput {
     pub graph_commit_epoch: u64,

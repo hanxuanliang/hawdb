@@ -7986,7 +7986,7 @@ fn projects_entity_labels_for_nowledge_growth() {
         ],
     };
     let projected = db
-        .knowledge_entity_label_projected_list(&projected_request)
+        .test_query_entity_label_projected_list(&projected_request)
         .unwrap();
     assert_eq!(projected.found_entity_count, 2);
     assert_eq!(projected.missing_entity_count, 1);
@@ -8024,7 +8024,7 @@ fn projects_entity_labels_for_nowledge_growth() {
 
     let stats = db.plan_cache_stats();
     let repeated_projected = db
-        .knowledge_entity_label_projected_list(&projected_request)
+        .test_query_entity_label_projected_list(&projected_request)
         .unwrap();
     assert_eq!(repeated_projected, projected);
     let repeated_stats = db.plan_cache_stats();
@@ -8033,7 +8033,7 @@ fn projects_entity_labels_for_nowledge_growth() {
     assert_eq!(repeated_stats.hits, stats.hits + 3);
 
     let source_projected = db
-        .knowledge_entity_label_projected_list(&KnowledgeEntityLabelProjectedListRequest {
+        .test_query_entity_label_projected_list(&KnowledgeEntityLabelProjectedListRequest {
             list: KnowledgeEntityLabelListRequest {
                 entity_label: "Source".to_string(),
                 external_ids: vec!["projected_label_source_a".to_string()],
@@ -8051,7 +8051,7 @@ fn projects_entity_labels_for_nowledge_growth() {
     );
 
     let snapshot_projected = snapshot
-        .knowledge_entity_label_projected_list(&KnowledgeEntityLabelProjectedListRequest {
+        .test_query_entity_label_projected_list(&KnowledgeEntityLabelProjectedListRequest {
             list: KnowledgeEntityLabelListRequest {
                 entity_label: "Memory".to_string(),
                 external_ids: vec!["projected_label_memory_a".to_string()],
@@ -8087,7 +8087,7 @@ fn entity_label_projected_read_rejects_empty_property_names_without_wal() {
     let wal_before = read_test_wal(&path).unwrap();
 
     let label_property_error = db
-        .knowledge_entity_label_projected_list(&KnowledgeEntityLabelProjectedListRequest {
+        .test_query_entity_label_projected_list(&KnowledgeEntityLabelProjectedListRequest {
             list: KnowledgeEntityLabelListRequest {
                 entity_label: "Memory".to_string(),
                 external_ids: vec!["projected_label_wal_memory".to_string()],
@@ -8102,7 +8102,7 @@ fn entity_label_projected_read_rejects_empty_property_names_without_wal() {
         .contains("non-empty property names"));
 
     let relationship_property_error = db
-        .knowledge_entity_label_projected_list(&KnowledgeEntityLabelProjectedListRequest {
+        .test_query_entity_label_projected_list(&KnowledgeEntityLabelProjectedListRequest {
             list: KnowledgeEntityLabelListRequest {
                 entity_label: "Memory".to_string(),
                 external_ids: vec!["projected_label_wal_memory".to_string()],
@@ -8721,7 +8721,7 @@ fn reads_entity_labels_for_nowledge_has_label_shapes() {
         ],
         limit_per_entity: 0,
     };
-    let memories = db.knowledge_entity_labels(&memories_request).unwrap();
+    let memories = db.test_query_entity_labels(&memories_request).unwrap();
 
     assert_eq!(memories.graph_commit_epoch, graph_commit_epoch);
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
@@ -8759,7 +8759,7 @@ fn reads_entity_labels_for_nowledge_has_label_shapes() {
     assert_eq!(memories.groups[2].node_id, None);
 
     let stats = db.plan_cache_stats();
-    let repeated_memories = db.knowledge_entity_labels(&memories_request).unwrap();
+    let repeated_memories = db.test_query_entity_labels(&memories_request).unwrap();
     assert_eq!(repeated_memories, memories);
     let repeated_stats = db.plan_cache_stats();
     assert_eq!(repeated_stats.entries, stats.entries);
@@ -8767,7 +8767,7 @@ fn reads_entity_labels_for_nowledge_has_label_shapes() {
     assert_eq!(repeated_stats.hits, stats.hits + 3);
 
     let sources = db
-        .knowledge_entity_labels(&KnowledgeEntityLabelListRequest {
+        .test_query_entity_labels(&KnowledgeEntityLabelListRequest {
             entity_label: "Source".to_string(),
             external_ids: vec!["source_1".to_string()],
             limit_per_entity: 1,
@@ -8790,7 +8790,7 @@ fn reads_entity_labels_for_nowledge_has_label_shapes() {
 fn entity_label_read_requests_validate_non_empty_filters() {
     let db = Database::new();
     let entity_label_error = db
-        .knowledge_entity_labels(&KnowledgeEntityLabelListRequest {
+        .test_query_entity_labels(&KnowledgeEntityLabelListRequest {
             entity_label: "Bad Label".to_string(),
             external_ids: vec!["memory_1".to_string()],
             limit_per_entity: 10,
@@ -8801,7 +8801,7 @@ fn entity_label_read_requests_validate_non_empty_filters() {
         .contains("knowledge entity label"));
 
     let external_ids_error = db
-        .knowledge_entity_labels(&KnowledgeEntityLabelListRequest {
+        .test_query_entity_labels(&KnowledgeEntityLabelListRequest {
             entity_label: "Memory".to_string(),
             external_ids: Vec::new(),
             limit_per_entity: 10,

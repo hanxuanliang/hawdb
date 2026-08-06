@@ -485,20 +485,12 @@ target `HAS_LABEL` creation. Memory label carry-over writes are available as
 `Database::transfer_knowledge_memory_label_edges`, covering older-Memory to
 newer-Memory label copying inside one exact `space_id` with duplicate old label
 edges de-duplicated and target `HAS_LABEL` creation kept idempotent.
-Endpoint-known label assignment reads are also available as
-`Database::knowledge_entity_labels`, covering the Nowledge Memory/Source/Entity
-bulk `HAS_LABEL` id/name/metadata read shapes without application-side Cypher
-construction or WAL writes.
-Field-extensible endpoint-known label reads are available as
-`Database::knowledge_entity_label_projected_list`, reusing the same explicit
-entity label, external-id list, and per-entity limit while projecting only
-caller-allowlisted Label and `HAS_LABEL` relationship properties. This keeps
-future Memory/Source label fields extensible without cloning whole Label nodes
-or scanning labels outside the requested endpoints.
-Induced edge-list reads are available as `Database::knowledge_induced_edges`,
-covering Nowledge overview and MCP subgraph `MATCH (a)-[r]->(b) WHERE a.id IN
-$ids AND b.id IN $ids` shapes with relationship type and strength/confidence
-fallback projection and no WAL writes.
+Endpoint-known Label assignment and field-extensible Label reads use fixed
+parameterized Cypher with explicit entity labels, external-id lists,
+per-entity limits, allowlisted Label and `HAS_LABEL` projections, and matching
+row and payload budgets. Induced edge-list reads use a separate bounded query
+with both endpoints constrained by the selected id set. These reads expose no
+route-specific typed API or DTO and do not write WAL.
 Memory bulk detail, filtered list, and feature-specific projections use fixed
 parameterized Cypher. Each business phase owns its projection, filters,
 ordering, `LIMIT`, and query budgets; host code derives missing ids and
@@ -810,8 +802,8 @@ remains rejected. Anonymous relationship endpoints such as `()` and `(:Label)`
 are supported for Nowledge relationship-count reads. Untyped one-hop
 relationship reads such as `MATCH (a)-[r]->(b)` are supported for Nowledge
 overview edge queries, and `label(r)`/`type(r)` can project the bound
-relationship type; `Database::knowledge_induced_edges` provides the typed API
-for the id-set induced subgraph edge-list business shape. Nowledge-used
+relationship type. The graph-canvas id-set induced subgraph is a fixed bounded
+query decoded by the host route. Nowledge-used
 `RETURN` projection fallbacks support
 `COALESCE(...)` and `LEFT(...)`, including nested forms such as
 `COALESCE(m.title, LEFT(COALESCE(m.content, ''), 60))`, and the same limited

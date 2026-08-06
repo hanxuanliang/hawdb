@@ -45,7 +45,7 @@ fn induced_edge_read_rejects_empty_external_ids() {
     let db = Database::new();
 
     let empty_list_error = db
-        .knowledge_induced_edges(&KnowledgeInducedEdgeListRequest {
+        .test_query_induced_edges(&KnowledgeInducedEdgeListRequest {
             external_ids: Vec::new(),
             limit: 10,
         })
@@ -55,7 +55,7 @@ fn induced_edge_read_rejects_empty_external_ids() {
         .contains("non-empty external ids"));
 
     let empty_id_error = db
-        .knowledge_induced_edges(&KnowledgeInducedEdgeListRequest {
+        .test_query_induced_edges(&KnowledgeInducedEdgeListRequest {
             external_ids: vec![String::new()],
             limit: 10,
         })
@@ -409,7 +409,7 @@ fn reads_induced_edges_for_nowledge_overview_and_subgraph_shapes() {
     let graph_commit_epoch = db.store.commit_epoch();
 
     let output = db
-        .knowledge_induced_edges(&KnowledgeInducedEdgeListRequest {
+        .test_query_induced_edges(&KnowledgeInducedEdgeListRequest {
             external_ids: vec![
                 "memory_1".to_string(),
                 "entity_1".to_string(),
@@ -447,12 +447,12 @@ fn reads_induced_edges_for_nowledge_overview_and_subgraph_shapes() {
         ],
         limit: 2,
     };
-    let limited = db.knowledge_induced_edges(&limited_request).unwrap();
+    let limited = db.test_query_induced_edges(&limited_request).unwrap();
     assert_eq!(limited.matched_count, 3);
     assert_eq!(limited.returned_count, 2);
 
     let stats = db.plan_cache_stats();
-    let repeated_limited = db.knowledge_induced_edges(&limited_request).unwrap();
+    let repeated_limited = db.test_query_induced_edges(&limited_request).unwrap();
     assert_eq!(repeated_limited, limited);
     let repeated_stats = db.plan_cache_stats();
     assert_eq!(repeated_stats.entries, stats.entries);

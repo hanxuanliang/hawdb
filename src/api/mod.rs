@@ -2903,14 +2903,16 @@ impl Database {
         transfer_knowledge_memory_label_edges_for(self, request)
     }
 
-    pub fn knowledge_entity_labels(
+    #[cfg(test)]
+    pub(crate) fn test_query_entity_labels(
         &self,
         request: &KnowledgeEntityLabelListRequest,
     ) -> Result<KnowledgeEntityLabelListOutput> {
         knowledge_entity_labels_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_entity_label_projected_list(
+    #[cfg(test)]
+    pub(crate) fn test_query_entity_label_projected_list(
         &self,
         request: &KnowledgeEntityLabelProjectedListRequest,
     ) -> Result<KnowledgeEntityLabelProjectedListOutput> {
@@ -3187,7 +3189,8 @@ impl Database {
         knowledge_scoped_relationships_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_induced_edges(
+    #[cfg(test)]
+    pub(crate) fn test_query_induced_edges(
         &self,
         request: &KnowledgeInducedEdgeListRequest,
     ) -> Result<KnowledgeInducedEdgeListOutput> {
@@ -5741,6 +5744,7 @@ fn compare_community_memory_ids(
         .then_with(|| left.memory_node_id.cmp(&right.memory_node_id))
 }
 
+#[cfg(test)]
 fn projected_properties(
     properties: &BTreeMap<String, Value>,
     property_names: &[String],
@@ -9608,6 +9612,7 @@ fn optional_non_null_value(value: &Value) -> Option<Value> {
     (!matches!(value, Value::Null)).then(|| value.clone())
 }
 
+#[cfg(test)]
 fn value_to_map(value: &Value) -> Option<&BTreeMap<String, Value>> {
     match value {
         Value::Map(values) => Some(values),
@@ -12200,6 +12205,7 @@ fn node_property_equals_external_id(node: &NodeRecord, key: &str, expected: &str
         .is_some_and(|value| value_to_external_id(value) == expected)
 }
 
+#[cfg(test)]
 fn knowledge_entity_labels_via_query_runtime(
     db: &Database,
     request: &KnowledgeEntityLabelListRequest,
@@ -12250,6 +12256,7 @@ fn knowledge_entity_labels_via_query_runtime(
     })
 }
 
+#[cfg(test)]
 fn knowledge_entity_label_projected_list_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -12308,6 +12315,7 @@ fn knowledge_entity_label_projected_list_for(
     })
 }
 
+#[cfg(test)]
 fn knowledge_entity_label_projected_list_via_query_runtime(
     db: &Database,
     request: &KnowledgeEntityLabelProjectedListRequest,
@@ -12363,6 +12371,7 @@ fn knowledge_entity_label_projected_list_via_query_runtime(
     })
 }
 
+#[cfg(test)]
 fn validate_knowledge_entity_label_list_request(
     request: &KnowledgeEntityLabelListRequest,
 ) -> Result<()> {
@@ -12379,6 +12388,7 @@ fn validate_knowledge_entity_label_list_request(
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_knowledge_entity_label_projected_list_request(
     request: &KnowledgeEntityLabelProjectedListRequest,
 ) -> Result<()> {
@@ -12396,6 +12406,7 @@ fn validate_knowledge_entity_label_projected_list_request(
     Ok(())
 }
 
+#[cfg(test)]
 fn knowledge_entity_label_entities_via_query_runtime(
     db: &Database,
     entity_label: &str,
@@ -12434,6 +12445,7 @@ fn knowledge_entity_label_entities_via_query_runtime(
     Ok(entities)
 }
 
+#[cfg(test)]
 fn entity_label_rows_via_query_runtime(
     db: &Database,
     entity_node_id: u64,
@@ -12457,6 +12469,7 @@ fn entity_label_rows_via_query_runtime(
     Ok(rows)
 }
 
+#[cfg(test)]
 fn entity_label_projected_rows(
     catalog: &Catalog,
     store: &GraphStore,
@@ -12507,6 +12520,7 @@ fn entity_label_projected_rows(
     Ok(rows.into_iter().map(|(row, _name)| row).collect())
 }
 
+#[cfg(test)]
 fn entity_label_projected_rows_via_query_runtime(
     db: &Database,
     entity_node_id: u64,
@@ -12571,6 +12585,7 @@ fn entity_label_projected_rows_via_query_runtime(
     Ok(rows.into_iter().map(|(row, _name)| row).collect())
 }
 
+#[cfg(test)]
 fn entity_label_query_output_via_query_runtime(
     db: &Database,
     entity_node_id: u64,
@@ -12588,6 +12603,7 @@ fn entity_label_query_output_via_query_runtime(
     db.query_read_only_with_params_bounded(query, &parameters, None)
 }
 
+#[cfg(test)]
 fn entity_label_row_from_query_row(row: &Row) -> Result<KnowledgeEntityLabelRow> {
     let label = row
         .get("label")
@@ -12603,10 +12619,12 @@ fn entity_label_row_from_query_row(row: &Row) -> Result<KnowledgeEntityLabelRow>
     })
 }
 
+#[cfg(test)]
 fn knowledge_entity_string_property(entity: &KnowledgeEntity, key: &str) -> Option<String> {
     entity.properties.get(key).map(value_to_external_id)
 }
 
+#[cfg(test)]
 fn entity_label_projected_row(
     label: &NodeRecord,
     relationship: &RelRecord,
@@ -12846,6 +12864,7 @@ fn clear_knowledge_pagerank_scores_for(
     })
 }
 
+#[cfg(test)]
 fn validate_non_empty_external_ids(external_ids: &[String], message: &str) -> Result<()> {
     if external_ids.iter().any(String::is_empty) {
         return Err(SkeinError::Semantic(message.to_string()));
@@ -14380,6 +14399,7 @@ fn augmentation_job_create_statement(
     (cypher, parameters)
 }
 
+#[cfg(test)]
 fn node_string_property(node: &NodeRecord, property_name: &str) -> Option<String> {
     match node.properties.get(property_name) {
         Some(Value::String(value)) => Some(value.clone()),
@@ -19079,6 +19099,7 @@ fn try_node_by_label_property_external_id(
     Ok(found)
 }
 
+#[cfg(test)]
 fn knowledge_induced_edges_via_query_runtime(
     db: &Database,
     request: &KnowledgeInducedEdgeListRequest,
@@ -19189,6 +19210,7 @@ fn knowledge_induced_edges_via_query_runtime(
     })
 }
 
+#[cfg(test)]
 fn validate_knowledge_induced_edges_request(
     request: &KnowledgeInducedEdgeListRequest,
 ) -> Result<()> {
@@ -19200,6 +19222,7 @@ fn validate_knowledge_induced_edges_request(
     Ok(())
 }
 
+#[cfg(test)]
 fn knowledge_entity_id_property(entity: &KnowledgeEntity) -> Option<String> {
     entity
         .properties
@@ -19208,6 +19231,7 @@ fn knowledge_entity_id_property(entity: &KnowledgeEntity) -> Option<String> {
         .filter(|external_id| !external_id.is_empty())
 }
 
+#[cfg(test)]
 fn knowledge_induced_edge_row_from_query_row(row: &Row) -> Result<KnowledgeInducedEdgeRow> {
     let source = row
         .get("source")
@@ -20827,7 +20851,8 @@ impl DatabaseReadTransaction {
         knowledge_crystal_source_visibility_for(&self.catalog, &self.store, request)
     }
 
-    pub fn knowledge_entity_label_projected_list(
+    #[cfg(test)]
+    pub(crate) fn test_query_entity_label_projected_list(
         &self,
         request: &KnowledgeEntityLabelProjectedListRequest,
     ) -> Result<KnowledgeEntityLabelProjectedListOutput> {

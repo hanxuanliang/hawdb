@@ -557,26 +557,16 @@ statement with explicit Memory/Label projection, grouped `HAS_LABEL` counts,
 deterministic ordering, `SKIP`, `LIMIT`, a matching row budget, and a pinned
 snapshot. Any total-count phase is a separate host-owned bounded query; no
 caller-projection typed database API is exposed.
-Endpoint-known `HAS_LABEL` assignment reads are covered by
-`Database::knowledge_entity_labels` for Nowledge Memory, Source, Entity, and
-other id-bearing graph identities. The typed read validates the entity label
-and non-empty external id list, resolves each input identity in caller order,
-returns Label id/name/canonical-name/color/description rows sorted by label
-name/id/node id with optional per-entity limits, reports found/missing entity
-counts and the graph commit epoch, and does not write WAL.
-Field-extensible endpoint-known `HAS_LABEL` reads are covered by
-`Database::knowledge_entity_label_projected_list`. The typed read preserves the
-same explicit entity-label, external-id, caller-order grouping, and per-entity
-limit semantics, but projects only caller-allowlisted Label and relationship
-properties so Memory/Source label payloads can grow without cloning whole Label
-nodes or broadening scans beyond requested endpoints.
-Induced edge-list reads are covered by `Database::knowledge_induced_edges` for
-Nowledge overview and MCP subgraph edge-list shapes. The typed read validates a
-non-empty external id set, scans canonical relationships whose source and
-target endpoint ids are both in that set, returns endpoint ids/node ids,
-relationship id/type, and `strength`/`confidence`/default weight, supports
-bounded limits, reports missing external ids and the graph commit epoch, and
-does not write WAL.
+Endpoint-known `HAS_LABEL` assignment and field-extensible Label projections use
+fixed parameterized Cypher. Callers select the concrete entity label, bind a
+non-empty external-id list, project only the Label and relationship properties
+needed by that phase, and enforce deterministic ordering plus per-entity row
+and payload budgets. No route-specific Label read API or DTO is exposed.
+Induced edge-list reads use a fixed parameterized Cypher statement whose source
+and target ids are both constrained by the selected node-id list. Graph canvas
+decodes the bounded relationship projection directly and records its query
+report alongside the node-phase reports; no route-specific induced-edge API is
+exposed.
 PageRank score writes are covered by typed batches for Nowledge Memory and
 Entity `pagerank_score` persistence and clear operations. The wrapper accepts
 only finite non-negative scores for Memory/Entity identities, reports missing,
