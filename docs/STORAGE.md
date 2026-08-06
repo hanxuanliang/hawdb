@@ -86,6 +86,40 @@ resident build state. `SearchIndex::checkpoint_with_report` exposes the
 uncompressed and compressed byte counts, largest encoded record, and published
 out-of-core generation so qualification can verify the bounded writer path.
 
+`SearchOutOfCoreGenerationWriter` is the larger-than-memory rebuild boundary.
+It accepts complete `SearchDocument` values in strictly increasing UTF-8 ID
+order, validates embedding identity and finite values, and writes checksummed
+length-delimited records to a private same-directory spool. Document count,
+logical input bytes, spool bytes, record bytes, descriptor fields, descriptor
+working bytes, lexical spill, complete published-generation bytes, and
+compressed/uncompressed segment sizes all have explicit admission limits.
+Finalization replays the spool instead of
+collecting the corpus: one bounded document segment builds the descriptor,
+document payload, metadata sidecar, and raw-vector sidecar, while the lexical
+writer performs its existing bounded external posting sort. Immutable artifacts
+are synced before the active out-of-core manifest is atomically replaced. A
+failed input or finalization removes the private stage and leaves the previous
+active manifest readable. Mutable checkpoints and streaming finalization share
+one process-aware, cross-platform file lease so concurrent publishers cannot
+reuse a generation or switch the active manifest backwards; the persistent lock
+inode is safe after a crash because ownership is released by the operating
+system rather than by deleting a marker.
+After a successful switch, the writer applies the same bounded active-plus-one
+generation cleanup policy as mutable checkpoints and reports deletion failures
+as retry-required evidence without invalidating the durable generation.
+
+The streaming writer deliberately does not publish the mutable compatibility
+snapshot, so `SearchIndex::open()` is not accidentally turned into a
+larger-than-memory serving owner. `SearchOutOfCoreReader` reopens the generation
+with zero resident documents. Raw vector sidecars remain sufficient for exact
+bounded vector and hybrid search; TurboQuant candidate construction and its
+production qualification remain a separate derived-generation gate. Run
+`cargo bench --bench search_generation` for the default 100,000-document build
+profile and its RSS, page-fault, spool, descriptor, payload, and peak-segment
+evidence. [`SEARCH_GENERATION_BENCHMARK.md`](SEARCH_GENERATION_BENCHMARK.md)
+records the reproducible resident-versus-streaming kernel comparison and keeps
+it explicitly separate from representative Mem qualification.
+
 WAL entries can represent either a single mutation or a batch commit record.
 The relationship pattern create path uses a single batch record for source node,
 target node, and relationship creation. Recovery only applies a batch after its

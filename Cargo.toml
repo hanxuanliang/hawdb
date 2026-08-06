@@ -147,3 +147,7 @@ harness = false
 [[bench]]
 name = "search_checkpoint"
 harness = false
+
+[[bench]]
+name = "search_generation"
+harness = false

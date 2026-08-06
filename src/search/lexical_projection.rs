@@ -22,6 +22,16 @@ pub(super) fn artifact_file(generation: u64) -> String {
     format!("search_lexical.{generation}.skein")
 }
 
+pub(super) fn manifest_generation(path: &Path) -> Result<u64> {
+    let length = fs::metadata(path)?.len();
+    if length > MAX_MANIFEST_BYTES {
+        return Err(SkeinError::Storage(format!(
+            "lexical projection manifest requires {length} bytes, exceeding {MAX_MANIFEST_BYTES}"
+        )));
+    }
+    Ok(ManifestBody::decode(&fs::read(path)?)?.generation)
+}
+
 pub(super) fn analyzer_digest(analyzer: &SearchAnalyzerLexicon) -> u64 {
     let mut digest = Digest::new();
     digest.update(ANALYZER_FORMAT_VERSION);
@@ -939,6 +949,33 @@ impl LexicalProjectionWriter {
         documents: impl Iterator<Item = &'a SearchDocument>,
         analyzer: &SearchAnalyzerLexicon,
     ) -> Result<Arc<LexicalProjectionReader>> {
+        self.write_scanned(
+            root,
+            generation,
+            source_graph_commit_epoch,
+            analyzer_digest,
+            documents_digest,
+            |consumer| {
+                for document in documents {
+                    consumer(document)?;
+                }
+                Ok(())
+            },
+            analyzer,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn write_scanned(
+        &self,
+        root: &Path,
+        generation: u64,
+        source_graph_commit_epoch: Option<u64>,
+        analyzer_digest: u64,
+        documents_digest: u64,
+        scan: impl FnOnce(&mut dyn FnMut(&SearchDocument) -> Result<()>) -> Result<()>,
+        analyzer: &SearchAnalyzerLexicon,
+    ) -> Result<Arc<LexicalProjectionReader>> {
         let artifact_name = artifact_file(generation);
         let artifact_path = root.join(&artifact_name);
         let tmp_path = artifact_path.with_extension("skein.tmp");
@@ -949,7 +986,7 @@ impl LexicalProjectionWriter {
         let mut chunk_bytes = 0u64;
         let mut document_count = 0u64;
         let mut total_document_len = 0u64;
-        for document in documents {
+        let mut consume = |document: &SearchDocument| -> Result<()> {
             let analyzed = analyze_delta_document(document, analyzer, self.config)?;
             document_count = document_count.saturating_add(1);
             total_document_len =
@@ -977,7 +1014,9 @@ impl LexicalProjectionWriter {
                 chunk_bytes = chunk_bytes.saturating_add(bytes);
                 chunk.push(posting);
             }
-        }
+            Ok(())
+        };
+        scan(&mut consume)?;
         artifact.finish_documents()?;
         if !chunk.is_empty() {
             runs.spill(&mut chunk)?;

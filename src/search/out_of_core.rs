@@ -1,5 +1,6 @@
 use super::lexical_projection::{
-    LexicalMiniDelta, LexicalProjectionConfig, LexicalProjectionReader, MANIFEST_FILE,
+    manifest_generation as lexical_manifest_generation, LexicalMiniDelta, LexicalProjectionConfig,
+    LexicalProjectionReader, MANIFEST_FILE,
 };
 use super::{
     checksum_bytes, cosine_similarity, decode_embedding, decode_metadata,
@@ -30,6 +31,14 @@ use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+
+mod generation_writer;
+mod publish_lease;
+pub use generation_writer::{
+    SearchOutOfCoreGenerationBuildOptions, SearchOutOfCoreGenerationBuildReport,
+    SearchOutOfCoreGenerationWriter,
+};
+pub(super) use publish_lease::SearchProjectionPublishLease;
 
 const OUT_OF_CORE_MANIFEST_FILE: &str = "search_projection.out_of_core.manifest.skein";
 const OUT_OF_CORE_FORMAT: &str = "SKEIN_SEARCH_OUT_OF_CORE_V1";
@@ -2350,21 +2359,42 @@ fn unique_candidate_path(directory: &Path) -> PathBuf {
     ))
 }
 
-fn next_generation(root: &Path) -> Result<u64> {
-    let mut generation = 0u64;
+pub(super) fn next_generation(root: &Path) -> Result<u64> {
+    let manifest_path = root.join(OUT_OF_CORE_MANIFEST_FILE);
+    if !manifest_path.exists() {
+        return Ok(1);
+    }
+    let active_generation = match read_bounded_file(&manifest_path, MAX_OUT_OF_CORE_MANIFEST_BYTES)
+        .and_then(|bytes| SearchOutOfCoreManifestBody::decode(&bytes))
+        .map(|manifest| manifest.generation)
+    {
+        Ok(generation) => generation,
+        Err(_) => latest_recoverable_lexical_generation(root)?,
+    };
+    active_generation
+        .checked_add(1)
+        .ok_or_else(|| SkeinError::Storage("search out-of-core generation overflow".to_string()))
+}
+
+fn latest_recoverable_lexical_generation(root: &Path) -> Result<u64> {
+    let mut latest = 0u64;
     for entry in fs::read_dir(root)? {
         let entry = entry?;
         let Some(name) = entry.file_name().to_str().map(str::to_string) else {
             continue;
         };
-        let parsed = name
-            .strip_prefix("search_projection_segments.")
+        let Some(generation) = name
+            .strip_prefix("search_lexical.manifest.")
             .and_then(|value| value.strip_suffix(".skein"))
             .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(0);
-        generation = generation.max(parsed);
+        else {
+            continue;
+        };
+        if lexical_manifest_generation(&entry.path()).ok() == Some(generation) {
+            latest = latest.max(generation);
+        }
     }
-    Ok(generation.saturating_add(1).max(1))
+    Ok(latest)
 }
 
 fn publish_generation_link(source: &Path, target: &Path) -> Result<()> {

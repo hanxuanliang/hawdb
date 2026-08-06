@@ -69,8 +69,10 @@ pub use lexical_readiness::{
     SEARCH_LEXICAL_QUALIFICATION_PROTOCOL_VERSION,
 };
 pub use out_of_core::{
-    SearchOutOfCoreConfig, SearchOutOfCoreHydrationOutput, SearchOutOfCoreMetrics,
-    SearchOutOfCoreOutput, SearchOutOfCoreReader,
+    SearchOutOfCoreConfig, SearchOutOfCoreGenerationBuildOptions,
+    SearchOutOfCoreGenerationBuildReport, SearchOutOfCoreGenerationWriter,
+    SearchOutOfCoreHydrationOutput, SearchOutOfCoreMetrics, SearchOutOfCoreOutput,
+    SearchOutOfCoreReader,
 };
 pub use range_io::SearchRangeReadConfig;
 use recall_validation::{sample_positions, VectorRecallValidationAccumulator};
@@ -2231,6 +2233,7 @@ impl SearchIndex {
         };
         let started = std::time::Instant::now();
         let result = (|| {
+            let _publish_lease = out_of_core::SearchProjectionPublishLease::acquire(path)?;
             let snapshot_path = path.join(SEARCH_SNAPSHOT_FILE);
             let snapshot = write_search_snapshot(
                 &snapshot_path,
@@ -2278,25 +2281,7 @@ impl SearchIndex {
     }
 
     fn write_lexical_projection(&self, path: &Path) -> Result<()> {
-        let loaded_generation = self
-            .lexical_projection
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .as_ref()
-            .map(|projection| projection.generation())
-            .unwrap_or(0);
-        let artifact_generation = fs::read_dir(path)?.try_fold(0u64, |generation, entry| {
-            let entry = entry?;
-            let parsed = entry
-                .file_name()
-                .to_str()
-                .and_then(|name| name.strip_prefix("search_lexical."))
-                .and_then(|value| value.strip_suffix(".skein"))
-                .and_then(|value| value.parse::<u64>().ok())
-                .unwrap_or(0);
-            Ok::<_, std::io::Error>(generation.max(parsed))
-        })?;
-        let generation = loaded_generation.max(artifact_generation).saturating_add(1);
+        let generation = out_of_core::next_generation(path)?;
         let projection = LexicalProjectionWriter::new(self.lexical_config).write(
             path,
             generation,
@@ -6763,6 +6748,25 @@ fn encode_search_document_line(document: &SearchDocument) -> String {
     )
 }
 
+fn decode_search_document_line(line: &str) -> Result<SearchDocument> {
+    let line = line.strip_suffix('\n').unwrap_or(line);
+    let fields = line.split('\t').collect::<Vec<_>>();
+    match fields.as_slice() {
+        ["doc", raw_id, raw_title, raw_content, raw_embedding, raw_metadata] => {
+            Ok(SearchDocument {
+                id: decode_string(raw_id)?,
+                title: decode_string(raw_title)?,
+                content: decode_string(raw_content)?,
+                embedding: decode_embedding(raw_embedding)?,
+                metadata: decode_metadata(raw_metadata)?,
+            })
+        }
+        _ => Err(SkeinError::Storage(format!(
+            "invalid search document line: {line}"
+        ))),
+    }
+}
+
 fn write_search_segment_payloads(
     path: &Path,
     documents: &BTreeMap<String, SearchDocument>,
@@ -7110,15 +7114,7 @@ fn decode_search_segment_documents_bounded(
         }
         let fields = line.split('\t').collect::<Vec<_>>();
         match fields.as_slice() {
-            ["doc", raw_id, raw_title, raw_content, raw_embedding, raw_metadata] => {
-                documents.push(SearchDocument {
-                    id: decode_string(raw_id)?,
-                    title: decode_string(raw_title)?,
-                    content: decode_string(raw_content)?,
-                    embedding: decode_embedding(raw_embedding)?,
-                    metadata: decode_metadata(raw_metadata)?,
-                });
-            }
+            ["doc", ..] => documents.push(decode_search_document_line(line)?),
             [""] => {}
             _ => {
                 return Err(SkeinError::Storage(format!(

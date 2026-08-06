@@ -328,6 +328,17 @@ The mutable full-residency search index is a maintenance and compatibility
 owner. A larger-than-memory production caller MUST use the generation-bound
 out-of-core facade and its production constructor.
 
+A complete larger-than-memory rebuild MUST enter through
+`SearchOutOfCoreGenerationWriter` or an equivalent typed library path with the
+same contract. Input IDs MUST be strictly ordered, every input and temporary
+resource limit MUST fail before active-manifest publication, and finalization
+MUST retain at most one admitted document segment plus the explicitly bounded
+descriptor and lexical spill state. All immutable files MUST be durable before
+the active out-of-core manifest switches. A failed build MUST leave the prior
+generation readable and remove its private stage. This kernel property enables
+the production-copy qualification but does not replace the representative Mem
+evidence required below.
+
 The embedded serving entrypoint is
 `NowledgeMemOpenOptions::with_qualified_out_of_core_search_projection`. It MUST
 receive the raw lexical qualification report, the exact current release
