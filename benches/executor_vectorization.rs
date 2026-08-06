@@ -1,16 +1,12 @@
 use serde_json::json;
-use skein::executor::{execute_with_row_limit_and_context, execute_with_row_limit_profile};
+use skein::executor::{execute_with_row_limit_profile, ExecutionMemoryConfig};
 use skein::optimizer::PhysicalPlan;
 use skein::planner::{ComparisonOp, Predicate, Projection, ProjectionExpression};
 use skein::schema::{Catalog, PropertyType, TableKind};
-use skein::store::GraphStore;
+use skein::store::{GraphSnapshotNodeImport, GraphStore, NodeId};
 use skein::Value;
 use skein_core::RuntimeTaskContext;
-use skein_executor::{
-    execute_morsels_ordered, filter_numeric_column, ColumnVector, MorselAdmission,
-    MorselAdmissionRequest, NumericLiteral, PipelineId, Selection, SharedExecutorPool,
-    SharedPoolMorselScheduler, Validity,
-};
+use skein_executor::{filter_numeric_column, ColumnVector, NumericLiteral, Selection, Validity};
 use std::collections::BTreeMap;
 use std::hint::black_box;
 use std::num::NonZeroUsize;
@@ -22,117 +18,48 @@ const END_TO_END_ROWS: usize = 65_536;
 const END_TO_END_ITERATIONS: usize = 16;
 const END_TO_END_PAYLOAD_BYTES: usize = 256;
 const SAMPLES: usize = 11;
-const MORSEL_ROWS: usize = 1_048_576;
-const MORSEL_TARGET_ROWS: usize = 16_384;
-const MORSEL_ITERATIONS: usize = 8;
+const MORSEL_MATRIX_SAMPLES: usize = 3;
+const LOCAL_MORSEL_BENCHMARK_PROTOCOL: &str = "skein-local-morsel-benchmark-v1";
+const EXECUTOR_BENCH_MODE_ENV: &str = "SKEIN_EXECUTOR_BENCH_MODE";
+
+#[path = "executor_vectorization/morsel.rs"]
+mod morsel;
 
 fn main() {
-    let micro = micro_benchmark();
-    let (end_to_end, production_morsel) = end_to_end_benchmark();
-    let morsel = morsel_benchmark();
-    assert_eq!(micro.row_checksum, micro.columnar_checksum);
-    assert_eq!(end_to_end.row_checksum, end_to_end.columnar_checksum);
+    let requested_workers = morsel::benchmark_workers();
+    let mode = std::env::var(EXECUTOR_BENCH_MODE_ENV).unwrap_or_else(|_| "full".to_string());
+    assert!(
+        matches!(mode.as_str(), "full" | "scheduler" | "morsel"),
+        "{EXECUTOR_BENCH_MODE_ENV} must be full, scheduler, or morsel"
+    );
+    let full = mode == "full";
+    let micro = full.then(micro_benchmark);
+    let (end_to_end, production_morsel) = if mode == "scheduler" {
+        (None, None)
+    } else {
+        let (comparison, production) = end_to_end_benchmark(requested_workers, full);
+        (comparison, Some(production))
+    };
+    let morsel = matches!(mode.as_str(), "full" | "scheduler")
+        .then(|| morsel::scheduler_benchmark(requested_workers));
+    if let Some(micro) = micro {
+        assert_eq!(micro.row_checksum, micro.columnar_checksum);
+    }
+    if let Some(end_to_end) = end_to_end {
+        assert_eq!(end_to_end.row_checksum, end_to_end.columnar_checksum);
+    }
 
     println!(
         "executor_vectorization {}",
         json!({
-            "micro": micro.json(),
-            "end_to_end": end_to_end.json(),
+            "micro": micro.map(ComparisonReport::json),
+            "end_to_end": end_to_end.map(ComparisonReport::json),
             "morsel": morsel,
             "production_morsel": production_morsel,
             "end_to_end_payload_bytes_per_row": END_TO_END_PAYLOAD_BYTES,
+            "mode": mode,
         })
     );
-}
-
-fn morsel_benchmark() -> serde_json::Value {
-    let requested_workers = std::thread::available_parallelism()
-        .unwrap_or(NonZeroUsize::MIN)
-        .min(NonZeroUsize::new(4).unwrap());
-    let bytes_per_worker = NonZeroUsize::new(64 * 1024).unwrap();
-    let admission = MorselAdmission::try_new(MorselAdmissionRequest {
-        pipeline_id: PipelineId(1),
-        input_rows: MORSEL_ROWS,
-        target_rows: NonZeroUsize::new(MORSEL_TARGET_ROWS).unwrap(),
-        requested_parallelism: requested_workers,
-        bytes_per_worker,
-        memory_budget_bytes: NonZeroUsize::new(
-            bytes_per_worker
-                .get()
-                .saturating_mul(requested_workers.get()),
-        )
-        .unwrap(),
-    })
-    .unwrap();
-    let input = (0..MORSEL_ROWS)
-        .map(|row| (row as u64).wrapping_mul(0x9e37_79b9))
-        .collect::<Vec<_>>();
-    let pool = SharedExecutorPool::new(requested_workers).unwrap();
-    let scheduler = SharedPoolMorselScheduler::new(pool);
-    let mut sequential_checksum = 0u64;
-    let mut parallel_checksum = 0u64;
-    let mut sequential_samples = Vec::with_capacity(SAMPLES);
-    let mut parallel_samples = Vec::with_capacity(SAMPLES);
-    for sample in 0..SAMPLES {
-        let parallel_first = sample % 2 == 1;
-        for parallel in [parallel_first, !parallel_first] {
-            let started = Instant::now();
-            for _ in 0..MORSEL_ITERATIONS {
-                let outputs = if parallel {
-                    scheduler
-                        .execute(&admission, |morsel| {
-                            Ok(morsel_checksum(
-                                &input[morsel.start_row..morsel.start_row + morsel.row_count],
-                            ))
-                        })
-                        .unwrap()
-                } else {
-                    execute_morsels_ordered(&admission, |morsel| {
-                        Ok(morsel_checksum(
-                            &input[morsel.start_row..morsel.start_row + morsel.row_count],
-                        ))
-                    })
-                    .unwrap()
-                };
-                let checksum = outputs
-                    .into_iter()
-                    .fold(0u64, |total, value| total.wrapping_add(value));
-                if parallel {
-                    parallel_checksum = black_box(checksum);
-                } else {
-                    sequential_checksum = black_box(checksum);
-                }
-            }
-            if parallel {
-                parallel_samples.push(started.elapsed().as_nanos());
-            } else {
-                sequential_samples.push(started.elapsed().as_nanos());
-            }
-        }
-    }
-    assert_eq!(parallel_checksum, sequential_checksum);
-    sequential_samples.sort_unstable();
-    parallel_samples.sort_unstable();
-    let sequential_ns = sequential_samples[SAMPLES / 2];
-    let parallel_ns = parallel_samples[SAMPLES / 2];
-    json!({
-        "rows": MORSEL_ROWS,
-        "target_rows": MORSEL_TARGET_ROWS,
-        "morsel_count": admission.morsel_count(),
-        "admitted_workers": admission.max_workers(),
-        "iterations_per_sample": MORSEL_ITERATIONS,
-        "samples": SAMPLES,
-        "sequential_median_ns": sequential_ns,
-        "shared_pool_median_ns": parallel_ns,
-        "speedup": sequential_ns as f64 / parallel_ns.max(1) as f64,
-        "checksum": parallel_checksum,
-    })
-}
-
-fn morsel_checksum(input: &[u64]) -> u64 {
-    input.iter().fold(0u64, |total, value| {
-        total.wrapping_add(value.rotate_left(17).wrapping_mul(0xbf58_476d_1ce4_e5b9))
-    })
 }
 
 fn micro_benchmark() -> ComparisonReport {
@@ -197,28 +124,52 @@ fn micro_benchmark() -> ComparisonReport {
     }
 }
 
-fn end_to_end_benchmark() -> (ComparisonReport, serde_json::Value) {
+fn end_to_end_benchmark(
+    requested_workers: NonZeroUsize,
+    include_vectorization_comparison: bool,
+) -> (Option<ComparisonReport>, serde_json::Value) {
+    let workload_rows = if include_vectorization_comparison {
+        END_TO_END_ROWS
+    } else {
+        morsel::benchmark_production_rows(requested_workers)
+    };
+    let iterations = if include_vectorization_comparison {
+        END_TO_END_ITERATIONS
+    } else {
+        1
+    };
+    let samples = if include_vectorization_comparison {
+        SAMPLES
+    } else {
+        MORSEL_MATRIX_SAMPLES
+    };
+    let memory = ExecutionMemoryConfig::default();
     let mut catalog = Catalog::default();
     let table = catalog.get_or_create_table(TableKind::Node, "Item");
     catalog.get_or_create_property(table, "score", PropertyType::Int, false);
     catalog.get_or_create_property(table, "payload", PropertyType::String, false);
     let mut store = GraphStore::in_memory();
-    for row in 0..END_TO_END_ROWS {
-        store
-            .create_node(
-                &mut catalog,
-                "Item",
+    let payload = "x".repeat(END_TO_END_PAYLOAD_BYTES);
+    let nodes = (0..workload_rows)
+        .map(|row| -> GraphSnapshotNodeImport {
+            (
+                NodeId(row as u64),
+                "Item".to_string(),
                 BTreeMap::from([
                     ("score".to_string(), Value::Int(row as i64)),
-                    (
-                        "payload".to_string(),
-                        Value::String("x".repeat(END_TO_END_PAYLOAD_BYTES)),
-                    ),
+                    ("payload".to_string(), Value::String(payload.clone())),
                 ]),
             )
-            .expect("benchmark node creation must succeed");
-    }
-    let threshold = (END_TO_END_ROWS * 7 / 8) as i64;
+        })
+        .collect();
+    store
+        .import_graph_snapshot_rows(&mut catalog, nodes, Vec::new())
+        .expect("benchmark node import must succeed");
+    let threshold = if include_vectorization_comparison {
+        workload_rows * 7 / 8
+    } else {
+        workload_rows.saturating_sub(workload_rows / 1024)
+    } as i64;
     let compare = Predicate::PropertyCompare {
         variable: "n".to_string(),
         property: "score".to_string(),
@@ -226,54 +177,52 @@ fn end_to_end_benchmark() -> (ComparisonReport, serde_json::Value) {
         value: Value::Int(threshold),
     };
     let columnar_plan = projection_plan(compare.clone());
-    let row_plan = projection_plan(Predicate::And(vec![compare]));
+    let comparison = include_vectorization_comparison.then(|| {
+        let row_plan = projection_plan(Predicate::And(vec![compare]));
+        let columnar_probe =
+            execute_with_row_limit_profile(&columnar_plan, &mut catalog, &mut store, None)
+                .expect("columnar probe must succeed");
+        assert!(
+            columnar_probe
+                .profile
+                .pipeline_memory_report
+                .columnar_batches
+                > 0
+        );
+        let row_probe = execute_with_row_limit_profile(&row_plan, &mut catalog, &mut store, None)
+            .expect("row probe must succeed");
+        assert_eq!(row_probe.profile.pipeline_memory_report.columnar_batches, 0);
+        assert_eq!(columnar_probe.rows, row_probe.rows);
 
-    let columnar_probe =
-        execute_with_row_limit_profile(&columnar_plan, &mut catalog, &mut store, None)
-            .expect("columnar probe must succeed");
-    assert!(
-        columnar_probe
-            .profile
-            .pipeline_memory_report
-            .columnar_batches
-            > 0
-    );
-    let row_probe = execute_with_row_limit_profile(&row_plan, &mut catalog, &mut store, None)
-        .expect("row probe must succeed");
-    assert_eq!(row_probe.profile.pipeline_memory_report.columnar_batches, 0);
-    assert_eq!(columnar_probe.rows, row_probe.rows);
+        let (row_ns, row_checksum, columnar_ns, columnar_checksum) =
+            paired_median_sample(END_TO_END_ITERATIONS, |path| {
+                let plan = match path {
+                    ExecutionPath::Row => &row_plan,
+                    ExecutionPath::Columnar => &columnar_plan,
+                };
+                let output =
+                    execute_with_row_limit_profile(black_box(plan), &mut catalog, &mut store, None)
+                        .expect("benchmark execution must succeed");
+                black_box(output_checksum(&output.rows))
+            });
 
-    let (row_ns, row_checksum, columnar_ns, columnar_checksum) =
-        paired_median_sample(END_TO_END_ITERATIONS, |path| {
-            let plan = match path {
-                ExecutionPath::Row => &row_plan,
-                ExecutionPath::Columnar => &columnar_plan,
-            };
-            let output =
-                execute_with_row_limit_profile(black_box(plan), &mut catalog, &mut store, None)
-                    .expect("benchmark execution must succeed");
-            black_box(output_checksum(&output.rows))
-        });
-
-    let comparison = ComparisonReport {
-        rows: END_TO_END_ROWS,
-        iterations: END_TO_END_ITERATIONS,
-        row_ns,
-        columnar_ns,
-        row_checksum,
-        columnar_checksum,
-    };
-    let requested_workers = std::thread::available_parallelism()
-        .unwrap_or(NonZeroUsize::MIN)
-        .min(NonZeroUsize::new(4).unwrap());
+        ComparisonReport {
+            rows: END_TO_END_ROWS,
+            iterations: END_TO_END_ITERATIONS,
+            row_ns,
+            columnar_ns,
+            row_checksum,
+            columnar_checksum,
+        }
+    });
     let serial_context = RuntimeTaskContext::default();
     let parallel_context =
         RuntimeTaskContext::default().with_admitted_parallelism(requested_workers);
-    let mut serial_samples = Vec::with_capacity(SAMPLES);
-    let mut parallel_samples = Vec::with_capacity(SAMPLES);
+    let mut serial_samples = Vec::with_capacity(samples);
+    let mut parallel_samples = Vec::with_capacity(samples);
     let mut serial_checksum = 0u64;
     let mut parallel_checksum = 0u64;
-    for sample in 0..SAMPLES {
+    for sample in 0..samples {
         let parallel_first = sample % 2 == 1;
         for parallel in [parallel_first, !parallel_first] {
             let context = if parallel {
@@ -282,16 +231,15 @@ fn end_to_end_benchmark() -> (ComparisonReport, serde_json::Value) {
                 &serial_context
             };
             let started = Instant::now();
-            for _ in 0..END_TO_END_ITERATIONS {
-                let rows = execute_with_row_limit_and_context(
+            for _ in 0..iterations {
+                let execution = morsel::stream_probe(
                     black_box(&columnar_plan),
                     &mut catalog,
                     &mut store,
-                    None,
                     context,
-                )
-                .expect("morsel production benchmark execution must succeed");
-                let checksum = black_box(output_checksum(&rows));
+                    &memory,
+                );
+                let checksum = black_box(execution.checksum);
                 if parallel {
                     parallel_checksum = checksum;
                 } else {
@@ -308,17 +256,57 @@ fn end_to_end_benchmark() -> (ComparisonReport, serde_json::Value) {
     assert_eq!(serial_checksum, parallel_checksum);
     serial_samples.sort_unstable();
     parallel_samples.sort_unstable();
-    let serial_ns = serial_samples[SAMPLES / 2];
-    let parallel_ns = parallel_samples[SAMPLES / 2];
+    let serial_ns = morsel::percentile(&serial_samples, 50);
+    let parallel_ns = morsel::percentile(&parallel_samples, 50);
+    let serial_probe = morsel::stream_probe(
+        &columnar_plan,
+        &mut catalog,
+        &mut store,
+        &serial_context,
+        &memory,
+    );
+    let parallel_probe = morsel::stream_probe(
+        &columnar_plan,
+        &mut catalog,
+        &mut store,
+        &parallel_context,
+        &memory,
+    );
+    assert_eq!(serial_probe.checksum, parallel_probe.checksum);
+    assert!(serial_probe.fully_streamed && parallel_probe.fully_streamed);
+    assert_eq!(parallel_probe.max_admitted_workers, requested_workers.get());
+    assert_eq!(parallel_probe.peak_active_workers, requested_workers.get());
+    let serial_ns_per_iteration = serial_ns as f64 / iterations as f64;
+    let parallel_ns_per_iteration = parallel_ns as f64 / iterations as f64;
     let production_morsel = json!({
-        "rows": END_TO_END_ROWS,
-        "admitted_workers": requested_workers,
-        "iterations_per_sample": END_TO_END_ITERATIONS,
-        "samples": SAMPLES,
-        "serial_median_ns": serial_ns,
-        "parallel_median_ns": parallel_ns,
+        "protocol": LOCAL_MORSEL_BENCHMARK_PROTOCOL,
+        "evidence_kind": "local_kernel_diagnostic",
+        "production_eligible": false,
+        "process_id": std::process::id(),
+        "rows": workload_rows,
+        "batch_rows": memory.batch_rows,
+        "requested_workers": requested_workers,
+        "morsel_count": parallel_probe.morsel_count,
+        "morsel_max_admitted_workers": parallel_probe.max_admitted_workers,
+        "morsel_peak_active_workers": parallel_probe.peak_active_workers,
+        "iterations_per_sample": iterations,
+        "samples": samples,
+        "serial_p50_ns": serial_ns,
+        "serial_p95_ns": morsel::percentile(&serial_samples, 95),
+        "serial_p99_ns": morsel::percentile(&serial_samples, 99),
+        "parallel_p50_ns": parallel_ns,
+        "parallel_p95_ns": morsel::percentile(&parallel_samples, 95),
+        "parallel_p99_ns": morsel::percentile(&parallel_samples, 99),
+        "serial_rows_per_second": workload_rows as f64 * 1_000_000_000.0
+            / serial_ns_per_iteration,
+        "parallel_rows_per_second": workload_rows as f64 * 1_000_000_000.0
+            / parallel_ns_per_iteration,
         "speedup": serial_ns as f64 / parallel_ns.max(1) as f64,
         "improved": parallel_ns < serial_ns,
+        "steady_resident_bytes": parallel_probe.steady_resident_bytes,
+        "peak_resident_bytes": parallel_probe.peak_resident_bytes,
+        "minor_page_faults": parallel_probe.minor_page_faults,
+        "major_page_faults": parallel_probe.major_page_faults,
         "checksum": parallel_checksum,
     });
     (comparison, production_morsel)
@@ -344,12 +332,15 @@ fn projection_plan(predicate: Predicate) -> PhysicalPlan {
 }
 
 fn output_checksum(rows: &[BTreeMap<String, Value>]) -> u64 {
-    rows.iter().fold(0u64, |total, row| {
-        total.wrapping_add(match row.get("score") {
-            Some(Value::Int(value)) => *value as u64,
-            _ => panic!("benchmark output score must be an integer"),
-        })
-    })
+    rows.iter()
+        .fold(0u64, |total, row| total.wrapping_add(output_row_score(row)))
+}
+
+fn output_row_score(row: &BTreeMap<String, Value>) -> u64 {
+    match row.get("score") {
+        Some(Value::Int(value)) => *value as u64,
+        _ => panic!("benchmark output score must be an integer"),
+    }
 }
 
 fn paired_median_sample(

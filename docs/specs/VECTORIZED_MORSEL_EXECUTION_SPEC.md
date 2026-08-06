@@ -118,6 +118,15 @@ Performance conclusions MUST use optimized builds and MUST include the
 end-to-end result; a faster isolated kernel does not qualify a slower query
 pipeline.
 
+`SKEIN_EXECUTOR_BENCH_MODE=scheduler` isolates shared-pool scheduling.
+`SKEIN_EXECUTOR_BENCH_MODE=morsel` exercises the complete streaming production
+fragment with `SKEIN_MORSEL_BENCH_WORKERS` set to 4, 8, or 16. An optional
+`SKEIN_MORSEL_BENCH_ROWS` selects one common dataset size, but the benchmark
+MUST reject a size that cannot activate the requested workers under default
+admission. Local benchmark output MUST identify itself as non-production
+evidence. The reproducible workload and directional result are recorded in
+[`../EXECUTOR_MORSEL_BENCHMARK.md`](../EXECUTOR_MORSEL_BENCHMARK.md).
+
 CI MUST check compilation, semantics, and deterministic resource bounds. A
 fixed speedup threshold is intentionally not a correctness gate because shared
 CI hardware is noisy; release qualification records the benchmark artifact on
