@@ -56,14 +56,12 @@ use plan_cache::{
 use query_domains::*;
 pub use skein_api_types::{
     KnowledgeLabelRegexMemoryConnectionRow, KnowledgeLabelRegexMemoryConnectionsOutput,
-    KnowledgeLabelRegexMemoryConnectionsRequest, KnowledgeMemoryCrystalSynthesisCountOutput,
-    KnowledgeMemoryCrystalSynthesisCountRequest, KnowledgeMemoryCrystalSynthesisCountRow,
-    KnowledgeMemoryDecayRefreshBatchOutput, KnowledgeMemoryDecayRefreshBatchRequest,
-    KnowledgeMemoryDecayRefreshBatchRow, KnowledgeMemoryDecayRefreshUpdate,
-    KnowledgeMemoryEvolvesNeighborOutput, KnowledgeMemoryEvolvesNeighborRequest,
-    KnowledgeMemoryEvolvesNeighborRow, KnowledgeMemoryEvolvesProjectedSuccessorCursor,
-    KnowledgeMemoryEvolvesProjectedSuccessorGroup, KnowledgeMemoryEvolvesProjectedSuccessorOrder,
-    KnowledgeMemoryEvolvesProjectedSuccessorOutput,
+    KnowledgeLabelRegexMemoryConnectionsRequest, KnowledgeMemoryDecayRefreshBatchOutput,
+    KnowledgeMemoryDecayRefreshBatchRequest, KnowledgeMemoryDecayRefreshBatchRow,
+    KnowledgeMemoryDecayRefreshUpdate, KnowledgeMemoryEvolvesNeighborOutput,
+    KnowledgeMemoryEvolvesNeighborRequest, KnowledgeMemoryEvolvesNeighborRow,
+    KnowledgeMemoryEvolvesProjectedSuccessorCursor, KnowledgeMemoryEvolvesProjectedSuccessorGroup,
+    KnowledgeMemoryEvolvesProjectedSuccessorOrder, KnowledgeMemoryEvolvesProjectedSuccessorOutput,
     KnowledgeMemoryEvolvesProjectedSuccessorPageCursor,
     KnowledgeMemoryEvolvesProjectedSuccessorRequest, KnowledgeMemoryEvolvesProjectedSuccessorRow,
     KnowledgeNeighborDirection,
@@ -2593,13 +2591,6 @@ impl Database {
         request: &KnowledgeContextMemoryPreviewRequest,
     ) -> Result<KnowledgeContextMemoryPreviewOutput> {
         knowledge_context_memory_preview_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_memory_crystal_synthesis_counts(
-        &self,
-        request: &KnowledgeMemoryCrystalSynthesisCountRequest,
-    ) -> Result<KnowledgeMemoryCrystalSynthesisCountOutput> {
-        knowledge_memory_crystal_synthesis_counts_via_query_runtime(self, request)
     }
 
     pub fn knowledge_memory_evolves_neighbors(
@@ -7092,233 +7083,6 @@ fn context_memory_label_preview_rows_via_query_runtime(
         }
     }
     Ok(output)
-}
-
-fn knowledge_memory_crystal_synthesis_counts_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeMemoryCrystalSynthesisCountRequest,
-) -> Result<KnowledgeMemoryCrystalSynthesisCountOutput> {
-    validate_knowledge_memory_crystal_synthesis_count_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    if request.memory_ids.is_empty() {
-        return Ok(KnowledgeMemoryCrystalSynthesisCountOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_memory_count: 0,
-            missing_memory_ids: Vec::new(),
-            matched_relationship_count: 0,
-            returned_count: 0,
-        });
-    }
-
-    let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Ok(KnowledgeMemoryCrystalSynthesisCountOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_memory_count: 0,
-            missing_memory_ids: deduplicated_strings_in_order(&request.memory_ids),
-            matched_relationship_count: 0,
-            returned_count: 0,
-        });
-    };
-
-    let requested_ids = request.memory_ids.iter().cloned().collect::<BTreeSet<_>>();
-    let mut matched_ids = BTreeSet::new();
-    let mut memories = Vec::new();
-    store.visit_nodes_owned(Some(memory_label_id), |memory| {
-        if node_external_id(&memory).is_some_and(|memory_id| {
-            let matched = requested_ids.contains(&memory_id);
-            if matched {
-                matched_ids.insert(memory_id);
-            }
-            matched
-        }) {
-            memories.push(memory);
-        }
-        crate::store::GraphScanControl::Continue
-    })?;
-
-    let mut seen_missing = BTreeSet::new();
-    let missing_memory_ids = request
-        .memory_ids
-        .iter()
-        .filter(|memory_id| !matched_ids.contains(*memory_id))
-        .filter(|memory_id| seen_missing.insert((*memory_id).clone()))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    let Some(synthesized_from_type_id) = catalog.rel_type_id("SYNTHESIZED_FROM") else {
-        return Ok(KnowledgeMemoryCrystalSynthesisCountOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_memory_count: matched_ids.len(),
-            missing_memory_ids,
-            matched_relationship_count: 0,
-            returned_count: 0,
-        });
-    };
-
-    let mut matched_relationship_count = 0;
-    let mut rows = Vec::new();
-    for memory in memories {
-        let mut count = 0usize;
-        store.try_visit_adjacent_relationships_owned(
-            memory.id,
-            Some(synthesized_from_type_id),
-            AdjacencyDirection::Incoming,
-            |relationship| {
-                if store
-                    .node_owned(relationship.source)?
-                    .filter(|crystal| crystal.labels.contains(&memory_label_id))
-                    .is_some_and(|crystal| boolean_property(&crystal, "is_crystal") == Some(true))
-                {
-                    count = count.saturating_add(1);
-                }
-                Ok(crate::store::GraphScanControl::Continue)
-            },
-        )?;
-        matched_relationship_count += count;
-        if count > 0
-            && let Some(memory_id) = node_external_id(&memory)
-        {
-            rows.push(KnowledgeMemoryCrystalSynthesisCountRow {
-                memory_id,
-                node_id: memory.id.0,
-                count,
-            });
-        }
-    }
-
-    rows.sort_by(|left, right| {
-        left.memory_id
-            .cmp(&right.memory_id)
-            .then_with(|| left.node_id.cmp(&right.node_id))
-    });
-    let returned_count = rows.len();
-
-    Ok(KnowledgeMemoryCrystalSynthesisCountOutput {
-        graph_commit_epoch,
-        rows,
-        matched_memory_count: matched_ids.len(),
-        missing_memory_ids,
-        matched_relationship_count,
-        returned_count,
-    })
-}
-
-fn knowledge_memory_crystal_synthesis_counts_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeMemoryCrystalSynthesisCountRequest,
-) -> Result<KnowledgeMemoryCrystalSynthesisCountOutput> {
-    validate_knowledge_memory_crystal_synthesis_count_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    if request.memory_ids.is_empty() {
-        return Ok(KnowledgeMemoryCrystalSynthesisCountOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_memory_count: 0,
-            missing_memory_ids: Vec::new(),
-            matched_relationship_count: 0,
-            returned_count: 0,
-        });
-    }
-
-    let requested_ids = request.memory_ids.iter().cloned().collect::<BTreeSet<_>>();
-    let parameters = BTreeMap::from([(
-        "memory_ids".to_string(),
-        Value::List(requested_ids.iter().cloned().map(Value::String).collect()),
-    )]);
-    let memory_output = db.query_read_only_with_params_bounded(
-        "MATCH (m:Memory) WHERE m.id IN $memory_ids RETURN m.id AS memory_id",
-        &parameters,
-        None,
-    )?;
-    let matched_ids = memory_output
-        .rows
-        .iter()
-        .filter_map(|row| optional_string_cell(row, "memory_id"))
-        .collect::<BTreeSet<_>>();
-    let mut seen_missing = BTreeSet::new();
-    let missing_memory_ids = request
-        .memory_ids
-        .iter()
-        .filter(|memory_id| !matched_ids.contains(*memory_id))
-        .filter(|memory_id| seen_missing.insert((*memory_id).clone()))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    let count_output = db.query_read_only_with_params_bounded(
-        "MATCH (c:Memory)-[r:SYNTHESIZED_FROM]->(m:Memory) \
-         WHERE m.id IN $memory_ids AND c.is_crystal = true \
-         RETURN m.id AS memory_id, id(m) AS node_id, count(r) AS count",
-        &parameters,
-        None,
-    )?;
-    let mut rows = count_output
-        .rows
-        .iter()
-        .map(knowledge_memory_crystal_synthesis_count_row_from_query)
-        .collect::<Result<Vec<_>>>()?;
-    rows.sort_by(|left, right| {
-        left.memory_id
-            .cmp(&right.memory_id)
-            .then_with(|| left.node_id.cmp(&right.node_id))
-    });
-    let matched_relationship_count = rows.iter().map(|row| row.count).sum();
-    let returned_count = rows.len();
-
-    Ok(KnowledgeMemoryCrystalSynthesisCountOutput {
-        graph_commit_epoch,
-        rows,
-        matched_memory_count: matched_ids.len(),
-        missing_memory_ids,
-        matched_relationship_count,
-        returned_count,
-    })
-}
-
-fn knowledge_memory_crystal_synthesis_count_row_from_query(
-    row: &Row,
-) -> Result<KnowledgeMemoryCrystalSynthesisCountRow> {
-    let memory_id = optional_string_cell(row, "memory_id").ok_or_else(|| {
-        SkeinError::Execution(
-            "knowledge memory crystal synthesis count row is missing memory_id".to_string(),
-        )
-    })?;
-    let node_id = row
-        .get("node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge memory crystal synthesis count row is missing node_id".to_string(),
-            )
-        })?;
-    let count = row
-        .get("count")
-        .and_then(value_to_non_negative_usize)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge memory crystal synthesis count row is missing count".to_string(),
-            )
-        })?;
-    Ok(KnowledgeMemoryCrystalSynthesisCountRow {
-        memory_id,
-        node_id,
-        count,
-    })
-}
-
-fn validate_knowledge_memory_crystal_synthesis_count_request(
-    request: &KnowledgeMemoryCrystalSynthesisCountRequest,
-) -> Result<()> {
-    if request.memory_ids.iter().any(String::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge memory crystal synthesis count read requires non-empty memory ids"
-                .to_string(),
-        ));
-    }
-    Ok(())
 }
 
 fn knowledge_memory_evolves_neighbors_for(
@@ -23763,13 +23527,6 @@ impl DatabaseReadTransaction {
         request: &KnowledgeRelatedEntityNameListRequest,
     ) -> Result<KnowledgeRelatedEntityNameListOutput> {
         knowledge_related_entity_names_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_memory_crystal_synthesis_counts(
-        &self,
-        request: &KnowledgeMemoryCrystalSynthesisCountRequest,
-    ) -> Result<KnowledgeMemoryCrystalSynthesisCountOutput> {
-        knowledge_memory_crystal_synthesis_counts_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_memory_evolves_neighbors(

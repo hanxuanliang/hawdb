@@ -374,13 +374,11 @@ statement with explicit source/target labels, relation filtering, deterministic
 ordering, `LIMIT`, a matching row budget, and a pinned snapshot. Missing-id and
 total-count response shaping stays in the scheduler; no scheduler-specific
 typed database API is exposed.
-Memory crystal synthesis count reads are covered by
-`Database::knowledge_memory_crystal_synthesis_counts`. The typed read covers the
-decay scheduler's incoming `SYNTHESIZED_FROM` count shape over requested source
-Memory ids, scans only matched Memory nodes, filters incoming `SYNTHESIZED_FROM`
-edges to `Memory` crystals with `is_crystal = true`, returns one row per Memory
-with a positive count, reports missing Memory ids and full matched relationship
-counts, supports pinned read snapshots, and does not write WAL.
+Memory crystal synthesis counts use one fixed parameterized aggregate Cypher
+statement with explicit Memory endpoint labels, `is_crystal = true`,
+deterministic ordering, `LIMIT`, a matching row budget, and a pinned snapshot.
+Missing-id and total-count shaping stays in the scheduler; no scheduler-specific
+typed database API is exposed.
 Memory decay detail reads use one fixed parameterized exact-id Cypher statement
 with explicit projection, stable ordering, `LIMIT 1`, a one-row budget, and a
 pinned snapshot. The scheduler shapes optional and future fields from the query

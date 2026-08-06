@@ -32,11 +32,11 @@ use super::{
     KnowledgeLabelMemoryTransferRequest, KnowledgeLabelRegexMemoryConnectionsRequest,
     KnowledgeLabelUsageListRequest, KnowledgeLabelUsageRequest, KnowledgeMemoryAccessBatchRequest,
     KnowledgeMemoryAccessTouch, KnowledgeMemoryContentBatchRequest, KnowledgeMemoryContentUpdate,
-    KnowledgeMemoryCrystalSynthesisCountRequest, KnowledgeMemoryDecayRefreshBatchRequest,
-    KnowledgeMemoryDecayRefreshUpdate, KnowledgeMemoryDedupReviewedBatchRequest,
-    KnowledgeMemoryEntityListRequest, KnowledgeMemoryEvolvesCreate,
-    KnowledgeMemoryEvolvesCreateBatchRequest, KnowledgeMemoryEvolvesNeighborRequest,
-    KnowledgeMemoryEvolvesProjectedSuccessorCursor, KnowledgeMemoryEvolvesProjectedSuccessorOrder,
+    KnowledgeMemoryDecayRefreshBatchRequest, KnowledgeMemoryDecayRefreshUpdate,
+    KnowledgeMemoryDedupReviewedBatchRequest, KnowledgeMemoryEntityListRequest,
+    KnowledgeMemoryEvolvesCreate, KnowledgeMemoryEvolvesCreateBatchRequest,
+    KnowledgeMemoryEvolvesNeighborRequest, KnowledgeMemoryEvolvesProjectedSuccessorCursor,
+    KnowledgeMemoryEvolvesProjectedSuccessorOrder,
     KnowledgeMemoryEvolvesProjectedSuccessorPageCursor,
     KnowledgeMemoryEvolvesProjectedSuccessorRequest, KnowledgeMemoryLabelDeleteRequest,
     KnowledgeMemoryLabelTransferRequest, KnowledgeMemoryLatestBatchRequest,
@@ -130,6 +130,7 @@ mod knowledge_entity_deletes;
 mod knowledge_entity_mention_counts;
 mod knowledge_entity_reads;
 mod knowledge_memory_cleanup_fingerprints;
+mod knowledge_memory_crystal_synthesis_counts;
 mod knowledge_memory_decay_detail;
 mod knowledge_memory_entities;
 mod knowledge_memory_evolves_latest;
@@ -320,146 +321,6 @@ fn returns_relationship_endpoint_properties() {
         output.rows[0].get("e2.id"),
         Some(&Value::String("right".to_string()))
     );
-}
-
-#[test]
-fn counts_memory_crystal_synthesis_for_decay_scheduler_shape() {
-    let mut db = Database::new();
-    db.query("CREATE (:Memory {id: 'decay-base-a'})").unwrap();
-    db.query("CREATE (:Memory {id: 'decay-base-b'})").unwrap();
-    db.query("CREATE (:Memory {id: 'decay-crystal-a', is_crystal: true})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'decay-crystal-b', is_crystal: true})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'decay-non-crystal', is_crystal: false})")
-        .unwrap();
-    db.query("CREATE (:Source {id: 'decay-synthesis-source-skip'})")
-        .unwrap();
-    db.query("MATCH (c:Memory {id: 'decay-crystal-a'}), (m:Memory {id: 'decay-base-a'}) CREATE (c)-[:SYNTHESIZED_FROM]->(m)")
-        .unwrap();
-    db.query("MATCH (c:Memory {id: 'decay-crystal-b'}), (m:Memory {id: 'decay-base-a'}) CREATE (c)-[:SYNTHESIZED_FROM]->(m)")
-        .unwrap();
-    db.query("MATCH (c:Memory {id: 'decay-non-crystal'}), (m:Memory {id: 'decay-base-a'}) CREATE (c)-[:SYNTHESIZED_FROM]->(m)")
-        .unwrap();
-    db.query("MATCH (s:Source {id: 'decay-synthesis-source-skip'}), (m:Memory {id: 'decay-base-a'}) CREATE (s)-[:SYNTHESIZED_FROM]->(m)")
-        .unwrap();
-    db.query("MATCH (c:Memory {id: 'decay-crystal-a'}), (m:Memory {id: 'decay-base-b'}) CREATE (c)-[:SYNTHESIZED_FROM]->(m)")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let snapshot = db.begin_read_transaction();
-
-    db.query("MATCH (c:Memory {id: 'decay-crystal-b'}), (m:Memory {id: 'decay-base-b'}) CREATE (c)-[:SYNTHESIZED_FROM]->(m)")
-        .unwrap();
-
-    let counts = db
-        .knowledge_memory_crystal_synthesis_counts(&KnowledgeMemoryCrystalSynthesisCountRequest {
-            memory_ids: vec![
-                "decay-base-a".to_string(),
-                "missing-decay-base".to_string(),
-                "decay-base-b".to_string(),
-                "decay-base-a".to_string(),
-            ],
-        })
-        .unwrap();
-    assert_eq!(counts.graph_commit_epoch, db.store.commit_epoch());
-    assert_eq!(counts.matched_memory_count, 2);
-    assert_eq!(
-        counts.missing_memory_ids,
-        vec!["missing-decay-base".to_string()]
-    );
-    assert_eq!(counts.matched_relationship_count, 4);
-    assert_eq!(counts.returned_count, 2);
-    assert_eq!(counts.rows[0].memory_id, "decay-base-a");
-    assert_eq!(counts.rows[0].count, 2);
-    assert_eq!(counts.rows[1].memory_id, "decay-base-b");
-    assert_eq!(counts.rows[1].count, 2);
-
-    let snapshot_counts = snapshot
-        .knowledge_memory_crystal_synthesis_counts(&KnowledgeMemoryCrystalSynthesisCountRequest {
-            memory_ids: vec!["decay-base-b".to_string()],
-        })
-        .unwrap();
-    assert_eq!(snapshot_counts.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot_counts.matched_relationship_count, 1);
-    assert_eq!(snapshot_counts.rows[0].count, 1);
-}
-
-#[test]
-fn memory_crystal_synthesis_counts_use_query_runtime_plan_cache() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Memory {id: 'synthesis-count-cache-a'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'synthesis-count-cache-b'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'synthesis-count-cache-crystal-a', is_crystal: true})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'synthesis-count-cache-crystal-b', is_crystal: true})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'synthesis-count-cache-non-crystal', is_crystal: false})")
-        .unwrap();
-    db.query("CREATE (:Source {id: 'synthesis-count-cache-source'})")
-        .unwrap();
-    db.query("MATCH (c:Memory {id: 'synthesis-count-cache-crystal-a'}), (m:Memory {id: 'synthesis-count-cache-a'}) CREATE (c)-[:SYNTHESIZED_FROM]->(m)")
-        .unwrap();
-    db.query("MATCH (c:Memory {id: 'synthesis-count-cache-crystal-b'}), (m:Memory {id: 'synthesis-count-cache-a'}) CREATE (c)-[:SYNTHESIZED_FROM]->(m)")
-        .unwrap();
-    db.query("MATCH (c:Memory {id: 'synthesis-count-cache-non-crystal'}), (m:Memory {id: 'synthesis-count-cache-a'}) CREATE (c)-[:SYNTHESIZED_FROM]->(m)")
-        .unwrap();
-    db.query("MATCH (s:Source {id: 'synthesis-count-cache-source'}), (m:Memory {id: 'synthesis-count-cache-a'}) CREATE (s)-[:SYNTHESIZED_FROM]->(m)")
-        .unwrap();
-    let request = KnowledgeMemoryCrystalSynthesisCountRequest {
-        memory_ids: vec![
-            "synthesis-count-cache-a".to_string(),
-            "missing-synthesis-count-cache".to_string(),
-            "synthesis-count-cache-b".to_string(),
-            "synthesis-count-cache-a".to_string(),
-        ],
-    };
-
-    let first = db
-        .knowledge_memory_crystal_synthesis_counts(&request)
-        .unwrap();
-    let second = db
-        .knowledge_memory_crystal_synthesis_counts(&request)
-        .unwrap();
-
-    assert_eq!(first, second);
-    assert_eq!(first.matched_memory_count, 2);
-    assert_eq!(
-        first.missing_memory_ids,
-        vec!["missing-synthesis-count-cache".to_string()]
-    );
-    assert_eq!(first.matched_relationship_count, 2);
-    assert_eq!(first.returned_count, 1);
-    assert_eq!(first.rows[0].memory_id, "synthesis-count-cache-a");
-    assert_eq!(first.rows[0].count, 2);
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, 2);
-    assert_eq!(stats.misses, 2);
-    assert_eq!(stats.hits, 2);
-}
-
-#[test]
-fn memory_crystal_synthesis_counts_rejects_empty_ids_without_wal() {
-    let path = unique_test_dir("memory_crystal_synthesis_counts_empty_without_wal");
-    let mut db = Database::open(&path).unwrap();
-    db.query("CREATE (:Memory {id: 'decay-base'})").unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let wal_before = read_test_wal(&path).unwrap();
-
-    let error = db
-        .knowledge_memory_crystal_synthesis_counts(&KnowledgeMemoryCrystalSynthesisCountRequest {
-            memory_ids: vec![String::new()],
-        })
-        .unwrap_err();
-    assert!(error.to_string().contains("non-empty memory ids"));
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
-    std::fs::remove_dir_all(path).unwrap();
 }
 
 #[test]

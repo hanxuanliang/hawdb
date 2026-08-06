@@ -524,13 +524,10 @@ Memory EVOLVES relation counts use one fixed parameterized aggregate Cypher
 statement with explicit source/target labels, relation filtering, deterministic
 ordering, `LIMIT`, a matching row budget, and a pinned snapshot. Missing-id and
 total-count shaping remains outside the embedded database facade.
-Memory crystal synthesis count reads are available as
-`Database::knowledge_memory_crystal_synthesis_counts`, covering the decay
-scheduler's bounded incoming `SYNTHESIZED_FROM` count shape over requested
-source Memory ids. The read scans only requested Memory nodes, filters incoming
-`SYNTHESIZED_FROM` edges to `Memory` crystals with `is_crystal = true`, reports
-missing Memory ids separately, supports pinned read snapshots, and does not
-write WAL.
+Memory crystal synthesis counts use one fixed parameterized aggregate Cypher
+statement with explicit Memory endpoint labels, `is_crystal = true`,
+deterministic ordering, `LIMIT`, a matching row budget, and a pinned snapshot.
+Missing-id and total-count shaping remains outside the embedded database facade.
 Memory decay detail reads use one fixed parameterized exact-id Cypher statement
 with explicit projection, stable ordering, `LIMIT 1`, a one-row budget, and a
 pinned snapshot. Scheduler response shaping remains outside the embedded
