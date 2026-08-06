@@ -325,14 +325,13 @@ empty `occasion_key`, and `created_at` relationship properties, reports missing
 endpoints and idless endpoints without writing, preserves existing-edge
 properties for `MERGE ON CREATE SET` semantics, validates numeric finite
 weights before WAL, and uses the WAL-backed relationship write path.
-Synthesized-source coverage lookups are covered by
-`Database::knowledge_synthesized_source_coverage`. The typed read validates an
-explicit non-empty source Memory id set and positive required distinct coverage
-count, scans only `Memory` crystals with outgoing `SYNTHESIZED_FROM` Memory
-sources, de-duplicates repeated source relationships, returns matching crystal
-ids/titles plus matched source ids for the Nowledge `cid` and `cid, ct`
-coverage lookup shapes, supports read-transaction snapshots, and does not write
-WAL.
+Synthesized-source coverage lookups use a host-owned fixed grouped Cypher
+query. It binds the source Memory id set and required distinct coverage count,
+scans only `Memory` crystals with outgoing `SYNTHESIZED_FROM` Memory sources,
+and projects matching crystal ids/titles plus matched source ids. Bounded and
+unbounded host variants are separate statements so query shape remains static.
+Callers use a pinned read transaction when coverage and hydration must share a
+graph version.
 Memory entity mention reads are covered by
 `Database::knowledge_memory_entities`. The typed read validates a non-empty
 Memory id list, resolves each Memory in caller order, scans outgoing `MENTIONS`

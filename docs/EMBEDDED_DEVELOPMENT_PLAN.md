@@ -843,25 +843,22 @@ Nowledge graph path reads support the endpoint-id bounded
 through a dedicated shortest-path read operator. The operator returns all
 simple paths at the first target depth and only supports `properties(nodes(p),
 ...)` plus `length(p)` projections; generic returned path values and
-unbounded shortest-path searches remain outside the compatibility subset.
+unbounded shortest-path searches remain outside the supported subset.
 Nowledge feed reads support the bounded synthesized-source aggregation
 `MATCH (c:Memory)-[:SYNTHESIZED_FROM]->(s:Memory) WHERE c.id IN $ids WITH c, COLLECT(DISTINCT s.id) AS source_ids RETURN c.id, source_ids`
 as a direct group-by-property plus collected-property list. General `WITH`
 projection chains and general `COLLECT` expressions remain outside this
-bounded subset. The same feed hydration shape is also available as the typed
-`Database::knowledge_synthesized_source_ids` read, which accepts bounded
-crystal Memory ids, returns one ordered row per requested id with distinct
-sorted source Memory ids, reports missing crystals, and does not write WAL.
+bounded subset. Hosts combine it with a fixed bounded crystal-identity query on
+one `DatabaseReadTransaction` to distinguish present crystals without sources
+from missing crystal ids.
 Nowledge synthesized-source coverage lookups also support the bounded grouped
 aggregate filter shape
 `WITH c.id AS cid, count(DISTINCT s.id) AS covered WHERE covered = $n RETURN cid LIMIT 1`
 and the two-column title variant returning `cid, ct`. This is implemented as
 grouped aggregation over matched rows, a column filter on the aggregate alias,
-and final column projection; it is not a general HAVING implementation. The
-same Nowledge business shape is also available as the typed
-`Database::knowledge_synthesized_source_coverage` read, which accepts explicit
-source Memory ids plus the required distinct coverage count and returns matching
-crystal ids/titles without WAL writes.
+and final column projection; it is not a general HAVING implementation. Hosts
+bind source Memory ids and the required coverage count, choose a fixed bounded
+or unbounded query variant, and enforce an explicit result-row budget.
 Nowledge community memory reads also support the bounded
 `WITH m, COUNT(e) AS entity_count` shape after a one-hop relationship match.
 The grouped node is represented as a projected map column, so subsequent
