@@ -394,14 +394,11 @@ the decay scheduler's exact-id score-only and score-plus-confidence update
 shapes, validates Memory ids and finite numeric decay/confidence values before
 WAL, reports missing, idless, and duplicate rows without writing those rows, and
 commits eligible updates through one grouped WAL batch.
-Memory cleanup fingerprint reads are covered by
-`Database::knowledge_memory_cleanup_fingerprints`. The typed read covers the
-cleanup scheduler's bounded `m.id IN $ids` row fetch for metadata, lifecycle,
-engagement, decay, importance, type, and semantic fields, resolves requested
-ids with one Memory-label scan, returns rows in deduplicated request order,
-reports missing ids, defaults property projection to the current production
-columns, accepts explicit future property names without widening default
-payloads, supports pinned read snapshots, and does not write WAL.
+Memory cleanup fingerprint reads use one fixed parameterized `m.id IN $ids`
+Cypher statement with explicit projection, stable ordering, `LIMIT`, a matching
+row budget, and a pinned snapshot. The cleanup scheduler owns request-order
+shaping and missing-id calculation; no scheduler-specific typed database API is
+exposed.
 Memory EVOLVES neighbor reads are covered by
 `Database::knowledge_memory_evolves_neighbors`. The typed read covers the MCP
 outgoing and incoming `Memory-[:EVOLVES]-Memory` shapes, anchors by one physical

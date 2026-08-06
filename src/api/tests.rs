@@ -31,8 +31,7 @@ use super::{
     KnowledgeLabelLifecycleUpdate, KnowledgeLabelMemoryDistributionRequest,
     KnowledgeLabelMemoryTransferRequest, KnowledgeLabelRegexMemoryConnectionsRequest,
     KnowledgeLabelUsageListRequest, KnowledgeLabelUsageRequest, KnowledgeMemoryAccessBatchRequest,
-    KnowledgeMemoryAccessTouch, KnowledgeMemoryCleanupFingerprintRequest,
-    KnowledgeMemoryContentBatchRequest, KnowledgeMemoryContentUpdate,
+    KnowledgeMemoryAccessTouch, KnowledgeMemoryContentBatchRequest, KnowledgeMemoryContentUpdate,
     KnowledgeMemoryCrystalSynthesisCountRequest, KnowledgeMemoryDecayRefreshBatchRequest,
     KnowledgeMemoryDecayRefreshUpdate, KnowledgeMemoryDedupReviewedBatchRequest,
     KnowledgeMemoryEntityListRequest, KnowledgeMemoryEvolvesCreate,
@@ -132,6 +131,7 @@ mod knowledge_entity_batch_deletes;
 mod knowledge_entity_deletes;
 mod knowledge_entity_mention_counts;
 mod knowledge_entity_reads;
+mod knowledge_memory_cleanup_fingerprints;
 mod knowledge_memory_decay_detail;
 mod knowledge_memory_entities;
 mod knowledge_memory_evolves_latest;
@@ -8255,185 +8255,6 @@ fn typed_thread_compaction_link_persists_as_one_wal_batch_and_replays() {
             Some(&Value::String("manual_distillation".to_string()))
         );
     }
-    std::fs::remove_dir_all(path).unwrap();
-}
-
-#[test]
-fn reads_memory_cleanup_fingerprints_for_scheduler_shape() {
-    let mut db = Database::new();
-    db.query("CREATE (:Memory {id: 'cleanup-fingerprint-a', title: 'Cleanup A', metadata: '{\"state\":\"active\"}', is_latest: true, decay_score_cached: 0.6, created_at: '2026-07-01T00:00:00', last_accessed_at: '2026-07-02T00:00:00', last_clicked_at: '2026-07-03T00:00:00', access_count: 4, appearances: 1, clicks: 2, total_dwell_time_ms: 300, importance: 0.8, unit_type: 'fact', semantic_field: 'cleanup text', future_cleanup_field: 'future-a'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'cleanup-fingerprint-b', title: 'Cleanup B', metadata: '{}', decay_score_cached: 0.2, created_at: '2026-07-04T00:00:00', future_cleanup_field: 'future-b'})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let snapshot = db.begin_read_transaction();
-
-    db.query("MATCH (m:Memory {id: 'cleanup-fingerprint-a'}) SET m.decay_score_cached = 0.9, m.future_cleanup_field = 'late-a'")
-        .unwrap();
-
-    let output = db
-        .knowledge_memory_cleanup_fingerprints(&KnowledgeMemoryCleanupFingerprintRequest {
-            memory_ids: vec![
-                "cleanup-fingerprint-b".to_string(),
-                "cleanup-fingerprint-a".to_string(),
-                "cleanup-fingerprint-b".to_string(),
-                "missing".to_string(),
-            ],
-            property_names: Vec::new(),
-        })
-        .unwrap();
-    assert_eq!(output.matched_count, 2);
-    assert_eq!(output.returned_count, 2);
-    assert_eq!(output.missing_memory_ids, vec!["missing".to_string()]);
-    assert_eq!(
-        output.rows[0].memory_id.as_deref(),
-        Some("cleanup-fingerprint-b")
-    );
-    assert_eq!(
-        output.rows[1].memory_id.as_deref(),
-        Some("cleanup-fingerprint-a")
-    );
-    let row = &output.rows[1];
-    assert_eq!(row.title.as_deref(), Some("Cleanup A"));
-    assert_eq!(
-        row.metadata,
-        Some(Value::String("{\"state\":\"active\"}".to_string()))
-    );
-    assert_eq!(row.is_latest, Some(true));
-    assert_eq!(row.decay_score_cached, Some(Value::Float(0.9)));
-    assert_eq!(
-        row.created_at,
-        Some(Value::String("2026-07-01T00:00:00".to_string()))
-    );
-    assert_eq!(
-        row.last_accessed_at,
-        Some(Value::String("2026-07-02T00:00:00".to_string()))
-    );
-    assert_eq!(
-        row.last_clicked_at,
-        Some(Value::String("2026-07-03T00:00:00".to_string()))
-    );
-    assert_eq!(row.access_count, Some(Value::Int(4)));
-    assert_eq!(row.appearances, Some(Value::Int(1)));
-    assert_eq!(row.clicks, Some(Value::Int(2)));
-    assert_eq!(row.total_dwell_time_ms, Some(Value::Int(300)));
-    assert_eq!(row.importance, Some(Value::Float(0.8)));
-    assert_eq!(row.unit_type.as_deref(), Some("fact"));
-    assert_eq!(row.semantic_field.as_deref(), Some("cleanup text"));
-    assert!(row.properties.contains_key("decay_score_cached"));
-    assert!(!row.properties.contains_key("future_cleanup_field"));
-
-    let projected = db
-        .knowledge_memory_cleanup_fingerprints(&KnowledgeMemoryCleanupFingerprintRequest {
-            memory_ids: vec!["cleanup-fingerprint-a".to_string()],
-            property_names: vec![
-                "future_cleanup_field".to_string(),
-                "decay_score_cached".to_string(),
-                "future_cleanup_field".to_string(),
-            ],
-        })
-        .unwrap();
-    assert_eq!(projected.rows[0].properties.len(), 2);
-    assert_eq!(
-        projected.rows[0].properties.get("future_cleanup_field"),
-        Some(&Value::String("late-a".to_string()))
-    );
-
-    let snapshot_output = snapshot
-        .knowledge_memory_cleanup_fingerprints(&KnowledgeMemoryCleanupFingerprintRequest {
-            memory_ids: vec!["cleanup-fingerprint-a".to_string()],
-            property_names: Vec::new(),
-        })
-        .unwrap();
-    assert_eq!(snapshot_output.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(
-        snapshot_output.rows[0].decay_score_cached,
-        Some(Value::Float(0.6))
-    );
-
-    let empty = db
-        .knowledge_memory_cleanup_fingerprints(&KnowledgeMemoryCleanupFingerprintRequest {
-            memory_ids: Vec::new(),
-            property_names: Vec::new(),
-        })
-        .unwrap();
-    assert_eq!(empty.matched_count, 0);
-    assert!(empty.rows.is_empty());
-    assert!(empty.missing_memory_ids.is_empty());
-}
-
-#[test]
-fn memory_cleanup_fingerprints_uses_query_runtime_plan_cache() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Memory {id: 'cleanup-cache-a', title: 'Cleanup A', decay_score_cached: 0.6, future_cleanup_field: 'future-a'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'cleanup-cache-b', title: 'Cleanup B', decay_score_cached: 0.2, future_cleanup_field: 'future-b'})")
-        .unwrap();
-    let request = KnowledgeMemoryCleanupFingerprintRequest {
-        memory_ids: vec![
-            "cleanup-cache-b".to_string(),
-            "cleanup-cache-a".to_string(),
-            "cleanup-cache-missing".to_string(),
-        ],
-        property_names: vec!["future_cleanup_field".to_string()],
-    };
-
-    let first = db.knowledge_memory_cleanup_fingerprints(&request).unwrap();
-    let second = db.knowledge_memory_cleanup_fingerprints(&request).unwrap();
-
-    assert_eq!(first, second);
-    assert_eq!(first.matched_count, 2);
-    assert_eq!(first.returned_count, 2);
-    assert_eq!(
-        first.missing_memory_ids,
-        vec!["cleanup-cache-missing".to_string()]
-    );
-    assert_eq!(first.rows[0].memory_id.as_deref(), Some("cleanup-cache-b"));
-    assert_eq!(
-        first.rows[0].properties.get("future_cleanup_field"),
-        Some(&Value::String("future-b".to_string()))
-    );
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, 1);
-    assert_eq!(stats.misses, 1);
-    assert_eq!(stats.hits, 1);
-}
-
-#[test]
-fn memory_cleanup_fingerprints_reject_empty_inputs_without_wal() {
-    let path = unique_test_dir("memory_cleanup_fingerprints_reject_empty_inputs_without_wal");
-    let mut db = Database::open(&path).unwrap();
-    db.query("CREATE (:Memory {id: 'cleanup-fingerprint', decay_score_cached: 0.4})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let wal_before = read_test_wal(&path).unwrap();
-
-    let err = db
-        .knowledge_memory_cleanup_fingerprints(&KnowledgeMemoryCleanupFingerprintRequest {
-            memory_ids: vec![String::new()],
-            property_names: Vec::new(),
-        })
-        .unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("knowledge memory cleanup fingerprint read requires non-empty memory ids"));
-
-    let err = db
-        .knowledge_memory_cleanup_fingerprints(&KnowledgeMemoryCleanupFingerprintRequest {
-            memory_ids: vec!["cleanup-fingerprint".to_string()],
-            property_names: vec![String::new()],
-        })
-        .unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("knowledge memory cleanup fingerprint read requires non-empty property names"));
-
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
     std::fs::remove_dir_all(path).unwrap();
 }
 
