@@ -5,10 +5,11 @@ mod lending;
 use super::*;
 use lending::{
     admitted_numeric_batch_rows, LendingBatchCursor, NumericNodeBatch, NumericNodeBatchCursor,
-    OwnedNumericBatch, OwnedNumericBatchBuffer,
+    OwnedNumericBatchBuffer,
 };
 use skein_executor::columnar::{
-    filter_float64_values, filter_int64_values, NumericLiteral, Selection, ValidityBuilder,
+    filter_float64_values, filter_int64_values, select_float64_values_view,
+    select_int64_values_view, NumericLiteral, Selection, ValidityBuilder,
 };
 use skein_executor::morsel::{
     MorselAdmission, MorselAdmissionRequest, PipelineId, SharedPoolMorselScheduler,
@@ -43,6 +44,7 @@ struct NumericBatchEmitter<'plan, 'task, 'observer, 'emit> {
     task_context: Option<&'task RuntimeTaskContext>,
     observer: &'observer QueryExecutionObserver,
     emit: &'emit mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+    selected_rows: Vec<u32>,
 }
 
 pub(super) fn supports_parallel_morsel_execution(plan: &PhysicalPlan, catalog: &Catalog) -> bool {
@@ -186,7 +188,7 @@ impl<'a> NumericFragment<'a> {
                 memory.batch_rows.get(),
                 memory.batch_payload_bytes.get(),
                 needs_node_ids,
-                false,
+                true,
             )
             .unwrap_or(1)
         } else {
@@ -220,7 +222,7 @@ impl<'a> NumericFragment<'a> {
                 context.memory.batch_rows.get(),
                 context.memory.batch_payload_bytes.get(),
                 needs_node_ids,
-                use_owned_typed,
+                true,
             )
             .ok_or_else(|| {
                 SkeinError::Execution(format!(
@@ -518,7 +520,7 @@ fn stream_lending_numeric_nodes(
     );
     let mut stopped = false;
     while let Some(batch) = cursor.next_batch()? {
-        stopped = batch_emitter.emit_lending(batch)? == BatchControl::Stop;
+        stopped = batch_emitter.emit_typed(batch)? == BatchControl::Stop;
         if stopped || batch_emitter.limit_reached() {
             stopped = true;
             break;
@@ -675,7 +677,7 @@ fn stream_owned_typed_numeric_nodes(
                 return GraphScanControl::Stop;
             }
             if buffer.is_full() {
-                match batch_emitter.emit_owned_typed(buffer.take_batch()) {
+                match batch_emitter.emit_typed(buffer.take_batch()) {
                     Ok(BatchControl::Continue) => buffer.clear(),
                     Ok(BatchControl::Stop) => {
                         stopped = true;
@@ -703,7 +705,7 @@ fn stream_owned_typed_numeric_nodes(
         return Err(error);
     }
     if !stopped && !buffer.is_empty() {
-        stopped = batch_emitter.emit_owned_typed(buffer.take_batch())? == BatchControl::Stop;
+        stopped = batch_emitter.emit_typed(buffer.take_batch())? == BatchControl::Stop;
     }
     Ok((batch_emitter.emitted, stopped))
 }
@@ -725,6 +727,7 @@ impl<'plan, 'task, 'observer, 'emit> NumericBatchEmitter<'plan, 'task, 'observer
             task_context,
             observer,
             emit,
+            selected_rows: Vec::new(),
         }
     }
 
@@ -738,17 +741,11 @@ impl<'plan, 'task, 'observer, 'emit> NumericBatchEmitter<'plan, 'task, 'observer
         Ok(control)
     }
 
-    fn emit_lending(&mut self, input: NumericNodeBatch<'_>) -> Result<BatchControl> {
+    fn emit_typed(&mut self, input: NumericNodeBatch<'_>) -> Result<BatchControl> {
         runtime_checkpoint(self.task_context)?;
         self.observer.record_morsels(1);
-        let prepared = prepare_lending_batch(self.items, input);
-        self.emit_prepared(prepared)
-    }
-
-    fn emit_owned_typed(&mut self, input: OwnedNumericBatch<'_>) -> Result<BatchControl> {
-        runtime_checkpoint(self.task_context)?;
-        self.observer.record_morsels(1);
-        let prepared = prepare_owned_typed_batch(self.fragment, self.items, input)?;
+        let prepared =
+            prepare_typed_batch(self.fragment, self.items, input, &mut self.selected_rows)?;
         self.emit_prepared(prepared)
     }
 
@@ -793,77 +790,43 @@ impl<'plan, 'task, 'observer, 'emit> NumericBatchEmitter<'plan, 'task, 'observer
     }
 }
 
-fn prepare_lending_batch(
-    items: &[Projection],
-    input: NumericNodeBatch<'_>,
-) -> PreparedNumericBatch {
-    let selected_rows = input.values.len();
-    let mut output = Vec::with_capacity(selected_rows);
-    for row in 0..selected_rows {
-        let mut values = BTreeMap::new();
-        for item in items {
-            let value = match &item.expression {
-                ProjectionExpression::Id { .. } => Value::Int(
-                    input
-                        .node_ids
-                        .expect("lending cursor retains requested node ids")[row]
-                        as i64,
-                ),
-                ProjectionExpression::Property { .. } => input.values.value(row),
-                ProjectionExpression::Literal(value) => value.clone(),
-                _ => unreachable!("lending projection eligibility checks expressions"),
-            };
-            insert_projected_value(&mut values, &item.name, value);
-        }
-        output.push(Binding {
-            values,
-            nodes: BTreeMap::new(),
-            relationships: BTreeMap::new(),
-        });
-    }
-    PreparedNumericBatch {
-        input_rows: input.input_rows,
-        selected_rows,
-        output,
-    }
-}
-
-fn prepare_owned_typed_batch(
+fn prepare_typed_batch(
     fragment: NumericFragment<'_>,
     items: &[Projection],
-    input: OwnedNumericBatch<'_>,
+    input: NumericNodeBatch<'_>,
+    selected_rows: &mut Vec<u32>,
 ) -> Result<PreparedNumericBatch> {
-    let selection = match input.values {
-        lending::NumericBatchValues::Int(values) => filter_int64_values(
+    match input.values {
+        lending::NumericBatchValues::Int(values) => select_int64_values_view(
             values,
-            &input.validity,
-            &Selection::all(input.input_rows),
+            input.validity,
             fragment.op,
             fragment.expected,
+            selected_rows,
         )?,
-        lending::NumericBatchValues::Float(values) => filter_float64_values(
+        lending::NumericBatchValues::Float(values) => select_float64_values_view(
             values,
-            &input.validity,
-            &Selection::all(input.input_rows),
+            input.validity,
             fragment.op,
             fragment.expected,
+            selected_rows,
         )?,
-    };
-    let selected_rows = selection.selected_count();
-    let mut output = Vec::with_capacity(selected_rows);
-    for row in selection.iter() {
+    }
+    let selected_count = selected_rows.len();
+    let mut output = Vec::with_capacity(selected_count);
+    for row in selected_rows.iter().copied().map(|row| row as usize) {
         let mut values = BTreeMap::new();
         for item in items {
             let value = match &item.expression {
                 ProjectionExpression::Id { .. } => Value::Int(
                     input
                         .node_ids
-                        .expect("typed owned scan retains requested node ids")[row]
+                        .expect("typed scan retains requested node ids")[row]
                         as i64,
                 ),
                 ProjectionExpression::Property { .. } => input.values.value(row),
                 ProjectionExpression::Literal(value) => value.clone(),
-                _ => unreachable!("typed owned projection eligibility checks expressions"),
+                _ => unreachable!("typed projection eligibility checks expressions"),
             };
             insert_projected_value(&mut values, &item.name, value);
         }
@@ -871,7 +834,7 @@ fn prepare_owned_typed_batch(
     }
     Ok(PreparedNumericBatch {
         input_rows: input.input_rows,
-        selected_rows,
+        selected_rows: selected_count,
         output,
     })
 }
@@ -1012,9 +975,10 @@ fn prepare_lending_numeric_morsel(
     );
     let mut output_bytes = 0usize;
     let mut batches = Vec::with_capacity(input.len().div_ceil(scan.batch_rows));
+    let mut selected_rows = Vec::with_capacity(scan.batch_rows);
     while let Some(input) = cursor.next_batch()? {
         runtime_checkpoint(task_context)?;
-        let batch = prepare_lending_batch(items, input);
+        let batch = prepare_typed_batch(fragment, items, input, &mut selected_rows)?;
         let batch_bytes = batch.output.iter().fold(0usize, |total, binding| {
             total.saturating_add(binding_memory_bytes(binding))
         });

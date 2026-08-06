@@ -32,9 +32,10 @@ pub mod traversal;
 pub mod vector;
 
 pub use columnar::{
-    filter_float64_values, filter_int64_values, filter_numeric_column, BindingSchema, ColumnVector,
-    ColumnarBatch, LogicalType, NumericLiteral, Selection, SlotDescriptor, SlotId, Validity,
-    ValidityBuilder,
+    filter_float64_values, filter_float64_values_view, filter_int64_values,
+    filter_int64_values_view, filter_numeric_column, select_float64_values_view,
+    select_int64_values_view, BindingSchema, ColumnVector, ColumnarBatch, LogicalType,
+    NumericLiteral, Selection, SlotDescriptor, SlotId, Validity, ValidityBuilder, ValidityView,
 };
 pub use concurrent::{BoundedExecutor, SharedExecutorPool, SharedExecutorPoolError};
 pub use external::{

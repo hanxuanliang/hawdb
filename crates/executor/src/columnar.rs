@@ -100,6 +100,50 @@ impl Validity {
             Self::Bitmap { len, words } => count_bitmap_rows(words, *len),
         }
     }
+
+    pub fn view(&self) -> ValidityView<'_> {
+        match self {
+            Self::All { len } => ValidityView::All { len: *len },
+            Self::Bitmap { len, words } => ValidityView::Bitmap { len: *len, words },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ValidityView<'a> {
+    All { len: usize },
+    Bitmap { len: usize, words: &'a [u64] },
+}
+
+impl ValidityView<'_> {
+    pub fn len(self) -> usize {
+        match self {
+            Self::All { len } | Self::Bitmap { len, .. } => len,
+        }
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn is_valid(self, row: usize) -> bool {
+        if row >= self.len() {
+            return false;
+        }
+        match self {
+            Self::All { .. } => true,
+            Self::Bitmap { words, .. } => words
+                .get(row / u64::BITS as usize)
+                .is_some_and(|word| word & (1u64 << (row % u64::BITS as usize)) != 0),
+        }
+    }
+
+    pub fn valid_count(self) -> usize {
+        match self {
+            Self::All { len } => len,
+            Self::Bitmap { len, words } => count_bitmap_rows(words, len),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -123,7 +167,9 @@ impl ValidityBuilder {
         let bit_index = self.len % u64::BITS as usize;
         if self.words.is_empty() {
             if !valid {
-                self.words = Vec::with_capacity(self.word_capacity);
+                if self.words.capacity() < self.word_capacity {
+                    self.words.reserve(self.word_capacity);
+                }
                 self.words.resize(word_index + 1, u64::MAX);
                 self.words[word_index] = if bit_index == 0 {
                     0
@@ -140,6 +186,22 @@ impl ValidityBuilder {
             }
         }
         self.len = self.len.saturating_add(1);
+    }
+
+    pub fn clear(&mut self) {
+        self.len = 0;
+        self.words.clear();
+    }
+
+    pub fn view(&self) -> ValidityView<'_> {
+        if self.words.is_empty() {
+            ValidityView::All { len: self.len }
+        } else {
+            ValidityView::Bitmap {
+                len: self.len,
+                words: &self.words,
+            }
+        }
     }
 
     pub fn finish(self) -> Validity {
@@ -580,6 +642,16 @@ pub fn filter_int64_values(
     op: ComparisonOp,
     expected: NumericLiteral,
 ) -> Result<Selection> {
+    filter_int64_values_view(values, validity.view(), input, op, expected)
+}
+
+pub fn filter_int64_values_view(
+    values: &[i64],
+    validity: ValidityView<'_>,
+    input: &Selection,
+    op: ComparisonOp,
+    expected: NumericLiteral,
+) -> Result<Selection> {
     filter_numeric_values(values, validity, input, |actual| {
         int64_value_matches(actual, op, expected)
     })
@@ -592,14 +664,90 @@ pub fn filter_float64_values(
     op: ComparisonOp,
     expected: NumericLiteral,
 ) -> Result<Selection> {
+    filter_float64_values_view(values, validity.view(), input, op, expected)
+}
+
+pub fn filter_float64_values_view(
+    values: &[f64],
+    validity: ValidityView<'_>,
+    input: &Selection,
+    op: ComparisonOp,
+    expected: NumericLiteral,
+) -> Result<Selection> {
     filter_numeric_values(values, validity, input, |actual| {
         float64_value_matches(actual, op, expected)
     })
 }
 
+pub fn select_int64_values_view(
+    values: &[i64],
+    validity: ValidityView<'_>,
+    op: ComparisonOp,
+    expected: NumericLiteral,
+    selected_rows: &mut Vec<u32>,
+) -> Result<()> {
+    select_numeric_values(values, validity, selected_rows, |actual| {
+        int64_value_matches(actual, op, expected)
+    })
+}
+
+pub fn select_float64_values_view(
+    values: &[f64],
+    validity: ValidityView<'_>,
+    op: ComparisonOp,
+    expected: NumericLiteral,
+    selected_rows: &mut Vec<u32>,
+) -> Result<()> {
+    select_numeric_values(values, validity, selected_rows, |actual| {
+        float64_value_matches(actual, op, expected)
+    })
+}
+
+fn select_numeric_values<T: Copy>(
+    values: &[T],
+    validity: ValidityView<'_>,
+    selected_rows: &mut Vec<u32>,
+    mut matches: impl FnMut(T) -> bool,
+) -> Result<()> {
+    if values.len() != validity.len() {
+        return Err(SkeinError::Execution(format!(
+            "numeric selection has {} values and {} validity entries",
+            values.len(),
+            validity.len()
+        )));
+    }
+    if values.len() > u32::MAX as usize {
+        return Err(SkeinError::Execution(format!(
+            "numeric selection batch has {} rows, exceeding the u32 row index limit",
+            values.len()
+        )));
+    }
+    selected_rows.clear();
+    if selected_rows.capacity() < values.len() {
+        selected_rows.reserve(values.len());
+    }
+    match validity {
+        ValidityView::All { .. } => {
+            for (row, value) in values.iter().copied().enumerate() {
+                if matches(value) {
+                    selected_rows.push(row as u32);
+                }
+            }
+        }
+        ValidityView::Bitmap { .. } => {
+            for (row, value) in values.iter().copied().enumerate() {
+                if validity.is_valid(row) && matches(value) {
+                    selected_rows.push(row as u32);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn filter_numeric_values<T: Copy>(
     values: &[T],
-    validity: &Validity,
+    validity: ValidityView<'_>,
     input: &Selection,
     mut matches: impl FnMut(T) -> bool,
 ) -> Result<Selection> {
@@ -694,6 +842,25 @@ mod tests {
     }
 
     #[test]
+    fn validity_builder_reuses_bitmap_storage_between_batches() {
+        let mut builder = ValidityBuilder::with_capacity(130);
+        builder.push(false);
+        let words_ptr = builder.words.as_ptr();
+        let words_capacity = builder.words.capacity();
+
+        builder.clear();
+        builder.push(true);
+        builder.push(false);
+
+        assert_eq!(builder.words.as_ptr(), words_ptr);
+        assert_eq!(builder.words.capacity(), words_capacity);
+        let validity = builder.view();
+        assert!(!validity.is_empty());
+        assert!(validity.is_valid(0));
+        assert!(!validity.is_valid(1));
+    }
+
+    #[test]
     fn numeric_filter_preserves_null_and_nan_semantics() {
         let mut validity = ValidityBuilder::with_capacity(4);
         validity.push(true);
@@ -712,6 +879,36 @@ mod tests {
         .unwrap();
 
         assert_eq!(selection.iter().collect::<Vec<_>>(), vec![2, 3]);
+    }
+
+    #[test]
+    fn numeric_selection_reuses_row_index_storage() {
+        let mut selected_rows = Vec::new();
+        select_int64_values_view(
+            &[1, 2, 3, 4],
+            ValidityView::All { len: 4 },
+            ComparisonOp::Gte,
+            NumericLiteral::Int(3),
+            &mut selected_rows,
+        )
+        .unwrap();
+        assert_eq!(selected_rows, [2, 3]);
+        let rows_ptr = selected_rows.as_ptr();
+
+        select_int64_values_view(
+            &[5, 6, 7, 8],
+            ValidityView::Bitmap {
+                len: 4,
+                words: &[0b1101],
+            },
+            ComparisonOp::Lt,
+            NumericLiteral::Int(8),
+            &mut selected_rows,
+        )
+        .unwrap();
+
+        assert_eq!(selected_rows, [0, 2]);
+        assert_eq!(selected_rows.as_ptr(), rows_ptr);
     }
 
     #[test]

@@ -1,9 +1,7 @@
 use super::{schema_value_mismatch, NumericFragment};
 use crate::error::Result;
 use skein_core::Value;
-use skein_executor::columnar::{
-    float64_value_matches, int64_value_matches, Validity, ValidityBuilder,
-};
+use skein_executor::columnar::{ValidityBuilder, ValidityView};
 use skein_storage::NodeRecord;
 
 pub(super) fn admitted_numeric_batch_rows(
@@ -14,7 +12,10 @@ pub(super) fn admitted_numeric_batch_rows(
 ) -> Option<usize> {
     let value_bytes = std::mem::size_of::<f64>();
     let node_id_bytes = usize::from(needs_node_ids) * std::mem::size_of::<u64>();
-    let bytes_per_row = value_bytes.saturating_add(node_id_bytes);
+    let selection_bytes = std::mem::size_of::<u32>();
+    let bytes_per_row = value_bytes
+        .saturating_add(node_id_bytes)
+        .saturating_add(selection_bytes);
     let mut lower = 0usize;
     let mut upper = configured_rows;
     while lower < upper {
@@ -52,6 +53,7 @@ pub(super) enum NumericBatchValues<'batch> {
 }
 
 impl NumericBatchValues<'_> {
+    #[cfg(test)]
     pub(super) fn len(self) -> usize {
         match self {
             Self::Int(values) => values.len(),
@@ -95,35 +97,6 @@ impl NumericValueBuffer {
         }
     }
 
-    fn push_node_if_selected(
-        &mut self,
-        fragment: NumericFragment<'_>,
-        node_ids: &mut Option<Vec<u64>>,
-        node: &NodeRecord,
-    ) -> Result<()> {
-        match (self, node.properties.get(fragment.property)) {
-            (Self::Int(values), Some(Value::Int(value))) => {
-                if int64_value_matches(*value, fragment.op, fragment.expected) {
-                    if let Some(node_ids) = node_ids {
-                        node_ids.push(node.id.0);
-                    }
-                    values.push(*value);
-                }
-            }
-            (Self::Float(values), Some(Value::Float(value))) => {
-                if float64_value_matches(*value, fragment.op, fragment.expected) {
-                    if let Some(node_ids) = node_ids {
-                        node_ids.push(node.id.0);
-                    }
-                    values.push(*value);
-                }
-            }
-            (_, Some(Value::Null) | None) => {}
-            (_, Some(value)) => return Err(schema_value_mismatch(fragment, value)),
-        }
-        Ok(())
-    }
-
     fn push_node_value(
         &mut self,
         fragment: NumericFragment<'_>,
@@ -155,13 +128,7 @@ pub(super) struct NumericNodeBatch<'batch> {
     pub(super) input_rows: usize,
     pub(super) node_ids: Option<&'batch [u64]>,
     pub(super) values: NumericBatchValues<'batch>,
-}
-
-pub(super) struct OwnedNumericBatch<'batch> {
-    pub(super) input_rows: usize,
-    pub(super) node_ids: Option<&'batch [u64]>,
-    pub(super) values: NumericBatchValues<'batch>,
-    pub(super) validity: Validity,
+    pub(super) validity: ValidityView<'batch>,
 }
 
 pub(super) struct OwnedNumericBatchBuffer<'plan> {
@@ -207,17 +174,12 @@ impl<'plan> OwnedNumericBatchBuffer<'plan> {
         self.input_rows == 0
     }
 
-    pub(super) fn take_batch(&mut self) -> OwnedNumericBatch<'_> {
-        let validity = std::mem::replace(
-            &mut self.validity,
-            ValidityBuilder::with_capacity(self.batch_rows),
-        )
-        .finish();
-        OwnedNumericBatch {
+    pub(super) fn take_batch(&self) -> NumericNodeBatch<'_> {
+        NumericNodeBatch {
             input_rows: self.input_rows,
             node_ids: self.node_ids.as_deref(),
             values: self.values.view(),
-            validity,
+            validity: self.validity.view(),
         }
     }
 
@@ -227,7 +189,7 @@ impl<'plan> OwnedNumericBatchBuffer<'plan> {
             node_ids.clear();
         }
         self.values.clear();
-        self.validity = ValidityBuilder::with_capacity(self.batch_rows);
+        self.validity.clear();
     }
 }
 
@@ -240,6 +202,7 @@ where
     batch_rows: usize,
     node_ids: Option<Vec<u64>>,
     values: NumericValueBuffer,
+    validity: ValidityBuilder,
 }
 
 impl<'store, 'plan, I> NumericNodeBatchCursor<'store, 'plan, I>
@@ -258,12 +221,17 @@ where
             batch_rows,
             node_ids: needs_node_ids.then(|| Vec::with_capacity(batch_rows)),
             values: NumericValueBuffer::with_capacity(fragment.property_type, batch_rows),
+            validity: ValidityBuilder::with_capacity(batch_rows),
         }
     }
 
-    fn push_node_if_selected(&mut self, node: &NodeRecord) -> Result<()> {
-        self.values
-            .push_node_if_selected(self.fragment, &mut self.node_ids, node)
+    fn push_node_value(&mut self, node: &NodeRecord) -> Result<()> {
+        if let Some(node_ids) = &mut self.node_ids {
+            node_ids.push(node.id.0);
+        }
+        let valid = self.values.push_node_value(self.fragment, node)?;
+        self.validity.push(valid);
+        Ok(())
     }
 }
 
@@ -281,13 +249,14 @@ where
             node_ids.clear();
         }
         self.values.clear();
+        self.validity.clear();
         let mut input_rows = 0usize;
         for _ in 0..self.batch_rows {
             let Some(node) = self.nodes.next() else {
                 break;
             };
             input_rows = input_rows.saturating_add(1);
-            self.push_node_if_selected(node)?;
+            self.push_node_value(node)?;
         }
         if input_rows == 0 {
             return Ok(None);
@@ -296,6 +265,7 @@ where
             input_rows,
             node_ids: self.node_ids.as_deref(),
             values: self.values.view(),
+            validity: self.validity.view(),
         }))
     }
 }
@@ -308,10 +278,13 @@ mod tests {
 
     #[test]
     fn numeric_batch_admission_accounts_for_required_slots() {
-        assert_eq!(admitted_numeric_batch_rows(128, 80, false, false), Some(10));
-        assert_eq!(admitted_numeric_batch_rows(128, 80, true, false), Some(5));
-        assert_eq!(admitted_numeric_batch_rows(128, 7, false, false), None);
-        assert_eq!(admitted_numeric_batch_rows(128, 80, false, true), Some(9));
+        assert_eq!(
+            admitted_numeric_batch_rows(128, 120, false, false),
+            Some(10)
+        );
+        assert_eq!(admitted_numeric_batch_rows(128, 120, true, false), Some(6));
+        assert_eq!(admitted_numeric_batch_rows(128, 11, false, false), None);
+        assert_eq!(admitted_numeric_batch_rows(128, 120, false, true), Some(9));
     }
 
     #[test]
@@ -385,8 +358,10 @@ mod tests {
         let batch = cursor.next_batch().unwrap().unwrap();
         assert_eq!(batch.node_ids, None);
         assert_eq!(batch.input_rows, 2);
-        assert_eq!(batch.values.len(), 1);
-        assert_eq!(batch.values.value(0), Value::Float(2.5));
+        assert_eq!(batch.values.len(), 2);
+        assert_eq!(batch.values.value(1), Value::Float(2.5));
+        assert_eq!(batch.validity.valid_count(), 1);
+        assert!(!batch.validity.is_valid(0));
     }
 
     #[test]

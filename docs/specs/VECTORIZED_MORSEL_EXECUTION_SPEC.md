@@ -47,10 +47,16 @@ Eligibility MUST be decided before scanning. An unsupported fragment MUST use
 the existing row pipeline for the whole fragment; execution MUST NOT switch
 between row and columnar evaluation after emitting output.
 
-The in-memory adapter MUST borrow scan rows and materialize only selected
-projected output. The out-of-core adapter MAY own decoded records, but remains
-bounded by row and byte batch limits. A completed projection MUST NOT retain
-hidden node bindings that are outside the projected result scope.
+The in-memory adapter MUST borrow scan rows, retain only the admitted typed
+predicate column, optional node-id column, and validity for one batch, run the
+same typed selection kernel as the owned adapter, and materialize only selected
+projected output. The out-of-core adapter MAY own decoded records while filling
+that typed batch, but MUST drop each record before accepting the next one and
+remain bounded by row and byte batch limits. Both adapters MUST include the
+worst-case validity bitmap and selected-row index scratch in admission. The
+validity bitmap and selected-row buffers MUST be reused across batches. A
+completed projection MUST NOT retain hidden node bindings that are outside the
+projected result scope.
 
 ## Morsel Contract
 
