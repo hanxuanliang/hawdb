@@ -505,40 +505,6 @@ pub struct KnowledgeMemoryCompactingThreadProjectedListOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeThreadMessageListRequest {
-    pub thread_id: String,
-    pub limit: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeThreadMessageRow {
-    pub message_id: Option<String>,
-    pub node_id: u64,
-    pub relationship_id: u64,
-    pub role: Option<String>,
-    pub content: Option<String>,
-    pub order_index: Option<i64>,
-    pub relationship_order_index: Option<i64>,
-    pub message_order_index: Option<i64>,
-    pub timestamp: Option<Value>,
-    pub token_count: Option<i64>,
-    pub created_at: Option<Value>,
-    pub updated_at: Option<Value>,
-    pub metadata: Option<Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeThreadMessageListOutput {
-    pub graph_commit_epoch: u64,
-    pub thread_id: String,
-    pub thread_node_id: Option<u64>,
-    pub found: bool,
-    pub rows: Vec<KnowledgeThreadMessageRow>,
-    pub matched_count: usize,
-    pub returned_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeThreadMessageDeleteRequest {
     pub thread_id: String,
 }

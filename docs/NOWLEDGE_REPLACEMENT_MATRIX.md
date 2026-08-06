@@ -512,21 +512,20 @@ Nowledge cascade predicate over `public_thread_id`, `input_thread_id`, and
 `thread_uuid`, reports matched/deleted identity counts plus deleted node ids,
 deduplicates overlapping cascade matches, keeps missing cleanup read-only, and
 routes eligible deletes through the WAL-backed Cypher mutation path.
-Thread ordered message reads are covered by
-`Database::knowledge_thread_messages`. The typed read resolves one Thread id,
-scans outgoing `CONTAINS` Message edges, returns Message id/role/content/order
-index/timestamps/token count/metadata plus relationship id and relationship
-order index, orders by `COALESCE(c.order_index, m.order_index)`, supports
-bounded limits, reports found/matched/returned counts and the graph commit
-epoch, and does not write WAL.
+Thread ordered message reads use a pinned read transaction with a fixed exact
+Thread lookup followed by a fixed parameterized `CONTAINS` page query. The page
+projects only Message and relationship fields needed by the caller, orders by
+`COALESCE(r.order_index, m.order_index)`, and carries an explicit `LIMIT`, row
+budget, and payload budget. The read intentionally has no route-specific typed
+database API.
 Thread-owned Message cleanup is covered by
 `Database::delete_knowledge_thread_messages` for the Nowledge
 `MATCH (t:Thread {id})-[:CONTAINS]->(m:Message) DETACH DELETE m` shape. The
 typed facade validates Thread ids before WAL, reports missing Thread rows
 without writing, counts matched `CONTAINS` relationships and unique Message
-targets, preserves the Thread node, deletes only outgoing Message target nodes
-through the WAL-backed Cypher mutation path, and keeps empty-thread cleanup
-read-only.
+targets without materializing complete Message rows, preserves the Thread node,
+deletes only outgoing Message target nodes through the WAL-backed Cypher
+mutation path, and keeps empty-thread cleanup read-only.
 Thread compacted-memory reads are covered by
 `Database::knowledge_thread_compacted_memories`. The typed read resolves one
 Thread by physical `id` or logical `thread_id`, scans outgoing `COMPACTS_TO`

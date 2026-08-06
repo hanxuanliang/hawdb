@@ -633,10 +633,10 @@ Related Entity name reads are available as
 `Memory` id to distinct `Entity.name` reads and `Thread` `COMPACTS_TO`
 `Memory` to `MENTIONS` Entity name reads with bounded limits, missing Memory id
 reporting, Thread physical/logical identity support, and no WAL writes.
-Thread ordered message reads are available as
-`Database::knowledge_thread_messages`, covering Nowledge `Thread` outgoing
-`CONTAINS` transcript/list shapes with `COALESCE(c.order_index, m.order_index)`
-ordering and no WAL writes.
+Thread ordered message reads use fixed exact-Thread and bounded outgoing
+`CONTAINS` queries in one pinned read transaction, with
+`COALESCE(r.order_index, m.order_index)` ordering and no route-specific typed
+database API.
 Bounded Thread list and source reads use fixed parameterized Cypher covering
 Thread page, source lookup, normalized-space filtering, favorite metadata,
 id/thread-id bulk lookup, and message-count ranking shapes. The statement owns

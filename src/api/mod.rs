@@ -3026,13 +3026,6 @@ impl Database {
         knowledge_memory_compacting_thread_projected_list_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_thread_messages(
-        &self,
-        request: &KnowledgeThreadMessageListRequest,
-    ) -> Result<KnowledgeThreadMessageListOutput> {
-        knowledge_thread_messages_via_query_runtime(self, request)
-    }
-
     pub fn delete_knowledge_thread_messages(
         &mut self,
         request: &KnowledgeThreadMessageDeleteRequest,
@@ -13636,13 +13629,6 @@ fn value_to_non_negative_u64(value: &Value) -> Option<u64> {
     }
 }
 
-fn value_to_i64(value: &Value) -> Option<i64> {
-    match value {
-        Value::Int(value) => Some(*value),
-        _ => None,
-    }
-}
-
 fn value_to_bool(value: &Value) -> Option<bool> {
     match value {
         Value::Bool(value) => Some(*value),
@@ -16611,76 +16597,6 @@ fn compacting_thread_row_from_query(
     })
 }
 
-fn knowledge_thread_messages_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeThreadMessageListRequest,
-) -> Result<KnowledgeThreadMessageListOutput> {
-    if request.thread_id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge thread message read requires a non-empty thread id".to_string(),
-        ));
-    }
-    let graph_commit_epoch = db.store.commit_epoch();
-    let thread = knowledge_thread_message_thread_via_query_runtime(db, &request.thread_id)?;
-    let Some(thread) = thread else {
-        return Ok(KnowledgeThreadMessageListOutput {
-            graph_commit_epoch,
-            thread_id: request.thread_id.clone(),
-            thread_node_id: None,
-            found: false,
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-        });
-    };
-    let mut rows = thread_message_rows_via_query_runtime(db, thread.node_id)?;
-    let matched_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-    Ok(KnowledgeThreadMessageListOutput {
-        graph_commit_epoch,
-        thread_id: request.thread_id.clone(),
-        thread_node_id: Some(thread.node_id),
-        found: true,
-        rows,
-        matched_count,
-        returned_count,
-    })
-}
-
-fn knowledge_thread_message_thread_via_query_runtime(
-    db: &Database,
-    thread_id: &str,
-) -> Result<Option<KnowledgeEntity>> {
-    let parameters = BTreeMap::from([(
-        "thread_id".to_string(),
-        Value::String(thread_id.to_string()),
-    )]);
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (t:Thread {id: $thread_id}) \
-         RETURN t AS thread \
-         ORDER BY id(t) ASC \
-         LIMIT 1",
-        &parameters,
-        Some(1),
-    )?;
-    output
-        .rows
-        .first()
-        .map(|row| {
-            row.get("thread")
-                .and_then(knowledge_entity_from_value)
-                .ok_or_else(|| {
-                    SkeinError::Execution(
-                        "knowledge thread message row is missing thread map".to_string(),
-                    )
-                })
-        })
-        .transpose()
-}
-
 fn delete_knowledge_thread_messages_for(
     db: &mut Database,
     request: &KnowledgeThreadMessageDeleteRequest,
@@ -16712,13 +16628,9 @@ fn delete_knowledge_thread_messages_for(
     };
 
     let thread_node_id = thread.id;
-    let message_rows = thread_message_rows(&db.catalog, &db.store, thread_node_id)?;
-    let matched_relationship_count = message_rows.len();
-    let deleted_message_count = message_rows
-        .iter()
-        .map(|row| row.node_id)
-        .collect::<BTreeSet<_>>()
-        .len();
+    let message_node_ids = thread_message_node_ids(&db.catalog, &db.store, thread_node_id)?;
+    let matched_relationship_count = message_node_ids.len();
+    let deleted_message_count = message_node_ids.into_iter().collect::<BTreeSet<_>>().len();
 
     if deleted_message_count == 0 {
         return Ok(KnowledgeThreadMessageDeleteOutput {
@@ -16751,18 +16663,18 @@ fn delete_knowledge_thread_messages_for(
     })
 }
 
-fn thread_message_rows(
+fn thread_message_node_ids(
     catalog: &Catalog,
     store: &GraphStore,
     thread_node_id: NodeId,
-) -> Result<Vec<KnowledgeThreadMessageRow>> {
+) -> Result<Vec<u64>> {
     let Some(rel_type_id) = catalog.rel_type_id("CONTAINS") else {
         return Ok(Vec::new());
     };
     let Some(message_label_id) = catalog.label_id("Message") else {
         return Ok(Vec::new());
     };
-    let mut rows = Vec::new();
+    let mut node_ids = Vec::new();
     store.try_visit_adjacent_relationships_owned(
         thread_node_id,
         Some(rel_type_id),
@@ -16772,113 +16684,12 @@ fn thread_message_rows(
                 .node_owned(relationship.target)?
                 .filter(|message| message.labels.contains(&message_label_id))
             {
-                rows.push(thread_message_row(&message, &relationship));
+                node_ids.push(message.id.0);
             }
             Ok(crate::store::GraphScanControl::Continue)
         },
     )?;
-    rows.sort_by(|left, right| {
-        left.order_index
-            .cmp(&right.order_index)
-            .then_with(|| left.message_id.cmp(&right.message_id))
-            .then_with(|| left.relationship_id.cmp(&right.relationship_id))
-    });
-    Ok(rows)
-}
-
-fn thread_message_rows_via_query_runtime(
-    db: &Database,
-    thread_node_id: u64,
-) -> Result<Vec<KnowledgeThreadMessageRow>> {
-    let parameters = BTreeMap::from([(
-        "thread_node_id".to_string(),
-        Value::Int(i64::try_from(thread_node_id).map_err(|_| {
-            SkeinError::Execution("knowledge thread node id exceeds i64".to_string())
-        })?),
-    )]);
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (thread)-[relationship:CONTAINS]->(message:Message) \
-         WHERE id(thread) = $thread_node_id \
-         RETURN message AS message, relationship AS relationship, \
-         id(relationship) AS relationship_id",
-        &parameters,
-        None,
-    )?;
-    let mut rows = output
-        .rows
-        .iter()
-        .map(thread_message_row_from_query)
-        .collect::<Result<Vec<_>>>()?;
-    rows.sort_by(|left, right| {
-        left.order_index
-            .cmp(&right.order_index)
-            .then_with(|| left.message_id.cmp(&right.message_id))
-            .then_with(|| left.relationship_id.cmp(&right.relationship_id))
-    });
-    Ok(rows)
-}
-
-fn thread_message_row(message: &NodeRecord, relationship: &RelRecord) -> KnowledgeThreadMessageRow {
-    let relationship_order_index = relationship_integer_property(relationship, "order_index");
-    let message_order_index = integer_property(message, "order_index");
-    KnowledgeThreadMessageRow {
-        message_id: node_external_id(message),
-        node_id: message.id.0,
-        relationship_id: relationship.id.0,
-        role: string_property(message, "role"),
-        content: string_property(message, "content"),
-        order_index: relationship_order_index.or(message_order_index),
-        relationship_order_index,
-        message_order_index,
-        timestamp: message.properties.get("timestamp").cloned(),
-        token_count: integer_property(message, "token_count"),
-        created_at: message.properties.get("created_at").cloned(),
-        updated_at: message.properties.get("updated_at").cloned(),
-        metadata: message.properties.get("metadata").cloned(),
-    }
-}
-
-fn thread_message_row_from_query(row: &Row) -> Result<KnowledgeThreadMessageRow> {
-    let message = row
-        .get("message")
-        .and_then(knowledge_entity_from_value)
-        .ok_or_else(|| {
-            SkeinError::Execution("knowledge thread message row is missing message map".to_string())
-        })?;
-    let relationship = row
-        .get("relationship")
-        .and_then(value_to_map)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge thread message row is missing relationship map".to_string(),
-            )
-        })?;
-    let relationship_id = row
-        .get("relationship_id")
-        .and_then(value_to_non_negative_u64)
-        .or_else(|| relationship.get("_id").and_then(value_to_non_negative_u64))
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge thread message row is missing relationship_id".to_string(),
-            )
-        })?;
-    let relationship_order_index = relationship.get("order_index").and_then(value_to_i64);
-    let message_order_index = integer_property_value(&message.properties, "order_index");
-    Ok(KnowledgeThreadMessageRow {
-        message_id: knowledge_entity_id_property(&message),
-        node_id: message.node_id,
-        relationship_id,
-        role: string_property_value(&message.properties, "role"),
-        content: string_property_value(&message.properties, "content"),
-        order_index: relationship_order_index.or(message_order_index),
-        relationship_order_index,
-        message_order_index,
-        timestamp: message.properties.get("timestamp").cloned(),
-        token_count: integer_property_value(&message.properties, "token_count"),
-        created_at: message.properties.get("created_at").cloned(),
-        updated_at: message.properties.get("updated_at").cloned(),
-        metadata: message.properties.get("metadata").cloned(),
-    })
+    Ok(node_ids)
 }
 
 fn update_knowledge_label_lifecycle_batch_for(

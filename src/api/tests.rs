@@ -87,13 +87,13 @@ use super::{
     KnowledgeThreadDistillationCandidateRequest, KnowledgeThreadIdentityCascadeDeleteKeys,
     KnowledgeThreadIdentityDeleteRequest, KnowledgeThreadMessageCountBatchRequest,
     KnowledgeThreadMessageCountUpdate, KnowledgeThreadMessageDeleteRequest,
-    KnowledgeThreadMessageListRequest, KnowledgeThreadMetadataBatchRequest,
-    KnowledgeThreadMetadataUpdate, KnowledgeTraversalFallbackReasonCode,
-    KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphStatement,
-    PlanCacheBypassReason, PlanCacheLookup, QueryOutput, QueryStreamOptions, RecoveryMode,
-    SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
-    NOWLEDGE_DEEP_SEARCH_FILTERED_RANK_WINDOW, NOWLEDGE_DEEP_SEARCH_GRAPH_CONTEXT_MAX_HOPS,
-    NOWLEDGE_DEEP_SEARCH_MIN_GRAPH_SEED_LIMIT, NOWLEDGE_DEEP_SEARCH_MIN_RANK_WINDOW,
+    KnowledgeThreadMetadataBatchRequest, KnowledgeThreadMetadataUpdate,
+    KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
+    NowledgeGraphStatement, PlanCacheBypassReason, PlanCacheLookup, QueryOutput,
+    QueryStreamOptions, RecoveryMode, SearchProjectionGraphDeltaRequest,
+    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION, NOWLEDGE_DEEP_SEARCH_FILTERED_RANK_WINDOW,
+    NOWLEDGE_DEEP_SEARCH_GRAPH_CONTEXT_MAX_HOPS, NOWLEDGE_DEEP_SEARCH_MIN_GRAPH_SEED_LIMIT,
+    NOWLEDGE_DEEP_SEARCH_MIN_RANK_WINDOW,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{
@@ -190,6 +190,7 @@ mod statistics;
 mod storage_recovery;
 mod synthesized_source_reads;
 mod system_variables;
+mod thread_message_reads;
 mod thread_metadata_reads;
 mod transaction_control;
 mod transaction_merge;
@@ -8004,15 +8005,7 @@ fn deletes_thread_messages_for_nowledge_cleanup_shape() {
             .collect::<Vec<_>>(),
         vec![Value::String("message_other".to_string())]
     );
-    assert_eq!(
-        db.knowledge_thread_messages(&KnowledgeThreadMessageListRequest {
-            thread_id: "thread_1".to_string(),
-            limit: 0,
-        })
-        .unwrap()
-        .matched_count,
-        0
-    );
+    assert_eq!(test_thread_message_count(&db, "thread_1"), 0);
 
     let missing = db
         .delete_knowledge_thread_messages(&KnowledgeThreadMessageDeleteRequest {
@@ -9218,99 +9211,6 @@ fn memory_compacting_thread_read_rejects_empty_memory_ids() {
         })
         .unwrap_err();
     assert!(empty_item.to_string().contains("non-empty memory ids"));
-}
-
-#[test]
-fn reads_thread_messages_for_nowledge_ordered_transcript_shapes() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Thread {id: 'thread_1'})").unwrap();
-    db.query("CREATE (:Message {id: 'msg_1', role: 'user', content: 'first', order_index: 2, timestamp: 20, token_count: 3, created_at: 21, updated_at: 22, metadata: '{\"a\":1}'})")
-        .unwrap();
-    db.query("CREATE (:Message {id: 'msg_2', role: 'assistant', content: 'second', order_index: 1, timestamp: 10, token_count: 5, created_at: 11})")
-        .unwrap();
-    db.query("MATCH (t:Thread {id: 'thread_1'}), (m:Message {id: 'msg_1'}) CREATE (t)-[:CONTAINS {order_index: 1}]->(m)")
-        .unwrap();
-    db.query(
-        "MATCH (t:Thread {id: 'thread_1'}), (m:Message {id: 'msg_2'}) CREATE (t)-[:CONTAINS]->(m)",
-    )
-    .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let request = KnowledgeThreadMessageListRequest {
-        thread_id: "thread_1".to_string(),
-        limit: 0,
-    };
-    let output = db.knowledge_thread_messages(&request).unwrap();
-
-    assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert!(output.found);
-    assert_eq!(output.thread_id, "thread_1");
-    assert!(output.thread_node_id.is_some());
-    assert_eq!(output.matched_count, 2);
-    assert_eq!(output.returned_count, 2);
-    assert_eq!(output.rows[0].message_id.as_deref(), Some("msg_1"));
-    assert_eq!(output.rows[0].role.as_deref(), Some("user"));
-    assert_eq!(output.rows[0].content.as_deref(), Some("first"));
-    assert_eq!(output.rows[0].order_index, Some(1));
-    assert_eq!(output.rows[0].relationship_order_index, Some(1));
-    assert_eq!(output.rows[0].message_order_index, Some(2));
-    assert_eq!(output.rows[0].timestamp, Some(Value::Int(20)));
-    assert_eq!(output.rows[0].token_count, Some(3));
-    assert_eq!(output.rows[0].created_at, Some(Value::Int(21)));
-    assert_eq!(output.rows[0].updated_at, Some(Value::Int(22)));
-    assert_eq!(
-        output.rows[0].metadata,
-        Some(Value::String("{\"a\":1}".to_string()))
-    );
-    assert_eq!(output.rows[1].message_id.as_deref(), Some("msg_2"));
-    assert_eq!(output.rows[1].order_index, Some(1));
-    assert_eq!(output.rows[1].relationship_order_index, None);
-    assert_eq!(output.rows[1].message_order_index, Some(1));
-
-    let stats = db.plan_cache_stats();
-    let repeated = db.knowledge_thread_messages(&request).unwrap();
-    assert_eq!(repeated, output);
-    let repeated_stats = db.plan_cache_stats();
-    assert_eq!(repeated_stats.entries, stats.entries);
-    assert_eq!(repeated_stats.misses, stats.misses);
-    assert_eq!(repeated_stats.hits, stats.hits + 2);
-
-    let limited = db
-        .knowledge_thread_messages(&KnowledgeThreadMessageListRequest {
-            thread_id: "thread_1".to_string(),
-            limit: 1,
-        })
-        .unwrap();
-    assert_eq!(limited.matched_count, 2);
-    assert_eq!(limited.returned_count, 1);
-
-    let missing = db
-        .knowledge_thread_messages(&KnowledgeThreadMessageListRequest {
-            thread_id: "missing".to_string(),
-            limit: 10,
-        })
-        .unwrap();
-    assert!(!missing.found);
-    assert_eq!(missing.thread_node_id, None);
-    assert_eq!(missing.matched_count, 0);
-    assert_eq!(missing.returned_count, 0);
-}
-
-#[test]
-fn thread_message_read_rejects_empty_thread_id() {
-    let db = Database::new();
-    let error = db
-        .knowledge_thread_messages(&KnowledgeThreadMessageListRequest {
-            thread_id: String::new(),
-            limit: 10,
-        })
-        .unwrap_err();
-    assert!(error.to_string().contains("non-empty thread id"));
 }
 
 #[test]
@@ -11169,6 +11069,22 @@ fn test_thread_identity_exists(db: &Database, identity_key: &str) -> bool {
     .unwrap()
     .rows
     .is_empty()
+}
+
+fn test_thread_message_count(db: &Database, thread_id: &str) -> usize {
+    let parameters = BTreeMap::from([(
+        "thread_id".to_string(),
+        Value::String(thread_id.to_string()),
+    )]);
+    db.query_read_only_with_params_bounded(
+        "MATCH (t:Thread {id: $thread_id})-[:CONTAINS]->(m:Message) \
+         RETURN id(m) AS message_node_id",
+        &parameters,
+        None,
+    )
+    .unwrap()
+    .rows
+    .len()
 }
 
 fn unique_test_dir(name: &str) -> std::path::PathBuf {
