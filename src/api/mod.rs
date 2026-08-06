@@ -2537,13 +2537,6 @@ impl Database {
         knowledge_entity_batch_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_entity_mention_counts(
-        &self,
-        request: &KnowledgeEntityMentionCountListRequest,
-    ) -> Result<KnowledgeEntityMentionCountListOutput> {
-        knowledge_entity_mention_counts_via_query_runtime(self, request)
-    }
-
     pub fn knowledge_community_entity_visibility(
         &self,
         request: &KnowledgeCommunityEntityVisibilityRequest,
@@ -4841,106 +4834,6 @@ fn knowledge_scoped_entity_batch_for(
     })
 }
 
-fn knowledge_entity_mention_counts_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeEntityMentionCountListRequest,
-) -> Result<KnowledgeEntityMentionCountListOutput> {
-    validate_entity_mention_count_request(request)?;
-    let Some(entity_label_id) = catalog.label_id("Entity") else {
-        return Ok(KnowledgeEntityMentionCountListOutput {
-            graph_commit_epoch: store.commit_epoch(),
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-        });
-    };
-
-    let mut rows = Vec::new();
-    store.try_visit_nodes_owned(Some(entity_label_id), |entity| {
-        if let Some(row) = entity_mention_count_row(catalog, store, &entity)? {
-            rows.push(row);
-        }
-        Ok(crate::store::GraphScanControl::Continue)
-    })?;
-    rows.sort_by(compare_entity_mention_count_rows);
-    if let Some(cursor) = &request.cursor {
-        rows.retain(|row| {
-            row.mention_count < cursor.after_count
-                || (row.mention_count == cursor.after_count
-                    && row.name.as_str() > cursor.after_name.as_str())
-        });
-    }
-    let matched_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-
-    Ok(KnowledgeEntityMentionCountListOutput {
-        graph_commit_epoch: store.commit_epoch(),
-        rows,
-        matched_count,
-        returned_count,
-    })
-}
-
-fn knowledge_entity_mention_counts_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeEntityMentionCountListRequest,
-) -> Result<KnowledgeEntityMentionCountListOutput> {
-    validate_entity_mention_count_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (e:Entity) \
-         WHERE e.id IS NOT NULL AND e.name IS NOT NULL \
-         OPTIONAL MATCH (m:Memory)-[r:MENTIONS]->(e) \
-         WITH e, count(r) AS mention_count \
-         RETURN e.id AS entity_id, id(e) AS node_id, e.name AS name, \
-         e.updated_at AS updated_at, mention_count AS mention_count",
-        &BTreeMap::new(),
-        None,
-    )?;
-    let mut rows = output
-        .rows
-        .iter()
-        .map(knowledge_entity_mention_count_row_from_query)
-        .collect::<Result<Vec<_>>>()?;
-    rows.sort_by(compare_entity_mention_count_rows);
-    if let Some(cursor) = &request.cursor {
-        rows.retain(|row| {
-            row.mention_count < cursor.after_count
-                || (row.mention_count == cursor.after_count
-                    && row.name.as_str() > cursor.after_name.as_str())
-        });
-    }
-    let matched_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-
-    Ok(KnowledgeEntityMentionCountListOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        returned_count,
-    })
-}
-
-fn validate_entity_mention_count_request(
-    request: &KnowledgeEntityMentionCountListRequest,
-) -> Result<()> {
-    if let Some(cursor) = &request.cursor
-        && cursor.after_name.is_empty()
-    {
-        return Err(SkeinError::Semantic(
-            "knowledge entity mention count cursor requires a non-empty after_name".to_string(),
-        ));
-    }
-    Ok(())
-}
-
 fn knowledge_entity_delete_guard_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -5193,101 +5086,6 @@ fn entity_delete_guard_distinct_relationship_count(
         },
     )?;
     Ok(incident_relationships.len() + incoming_relationships.len())
-}
-
-fn entity_mention_count_row(
-    catalog: &Catalog,
-    store: &GraphStore,
-    entity: &NodeRecord,
-) -> Result<Option<KnowledgeEntityMentionCountRow>> {
-    let Some(entity_id) = node_external_id(entity) else {
-        return Ok(None);
-    };
-    let Some(name) = string_property(entity, "name") else {
-        return Ok(None);
-    };
-    Ok(Some(KnowledgeEntityMentionCountRow {
-        entity_id,
-        node_id: entity.id.0,
-        name,
-        updated_at: entity.properties.get("updated_at").cloned(),
-        mention_count: memory_mention_count_for_entity(catalog, store, entity.id)?,
-    }))
-}
-
-fn knowledge_entity_mention_count_row_from_query(
-    row: &Row,
-) -> Result<KnowledgeEntityMentionCountRow> {
-    let entity_id = optional_string_cell(row, "entity_id").ok_or_else(|| {
-        SkeinError::Execution("knowledge entity mention count row is missing entity_id".to_string())
-    })?;
-    let node_id = row
-        .get("node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge entity mention count row is missing node_id".to_string(),
-            )
-        })?;
-    let name = optional_string_cell(row, "name").ok_or_else(|| {
-        SkeinError::Execution("knowledge entity mention count row is missing name".to_string())
-    })?;
-    let mention_count = row
-        .get("mention_count")
-        .and_then(value_to_non_negative_usize)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge entity mention count row is missing mention_count".to_string(),
-            )
-        })?;
-    Ok(KnowledgeEntityMentionCountRow {
-        entity_id,
-        node_id,
-        name,
-        updated_at: optional_value_cell(row, "updated_at"),
-        mention_count,
-    })
-}
-
-fn memory_mention_count_for_entity(
-    catalog: &Catalog,
-    store: &GraphStore,
-    entity_node_id: NodeId,
-) -> Result<usize> {
-    let Some(rel_type_id) = catalog.rel_type_id("MENTIONS") else {
-        return Ok(0);
-    };
-    let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Ok(0);
-    };
-    let mut count = 0usize;
-    store.try_visit_adjacent_relationships_owned(
-        entity_node_id,
-        Some(rel_type_id),
-        AdjacencyDirection::Incoming,
-        |relationship| {
-            if store
-                .node_owned(relationship.source)?
-                .is_some_and(|memory| memory.labels.contains(&memory_label_id))
-            {
-                count = count.saturating_add(1);
-            }
-            Ok(crate::store::GraphScanControl::Continue)
-        },
-    )?;
-    Ok(count)
-}
-
-fn compare_entity_mention_count_rows(
-    left: &KnowledgeEntityMentionCountRow,
-    right: &KnowledgeEntityMentionCountRow,
-) -> std::cmp::Ordering {
-    right
-        .mention_count
-        .cmp(&left.mention_count)
-        .then_with(|| left.name.cmp(&right.name))
-        .then_with(|| left.entity_id.cmp(&right.entity_id))
-        .then_with(|| left.node_id.cmp(&right.node_id))
 }
 
 fn knowledge_community_entity_visibility_for(
@@ -21407,13 +21205,6 @@ impl DatabaseReadTransaction {
         request: &KnowledgeEntityBatchRequest,
     ) -> Result<KnowledgeEntityBatchOutput> {
         knowledge_entity_batch_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_entity_mention_counts(
-        &self,
-        request: &KnowledgeEntityMentionCountListRequest,
-    ) -> Result<KnowledgeEntityMentionCountListOutput> {
-        knowledge_entity_mention_counts_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_community_entity_visibility(

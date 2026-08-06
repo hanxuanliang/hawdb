@@ -301,13 +301,11 @@ Memory with explicit Memory/Entity labels, node and relationship projection,
 deterministic ordering, `LIMIT`, a matching row budget, and a shared pinned
 snapshot. Grouping, missing-id handling, and distinct-name shaping stay in the
 host; no route-specific typed database API is exposed.
-Entity mention-count list reads are covered by
-`Database::knowledge_entity_mention_counts`. The typed read scans only `Entity`
-nodes with non-empty `id` and `name`, counts incoming `MENTIONS` relationships
-from `Memory` nodes while preserving zero-mention Entities, returns
-id/name/updated_at/mention_count rows ordered by mention count descending then
-name ascending, supports the Nowledge cursor predicate over count/name,
-bounded limits, read-transaction snapshots, and no WAL writes.
+Entity mention-count lists use separate fixed parameterized Cypher statements
+for the first page and cursor pages. Both scan only named, id-bearing `Entity`
+nodes, preserve zero-mention Entities, count incoming `Memory` `MENTIONS`, use
+deterministic ordering, apply `LIMIT` with a matching row budget, and run on a
+pinned read transaction. No route-specific typed read API is exposed.
 REST write Entity delete guards are covered by
 `Database::knowledge_entity_delete_guard`. The typed read resolves one
 `Entity.id`, returns the Nowledge pre-delete counts for other Memory mentions,

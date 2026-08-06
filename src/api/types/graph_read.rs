@@ -275,35 +275,6 @@ pub struct KnowledgeEntityBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeEntityMentionCountCursor {
-    pub after_count: usize,
-    pub after_name: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeEntityMentionCountListRequest {
-    pub cursor: Option<KnowledgeEntityMentionCountCursor>,
-    pub limit: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeEntityMentionCountRow {
-    pub entity_id: String,
-    pub node_id: u64,
-    pub name: String,
-    pub updated_at: Option<Value>,
-    pub mention_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeEntityMentionCountListOutput {
-    pub graph_commit_epoch: u64,
-    pub rows: Vec<KnowledgeEntityMentionCountRow>,
-    pub matched_count: usize,
-    pub returned_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCommunityEntityVisibilityRequest {
     pub community_ids: Vec<Value>,
     pub limit: usize,

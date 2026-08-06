@@ -575,12 +575,11 @@ Memory entity mention reads use one fixed parameterized Cypher statement per
 Memory with explicit projection, deterministic ordering, `LIMIT`, a matching
 row budget, and a shared pinned snapshot. Grouping, missing-id handling, and
 distinct-name shaping remain outside the embedded database facade.
-Entity mention-count list reads are available as
-`Database::knowledge_entity_mention_counts`, covering Nowledge wiki Entity
-listing and cursor shapes with non-empty Entity id/name filtering, incoming
-`Memory` `MENTIONS` counts including zero-mention Entities, mention-count/name
-ordering, cursor pagination, pinned read-transaction snapshots, and no WAL
-writes.
+Entity mention-count list reads use separate fixed parameterized Cypher
+statements for first-page and cursor shapes, with non-empty Entity id/name
+filtering, incoming `Memory` `MENTIONS` counts including zero-mention Entities,
+deterministic ordering, bounded limits, pinned read-transaction snapshots, and
+no WAL writes. No route-specific typed read API is exposed.
 Community Entity visibility reads are available as
 `Database::knowledge_community_entity_visibility`, covering the Nowledge wiki
 community anchor row shape for Entity nodes in explicit communities plus
