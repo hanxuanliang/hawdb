@@ -1,8 +1,4 @@
-use crate::api::{
-    KnowledgeEntityDetailsOutput, KnowledgeEntityDetailsRequest, KnowledgeInducedEdgeListOutput,
-    KnowledgeInducedEdgeListRequest, KnowledgeMemoryPrefixOwnershipOutput,
-    KnowledgeMemoryPrefixOwnershipRequest, KnowledgeSubgraphOutput, KnowledgeSubgraphRequest,
-};
+use crate::api::KnowledgeInducedEdgeListRequest;
 use crate::search::{
     AdaptiveVectorSearchOptions, CompressedVectorSearchMode, SearchCandidateSetReport,
     SearchFallbackReasonCode, SearchFusionWeights, SearchLexicalProductionQualificationReport,
@@ -27,9 +23,8 @@ use crate::{
     KnowledgeEntityDeleteBatchRequest, KnowledgeMemoryEvolvesCreateBatchOutput,
     KnowledgeMemoryEvolvesCreateBatchRequest, KnowledgeMemoryLifecycleBatchOutput,
     KnowledgeMemoryLifecycleBatchRequest, KnowledgeRetrievalOutput, KnowledgeRetrievalRequest,
-    KnowledgeSourceCandidateScanOutput, KnowledgeSourceCandidateScanRequest, LocalQosPolicy,
-    LocalQosScheduler, LocalQosState, NowledgeGraphStatement, PlanCacheLookup, QueryOutput,
-    QueryStreamOptions, QueryStreamReport, ReadExecutionProfile, Result,
+    LocalQosPolicy, LocalQosScheduler, LocalQosState, NowledgeGraphStatement, PlanCacheLookup,
+    QueryOutput, QueryStreamOptions, QueryStreamReport, ReadExecutionProfile, Result,
     ScheduledSearchProjectionCatchUpReport, SearchDocument, SearchIndex,
     SearchProjectionCatchUpReport, SearchProjectionChangefeedReadiness,
     SearchProjectionChangefeedStatus, SearchProjectionDelta, SearchProjectionDeltaReport,
@@ -7993,66 +7988,6 @@ impl NowledgeMemEmbeddedStoreHandle {
         }
     }
 
-    pub fn knowledge_source_candidates(
-        &self,
-        request: &KnowledgeSourceCandidateScanRequest,
-    ) -> Result<KnowledgeSourceCandidateScanOutput> {
-        let _permit = self.admit_typed_query()?;
-        self.read_store()?
-            .graph
-            .database()
-            .knowledge_source_candidates(request)
-    }
-
-    /// Reads a bounded graph subgraph through the embedded query runtime.
-    pub fn knowledge_subgraph(
-        &self,
-        request: &KnowledgeSubgraphRequest,
-    ) -> Result<KnowledgeSubgraphOutput> {
-        let _permit = self.admit_typed_query()?;
-        self.read_store()?
-            .graph
-            .database()
-            .knowledge_subgraph(request)
-    }
-
-    /// Reads relationships induced by a bounded external-id set through the
-    /// embedded query runtime.
-    pub fn knowledge_induced_edges(
-        &self,
-        request: &KnowledgeInducedEdgeListRequest,
-    ) -> Result<KnowledgeInducedEdgeListOutput> {
-        let _permit = self.admit_typed_query()?;
-        self.read_store()?
-            .graph
-            .database()
-            .knowledge_induced_edges(request)
-    }
-
-    /// Resolves a Memory id prefix through the embedded query runtime. Hosts
-    /// use the result to preserve exact-first, unique-prefix reference rules.
-    pub fn knowledge_memory_prefix_ownership(
-        &self,
-        request: &KnowledgeMemoryPrefixOwnershipRequest,
-    ) -> Result<KnowledgeMemoryPrefixOwnershipOutput> {
-        let _permit = self.admit_typed_query()?;
-        self.read_store()?
-            .graph
-            .database()
-            .knowledge_memory_prefix_ownership(request)
-    }
-
-    pub fn knowledge_entity_details(
-        &self,
-        request: &KnowledgeEntityDetailsRequest,
-    ) -> Result<KnowledgeEntityDetailsOutput> {
-        let _permit = self.admit_typed_query()?;
-        self.read_store()?
-            .graph
-            .database()
-            .knowledge_entity_details(request)
-    }
-
     pub fn create_knowledge_memory_evolves_batch(
         &self,
         request: &KnowledgeMemoryEvolvesCreateBatchRequest,
@@ -8683,30 +8618,6 @@ impl NowledgeMemEmbeddedStoreHandle {
             RuntimeWorkRequest::foreground_query(memory_bytes, result_bytes)
                 .with_io_slots(io_slots)
                 .with_blocking(true),
-        )
-    }
-
-    fn admit_typed_query(&self) -> Result<RuntimePermit> {
-        let store = self.read_store()?;
-        let config = store.graph.database().config();
-        let result_bytes = config
-            .max_read_result_payload_bytes
-            .ok_or_else(|| {
-                SkeinError::Execution(
-                    "admitted typed query requires max_read_result_payload_bytes".to_string(),
-                )
-            })
-            .and_then(|bytes| {
-                u64::try_from(bytes).map_err(|_| {
-                    SkeinError::Execution(
-                        "admitted typed query result budget exceeds u64".to_string(),
-                    )
-                })
-            })?;
-        let memory_bytes = u64::try_from(config.execution_memory.blocking_operator_bytes.get())
-            .unwrap_or(u64::MAX);
-        store.graph.try_admit_runtime(
-            RuntimeWorkRequest::foreground_query(memory_bytes, result_bytes).with_blocking(true),
         )
     }
 

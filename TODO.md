@@ -73,19 +73,28 @@ and algorithms outside active routes are not implied backlog items.
 
 ## P1: Runtime And Availability Hardening
 
+- [ ] Complete the query-first public API convergence.
+  - Migrate the remaining single-query `Database::knowledge_*` compatibility
+    wrappers and their tests to parameterized Cypher.
+  - Add bounded `system.*` tables before removing any remaining typed catalog,
+    statistics, runtime, or projection introspection surface.
+  - Remove route-only request/output DTOs and the `skein-api-types` crate after
+    the workspace and the Mem host have no remaining references.
+  - Preserve typed APIs for grouped WAL atomicity, recovery, admission,
+    generation publication, and bounded multi-statement workflows.
+
 - [ ] Qualify default parallel morsel execution on production-shaped workloads.
   - Require higher throughput without a p99, peak RSS, cancellation-latency, or
     foreground-admission regression across 4, 8, and 16 workers.
 
 - [ ] Close the remaining blocking-operator availability gaps for active
   workloads.
-  - Capture route evidence for high-cardinality `DISTINCT` and Cartesian build
-    sides before adding storage complexity.
-  - If active workloads exceed the in-memory budget, add byte- and run-bounded
-    external distinct and a partitioned product/join strategy.
-  - Otherwise encode the accepted route-bound admission limit and stable
-    resource error in readiness evidence.
-  - Do not weaken the existing blocking-operator memory limit.
+  - Capture production-route evidence for high-cardinality `DISTINCT` and
+    Cartesian build sides through `run_production_blocking_qualification`.
+  - Require the existing ordered distinct spill and partitioned Cartesian build
+    spill to remain within byte, run, cleanup, and admission limits.
+  - Accept an in-memory result only when route-bound evidence proves it remains
+    within admission; do not weaken the blocking-operator memory limit.
 
 ## P2: Deferred Delivery Governance
 

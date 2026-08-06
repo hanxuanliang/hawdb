@@ -102,13 +102,19 @@ impl Database {
         max_rows: Option<usize>,
     ) -> Result<QueryOutput> {
         let max_rows = super::restrictive_query_limit(self.config.max_read_result_rows, max_rows);
+        let plan_cache_stats = self.plan_cache.borrow().stats();
+        let slow_queries = self.slow_query_log.borrow().snapshot();
+        let statement_summaries = self.statement_summary.borrow().snapshot();
         system_sql::query_sql(
             sql_text,
             max_rows,
             self.config.max_read_result_payload_bytes,
-            &self.plan_cache.borrow().stats(),
-            &self.slow_query_log.borrow().snapshot(),
-            &self.statement_summary.borrow().snapshot(),
+            &system_sql::SystemSqlContext {
+                catalog: &self.catalog,
+                plan_cache_stats: &plan_cache_stats,
+                slow_queries: &slow_queries,
+                statement_summaries: &statement_summaries,
+            },
         )
     }
 

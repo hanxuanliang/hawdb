@@ -104,6 +104,27 @@ unavailable query produces the same typed `CapabilityUnavailable` error rather
 than an unknown-syntax error. Core storage, WAL, recovery, parameterized Cypher,
 and incremental base indexes are never optional features.
 
+## Public Query Surface
+
+Application graph reads and writes MUST use parameterized Cypher through an
+admitted embedded query entrypoint. Catalog and operational introspection MUST
+use bounded read-only SQL over `system.*` tables when the information is
+representable as rows. The initial catalog tables are `system.tables`,
+`system.properties`, `system.indexes`, and `system.constraints`; the existing
+observability tables are `system.plan_cache`, `system.slow_queries`, and
+`system.statement_summary`.
+
+The live database and a pinned read transaction MUST execute the same system
+SQL surface against their respective catalog snapshots. A read transaction MUST
+NOT expose a second route-shaped catalog getter surface that can drift from SQL
+filtering, projection, ordering, row limits, or payload limits.
+
+A typed Rust operation remains appropriate only when it owns a stable contract
+that cannot be represented safely by one statement, including grouped WAL
+atomicity, recovery, runtime admission, projection generation publication, or a
+bounded multi-statement workflow. New single-query route wrappers and their
+request/output DTOs MUST NOT be added to the embedded facade.
+
 ## Concurrency Model
 
 Skein MUST support concurrent readers and a concurrent writer through

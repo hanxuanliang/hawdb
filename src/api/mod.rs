@@ -12,8 +12,12 @@ use crate::qos::{
     WorkPriority, WorkRequest,
 };
 use crate::schema::{
-    BasicGraphStatistics, Catalog, CompositeIndexDescriptor, ConstraintDescriptor, GraphStatistics,
-    IndexDescriptor, IndexKind, LabelId, PropertyDescriptor, RelTypeId, SchemaObjectState,
+    BasicGraphStatistics, Catalog, GraphStatistics, IndexKind, LabelId, RelTypeId,
+    SchemaObjectState,
+};
+#[cfg(test)]
+use crate::schema::{
+    CompositeIndexDescriptor, ConstraintDescriptor, IndexDescriptor, PropertyDescriptor,
     TableDescriptor,
 };
 use crate::search::{
@@ -1592,11 +1596,13 @@ impl Database {
         self.store.property_index_consistency_report()
     }
 
-    pub fn property_indexes(&self) -> Vec<IndexDescriptor> {
+    #[cfg(test)]
+    pub(crate) fn property_indexes(&self) -> Vec<IndexDescriptor> {
         self.catalog.property_indexes().cloned().collect()
     }
 
-    pub fn composite_property_indexes(&self) -> Vec<CompositeIndexDescriptor> {
+    #[cfg(test)]
+    pub(crate) fn composite_property_indexes(&self) -> Vec<CompositeIndexDescriptor> {
         self.catalog.composite_property_indexes().cloned().collect()
     }
 
@@ -1698,36 +1704,42 @@ impl Database {
         result
     }
 
-    pub fn unique_constraints(&self) -> Vec<ConstraintDescriptor> {
+    #[cfg(test)]
+    pub(crate) fn unique_constraints(&self) -> Vec<ConstraintDescriptor> {
         self.catalog.unique_constraints().cloned().collect()
     }
 
-    pub fn node_property_exists_constraints(&self) -> Vec<ConstraintDescriptor> {
+    #[cfg(test)]
+    pub(crate) fn node_property_exists_constraints(&self) -> Vec<ConstraintDescriptor> {
         self.catalog
             .node_property_exists_constraints()
             .cloned()
             .collect()
     }
 
-    pub fn relationship_property_exists_constraints(&self) -> Vec<ConstraintDescriptor> {
+    #[cfg(test)]
+    pub(crate) fn relationship_property_exists_constraints(&self) -> Vec<ConstraintDescriptor> {
         self.catalog
             .relationship_property_exists_constraints()
             .cloned()
             .collect()
     }
 
-    pub fn relationship_unique_constraints(&self) -> Vec<ConstraintDescriptor> {
+    #[cfg(test)]
+    pub(crate) fn relationship_unique_constraints(&self) -> Vec<ConstraintDescriptor> {
         self.catalog
             .relationship_unique_constraints()
             .cloned()
             .collect()
     }
 
-    pub fn table_descriptors(&self) -> Vec<TableDescriptor> {
+    #[cfg(test)]
+    pub(crate) fn table_descriptors(&self) -> Vec<TableDescriptor> {
         self.catalog.table_descriptors().cloned().collect()
     }
 
-    pub fn property_descriptors(&self) -> Vec<PropertyDescriptor> {
+    #[cfg(test)]
+    pub(crate) fn property_descriptors(&self) -> Vec<PropertyDescriptor> {
         self.catalog.property_descriptors().cloned().collect()
     }
 
@@ -31914,9 +31926,12 @@ impl DatabaseReadTransaction {
             sql_text,
             max_rows,
             self.config.max_read_result_payload_bytes,
-            &self.plan_cache.borrow().stats(),
-            &self.slow_query_snapshot,
-            &self.statement_summary_snapshot,
+            &system_sql::SystemSqlContext {
+                catalog: &self.catalog,
+                plan_cache_stats: &self.plan_cache.borrow().stats(),
+                slow_queries: &self.slow_query_snapshot,
+                statement_summaries: &self.statement_summary_snapshot,
+            },
         )
     }
 
@@ -32475,47 +32490,6 @@ impl DatabaseReadTransaction {
 
     pub fn basic_statistics(&self) -> BasicGraphStatistics {
         self.store.basic_statistics()
-    }
-
-    pub fn property_indexes(&self) -> Vec<IndexDescriptor> {
-        self.catalog.property_indexes().cloned().collect()
-    }
-
-    pub fn composite_property_indexes(&self) -> Vec<CompositeIndexDescriptor> {
-        self.catalog.composite_property_indexes().cloned().collect()
-    }
-
-    pub fn unique_constraints(&self) -> Vec<ConstraintDescriptor> {
-        self.catalog.unique_constraints().cloned().collect()
-    }
-
-    pub fn node_property_exists_constraints(&self) -> Vec<ConstraintDescriptor> {
-        self.catalog
-            .node_property_exists_constraints()
-            .cloned()
-            .collect()
-    }
-
-    pub fn relationship_property_exists_constraints(&self) -> Vec<ConstraintDescriptor> {
-        self.catalog
-            .relationship_property_exists_constraints()
-            .cloned()
-            .collect()
-    }
-
-    pub fn relationship_unique_constraints(&self) -> Vec<ConstraintDescriptor> {
-        self.catalog
-            .relationship_unique_constraints()
-            .cloned()
-            .collect()
-    }
-
-    pub fn table_descriptors(&self) -> Vec<TableDescriptor> {
-        self.catalog.table_descriptors().cloned().collect()
-    }
-
-    pub fn property_descriptors(&self) -> Vec<PropertyDescriptor> {
-        self.catalog.property_descriptors().cloned().collect()
     }
 }
 

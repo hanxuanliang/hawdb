@@ -1,6 +1,10 @@
 use super::{PlanCacheStats, QueryOutput};
 use crate::error::{Result, SkeinError};
 use crate::executor::Row;
+use crate::schema::{
+    Catalog, ConstraintKind, ConstraintSubject, IndexKind, PropertyType, SchemaObjectState,
+    TableKind,
+};
 use crate::sql::{
     parse_postgres_sql, SelectProjection, SelectStatement, SqlColumnRef, SqlComparisonOp,
     SqlOrderDirection, SqlPredicate, SqlStatement,
@@ -97,6 +101,13 @@ pub(crate) struct StatementSummary {
     insertion_order: VecDeque<String>,
 }
 
+pub(crate) struct SystemSqlContext<'a> {
+    pub(crate) catalog: &'a Catalog,
+    pub(crate) plan_cache_stats: &'a PlanCacheStats,
+    pub(crate) slow_queries: &'a [SlowQueryRecord],
+    pub(crate) statement_summaries: &'a [StatementSummaryRecord],
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SqlLogicalPlan {
     SystemTableScan(SystemTableScan),
@@ -119,6 +130,10 @@ pub(crate) struct SystemTableScan {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SystemTable {
+    Tables,
+    Properties,
+    Indexes,
+    Constraints,
     PlanCache,
     SlowQueries,
     StatementSummary,
@@ -417,19 +432,11 @@ pub(crate) fn query_sql(
     sql_text: &str,
     max_rows: Option<usize>,
     max_payload_bytes: Option<usize>,
-    plan_cache_stats: &PlanCacheStats,
-    slow_queries: &[SlowQueryRecord],
-    statement_summaries: &[StatementSummaryRecord],
+    context: &SystemSqlContext<'_>,
 ) -> Result<QueryOutput> {
     let logical = plan_sql(sql_text)?;
     let physical = optimize_sql(logical);
-    let rows = execute_sql(
-        physical,
-        plan_cache_stats,
-        slow_queries,
-        statement_summaries,
-        max_rows,
-    )?;
+    let rows = execute_sql(physical, context, max_rows)?;
     let payload_bytes = rows.iter().fold(0usize, |total, row| {
         total.saturating_add(crate::executor::map_payload_bytes(row))
     });
@@ -466,33 +473,29 @@ fn optimize_sql(logical: SqlLogicalPlan) -> SqlPhysicalPlan {
 
 fn execute_sql(
     physical: SqlPhysicalPlan,
-    plan_cache_stats: &PlanCacheStats,
-    slow_queries: &[SlowQueryRecord],
-    statement_summaries: &[StatementSummaryRecord],
+    context: &SystemSqlContext<'_>,
     max_rows: Option<usize>,
 ) -> Result<Vec<Row>> {
     match physical {
-        SqlPhysicalPlan::SystemTableScanExec(scan) => execute_system_table_scan(
-            scan,
-            plan_cache_stats,
-            slow_queries,
-            statement_summaries,
-            max_rows,
-        ),
+        SqlPhysicalPlan::SystemTableScanExec(scan) => {
+            execute_system_table_scan(scan, context, max_rows)
+        }
     }
 }
 
 fn execute_system_table_scan(
     scan: SystemTableScan,
-    plan_cache_stats: &PlanCacheStats,
-    slow_queries: &[SlowQueryRecord],
-    statement_summaries: &[StatementSummaryRecord],
+    context: &SystemSqlContext<'_>,
     max_rows: Option<usize>,
 ) -> Result<Vec<Row>> {
     let mut rows = match scan.table {
-        SystemTable::PlanCache => plan_cache_rows(plan_cache_stats),
-        SystemTable::SlowQueries => slow_query_rows(slow_queries),
-        SystemTable::StatementSummary => statement_summary_rows(statement_summaries),
+        SystemTable::Tables => table_rows(context.catalog),
+        SystemTable::Properties => property_rows(context.catalog),
+        SystemTable::Indexes => index_rows(context.catalog),
+        SystemTable::Constraints => constraint_rows(context.catalog),
+        SystemTable::PlanCache => plan_cache_rows(context.plan_cache_stats),
+        SystemTable::SlowQueries => slow_query_rows(context.slow_queries),
+        SystemTable::StatementSummary => statement_summary_rows(context.statement_summaries),
     };
 
     if let Some(predicate) = &scan.predicate {
@@ -558,6 +561,218 @@ fn project_rows(rows: Vec<Row>, projection: &[SelectProjection]) -> Result<Vec<R
                 .collect()
         })
         .collect()
+}
+
+fn table_rows(catalog: &Catalog) -> Vec<Row> {
+    catalog
+        .table_descriptors()
+        .map(|table| {
+            BTreeMap::from([
+                ("table_id".to_string(), u32_value(table.id.0)),
+                ("table_name".to_string(), Value::String(table.name.clone())),
+                (
+                    "table_kind".to_string(),
+                    Value::String(table_kind_name(table.kind).to_string()),
+                ),
+                (
+                    "state".to_string(),
+                    Value::String(schema_object_state_name(table.state).to_string()),
+                ),
+            ])
+        })
+        .collect()
+}
+
+fn property_rows(catalog: &Catalog) -> Vec<Row> {
+    catalog
+        .property_descriptors()
+        .map(|property| {
+            let table = catalog.table_descriptor(property.table_id);
+            BTreeMap::from([
+                ("property_id".to_string(), u32_value(property.id.0)),
+                ("table_id".to_string(), u32_value(property.table_id.0)),
+                (
+                    "table_name".to_string(),
+                    table
+                        .map(|table| Value::String(table.name.clone()))
+                        .unwrap_or(Value::Null),
+                ),
+                (
+                    "table_kind".to_string(),
+                    table
+                        .map(|table| Value::String(table_kind_name(table.kind).to_string()))
+                        .unwrap_or(Value::Null),
+                ),
+                (
+                    "property_name".to_string(),
+                    Value::String(property.name.clone()),
+                ),
+                (
+                    "value_type".to_string(),
+                    Value::String(property_type_name(property.value_type).to_string()),
+                ),
+                ("nullable".to_string(), Value::Bool(property.nullable)),
+                (
+                    "state".to_string(),
+                    Value::String(schema_object_state_name(property.state).to_string()),
+                ),
+            ])
+        })
+        .collect()
+}
+
+fn index_rows(catalog: &Catalog) -> Vec<Row> {
+    let mut rows = catalog
+        .property_indexes()
+        .map(|index| {
+            BTreeMap::from([
+                ("index_id".to_string(), u32_value(index.id.0)),
+                (
+                    "subject_kind".to_string(),
+                    Value::String("node".to_string()),
+                ),
+                ("subject_id".to_string(), u32_value(index.label_id.0)),
+                (
+                    "subject_name".to_string(),
+                    optional_string_value(catalog.label_name(index.label_id)),
+                ),
+                (
+                    "index_kind".to_string(),
+                    Value::String(index_kind_name(index.kind).to_string()),
+                ),
+                (
+                    "property_names".to_string(),
+                    Value::List(vec![Value::String(index.property.clone())]),
+                ),
+            ])
+        })
+        .chain(catalog.composite_property_indexes().map(|index| {
+            BTreeMap::from([
+                ("index_id".to_string(), u32_value(index.id.0)),
+                (
+                    "subject_kind".to_string(),
+                    Value::String("node".to_string()),
+                ),
+                ("subject_id".to_string(), u32_value(index.label_id.0)),
+                (
+                    "subject_name".to_string(),
+                    optional_string_value(catalog.label_name(index.label_id)),
+                ),
+                (
+                    "index_kind".to_string(),
+                    Value::String("composite_equality".to_string()),
+                ),
+                (
+                    "property_names".to_string(),
+                    Value::List(
+                        index
+                            .properties
+                            .iter()
+                            .cloned()
+                            .map(Value::String)
+                            .collect(),
+                    ),
+                ),
+            ])
+        }))
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|row| row.get("index_id").cloned());
+    rows
+}
+
+fn constraint_rows(catalog: &Catalog) -> Vec<Row> {
+    let constraints = catalog
+        .unique_constraints()
+        .chain(catalog.node_property_exists_constraints())
+        .chain(catalog.relationship_property_exists_constraints())
+        .chain(catalog.relationship_unique_constraints());
+    let mut rows = constraints
+        .map(|constraint| {
+            let (subject_kind, subject_id, subject_name) = match constraint.subject {
+                ConstraintSubject::Node(label_id) => (
+                    "node",
+                    label_id.0,
+                    optional_string_value(catalog.label_name(label_id)),
+                ),
+                ConstraintSubject::Relationship(rel_type_id) => (
+                    "relationship",
+                    rel_type_id.0,
+                    optional_string_value(catalog.rel_type_name(rel_type_id)),
+                ),
+            };
+            BTreeMap::from([
+                ("constraint_id".to_string(), u32_value(constraint.id.0)),
+                (
+                    "subject_kind".to_string(),
+                    Value::String(subject_kind.to_string()),
+                ),
+                ("subject_id".to_string(), u32_value(subject_id)),
+                ("subject_name".to_string(), subject_name),
+                (
+                    "property_name".to_string(),
+                    Value::String(constraint.property.clone()),
+                ),
+                (
+                    "constraint_kind".to_string(),
+                    Value::String(constraint_kind_name(constraint.kind).to_string()),
+                ),
+            ])
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|row| row.get("constraint_id").cloned());
+    rows
+}
+
+fn optional_string_value(value: Option<&str>) -> Value {
+    value
+        .map(|value| Value::String(value.to_string()))
+        .unwrap_or(Value::Null)
+}
+
+const fn table_kind_name(kind: TableKind) -> &'static str {
+    match kind {
+        TableKind::Node => "node",
+        TableKind::Relationship => "relationship",
+    }
+}
+
+const fn schema_object_state_name(state: SchemaObjectState) -> &'static str {
+    match state {
+        SchemaObjectState::DeleteOnly => "delete_only",
+        SchemaObjectState::WriteOnly => "write_only",
+        SchemaObjectState::Backfill => "backfill",
+        SchemaObjectState::Validating => "validating",
+        SchemaObjectState::Public => "public",
+        SchemaObjectState::Gc => "gc",
+    }
+}
+
+const fn property_type_name(value_type: PropertyType) -> &'static str {
+    match value_type {
+        PropertyType::Any => "any",
+        PropertyType::Bool => "bool",
+        PropertyType::Int => "int",
+        PropertyType::Float => "float",
+        PropertyType::String => "string",
+        PropertyType::List => "list",
+    }
+}
+
+const fn index_kind_name(kind: IndexKind) -> &'static str {
+    match kind {
+        IndexKind::Equality => "equality",
+        IndexKind::Range => "range",
+        IndexKind::FullText => "full_text",
+    }
+}
+
+const fn constraint_kind_name(kind: ConstraintKind) -> &'static str {
+    match kind {
+        ConstraintKind::NodePropertyUnique => "node_property_unique",
+        ConstraintKind::NodePropertyExists => "node_property_exists",
+        ConstraintKind::RelationshipPropertyUnique => "relationship_property_unique",
+        ConstraintKind::RelationshipPropertyExists => "relationship_property_exists",
+    }
 }
 
 fn plan_cache_rows(stats: &PlanCacheStats) -> Vec<Row> {
@@ -793,6 +1008,10 @@ fn compare_ordered_rows(
 
 fn system_table(select: &SelectStatement) -> Result<SystemTable> {
     match (select.from.schema.as_deref(), select.from.name.as_str()) {
+        (Some("system"), "tables") => Ok(SystemTable::Tables),
+        (Some("system"), "properties") => Ok(SystemTable::Properties),
+        (Some("system"), "indexes") => Ok(SystemTable::Indexes),
+        (Some("system"), "constraints") => Ok(SystemTable::Constraints),
         (Some("system"), "plan_cache") => Ok(SystemTable::PlanCache),
         (Some("system"), "slow_queries") => Ok(SystemTable::SlowQueries),
         (Some("system"), "statement_summary") => Ok(SystemTable::StatementSummary),
@@ -839,6 +1058,10 @@ fn validate_order_columns(table: SystemTable, order_by: &[crate::sql::SqlOrderIt
 fn validate_column(table: SystemTable, column: &SqlColumnRef) -> Result<()> {
     if let Some(qualifier) = &column.qualifier {
         let table_name = match table {
+            SystemTable::Tables => "tables",
+            SystemTable::Properties => "properties",
+            SystemTable::Indexes => "indexes",
+            SystemTable::Constraints => "constraints",
             SystemTable::PlanCache => "plan_cache",
             SystemTable::SlowQueries => "slow_queries",
             SystemTable::StatementSummary => "statement_summary",
@@ -861,6 +1084,33 @@ fn validate_column(table: SystemTable, column: &SqlColumnRef) -> Result<()> {
 
 fn table_columns(table: SystemTable) -> &'static [&'static str] {
     match table {
+        SystemTable::Tables => &["table_id", "table_name", "table_kind", "state"],
+        SystemTable::Properties => &[
+            "property_id",
+            "table_id",
+            "table_name",
+            "table_kind",
+            "property_name",
+            "value_type",
+            "nullable",
+            "state",
+        ],
+        SystemTable::Indexes => &[
+            "index_id",
+            "subject_kind",
+            "subject_id",
+            "subject_name",
+            "index_kind",
+            "property_names",
+        ],
+        SystemTable::Constraints => &[
+            "constraint_id",
+            "subject_kind",
+            "subject_id",
+            "subject_name",
+            "property_name",
+            "constraint_kind",
+        ],
         SystemTable::PlanCache => &["metric", "value"],
         SystemTable::SlowQueries => &[
             "sequence",
@@ -914,6 +1164,10 @@ fn usize_value(value: usize) -> Value {
     Value::Int(i64::try_from(value).unwrap_or(i64::MAX))
 }
 
+fn u32_value(value: u32) -> Value {
+    Value::Int(i64::from(value))
+}
+
 fn u64_value(value: u64) -> Value {
     Value::Int(i64::try_from(value).unwrap_or(i64::MAX))
 }
@@ -955,6 +1209,7 @@ mod tests {
 
     #[test]
     fn query_plan_cache_virtual_table_with_predicate_and_projection() {
+        let catalog = Catalog::default();
         let stats = PlanCacheStats {
             max_entries: Some(128),
             entries: 3,
@@ -971,9 +1226,12 @@ mod tests {
             "SELECT value FROM system.plan_cache WHERE metric = 'hits'",
             None,
             None,
-            &stats,
-            &[],
-            &[],
+            &SystemSqlContext {
+                catalog: &catalog,
+                plan_cache_stats: &stats,
+                slow_queries: &[],
+                statement_summaries: &[],
+            },
         )
         .expect("system plan cache query");
 
@@ -985,6 +1243,18 @@ mod tests {
 
     #[test]
     fn query_slow_queries_pushes_filter_order_and_limit_into_scan() {
+        let catalog = Catalog::default();
+        let stats = PlanCacheStats {
+            max_entries: None,
+            entries: 0,
+            hits: 0,
+            misses: 0,
+            admissions: 0,
+            disabled_misses: 0,
+            bypasses: 0,
+            evictions: 0,
+            memory_pressure_events: 0,
+        };
         let records = vec![
             SlowQueryRecord {
                 sequence: 1,
@@ -1042,19 +1312,12 @@ mod tests {
              ORDER BY elapsed_micros DESC LIMIT 1",
             None,
             None,
-            &PlanCacheStats {
-                max_entries: None,
-                entries: 0,
-                hits: 0,
-                misses: 0,
-                admissions: 0,
-                disabled_misses: 0,
-                bypasses: 0,
-                evictions: 0,
-                memory_pressure_events: 0,
+            &SystemSqlContext {
+                catalog: &catalog,
+                plan_cache_stats: &stats,
+                slow_queries: &records,
+                statement_summaries: &[],
             },
-            &records,
-            &[],
         )
         .expect("system slow query scan");
 
@@ -1063,6 +1326,129 @@ mod tests {
             vec![BTreeMap::from([
                 ("elapsed_micros".to_string(), Value::Int(500)),
                 ("sequence".to_string(), Value::Int(2)),
+            ])]
+        );
+    }
+
+    #[test]
+    fn query_catalog_virtual_tables_expose_schema_without_typed_getters() {
+        let mut catalog = Catalog::default();
+        let memory_label = catalog.get_or_create_label("Memory");
+        let memory_table = catalog.get_or_create_table(TableKind::Node, "Memory");
+        catalog.get_or_create_property(
+            memory_table,
+            "id",
+            crate::schema::PropertyType::String,
+            false,
+        );
+        catalog.get_or_create_property_index_with_kind(memory_label, "id", IndexKind::Equality);
+        catalog.get_or_create_unique_constraint(memory_label, "id");
+        let stats = PlanCacheStats {
+            max_entries: None,
+            entries: 0,
+            hits: 0,
+            misses: 0,
+            admissions: 0,
+            disabled_misses: 0,
+            bypasses: 0,
+            evictions: 0,
+            memory_pressure_events: 0,
+        };
+        let context = SystemSqlContext {
+            catalog: &catalog,
+            plan_cache_stats: &stats,
+            slow_queries: &[],
+            statement_summaries: &[],
+        };
+
+        let tables = query_sql(
+            "SELECT table_id, table_name, table_kind, state FROM system.tables",
+            None,
+            None,
+            &context,
+        )
+        .expect("system tables query");
+        assert_eq!(
+            tables.rows,
+            vec![BTreeMap::from([
+                ("state".to_string(), Value::String("public".to_string())),
+                ("table_id".to_string(), Value::Int(0)),
+                ("table_kind".to_string(), Value::String("node".to_string()),),
+                (
+                    "table_name".to_string(),
+                    Value::String("Memory".to_string()),
+                ),
+            ])]
+        );
+
+        let properties = query_sql(
+            "SELECT table_name, property_name, value_type, nullable \
+             FROM system.properties WHERE table_name = 'Memory'",
+            None,
+            None,
+            &context,
+        )
+        .expect("system properties query");
+        assert_eq!(
+            properties.rows,
+            vec![BTreeMap::from([
+                ("nullable".to_string(), Value::Bool(false)),
+                ("property_name".to_string(), Value::String("id".to_string()),),
+                (
+                    "table_name".to_string(),
+                    Value::String("Memory".to_string()),
+                ),
+                (
+                    "value_type".to_string(),
+                    Value::String("string".to_string()),
+                ),
+            ])]
+        );
+
+        let indexes = query_sql(
+            "SELECT subject_name, index_kind, property_names FROM system.indexes",
+            None,
+            None,
+            &context,
+        )
+        .expect("system indexes query");
+        assert_eq!(
+            indexes.rows,
+            vec![BTreeMap::from([
+                (
+                    "index_kind".to_string(),
+                    Value::String("equality".to_string()),
+                ),
+                (
+                    "property_names".to_string(),
+                    Value::List(vec![Value::String("id".to_string())]),
+                ),
+                (
+                    "subject_name".to_string(),
+                    Value::String("Memory".to_string()),
+                ),
+            ])]
+        );
+
+        let constraints = query_sql(
+            "SELECT subject_name, property_name, constraint_kind FROM system.constraints",
+            None,
+            None,
+            &context,
+        )
+        .expect("system constraints query");
+        assert_eq!(
+            constraints.rows,
+            vec![BTreeMap::from([
+                (
+                    "constraint_kind".to_string(),
+                    Value::String("node_property_unique".to_string()),
+                ),
+                ("property_name".to_string(), Value::String("id".to_string()),),
+                (
+                    "subject_name".to_string(),
+                    Value::String("Memory".to_string()),
+                ),
             ])]
         );
     }
