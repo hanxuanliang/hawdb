@@ -384,12 +384,10 @@ Memory ids, scans only matched Memory nodes, filters incoming `SYNTHESIZED_FROM`
 edges to `Memory` crystals with `is_crystal = true`, returns one row per Memory
 with a positive count, reports missing Memory ids and full matched relationship
 counts, supports pinned read snapshots, and does not write WAL.
-Memory decay detail reads are covered by
-`Database::knowledge_memory_decay_detail`. The typed read covers the scheduler's
-exact-id `Memory` detail shape, returns typed core fields plus a bounded
-property projection, defaults that projection to the current production columns,
-accepts explicit future property names without widening default payloads,
-supports pinned read snapshots, and does not write WAL.
+Memory decay detail reads use one fixed parameterized exact-id Cypher statement
+with explicit projection, stable ordering, `LIMIT 1`, a one-row budget, and a
+pinned snapshot. The scheduler shapes optional and future fields from the query
+row; no scheduler-specific typed database API is exposed.
 Memory decay refresh writes are covered by
 `Database::update_knowledge_memory_decay_refresh_batch`. The typed write covers
 the decay scheduler's exact-id score-only and score-plus-confidence update

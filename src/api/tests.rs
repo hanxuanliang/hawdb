@@ -33,12 +33,12 @@ use super::{
     KnowledgeLabelUsageListRequest, KnowledgeLabelUsageRequest, KnowledgeMemoryAccessBatchRequest,
     KnowledgeMemoryAccessTouch, KnowledgeMemoryCleanupFingerprintRequest,
     KnowledgeMemoryContentBatchRequest, KnowledgeMemoryContentUpdate,
-    KnowledgeMemoryCrystalSynthesisCountRequest, KnowledgeMemoryDecayDetailRequest,
-    KnowledgeMemoryDecayRefreshBatchRequest, KnowledgeMemoryDecayRefreshUpdate,
-    KnowledgeMemoryDedupReviewedBatchRequest, KnowledgeMemoryEntityListRequest,
-    KnowledgeMemoryEvolvesCreate, KnowledgeMemoryEvolvesCreateBatchRequest,
-    KnowledgeMemoryEvolvesLatestRequest, KnowledgeMemoryEvolvesNeighborRequest,
-    KnowledgeMemoryEvolvesProjectedSuccessorCursor, KnowledgeMemoryEvolvesProjectedSuccessorOrder,
+    KnowledgeMemoryCrystalSynthesisCountRequest, KnowledgeMemoryDecayRefreshBatchRequest,
+    KnowledgeMemoryDecayRefreshUpdate, KnowledgeMemoryDedupReviewedBatchRequest,
+    KnowledgeMemoryEntityListRequest, KnowledgeMemoryEvolvesCreate,
+    KnowledgeMemoryEvolvesCreateBatchRequest, KnowledgeMemoryEvolvesLatestRequest,
+    KnowledgeMemoryEvolvesNeighborRequest, KnowledgeMemoryEvolvesProjectedSuccessorCursor,
+    KnowledgeMemoryEvolvesProjectedSuccessorOrder,
     KnowledgeMemoryEvolvesProjectedSuccessorPageCursor,
     KnowledgeMemoryEvolvesProjectedSuccessorRequest, KnowledgeMemoryEvolvesRelationCountRequest,
     KnowledgeMemoryLabelDeleteRequest, KnowledgeMemoryLabelTransferRequest,
@@ -132,6 +132,7 @@ mod knowledge_entity_batch_deletes;
 mod knowledge_entity_deletes;
 mod knowledge_entity_mention_counts;
 mod knowledge_entity_reads;
+mod knowledge_memory_decay_detail;
 mod knowledge_memory_entities;
 mod knowledge_memory_evolves_latest;
 mod knowledge_memory_evolves_relation_counts;
@@ -8254,131 +8255,6 @@ fn typed_thread_compaction_link_persists_as_one_wal_batch_and_replays() {
             Some(&Value::String("manual_distillation".to_string()))
         );
     }
-    std::fs::remove_dir_all(path).unwrap();
-}
-
-#[test]
-fn reads_memory_decay_detail_for_scheduler_shape() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Memory {id: 'scheduler-memory-decay-detail', title: 'Decay Detail', content: 'content', unit_type: 'fact', source: 'agent', space_id: 'default', created_at: 12, decay_score_cached: 0.4, metadata: '{}', is_latest: true, lifecycle_state: 'active', future_decay_field: 'future'})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let snapshot = db.begin_read_transaction();
-
-    db.query("MATCH (m:Memory {id: 'scheduler-memory-decay-detail'}) SET m.decay_score_cached = 0.9, m.future_decay_field = 'late'")
-        .unwrap();
-
-    let request = KnowledgeMemoryDecayDetailRequest {
-        memory_id: "scheduler-memory-decay-detail".to_string(),
-        property_names: Vec::new(),
-    };
-    let output = db.knowledge_memory_decay_detail(&request).unwrap();
-    assert!(output.found);
-    let memory = output.memory.as_ref().unwrap();
-    assert_eq!(
-        memory.memory_id.as_deref(),
-        Some("scheduler-memory-decay-detail")
-    );
-    assert_eq!(memory.title.as_deref(), Some("Decay Detail"));
-    assert_eq!(memory.content.as_deref(), Some("content"));
-    assert_eq!(memory.unit_type.as_deref(), Some("fact"));
-    assert_eq!(memory.source.as_deref(), Some("agent"));
-    assert_eq!(memory.raw_space_id.as_deref(), Some("default"));
-    assert_eq!(memory.normalized_space_id, "default");
-    assert_eq!(memory.created_at, Some(Value::Int(12)));
-    assert_eq!(memory.decay_score_cached, Some(Value::Float(0.9)));
-    assert_eq!(memory.metadata, Some(Value::String("{}".to_string())));
-    assert_eq!(memory.is_latest, Some(true));
-    assert_eq!(memory.lifecycle_state.as_deref(), Some("active"));
-    assert_eq!(
-        memory.properties.get("decay_score_cached"),
-        Some(&Value::Float(0.9))
-    );
-    assert!(!memory.properties.contains_key("future_decay_field"));
-
-    let projected_request = KnowledgeMemoryDecayDetailRequest {
-        memory_id: "scheduler-memory-decay-detail".to_string(),
-        property_names: vec![
-            "future_decay_field".to_string(),
-            "decay_score_cached".to_string(),
-            "future_decay_field".to_string(),
-        ],
-    };
-    let projected = db
-        .knowledge_memory_decay_detail(&projected_request)
-        .unwrap();
-    let projected_memory = projected.memory.as_ref().unwrap();
-    assert_eq!(projected_memory.properties.len(), 2);
-    assert_eq!(
-        projected_memory.properties.get("future_decay_field"),
-        Some(&Value::String("late".to_string()))
-    );
-
-    let stats = db.plan_cache_stats();
-    let repeated = db.knowledge_memory_decay_detail(&request).unwrap();
-    assert_eq!(repeated, output);
-    let repeated_stats = db.plan_cache_stats();
-    assert_eq!(repeated_stats.entries, stats.entries);
-    assert_eq!(repeated_stats.misses, stats.misses);
-    assert_eq!(repeated_stats.hits, stats.hits + 1);
-
-    let snapshot_output = snapshot
-        .knowledge_memory_decay_detail(&KnowledgeMemoryDecayDetailRequest {
-            memory_id: "scheduler-memory-decay-detail".to_string(),
-            property_names: Vec::new(),
-        })
-        .unwrap();
-    assert_eq!(snapshot_output.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(
-        snapshot_output.memory.unwrap().decay_score_cached,
-        Some(Value::Float(0.4))
-    );
-
-    let missing = db
-        .knowledge_memory_decay_detail(&KnowledgeMemoryDecayDetailRequest {
-            memory_id: "missing".to_string(),
-            property_names: Vec::new(),
-        })
-        .unwrap();
-    assert!(!missing.found);
-    assert_eq!(missing.memory, None);
-}
-
-#[test]
-fn memory_decay_detail_rejects_empty_inputs_without_wal() {
-    let path = unique_test_dir("memory_decay_detail_rejects_empty_inputs_without_wal");
-    let mut db = Database::open(&path).unwrap();
-    db.query("CREATE (:Memory {id: 'scheduler-memory-decay-detail', decay_score_cached: 0.4})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let wal_before = read_test_wal(&path).unwrap();
-
-    let err = db
-        .knowledge_memory_decay_detail(&KnowledgeMemoryDecayDetailRequest {
-            memory_id: String::new(),
-            property_names: Vec::new(),
-        })
-        .unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("knowledge memory decay detail read requires a non-empty memory id"));
-
-    let err = db
-        .knowledge_memory_decay_detail(&KnowledgeMemoryDecayDetailRequest {
-            memory_id: "scheduler-memory-decay-detail".to_string(),
-            property_names: vec![String::new()],
-        })
-        .unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("knowledge memory decay detail read requires non-empty property names"));
-
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
     std::fs::remove_dir_all(path).unwrap();
 }
 

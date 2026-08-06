@@ -59,14 +59,12 @@ pub use skein_api_types::{
     KnowledgeLabelRegexMemoryConnectionsRequest, KnowledgeMemoryCleanupFingerprintOutput,
     KnowledgeMemoryCleanupFingerprintRequest, KnowledgeMemoryCleanupFingerprintRow,
     KnowledgeMemoryCrystalSynthesisCountOutput, KnowledgeMemoryCrystalSynthesisCountRequest,
-    KnowledgeMemoryCrystalSynthesisCountRow, KnowledgeMemoryDecayDetail,
-    KnowledgeMemoryDecayDetailOutput, KnowledgeMemoryDecayDetailRequest,
-    KnowledgeMemoryDecayRefreshBatchOutput, KnowledgeMemoryDecayRefreshBatchRequest,
-    KnowledgeMemoryDecayRefreshBatchRow, KnowledgeMemoryDecayRefreshUpdate,
-    KnowledgeMemoryEvolvesNeighborOutput, KnowledgeMemoryEvolvesNeighborRequest,
-    KnowledgeMemoryEvolvesNeighborRow, KnowledgeMemoryEvolvesProjectedSuccessorCursor,
-    KnowledgeMemoryEvolvesProjectedSuccessorGroup, KnowledgeMemoryEvolvesProjectedSuccessorOrder,
-    KnowledgeMemoryEvolvesProjectedSuccessorOutput,
+    KnowledgeMemoryCrystalSynthesisCountRow, KnowledgeMemoryDecayRefreshBatchOutput,
+    KnowledgeMemoryDecayRefreshBatchRequest, KnowledgeMemoryDecayRefreshBatchRow,
+    KnowledgeMemoryDecayRefreshUpdate, KnowledgeMemoryEvolvesNeighborOutput,
+    KnowledgeMemoryEvolvesNeighborRequest, KnowledgeMemoryEvolvesNeighborRow,
+    KnowledgeMemoryEvolvesProjectedSuccessorCursor, KnowledgeMemoryEvolvesProjectedSuccessorGroup,
+    KnowledgeMemoryEvolvesProjectedSuccessorOrder, KnowledgeMemoryEvolvesProjectedSuccessorOutput,
     KnowledgeMemoryEvolvesProjectedSuccessorPageCursor,
     KnowledgeMemoryEvolvesProjectedSuccessorRequest, KnowledgeMemoryEvolvesProjectedSuccessorRow,
     KnowledgeMemoryEvolvesRelationCountOutput, KnowledgeMemoryEvolvesRelationCountRequest,
@@ -2940,13 +2938,6 @@ impl Database {
         request: &KnowledgeThreadIdentityDeleteRequest,
     ) -> Result<KnowledgeThreadIdentityDeleteOutput> {
         delete_knowledge_thread_identities_for(self, request)
-    }
-
-    pub fn knowledge_memory_decay_detail(
-        &self,
-        request: &KnowledgeMemoryDecayDetailRequest,
-    ) -> Result<KnowledgeMemoryDecayDetailOutput> {
-        knowledge_memory_decay_detail_via_query_runtime(self, request)
     }
 
     pub fn create_knowledge_thread_compaction_link(
@@ -14391,151 +14382,6 @@ fn thread_node_by_identity(
     Ok(found)
 }
 
-const KNOWLEDGE_MEMORY_DECAY_DETAIL_DEFAULT_PROPERTIES: &[&str] = &[
-    "id",
-    "title",
-    "content",
-    "unit_type",
-    "source",
-    "space_id",
-    "created_at",
-    "decay_score_cached",
-    "metadata",
-    "is_latest",
-    "lifecycle_state",
-];
-
-fn knowledge_memory_decay_detail_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeMemoryDecayDetailRequest,
-) -> Result<KnowledgeMemoryDecayDetailOutput> {
-    validate_knowledge_memory_decay_detail_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let memory =
-        try_seed_node_by_label_and_external_id(catalog, store, "Memory", &request.memory_id)?
-            .map(|memory| knowledge_memory_decay_detail_row(&memory, request));
-    Ok(KnowledgeMemoryDecayDetailOutput {
-        graph_commit_epoch,
-        found: memory.is_some(),
-        memory,
-    })
-}
-
-fn knowledge_memory_decay_detail_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeMemoryDecayDetailRequest,
-) -> Result<KnowledgeMemoryDecayDetailOutput> {
-    validate_knowledge_memory_decay_detail_request(request)?;
-    let parameters = BTreeMap::from([(
-        "memory_id".to_string(),
-        Value::String(request.memory_id.clone()),
-    )]);
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (m:Memory {id: $memory_id}) \
-         RETURN m AS memory \
-         ORDER BY id(m) ASC \
-         LIMIT 1",
-        &parameters,
-        Some(1),
-    )?;
-    let memory = output
-        .rows
-        .first()
-        .map(knowledge_memory_decay_detail_row_from_query)
-        .transpose()?
-        .map(|memory| knowledge_memory_decay_detail_row_from_entity(&memory, request));
-    Ok(KnowledgeMemoryDecayDetailOutput {
-        graph_commit_epoch: db.store.commit_epoch(),
-        found: memory.is_some(),
-        memory,
-    })
-}
-
-fn knowledge_memory_decay_detail_row_from_query(row: &Row) -> Result<KnowledgeEntity> {
-    row.get("memory")
-        .and_then(knowledge_entity_from_value)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge memory decay detail row is missing memory map".to_string(),
-            )
-        })
-}
-
-fn validate_knowledge_memory_decay_detail_request(
-    request: &KnowledgeMemoryDecayDetailRequest,
-) -> Result<()> {
-    if request.memory_id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge memory decay detail read requires a non-empty memory id".to_string(),
-        ));
-    }
-    if request.property_names.iter().any(String::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge memory decay detail read requires non-empty property names".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn knowledge_memory_decay_detail_row_from_entity(
-    memory: &KnowledgeEntity,
-    request: &KnowledgeMemoryDecayDetailRequest,
-) -> KnowledgeMemoryDecayDetail {
-    let property_names = knowledge_memory_decay_detail_property_names(request);
-    KnowledgeMemoryDecayDetail {
-        memory_id: memory.external_id.clone(),
-        node_id: memory.node_id,
-        title: string_property_value(&memory.properties, "title"),
-        content: string_property_value(&memory.properties, "content"),
-        unit_type: string_property_value(&memory.properties, "unit_type"),
-        source: string_property_value(&memory.properties, "source"),
-        raw_space_id: string_property_value(&memory.properties, "space_id"),
-        normalized_space_id: knowledge_entity_normalized_space_id(memory),
-        created_at: memory.properties.get("created_at").cloned(),
-        decay_score_cached: memory.properties.get("decay_score_cached").cloned(),
-        metadata: memory.properties.get("metadata").cloned(),
-        is_latest: boolean_property_value(&memory.properties, "is_latest"),
-        lifecycle_state: string_property_value(&memory.properties, "lifecycle_state"),
-        properties: projected_properties(&memory.properties, &property_names),
-    }
-}
-
-fn knowledge_memory_decay_detail_row(
-    memory: &NodeRecord,
-    request: &KnowledgeMemoryDecayDetailRequest,
-) -> KnowledgeMemoryDecayDetail {
-    let property_names = knowledge_memory_decay_detail_property_names(request);
-    KnowledgeMemoryDecayDetail {
-        memory_id: node_external_id(memory),
-        node_id: memory.id.0,
-        title: string_property(memory, "title"),
-        content: string_property(memory, "content"),
-        unit_type: string_property(memory, "unit_type"),
-        source: string_property(memory, "source"),
-        raw_space_id: string_property(memory, "space_id"),
-        normalized_space_id: normalized_node_space_id(memory),
-        created_at: memory.properties.get("created_at").cloned(),
-        decay_score_cached: memory.properties.get("decay_score_cached").cloned(),
-        metadata: memory.properties.get("metadata").cloned(),
-        is_latest: boolean_property(memory, "is_latest"),
-        lifecycle_state: string_property(memory, "lifecycle_state"),
-        properties: projected_properties(&memory.properties, &property_names),
-    }
-}
-
-fn knowledge_memory_decay_detail_property_names(
-    request: &KnowledgeMemoryDecayDetailRequest,
-) -> Vec<String> {
-    if request.property_names.is_empty() {
-        return KNOWLEDGE_MEMORY_DECAY_DETAIL_DEFAULT_PROPERTIES
-            .iter()
-            .map(|property_name| (*property_name).to_string())
-            .collect();
-    }
-    deduplicated_strings_in_order(&request.property_names)
-}
-
 fn delete_knowledge_thread_messages_for(
     db: &mut Database,
     request: &KnowledgeThreadMessageDeleteRequest,
@@ -24682,13 +24528,6 @@ impl DatabaseReadTransaction {
         request: &KnowledgeMemoryEvolvesProjectedSuccessorRequest,
     ) -> Result<KnowledgeMemoryEvolvesProjectedSuccessorOutput> {
         knowledge_memory_evolves_projected_successors_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_memory_decay_detail(
-        &self,
-        request: &KnowledgeMemoryDecayDetailRequest,
-    ) -> Result<KnowledgeMemoryDecayDetailOutput> {
-        knowledge_memory_decay_detail_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_crystals(

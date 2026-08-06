@@ -9,37 +9,6 @@ pub enum KnowledgeNeighborDirection {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryDecayDetailRequest {
-    pub memory_id: String,
-    pub property_names: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryDecayDetail {
-    pub memory_id: Option<String>,
-    pub node_id: u64,
-    pub title: Option<String>,
-    pub content: Option<String>,
-    pub unit_type: Option<String>,
-    pub source: Option<String>,
-    pub raw_space_id: Option<String>,
-    pub normalized_space_id: String,
-    pub created_at: Option<Value>,
-    pub decay_score_cached: Option<Value>,
-    pub metadata: Option<Value>,
-    pub is_latest: Option<bool>,
-    pub lifecycle_state: Option<String>,
-    pub properties: BTreeMap<String, Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryDecayDetailOutput {
-    pub graph_commit_epoch: u64,
-    pub found: bool,
-    pub memory: Option<KnowledgeMemoryDecayDetail>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeMemoryCleanupFingerprintRequest {
     pub memory_ids: Vec<String>,
     pub property_names: Vec<String>,
