@@ -2627,13 +2627,6 @@ impl Database {
         knowledge_memory_metadata_related_projected_list_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_memory_prefix_ownership(
-        &self,
-        request: &KnowledgeMemoryPrefixOwnershipRequest,
-    ) -> Result<KnowledgeMemoryPrefixOwnershipOutput> {
-        knowledge_memory_prefix_ownership_via_query_runtime(self, request)
-    }
-
     pub fn knowledge_memory_evolves_latest(
         &self,
         request: &KnowledgeMemoryEvolvesLatestRequest,
@@ -7807,123 +7800,6 @@ fn knowledge_memory_list_row_from_entity(memory: &KnowledgeEntity) -> KnowledgeM
         event_start: memory.properties.get("event_start").cloned(),
         event_end: memory.properties.get("event_end").cloned(),
     }
-}
-
-fn knowledge_memory_prefix_ownership_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeMemoryPrefixOwnershipRequest,
-) -> Result<KnowledgeMemoryPrefixOwnershipOutput> {
-    if request.prefix.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge memory prefix ownership requires a non-empty prefix".to_string(),
-        ));
-    }
-
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Ok(KnowledgeMemoryPrefixOwnershipOutput {
-            graph_commit_epoch,
-            prefix: request.prefix.clone(),
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-        });
-    };
-
-    let mut rows = Vec::new();
-    store.visit_nodes_owned(Some(memory_label_id), |memory| {
-        if let Some(memory_id) = node_external_id(&memory)
-            && memory_id.starts_with(&request.prefix)
-        {
-            rows.push(KnowledgeMemoryPrefixOwnershipRow {
-                memory_id,
-                memory_node_id: memory.id.0,
-                raw_space_id: memory.properties.get("space_id").map(value_to_external_id),
-                normalized_space_id: normalized_node_space_id(&memory),
-            });
-        }
-        crate::store::GraphScanControl::Continue
-    })?;
-    rows.sort_by(|left, right| {
-        left.memory_id
-            .cmp(&right.memory_id)
-            .then_with(|| left.memory_node_id.cmp(&right.memory_node_id))
-    });
-    let matched_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-
-    Ok(KnowledgeMemoryPrefixOwnershipOutput {
-        graph_commit_epoch,
-        prefix: request.prefix.clone(),
-        rows,
-        matched_count,
-        returned_count,
-    })
-}
-
-fn knowledge_memory_prefix_ownership_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeMemoryPrefixOwnershipRequest,
-) -> Result<KnowledgeMemoryPrefixOwnershipOutput> {
-    if request.prefix.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge memory prefix ownership requires a non-empty prefix".to_string(),
-        ));
-    }
-
-    let graph_commit_epoch = db.store.commit_epoch();
-    let parameters =
-        BTreeMap::from([("prefix".to_string(), Value::String(request.prefix.clone()))]);
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (m:Memory) WHERE m.id STARTS WITH $prefix RETURN m.id AS memory_id, id(m) AS memory_node_id, m.space_id AS raw_space_id",
-        &parameters,
-        None,
-    )?;
-    let mut rows = output
-        .rows
-        .iter()
-        .filter_map(knowledge_memory_prefix_ownership_row_from_query)
-        .collect::<Vec<_>>();
-    rows.sort_by(|left, right| {
-        left.memory_id
-            .cmp(&right.memory_id)
-            .then_with(|| left.memory_node_id.cmp(&right.memory_node_id))
-    });
-    let matched_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-
-    Ok(KnowledgeMemoryPrefixOwnershipOutput {
-        graph_commit_epoch,
-        prefix: request.prefix.clone(),
-        rows,
-        matched_count,
-        returned_count,
-    })
-}
-
-fn knowledge_memory_prefix_ownership_row_from_query(
-    row: &Row,
-) -> Option<KnowledgeMemoryPrefixOwnershipRow> {
-    let raw_space_id = row.get("raw_space_id").map(value_to_external_id);
-    Some(KnowledgeMemoryPrefixOwnershipRow {
-        memory_id: optional_string_cell(row, "memory_id")?,
-        memory_node_id: row
-            .get("memory_node_id")
-            .and_then(value_to_non_negative_u64)?,
-        normalized_space_id: raw_space_id
-            .as_ref()
-            .filter(|space_id| !space_id.is_empty())
-            .cloned()
-            .unwrap_or_else(|| "default".to_string()),
-        raw_space_id,
-    })
 }
 
 fn knowledge_memory_evolves_latest_for(
@@ -25319,13 +25195,6 @@ impl DatabaseReadTransaction {
         request: &KnowledgeRelatedEntityNameListRequest,
     ) -> Result<KnowledgeRelatedEntityNameListOutput> {
         knowledge_related_entity_names_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_memory_prefix_ownership(
-        &self,
-        request: &KnowledgeMemoryPrefixOwnershipRequest,
-    ) -> Result<KnowledgeMemoryPrefixOwnershipOutput> {
-        knowledge_memory_prefix_ownership_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_memory_metadata_related_projected_list(

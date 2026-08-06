@@ -590,29 +590,6 @@ pub struct KnowledgeMemoryMetadataRelatedProjectedListOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryPrefixOwnershipRequest {
-    pub prefix: String,
-    pub limit: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryPrefixOwnershipRow {
-    pub memory_id: String,
-    pub memory_node_id: u64,
-    pub raw_space_id: Option<String>,
-    pub normalized_space_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryPrefixOwnershipOutput {
-    pub graph_commit_epoch: u64,
-    pub prefix: String,
-    pub rows: Vec<KnowledgeMemoryPrefixOwnershipRow>,
-    pub matched_count: usize,
-    pub returned_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeMemoryEvolvesLatestRequest {
     pub old_memory_ids: Vec<String>,
 }

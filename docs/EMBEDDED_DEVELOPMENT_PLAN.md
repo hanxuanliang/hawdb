@@ -518,10 +518,9 @@ metadata references a source or source Thread id. The typed read builds only the
 Nowledge-used `source_id` and `source_thread_id` metadata markers, requires a
 positive limit, projects caller-allowlisted Memory fields, orders by internal
 `created_at` descending, supports pinned snapshots, and does not write WAL.
-Memory prefix ownership guard reads are available as
-`Database::knowledge_memory_prefix_ownership`, covering MCP skill-memory prefix
-ownership checks with raw and normalized `space_id` projection and no WAL
-writes.
+Memory prefix ownership guards use one fixed parameterized, bounded
+`STARTS WITH` query; host code handles `space_id` normalization and response
+shaping.
 Memory title/content reads use one fixed parameterized, id-bounded Cypher
 statement with explicit projection, created-at ordering, `LIMIT`, and pinned
 snapshot semantics; host code shapes missing ids.

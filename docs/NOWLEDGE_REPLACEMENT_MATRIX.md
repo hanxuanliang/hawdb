@@ -367,12 +367,10 @@ and tests Memory metadata for `source_id` or `source_thread_id` markers, returns
 only caller-allowlisted Memory properties plus stable Memory id/node/space
 identity fields, orders by internal `created_at` descending, requires a bounded
 positive limit, supports pinned snapshots, and does not write WAL.
-Memory prefix ownership guard reads are covered by
-`Database::knowledge_memory_prefix_ownership`. The typed read covers the MCP
-skill-memory guard shape `MATCH (m:Memory) WHERE m.id STARTS WITH $p RETURN
-m.id, m.space_id LIMIT n`, requires a non-empty prefix, returns raw and
-normalized `space_id` values, supports pinned read snapshots, and does not write
-WAL.
+Memory prefix ownership guards use one fixed parameterized `STARTS WITH` query
+with an explicit Memory label, projection, stable ordering, `LIMIT`, row budget,
+and pinned snapshot. Host code normalizes `space_id`; no route-specific typed
+database API is exposed.
 Memory title/content id-list reads use one fixed parameterized, id-bounded
 Cypher statement with explicit projection, created-at ordering, `LIMIT`, row
 budget, and a pinned snapshot. Host code derives missing ids and shapes the
