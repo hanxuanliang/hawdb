@@ -595,11 +595,10 @@ supports incoming `Memory` -> `MENTIONS` -> `Entity` mention breadth, direct
 Nowledge `unit_type IN $types` filters, importance and `created_at` fallbacks,
 distinct mentioned Entity ids, pinned read-transaction snapshots, and no WAL
 writes.
-Related Entity name reads are available as
-`Database::knowledge_related_entity_names`, covering Nowledge REST list
-`Memory` id to distinct `Entity.name` reads and `Thread` `COMPACTS_TO`
-`Memory` to `MENTIONS` Entity name reads with bounded limits, missing Memory id
-reporting, Thread physical/logical identity support, and no WAL writes.
+Related Entity name reads use separate fixed parameterized Cypher statements
+for Memory-id batches and Thread-compaction paths. Each owns its distinct-name
+projection, deterministic ordering, `LIMIT`, matching row budget, and pinned
+snapshot; identity selection and missing-endpoint shaping remain in the host.
 Thread ordered message reads use fixed exact-Thread and bounded outgoing
 `CONTAINS` queries in one pinned read transaction, with
 `COALESCE(r.order_index, m.order_index)` ordering and no route-specific typed

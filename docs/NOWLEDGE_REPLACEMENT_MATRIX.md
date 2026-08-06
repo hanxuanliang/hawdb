@@ -330,13 +330,12 @@ supports false-only and null-or-false crystal filters plus Nowledge
 `unit_type IN $types` filters, applies importance and latest-state fallbacks,
 supports the Nowledge ordering variants, read-transaction snapshots, and no WAL
 writes.
-Related Entity name reads are covered by
-`Database::knowledge_related_entity_names`. The typed read validates either a
-non-empty Memory id list or one Thread id with physical `id` or logical
-`thread_id` identity, returns distinct non-empty `Entity.name` values in sorted
-order for the Nowledge REST list `Memory` id and `Thread` `COMPACTS_TO` ->
-`MENTIONS` shapes, reports missing Memory ids or missing Thread status,
-supports bounded limits, and does not write WAL.
+Related Entity name reads use separate fixed parameterized Cypher statements
+for Memory-id batches and Thread-compaction paths. Each has explicit labels,
+distinct-name projection, deterministic ordering, `LIMIT`, a matching row
+budget, and a pinned snapshot. Identity-specific Thread statements and missing
+endpoint shaping stay in the host; no scope-switching typed database API is
+exposed.
 Context memory previews use two fixed parameterized Cypher statements: one for
 title/unit-type rows and one for `HAS_LABEL` expansion. Each statement owns its
 latest-state predicate, explicit projection, deterministic ordering, `LIMIT`,

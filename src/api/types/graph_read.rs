@@ -399,32 +399,6 @@ pub struct KnowledgeCommunityMemoryListOutput {
     pub returned_count: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum KnowledgeRelatedEntityNameScope {
-    MemoryIds(Vec<String>),
-    Thread {
-        thread_id: String,
-        identity_property: String,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeRelatedEntityNameListRequest {
-    pub scope: KnowledgeRelatedEntityNameScope,
-    pub limit: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeRelatedEntityNameListOutput {
-    pub graph_commit_epoch: u64,
-    pub entity_names: Vec<String>,
-    pub matched_memory_count: usize,
-    pub returned_count: usize,
-    pub missing_memory_ids: Vec<String>,
-    pub thread_node_id: Option<u64>,
-    pub found_thread: Option<bool>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnowledgeCrystalListOrder {
     ExternalIdAsc,
