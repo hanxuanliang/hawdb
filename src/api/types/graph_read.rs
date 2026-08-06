@@ -574,22 +574,6 @@ pub struct KnowledgeMemoryProjectedListOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryMetadataRelatedProjectedListRequest {
-    pub normalized_space_id: String,
-    pub source_id: String,
-    pub limit: usize,
-    pub property_names: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryMetadataRelatedProjectedListOutput {
-    pub graph_commit_epoch: u64,
-    pub rows: Vec<KnowledgeMemoryProjectedRow>,
-    pub matched_count: usize,
-    pub returned_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeMemoryEvolvesLatestRequest {
     pub old_memory_ids: Vec<String>,
 }

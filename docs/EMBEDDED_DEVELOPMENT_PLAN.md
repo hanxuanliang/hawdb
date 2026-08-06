@@ -512,12 +512,10 @@ filters and ordering while projecting only caller-allowlisted Memory fields.
 Sort keys remain internal, so Nowledge can request newly added Memory fields
 without widening the default typed row or emitting WAL entries.
 Metadata-related Memory detail reads are available as
-`Database::knowledge_memory_metadata_related_projected_list`, covering the
-Nowledge REST list fallback that finds Memories in one normalized space whose
-metadata references a source or source Thread id. The typed read builds only the
-Nowledge-used `source_id` and `source_thread_id` metadata markers, requires a
-positive limit, projects caller-allowlisted Memory fields, orders by internal
-`created_at` descending, supports pinned snapshots, and does not write WAL.
+Metadata-related Memory reads use a fixed parameterized query for one normalized
+space and the supported `source_id`/`source_thread_id` metadata markers. Each
+named business phase selects its fields and supplies explicit ordering, limit,
+row, payload, and snapshot budgets.
 Memory prefix ownership guards use one fixed parameterized, bounded
 `STARTS WITH` query; host code handles `space_id` normalization and response
 shaping.

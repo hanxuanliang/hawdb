@@ -360,13 +360,11 @@ properties plus stable Memory id, node id, and normalized space id. Ordering can
 still use internal `created_at`, `pagerank_score`, or `importance` keys even
 when those fields are not projected, allowing Nowledge to add Memory fields
 without broadening the default row shape or writing WAL.
-Metadata-related Memory detail reads are covered by
-`Database::knowledge_memory_metadata_related_projected_list`. The typed read
-fixes the Nowledge REST list fallback shape that filters one normalized space
-and tests Memory metadata for `source_id` or `source_thread_id` markers, returns
-only caller-allowlisted Memory properties plus stable Memory id/node/space
-identity fields, orders by internal `created_at` descending, requires a bounded
-positive limit, supports pinned snapshots, and does not write WAL.
+Metadata-related Memory detail reads use one fixed parameterized query that
+filters normalized space and the supported `source_id`/`source_thread_id`
+metadata markers. Each business phase owns its projection, created-at ordering,
+`LIMIT`, row budget, and pinned snapshot; no caller-projection typed API is
+exposed.
 Memory prefix ownership guards use one fixed parameterized `STARTS WITH` query
 with an explicit Memory label, projection, stable ordering, `LIMIT`, row budget,
 and pinned snapshot. Host code normalizes `space_id`; no route-specific typed
