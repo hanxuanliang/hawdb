@@ -8,7 +8,9 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::ErrorKind;
+#[cfg(not(any(unix, windows)))]
+use std::io::Read;
 use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -147,7 +149,7 @@ pub struct FileSegmentRangeReader {
 #[derive(Debug)]
 struct RegisteredArtifact {
     path: PathBuf,
-    file: Mutex<Option<File>>,
+    file: OnceLock<File>,
 }
 
 impl FileSegmentRangeReader {
@@ -173,7 +175,7 @@ impl FileSegmentRangeReader {
                 artifact_id,
                 Arc::new(RegisteredArtifact {
                     path: path.into(),
-                    file: Mutex::new(None),
+                    file: OnceLock::new(),
                 }),
             )
             .map(|artifact| artifact.path.clone())
@@ -212,24 +214,21 @@ impl SegmentRangeReader for FileSegmentRangeReader {
                 artifact_id: range.artifact_id,
                 length: range.length.get(),
             })?;
-        let payload = {
-            let mut file = artifact
-                .file
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if file.is_none() {
-                *file = Some(
-                    File::open(&artifact.path).map_err(|source| range_io_error(range, source))?,
-                );
+        let file = match artifact.file.get() {
+            Some(file) => file,
+            None => {
+                let opened =
+                    File::open(&artifact.path).map_err(|source| range_io_error(range, source))?;
+                let _ = artifact.file.set(opened);
+                artifact
+                    .file
+                    .get()
+                    .expect("the current or a concurrent reader opened the artifact")
             }
-            let file = file.as_mut().expect("registered artifact file is open");
-            file.seek(SeekFrom::Start(range.offset))
-                .map_err(|source| range_io_error(range, source))?;
-            let mut payload = vec![0; length];
-            file.read_exact(&mut payload)
-                .map_err(|source| range_io_error(range, source))?;
-            payload
         };
+        let mut payload = vec![0; length];
+        read_exact_at(file, &mut payload, range.offset)
+            .map_err(|source| range_io_error(range, source))?;
         let payload: Arc<[u8]> = payload.into();
         if let Some(expected) = range.content_digest
             && content_digest(&payload) != expected
@@ -257,6 +256,49 @@ impl SegmentRangeReader for FileSegmentRangeReader {
         }
         Ok(payload)
     }
+}
+
+#[cfg(unix)]
+fn read_at(file: &File, buffer: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    use std::os::unix::fs::FileExt;
+
+    file.read_at(buffer, offset)
+}
+
+#[cfg(windows)]
+fn read_at(file: &File, buffer: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    use std::os::windows::fs::FileExt;
+
+    file.seek_read(buffer, offset)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn read_at(file: &File, buffer: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    use std::io::{Seek, SeekFrom};
+
+    let mut file = file.try_clone()?;
+    file.seek(SeekFrom::Start(offset))?;
+    file.read(buffer)
+}
+
+fn read_exact_at(file: &File, mut buffer: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+    while !buffer.is_empty() {
+        match read_at(file, buffer, offset) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    ErrorKind::UnexpectedEof,
+                    "segment range ended before the admitted length",
+                ));
+            }
+            Ok(read) => {
+                offset = offset.saturating_add(read as u64);
+                buffer = &mut buffer[read..];
+            }
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -576,6 +618,54 @@ mod tests {
         assert_eq!(report.range_count, 2);
         assert_eq!(report.bytes_read, 8);
         assert_eq!(report.max_wave_bytes_read, 8);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn file_reader_reads_disjoint_ranges_concurrently_without_shared_cursor_state() {
+        let path = unique_test_file("positioned-concurrent");
+        let payload = (0..64u8).collect::<Vec<_>>();
+        std::fs::write(&path, &payload).unwrap();
+        let mut reader = FileSegmentRangeReader::new();
+        reader.register(7, &path);
+        let reader = Arc::new(reader);
+
+        let outputs = std::thread::scope(|scope| {
+            (0..16u64)
+                .map(|index| {
+                    let reader = Arc::clone(&reader);
+                    scope.spawn(move || {
+                        let range =
+                            SegmentReadRange::new(7, index, index * 4, NonZeroU64::new(4).unwrap());
+                        reader.read_range(&range).unwrap().to_vec()
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+
+        for (index, output) in outputs.iter().enumerate() {
+            assert_eq!(output, &payload[index * 4..index * 4 + 4]);
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn file_reader_reports_truncated_positioned_range_as_io_error() {
+        let path = unique_test_file("positioned-truncated");
+        std::fs::write(&path, b"short").unwrap();
+        let mut reader = FileSegmentRangeReader::new();
+        reader.register(7, &path);
+        let range = SegmentReadRange::new(7, 1, 2, NonZeroU64::new(8).unwrap());
+
+        let error = reader.read_range(&range).unwrap_err();
+        assert!(matches!(error, SegmentReadError::Io { .. }));
+        assert_eq!(
+            error.source().unwrap().to_string(),
+            "segment range ended before the admitted length"
+        );
         std::fs::remove_file(path).unwrap();
     }
 

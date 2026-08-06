@@ -51,6 +51,7 @@ pub(crate) fn select_kernel(preference: KernelPreference) -> Result<ScanKernel> 
     }
 }
 
+#[cfg(test)]
 pub(crate) fn score_codes(
     kernel: ScanKernel,
     codes: &[u8],
@@ -70,12 +71,38 @@ pub(crate) fn score_codes(
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+fn score_avx2_dispatch(codes: &[u8], query: &[f32], centroids: &[f32; TURBOQUANT_LEVELS]) -> f32 {
+    unsafe { score_avx2(codes, query, centroids) }
+}
+
+#[cfg(target_arch = "aarch64")]
+fn score_neon_dispatch(codes: &[u8], query: &[f32], centroids: &[f32; TURBOQUANT_LEVELS]) -> f32 {
+    unsafe { score_neon(codes, query, centroids) }
+}
+
 fn score_scalar(codes: &[u8], query: &[f32], centroids: &[f32; TURBOQUANT_LEVELS]) -> f32 {
     query
         .iter()
         .enumerate()
         .map(|(dimension, value)| *value * centroids[usize::from(code_at(codes, dimension))])
         .sum()
+}
+
+pub(crate) type ScoreFunction = fn(&[u8], &[f32], &[f32; TURBOQUANT_LEVELS]) -> f32;
+
+pub(crate) fn score_function(kernel: ScanKernel) -> ScoreFunction {
+    match kernel {
+        ScanKernel::Scalar => score_scalar,
+        #[cfg(target_arch = "x86_64")]
+        ScanKernel::Avx2 => score_avx2_dispatch,
+        #[cfg(not(target_arch = "x86_64"))]
+        ScanKernel::Avx2 => unreachable!("AVX2 is selected only on x86_64"),
+        #[cfg(target_arch = "aarch64")]
+        ScanKernel::Neon => score_neon_dispatch,
+        #[cfg(not(target_arch = "aarch64"))]
+        ScanKernel::Neon => unreachable!("NEON is selected only on aarch64"),
+    }
 }
 
 #[cfg(target_arch = "x86_64")]

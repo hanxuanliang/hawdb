@@ -6,6 +6,7 @@ enum AggregateDistinctValue {
     Value(Value),
 }
 
+#[derive(Clone)]
 enum AggregateState {
     Count {
         count: usize,
@@ -213,6 +214,69 @@ impl AggregateState {
             } => Value::List(values.into_iter().collect()),
         }
     }
+
+    fn merge_partial(&mut self, other: Self) -> Result<MemoryDelta> {
+        match (self, other) {
+            (
+                Self::Count {
+                    count,
+                    distinct: None,
+                },
+                Self::Count {
+                    count: other,
+                    distinct: None,
+                },
+            ) => {
+                *count = count.saturating_add(other);
+                Ok(MemoryDelta::default())
+            }
+            (Self::Min(current), Self::Min(other)) => {
+                let previous = current.as_ref().map_or(0, value_memory_bytes);
+                if let Some(other) = other
+                    && current.as_ref().is_none_or(|current| other < *current)
+                {
+                    *current = Some(other);
+                }
+                let next = current.as_ref().map_or(0, value_memory_bytes);
+                Ok(MemoryDelta::between(previous, next))
+            }
+            (Self::Max(current), Self::Max(other)) => {
+                let previous = current.as_ref().map_or(0, value_memory_bytes);
+                if let Some(other) = other
+                    && current.as_ref().is_none_or(|current| other > *current)
+                {
+                    *current = Some(other);
+                }
+                let next = current.as_ref().map_or(0, value_memory_bytes);
+                Ok(MemoryDelta::between(previous, next))
+            }
+            (
+                Self::Avg { sum, count },
+                Self::Avg {
+                    sum: other_sum,
+                    count: other_count,
+                },
+            ) => {
+                *sum += other_sum;
+                *count = count.saturating_add(other_count);
+                Ok(MemoryDelta::default())
+            }
+            _ => Err(SkeinError::Execution(
+                "AggregateExec encountered incompatible partial states".to_string(),
+            )),
+        }
+    }
+
+    fn partial_memory_bytes(&self) -> usize {
+        std::mem::size_of::<Self>().saturating_add(match self {
+            Self::Min(Some(value)) | Self::Max(Some(value)) => value_memory_bytes(value),
+            Self::Count { .. }
+            | Self::Min(None)
+            | Self::Max(None)
+            | Self::Avg { .. }
+            | Self::Collect { .. } => 0,
+        })
+    }
 }
 
 fn aggregate_distinct_value_memory_bytes(value: &AggregateDistinctValue) -> usize {
@@ -313,6 +377,10 @@ struct GroupMergeEntry {
     run_index: usize,
 }
 
+mod partial;
+
+use partial::{partial_aggregation_is_mergeable, stream_partial_aggregate_batches};
+
 #[derive(Clone, Copy)]
 struct AggregateExecutionContext<'a> {
     group_keys: &'a [Projection],
@@ -386,6 +454,27 @@ pub fn stream_aggregate_batches(
             memory,
         ));
         return emit(vec![accumulator.finish()]);
+    }
+
+    if items.iter().all(partial_aggregation_is_mergeable) {
+        return stream_partial_aggregate_batches(
+            input,
+            group_keys,
+            items,
+            source,
+            AggregateExecutionContext {
+                group_keys,
+                items,
+                catalog,
+                batch_rows: memory.batch_rows.get(),
+                memory_budget: memory.blocking_operator_bytes,
+                execution_limit,
+                task_context,
+            },
+            memory,
+            observer,
+            emit,
+        );
     }
 
     let mut tracker = OperatorMemoryTracker::new(memory.blocking_operator_bytes);

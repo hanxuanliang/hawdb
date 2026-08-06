@@ -5,6 +5,7 @@ mod lending;
 use super::*;
 use lending::{
     admitted_numeric_batch_rows, LendingBatchCursor, NumericNodeBatch, NumericNodeBatchCursor,
+    OwnedNumericBatch, OwnedNumericBatchBuffer,
 };
 use skein_executor::columnar::{
     filter_float64_values, filter_int64_values, NumericLiteral, Selection, ValidityBuilder,
@@ -185,6 +186,7 @@ impl<'a> NumericFragment<'a> {
                 memory.batch_rows.get(),
                 memory.batch_payload_bytes.get(),
                 needs_node_ids,
+                false,
             )
             .unwrap_or(1)
         } else {
@@ -207,16 +209,18 @@ impl<'a> NumericFragment<'a> {
         let Some(label_id) = context.catalog.label_id(self.label) else {
             return Ok(BatchControl::Continue);
         };
-        let use_lending =
-            !context.store.is_out_of_core() && self.supports_lending_projection(items);
+        let supports_typed_projection = self.supports_lending_projection(items);
+        let use_lending = !context.store.is_out_of_core() && supports_typed_projection;
+        let use_owned_typed = context.store.is_out_of_core() && supports_typed_projection;
         let needs_node_ids = items
             .iter()
             .any(|item| matches!(item.expression, ProjectionExpression::Id { .. }));
-        let target_rows = if use_lending {
+        let target_rows = if use_lending || use_owned_typed {
             let admitted = admitted_numeric_batch_rows(
                 context.memory.batch_rows.get(),
                 context.memory.batch_payload_bytes.get(),
                 needs_node_ids,
+                use_owned_typed,
             )
             .ok_or_else(|| {
                 SkeinError::Execution(format!(
@@ -294,7 +298,17 @@ impl<'a> NumericFragment<'a> {
             },
         );
 
-        let (emitted, stopped) = if context.store.is_out_of_core() {
+        let (emitted, stopped) = if use_owned_typed {
+            stream_owned_typed_numeric_nodes(
+                self,
+                items,
+                label_id,
+                lending_scan,
+                context,
+                execution_limit,
+                emit,
+            )?
+        } else if context.store.is_out_of_core() {
             stream_owned_numeric_nodes(self, items, label_id, context, execution_limit, emit)?
         } else if parallel {
             stream_parallel_borrowed_numeric_nodes(
@@ -629,6 +643,71 @@ fn stream_owned_numeric_nodes(
     Ok((batch_emitter.emitted, stopped))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn stream_owned_typed_numeric_nodes(
+    fragment: NumericFragment<'_>,
+    items: &[Projection],
+    label_id: crate::schema::LabelId,
+    scan: LendingNumericScan,
+    context: BatchReadContext<'_>,
+    execution_limit: ExecutionLimit,
+    emit: &mut dyn FnMut(BindingBatch) -> Result<BatchControl>,
+) -> Result<(usize, bool)> {
+    let mut buffer = OwnedNumericBatchBuffer::new(fragment, scan.batch_rows, scan.needs_node_ids);
+    let mut batch_emitter = NumericBatchEmitter::new(
+        fragment,
+        items,
+        execution_limit,
+        context.task_context,
+        context.observer,
+        emit,
+    );
+    let mut callback_error = None;
+    let mut stopped = false;
+    {
+        let mut consume = |node: NodeRecord| {
+            if stopped {
+                return GraphScanControl::Stop;
+            }
+            if let Err(error) = buffer.push_owned(node) {
+                callback_error = Some(error);
+                stopped = true;
+                return GraphScanControl::Stop;
+            }
+            if buffer.is_full() {
+                match batch_emitter.emit_owned_typed(buffer.take_batch()) {
+                    Ok(BatchControl::Continue) => buffer.clear(),
+                    Ok(BatchControl::Stop) => {
+                        stopped = true;
+                        return GraphScanControl::Stop;
+                    }
+                    Err(error) => {
+                        callback_error = Some(error);
+                        stopped = true;
+                        return GraphScanControl::Stop;
+                    }
+                }
+            }
+            if batch_emitter.limit_reached() {
+                stopped = true;
+                GraphScanControl::Stop
+            } else {
+                GraphScanControl::Continue
+            }
+        };
+        context
+            .store
+            .visit_nodes_owned(Some(label_id), &mut consume)?;
+    }
+    if let Some(error) = callback_error {
+        return Err(error);
+    }
+    if !stopped && !buffer.is_empty() {
+        stopped = batch_emitter.emit_owned_typed(buffer.take_batch())? == BatchControl::Stop;
+    }
+    Ok((batch_emitter.emitted, stopped))
+}
+
 impl<'plan, 'task, 'observer, 'emit> NumericBatchEmitter<'plan, 'task, 'observer, 'emit> {
     fn new(
         fragment: NumericFragment<'plan>,
@@ -663,6 +742,13 @@ impl<'plan, 'task, 'observer, 'emit> NumericBatchEmitter<'plan, 'task, 'observer
         runtime_checkpoint(self.task_context)?;
         self.observer.record_morsels(1);
         let prepared = prepare_lending_batch(self.items, input);
+        self.emit_prepared(prepared)
+    }
+
+    fn emit_owned_typed(&mut self, input: OwnedNumericBatch<'_>) -> Result<BatchControl> {
+        runtime_checkpoint(self.task_context)?;
+        self.observer.record_morsels(1);
+        let prepared = prepare_owned_typed_batch(self.fragment, self.items, input)?;
         self.emit_prepared(prepared)
     }
 
@@ -740,6 +826,54 @@ fn prepare_lending_batch(
         selected_rows,
         output,
     }
+}
+
+fn prepare_owned_typed_batch(
+    fragment: NumericFragment<'_>,
+    items: &[Projection],
+    input: OwnedNumericBatch<'_>,
+) -> Result<PreparedNumericBatch> {
+    let selection = match input.values {
+        lending::NumericBatchValues::Int(values) => filter_int64_values(
+            values,
+            &input.validity,
+            &Selection::all(input.input_rows),
+            fragment.op,
+            fragment.expected,
+        )?,
+        lending::NumericBatchValues::Float(values) => filter_float64_values(
+            values,
+            &input.validity,
+            &Selection::all(input.input_rows),
+            fragment.op,
+            fragment.expected,
+        )?,
+    };
+    let selected_rows = selection.selected_count();
+    let mut output = Vec::with_capacity(selected_rows);
+    for row in selection.iter() {
+        let mut values = BTreeMap::new();
+        for item in items {
+            let value = match &item.expression {
+                ProjectionExpression::Id { .. } => Value::Int(
+                    input
+                        .node_ids
+                        .expect("typed owned scan retains requested node ids")[row]
+                        as i64,
+                ),
+                ProjectionExpression::Property { .. } => input.values.value(row),
+                ProjectionExpression::Literal(value) => value.clone(),
+                _ => unreachable!("typed owned projection eligibility checks expressions"),
+            };
+            insert_projected_value(&mut values, &item.name, value);
+        }
+        output.push(Binding::values(values));
+    }
+    Ok(PreparedNumericBatch {
+        input_rows: input.input_rows,
+        selected_rows,
+        output,
+    })
 }
 
 fn prepare_numeric_batch<N: Borrow<NodeRecord>>(

@@ -1,7 +1,7 @@
 use crate::artifact::{FileProjection, SegmentParts};
 use crate::codec::bytes_per_vector;
 use crate::error::{ProjectionError, Result};
-use crate::kernel::{score_codes, select_kernel, KernelPreference, ScanKernel};
+use crate::kernel::{score_function, select_kernel, KernelPreference, ScanKernel};
 use crate::model::{InMemoryProjection, ProjectionManifest};
 use crate::quantizer::TurboQuantCodebook;
 use crate::transform::normalize_and_transform;
@@ -16,6 +16,7 @@ const DEFAULT_SEARCH_MEMORY_BYTES: usize = 64 * 1024 * 1024;
 const WORKER_FIXED_BYTES: usize = 1_024;
 const WORKER_STACK_BYTES: usize = 512 * 1024;
 const SEARCH_FIXED_BYTES: usize = 1_024;
+const MIN_ALLOWLIST_DOCUMENTS_PER_WORKER: usize = 1_024;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ProjectionSearchOptions<'a> {
@@ -279,11 +280,23 @@ where
             available: options.max_working_bytes,
         });
     }
+    let admitted_by_allowlist = options.allowed_ids.map_or(usize::MAX, |allowed| {
+        allowed
+            .len()
+            .div_ceil(MIN_ALLOWLIST_DOCUMENTS_PER_WORKER)
+            .max(1)
+    });
     let worker_count = options
         .max_parallelism
         .get()
+        .min(
+            options
+                .task_context
+                .map_or(usize::MAX, |context| context.admitted_parallelism().get()),
+        )
         .min(segment_count)
         .min(admitted_by_memory)
+        .min(admitted_by_allowlist)
         .max(1);
     let admitted_working_bytes = global_bytes.saturating_add(worker_count * per_worker_bytes);
 
@@ -438,15 +451,8 @@ where
             "segment code length does not match rows and dimension".to_string(),
         ));
     }
-    let mask = allowed_ids.map(|allowed| {
-        let mut words = vec![0u64; rows.div_ceil(u64::BITS as usize)];
-        for row in 0..rows {
-            if allowed.binary_search(&id_at(row)).is_ok() {
-                words[row / u64::BITS as usize] |= 1u64 << (row % u64::BITS as usize);
-            }
-        }
-        words
-    });
+    let mask = allowed_ids.map(|allowed| build_allowed_mask(rows, &id_at, allowed));
+    let score = score_function(kernel);
     let mut top = TopK::new(top_k);
     let mut scored_document_count = 0usize;
     let mut scanned_block_count = 0usize;
@@ -464,13 +470,7 @@ where
             continue;
         }
         scanned_block_count = scanned_block_count.saturating_add(1);
-        for row in block_start..block_end {
-            if mask
-                .as_deref()
-                .is_some_and(|mask| !mask_contains(mask, row))
-            {
-                continue;
-            }
+        let mut score_row = |row: usize| -> Result<()> {
             let scale = scale_at(row);
             if !scale.is_finite() || scale < 0.0 {
                 return Err(ProjectionError::CorruptArtifact(format!(
@@ -478,8 +478,7 @@ where
                 )));
             }
             let start = row * bytes_per_vector;
-            let score = score_codes(
-                kernel,
+            let score = score(
                 &codes[start..start + bytes_per_vector],
                 query,
                 codebook.centroids(),
@@ -494,6 +493,17 @@ where
                 score,
             });
             scored_document_count = scored_document_count.saturating_add(1);
+            Ok(())
+        };
+        match mask.as_deref() {
+            Some(mask) => {
+                for_each_selected_row(mask, block_start, block_end, &mut score_row)?;
+            }
+            None => {
+                for row in block_start..block_end {
+                    score_row(row)?;
+                }
+            }
         }
     }
     Ok(SegmentSearchResult {
@@ -508,12 +518,87 @@ where
 }
 
 fn mask_has_any(mask: &[u64], start: usize, end: usize) -> bool {
-    (start..end).any(|row| mask_contains(mask, row))
+    mask_words(mask, start, end).any(|(_, selected, _)| selected != 0)
 }
 
-fn mask_contains(mask: &[u64], row: usize) -> bool {
-    mask.get(row / u64::BITS as usize)
-        .is_some_and(|word| word & (1u64 << (row % u64::BITS as usize)) != 0)
+fn build_allowed_mask<Id>(rows: usize, id_at: &Id, allowed: &[u64]) -> Vec<u64>
+where
+    Id: Fn(usize) -> u64,
+{
+    let mut words = vec![0u64; rows.div_ceil(u64::BITS as usize)];
+    if rows == 0 || allowed.is_empty() {
+        return words;
+    }
+    let first_id = id_at(0);
+    let mut allowed_index = allowed.partition_point(|id| *id < first_id);
+    for row in 0..rows {
+        if allowed_index == allowed.len() {
+            break;
+        }
+        let id = id_at(row);
+        while allowed_index < allowed.len() && allowed[allowed_index] < id {
+            allowed_index += 1;
+        }
+        if allowed_index < allowed.len() && allowed[allowed_index] == id {
+            words[row / u64::BITS as usize] |= 1u64 << (row % u64::BITS as usize);
+            allowed_index += 1;
+        }
+    }
+    words
+}
+
+fn for_each_selected_row(
+    mask: &[u64],
+    start: usize,
+    end: usize,
+    visit: &mut impl FnMut(usize) -> Result<()>,
+) -> Result<()> {
+    for (word_start, mut selected, valid) in mask_words(mask, start, end) {
+        if selected == 0 {
+            continue;
+        }
+        if selected == valid {
+            let first = valid.trailing_zeros() as usize;
+            let last = (u64::BITS - valid.leading_zeros()) as usize;
+            for bit in first..last {
+                visit(word_start + bit)?;
+            }
+            continue;
+        }
+        while selected != 0 {
+            let bit = selected.trailing_zeros() as usize;
+            visit(word_start + bit)?;
+            selected &= selected - 1;
+        }
+    }
+    Ok(())
+}
+
+fn mask_words(
+    mask: &[u64],
+    start: usize,
+    end: usize,
+) -> impl Iterator<Item = (usize, u64, u64)> + '_ {
+    let first_word = start / u64::BITS as usize;
+    let end_word = end.div_ceil(u64::BITS as usize);
+    (first_word..end_word).map(move |word_index| {
+        let word_start = word_index * u64::BITS as usize;
+        let first_bit = start.saturating_sub(word_start).min(u64::BITS as usize);
+        let end_bit = end.saturating_sub(word_start).min(u64::BITS as usize);
+        let below_end = if end_bit == u64::BITS as usize {
+            u64::MAX
+        } else {
+            (1u64 << end_bit) - 1
+        };
+        let below_start = if first_bit == u64::BITS as usize {
+            u64::MAX
+        } else {
+            (1u64 << first_bit) - 1
+        };
+        let valid = below_end & !below_start;
+        let selected = mask.get(word_index).copied().unwrap_or(0) & valid;
+        (word_start, selected, valid)
+    })
 }
 
 fn store_error(
@@ -684,6 +769,30 @@ mod tests {
     }
 
     #[test]
+    fn linear_allowlist_mask_and_word_iteration_cover_sparse_and_dense_ranges() {
+        let ids = (100..230u64).collect::<Vec<_>>();
+        let allowed = [99, 100, 102, 163, 164, 165, 228, 229, 300];
+        let mask = build_allowed_mask(ids.len(), &|row| ids[row], &allowed);
+        let mut selected = Vec::new();
+        for_each_selected_row(&mask, 1, 129, &mut |row| {
+            selected.push(row);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(selected, vec![2, 63, 64, 65, 128]);
+
+        let dense_allowed = ids.clone();
+        let dense_mask = build_allowed_mask(ids.len(), &|row| ids[row], &dense_allowed);
+        let mut dense = Vec::new();
+        for_each_selected_row(&dense_mask, 5, 70, &mut |row| {
+            dense.push(row);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(dense, (5..70).collect::<Vec<_>>());
+    }
+
+    #[test]
     fn search_budget_accounts_for_global_top_k_and_worker_stack() {
         let projection = sample_in_memory_projection(8, 2);
         let query = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
@@ -748,6 +857,35 @@ mod tests {
             .unwrap();
         assert_eq!(parallel.hits, sequential.hits);
         assert_eq!(parallel.report.worker_count, 4);
+
+        let context =
+            RuntimeTaskContext::default().with_admitted_parallelism(NonZeroUsize::new(2).unwrap());
+        let governed = projection
+            .search(
+                &query,
+                7,
+                ProjectionSearchOptions::new()
+                    .with_kernel(KernelPreference::Scalar)
+                    .with_max_parallelism(NonZeroUsize::new(4).unwrap())
+                    .with_task_context(&context),
+            )
+            .unwrap();
+        assert_eq!(governed.hits, sequential.hits);
+        assert_eq!(governed.report.worker_count, 2);
+
+        let sparse_allowed = [0];
+        let sparse = projection
+            .search(
+                &query,
+                7,
+                ProjectionSearchOptions::new()
+                    .with_kernel(KernelPreference::Scalar)
+                    .with_max_parallelism(NonZeroUsize::new(4).unwrap())
+                    .with_allowed_ids(&sparse_allowed),
+            )
+            .unwrap();
+        assert_eq!(sparse.report.worker_count, 1);
+        assert_eq!(sparse.report.scored_document_count, 1);
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -4,7 +4,7 @@ use super::*;
 use crate::planner::{
     AggregateFunction, AggregateTarget, ProjectionExpression, SortDirection, SortKey,
 };
-use crate::store::ScanPruningStrategy;
+use crate::store::{DurabilityPolicy, ScanPruningStrategy, StorageResidencyMode, WalReplayConfig};
 
 fn spill_test_config(name: &str) -> ExecutionMemoryConfig {
     let nonce = std::time::SystemTime::now()
@@ -121,7 +121,7 @@ fn grouped_aggregate_pipeline_spills_and_merges_groups() {
             .create_node(
                 &mut catalog,
                 "Item",
-                properties([("group", Value::Int(value % 3))]),
+                properties([("group", Value::Int(value % 8))]),
             )
             .unwrap();
     }
@@ -164,9 +164,14 @@ fn grouped_aggregate_pipeline_spills_and_merges_groups() {
             .map(|row| (row["group"].clone(), row["count"].clone()))
             .collect::<Vec<_>>(),
         vec![
-            (Value::Int(0), Value::Int(7)),
-            (Value::Int(1), Value::Int(7)),
-            (Value::Int(2), Value::Int(6)),
+            (Value::Int(0), Value::Int(3)),
+            (Value::Int(1), Value::Int(3)),
+            (Value::Int(2), Value::Int(3)),
+            (Value::Int(3), Value::Int(3)),
+            (Value::Int(4), Value::Int(2)),
+            (Value::Int(5), Value::Int(2)),
+            (Value::Int(6), Value::Int(2)),
+            (Value::Int(7), Value::Int(2)),
         ]
     );
     let report = output
@@ -181,6 +186,110 @@ fn grouped_aggregate_pipeline_spills_and_merges_groups() {
     assert!(report.spilled_bytes > 0);
     assert!(report.spilled_bytes <= report.max_spill_bytes);
     assert!(report.spill_run_count <= report.max_spill_runs);
+    assert!(std::fs::read_dir(&memory.spill_directory)
+        .unwrap()
+        .next()
+        .is_none());
+    std::fs::remove_dir(memory.spill_directory).unwrap();
+}
+
+#[test]
+fn grouped_partial_aggregate_spill_does_not_write_unused_binding_payloads() {
+    let mut catalog = Catalog::default();
+    let mut store = GraphStore::in_memory();
+    let payload = "x".repeat(4096);
+    for value in 0..24 {
+        store
+            .create_node(
+                &mut catalog,
+                "Item",
+                properties([
+                    ("group", Value::Int(value % 8)),
+                    ("value", Value::Int(value)),
+                    ("payload", Value::String(payload.clone())),
+                ]),
+            )
+            .unwrap();
+    }
+    let plan = PhysicalPlan::AggregateExec {
+        group_keys: vec![Projection {
+            expression: ProjectionExpression::Property {
+                variable: "n".to_string(),
+                property: "group".to_string(),
+            },
+            name: "group".to_string(),
+        }],
+        items: vec![
+            Aggregation {
+                function: AggregateFunction::Count,
+                target: AggregateTarget::All,
+                distinct: false,
+                name: "count".to_string(),
+            },
+            Aggregation {
+                function: AggregateFunction::Min,
+                target: AggregateTarget::Property {
+                    variable: "n".to_string(),
+                    property: "value".to_string(),
+                },
+                distinct: false,
+                name: "min".to_string(),
+            },
+            Aggregation {
+                function: AggregateFunction::Max,
+                target: AggregateTarget::Property {
+                    variable: "n".to_string(),
+                    property: "value".to_string(),
+                },
+                distinct: false,
+                name: "max".to_string(),
+            },
+            Aggregation {
+                function: AggregateFunction::Avg,
+                target: AggregateTarget::Property {
+                    variable: "n".to_string(),
+                    property: "value".to_string(),
+                },
+                distinct: false,
+                name: "avg".to_string(),
+            },
+        ],
+        input: Box::new(PhysicalPlan::SeqNodeScan {
+            variable: "n".to_string(),
+            label: "Item".to_string(),
+        }),
+    };
+    let mut memory = spill_test_config("aggregate-partial-spill");
+    memory.blocking_operator_bytes = NonZeroUsize::new(2048).unwrap();
+    let mut external = NoExternalReadOperator;
+    let output = execute_with_row_limit_profile_and_external_and_memory(
+        &plan,
+        &mut catalog,
+        &mut store,
+        &BTreeMap::new(),
+        &mut external,
+        None,
+        &memory,
+    )
+    .unwrap();
+
+    assert_eq!(output.rows.len(), 8);
+    for (group, row) in output.rows.iter().enumerate() {
+        assert_eq!(row["group"], Value::Int(group as i64));
+        assert_eq!(row["count"], Value::Int(3));
+        assert_eq!(row["min"], Value::Int(group as i64));
+        assert_eq!(row["max"], Value::Int(group as i64 + 16));
+        assert_eq!(row["avg"], Value::Float(group as f64 + 8.0));
+    }
+    let report = output
+        .profile
+        .blocking_operator_memory_reports
+        .iter()
+        .find(|report| report.operator == "AggregateExec")
+        .unwrap();
+    assert!(report.spill_run_count > 1);
+    assert_eq!(report.spilled_rows, 24);
+    assert!(report.spilled_bytes < 24 * payload.len() as u64);
     assert!(std::fs::read_dir(&memory.spill_directory)
         .unwrap()
         .next()
@@ -939,6 +1048,144 @@ fn columnar_lending_fragment_matches_row_for_narrow_numeric_projection() {
     assert_eq!(columnar.rows, row.rows);
     assert!(columnar.profile.pipeline_memory_report.columnar_batches > 1);
     assert_eq!(row.profile.pipeline_memory_report.columnar_batches, 0);
+}
+
+#[test]
+fn out_of_core_columnar_scan_drops_full_records_before_batching() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("skein-columnar-owned-{nonce}"));
+    let mut catalog = Catalog::default();
+    let table = catalog.get_or_create_table(crate::schema::TableKind::Node, "Item");
+    catalog.get_or_create_property(table, "score", crate::schema::PropertyType::Int, true);
+    let replay_config = WalReplayConfig {
+        residency_mode: StorageResidencyMode::OutOfCore,
+        ..WalReplayConfig::default()
+    };
+    let mut store = GraphStore::open_with_durability_and_replay_config(
+        &path,
+        &mut catalog,
+        DurabilityPolicy::default(),
+        replay_config,
+    )
+    .unwrap();
+    for row in 0..32i64 {
+        store
+            .create_node(
+                &mut catalog,
+                "Item",
+                properties([
+                    ("score", Value::Int(row)),
+                    ("payload", Value::String("x".repeat(4096))),
+                ]),
+            )
+            .unwrap();
+    }
+    store.checkpoint(&catalog).unwrap();
+    drop(store);
+
+    let mut catalog = Catalog::default();
+    let mut store = GraphStore::open_with_durability_and_replay_config(
+        &path,
+        &mut catalog,
+        DurabilityPolicy::default(),
+        replay_config,
+    )
+    .unwrap();
+    assert!(store.is_out_of_core());
+    let compare = Predicate::PropertyCompare {
+        variable: "n".to_string(),
+        property: "score".to_string(),
+        op: crate::planner::ComparisonOp::Gte,
+        value: Value::Int(24),
+    };
+    let items = vec![
+        Projection {
+            expression: ProjectionExpression::Id {
+                variable: "n".to_string(),
+            },
+            name: "node_id".to_string(),
+        },
+        Projection {
+            expression: ProjectionExpression::Property {
+                variable: "n".to_string(),
+                property: "score".to_string(),
+            },
+            name: "score".to_string(),
+        },
+    ];
+    let scan = PhysicalPlan::SeqNodeScan {
+        variable: "n".to_string(),
+        label: "Item".to_string(),
+    };
+    let columnar_plan = PhysicalPlan::ProjectExec {
+        items: items.clone(),
+        input: Box::new(PhysicalPlan::FilterExec {
+            predicate: compare.clone(),
+            input: Box::new(scan.clone()),
+        }),
+    };
+    let row_plan = PhysicalPlan::ProjectExec {
+        items,
+        input: Box::new(PhysicalPlan::FilterExec {
+            predicate: Predicate::And(vec![compare]),
+            input: Box::new(scan),
+        }),
+    };
+    let memory = ExecutionMemoryConfig {
+        batch_rows: NonZeroUsize::new(8).unwrap(),
+        batch_payload_bytes: NonZeroUsize::new(1024).unwrap(),
+        ..ExecutionMemoryConfig::default()
+    };
+    let mut external = NoExternalReadOperator;
+    let columnar = execute_with_row_limit_profile_and_external_and_memory(
+        &columnar_plan,
+        &mut catalog,
+        &mut store,
+        &BTreeMap::new(),
+        &mut external,
+        None,
+        &memory,
+    )
+    .unwrap();
+    let row_error = execute_with_row_limit_profile_and_external_and_memory(
+        &row_plan,
+        &mut catalog,
+        &mut store,
+        &BTreeMap::new(),
+        &mut external,
+        None,
+        &memory,
+    )
+    .unwrap_err();
+    assert!(row_error.to_string().contains("intermediate row uses"));
+    let row_memory = ExecutionMemoryConfig {
+        batch_rows: NonZeroUsize::new(8).unwrap(),
+        ..ExecutionMemoryConfig::default()
+    };
+    let row = execute_with_row_limit_profile_and_external_and_memory(
+        &row_plan,
+        &mut catalog,
+        &mut store,
+        &BTreeMap::new(),
+        &mut external,
+        None,
+        &row_memory,
+    )
+    .unwrap();
+
+    assert_eq!(columnar.rows, row.rows);
+    assert_eq!(columnar.rows.len(), 8);
+    assert_eq!(columnar.profile.pipeline_memory_report.columnar_batches, 4);
+    assert_eq!(
+        columnar.profile.pipeline_memory_report.columnar_input_rows,
+        32
+    );
+    assert_eq!(row.profile.pipeline_memory_report.columnar_batches, 0);
+    drop(store);
+    std::fs::remove_dir_all(path).unwrap();
 }
 
 #[test]

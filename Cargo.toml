@@ -150,3 +150,15 @@ harness = false
 [[bench]]
 name = "search_generation"
 harness = false
+
+[[bench]]
+name = "storage_segment_read"
+harness = false
+
+[[bench]]
+name = "vector_projection_scan"
+harness = false
+
+[[bench]]
+name = "aggregate_partial_spill"
+harness = false
