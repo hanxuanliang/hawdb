@@ -45,29 +45,6 @@ pub struct KnowledgeMemoryDecayRefreshBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryEvolvesRelationCountRequest {
-    pub memory_ids: Vec<String>,
-    pub content_relations: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryEvolvesRelationCountRow {
-    pub memory_id: String,
-    pub node_id: u64,
-    pub count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryEvolvesRelationCountOutput {
-    pub graph_commit_epoch: u64,
-    pub rows: Vec<KnowledgeMemoryEvolvesRelationCountRow>,
-    pub matched_memory_count: usize,
-    pub missing_memory_ids: Vec<String>,
-    pub matched_relationship_count: usize,
-    pub returned_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeMemoryCrystalSynthesisCountRequest {
     pub memory_ids: Vec<String>,
 }

@@ -369,13 +369,11 @@ statement with explicit target projection, deterministic ordering, `LIMIT`, a
 matching row budget, and a pinned snapshot. Optional source-existence and
 relationship-count phases are separate bounded queries owned by the host; no
 REST-specific typed database API is exposed.
-Memory EVOLVES relation count reads are covered by
-`Database::knowledge_memory_evolves_relation_counts`. The typed read covers the
-decay scheduler's `content_relation IN [...]` count shape over requested Memory
-ids, scans only matched Memory nodes, filters outgoing `EVOLVES` edges to
-Memory targets by caller-supplied relation names, returns one row per Memory
-with a positive count, reports missing Memory ids and full matched relationship
-counts, supports pinned read snapshots, and does not write WAL.
+Memory EVOLVES relation counts use one fixed parameterized aggregate Cypher
+statement with explicit source/target labels, relation filtering, deterministic
+ordering, `LIMIT`, a matching row budget, and a pinned snapshot. Missing-id and
+total-count response shaping stays in the scheduler; no scheduler-specific
+typed database API is exposed.
 Memory crystal synthesis count reads are covered by
 `Database::knowledge_memory_crystal_synthesis_counts`. The typed read covers the
 decay scheduler's incoming `SYNTHESIZED_FROM` count shape over requested source

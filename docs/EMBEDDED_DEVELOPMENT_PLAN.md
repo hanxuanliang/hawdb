@@ -520,13 +520,10 @@ Memory EVOLVES latest reads use one fixed parameterized successor Cypher
 statement with deterministic ordering, `LIMIT`, a matching row budget, and a
 pinned snapshot. Source-existence and relationship-count response shaping
 remain in separate host-owned bounded query phases.
-Memory EVOLVES relation count reads are available as
-`Database::knowledge_memory_evolves_relation_counts`, covering the decay
-scheduler's bounded `content_relation IN [...]` count shape over requested
-Memory ids. The read scans only requested Memory nodes, filters outgoing
-`EVOLVES` edges to Memory targets by caller-supplied relation names, reports
-missing Memory ids separately, supports pinned read snapshots, and does not
-write WAL.
+Memory EVOLVES relation counts use one fixed parameterized aggregate Cypher
+statement with explicit source/target labels, relation filtering, deterministic
+ordering, `LIMIT`, a matching row budget, and a pinned snapshot. Missing-id and
+total-count shaping remains outside the embedded database facade.
 Memory crystal synthesis count reads are available as
 `Database::knowledge_memory_crystal_synthesis_counts`, covering the decay
 scheduler's bounded incoming `SYNTHESIZED_FROM` count shape over requested
