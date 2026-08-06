@@ -808,8 +808,16 @@ jobs:
       - name: Test vector qualification protocol
         run: cargo test -p skein-qualification production_vector
 
+      - name: Install upstream oracle native dependency
+        if: matrix.target == 'linux-x86_64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libopenblas-dev
+
       - name: Test upstream differential oracle
         if: matrix.target == 'linux-x86_64'
+        env:
+          OPENBLAS_NUM_THREADS: "1"
         run: cargo test -p skein-qualification production_vector --features turbovec-oracle
 
   storage-platform:

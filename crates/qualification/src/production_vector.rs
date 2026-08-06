@@ -4,9 +4,9 @@ use serde::Serialize;
 use skein::{
     ProcessMemoryProfile, ProcessMemorySnapshot, ProductionEvidenceBinding,
     ProductionQualificationIdentity, RuntimeCancellationToken, RuntimeTaskContext,
-    SearchAccessControlContext, SearchFallbackReasonCode, SearchIndex, SearchOutOfCoreConfig,
-    SearchOutOfCoreReader, SearchProjectionQualificationIdentity, SearchResultSet,
-    VectorProjectionQualificationIdentity, VectorProjectionResourceEvidence,
+    SearchAccessControlContext, SearchDocument, SearchFallbackReasonCode, SearchIndex,
+    SearchOutOfCoreConfig, SearchOutOfCoreReader, SearchProjectionQualificationIdentity,
+    SearchResultSet, VectorProjectionQualificationIdentity, VectorProjectionResourceEvidence,
     VectorSearchExecutionOptions, VectorSearchKernelPreference,
     MAX_VECTOR_RECALL_VALIDATION_CANDIDATE_LIMIT, MAX_VECTOR_RECALL_VALIDATION_SAMPLES,
     MAX_VECTOR_RECALL_VALIDATION_TOP_K, MINIMUM_VECTOR_QUALIFICATION_DOCUMENT_COUNT,
@@ -97,6 +97,8 @@ pub struct ProductionVectorLifecycleConfig {
 pub struct ProductionVectorQualificationConfig {
     /// Full-residency algorithm oracle and lifecycle fixture.
     pub projection_path: PathBuf,
+    /// Full-residency corpus used only by optional differential oracles.
+    pub differential_oracle_documents: Vec<SearchDocument>,
     /// Production out-of-core generation whose document identity is released.
     pub search_projection_path: PathBuf,
     pub query_cases: Vec<ProductionVectorQueryCase>,

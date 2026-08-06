@@ -26,6 +26,10 @@ fn representative_runner_collects_recall_execution_and_lifecycle_evidence() {
     let identity = production_identity(42);
     let report = run_production_vector_qualification(ProductionVectorQualificationConfig {
         projection_path: source.clone(),
+        differential_oracle_documents: projection_rows()
+            .into_iter()
+            .map(SearchProjectionRow::into_document)
+            .collect(),
         search_projection_path: serving,
         query_cases: query_cases(),
         lifecycle: ProductionVectorLifecycleConfig {

@@ -510,7 +510,10 @@ upstream implementation as a development differential oracle. The report MUST
 label it as an oracle rather than truth, record candidate overlap and final
 result comparisons, and MUST NOT require oracle agreement as a correctness
 condition. A qualification configured to require this oracle MUST fail closed
-when it was not compiled or could not run.
+when it was not compiled or could not run. The upstream dependency, full-
+residency corpus, and oracle index MUST remain owned by `skein-qualification`;
+the production `skein` feature graph, checkpoint, and serving backend MUST NOT
+depend on them.
 
 `skein-production-vector-qualification-matrix-v1` combines independently
 generated reports and requires matching release and projection identities for

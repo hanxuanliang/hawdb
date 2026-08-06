@@ -1618,7 +1618,6 @@ dependencies = [
  "skein-storage",
  "skein-telemetry",
  "skein-vector-projection",
- "turbovec",
  "unicode-width",
  "zstd",
 ]
@@ -1742,6 +1741,7 @@ dependencies = [
  "skein",
  "skein-query",
  "tokio",
+ "turbovec",
 ]
 
 [[package]]

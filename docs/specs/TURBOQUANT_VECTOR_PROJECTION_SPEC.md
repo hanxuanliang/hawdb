@@ -144,7 +144,12 @@ x86_64, Linux AArch64, macOS AArch64, and Windows x86_64 reports bound to the
 same corpus and release identity.
 
 When `skein-qualification/turbovec-oracle` is enabled, the collector builds the
-upstream `turbovec` implementation only as an offline differential oracle. It
+upstream `turbovec` implementation only as an offline differential oracle. The
+dependency and its full-residency index are owned by `skein-qualification`;
+the production `skein` crate has no `turbovec` feature, backend, or checkpoint
+artifact. Oracle candidates re-enter Skein through a validation-only ingress so
+metadata filtering and canonical raw-vector reranking still execute in the
+serving implementation. That ingress is compiled only by the non-default
+`skein/qualification` feature forwarded from the oracle feature. The report
 records candidate-set overlap and final-result comparisons without treating
-oracle agreement as correctness truth or enabling `turbovec` in the production
-serving feature set.
+oracle agreement as correctness truth.

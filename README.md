@@ -48,10 +48,14 @@ cargo build --locked -p skein --no-default-features \
 | `graph-analytics` | yes | Makes bounded graph projection and analytics operations available. |
 | `background-maintenance` | yes | Makes QoS-admitted background schema, index, projection, and maintenance work available. |
 | `acl` | no | Compiles the optional access-control capability. The host must still provide fresh policy state and enable it at runtime; enabling this feature alone does not establish an authorization boundary. |
-| `turbovec` | no | Adds the upstream `turbovec` implementation as a development-only differential/shadow oracle and also enables `vector-search`. It is not the default production backend. |
 | `tokio-runtime` | no | Exposes the optional owned-or-borrowed Tokio adapter for asynchronous host integration. The synchronous embedded facade remains available without it. |
 | `opentelemetry` | no | Compiles the host-injected OpenTelemetry metrics adapter. It does not install a global provider, create an OTLP exporter, read an endpoint, or start a network worker. This feature is restricted to nightly non-production monitoring builds. |
+| `qualification` | no | Compiles validation-only candidate ingress used by offline qualification crates. It is not a serving capability. |
 | `loom-tests` | no | Enables Loom-only concurrency model tests. It is a validation feature, not an application capability. |
+
+The optional `skein-qualification/turbovec-oracle` feature owns the upstream
+`turbovec` dependency for offline differential qualification. It is not a
+`skein` serving feature and does not publish a production search artifact.
 
 Compile a nightly non-production monitoring variant with the metrics adapter and
 Tokio integration explicitly:

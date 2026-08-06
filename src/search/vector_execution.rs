@@ -13,7 +13,7 @@ use skein_optimizer::{
 };
 use skein_plan::VectorSearchLogicalPlan;
 use std::collections::BTreeMap;
-#[cfg(feature = "turbovec")]
+#[cfg(feature = "qualification")]
 use std::collections::BTreeSet;
 
 pub(super) struct SearchVectorExecution {
@@ -200,37 +200,25 @@ impl VectorExecutionSource for SearchVectorSource<'_, '_> {
                     }
                 }
             }
-            #[cfg(feature = "turbovec")]
-            VectorSearchBackend::Turbovec(projection) => {
+            #[cfg(feature = "qualification")]
+            VectorSearchBackend::ExternalValidation { candidates, .. } => {
                 let allowlist = self
                     .documents
                     .iter()
-                    .map(|document| document.id.clone())
+                    .map(|document| document.id.as_str())
                     .collect::<BTreeSet<_>>();
-                match projection.search(
-                    self.query_embedding,
-                    request.candidate_limit,
-                    Some(&allowlist),
-                ) {
-                    Ok(hits) => Ok(VectorCandidateBatch {
-                        score_source: VectorScoreSource::QuantizedApproximate,
-                        candidates: hits
-                            .into_iter()
-                            .map(|hit| VectorCandidate {
-                                id: hit.id,
-                                score: hit.score,
-                            })
-                            .collect(),
-                    }),
-                    Err(error) => {
-                        self.fallback_reason_codes
-                            .push(SearchFallbackReasonCode::VectorIndexEmpty);
-                        self.fallback_reasons.push(format!(
-                            "compressed vector projection unavailable; fell back to scalar vector scan: {error}"
-                        ));
-                        Ok(self.raw_vector_candidates())
-                    }
-                }
+                Ok(VectorCandidateBatch {
+                    score_source: VectorScoreSource::QuantizedApproximate,
+                    candidates: candidates
+                        .iter()
+                        .filter(|(id, _)| allowlist.contains(id.as_str()))
+                        .take(request.candidate_limit)
+                        .map(|(id, score)| VectorCandidate {
+                            id: id.clone(),
+                            score: *score,
+                        })
+                        .collect(),
+                })
             }
         }
     }
