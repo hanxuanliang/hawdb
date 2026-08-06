@@ -3,9 +3,11 @@ use crate::production_graph::validate_production_identity_for_current_target;
 use serde::Serialize;
 use skein::{
     ProcessMemoryProfile, ProcessMemorySnapshot, ProductionEvidenceBinding,
-    ProductionQualificationIdentity, RuntimeTaskContext, SearchAccessControlContext,
-    SearchFallbackReasonCode, SearchIndex, SearchResultSet, VectorProjectionQualificationIdentity,
-    VectorProjectionResourceEvidence, VectorSearchExecutionOptions, VectorSearchKernelPreference,
+    ProductionQualificationIdentity, RuntimeCancellationToken, RuntimeTaskContext,
+    SearchAccessControlContext, SearchFallbackReasonCode, SearchIndex, SearchOutOfCoreConfig,
+    SearchOutOfCoreReader, SearchProjectionQualificationIdentity, SearchResultSet,
+    VectorProjectionQualificationIdentity, VectorProjectionResourceEvidence,
+    VectorSearchExecutionOptions, VectorSearchKernelPreference,
     MAX_VECTOR_RECALL_VALIDATION_CANDIDATE_LIMIT, MAX_VECTOR_RECALL_VALIDATION_SAMPLES,
     MAX_VECTOR_RECALL_VALIDATION_TOP_K, MINIMUM_VECTOR_QUALIFICATION_DOCUMENT_COUNT,
 };
@@ -29,7 +31,8 @@ pub use oracle::{
     ProductionVectorDifferentialOracleCase, ProductionVectorDifferentialOracleEvidence,
 };
 use query::{
-    collect_recall_evidence, execute_query, measure_query, request_digest, VectorExecutionProfile,
+    collect_recall_evidence, execute_query, execute_serving_query, measure_query,
+    measure_serving_query, request_digest, VectorExecutionProfile,
 };
 pub use query::{
     ProductionVectorExecutionMetrics, ProductionVectorQueryEvidence, ProductionVectorRecallEvidence,
@@ -92,7 +95,10 @@ pub struct ProductionVectorLifecycleConfig {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProductionVectorQualificationConfig {
+    /// Full-residency algorithm oracle and lifecycle fixture.
     pub projection_path: PathBuf,
+    /// Production out-of-core generation whose document identity is released.
+    pub search_projection_path: PathBuf,
     pub query_cases: Vec<ProductionVectorQueryCase>,
     pub lifecycle: ProductionVectorLifecycleConfig,
     pub warmup_runs: usize,
@@ -113,6 +119,11 @@ impl ProductionVectorQualificationConfig {
         if !self.projection_path.is_dir() {
             return Err(ProductionVectorQualificationError::new(
                 "production vector qualification requires an existing projection directory",
+            ));
+        }
+        if !self.search_projection_path.is_dir() {
+            return Err(ProductionVectorQualificationError::new(
+                "production vector qualification requires an existing out-of-core search projection directory",
             ));
         }
         if self.measurement_runs == 0
@@ -243,11 +254,13 @@ pub struct ProductionVectorLifecycleReport {
     pub stale_generation_isolated: bool,
     pub corrupt_projection_rejected: bool,
     pub cancellation_propagated: bool,
+    pub serving_cancellation_propagated: bool,
     pub mixed_foreground_background: bool,
     pub update_latency: LatencyPercentiles,
     pub checkpoint_latency: LatencyPercentiles,
     pub reopen_latency: LatencyPercentiles,
     pub cancellation_latency: LatencyPercentiles,
+    pub serving_cancellation_latency: LatencyPercentiles,
     pub checkpoint_write_amplification_per_million: u64,
 }
 
@@ -259,6 +272,8 @@ pub struct ProductionVectorQualificationReport {
     pub evidence_binding: ProductionEvidenceBinding,
     pub expected_identity: ProductionQualificationIdentity,
     pub projection_identity: VectorProjectionQualificationIdentity,
+    pub oracle_projection_identity: VectorProjectionQualificationIdentity,
+    pub search_projection_identity: SearchProjectionQualificationIdentity,
     pub projection_resources: VectorProjectionResourceEvidence,
     pub recall_evidence: Vec<ProductionVectorRecallEvidence>,
     pub query_evidence: Vec<ProductionVectorQueryEvidence>,
@@ -279,6 +294,8 @@ impl ProductionVectorQualificationReport {
             "evidence_binding": self.evidence_binding.json(),
             "expected_identity": self.expected_identity.json(),
             "projection_identity": self.projection_identity.json(),
+            "oracle_projection_identity": self.oracle_projection_identity.json(),
+            "search_projection_identity": self.search_projection_identity.json(),
             "projection_resources": self.projection_resources.json(),
             "recall_evidence": self.recall_evidence.iter().map(ProductionVectorRecallEvidence::json).collect::<Vec<_>>(),
             "query_evidence": self.query_evidence.iter().map(ProductionVectorQueryEvidence::json).collect::<Vec<_>>(),
@@ -310,6 +327,25 @@ impl ProductionVectorQualificationReport {
         {
             blockers.push("projection_identity_not_production_bound".to_string());
         }
+        if self.projection_identity.projection_generation
+            != self.search_projection_identity.projection_generation
+            || self.projection_identity.source_graph_commit_epoch
+                != self.search_projection_identity.source_graph_commit_epoch
+            || self.projection_identity.embedding_model
+                != self.search_projection_identity.embedding_model
+            || self.projection_identity.embedding_version
+                != self.search_projection_identity.embedding_version
+            || Some(self.projection_identity.dimension)
+                != self.search_projection_identity.embedding_dimension
+        {
+            blockers.push("search_vector_generation_identity_mismatch".to_string());
+        }
+        if !same_vector_algorithm_identity(
+            &self.projection_identity,
+            &self.oracle_projection_identity,
+        ) {
+            blockers.push("serving_vector_oracle_identity_mismatch".to_string());
+        }
         if self.projection_resources.segment_count == 0
             || self.projection_resources.raw_vector_bytes == 0
             || self.projection_resources.projection_payload_bytes == 0
@@ -330,11 +366,20 @@ impl ProductionVectorQualificationReport {
             || self.query_evidence.iter().any(|evidence| {
                 !evidence.auto_scalar_candidate_parity
                     || !evidence.auto_scalar_final_parity
+                    || !evidence.serving_auto_final_parity
                     || evidence.auto_metrics.kernel.is_empty()
                     || evidence.auto_metrics.max_admitted_workers == 0
                     || evidence.scalar_candidate_metrics.kernel != "scalar"
+                    || evidence.serving_metrics.backend
+                        != "skein_turboquant_out_of_core_candidate_projection"
+                    || evidence.serving_metrics.candidate_score_source != "quantized_projection"
+                    || evidence.serving_metrics.final_score_source != "raw_vector"
+                    || evidence.serving_metrics.kernel.is_empty()
+                    || evidence.serving_metrics.max_admitted_workers == 0
+                    || evidence.serving_metrics.projection_payload_bytes_read == 0
                     || evidence.auto_metrics.fallback_count > 0
                     || evidence.scalar_candidate_metrics.fallback_count > 0
+                    || evidence.serving_metrics.fallback_count > 0
             })
         {
             blockers.push("query_execution_evidence_failed".to_string());
@@ -354,6 +399,7 @@ impl ProductionVectorQualificationReport {
             || !lifecycle.stale_generation_isolated
             || !lifecycle.corrupt_projection_rejected
             || !lifecycle.cancellation_propagated
+            || !lifecycle.serving_cancellation_propagated
             || !lifecycle.mixed_foreground_background
         {
             blockers.push("projection_lifecycle_evidence_failed".to_string());
@@ -368,20 +414,40 @@ pub fn run_production_vector_qualification(
     config: ProductionVectorQualificationConfig,
 ) -> Result<ProductionVectorQualificationReport, ProductionVectorQualificationError> {
     config.validate()?;
-    let index = SearchIndex::open(&config.projection_path)
-        .map_err(ProductionVectorQualificationError::from_error)?;
-    let projection_identity = index
+    let reference_search_identity = SearchOutOfCoreReader::open(&config.projection_path)
+        .map_err(ProductionVectorQualificationError::from_error)?
+        .production_qualification_identity();
+    let serving_config = SearchOutOfCoreConfig {
+        max_vector_candidates: NonZeroUsize::new(config.candidate_limit)
+            .expect("validated candidate limit is non-zero"),
+        max_vector_search_working_bytes: NonZeroUsize::new(config.max_working_bytes)
+            .expect("validated vector working memory is non-zero"),
+        max_vector_search_parallelism: config.max_parallelism,
+        ..SearchOutOfCoreConfig::default()
+    };
+    let serving_reader =
+        SearchOutOfCoreReader::open_with_config(&config.search_projection_path, serving_config)
+            .map_err(ProductionVectorQualificationError::from_error)?;
+    let search_projection_identity = serving_reader.production_qualification_identity();
+    if !same_search_document_identity(&reference_search_identity, &search_projection_identity) {
+        return Err(ProductionVectorQualificationError::new(
+            "production vector oracle document identity does not match the released out-of-core search generation",
+        ));
+    }
+    let projection_identity = serving_reader
         .vector_projection_qualification_identity()
         .ok_or_else(|| {
             ProductionVectorQualificationError::new(
-                "production vector qualification requires a valid file-backed TurboQuant projection",
+                "production vector qualification requires TurboQuant on the released out-of-core search generation",
             )
         })?;
-    let projection_resources = index.vector_projection_resource_evidence().ok_or_else(|| {
-        ProductionVectorQualificationError::new(
-            "production vector qualification projection resource evidence is unavailable",
-        )
-    })?;
+    let projection_resources = serving_reader
+        .vector_projection_resource_evidence()
+        .ok_or_else(|| {
+            ProductionVectorQualificationError::new(
+                "released out-of-core TurboQuant resource evidence is unavailable",
+            )
+        })?;
     if projection_identity.source_graph_commit_epoch
         != Some(config.expected_identity.canonical_graph_commit_epoch)
     {
@@ -389,9 +455,48 @@ pub fn run_production_vector_qualification(
             "production vector projection epoch does not match the expected release identity",
         ));
     }
-
     let task_context =
         RuntimeTaskContext::default().with_admitted_parallelism(config.max_parallelism);
+    for _ in 0..config.warmup_runs {
+        for query_case in &config.query_cases {
+            execute_serving_query(&serving_reader, query_case, &config, &task_context)?;
+        }
+    }
+    let process_start =
+        ProcessMemorySnapshot::capture().map_err(ProductionVectorQualificationError::from_error)?;
+    let serving_runs = config
+        .query_cases
+        .iter()
+        .map(|query_case| {
+            measure_serving_query(&serving_reader, query_case, &config, &task_context)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let (serving_cancellation_propagated, serving_cancellation_micros) =
+        run_serving_cancellation_probe(
+            &serving_reader,
+            &config.lifecycle.verification_case,
+            &config,
+        )?;
+    let process_end =
+        ProcessMemorySnapshot::capture().map_err(ProductionVectorQualificationError::from_error)?;
+    let process_memory = ProcessMemoryProfile::between(process_start, process_end);
+    drop(serving_reader);
+
+    let index = SearchIndex::open(&config.projection_path)
+        .map_err(ProductionVectorQualificationError::from_error)?;
+    let oracle_projection_identity = index
+        .vector_projection_qualification_identity()
+        .ok_or_else(|| {
+            ProductionVectorQualificationError::new(
+                "production vector qualification requires a valid file-backed TurboQuant projection",
+            )
+        })?;
+    if !same_vector_algorithm_identity(&projection_identity, &oracle_projection_identity) {
+        return Err(ProductionVectorQualificationError::new(
+            "production vector oracle algorithm identity does not match the released TurboQuant projection",
+        ));
+    }
+
     for _ in 0..config.warmup_runs {
         for query_case in &config.query_cases {
             execute_query(
@@ -404,8 +509,6 @@ pub fn run_production_vector_qualification(
         }
     }
 
-    let process_start =
-        ProcessMemorySnapshot::capture().map_err(ProductionVectorQualificationError::from_error)?;
     let auto_runs = config
         .query_cases
         .iter()
@@ -424,10 +527,6 @@ pub fn run_production_vector_qualification(
         .iter()
         .map(|query_case| collect_recall_evidence(&index, query_case, &config))
         .collect::<Result<Vec<_>, _>>()?;
-    let process_end =
-        ProcessMemorySnapshot::capture().map_err(ProductionVectorQualificationError::from_error)?;
-    let process_memory = ProcessMemoryProfile::between(process_start, process_end);
-
     let scalar_candidate_runs = config
         .query_cases
         .iter()
@@ -460,27 +559,34 @@ pub fn run_production_vector_qualification(
         .zip(auto_runs)
         .zip(scalar_candidate_runs)
         .zip(exact_runs)
+        .zip(serving_runs)
         .map(
-            |(((query_case, auto), scalar_candidate), exact)| ProductionVectorQueryEvidence {
-                name: query_case.name.clone(),
-                kind: query_case.kind,
-                request_digest: request_digest(query_case, &config),
-                exact_result_digest: exact.result_digest.clone(),
-                auto_result_digest: auto.result_digest.clone(),
-                scalar_candidate_result_digest: scalar_candidate.result_digest.clone(),
-                auto_candidate_digest: auto.candidate_digest.clone(),
-                scalar_candidate_digest: scalar_candidate.candidate_digest.clone(),
-                auto_scalar_candidate_parity: auto.candidate_digest
-                    == scalar_candidate.candidate_digest,
-                auto_scalar_final_parity: auto.result_digest == scalar_candidate.result_digest,
-                auto_final_matches_exact: auto.result_digest == exact.result_digest,
-                scalar_candidate_final_matches_exact: scalar_candidate.result_digest
-                    == exact.result_digest,
-                exact_latency: latency_percentiles(&exact.latencies),
-                auto_latency: latency_percentiles(&auto.latencies),
-                scalar_candidate_latency: latency_percentiles(&scalar_candidate.latencies),
-                auto_metrics: auto.metrics,
-                scalar_candidate_metrics: scalar_candidate.metrics,
+            |((((query_case, auto), scalar_candidate), exact), serving)| {
+                ProductionVectorQueryEvidence {
+                    name: query_case.name.clone(),
+                    kind: query_case.kind,
+                    request_digest: request_digest(query_case, &config),
+                    exact_result_digest: exact.result_digest.clone(),
+                    auto_result_digest: auto.result_digest.clone(),
+                    scalar_candidate_result_digest: scalar_candidate.result_digest.clone(),
+                    serving_result_digest: serving.result_digest.clone(),
+                    auto_candidate_digest: auto.candidate_digest.clone(),
+                    scalar_candidate_digest: scalar_candidate.candidate_digest.clone(),
+                    auto_scalar_candidate_parity: auto.candidate_digest
+                        == scalar_candidate.candidate_digest,
+                    auto_scalar_final_parity: auto.result_digest == scalar_candidate.result_digest,
+                    serving_auto_final_parity: serving.result_digest == auto.result_digest,
+                    auto_final_matches_exact: auto.result_digest == exact.result_digest,
+                    scalar_candidate_final_matches_exact: scalar_candidate.result_digest
+                        == exact.result_digest,
+                    exact_latency: latency_percentiles(&exact.latencies),
+                    auto_latency: latency_percentiles(&auto.latencies),
+                    scalar_candidate_latency: latency_percentiles(&scalar_candidate.latencies),
+                    serving_latency: latency_percentiles(&serving.latencies),
+                    auto_metrics: auto.metrics,
+                    scalar_candidate_metrics: scalar_candidate.metrics,
+                    serving_metrics: serving.metrics,
+                }
             },
         )
         .collect::<Vec<_>>();
@@ -488,7 +594,9 @@ pub fn run_production_vector_qualification(
         oracle::collect_differential_oracle(&index, &config, &query_evidence, &task_context)?;
     drop(index);
 
-    let lifecycle = lifecycle::run_lifecycle(&config)?;
+    let mut lifecycle = lifecycle::run_lifecycle(&config)?;
+    lifecycle.serving_cancellation_propagated = serving_cancellation_propagated;
+    lifecycle.serving_cancellation_latency = latency_percentiles(&[serving_cancellation_micros]);
     let mut report = ProductionVectorQualificationReport {
         protocol: PRODUCTION_VECTOR_QUALIFICATION_PROTOCOL.to_string(),
         ready: false,
@@ -496,6 +604,8 @@ pub fn run_production_vector_qualification(
         evidence_binding: config.evidence_binding,
         expected_identity: config.expected_identity,
         projection_identity,
+        oracle_projection_identity,
+        search_projection_identity,
         projection_resources,
         recall_evidence,
         query_evidence,
@@ -506,6 +616,54 @@ pub fn run_production_vector_qualification(
     report.blocker_codes = report.recompute_blocker_codes();
     report.ready = report.blocker_codes.is_empty();
     Ok(report)
+}
+
+fn run_serving_cancellation_probe(
+    reader: &SearchOutOfCoreReader,
+    query_case: &ProductionVectorQueryCase,
+    config: &ProductionVectorQualificationConfig,
+) -> Result<(bool, u64), ProductionVectorQualificationError> {
+    let token = RuntimeCancellationToken::new();
+    token.cancel();
+    let task_context = RuntimeTaskContext::without_deadline(token)
+        .with_admitted_parallelism(config.max_parallelism);
+    let started = Instant::now();
+    let result = execute_serving_query(reader, query_case, config, &task_context);
+    let elapsed = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+    Ok((
+        matches!(result, Err(ref error) if error.to_string().contains("cancelled")),
+        elapsed,
+    ))
+}
+
+fn same_vector_algorithm_identity(
+    serving: &VectorProjectionQualificationIdentity,
+    oracle: &VectorProjectionQualificationIdentity,
+) -> bool {
+    serving.source_graph_commit_epoch == oracle.source_graph_commit_epoch
+        && serving.document_count == oracle.document_count
+        && serving.format_version == oracle.format_version
+        && serving.algorithm == oracle.algorithm
+        && serving.bit_width == oracle.bit_width
+        && serving.dimension == oracle.dimension
+        && serving.transform_seed == oracle.transform_seed
+        && serving.embedding_model == oracle.embedding_model
+        && serving.embedding_version == oracle.embedding_version
+        && serving.file_backed
+        && oracle.file_backed
+}
+
+fn same_search_document_identity(
+    left: &SearchProjectionQualificationIdentity,
+    right: &SearchProjectionQualificationIdentity,
+) -> bool {
+    left.source_graph_commit_epoch == right.source_graph_commit_epoch
+        && left.document_count == right.document_count
+        && left.documents_digest == right.documents_digest
+        && left.analyzer_digest == right.analyzer_digest
+        && left.embedding_model == right.embedding_model
+        && left.embedding_version == right.embedding_version
+        && left.embedding_dimension == right.embedding_dimension
 }
 
 fn validate_query_cases(

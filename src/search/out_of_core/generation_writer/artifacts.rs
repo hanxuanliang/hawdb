@@ -33,6 +33,7 @@ pub(super) struct SegmentArtifactBuilder<'a> {
     document_offset: u64,
     metadata_offset: u64,
     vector_offset: u64,
+    next_vector_ordinal: u64,
     descriptor_working_bytes: u64,
     peak_segment_document_count: usize,
     peak_segment_encoded_bytes: u64,
@@ -75,6 +76,7 @@ impl<'a> SegmentArtifactBuilder<'a> {
             document_offset: 0,
             metadata_offset: 0,
             vector_offset: 0,
+            next_vector_ordinal: 0,
             descriptor_working_bytes: 0,
             peak_segment_document_count: 0,
             peak_segment_encoded_bytes: 0,
@@ -165,11 +167,21 @@ impl<'a> SegmentArtifactBuilder<'a> {
         drop(document_payload);
 
         let mut metadata_body = String::from("SKEIN_SEARCH_METADATA_SEGMENT_V1\n");
+        let vector_ordinal_base = self.next_vector_ordinal;
+        let mut next_vector_ordinal = vector_ordinal_base;
         for document in &self.documents {
+            let vector_ordinal = document.embedding.as_ref().map(|_| {
+                let ordinal = next_vector_ordinal;
+                next_vector_ordinal = next_vector_ordinal.saturating_add(1);
+                ordinal
+            });
             writeln!(
                 metadata_body,
-                "meta\t{}\t{}",
+                "meta\t{}\t{}\t{}",
                 encode_string(&document.id),
+                vector_ordinal
+                    .map(|ordinal| ordinal.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
                 encode_metadata(&document.metadata)
             )
             .map_err(|_| SkeinError::Storage("search metadata encoding failed".to_string()))?;
@@ -190,7 +202,8 @@ impl<'a> SegmentArtifactBuilder<'a> {
             if let Some(embedding) = document.embedding.as_deref() {
                 writeln!(
                     vector_body,
-                    "vector\t{}\t{}",
+                    "vector\t{}\t{}\t{}",
+                    vector_ordinal_base.saturating_add(vector_count as u64),
                     encode_string(&document.id),
                     encode_embedding(Some(embedding))
                 )
@@ -198,6 +211,7 @@ impl<'a> SegmentArtifactBuilder<'a> {
                 vector_count = vector_count.saturating_add(1);
             }
         }
+        self.next_vector_ordinal = next_vector_ordinal;
         let vector_payload = self.encode_segment_payload(segment_id, "vector", vector_body)?;
         let vectors = append_sidecar_payload(
             &mut self.vector_file,
@@ -220,6 +234,7 @@ impl<'a> SegmentArtifactBuilder<'a> {
         self.descriptor.segments.push(descriptor);
         self.layouts.push(SearchOutOfCoreSegmentLayout {
             segment_id,
+            vector_ordinal_base,
             metadata,
             vectors,
         });

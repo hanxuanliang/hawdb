@@ -17,6 +17,8 @@ pub struct SearchLexicalFeasibilityCoverage {
     pub metadata_filter: bool,
     pub acl_filter: bool,
     pub hybrid_rrf: bool,
+    pub bounded_generation_update: bool,
+    pub bounded_turboquant_serving: bool,
     pub incremental_upsert_delete: bool,
     pub checkpoint_reopen: bool,
     pub corrupt_artifact: bool,
@@ -34,6 +36,8 @@ impl SearchLexicalFeasibilityCoverage {
             && self.metadata_filter
             && (!acl_required || self.acl_filter)
             && self.hybrid_rrf
+            && self.bounded_generation_update
+            && self.bounded_turboquant_serving
             && self.incremental_upsert_delete
             && self.checkpoint_reopen
             && self.corrupt_artifact
@@ -51,6 +55,8 @@ impl SearchLexicalFeasibilityCoverage {
             "metadata_filter": self.metadata_filter,
             "acl_filter": self.acl_filter,
             "hybrid_rrf": self.hybrid_rrf,
+            "bounded_generation_update": self.bounded_generation_update,
+            "bounded_turboquant_serving": self.bounded_turboquant_serving,
             "incremental_upsert_delete": self.incremental_upsert_delete,
             "checkpoint_reopen": self.checkpoint_reopen,
             "corrupt_artifact": self.corrupt_artifact,
@@ -157,7 +163,7 @@ pub struct SearchProjectionQualificationIdentity {
 }
 
 impl SearchProjectionQualificationIdentity {
-    fn json(&self) -> serde_json::Value {
+    pub fn json(&self) -> serde_json::Value {
         serde_json::json!({
             "projection_generation": self.projection_generation,
             "source_graph_commit_epoch": self.source_graph_commit_epoch,
@@ -541,6 +547,8 @@ mod tests {
             metadata_filter: true,
             acl_filter: true,
             hybrid_rrf: true,
+            bounded_generation_update: true,
+            bounded_turboquant_serving: true,
             incremental_upsert_delete: true,
             checkpoint_reopen: true,
             corrupt_artifact: true,

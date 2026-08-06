@@ -84,13 +84,15 @@ debug reports MUST NOT be accepted as production cutover evidence.
 
 `evaluate_production_release_qualification_bundle` is the final typed
 cross-process evidence gate. It consumes the raw graph-storage, out-of-core
-search, per-target vector, per-worker morsel, and active-route blocking
-artifacts. The evaluator does not trust their top-level `ready` fields: it
-revalidates protocols, release bindings, raw resource limits, lifecycle
-coverage, target and worker matrices, scalar parity, runtime-permit cleanup,
-spill cleanup, and the caller-declared regression policy. Its output retains
-only source-artifact SHA-256 digests and assessments, so it can be retained as
-release evidence without copying queries, paths, embeddings, or row payloads.
+search, per-target vector, per-worker morsel, active-route blocking, storage
+crash-recovery, and exact-revision release-control artifacts. The evaluator
+does not trust their top-level `ready` fields: it revalidates protocols,
+release bindings, raw resource limits, lifecycle coverage, target and worker
+matrices, scalar parity, runtime-permit cleanup, spill cleanup, crash-point
+coverage, required CI conclusions, artifact digests, and the caller-declared
+regression policy. Its output retains only source-artifact SHA-256 digests and
+assessments, so it can be retained as release evidence without copying queries,
+paths, embeddings, or row payloads.
 
 `skein-qualification-bundle` is a thin CI and release transport over that
 typed evaluator. It accepts bounded JSON inputs from independently generated
@@ -339,6 +341,42 @@ generation readable and remove its private stage. This kernel property enables
 the production-copy qualification but does not replace the representative Mem
 evidence required below.
 
+An incremental larger-than-memory update MUST use
+`SearchOutOfCoreGenerationWriter::prepare_delta`. It MUST merge a bounded,
+validated delta with one pinned immutable generation in document-ID order,
+retain no corpus-wide document map, and publish through the same immutable
+generation protocol as a full rebuild. Lifecycle evidence MUST report zero
+resident corpus documents and the peak decoded source-segment bytes. The old
+reader MUST remain usable while the new generation is finalized. After taking
+the publish lease, finalization MUST compare the active manifest generation
+with the pinned delta base. A changed base is a stale update and MUST abort
+without replacing the newer generation; callers may rebuild the delta against
+the new active generation.
+
+When `vector-search` is enabled, the generation writer MUST build the
+file-backed TurboQuant candidate artifact from the same ordered spool under the
+same publish lease. Its generation, source graph epoch, embedding identity,
+vector count, source digest, payload checksum, file length, and outer checksum
+MUST be covered by the active out-of-core manifest. Filter sidecars MUST carry
+stable vector ordinals. A compressed out-of-core query MUST push the ordinal
+allowlist into the quantized scan, retain at most the admitted candidate window,
+read raw vectors only for returned candidates, and use raw cosine scores for
+final ranking. `Required` MUST fail closed when the bound artifact is absent or
+invalid. `Preferred` MAY use the exact scalar segment path with an observable
+fallback reason only when no usable TurboQuant projection is attached to the
+reader. An I/O, corruption, cancellation, or resource error from an attached
+artifact MUST fail closed instead of being hidden by scalar fallback. The
+default exact scalar path remains available for differential qualification.
+
+Production qualification MUST exercise `Required` and `Preferred` against the
+source generation named by the report, not only against a later disposable
+lifecycle generation. Both modes MUST select the file-backed TurboQuant
+backend, push a metadata-derived ordinal allowlist, read projection payload
+bytes, and finish with raw-vector scores without fallback. The generation-update
+lifecycle repeats the same probes after publication and corrupts both a bound
+TurboQuant artifact and the active manifest; either corruption MUST be rejected
+during open.
+
 The embedded serving entrypoint is
 `NowledgeMemOpenOptions::with_qualified_out_of_core_search_projection`. It MUST
 receive the raw lexical qualification report, the exact current release
@@ -350,9 +388,10 @@ Candidate search, bounded late hydration, Knowledge Retrieval graph-context
 expansion, and Cypher vector seed reads MUST use the same admitted handle and
 the pinned out-of-core generation. Out-of-core byte metrics MUST remain visible
 on the typed candidate, hydration, and retrieval outputs. Runtime admission MUST
-charge the configured decoded-segment, candidate-block, hydration, and matched-
-span buffers in addition to blocking score state and the result budget; a bound
-larger than the shared governor can admit MUST reject before search I/O.
+charge the configured decoded-segment, candidate-block, TurboQuant scan,
+hydration, and matched-span buffers in addition to blocking score state and the
+result budget; a bound larger than the shared governor can admit MUST reject
+before search I/O.
 
 Immutable lexical, out-of-core, and TurboQuant generation cleanup MUST retain
 the active and immediately previous generations. `SearchIndex` MUST run a
@@ -399,6 +438,14 @@ the report stores request and result digests instead of query text, embeddings,
 or document identifiers. Exact TopK and score parity is derived from those
 digests, not from caller-provided booleans.
 
+The collector takes separate serving and reference projection directories.
+The serving directory owns the generation-bound out-of-core artifacts; the
+reference directory is an offline full-residency oracle and MUST NOT be opened
+by production traffic. Before comparison, the collector requires equal source
+epoch, document count and digest, analyzer digest, and embedding identity. It
+also records lifecycle RSS and page faults before opening the full-residency
+oracle so oracle residency cannot hide generation-update memory growth.
+
 Lifecycle probes MUST use at least three explicit, disposable writable copies
 of the same projection generation. The runner mutates those copies to measure
 incremental update and checkpoint latency, verifies reopen and pinned stale-
@@ -409,6 +456,13 @@ projection. Synthetic fixtures can test this protocol but remain blocked by
 the representative document-count, larger-than-memory, identity, and resource
 thresholds.
 
+Search and vector release artifacts MUST carry the same
+`SearchProjectionQualificationIdentity`. The release evaluator MUST reject a
+vector target when its search generation, document digest, analyzer digest,
+source graph epoch, or embedding identity differs from the qualified search
+artifact. The file-backed vector projection generation MUST equal that common
+search generation.
+
 `run_production_vector_qualification` is the typed TurboQuant production
 collector. Its `skein-production-vector-qualification-v1` report wraps the
 bounded `skein-vector-recall-production-qualification-v1` probes and binds
@@ -417,6 +471,27 @@ generation, source graph epoch, raw-vector source digest, payload identity,
 format, algorithm, bit width, dimension, transform seed, embedding
 model/version, and document count. In-memory generation-zero projections and
 corpora below 100,000 vector documents MUST NOT qualify production.
+
+Its algorithm-oracle path and released search-generation path MAY be separate
+directories, but their source epoch, document count and digest, analyzer
+digest, and embedding identity MUST match. The report carries the released
+search identity and the vector identity and resource evidence read from that
+released generation; the final bundle additionally requires the vector
+projection generation to equal that search generation. The offline projection
+identity MUST match the serving algorithm, format, bit width, dimension,
+transform seed, source epoch, document count, and embedding identity.
+
+Before opening the full-residency oracle, the collector MUST run the released
+out-of-core TurboQuant artifact with `Required`, record its latency, RSS, page
+faults, backend, kernel, payload I/O, admitted workers, and raw-reranked result
+digest, and propagate a cancelled `RuntimeTaskContext` into that scan. The
+serving final digest MUST equal the corresponding offline TurboQuant oracle
+digest for every case. Candidate recall remains the offline oracle's bounded
+responsibility, bound to the same document identity and TurboQuant algorithm
+identity; the production reader does not retain candidate-ID evidence solely
+for qualification. This keeps full-residency recall and differential machinery
+out of the serving path without allowing an unrelated or unexecuted artifact to
+certify it.
 
 The collector MUST include separate quantized candidate-window and final raw-
 reranked TopK recall, scalar-versus-dispatched candidate parity, P50/P95/P99
@@ -477,6 +552,13 @@ A production release MUST identify one exact revision and require its green
 checks. Required release checks MUST include formatting, strict lint, workspace
 tests, supported-platform runtime and storage tests, concurrency models, and
 build system parity.
+
+`skein-production-release-control-evidence-v1` is the typed exact-revision CI
+input to the final bundle. Every required check MUST record the same full source
+revision as the release identity, a successful conclusion, and the SHA-256 of
+its retained evidence artifact. The final bundle MUST also consume and
+revalidate `skein-storage-crash-recovery-evidence-v1`; a green job name or a
+top-level `ready` value alone cannot satisfy either gate.
 
 Before a general-availability phase, the project SHOULD protect its release
 branch, require pull requests and required checks, and prohibit force pushes and

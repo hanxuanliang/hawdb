@@ -1,6 +1,10 @@
 use super::super::OUT_OF_CORE_MANIFEST_FILE;
 use super::*;
-use crate::search::{SearchMode, SearchQueryOptions, SEARCH_FILTER_SEGMENT_TARGET_DOCUMENTS};
+use crate::search::{
+    CompressedVectorSearchMode, SearchMode, SearchProjectionDelta, SearchProjectionKind,
+    SearchProjectionRow, SearchQueryOptions, SEARCH_FILTER_SEGMENT_TARGET_DOCUMENTS,
+};
+use crate::{RuntimeCancellationToken, RuntimeTaskContext};
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -24,13 +28,22 @@ fn streaming_generation_publishes_reopenable_zero_residency_projection() {
     let report = writer.finish().unwrap();
     assert_eq!(report.document_count, 300);
     assert_eq!(report.vector_document_count, 300);
+    assert!(report.turboquant_artifact_bytes > 0);
+    assert!(report.turboquant_source_digest.is_some());
     assert_eq!(report.resident_document_count, 0);
     assert!(report.active_manifest_published_last);
     assert!(!report.cleanup_retry_required);
     assert!(report.peak_segment_document_count <= SEARCH_FILTER_SEGMENT_TARGET_DOCUMENTS);
     assert!(!root.join(crate::search::SEARCH_SNAPSHOT_FILE).exists());
 
-    let reader = super::super::SearchOutOfCoreReader::open(&root).unwrap();
+    let reader = super::super::SearchOutOfCoreReader::open_with_config(
+        &root,
+        super::super::SearchOutOfCoreConfig {
+            max_vector_candidates: NonZeroUsize::new(16).unwrap(),
+            ..super::super::SearchOutOfCoreConfig::default()
+        },
+    )
+    .unwrap();
     assert_eq!(reader.document_count(), 300);
     assert_eq!(reader.resident_document_count(), 0);
     assert_eq!(reader.generation(), report.generation);
@@ -52,6 +65,304 @@ fn streaming_generation_publishes_reopenable_zero_residency_projection() {
         .unwrap();
     assert_eq!(output.result.hits.len(), 5);
     assert!(output.metrics.hydrated_documents <= 5);
+    let compressed = reader
+        .search_with_options_compressed_vector_projection_mode(
+            "",
+            Some(&[1.0, 0.5]),
+            SearchMode::Vector,
+            SearchQueryOptions {
+                limit: 5,
+                offset: 0,
+                rank_window: Some(16),
+                fusion_weights: Default::default(),
+                metadata_filters: BTreeMap::new(),
+                policy_epoch: None,
+            },
+            CompressedVectorSearchMode::Required,
+        )
+        .unwrap();
+    assert_eq!(
+        compressed.result.retrievers[0].backend,
+        "skein_turboquant_out_of_core_candidate_projection"
+    );
+    assert!(compressed.metrics.turboquant_payload_bytes_read > 0);
+    assert!(compressed.result.retrievers[0].reranked_candidate_count <= 16);
+    assert_eq!(
+        compressed.result.retrievers[0].final_score_source,
+        "raw_vector"
+    );
+    let filtered = reader
+        .search_with_options_compressed_vector_projection_mode(
+            "",
+            Some(&[1.0, 0.5]),
+            SearchMode::Vector,
+            SearchQueryOptions {
+                limit: 5,
+                offset: 0,
+                rank_window: Some(16),
+                fusion_weights: Default::default(),
+                metadata_filters: BTreeMap::from([("group".to_string(), "even".to_string())]),
+                policy_epoch: None,
+            },
+            CompressedVectorSearchMode::Required,
+        )
+        .unwrap();
+    assert_eq!(filtered.result.filtered_document_count, 150);
+    assert!(filtered.result.hits.iter().all(|hit| {
+        hit.id
+            .strip_prefix("memory:")
+            .and_then(|value| value.parse::<usize>().ok())
+            .is_some_and(|number| number % 2 == 0)
+    }));
+    let cancellation = RuntimeCancellationToken::new();
+    cancellation.cancel();
+    let task_context = RuntimeTaskContext::without_deadline(cancellation);
+    let preferred_error = reader
+        .search_with_options_compressed_vector_projection_context(
+            "",
+            Some(&[1.0, 0.5]),
+            SearchMode::Vector,
+            SearchQueryOptions {
+                limit: 5,
+                offset: 0,
+                rank_window: Some(16),
+                fusion_weights: Default::default(),
+                metadata_filters: BTreeMap::new(),
+                policy_epoch: None,
+            },
+            CompressedVectorSearchMode::Preferred,
+            &task_context,
+        )
+        .unwrap_err();
+    assert!(preferred_error.to_string().contains("cancelled"));
+    let scalar_error = reader
+        .search_with_options_compressed_vector_projection_context(
+            "",
+            Some(&[1.0, 0.5]),
+            SearchMode::Vector,
+            SearchQueryOptions {
+                limit: 5,
+                offset: 0,
+                rank_window: Some(16),
+                fusion_weights: Default::default(),
+                metadata_filters: BTreeMap::new(),
+                policy_epoch: None,
+            },
+            CompressedVectorSearchMode::Disabled,
+            &task_context,
+        )
+        .unwrap_err();
+    assert!(scalar_error.to_string().contains("cancelled"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bounded_delta_merge_publishes_without_full_document_residency() {
+    let root = test_dir("bounded_delta_merge");
+    let mut writer = SearchOutOfCoreGenerationWriter::create(
+        &root,
+        SearchOutOfCoreGenerationBuildOptions {
+            source_graph_commit_epoch: Some(17),
+            embedding_manifest: Some(SearchEmbeddingManifest {
+                model: "test-model".to_string(),
+                version: Some("v1".to_string()),
+                dimension: 2,
+            }),
+            ..SearchOutOfCoreGenerationBuildOptions::default()
+        },
+    )
+    .unwrap();
+    for number in 0..300 {
+        writer.push(document(number)).unwrap();
+    }
+    writer.finish().unwrap();
+
+    let old_reader = super::super::SearchOutOfCoreReader::open(&root).unwrap();
+    let update = SearchOutOfCoreGenerationWriter::prepare_delta(
+        &old_reader,
+        SearchProjectionDelta {
+            upserts: vec![SearchProjectionRow {
+                kind: SearchProjectionKind::Memory,
+                external_id: "added".to_string(),
+                title: "Added document".to_string(),
+                body: "bounded delta generation".to_string(),
+                embedding: Some(vec![1.0, 0.5]),
+                source_id: None,
+                metadata: BTreeMap::from([("space_id".to_string(), "default".to_string())]),
+            }],
+            deletes: vec!["memory:000001".to_string()],
+            max_operations: Some(2),
+            source_graph_commit_epoch: Some(18),
+        },
+        SearchOutOfCoreGenerationBuildOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(update.delta_report().after_document_count, 300);
+    assert!(update.source_read_metrics().peak_segment_document_bytes > 0);
+    let (_, build, _) = update.finish().unwrap();
+    assert_eq!(build.resident_document_count, 0);
+    assert_eq!(build.generation, old_reader.generation() + 1);
+
+    let new_reader = super::super::SearchOutOfCoreReader::open(&root).unwrap();
+    assert_eq!(new_reader.source_graph_commit_epoch(), Some(18));
+    assert!(new_reader
+        .hydrate_documents(&["memory:added".to_string()])
+        .is_ok());
+    assert!(new_reader
+        .hydrate_documents(&["memory:000001".to_string()])
+        .is_err());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bounded_delta_admission_rejects_before_staging_and_preserves_generation() {
+    let root = test_dir("bounded_delta_admission");
+    let mut writer = SearchOutOfCoreGenerationWriter::create(
+        &root,
+        SearchOutOfCoreGenerationBuildOptions::default(),
+    )
+    .unwrap();
+    writer.push(document(0)).unwrap();
+    writer.push(document(1)).unwrap();
+    let initial = writer.finish().unwrap();
+    let manifest_before = fs::read(root.join(OUT_OF_CORE_MANIFEST_FILE)).unwrap();
+    let reader = super::super::SearchOutOfCoreReader::open(&root).unwrap();
+
+    let error = SearchOutOfCoreGenerationWriter::prepare_delta(
+        &reader,
+        SearchProjectionDelta {
+            upserts: vec![SearchProjectionRow {
+                kind: SearchProjectionKind::Memory,
+                external_id: "added".to_string(),
+                title: "Added document".to_string(),
+                body: "bounded delta admission".to_string(),
+                embedding: Some(vec![1.0, 0.5]),
+                source_id: None,
+                metadata: BTreeMap::new(),
+            }],
+            deletes: vec!["memory:000001".to_string()],
+            max_operations: None,
+            source_graph_commit_epoch: None,
+        },
+        SearchOutOfCoreGenerationBuildOptions {
+            max_delta_operations: NonZeroUsize::MIN,
+            ..SearchOutOfCoreGenerationBuildOptions::default()
+        },
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("generation admission"));
+    assert_eq!(
+        fs::read(root.join(OUT_OF_CORE_MANIFEST_FILE)).unwrap(),
+        manifest_before
+    );
+    assert_eq!(
+        super::super::SearchOutOfCoreReader::open(&root)
+            .unwrap()
+            .generation(),
+        initial.generation
+    );
+    assert_eq!(stage_directories(&root), 0);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bounded_delta_rejects_stale_base_generation_without_lost_update() {
+    let root = test_dir("bounded_delta_stale_base");
+    let mut initial = SearchOutOfCoreGenerationWriter::create(
+        &root,
+        SearchOutOfCoreGenerationBuildOptions::default(),
+    )
+    .unwrap();
+    initial.push(document(0)).unwrap();
+    initial.push(document(1)).unwrap();
+    initial.finish().unwrap();
+    let stale_reader = super::super::SearchOutOfCoreReader::open(&root).unwrap();
+    let stale_update = SearchOutOfCoreGenerationWriter::prepare_delta(
+        &stale_reader,
+        SearchProjectionDelta {
+            upserts: vec![SearchProjectionRow {
+                kind: SearchProjectionKind::Memory,
+                external_id: "stale".to_string(),
+                title: "Stale update".to_string(),
+                body: "must not overwrite a newer generation".to_string(),
+                embedding: Some(vec![1.0, 0.5]),
+                source_id: None,
+                metadata: BTreeMap::new(),
+            }],
+            deletes: Vec::new(),
+            max_operations: Some(1),
+            source_graph_commit_epoch: None,
+        },
+        SearchOutOfCoreGenerationBuildOptions::default(),
+    )
+    .unwrap();
+
+    let mut replacement = SearchOutOfCoreGenerationWriter::create(
+        &root,
+        SearchOutOfCoreGenerationBuildOptions::default(),
+    )
+    .unwrap();
+    replacement.push(document(10)).unwrap();
+    let replacement = replacement.finish().unwrap();
+    let manifest_after_replacement = fs::read(root.join(OUT_OF_CORE_MANIFEST_FILE)).unwrap();
+
+    let error = stale_update.finish().unwrap_err();
+    assert!(error.to_string().contains("base changed"));
+    assert_eq!(
+        fs::read(root.join(OUT_OF_CORE_MANIFEST_FILE)).unwrap(),
+        manifest_after_replacement
+    );
+    let active = super::super::SearchOutOfCoreReader::open(&root).unwrap();
+    assert_eq!(active.generation(), replacement.generation);
+    assert!(active
+        .hydrate_documents(&["memory:000010".to_string()])
+        .is_ok());
+    assert!(active
+        .hydrate_documents(&["memory:stale".to_string()])
+        .is_err());
+    assert_eq!(stage_directories(&root), 0);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn turboquant_open_rejects_corruption_and_insufficient_serving_memory() {
+    let root = test_dir("turboquant_open_admission");
+    let mut writer = SearchOutOfCoreGenerationWriter::create(
+        &root,
+        SearchOutOfCoreGenerationBuildOptions {
+            embedding_manifest: Some(SearchEmbeddingManifest {
+                model: "test-model".to_string(),
+                version: Some("v1".to_string()),
+                dimension: 2,
+            }),
+            ..SearchOutOfCoreGenerationBuildOptions::default()
+        },
+    )
+    .unwrap();
+    for number in 0..32 {
+        writer.push(document(number)).unwrap();
+    }
+    let report = writer.finish().unwrap();
+
+    let admission_error = super::super::SearchOutOfCoreReader::open_with_config(
+        &root,
+        super::super::SearchOutOfCoreConfig {
+            max_vector_search_working_bytes: NonZeroUsize::MIN,
+            ..super::super::SearchOutOfCoreConfig::default()
+        },
+    )
+    .unwrap_err();
+    assert!(admission_error.to_string().contains("serving admission"));
+
+    let artifact = root.join(format!("search_turboquant.{}.skein", report.generation));
+    let mut bytes = fs::read(&artifact).unwrap();
+    *bytes.last_mut().unwrap() ^= 0xff;
+    fs::write(&artifact, bytes).unwrap();
+    let corruption_error = super::super::SearchOutOfCoreReader::open(&root).unwrap_err();
+    assert!(corruption_error
+        .to_string()
+        .contains("does not match its manifest"));
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -308,6 +619,15 @@ fn document(number: usize) -> SearchDocument {
         metadata: BTreeMap::from([
             ("kind".to_string(), "memory".to_string()),
             ("space_id".to_string(), "default".to_string()),
+            (
+                "group".to_string(),
+                if number.is_multiple_of(2) {
+                    "even"
+                } else {
+                    "odd"
+                }
+                .to_string(),
+            ),
         ]),
     }
 }

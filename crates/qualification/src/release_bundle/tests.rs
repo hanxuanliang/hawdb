@@ -22,6 +22,8 @@ fn complete_raw_artifact_bundle_is_ready() {
             .map(|(index, workers)| morsel(&expected, workers, (index + 1) as u64))
             .collect(),
         blocking_operators: Some(blocking(&expected)),
+        storage_crash_recovery: Some(crash_recovery(&expected)),
+        release_controls: Some(release_controls(&expected)),
     };
 
     let report = evaluate_production_release_qualification_bundle(
@@ -36,6 +38,8 @@ fn complete_raw_artifact_bundle_is_ready() {
     assert!(report.vector_matrix.ready);
     assert!(report.morsel_matrix.ready);
     assert!(report.blocking_operators.ready);
+    assert!(report.storage_crash_recovery.ready);
+    assert!(report.release_controls.ready);
     assert_eq!(
         report.json()["protocol"],
         PRODUCTION_RELEASE_QUALIFICATION_BUNDLE_PROTOCOL
@@ -85,9 +89,94 @@ fn vector_matrix_rejects_stale_shared_release_identity() {
         .contains(&"release_identity_mismatch".to_string()));
 }
 
+#[test]
+fn vector_matrix_rejects_a_different_search_generation() {
+    let expected = identity("linux", "x86_64");
+    let mut vector = vector(&expected);
+    vector["search_projection_identity"]["projection_generation"] = serde_json::json!(8);
+    let report = evaluate_production_release_qualification_bundle(
+        ProductionReleaseQualificationArtifacts {
+            search: Some(search(&expected)),
+            vector_targets: vec![vector],
+            ..ProductionReleaseQualificationArtifacts::default()
+        },
+        expected,
+        ProductionReleaseQualificationPolicy::default(),
+    );
+
+    assert!(report.vector_matrix.target_reports[0]
+        .blocker_codes
+        .contains(&"search_vector_document_identity_mismatch".to_string()));
+    assert!(report.vector_matrix.target_reports[0]
+        .blocker_codes
+        .contains(&"search_vector_generation_mismatch".to_string()));
+}
+
+#[test]
+fn vector_matrix_rejects_an_unrelated_offline_oracle() {
+    let expected = identity("linux", "x86_64");
+    let mut vector = vector(&expected);
+    vector["oracle_projection_identity"]["transform_seed"] = serde_json::json!(2);
+    let report = evaluate_production_release_qualification_bundle(
+        ProductionReleaseQualificationArtifacts {
+            search: Some(search(&expected)),
+            vector_targets: vec![vector],
+            ..ProductionReleaseQualificationArtifacts::default()
+        },
+        expected,
+        ProductionReleaseQualificationPolicy::default(),
+    );
+
+    assert!(report.vector_matrix.target_reports[0]
+        .blocker_codes
+        .contains(&"serving_vector_oracle_identity_mismatch".to_string()));
+}
+
+#[test]
+fn release_controls_reject_a_stale_revision() {
+    let expected = identity("linux", "x86_64");
+    let mut controls = release_controls(&expected);
+    controls["checks"][0]["source_revision"] = serde_json::json!("stale");
+    let report = evaluate_production_release_qualification_bundle(
+        ProductionReleaseQualificationArtifacts {
+            release_controls: Some(controls),
+            ..ProductionReleaseQualificationArtifacts::default()
+        },
+        expected,
+        ProductionReleaseQualificationPolicy::default(),
+    );
+
+    assert!(report
+        .release_controls
+        .blocker_codes
+        .contains(&"release_control_check_revision_mismatch".to_string()));
+}
+
+#[test]
+fn crash_recovery_top_level_ready_cannot_hide_an_incomplete_matrix() {
+    let expected = identity("linux", "x86_64");
+    let mut crash = crash_recovery(&expected);
+    crash["cases"].as_array_mut().unwrap().pop();
+    crash["case_count"] = serde_json::json!(4);
+    let report = evaluate_production_release_qualification_bundle(
+        ProductionReleaseQualificationArtifacts {
+            storage_crash_recovery: Some(crash),
+            ..ProductionReleaseQualificationArtifacts::default()
+        },
+        expected,
+        ProductionReleaseQualificationPolicy::default(),
+    );
+
+    assert!(!report.storage_crash_recovery.ready);
+    assert!(report
+        .storage_crash_recovery
+        .blocker_codes
+        .contains(&"crash_recovery_matrix_incomplete".to_string()));
+}
+
 fn identity(target_os: &str, target_arch: &str) -> ProductionQualificationIdentity {
     ProductionQualificationIdentity {
-        source_revision: "revision".to_string(),
+        source_revision: "a".repeat(40),
         rust_toolchain: "1.97.1".to_string(),
         target_os: target_os.to_string(),
         target_arch: target_arch.to_string(),
@@ -112,6 +201,66 @@ fn binding(identity: &ProductionQualificationIdentity) -> Value {
         generated_at_unix_seconds: 1,
     })
     .unwrap()
+}
+
+fn release_controls(identity: &ProductionQualificationIdentity) -> Value {
+    let digest = format!("sha256:{}", "a".repeat(64));
+    serde_json::json!({
+        "protocol": PRODUCTION_RELEASE_CONTROL_EVIDENCE_PROTOCOL,
+        "evidence_kind": "exact_revision_release_controls",
+        "production_eligible": true,
+        "ready": true,
+        "blocker_codes": [],
+        "evidence_binding": binding(identity),
+        "source_revision": identity.source_revision,
+        "checks": REQUIRED_PRODUCTION_RELEASE_CONTROLS.into_iter().map(|name| {
+            serde_json::json!({
+                "name": name,
+                "source_revision": identity.source_revision,
+                "conclusion": "success",
+                "artifact_sha256": digest,
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
+fn crash_recovery(identity: &ProductionQualificationIdentity) -> Value {
+    let cases = [
+        "before_wal_append",
+        "after_wal_append",
+        "after_wal_sync",
+        "during_checkpoint_publication",
+        "after_manifest_publication",
+    ]
+    .into_iter()
+    .map(|point| {
+        serde_json::json!({
+            "point": point,
+            "repetition": 0,
+            "process_terminated": true,
+            "recovered_batch_present": point != "before_wal_append",
+            "whole_batch_recovered": true,
+            "commit_epoch": 42,
+            "recovered_commit_epoch": 42,
+            "replay_lsn_present": true,
+            "relationship_endpoints_valid": true,
+            "projection_watermark_valid": true,
+            "artifact_generation_valid": true,
+            "ready": true,
+        })
+    })
+    .collect::<Vec<_>>();
+    serde_json::json!({
+        "protocol": "skein-storage-crash-recovery-evidence-v1",
+        "protocol_version": 1,
+        "evidence_binding": binding(identity),
+        "expected_identity": identity,
+        "required_repetitions": 1,
+        "case_count": cases.len(),
+        "cases": cases,
+        "blocker_codes": [],
+        "ready": true,
+    })
 }
 
 fn runtime() -> Value {
@@ -209,6 +358,8 @@ fn search(identity: &ProductionQualificationIdentity) -> Value {
         "metadata_filter": true,
         "acl_filter": false,
         "hybrid_rrf": true,
+        "bounded_generation_update": true,
+        "bounded_turboquant_serving": true,
         "incremental_upsert_delete": true,
         "checkpoint_reopen": true,
         "corrupt_artifact": true,
@@ -263,11 +414,24 @@ fn search(identity: &ProductionQualificationIdentity) -> Value {
             query("no_hit"), query("metadata_filter"), query("vector"), query("hybrid")
         ],
         "lifecycle": {
+            "bounded_generation_update": true,
+            "turboquant_serving": true,
+            "turboquant_preferred_serving": true,
+            "turboquant_raw_rerank": true,
+            "turboquant_metadata_filter_pushdown": true,
+            "turboquant_payload_bytes_read": 1,
             "incremental_upsert_delete": true,
             "checkpoint_reopen": true,
             "stale_generation": true,
             "corrupt_artifact_rejected": true,
             "mixed_foreground_background": true,
+            "max_update_resident_document_count": 0,
+            "max_update_peak_segment_document_bytes": 1,
+            "process_memory": {
+                "capabilities": {"resident_memory": true, "total_page_faults": true},
+                "peak_resident_bytes": 1,
+                "total_page_faults": 0,
+            },
         },
         "process_memory": {
             "capabilities": {"resident_memory": true, "total_page_faults": true},
@@ -283,6 +447,9 @@ fn search(identity: &ProductionQualificationIdentity) -> Value {
 fn vector(identity: &ProductionQualificationIdentity) -> Value {
     let metrics = |kernel: &str| {
         serde_json::json!({
+            "backend": "skein_turboquant_candidate_projection",
+            "candidate_score_source": "quantized_projection",
+            "final_score_source": "raw_vector",
             "kernel": kernel,
             "max_admitted_workers": 1,
             "segment_count": 1,
@@ -290,6 +457,33 @@ fn vector(identity: &ProductionQualificationIdentity) -> Value {
             "fallback_count": 0,
         })
     };
+    let serving_metrics = serde_json::json!({
+        "backend": "skein_turboquant_out_of_core_candidate_projection",
+        "candidate_score_source": "quantized_projection",
+        "final_score_source": "raw_vector",
+        "kernel": "portable",
+        "max_admitted_workers": 1,
+        "segment_count": 1,
+        "projection_payload_bytes_read": 1,
+        "peak_admitted_working_bytes": 1,
+        "fallback_count": 0,
+    });
+    let projection_identity = serde_json::json!({
+        "projection_generation": 7,
+        "source_graph_commit_epoch": 42,
+        "document_count": 100_000,
+        "source_digest": 1,
+        "payload_bytes": 1,
+        "payload_checksum": 1,
+        "format_version": 1,
+        "algorithm": "turboquant",
+        "bit_width": 4,
+        "dimension": 3,
+        "transform_seed": 1,
+        "embedding_model": "model",
+        "embedding_version": "v1",
+        "file_backed": true,
+    });
     serde_json::json!({
         "protocol": "skein-production-vector-qualification-v1",
         "evidence_kind": "representative_production_vector_replica",
@@ -298,21 +492,17 @@ fn vector(identity: &ProductionQualificationIdentity) -> Value {
         "blocker_codes": [],
         "evidence_binding": binding(identity),
         "expected_identity": serde_json::to_value(identity).unwrap(),
-        "projection_identity": {
-            "projection_generation": 9,
+        "projection_identity": projection_identity.clone(),
+        "oracle_projection_identity": projection_identity,
+        "search_projection_identity": {
+            "projection_generation": 7,
             "source_graph_commit_epoch": 42,
             "document_count": 100_000,
-            "source_digest": 1,
-            "payload_bytes": 1,
-            "payload_checksum": 1,
-            "format_version": 1,
-            "algorithm": "turboquant",
-            "bit_width": 4,
-            "dimension": 3,
-            "transform_seed": 1,
+            "documents_digest": 1,
+            "analyzer_digest": 2,
             "embedding_model": "model",
             "embedding_version": "v1",
-            "file_backed": true,
+            "embedding_dimension": 3,
         },
         "projection_resources": {
             "segment_count": 1,
@@ -341,13 +531,16 @@ fn vector(identity: &ProductionQualificationIdentity) -> Value {
         "query_evidence": [{
             "auto_scalar_candidate_parity": true,
             "auto_scalar_final_parity": true,
+            "serving_auto_final_parity": true,
             "auto_final_matches_exact": true,
             "scalar_candidate_final_matches_exact": true,
             "exact_latency": latency(),
             "auto_latency": latency(),
             "scalar_candidate_latency": latency(),
+            "serving_latency": latency(),
             "auto_metrics": metrics("portable"),
             "scalar_candidate_metrics": metrics("scalar"),
+            "serving_metrics": serving_metrics,
         }],
         "differential_oracle": {
             "required": true,
@@ -365,11 +558,13 @@ fn vector(identity: &ProductionQualificationIdentity) -> Value {
             "stale_generation_isolated": true,
             "corrupt_projection_rejected": true,
             "cancellation_propagated": true,
+            "serving_cancellation_propagated": true,
             "mixed_foreground_background": true,
             "update_latency": latency(),
             "checkpoint_latency": latency(),
             "reopen_latency": latency(),
             "cancellation_latency": latency(),
+            "serving_cancellation_latency": latency(),
         },
         "process_memory": {
             "capabilities": {"resident_memory": true, "total_page_faults": true},

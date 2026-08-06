@@ -12,10 +12,11 @@ use super::{
     search_document_matches_predicates, search_empty_reason_codes, search_empty_reasons,
     search_metadata_predicate_pushdown, tokenize, top_ranked_candidates, top_ranked_ids,
     validate_search_segment_documents, weighted_rrf_score, window_ranks,
-    SearchAccessControlContext, SearchAnalyzerLexicon, SearchCandidateSetReport, SearchDocument,
-    SearchFallbackReasonCode, SearchFieldPruningAccumulator, SearchHit, SearchIndex, SearchMode,
-    SearchPageWindow, SearchPredicatePushdownReport, SearchProjectionFreshness, SearchQueryOptions,
-    SearchResultSet, SearchRetrieverReport, SearchScoredCandidate, SearchSegmentDescriptor,
+    CompressedVectorSearchMode, SearchAccessControlContext, SearchAnalyzerLexicon,
+    SearchCandidateSetReport, SearchDocument, SearchEmbeddingManifest, SearchFallbackReasonCode,
+    SearchFieldPruningAccumulator, SearchHit, SearchIndex, SearchMode, SearchPageWindow,
+    SearchPredicatePushdownReport, SearchProjectionFreshness, SearchQueryOptions, SearchResultSet,
+    SearchRetrieverReport, SearchScoredCandidate, SearchSegmentDescriptor,
     SearchSegmentDescriptorEntry, SearchTruncationReasonCode, FULL_REINDEX_MARKER,
     METADATA_REPAIR_MARKER, SEARCH_SEGMENT_DESCRIPTOR_FILE, SEARCH_SEGMENT_PAYLOAD_FILE,
 };
@@ -26,7 +27,7 @@ use skein_storage::durable_replace_file;
 use std::cmp::{Ordering as CmpOrdering, Reverse};
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,11 +35,15 @@ use std::sync::{Arc, Mutex};
 
 mod generation_writer;
 mod publish_lease;
+mod vector_serving;
 pub use generation_writer::{
     SearchOutOfCoreGenerationBuildOptions, SearchOutOfCoreGenerationBuildReport,
-    SearchOutOfCoreGenerationWriter,
+    SearchOutOfCoreGenerationUpdate, SearchOutOfCoreGenerationWriter,
 };
 pub(super) use publish_lease::SearchProjectionPublishLease;
+#[cfg(feature = "vector-search")]
+use vector_serving::vector_projection_error;
+use vector_serving::VectorScoreScan;
 
 const OUT_OF_CORE_MANIFEST_FILE: &str = "search_projection.out_of_core.manifest.skein";
 const OUT_OF_CORE_FORMAT: &str = "SKEIN_SEARCH_OUT_OF_CORE_V1";
@@ -57,6 +62,9 @@ pub struct SearchOutOfCoreConfig {
     pub max_candidate_spill_bytes: NonZeroU64,
     pub max_candidate_block_bytes: NonZeroU64,
     pub max_score_entries: NonZeroUsize,
+    pub max_vector_candidates: NonZeroUsize,
+    pub max_vector_search_working_bytes: NonZeroUsize,
+    pub max_vector_search_parallelism: NonZeroUsize,
     pub max_hydrated_documents: NonZeroUsize,
     pub max_hydrated_bytes: NonZeroU64,
     pub max_matched_spans: NonZeroUsize,
@@ -74,6 +82,9 @@ impl Default for SearchOutOfCoreConfig {
             max_candidate_spill_bytes: NonZeroU64::new(4 * 1024 * 1024 * 1024).unwrap(),
             max_candidate_block_bytes: NonZeroU64::new(16 * 1024 * 1024).unwrap(),
             max_score_entries: NonZeroUsize::new(1_000_000).unwrap(),
+            max_vector_candidates: NonZeroUsize::new(1_024).unwrap(),
+            max_vector_search_working_bytes: NonZeroUsize::new(64 * 1024 * 1024).unwrap(),
+            max_vector_search_parallelism: NonZeroUsize::MIN,
             max_hydrated_documents: NonZeroUsize::new(1024).unwrap(),
             max_hydrated_bytes: NonZeroU64::new(64 * 1024 * 1024).unwrap(),
             max_matched_spans: NonZeroUsize::new(4096).unwrap(),
@@ -97,6 +108,7 @@ pub struct SearchOutOfCoreMetrics {
     pub candidate_block_reads: u64,
     pub candidate_bytes_read: u64,
     pub vector_bytes_read: u64,
+    pub turboquant_payload_bytes_read: u64,
     pub hydrated_documents: usize,
     pub hydrated_bytes: u64,
 }
@@ -125,6 +137,8 @@ pub struct SearchOutOfCoreReader {
     vector_payload: Arc<File>,
     layout: SearchOutOfCoreLayoutBody,
     lexical_projection: Arc<LexicalProjectionReader>,
+    #[cfg(feature = "vector-search")]
+    turboquant_projection: Option<Arc<skein_vector_projection::FileProjection>>,
     runtime_capabilities: RuntimeCapabilities,
 }
 
@@ -148,6 +162,20 @@ struct SearchOutOfCoreManifestBody {
     lexical_manifest_file: String,
     lexical_manifest_len: u64,
     lexical_manifest_checksum: u64,
+    #[serde(default)]
+    turboquant_artifact_file: Option<String>,
+    #[serde(default)]
+    turboquant_artifact_len: Option<u64>,
+    #[serde(default)]
+    turboquant_artifact_checksum: Option<u64>,
+    #[serde(default)]
+    turboquant_source_digest: Option<u64>,
+    #[serde(default)]
+    turboquant_vector_document_count: Option<usize>,
+    #[serde(default)]
+    turboquant_payload_checksum: Option<u32>,
+    #[serde(default)]
+    turboquant_peak_build_working_bytes: Option<usize>,
     document_count: usize,
     documents_digest: u64,
     source_graph_commit_epoch: Option<u64>,
@@ -184,6 +212,7 @@ struct SearchOutOfCoreLayoutBody {
 #[serde(deny_unknown_fields)]
 struct SearchOutOfCoreSegmentLayout {
     segment_id: u64,
+    vector_ordinal_base: u64,
     metadata: SearchOutOfCoreRange,
     vectors: SearchOutOfCoreRange,
 }
@@ -200,13 +229,32 @@ struct SearchOutOfCoreRange {
 #[derive(Debug)]
 struct SearchMetadataDocument {
     id: String,
+    vector_ordinal: Option<u64>,
     metadata: BTreeMap<String, String>,
 }
 
 #[derive(Debug)]
 struct SearchVectorDocument {
+    vector_ordinal: u64,
     id: String,
     embedding: Vec<f32>,
+}
+
+#[derive(Clone, Copy)]
+struct SearchOutOfCoreExecutionContext<'a> {
+    access_control: Option<&'a SearchAccessControlContext>,
+    compressed_vector_search_mode: CompressedVectorSearchMode,
+    task_context: Option<&'a crate::RuntimeTaskContext>,
+}
+
+impl SearchOutOfCoreExecutionContext<'_> {
+    const fn scalar() -> Self {
+        Self {
+            access_control: None,
+            compressed_vector_search_mode: CompressedVectorSearchMode::Disabled,
+            task_context: None,
+        }
+    }
 }
 
 impl SearchOutOfCoreManifestBody {
@@ -267,6 +315,14 @@ impl SearchOutOfCoreManifestBody {
                 ));
             }
         }
+        if let Some(name) = self.turboquant_artifact_file.as_deref()
+            && Path::new(name).file_name().and_then(|value| value.to_str()) != Some(name)
+        {
+            return Err(SkeinError::Storage(
+                "search out-of-core manifest contains an invalid TurboQuant artifact name"
+                    .to_string(),
+            ));
+        }
         if self.descriptor_file != format!("search_projection_segments.{}.skein", self.generation)
             || self.payload_file
                 != format!(
@@ -294,6 +350,29 @@ impl SearchOutOfCoreManifestBody {
             return Err(SkeinError::Storage(
                 "search out-of-core manifest artifact names do not match its generation"
                     .to_string(),
+            ));
+        }
+        let turboquant_fields = [
+            self.turboquant_artifact_file.is_some(),
+            self.turboquant_artifact_len.is_some(),
+            self.turboquant_artifact_checksum.is_some(),
+            self.turboquant_source_digest.is_some(),
+            self.turboquant_vector_document_count.is_some(),
+            self.turboquant_payload_checksum.is_some(),
+            self.turboquant_peak_build_working_bytes.is_some(),
+        ];
+        if turboquant_fields.iter().any(|present| *present)
+            && turboquant_fields.iter().any(|present| !*present)
+        {
+            return Err(SkeinError::Storage(
+                "search out-of-core manifest has an incomplete TurboQuant identity".to_string(),
+            ));
+        }
+        if let Some(name) = self.turboquant_artifact_file.as_deref()
+            && name != format!("search_turboquant.{}.skein", self.generation)
+        {
+            return Err(SkeinError::Storage(
+                "search out-of-core TurboQuant artifact does not match its generation".to_string(),
             ));
         }
         Ok(())
@@ -354,8 +433,10 @@ impl SearchOutOfCoreLayoutBody {
         }
         let mut metadata_end = 0u64;
         let mut vector_end = 0u64;
+        let mut vector_ordinal_base = 0u64;
         for (layout, segment) in self.segments.iter().zip(&descriptor.segments) {
             if layout.segment_id != segment.segment_id
+                || layout.vector_ordinal_base != vector_ordinal_base
                 || layout.metadata.entry_count != segment.document_count
                 || layout.vectors.entry_count > segment.document_count
             {
@@ -382,6 +463,11 @@ impl SearchOutOfCoreLayoutBody {
             )?;
             metadata_end = layout.metadata.offset + layout.metadata.length;
             vector_end = layout.vectors.offset + layout.vectors.length;
+            vector_ordinal_base = vector_ordinal_base
+                .checked_add(layout.vectors.entry_count as u64)
+                .ok_or_else(|| {
+                    SkeinError::Storage("search vector ordinal range overflow".to_string())
+                })?;
         }
         if metadata_end != manifest.metadata_payload_len
             || vector_end != manifest.vector_payload_len
@@ -476,6 +562,20 @@ impl SearchOutOfCoreReader {
             &descriptor,
             config.max_compressed_segment_bytes.get(),
         )?;
+        if manifest.turboquant_vector_document_count
+            != manifest.turboquant_artifact_file.as_ref().map(|_| {
+                layout
+                    .segments
+                    .iter()
+                    .map(|segment| segment.vectors.entry_count)
+                    .sum()
+            })
+        {
+            return Err(SkeinError::Storage(
+                "search out-of-core TurboQuant vector count does not match the sidecar layout"
+                    .to_string(),
+            ));
+        }
 
         let metadata_payload = open_exact_length_artifact(
             &root.join(&manifest.metadata_payload_file),
@@ -516,6 +616,15 @@ impl SearchOutOfCoreReader {
             )
         })?;
 
+        #[cfg(feature = "vector-search")]
+        let turboquant_projection = open_turboquant_projection(
+            &root,
+            &manifest,
+            config.max_vector_search_working_bytes.get(),
+        )?;
+        #[cfg(not(feature = "vector-search"))]
+        verify_turboquant_artifact(&root, &manifest)?;
+
         Ok(Self {
             root,
             config,
@@ -527,6 +636,8 @@ impl SearchOutOfCoreReader {
             vector_payload: Arc::new(vector_payload),
             layout,
             lexical_projection,
+            #[cfg(feature = "vector-search")]
+            turboquant_projection,
             runtime_capabilities: crate::compiled_runtime_capabilities(),
         })
     }
@@ -543,6 +654,7 @@ impl SearchOutOfCoreReader {
             .saturating_add(self.manifest.vector_payload_len)
             .saturating_add(self.manifest.layout_len)
             .saturating_add(self.manifest.lexical_manifest_len)
+            .saturating_add(self.manifest.turboquant_artifact_len.unwrap_or_default())
     }
 
     pub(crate) fn config(&self) -> &SearchOutOfCoreConfig {
@@ -557,6 +669,26 @@ impl SearchOutOfCoreReader {
         self.manifest.source_graph_commit_epoch
     }
 
+    pub fn import_source_graph_commit_epoch(&self) -> Option<u64> {
+        self.manifest.import_source_graph_commit_epoch
+    }
+
+    pub fn embedding_manifest(&self) -> Option<SearchEmbeddingManifest> {
+        self.manifest
+            .embedding_model
+            .as_ref()
+            .zip(self.manifest.embedding_dimension)
+            .map(|(model, dimension)| SearchEmbeddingManifest {
+                model: model.clone(),
+                version: self.manifest.embedding_version.clone(),
+                dimension,
+            })
+    }
+
+    pub fn analyzer_lexicon(&self) -> &SearchAnalyzerLexicon {
+        &self.analyzer_lexicon
+    }
+
     pub fn production_qualification_identity(
         &self,
     ) -> super::SearchProjectionQualificationIdentity {
@@ -569,6 +701,67 @@ impl SearchOutOfCoreReader {
             embedding_model: self.manifest.embedding_model.clone(),
             embedding_version: self.manifest.embedding_version.clone(),
             embedding_dimension: self.manifest.embedding_dimension,
+        }
+    }
+
+    pub fn vector_projection_qualification_identity(
+        &self,
+    ) -> Option<super::VectorProjectionQualificationIdentity> {
+        #[cfg(feature = "vector-search")]
+        {
+            let projection = self.turboquant_projection.as_ref()?;
+            let manifest = projection.manifest();
+            Some(super::VectorProjectionQualificationIdentity {
+                projection_generation: manifest.identity.generation,
+                source_graph_commit_epoch: manifest.identity.source_epoch,
+                document_count: manifest.document_count,
+                source_digest: manifest.source_digest,
+                payload_bytes: manifest.payload_bytes,
+                payload_checksum: manifest.payload_checksum,
+                format_version: manifest.format_version,
+                algorithm: manifest.algorithm.clone(),
+                bit_width: manifest.bit_width,
+                dimension: manifest.dimension,
+                transform_seed: manifest.transform_seed,
+                embedding_model: manifest.identity.embedding_model.clone(),
+                embedding_version: manifest.identity.embedding_version.clone(),
+                file_backed: true,
+            })
+        }
+        #[cfg(not(feature = "vector-search"))]
+        {
+            None
+        }
+    }
+
+    pub fn vector_projection_resource_evidence(
+        &self,
+    ) -> Option<super::VectorProjectionResourceEvidence> {
+        #[cfg(feature = "vector-search")]
+        {
+            let projection = self.turboquant_projection.as_ref()?;
+            let manifest = projection.manifest();
+            let raw_vector_bytes = (manifest.document_count as u64)
+                .saturating_mul(manifest.dimension as u64)
+                .saturating_mul(std::mem::size_of::<f32>() as u64);
+            Some(super::VectorProjectionResourceEvidence {
+                segment_count: manifest.segments.len(),
+                requested_segment_rows: manifest.requested_segment_rows,
+                admitted_segment_rows: manifest.admitted_segment_rows,
+                configured_build_working_bytes: manifest.configured_build_working_bytes,
+                peak_build_working_bytes: manifest.peak_build_working_bytes,
+                raw_vector_bytes,
+                projection_payload_bytes: manifest.payload_bytes,
+                build_write_amplification_per_million: manifest
+                    .payload_bytes
+                    .saturating_mul(1_000_000)
+                    .checked_div(raw_vector_bytes.max(1))
+                    .unwrap_or(u64::MAX),
+            })
+        }
+        #[cfg(not(feature = "vector-search"))]
+        {
+            None
         }
     }
 
@@ -615,7 +808,56 @@ impl SearchOutOfCoreReader {
         mode: SearchMode,
         options: SearchQueryOptions,
     ) -> Result<SearchOutOfCoreOutput> {
-        self.search_with_options_internal(query_text, query_embedding, mode, options, None)
+        self.search_with_options_internal(
+            query_text,
+            query_embedding,
+            mode,
+            options,
+            SearchOutOfCoreExecutionContext::scalar(),
+        )
+    }
+
+    pub fn search_with_options_compressed_vector_projection_mode(
+        &self,
+        query_text: &str,
+        query_embedding: Option<&[f32]>,
+        mode: SearchMode,
+        options: SearchQueryOptions,
+        compressed_vector_search_mode: CompressedVectorSearchMode,
+    ) -> Result<SearchOutOfCoreOutput> {
+        self.search_with_options_internal(
+            query_text,
+            query_embedding,
+            mode,
+            options,
+            SearchOutOfCoreExecutionContext {
+                access_control: None,
+                compressed_vector_search_mode,
+                task_context: None,
+            },
+        )
+    }
+
+    pub fn search_with_options_compressed_vector_projection_context(
+        &self,
+        query_text: &str,
+        query_embedding: Option<&[f32]>,
+        mode: SearchMode,
+        options: SearchQueryOptions,
+        compressed_vector_search_mode: CompressedVectorSearchMode,
+        task_context: &crate::RuntimeTaskContext,
+    ) -> Result<SearchOutOfCoreOutput> {
+        self.search_with_options_internal(
+            query_text,
+            query_embedding,
+            mode,
+            options,
+            SearchOutOfCoreExecutionContext {
+                access_control: None,
+                compressed_vector_search_mode,
+                task_context: Some(task_context),
+            },
+        )
     }
 
     pub fn search_with_options_access_control(
@@ -631,7 +873,11 @@ impl SearchOutOfCoreReader {
             query_embedding,
             mode,
             options,
-            Some(&access_control),
+            SearchOutOfCoreExecutionContext {
+                access_control: Some(&access_control),
+                compressed_vector_search_mode: CompressedVectorSearchMode::Disabled,
+                task_context: None,
+            },
         )
     }
 
@@ -661,14 +907,32 @@ impl SearchOutOfCoreReader {
         Ok(SearchOutOfCoreHydrationOutput { documents, metrics })
     }
 
+    fn visit_documents_in_order(
+        &self,
+        consumer: &mut dyn FnMut(SearchDocument) -> Result<()>,
+    ) -> Result<SearchOutOfCoreMetrics> {
+        let mut metrics = SearchOutOfCoreMetrics::default();
+        for segment in &self.descriptor.segments {
+            for document in self.read_hydration_segment(segment, &mut metrics)? {
+                consumer(document)?;
+            }
+        }
+        Ok(metrics)
+    }
+
     fn search_with_options_internal(
         &self,
         query_text: &str,
         query_embedding: Option<&[f32]>,
         mode: SearchMode,
         options: SearchQueryOptions,
-        access_control: Option<&SearchAccessControlContext>,
+        execution: SearchOutOfCoreExecutionContext<'_>,
     ) -> Result<SearchOutOfCoreOutput> {
+        let SearchOutOfCoreExecutionContext {
+            access_control,
+            compressed_vector_search_mode,
+            task_context,
+        } = execution;
         if access_control.is_some() {
             self.runtime_capabilities
                 .require(RuntimeCapability::AccessControl)?;
@@ -818,14 +1082,18 @@ impl SearchOutOfCoreReader {
                 query_embedding.expect("vector availability requires an embedding"),
                 &candidate_set,
                 retained_vector_limit,
+                compressed_vector_search_mode,
+                task_context,
                 &mut metrics,
             )?
         } else {
             VectorScoreScan::default()
         };
-        let vector_scores = vector_scan.scores;
+        vector_fallback_reason_codes.extend(vector_scan.fallback_reason_codes.iter().copied());
+        vector_fallback_reasons.extend(vector_scan.fallback_reasons.iter().cloned());
+        let vector_scores = &vector_scan.scores;
 
-        let vector_ranks = ranked_scores(&vector_scores);
+        let vector_ranks = ranked_scores(vector_scores);
         let text_ranks = ranked_scores(&text_scores);
         let vector_window_ranks = window_ranks(&vector_ranks, options.rank_window);
         let text_window_ranks = window_ranks(&text_ranks, options.rank_window);
@@ -837,7 +1105,7 @@ impl SearchOutOfCoreReader {
         let retrievers = vec![
             SearchRetrieverReport {
                 name: "vector".to_string(),
-                backend: "scalar_vector_segment_scan".to_string(),
+                backend: vector_scan.backend.clone(),
                 backend_selection_reason: None,
                 estimated_raw_vector_bytes: self.manifest.embedding_dimension.map(|dimension| {
                     (dimension as u64)
@@ -848,7 +1116,7 @@ impl SearchOutOfCoreReader {
                 available: vector_available && mode != SearchMode::Text,
                 input_candidate_set: candidate_report.clone(),
                 candidate_score_source: if vector_available && mode != SearchMode::Text {
-                    "raw_vector"
+                    vector_scan.candidate_score_source.as_str()
                 } else {
                     "none"
                 }
@@ -859,7 +1127,7 @@ impl SearchOutOfCoreReader {
                     "none"
                 }
                 .to_string(),
-                generated_candidate_count: vector_scan.matching_count,
+                generated_candidate_count: vector_scan.generated_candidate_count,
                 candidate_scan_rounds: vector_scan.segment_scan_count,
                 descriptor_pruned_count: candidate_report
                     .metadata_predicate_pushdown
@@ -870,18 +1138,22 @@ impl SearchOutOfCoreReader {
                         .segment_pruned_document_count,
                 ),
                 residual_filtered_count: 0,
-                reranked_candidate_count: 0,
+                reranked_candidate_count: vector_scan.reranked_candidate_count,
                 raw_vector_bytes_read: metrics.vector_bytes_read,
-                candidate_scan_kernel: None,
-                candidate_scan_worker_count: 0,
-                candidate_scan_segment_count: vector_scan.segment_scan_count,
-                candidate_scan_scanned_segment_count: vector_scan.segment_scan_count,
-                candidate_scan_scored_document_count: vector_scan.matching_count,
-                candidate_scan_filtered_document_count: candidate_report.filtered_out_count,
-                candidate_scan_scanned_block_count: 0,
-                candidate_scan_skipped_block_count: 0,
-                candidate_scan_payload_bytes_read: metrics.vector_bytes_read,
-                candidate_scan_admitted_working_bytes: 0,
+                candidate_scan_kernel: vector_scan.candidate_scan_kernel.clone(),
+                candidate_scan_worker_count: vector_scan.candidate_scan_worker_count,
+                candidate_scan_segment_count: vector_scan.candidate_scan_segment_count,
+                candidate_scan_scanned_segment_count: vector_scan
+                    .candidate_scan_scanned_segment_count,
+                candidate_scan_scored_document_count: vector_scan
+                    .candidate_scan_scored_document_count,
+                candidate_scan_filtered_document_count: vector_scan
+                    .candidate_scan_filtered_document_count,
+                candidate_scan_scanned_block_count: vector_scan.candidate_scan_scanned_block_count,
+                candidate_scan_skipped_block_count: vector_scan.candidate_scan_skipped_block_count,
+                candidate_scan_payload_bytes_read: vector_scan.candidate_scan_payload_bytes_read,
+                candidate_scan_admitted_working_bytes: vector_scan
+                    .candidate_scan_admitted_working_bytes,
                 posting_bytes_read: 0,
                 candidate_postings_visited: 0,
                 segmented_lexical_projection_used: false,
@@ -895,13 +1167,13 @@ impl SearchOutOfCoreReader {
                     policy_epoch,
                     true,
                 ),
-                fallback_reason_codes: vector_fallback_reason_codes,
-                fallback_reasons: vector_fallback_reasons,
+                fallback_reason_codes: vector_fallback_reason_codes.clone(),
+                fallback_reasons: vector_fallback_reasons.clone(),
                 candidate_top_ids: Vec::new(),
                 top_hit_ids: top_ranked_ids(&vector_window_ranks, options.limit),
                 top_candidates: top_ranked_candidates(
                     &vector_window_ranks,
-                    &vector_scores,
+                    vector_scores,
                     options.limit,
                 ),
             },
@@ -1100,50 +1372,6 @@ impl SearchOutOfCoreReader {
                 projection_freshness,
             },
             metrics,
-        })
-    }
-
-    fn scan_vector_scores(
-        &self,
-        query_embedding: &[f32],
-        candidate_set: &CandidateSet,
-        retained_limit: Option<usize>,
-        metrics: &mut SearchOutOfCoreMetrics,
-    ) -> Result<VectorScoreScan> {
-        let mut collector =
-            BoundedScoreCollector::new(retained_limit, self.config.max_score_entries.get())?;
-        let mut vector_document_count = 0usize;
-        let mut segment_scan_count = 0usize;
-        for segment in &self.descriptor.segments {
-            if candidate_set.segment_cardinality(segment.segment_id) == 0 {
-                continue;
-            }
-            segment_scan_count = segment_scan_count.saturating_add(1);
-            let documents = self.read_vector_segment(segment, metrics)?;
-            for document in &documents {
-                if !candidate_set.contains(&document.id, metrics)? {
-                    continue;
-                }
-                let embedding = document.embedding.as_slice();
-                if embedding.len() != query_embedding.len() || embedding.is_empty() {
-                    continue;
-                }
-                vector_document_count = vector_document_count.saturating_add(1);
-                metrics.vector_bytes_read = metrics.vector_bytes_read.saturating_add(
-                    (embedding.len() as u64).saturating_mul(std::mem::size_of::<f32>() as u64),
-                );
-                if let Some(score) = cosine_similarity(query_embedding, embedding)
-                    && score > 0.0
-                {
-                    collector.push(document.id.clone(), score)?;
-                }
-            }
-        }
-        Ok(VectorScoreScan {
-            matching_count: collector.matching_count,
-            scores: collector.finish(),
-            vector_document_count,
-            segment_scan_count,
         })
     }
 
@@ -1394,7 +1622,23 @@ impl SearchOutOfCoreReader {
         )?;
         metrics.peak_metadata_segment_bytes =
             metrics.peak_metadata_segment_bytes.max(text.len() as u64);
-        decode_metadata_segment(&text, segment, range.entry_count)
+        let documents = decode_metadata_segment(&text, segment, range.entry_count)?;
+        let layout = self.layout_range(segment.segment_id)?;
+        let ordinals = documents
+            .iter()
+            .filter_map(|document| document.vector_ordinal)
+            .collect::<Vec<_>>();
+        if ordinals.len() != layout.vectors.entry_count
+            || ordinals.iter().enumerate().any(|(offset, ordinal)| {
+                *ordinal != layout.vector_ordinal_base.saturating_add(offset as u64)
+            })
+        {
+            return Err(SkeinError::Storage(format!(
+                "search segment {} metadata vector ordinals do not match its layout",
+                segment.segment_id
+            )));
+        }
+        Ok(documents)
     }
 
     fn read_vector_segment(
@@ -1423,6 +1667,7 @@ impl SearchOutOfCoreReader {
             &text,
             segment,
             range.entry_count,
+            self.layout_range(segment.segment_id)?.vector_ordinal_base,
             self.manifest.embedding_dimension,
         )
     }
@@ -1504,6 +1749,8 @@ impl SearchOutOfCoreReader {
                 })?;
                 encoded.extend_from_slice(&id_len.to_le_bytes());
                 encoded.extend_from_slice(candidate.id.as_bytes());
+                encoded
+                    .extend_from_slice(&document.vector_ordinal.unwrap_or(u64::MAX).to_le_bytes());
                 block_cardinality = block_cardinality.saturating_add(1);
             }
             if encoded.len() as u64 > self.config.max_candidate_block_bytes.get() {
@@ -1553,6 +1800,88 @@ impl SearchOutOfCoreReader {
     }
 }
 
+fn verify_turboquant_artifact(root: &Path, manifest: &SearchOutOfCoreManifestBody) -> Result<()> {
+    let Some(file_name) = manifest.turboquant_artifact_file.as_deref() else {
+        return Ok(());
+    };
+    let expected_len = manifest
+        .turboquant_artifact_len
+        .expect("validated TurboQuant identity has a length");
+    let expected_checksum = manifest
+        .turboquant_artifact_checksum
+        .expect("validated TurboQuant identity has a checksum");
+    let (actual_len, actual_checksum) = file_len_checksum_streaming(&root.join(file_name))?;
+    if actual_len != expected_len || actual_checksum != expected_checksum {
+        return Err(SkeinError::Storage(
+            "search out-of-core TurboQuant artifact does not match its manifest".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "vector-search")]
+fn open_turboquant_projection(
+    root: &Path,
+    manifest: &SearchOutOfCoreManifestBody,
+    max_working_bytes: usize,
+) -> Result<Option<Arc<skein_vector_projection::FileProjection>>> {
+    verify_turboquant_artifact(root, manifest)?;
+    let Some(file_name) = manifest.turboquant_artifact_file.as_deref() else {
+        return Ok(None);
+    };
+    let peak_build_working_bytes = manifest
+        .turboquant_peak_build_working_bytes
+        .expect("validated TurboQuant identity has a build memory bound");
+    if peak_build_working_bytes > max_working_bytes {
+        return Err(SkeinError::Storage(format!(
+            "search TurboQuant artifact requires {peak_build_working_bytes} build bytes, exceeding the serving admission {max_working_bytes}"
+        )));
+    }
+    let projection = skein_vector_projection::FileProjection::open(root.join(file_name))
+        .map_err(vector_projection_error)?;
+    let projection_manifest = projection.manifest();
+    let expected_identity = skein_vector_projection::ProjectionIdentity {
+        generation: manifest.generation,
+        source_epoch: manifest.source_graph_commit_epoch,
+        embedding_model: manifest.embedding_model.clone(),
+        embedding_version: manifest.embedding_version.clone(),
+    };
+    if projection_manifest.identity != expected_identity
+        || Some(projection_manifest.dimension) != manifest.embedding_dimension
+        || Some(projection_manifest.document_count) != manifest.turboquant_vector_document_count
+        || Some(projection_manifest.source_digest) != manifest.turboquant_source_digest
+        || Some(projection_manifest.payload_checksum) != manifest.turboquant_payload_checksum
+    {
+        return Err(SkeinError::Storage(
+            "search out-of-core TurboQuant identity does not match its generation".to_string(),
+        ));
+    }
+    Ok(Some(Arc::new(projection)))
+}
+
+fn file_len_checksum_streaming(path: &Path) -> Result<(u64, u64)> {
+    let mut file = File::open(path)?;
+    let expected_len = file.metadata()?.len();
+    let mut hasher = skein_integrity::Crc32cHasher::new();
+    let mut actual_len = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        actual_len = actual_len.saturating_add(read as u64);
+    }
+    if actual_len != expected_len {
+        return Err(SkeinError::Storage(format!(
+            "search artifact {} changed while checksumming",
+            path.display()
+        )));
+    }
+    Ok((actual_len, hasher.finish()))
+}
+
 pub(super) fn published_generation(
     root: &Path,
     analyzer_lexicon: &SearchAnalyzerLexicon,
@@ -1567,6 +1896,15 @@ pub(super) fn published_generation(
         analyzer_lexicon.clone(),
     )?;
     Ok(Some(reader.generation()))
+}
+
+pub(super) fn active_manifest_generation(root: &Path) -> Result<Option<u64>> {
+    let manifest_path = root.join(OUT_OF_CORE_MANIFEST_FILE);
+    if !manifest_path.exists() {
+        return Ok(None);
+    }
+    let manifest_bytes = read_bounded_file(&manifest_path, MAX_OUT_OF_CORE_MANIFEST_BYTES)?;
+    SearchOutOfCoreManifestBody::decode(&manifest_bytes).map(|manifest| Some(manifest.generation))
 }
 
 pub(super) fn publish_out_of_core_projection(index: &SearchIndex, root: &Path) -> Result<u64> {
@@ -1632,6 +1970,13 @@ pub(super) fn publish_out_of_core_projection(index: &SearchIndex, root: &Path) -
         lexical_manifest_file,
         lexical_manifest_len: lexical_manifest_bytes.len() as u64,
         lexical_manifest_checksum: checksum_bytes(&lexical_manifest_bytes),
+        turboquant_artifact_file: None,
+        turboquant_artifact_len: None,
+        turboquant_artifact_checksum: None,
+        turboquant_source_digest: None,
+        turboquant_vector_document_count: None,
+        turboquant_payload_checksum: None,
+        turboquant_peak_build_working_bytes: None,
         document_count: index.documents.len(),
         documents_digest: lexical_documents_digest(&index.documents),
         source_graph_commit_epoch: index.source_graph_commit_epoch,
@@ -1668,6 +2013,7 @@ fn write_out_of_core_sidecars(
     let mut vector_file = File::create(&vector_tmp)?;
     let mut metadata_offset = 0u64;
     let mut vector_offset = 0u64;
+    let mut vector_ordinal = 0u64;
     let mut layouts = Vec::with_capacity(descriptor.segments.len());
 
     for segment in &descriptor.segments {
@@ -1689,9 +2035,13 @@ fn write_out_of_core_sidecars(
         let mut vector_body = String::from("SKEIN_SEARCH_VECTOR_SEGMENT_V1\n");
         let mut vector_count = 0usize;
         for document in documents {
+            let document_vector_ordinal = document.embedding.as_ref().map(|_| vector_ordinal);
             metadata_body.push_str(&format!(
-                "meta\t{}\t{}\n",
+                "meta\t{}\t{}\t{}\n",
                 encode_string(&document.id),
+                document_vector_ordinal
+                    .map(|ordinal| ordinal.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
                 encode_metadata(&document.metadata)
             ));
             if let Some(embedding) = document.embedding.as_deref() {
@@ -1702,11 +2052,15 @@ fn write_out_of_core_sidecars(
                     )));
                 }
                 vector_body.push_str(&format!(
-                    "vector\t{}\t{}\n",
+                    "vector\t{}\t{}\t{}\n",
+                    vector_ordinal,
                     encode_string(&document.id),
                     encode_embedding(Some(embedding))
                 ));
                 vector_count = vector_count.saturating_add(1);
+                vector_ordinal = vector_ordinal.checked_add(1).ok_or_else(|| {
+                    SkeinError::Storage("search vector ordinal overflow".to_string())
+                })?;
             }
         }
 
@@ -1726,6 +2080,7 @@ fn write_out_of_core_sidecars(
         )?;
         layouts.push(SearchOutOfCoreSegmentLayout {
             segment_id: segment.segment_id,
+            vector_ordinal_base: vector_ordinal.saturating_sub(vector_count as u64),
             metadata,
             vectors,
         });
@@ -1824,14 +2179,21 @@ impl CandidateSet {
                 .unwrap_or(0),
         }
     }
-}
 
-#[derive(Debug, Clone, Default)]
-struct VectorScoreScan {
-    scores: BTreeMap<String, f64>,
-    matching_count: usize,
-    vector_document_count: usize,
-    segment_scan_count: usize,
+    #[cfg(feature = "vector-search")]
+    fn vector_ordinals(
+        &self,
+        max_bytes: u64,
+        task_context: Option<&crate::RuntimeTaskContext>,
+        metrics: &mut SearchOutOfCoreMetrics,
+    ) -> Result<Option<Vec<u64>>> {
+        match self {
+            Self::All(_) => Ok(None),
+            Self::Spilled(set) => set
+                .vector_ordinals(max_bytes, task_context, metrics)
+                .map(Some),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1968,7 +2330,12 @@ impl CandidateBlock {
 #[derive(Debug)]
 struct CandidateCache {
     segment_id: u64,
-    ids: Vec<String>,
+    entries: Vec<CandidateEntry>,
+}
+
+#[derive(Debug)]
+struct CandidateEntry {
+    id: String,
 }
 
 #[derive(Debug)]
@@ -2032,15 +2399,92 @@ impl SpilledCandidateSet {
                 metrics.candidate_bytes_read.saturating_add(block.length);
             *cache = Some(CandidateCache {
                 segment_id: block.segment_id,
-                ids: decode_candidate_ids(&bytes, block.cardinality)?,
+                entries: decode_candidate_entries(&bytes, block.cardinality)?,
             });
         }
         Ok(cache.as_ref().is_some_and(|cached| {
             cached
-                .ids
-                .binary_search_by(|value| value.as_str().cmp(id))
+                .entries
+                .binary_search_by(|value| value.id.as_str().cmp(id))
                 .is_ok()
         }))
+    }
+
+    #[cfg(feature = "vector-search")]
+    fn vector_ordinals(
+        &self,
+        max_bytes: u64,
+        task_context: Option<&crate::RuntimeTaskContext>,
+        metrics: &mut SearchOutOfCoreMetrics,
+    ) -> Result<Vec<u64>> {
+        let ordinal_capacity_bytes = (self.cardinality as u64)
+            .checked_mul(std::mem::size_of::<u64>() as u64)
+            .ok_or_else(|| {
+                SkeinError::Storage("search vector allowlist size overflow".to_string())
+            })?;
+        let max_block_bytes = self
+            .blocks
+            .iter()
+            .map(|block| block.length)
+            .max()
+            .unwrap_or_default();
+        let required_working_bytes = ordinal_capacity_bytes
+            .checked_add(max_block_bytes)
+            .ok_or_else(|| {
+                SkeinError::Storage("search vector allowlist working set overflow".to_string())
+            })?;
+        if required_working_bytes > max_bytes {
+            return Err(SkeinError::Storage(format!(
+                "search vector candidate allowlist and block require {required_working_bytes} bytes, exceeding {max_bytes}"
+            )));
+        }
+        let mut ordinals = Vec::with_capacity(self.cardinality);
+        for block in &self.blocks {
+            if let Some(task_context) = task_context {
+                task_context.checkpoint().map_err(|reason| {
+                    SkeinError::Execution(format!("search vector task {reason}"))
+                })?;
+            }
+            if block.cardinality == 0 {
+                continue;
+            }
+            let bytes = self.read_block_bytes(block, metrics)?;
+            decode_candidate_ordinals_into(&bytes, block.cardinality, &mut ordinals)?;
+        }
+        if ordinals.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(SkeinError::Storage(
+                "search vector candidate ordinals are not strictly ordered".to_string(),
+            ));
+        }
+        Ok(ordinals)
+    }
+
+    #[cfg(feature = "vector-search")]
+    fn read_block_bytes(
+        &self,
+        block: &CandidateBlock,
+        metrics: &mut SearchOutOfCoreMetrics,
+    ) -> Result<Vec<u8>> {
+        if block.length > self.max_block_bytes {
+            return Err(SkeinError::Storage(format!(
+                "search candidate block {} exceeds its read budget",
+                block.segment_id
+            )));
+        }
+        let length = usize::try_from(block.length).map_err(|_| {
+            SkeinError::Storage("search candidate block length exceeds usize".to_string())
+        })?;
+        let mut bytes = vec![0u8; length];
+        read_exact_at(
+            self.file.as_ref().ok_or_else(|| {
+                SkeinError::Storage("search candidate spill file is closed".to_string())
+            })?,
+            block.offset,
+            &mut bytes,
+        )?;
+        metrics.candidate_block_reads = metrics.candidate_block_reads.saturating_add(1);
+        metrics.candidate_bytes_read = metrics.candidate_bytes_read.saturating_add(block.length);
+        Ok(bytes)
     }
 }
 
@@ -2074,9 +2518,9 @@ impl Drop for CandidateFileGuard {
     }
 }
 
-fn decode_candidate_ids(bytes: &[u8], expected: usize) -> Result<Vec<String>> {
+fn decode_candidate_entries(bytes: &[u8], expected: usize) -> Result<Vec<CandidateEntry>> {
     let mut offset = 0usize;
-    let mut ids = Vec::with_capacity(expected);
+    let mut entries = Vec::with_capacity(expected);
     while offset < bytes.len() {
         let end = offset.saturating_add(4);
         let length_bytes = bytes.get(offset..end).ok_or_else(|| {
@@ -2090,17 +2534,75 @@ fn decode_candidate_ids(bytes: &[u8], expected: usize) -> Result<Vec<String>> {
         let raw = bytes.get(offset..end).ok_or_else(|| {
             SkeinError::Storage("search candidate block has a truncated id".to_string())
         })?;
-        ids.push(String::from_utf8(raw.to_vec()).map_err(|error| {
+        let id = String::from_utf8(raw.to_vec()).map_err(|error| {
             SkeinError::Storage(format!("search candidate id is not UTF-8: {error}"))
-        })?);
+        })?;
+        offset = end;
+        let end = offset.saturating_add(std::mem::size_of::<u64>());
+        let raw_ordinal = bytes.get(offset..end).ok_or_else(|| {
+            SkeinError::Storage("search candidate block has a truncated vector ordinal".to_string())
+        })?;
+        let _vector_ordinal = u64::from_le_bytes(raw_ordinal.try_into().unwrap());
+        entries.push(CandidateEntry { id });
         offset = end;
     }
-    if ids.len() != expected || ids.windows(2).any(|pair| pair[0] >= pair[1]) {
+    if entries.len() != expected || entries.windows(2).any(|pair| pair[0].id >= pair[1].id) {
         return Err(SkeinError::Storage(
             "search candidate block count or ordering mismatch".to_string(),
         ));
     }
-    Ok(ids)
+    Ok(entries)
+}
+
+#[cfg(feature = "vector-search")]
+fn decode_candidate_ordinals_into(
+    bytes: &[u8],
+    expected: usize,
+    ordinals: &mut Vec<u64>,
+) -> Result<()> {
+    let mut offset = 0usize;
+    let mut count = 0usize;
+    let mut previous_id = None;
+    while offset < bytes.len() {
+        let end = offset.saturating_add(std::mem::size_of::<u32>());
+        let length_bytes = bytes.get(offset..end).ok_or_else(|| {
+            SkeinError::Storage("search candidate block has a truncated length".to_string())
+        })?;
+        let length = u32::from_le_bytes(length_bytes.try_into().unwrap()) as usize;
+        offset = end;
+        let end = offset.checked_add(length).ok_or_else(|| {
+            SkeinError::Storage("search candidate id length overflows".to_string())
+        })?;
+        let id = std::str::from_utf8(bytes.get(offset..end).ok_or_else(|| {
+            SkeinError::Storage("search candidate block has a truncated id".to_string())
+        })?)
+        .map_err(|error| {
+            SkeinError::Storage(format!("search candidate id is not UTF-8: {error}"))
+        })?;
+        if previous_id.is_some_and(|previous| previous >= id) {
+            return Err(SkeinError::Storage(
+                "search candidate block ids are not strictly ordered".to_string(),
+            ));
+        }
+        previous_id = Some(id);
+        offset = end;
+        let end = offset.saturating_add(std::mem::size_of::<u64>());
+        let raw_ordinal = bytes.get(offset..end).ok_or_else(|| {
+            SkeinError::Storage("search candidate block has a truncated vector ordinal".to_string())
+        })?;
+        let vector_ordinal = u64::from_le_bytes(raw_ordinal.try_into().unwrap());
+        if vector_ordinal != u64::MAX {
+            ordinals.push(vector_ordinal);
+        }
+        offset = end;
+        count = count.saturating_add(1);
+    }
+    if count != expected {
+        return Err(SkeinError::Storage(
+            "search candidate block count mismatch".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn search_document_bytes(document: &SearchDocument) -> u64 {
@@ -2199,10 +2701,13 @@ fn decode_metadata_segment(
     for line in lines {
         let fields = line.split('\t').collect::<Vec<_>>();
         match fields.as_slice() {
-            ["meta", raw_id, raw_metadata] => documents.push(SearchMetadataDocument {
-                id: decode_string(raw_id)?,
-                metadata: decode_metadata(raw_metadata)?,
-            }),
+            ["meta", raw_id, raw_vector_ordinal, raw_metadata] => {
+                documents.push(SearchMetadataDocument {
+                    id: decode_string(raw_id)?,
+                    vector_ordinal: decode_optional_vector_ordinal(raw_vector_ordinal)?,
+                    metadata: decode_metadata(raw_metadata)?,
+                })
+            }
             _ => {
                 return Err(SkeinError::Storage(format!(
                     "search segment {} has an invalid metadata sidecar line",
@@ -2230,6 +2735,7 @@ fn decode_vector_segment(
     text: &str,
     segment: &SearchSegmentDescriptorEntry,
     expected_count: usize,
+    expected_ordinal_base: u64,
     expected_dimension: Option<usize>,
 ) -> Result<Vec<SearchVectorDocument>> {
     let mut lines = text.lines();
@@ -2243,7 +2749,13 @@ fn decode_vector_segment(
     for line in lines {
         let fields = line.split('\t').collect::<Vec<_>>();
         match fields.as_slice() {
-            ["vector", raw_id, raw_embedding] => {
+            ["vector", raw_ordinal, raw_id, raw_embedding] => {
+                let vector_ordinal = raw_ordinal.parse::<u64>().map_err(|_| {
+                    SkeinError::Storage(format!(
+                        "search segment {} vector sidecar has an invalid ordinal",
+                        segment.segment_id
+                    ))
+                })?;
                 let embedding = decode_embedding(raw_embedding)?.ok_or_else(|| {
                     SkeinError::Storage(format!(
                         "search segment {} vector sidecar contains an empty embedding",
@@ -2259,6 +2771,7 @@ fn decode_vector_segment(
                     )));
                 }
                 documents.push(SearchVectorDocument {
+                    vector_ordinal,
                     id: decode_string(raw_id)?,
                     embedding,
                 });
@@ -2272,6 +2785,9 @@ fn decode_vector_segment(
         }
     }
     if documents.len() != expected_count
+        || documents.iter().enumerate().any(|(offset, document)| {
+            document.vector_ordinal != expected_ordinal_base.saturating_add(offset as u64)
+        })
         || documents.windows(2).any(|pair| pair[0].id >= pair[1].id)
         || documents.iter().any(|document| {
             document.id < segment.first_document_id || document.id > segment.last_document_id
@@ -2283,6 +2799,15 @@ fn decode_vector_segment(
         )));
     }
     Ok(documents)
+}
+
+fn decode_optional_vector_ordinal(raw: &str) -> Result<Option<u64>> {
+    if raw == "-" {
+        return Ok(None);
+    }
+    raw.parse::<u64>().map(Some).map_err(|_| {
+        SkeinError::Storage("search metadata sidecar has an invalid vector ordinal".to_string())
+    })
 }
 
 fn matched_span_bytes_for(span: &super::SearchMatchedSpan) -> u64 {

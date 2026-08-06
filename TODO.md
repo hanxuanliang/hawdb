@@ -32,6 +32,13 @@ and algorithms outside active routes are not implied backlog items.
     search memory budget.
   - Record P50, P95, and P99 latency, RSS, page faults, posting and sidecar
     bytes, hydration bytes, update latency, and checkpoint amplification.
+  - Exercise the bounded generation-delta merge and require zero resident
+    corpus documents while old-generation reads overlap publication.
+  - Exercise `Preferred` and `Required` TurboQuant out-of-core serving with
+    metadata allowlist pushdown and bounded raw-vector late reranking.
+  - Run those probes on the exact source generation recorded by the artifact,
+    not only on a disposable post-update generation, and record lifecycle RSS
+    and page faults before opening the full-residency oracle.
   - Require the selected projection generation, analyzer identity, embedding
     identity, source graph epoch, and release revision to match the evidence.
   - Acceptance: production routes open the out-of-core facade through its
@@ -52,6 +59,17 @@ and algorithms outside active routes are not implied backlog items.
     skipped blocks, admitted workers, and kernel selection.
   - Require evidence for Windows x86_64, Linux x86_64, Linux AArch64, macOS
     AArch64, and the scalar reference before production admission.
+  - Bind every target to the exact search generation, document digest, analyzer
+    digest, embedding identity, and source graph epoch accepted by the search
+    qualification artifact.
+  - Keep the full-residency recall oracle offline and require its document,
+    analyzer, embedding, and epoch identity to match the released out-of-core
+    search generation.
+  - Measure the released out-of-core TurboQuant artifact before opening the
+    oracle; require serving/oracle final-result parity, payload I/O, raw
+    reranking, and cancellation propagation from the serving path. Keep
+    candidate recall in the identity-bound offline oracle so serving does not
+    retain candidate IDs only for qualification.
 
 ## P1: Runtime And Availability Hardening
 

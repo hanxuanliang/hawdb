@@ -21,6 +21,7 @@ const TURBOQUANT_BACKEND: &str = "skein_turboquant_candidate_projection";
 
 pub(super) fn evaluate_matrix(
     artifacts: &[Value],
+    search_artifact: Option<&Value>,
     expected: &ProductionQualificationIdentity,
     policy: ProductionReleaseQualificationPolicy,
 ) -> ProductionVectorMatrixArtifactAssessment {
@@ -29,7 +30,7 @@ pub(super) fn evaluate_matrix(
     let mut projection_identity = None;
     let mut target_reports = Vec::with_capacity(artifacts.len());
     for artifact in artifacts {
-        let mut blockers = validate_target(artifact, expected, policy);
+        let mut blockers = validate_target(artifact, search_artifact, expected, policy);
         let target = artifact
             .pointer("/evidence_binding/identity")
             .and_then(|identity| {
@@ -78,6 +79,7 @@ pub(super) fn evaluate_matrix(
 
 fn validate_target(
     artifact: &Value,
+    search_artifact: Option<&Value>,
     expected: &ProductionQualificationIdentity,
     policy: ProductionReleaseQualificationPolicy,
 ) -> Vec<String> {
@@ -107,6 +109,8 @@ fn validate_target(
         blockers.push("report_expected_identity_mismatch".to_string());
     }
     validate_projection(artifact, expected, &mut blockers);
+    validate_serving_oracle_identity(artifact, &mut blockers);
+    validate_search_vector_identity(artifact, search_artifact, &mut blockers);
     validate_recall(artifact, &mut blockers);
     validate_queries(artifact, &mut blockers);
     validate_oracle(artifact, policy, &mut blockers);
@@ -114,6 +118,77 @@ fn validate_target(
     blockers.sort();
     blockers.dedup();
     blockers
+}
+
+fn validate_serving_oracle_identity(artifact: &Value, blockers: &mut Vec<String>) {
+    let Some(serving) = artifact.pointer("/projection_identity") else {
+        blockers.push("vector_projection_identity_missing".to_string());
+        return;
+    };
+    let Some(oracle) = artifact.pointer("/oracle_projection_identity") else {
+        blockers.push("vector_oracle_projection_identity_missing".to_string());
+        return;
+    };
+    for pointer in [
+        "/projection_generation",
+        "/document_count",
+        "/source_digest",
+        "/payload_bytes",
+        "/format_version",
+        "/bit_width",
+        "/dimension",
+    ] {
+        if !oracle
+            .pointer(pointer)
+            .and_then(Value::as_u64)
+            .is_some_and(|value| value > 0)
+        {
+            blockers.push("vector_oracle_projection_identity_incomplete".to_string());
+        }
+    }
+    for pointer in [
+        "/source_graph_commit_epoch",
+        "/document_count",
+        "/format_version",
+        "/algorithm",
+        "/bit_width",
+        "/dimension",
+        "/transform_seed",
+        "/embedding_model",
+        "/embedding_version",
+        "/file_backed",
+    ] {
+        if serving.pointer(pointer) != oracle.pointer(pointer) {
+            blockers.push("serving_vector_oracle_identity_mismatch".to_string());
+            break;
+        }
+    }
+}
+
+fn validate_search_vector_identity(
+    vector_artifact: &Value,
+    search_artifact: Option<&Value>,
+    blockers: &mut Vec<String>,
+) {
+    let search_identity =
+        search_artifact.and_then(|artifact| artifact.pointer("/qualification/projection_identity"));
+    let vector_search_identity = vector_artifact.pointer("/search_projection_identity");
+    if search_identity.is_none() || vector_search_identity.is_none() {
+        blockers.push("search_vector_identity_missing".to_string());
+        return;
+    }
+    if search_identity != vector_search_identity {
+        blockers.push("search_vector_document_identity_mismatch".to_string());
+    }
+    let vector_generation = vector_artifact
+        .pointer("/projection_identity/projection_generation")
+        .and_then(Value::as_u64);
+    let search_generation = vector_search_identity
+        .and_then(|identity| identity.pointer("/projection_generation"))
+        .and_then(Value::as_u64);
+    if vector_generation != search_generation {
+        blockers.push("search_vector_generation_mismatch".to_string());
+    }
 }
 
 fn validate_projection(
@@ -333,6 +408,7 @@ fn validate_queries(artifact: &Value, blockers: &mut Vec<String>) {
         for pointer in [
             "/auto_scalar_candidate_parity",
             "/auto_scalar_final_parity",
+            "/serving_auto_final_parity",
             "/auto_final_matches_exact",
             "/scalar_candidate_final_matches_exact",
         ] {
@@ -342,10 +418,13 @@ fn validate_queries(artifact: &Value, blockers: &mut Vec<String>) {
             "/exact_latency/sample_count",
             "/auto_latency/sample_count",
             "/scalar_candidate_latency/sample_count",
+            "/serving_latency/sample_count",
             "/auto_metrics/max_admitted_workers",
             "/auto_metrics/segment_count",
             "/auto_metrics/peak_admitted_working_bytes",
             "/scalar_candidate_metrics/max_admitted_workers",
+            "/serving_metrics/max_admitted_workers",
+            "/serving_metrics/projection_payload_bytes_read",
         ] {
             require_nonzero(case, pointer, "vector_query_measurement_missing", blockers);
         }
@@ -363,9 +442,38 @@ fn validate_queries(artifact: &Value, blockers: &mut Vec<String>) {
             "vector_scalar_kernel_mismatch",
             blockers,
         );
+        require_string(
+            case,
+            "/serving_metrics/backend",
+            "skein_turboquant_out_of_core_candidate_projection",
+            "vector_serving_backend_mismatch",
+            blockers,
+        );
+        require_string(
+            case,
+            "/serving_metrics/candidate_score_source",
+            "quantized_projection",
+            "vector_serving_candidate_source_mismatch",
+            blockers,
+        );
+        require_string(
+            case,
+            "/serving_metrics/final_score_source",
+            "raw_vector",
+            "vector_serving_final_source_mismatch",
+            blockers,
+        );
+        if !case
+            .pointer("/serving_metrics/kernel")
+            .and_then(Value::as_str)
+            .is_some_and(|kernel| !kernel.trim().is_empty())
+        {
+            blockers.push("vector_serving_kernel_missing".to_string());
+        }
         for pointer in [
             "/auto_metrics/fallback_count",
             "/scalar_candidate_metrics/fallback_count",
+            "/serving_metrics/fallback_count",
         ] {
             if case.pointer(pointer).and_then(Value::as_u64) != Some(0) {
                 blockers.push("vector_query_fallback_observed".to_string());
@@ -432,6 +540,10 @@ fn validate_lifecycle(artifact: &Value, blockers: &mut Vec<String>) {
             "vector_cancellation_probe_failed",
         ),
         (
+            "/lifecycle/serving_cancellation_propagated",
+            "vector_serving_cancellation_probe_failed",
+        ),
+        (
             "/lifecycle/mixed_foreground_background",
             "vector_mixed_load_failed",
         ),
@@ -443,6 +555,7 @@ fn validate_lifecycle(artifact: &Value, blockers: &mut Vec<String>) {
         "/lifecycle/checkpoint_latency/sample_count",
         "/lifecycle/reopen_latency/sample_count",
         "/lifecycle/cancellation_latency/sample_count",
+        "/lifecycle/serving_cancellation_latency/sample_count",
     ] {
         require_nonzero(
             artifact,

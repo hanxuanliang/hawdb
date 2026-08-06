@@ -67,6 +67,8 @@ fn run(
             .map(|path| read_value(path))
             .collect::<Result<Vec<_>, _>>()?,
         blocking_operators: Some(read_value(&config.blocking)?),
+        storage_crash_recovery: Some(read_value(&config.storage_crash_recovery)?),
+        release_controls: Some(read_value(&config.release_controls)?),
     };
     Ok(Some(evaluate_production_release_qualification_bundle(
         artifacts,
@@ -83,6 +85,8 @@ struct Config {
     vectors: Vec<PathBuf>,
     morsels: Vec<PathBuf>,
     blocking: PathBuf,
+    storage_crash_recovery: PathBuf,
+    release_controls: PathBuf,
     policy: ProductionReleaseQualificationPolicy,
 }
 
@@ -93,6 +97,8 @@ fn parse_config(args: impl IntoIterator<Item = String>) -> Result<Option<Config>
     let mut vectors = Vec::new();
     let mut morsels = Vec::new();
     let mut blocking = None;
+    let mut storage_crash_recovery = None;
+    let mut release_controls = None;
     let mut policy = ProductionReleaseQualificationPolicy::default();
     let mut args = args.into_iter();
     while let Some(argument) = args.next() {
@@ -109,6 +115,8 @@ fn parse_config(args: impl IntoIterator<Item = String>) -> Result<Option<Config>
             "--vector-json" => vectors.push(PathBuf::from(value)),
             "--morsel-json" => morsels.push(PathBuf::from(value)),
             "--blocking-json" => blocking = Some(PathBuf::from(value)),
+            "--storage-crash-recovery-json" => storage_crash_recovery = Some(PathBuf::from(value)),
+            "--release-controls-json" => release_controls = Some(PathBuf::from(value)),
             "--min-throughput-gain-per-million" => {
                 policy.morsel.min_throughput_gain_per_million = parse_u32(&argument, &value)?;
             }
@@ -134,6 +142,8 @@ fn parse_config(args: impl IntoIterator<Item = String>) -> Result<Option<Config>
         vectors,
         morsels,
         blocking: required(blocking, "--blocking-json")?,
+        storage_crash_recovery: required(storage_crash_recovery, "--storage-crash-recovery-json")?,
+        release_controls: required(release_controls, "--release-controls-json")?,
         policy,
     }))
 }
@@ -185,6 +195,7 @@ fn usage() -> &'static str {
     "usage: skein-qualification-bundle \
      --expected-identity-json <path> --graph-json <path> --search-json <path> \
      --vector-json <path>... --morsel-json <path>... --blocking-json <path> \
+     --storage-crash-recovery-json <path> --release-controls-json <path> \
      [--min-throughput-gain-per-million <u32>] \
      [--max-p99-regression-per-million <u32>] \
      [--max-peak-rss-regression-per-million <u32>] \
@@ -213,12 +224,18 @@ mod tests {
             "morsel-4.json".to_string(),
             "--blocking-json".to_string(),
             "blocking.json".to_string(),
+            "--storage-crash-recovery-json".to_string(),
+            "crash.json".to_string(),
+            "--release-controls-json".to_string(),
+            "controls.json".to_string(),
         ])
         .unwrap()
         .unwrap();
 
         assert_eq!(config.vectors.len(), 2);
         assert_eq!(config.morsels.len(), 1);
+        assert_eq!(config.storage_crash_recovery, PathBuf::from("crash.json"));
+        assert_eq!(config.release_controls, PathBuf::from("controls.json"));
         assert!(config.policy.require_turbovec_oracle);
     }
 }

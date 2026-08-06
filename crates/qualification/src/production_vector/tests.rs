@@ -1,7 +1,8 @@
 use super::*;
 use skein::{
-    SearchEmbeddingManifest, SearchProjectionDelta, SearchProjectionKind, SearchProjectionRow,
-    PRODUCTION_QUALIFICATION_POLICY_VERSION,
+    SearchEmbeddingManifest, SearchOutOfCoreGenerationBuildOptions,
+    SearchOutOfCoreGenerationWriter, SearchProjectionDelta, SearchProjectionKind,
+    SearchProjectionRow, PRODUCTION_QUALIFICATION_POLICY_VERSION,
 };
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -12,17 +13,20 @@ static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 fn representative_runner_collects_recall_execution_and_lifecycle_evidence() {
     let root = test_root("runner");
     let source = root.join("source");
+    let serving = root.join("serving");
     let replicas = (0..3)
         .map(|index| root.join(format!("replica-{index}")))
         .collect::<Vec<_>>();
     let corruption = root.join("corruption");
     build_projection(&source);
+    build_serving_projection(&serving);
     for path in replicas.iter().chain(std::iter::once(&corruption)) {
         copy_projection(&source, path);
     }
     let identity = production_identity(42);
     let report = run_production_vector_qualification(ProductionVectorQualificationConfig {
-        projection_path: source,
+        projection_path: source.clone(),
+        search_projection_path: serving,
         query_cases: query_cases(),
         lifecycle: ProductionVectorLifecycleConfig {
             replica_paths: replicas,
@@ -67,6 +71,12 @@ fn representative_runner_collects_recall_execution_and_lifecycle_evidence() {
         .iter()
         .all(|evidence| evidence.auto_scalar_candidate_parity));
     assert!(report
+        .query_evidence
+        .iter()
+        .all(|evidence| evidence.serving_auto_final_parity
+            && evidence.serving_metrics.backend
+                == "skein_turboquant_out_of_core_candidate_projection"));
+    assert!(report
         .recall_evidence
         .iter()
         .all(|evidence| evidence.report.validates_required_approximate_backend()));
@@ -75,6 +85,7 @@ fn representative_runner_collects_recall_execution_and_lifecycle_evidence() {
     assert!(report.lifecycle.stale_generation_isolated);
     assert!(report.lifecycle.corrupt_projection_rejected);
     assert!(report.lifecycle.cancellation_propagated);
+    assert!(report.lifecycle.serving_cancellation_propagated);
     assert!(report.lifecycle.mixed_foreground_background);
     if cfg!(feature = "turbovec-oracle") {
         assert!(
@@ -189,18 +200,48 @@ fn build_projection(path: &Path) {
         .unwrap();
     index
         .apply_projection_delta(SearchProjectionDelta {
-            upserts: vec![
-                projection_row("delete", unit_x(), "a"),
-                projection_row("keep-a", [0.95, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], "a"),
-                projection_row("keep-b", unit_y(), "b"),
-                projection_row("other-b", [0.1, 0.9, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], "b"),
-            ],
+            upserts: projection_rows(),
             deletes: Vec::new(),
             max_operations: Some(4),
             source_graph_commit_epoch: Some(42),
         })
         .unwrap();
     index.checkpoint().unwrap();
+}
+
+fn build_serving_projection(path: &Path) {
+    let embedding_manifest = SearchEmbeddingManifest {
+        model: "test-embedding".to_string(),
+        version: Some("v1".to_string()),
+        dimension: 8,
+    };
+    let mut documents = projection_rows()
+        .into_iter()
+        .map(SearchProjectionRow::into_document)
+        .collect::<Vec<_>>();
+    documents.sort_unstable_by(|left, right| left.id.cmp(&right.id));
+    let mut writer = SearchOutOfCoreGenerationWriter::create(
+        path,
+        SearchOutOfCoreGenerationBuildOptions {
+            source_graph_commit_epoch: Some(42),
+            embedding_manifest: Some(embedding_manifest),
+            ..SearchOutOfCoreGenerationBuildOptions::default()
+        },
+    )
+    .unwrap();
+    for document in documents {
+        writer.push(document).unwrap();
+    }
+    writer.finish().unwrap();
+}
+
+fn projection_rows() -> Vec<SearchProjectionRow> {
+    vec![
+        projection_row("delete", unit_x(), "a"),
+        projection_row("keep-a", [0.95, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], "a"),
+        projection_row("keep-b", unit_y(), "b"),
+        projection_row("other-b", [0.1, 0.9, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], "b"),
+    ]
 }
 
 fn copy_projection(source: &Path, destination: &Path) {

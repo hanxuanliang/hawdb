@@ -133,6 +133,26 @@ pub(super) fn validate_search(
 
     for (pointer, code) in [
         (
+            "/lifecycle/bounded_generation_update",
+            "search_bounded_generation_update_failed",
+        ),
+        (
+            "/lifecycle/turboquant_serving",
+            "search_turboquant_serving_failed",
+        ),
+        (
+            "/lifecycle/turboquant_preferred_serving",
+            "search_turboquant_preferred_serving_failed",
+        ),
+        (
+            "/lifecycle/turboquant_raw_rerank",
+            "search_turboquant_raw_rerank_failed",
+        ),
+        (
+            "/lifecycle/turboquant_metadata_filter_pushdown",
+            "search_turboquant_filter_pushdown_failed",
+        ),
+        (
             "/lifecycle/incremental_upsert_delete",
             "search_incremental_lifecycle_failed",
         ),
@@ -160,9 +180,48 @@ pub(super) fn validate_search(
             "/process_memory/capabilities/total_page_faults",
             "search_page_fault_metric_unavailable",
         ),
+        (
+            "/lifecycle/process_memory/capabilities/resident_memory",
+            "search_update_rss_metric_unavailable",
+        ),
+        (
+            "/lifecycle/process_memory/capabilities/total_page_faults",
+            "search_update_page_fault_metric_unavailable",
+        ),
     ] {
         require_bool(artifact, pointer, true, code, &mut blockers);
     }
+    if artifact
+        .pointer("/lifecycle/max_update_resident_document_count")
+        .and_then(Value::as_u64)
+        != Some(0)
+    {
+        blockers.push("search_update_retained_documents".to_string());
+    }
+    require_nonzero(
+        artifact,
+        "/lifecycle/max_update_peak_segment_document_bytes",
+        "search_update_segment_memory_missing",
+        &mut blockers,
+    );
+    require_nonzero(
+        artifact,
+        "/lifecycle/turboquant_payload_bytes_read",
+        "search_turboquant_payload_bytes_missing",
+        &mut blockers,
+    );
+    require_nonzero(
+        artifact,
+        "/lifecycle/process_memory/peak_resident_bytes",
+        "search_update_peak_rss_missing",
+        &mut blockers,
+    );
+    super::require_unsigned(
+        artifact,
+        "/lifecycle/process_memory/total_page_faults",
+        "search_update_page_faults_missing",
+        &mut blockers,
+    );
     for (pointer, code) in [
         (
             "/out_of_core_metrics/segment_range_reads",

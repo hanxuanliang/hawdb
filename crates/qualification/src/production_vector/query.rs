@@ -7,8 +7,8 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use skein::{
     AdaptiveVectorSearchOptions, CompressedVectorSearchMode, RuntimeTaskContext, SearchIndex,
-    SearchMode, SearchQueryOptions, SearchResultSet, VectorRecallValidationOptions,
-    VectorRecallValidationReport, VectorSearchKernelPreference,
+    SearchMode, SearchOutOfCoreReader, SearchQueryOptions, SearchResultSet,
+    VectorRecallValidationOptions, VectorRecallValidationReport, VectorSearchKernelPreference,
 };
 use std::time::Instant;
 
@@ -33,6 +33,9 @@ impl ProductionVectorRecallEvidence {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct ProductionVectorExecutionMetrics {
+    pub backend: String,
+    pub candidate_score_source: String,
+    pub final_score_source: String,
     pub kernel: String,
     pub max_admitted_workers: usize,
     pub segment_count: usize,
@@ -55,17 +58,21 @@ pub struct ProductionVectorQueryEvidence {
     pub exact_result_digest: String,
     pub auto_result_digest: String,
     pub scalar_candidate_result_digest: String,
+    pub serving_result_digest: String,
     pub auto_candidate_digest: String,
     pub scalar_candidate_digest: String,
     pub auto_scalar_candidate_parity: bool,
     pub auto_scalar_final_parity: bool,
+    pub serving_auto_final_parity: bool,
     pub auto_final_matches_exact: bool,
     pub scalar_candidate_final_matches_exact: bool,
     pub exact_latency: LatencyPercentiles,
     pub auto_latency: LatencyPercentiles,
     pub scalar_candidate_latency: LatencyPercentiles,
+    pub serving_latency: LatencyPercentiles,
     pub auto_metrics: ProductionVectorExecutionMetrics,
     pub scalar_candidate_metrics: ProductionVectorExecutionMetrics,
+    pub serving_metrics: ProductionVectorExecutionMetrics,
 }
 
 impl ProductionVectorQueryEvidence {
@@ -77,17 +84,21 @@ impl ProductionVectorQueryEvidence {
             "exact_result_digest": self.exact_result_digest,
             "auto_result_digest": self.auto_result_digest,
             "scalar_candidate_result_digest": self.scalar_candidate_result_digest,
+            "serving_result_digest": self.serving_result_digest,
             "auto_candidate_digest": self.auto_candidate_digest,
             "scalar_candidate_digest": self.scalar_candidate_digest,
             "auto_scalar_candidate_parity": self.auto_scalar_candidate_parity,
             "auto_scalar_final_parity": self.auto_scalar_final_parity,
+            "serving_auto_final_parity": self.serving_auto_final_parity,
             "auto_final_matches_exact": self.auto_final_matches_exact,
             "scalar_candidate_final_matches_exact": self.scalar_candidate_final_matches_exact,
             "exact_latency": self.exact_latency,
             "auto_latency": self.auto_latency,
             "scalar_candidate_latency": self.scalar_candidate_latency,
+            "serving_latency": self.serving_latency,
             "auto_metrics": self.auto_metrics,
             "scalar_candidate_metrics": self.scalar_candidate_metrics,
+            "serving_metrics": self.serving_metrics,
         })
     }
 }
@@ -141,6 +152,70 @@ pub(super) fn measure_query(
         add_execution_metrics(&mut measurement.metrics, &result);
     }
     Ok(measurement)
+}
+
+pub(super) fn measure_serving_query(
+    reader: &SearchOutOfCoreReader,
+    query_case: &ProductionVectorQueryCase,
+    config: &ProductionVectorQualificationConfig,
+    task_context: &RuntimeTaskContext,
+) -> Result<QueryMeasurement, ProductionVectorQualificationError> {
+    let mut measurement = QueryMeasurement {
+        latencies: Vec::with_capacity(config.measurement_runs),
+        ..QueryMeasurement::default()
+    };
+    for _ in 0..config.measurement_runs {
+        let started = Instant::now();
+        let result = execute_serving_query(reader, query_case, config, task_context)?;
+        measurement.latencies.push(elapsed_micros(started));
+        let result_digest = result_digest(&result);
+        let candidate_digest = candidate_digest(&result);
+        if !measurement.result_digest.is_empty() && measurement.result_digest != result_digest {
+            return Err(ProductionVectorQualificationError::new(
+                "production out-of-core vector query returned non-deterministic final results",
+            ));
+        }
+        if !measurement.candidate_digest.is_empty()
+            && measurement.candidate_digest != candidate_digest
+        {
+            return Err(ProductionVectorQualificationError::new(
+                "production out-of-core vector query returned non-deterministic candidates",
+            ));
+        }
+        measurement.result_digest = result_digest;
+        measurement.candidate_digest = candidate_digest;
+        add_execution_metrics(&mut measurement.metrics, &result);
+    }
+    Ok(measurement)
+}
+
+pub(super) fn execute_serving_query(
+    reader: &SearchOutOfCoreReader,
+    query_case: &ProductionVectorQueryCase,
+    config: &ProductionVectorQualificationConfig,
+    task_context: &RuntimeTaskContext,
+) -> Result<SearchResultSet, ProductionVectorQualificationError> {
+    reader
+        .search_with_options_compressed_vector_projection_context(
+            "",
+            Some(&query_case.query_embedding),
+            SearchMode::Vector,
+            SearchQueryOptions {
+                limit: config.top_k,
+                offset: 0,
+                rank_window: Some(config.candidate_limit),
+                fusion_weights: skein::SearchFusionWeights::default(),
+                metadata_filters: query_case.effective_metadata_filters()?,
+                policy_epoch: query_case
+                    .access_control
+                    .as_ref()
+                    .map(|access_control| access_control.policy_epoch),
+            },
+            CompressedVectorSearchMode::Required,
+            task_context,
+        )
+        .map(|output| output.result)
+        .map_err(ProductionVectorQualificationError::from_error)
 }
 
 pub(super) fn execute_query(
@@ -224,6 +299,15 @@ fn add_execution_metrics(
     else {
         return;
     };
+    merge_stable_label(&mut aggregate.backend, &vector.backend);
+    merge_stable_label(
+        &mut aggregate.candidate_score_source,
+        &vector.candidate_score_source,
+    );
+    merge_stable_label(
+        &mut aggregate.final_score_source,
+        &vector.final_score_source,
+    );
     if let Some(kernel) = &vector.candidate_scan_kernel {
         if aggregate.kernel.is_empty() {
             aggregate.kernel = kernel.clone();
@@ -263,6 +347,14 @@ fn add_execution_metrics(
         .max(vector.candidate_scan_admitted_working_bytes);
     if !vector.fallback_reason_codes.is_empty() {
         aggregate.fallback_count = aggregate.fallback_count.saturating_add(1);
+    }
+}
+
+fn merge_stable_label(aggregate: &mut String, observed: &str) {
+    if aggregate.is_empty() {
+        *aggregate = observed.to_string();
+    } else if aggregate != observed {
+        *aggregate = "mixed".to_string();
     }
 }
 

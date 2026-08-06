@@ -1,9 +1,10 @@
 use super::{
     elapsed_micros, execute_out_of_core, ProductionSearchLifecycleConfig,
-    ProductionSearchLifecycleReport, ProductionSearchQualificationError,
+    ProductionSearchLifecycleReport, ProductionSearchQualificationError, ProductionSearchQueryCase,
 };
 use skein::{
-    SearchIndex, SearchOutOfCoreConfig, SearchOutOfCoreReader, SearchProjectionDelta,
+    ProcessMemoryProfile, ProcessMemorySnapshot, SearchOutOfCoreConfig,
+    SearchOutOfCoreGenerationWriter, SearchOutOfCoreReader, SearchProjectionDelta,
     SearchProjectionQualificationIdentity, SearchResultSet,
 };
 use std::fs::OpenOptions;
@@ -14,12 +15,17 @@ use std::thread;
 use std::time::Instant;
 
 const OUT_OF_CORE_MANIFEST_FILE: &str = "search_projection.out_of_core.manifest.skein";
+const TURBOQUANT_ARTIFACT_PREFIX: &str = "search_turboquant.";
+const TURBOQUANT_ARTIFACT_SUFFIX: &str = ".skein";
 
 pub(super) fn run_lifecycle_probes(
     config: &ProductionSearchLifecycleConfig,
     expected_projection_identity: &SearchProjectionQualificationIdentity,
     out_of_core_config: &SearchOutOfCoreConfig,
+    compressed_vector_probe: &ProductionSearchQueryCase,
 ) -> Result<ProductionSearchLifecycleReport, ProductionSearchQualificationError> {
+    let process_start =
+        ProcessMemorySnapshot::capture().map_err(ProductionSearchQualificationError::from_error)?;
     let mut update_micros = Vec::with_capacity(config.replica_paths.len());
     let mut checkpoint_micros = Vec::with_capacity(config.replica_paths.len());
     let mut reopen_micros = Vec::with_capacity(config.replica_paths.len());
@@ -28,6 +34,14 @@ pub(super) fn run_lifecycle_probes(
     let mut stale_generation = true;
     let mut mixed_foreground_background = true;
     let mut checkpoint_write_amplification_per_million = 0;
+    let mut bounded_generation_update = true;
+    let mut max_update_resident_document_count = 0usize;
+    let mut max_update_peak_segment_document_bytes = 0u64;
+    let mut turboquant_serving = true;
+    let mut turboquant_preferred_serving = true;
+    let mut turboquant_raw_rerank = true;
+    let mut turboquant_metadata_filter_pushdown = true;
+    let mut turboquant_payload_bytes_read = 0u64;
     let logical_delta_bytes = delta_logical_bytes(&config.delta);
 
     for path in &config.replica_paths {
@@ -42,39 +56,53 @@ pub(super) fn run_lifecycle_probes(
                 && contains_hit(&delete_before.result, &config.expected_deleted_document_id);
 
         let bytes_before = directory_regular_file_bytes(path)?;
-        let mut index =
-            SearchIndex::open(path).map_err(ProductionSearchQualificationError::from_error)?;
         let update_started = Instant::now();
-        index
-            .apply_projection_delta(config.delta.clone())
-            .map_err(ProductionSearchQualificationError::from_error)?;
+        let update = SearchOutOfCoreGenerationWriter::prepare_delta(
+            &old_reader,
+            config.delta.clone(),
+            config.generation_build_options.clone(),
+        )
+        .map_err(ProductionSearchQualificationError::from_error)?;
         update_micros.push(elapsed_micros(update_started));
+        bounded_generation_update &= update.delta_report().action == "bounded_generation_update";
+        max_update_peak_segment_document_bytes = max_update_peak_segment_document_bytes
+            .max(update.source_read_metrics().peak_segment_document_bytes);
 
         let barrier = Arc::new(Barrier::new(2));
         let worker_barrier = Arc::clone(&barrier);
         let worker_case = config.upsert_verification.clone();
         let worker_runs = config.mixed_load_probe_runs;
+        let expected_old_digest = super::result_digest(&upsert_before.result);
         let worker = thread::spawn(move || {
             worker_barrier.wait();
             let mut succeeded = true;
+            let mut stable = true;
             for _ in 0..worker_runs {
-                succeeded &= execute_out_of_core(&old_reader, &worker_case).is_ok();
+                match execute_out_of_core(&old_reader, &worker_case) {
+                    Ok(output) => {
+                        stable &= super::result_digest(&output.result) == expected_old_digest;
+                    }
+                    Err(_) => succeeded = false,
+                }
             }
-            succeeded
+            (succeeded, stable)
         });
         barrier.wait();
         let checkpoint_started = Instant::now();
-        index
-            .checkpoint()
+        let (_, build_report, _) = update
+            .finish()
             .map_err(ProductionSearchQualificationError::from_error)?;
         checkpoint_micros.push(elapsed_micros(checkpoint_started));
-        mixed_foreground_background &= worker.join().map_err(|_| {
+        max_update_resident_document_count =
+            max_update_resident_document_count.max(build_report.resident_document_count);
+        bounded_generation_update &= build_report.resident_document_count == 0;
+        let (worker_succeeded, worker_stable) = worker.join().map_err(|_| {
             ProductionSearchQualificationError::new(
                 "production search mixed-load probe thread panicked",
             )
         })?;
-        drop(index);
-
+        mixed_foreground_background &= worker_succeeded;
+        stale_generation &= worker_stable;
         let bytes_after = directory_regular_file_bytes(path)?;
         checkpoint_write_amplification_per_million = checkpoint_write_amplification_per_million
             .max(ratio_per_million(
@@ -91,6 +119,13 @@ pub(super) fn run_lifecycle_probes(
         incremental_upsert_delete &=
             contains_hit(&upsert_after.result, &config.expected_upsert_document_id)
                 && !contains_hit(&delete_after.result, &config.expected_deleted_document_id);
+        let compressed = super::run_turboquant_serving_probe(&new_reader, compressed_vector_probe)?;
+        turboquant_serving &= compressed.required_serving;
+        turboquant_preferred_serving &= compressed.preferred_serving;
+        turboquant_raw_rerank &= compressed.raw_rerank;
+        turboquant_metadata_filter_pushdown &= compressed.metadata_filter_pushdown;
+        turboquant_payload_bytes_read =
+            turboquant_payload_bytes_read.saturating_add(compressed.payload_bytes_read);
         let expected_upsert_digest = super::result_digest(&upsert_after.result);
         let expected_delete_digest = super::result_digest(&delete_after.result);
         drop(new_reader);
@@ -104,6 +139,37 @@ pub(super) fn run_lifecycle_probes(
             ) == expected_delete_digest;
     }
 
+    let turboquant_corruption_path = config
+        .replica_paths
+        .last()
+        .expect("validated lifecycle paths are non-empty");
+    let turboquant_reader = SearchOutOfCoreReader::open_with_config(
+        turboquant_corruption_path,
+        out_of_core_config.clone(),
+    )
+    .map_err(ProductionSearchQualificationError::from_error)?;
+    let turboquant_generation = turboquant_reader.generation();
+    let turboquant_attached = turboquant_reader
+        .vector_projection_qualification_identity()
+        .is_some();
+    drop(turboquant_reader);
+
+    let turboquant_path = turboquant_corruption_path.join(format!(
+        "{TURBOQUANT_ARTIFACT_PREFIX}{turboquant_generation}{TURBOQUANT_ARTIFACT_SUFFIX}"
+    ));
+    flip_last_byte(&turboquant_path)?;
+    let corrupt_turboquant_rejected = SearchOutOfCoreReader::open_with_config(
+        turboquant_corruption_path,
+        out_of_core_config.clone(),
+    )
+    .is_err();
+    flip_last_byte(&turboquant_path)?;
+    let turboquant_restored = SearchOutOfCoreReader::open_with_config(
+        turboquant_corruption_path,
+        out_of_core_config.clone(),
+    )
+    .is_ok();
+
     let corrupt_reader = SearchOutOfCoreReader::open_with_config(
         &config.corruption_replica_path,
         out_of_core_config.clone(),
@@ -112,13 +178,20 @@ pub(super) fn run_lifecycle_probes(
     require_projection_identity(&corrupt_reader, expected_projection_identity)?;
     drop(corrupt_reader);
     corrupt_out_of_core_manifest(&config.corruption_replica_path)?;
-    let corrupt_artifact_rejected = SearchOutOfCoreReader::open_with_config(
+    let corrupt_manifest_rejected = SearchOutOfCoreReader::open_with_config(
         &config.corruption_replica_path,
         out_of_core_config.clone(),
     )
     .is_err();
+    let corrupt_artifact_rejected = turboquant_attached
+        && corrupt_turboquant_rejected
+        && turboquant_restored
+        && corrupt_manifest_rejected;
+    let process_end =
+        ProcessMemorySnapshot::capture().map_err(ProductionSearchQualificationError::from_error)?;
 
     Ok(ProductionSearchLifecycleReport {
+        bounded_generation_update,
         incremental_upsert_delete,
         checkpoint_reopen,
         stale_generation,
@@ -128,6 +201,14 @@ pub(super) fn run_lifecycle_probes(
         checkpoint_latency: crate::latency_percentiles(&checkpoint_micros),
         reopen_latency: crate::latency_percentiles(&reopen_micros),
         checkpoint_write_amplification_per_million,
+        max_update_resident_document_count,
+        max_update_peak_segment_document_bytes,
+        turboquant_serving,
+        turboquant_preferred_serving,
+        turboquant_raw_rerank,
+        turboquant_metadata_filter_pushdown,
+        turboquant_payload_bytes_read,
+        process_memory: ProcessMemoryProfile::between(process_start, process_end),
     })
 }
 
@@ -145,11 +226,14 @@ fn require_projection_identity(
 }
 
 fn corrupt_out_of_core_manifest(path: &Path) -> Result<(), ProductionSearchQualificationError> {
-    let manifest_path = path.join(OUT_OF_CORE_MANIFEST_FILE);
+    flip_last_byte(&path.join(OUT_OF_CORE_MANIFEST_FILE))
+}
+
+fn flip_last_byte(path: &Path) -> Result<(), ProductionSearchQualificationError> {
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
-        .open(&manifest_path)
+        .open(path)
         .map_err(ProductionSearchQualificationError::from_error)?;
     let length = file
         .metadata()
@@ -157,7 +241,7 @@ fn corrupt_out_of_core_manifest(path: &Path) -> Result<(), ProductionSearchQuali
         .len();
     if length == 0 {
         return Err(ProductionSearchQualificationError::new(
-            "production search corruption replica has an empty manifest",
+            "production search corruption artifact is empty",
         ));
     }
     file.seek(SeekFrom::End(-1))

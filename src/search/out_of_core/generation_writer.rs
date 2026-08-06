@@ -24,21 +24,26 @@ use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 
 mod artifacts;
+mod delta;
 mod publication;
 mod spool;
 #[cfg(test)]
 mod tests;
 
+pub use delta::SearchOutOfCoreGenerationUpdate;
+
 const STAGE_METADATA_FILE: &str = "search_projection_metadata_payloads.stage.skein";
 const STAGE_VECTOR_FILE: &str = "search_projection_vector_payloads.stage.skein";
 
 /// Explicit admission limits and immutable identity for a streaming out-of-core build.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchOutOfCoreGenerationBuildOptions {
     pub max_documents: NonZeroUsize,
     pub max_logical_document_bytes: NonZeroU64,
     pub max_spool_bytes: NonZeroU64,
     pub max_record_bytes: NonZeroU64,
+    pub max_delta_operations: NonZeroUsize,
+    pub max_delta_working_bytes: NonZeroU64,
     pub max_segment_uncompressed_bytes: NonZeroU64,
     pub max_segment_compressed_bytes: NonZeroU64,
     pub max_generation_bytes: NonZeroU64,
@@ -50,6 +55,9 @@ pub struct SearchOutOfCoreGenerationBuildOptions {
     pub lexical_max_spill_runs: NonZeroUsize,
     pub lexical_max_merge_fan_in: NonZeroUsize,
     pub lexical_max_document_source_bytes: NonZeroU64,
+    pub turboquant_segment_rows: NonZeroUsize,
+    pub turboquant_build_memory_bytes: NonZeroUsize,
+    pub turboquant_transform_seed: u64,
     pub source_graph_commit_epoch: Option<u64>,
     pub import_source_graph_commit_epoch: Option<u64>,
     pub embedding_manifest: Option<SearchEmbeddingManifest>,
@@ -64,6 +72,8 @@ impl Default for SearchOutOfCoreGenerationBuildOptions {
             max_logical_document_bytes: NonZeroU64::new(4 * 1024 * 1024 * 1024 * 1024).unwrap(),
             max_spool_bytes: NonZeroU64::new(4 * 1024 * 1024 * 1024 * 1024).unwrap(),
             max_record_bytes: NonZeroU64::new(16 * 1024 * 1024).unwrap(),
+            max_delta_operations: NonZeroUsize::new(1_000_000).unwrap(),
+            max_delta_working_bytes: NonZeroU64::new(1024 * 1024 * 1024).unwrap(),
             max_segment_uncompressed_bytes: NonZeroU64::new(256 * 1024 * 1024).unwrap(),
             max_segment_compressed_bytes: NonZeroU64::new(64 * 1024 * 1024).unwrap(),
             max_generation_bytes: NonZeroU64::new(8 * 1024 * 1024 * 1024 * 1024).unwrap(),
@@ -75,6 +85,9 @@ impl Default for SearchOutOfCoreGenerationBuildOptions {
             lexical_max_spill_runs: NonZeroUsize::new(4_096).unwrap(),
             lexical_max_merge_fan_in: NonZeroUsize::new(32).unwrap(),
             lexical_max_document_source_bytes: NonZeroU64::new(4 * 1024 * 1024).unwrap(),
+            turboquant_segment_rows: NonZeroUsize::new(1_024).unwrap(),
+            turboquant_build_memory_bytes: NonZeroUsize::new(64 * 1024 * 1024).unwrap(),
+            turboquant_transform_seed: 0x534b_4549_4e56_5134,
             source_graph_commit_epoch: None,
             import_source_graph_commit_epoch: None,
             embedding_manifest: None,
@@ -104,6 +117,9 @@ pub struct SearchOutOfCoreGenerationBuildReport {
     pub vector_payload_bytes: u64,
     pub lexical_artifact_bytes: u64,
     pub lexical_manifest_bytes: u64,
+    pub turboquant_artifact_bytes: u64,
+    pub turboquant_source_digest: Option<u64>,
+    pub turboquant_peak_build_working_bytes: usize,
     pub manifest_bytes: u64,
     pub generation_bytes: u64,
     pub source_graph_commit_epoch: Option<u64>,
@@ -138,6 +154,7 @@ pub struct SearchOutOfCoreGenerationWriter {
     documents_digest: Crc32cHasher,
     metadata_fields: BTreeSet<String>,
     metadata_field_bytes: u64,
+    expected_active_generation: Option<u64>,
     poisoned: bool,
 }
 
@@ -150,6 +167,10 @@ impl std::fmt::Debug for SearchOutOfCoreGenerationWriter {
             .field("document_count", &self.document_count)
             .field("logical_document_bytes", &self.logical_document_bytes)
             .field("spool_bytes", &self.spool_bytes)
+            .field(
+                "expected_active_generation",
+                &self.expected_active_generation,
+            )
             .field("poisoned", &self.poisoned)
             .finish_non_exhaustive()
     }
@@ -202,6 +223,7 @@ impl SearchOutOfCoreGenerationWriter {
             documents_digest: Crc32cHasher::new(),
             metadata_fields,
             metadata_field_bytes,
+            expected_active_generation: None,
             poisoned: false,
         })
     }
@@ -217,6 +239,14 @@ impl SearchOutOfCoreGenerationWriter {
             self.poisoned = true;
         }
         result
+    }
+
+    pub fn prepare_delta(
+        reader: &super::SearchOutOfCoreReader,
+        delta: crate::search::SearchProjectionDelta,
+        options: SearchOutOfCoreGenerationBuildOptions,
+    ) -> Result<SearchOutOfCoreGenerationUpdate> {
+        SearchOutOfCoreGenerationUpdate::prepare(reader, delta, options)
     }
 
     pub fn finish(mut self) -> Result<SearchOutOfCoreGenerationBuildReport> {
@@ -240,6 +270,14 @@ impl SearchOutOfCoreGenerationWriter {
         }
 
         let _publish_lease = super::SearchProjectionPublishLease::acquire(&self.root)?;
+        if let Some(expected) = self.expected_active_generation {
+            let actual = super::active_manifest_generation(&self.root)?;
+            if actual != Some(expected) {
+                return Err(SkeinError::Storage(format!(
+                    "search generation update base changed before publication: expected {expected}, got {actual:?}"
+                )));
+            }
+        }
 
         let source = SpoolSource {
             path: self.spool_path.clone(),
@@ -281,6 +319,16 @@ impl SearchOutOfCoreGenerationWriter {
         let (lexical_artifact_bytes, _) = file_len_checksum(&lexical_artifact_path)?;
         let (lexical_manifest_bytes, _) = file_len_checksum(&lexical_manifest_path)?;
 
+        let turboquant = build_turboquant_artifact(
+            &source,
+            &self.stage.path,
+            generation,
+            self.vector_document_count,
+            self.embedding_dimension,
+            self.options.embedding_manifest.as_ref(),
+            &self.options,
+        )?;
+
         let published = publish_generation(PublishGenerationInput {
             root: &self.root,
             stage: &self.stage.path,
@@ -293,25 +341,21 @@ impl SearchOutOfCoreGenerationWriter {
             embedding_dimension: self.embedding_dimension,
             layout: &segment_output.layout,
             lexical_artifact_name: &lexical_artifact_name,
+            turboquant: turboquant.as_ref(),
             payload_bytes: segment_output.document_payload_bytes,
             metadata_payload_bytes: segment_output.metadata_payload_bytes,
             vector_payload_bytes: segment_output.vector_payload_bytes,
             max_generation_bytes: self.options.max_generation_bytes.get(),
         })?;
 
-        #[cfg(feature = "vector-search")]
-        let turboquant_generation =
-            crate::search::latest_turboquant_artifact(&self.root).map(|(generation, _)| generation);
-        #[cfg(not(feature = "vector-search"))]
-        let turboquant_generation = None;
         let mut cleanup_state = SearchProjectionCleanupState::default();
         let cleanup = cleanup_state.run(
             &self.root,
             SearchProjectionGenerations {
                 lexical: Some(lexical_generation),
                 out_of_core: Some(generation),
-                turboquant: turboquant_generation,
-                turboquant_remove_all: false,
+                turboquant: turboquant.as_ref().map(|_| generation),
+                turboquant_remove_all: turboquant.is_none(),
                 out_of_core_discovery_failed: false,
             },
             self.options.cleanup_options,
@@ -335,6 +379,13 @@ impl SearchOutOfCoreGenerationWriter {
             vector_payload_bytes: segment_output.vector_payload_bytes,
             lexical_artifact_bytes,
             lexical_manifest_bytes,
+            turboquant_artifact_bytes: turboquant
+                .as_ref()
+                .map_or(0, |artifact| artifact.artifact_bytes),
+            turboquant_source_digest: turboquant.as_ref().map(|artifact| artifact.source_digest),
+            turboquant_peak_build_working_bytes: turboquant
+                .as_ref()
+                .map_or(0, |artifact| artifact.peak_build_working_bytes),
             manifest_bytes: published.manifest_bytes,
             generation_bytes: published.generation_bytes,
             source_graph_commit_epoch: self.options.source_graph_commit_epoch,
@@ -450,6 +501,100 @@ impl SearchOutOfCoreGenerationWriter {
         self.metadata_field_bytes = next_field_bytes;
         Ok(())
     }
+}
+
+#[derive(Debug)]
+pub(super) struct TurboQuantGenerationArtifact {
+    pub(super) file_name: String,
+    pub(super) artifact_bytes: u64,
+    pub(super) artifact_checksum: u64,
+    pub(super) source_digest: u64,
+    pub(super) document_count: usize,
+    pub(super) payload_checksum: u32,
+    pub(super) peak_build_working_bytes: usize,
+}
+
+#[cfg(feature = "vector-search")]
+fn build_turboquant_artifact(
+    source: &SpoolSource,
+    stage: &Path,
+    generation: u64,
+    vector_document_count: usize,
+    embedding_dimension: Option<usize>,
+    embedding_manifest: Option<&SearchEmbeddingManifest>,
+    options: &SearchOutOfCoreGenerationBuildOptions,
+) -> Result<Option<TurboQuantGenerationArtifact>> {
+    if vector_document_count == 0 {
+        return Ok(None);
+    }
+    let dimension = embedding_dimension.ok_or_else(|| {
+        SkeinError::Storage(
+            "search generation has vector documents without an embedding dimension".to_string(),
+        )
+    })?;
+    let file_name = crate::search::turboquant_artifact_file(generation);
+    let path = stage.join(&file_name);
+    let identity = skein_vector_projection::ProjectionIdentity {
+        generation,
+        source_epoch: options.source_graph_commit_epoch,
+        embedding_model: embedding_manifest.map(|manifest| manifest.model.clone()),
+        embedding_version: embedding_manifest.and_then(|manifest| manifest.version.clone()),
+    };
+    let config = skein_vector_projection::ProjectionBuildConfig::new(dimension, identity)
+        .with_segment_rows(options.turboquant_segment_rows.get())
+        .with_max_working_bytes(options.turboquant_build_memory_bytes.get())
+        .with_transform_seed(options.turboquant_transform_seed);
+    let mut writer = skein_vector_projection::ProjectionWriter::create(&path, config)
+        .map_err(turboquant_error)?;
+    let mut vector_ordinal = 0u64;
+    source.scan(&mut |document| {
+        let Some(embedding) = document.embedding.as_deref() else {
+            return Ok(());
+        };
+        writer
+            .push(vector_ordinal, embedding)
+            .map_err(turboquant_error)?;
+        vector_ordinal = vector_ordinal
+            .checked_add(1)
+            .ok_or_else(|| SkeinError::Storage("search vector ordinal overflow".to_string()))?;
+        Ok(())
+    })?;
+    if vector_ordinal != vector_document_count as u64 {
+        return Err(SkeinError::Storage(
+            "search TurboQuant build did not consume the expected vector document count"
+                .to_string(),
+        ));
+    }
+    let projection = writer.finish().map_err(turboquant_error)?;
+    let manifest = projection.manifest();
+    let (artifact_bytes, artifact_checksum) = file_len_checksum(&path)?;
+    Ok(Some(TurboQuantGenerationArtifact {
+        file_name,
+        artifact_bytes,
+        artifact_checksum,
+        source_digest: manifest.source_digest,
+        document_count: manifest.document_count,
+        payload_checksum: manifest.payload_checksum,
+        peak_build_working_bytes: manifest.peak_build_working_bytes,
+    }))
+}
+
+#[cfg(not(feature = "vector-search"))]
+fn build_turboquant_artifact(
+    _source: &SpoolSource,
+    _stage: &Path,
+    _generation: u64,
+    _vector_document_count: usize,
+    _embedding_dimension: Option<usize>,
+    _embedding_manifest: Option<&SearchEmbeddingManifest>,
+    _options: &SearchOutOfCoreGenerationBuildOptions,
+) -> Result<Option<TurboQuantGenerationArtifact>> {
+    Ok(None)
+}
+
+#[cfg(feature = "vector-search")]
+fn turboquant_error(error: skein_vector_projection::ProjectionError) -> SkeinError {
+    SkeinError::Storage(format!("search TurboQuant projection: {error}"))
 }
 
 fn validate_options(options: &SearchOutOfCoreGenerationBuildOptions) -> Result<()> {

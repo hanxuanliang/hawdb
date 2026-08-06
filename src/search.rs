@@ -70,9 +70,9 @@ pub use lexical_readiness::{
 };
 pub use out_of_core::{
     SearchOutOfCoreConfig, SearchOutOfCoreGenerationBuildOptions,
-    SearchOutOfCoreGenerationBuildReport, SearchOutOfCoreGenerationWriter,
-    SearchOutOfCoreHydrationOutput, SearchOutOfCoreMetrics, SearchOutOfCoreOutput,
-    SearchOutOfCoreReader,
+    SearchOutOfCoreGenerationBuildReport, SearchOutOfCoreGenerationUpdate,
+    SearchOutOfCoreGenerationWriter, SearchOutOfCoreHydrationOutput, SearchOutOfCoreMetrics,
+    SearchOutOfCoreOutput, SearchOutOfCoreReader,
 };
 pub use range_io::SearchRangeReadConfig;
 use recall_validation::{sample_positions, VectorRecallValidationAccumulator};

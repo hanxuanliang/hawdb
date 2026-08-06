@@ -5,6 +5,8 @@ use sha2::{Digest, Sha256};
 use skein::{ProductionEvidenceBinding, ProductionQualificationIdentity};
 use std::collections::BTreeSet;
 
+#[path = "release_bundle/durability.rs"]
+mod durability;
 #[path = "release_bundle/graph_search.rs"]
 mod graph_search;
 #[path = "release_bundle/runtime.rs"]
@@ -14,6 +16,88 @@ mod vector;
 
 pub const PRODUCTION_RELEASE_QUALIFICATION_BUNDLE_PROTOCOL: &str =
     "skein-production-release-qualification-bundle-v1";
+pub const PRODUCTION_RELEASE_CONTROL_EVIDENCE_PROTOCOL: &str =
+    "skein-production-release-control-evidence-v1";
+
+pub const REQUIRED_PRODUCTION_RELEASE_CONTROLS: [&str; 9] = [
+    "workspace_fmt",
+    "workspace_tests",
+    "workspace_clippy",
+    "cross_platform_linux",
+    "cross_platform_macos",
+    "cross_platform_windows",
+    "concurrency_models",
+    "bazel_parity",
+    "storage_tla_model_check",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct ProductionReleaseControlCheck {
+    pub name: String,
+    pub source_revision: String,
+    pub conclusion: String,
+    pub artifact_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct ProductionReleaseControlEvidence {
+    pub evidence_binding: ProductionEvidenceBinding,
+    pub source_revision: String,
+    pub checks: Vec<ProductionReleaseControlCheck>,
+}
+
+impl ProductionReleaseControlEvidence {
+    pub fn blocker_codes(&self) -> Vec<String> {
+        let mut blockers = self
+            .evidence_binding
+            .validate_for(&self.evidence_binding.identity)
+            .err()
+            .map(|_| vec!["release_control_evidence_binding_invalid".to_string()])
+            .unwrap_or_default();
+        if self.source_revision != self.evidence_binding.identity.source_revision
+            || !durability::valid_full_source_revision(&self.source_revision)
+        {
+            blockers.push("release_control_revision_invalid".to_string());
+        }
+        let mut observed = BTreeSet::new();
+        for check in &self.checks {
+            if !observed.insert(check.name.as_str()) {
+                blockers.push("release_control_duplicate".to_string());
+            }
+            if check.source_revision != self.source_revision {
+                blockers.push("release_control_check_revision_mismatch".to_string());
+            }
+            if check.conclusion != "success" {
+                blockers.push("release_control_check_failed".to_string());
+            }
+            if !durability::valid_sha256(&check.artifact_sha256) {
+                blockers.push("release_control_artifact_digest_invalid".to_string());
+            }
+        }
+        for required in REQUIRED_PRODUCTION_RELEASE_CONTROLS {
+            if !observed.contains(required) {
+                blockers.push(format!("release_control_{required}_missing"));
+            }
+        }
+        blockers.sort();
+        blockers.dedup();
+        blockers
+    }
+
+    pub fn json(&self) -> Value {
+        let blocker_codes = self.blocker_codes();
+        serde_json::json!({
+            "protocol": PRODUCTION_RELEASE_CONTROL_EVIDENCE_PROTOCOL,
+            "evidence_kind": "exact_revision_release_controls",
+            "production_eligible": true,
+            "ready": blocker_codes.is_empty(),
+            "blocker_codes": blocker_codes,
+            "evidence_binding": self.evidence_binding,
+            "source_revision": self.source_revision,
+            "checks": self.checks,
+        })
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProductionReleaseQualificationArtifacts {
@@ -22,6 +106,8 @@ pub struct ProductionReleaseQualificationArtifacts {
     pub vector_targets: Vec<Value>,
     pub morsel_profiles: Vec<Value>,
     pub blocking_operators: Option<Value>,
+    pub storage_crash_recovery: Option<Value>,
+    pub release_controls: Option<Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -99,6 +185,8 @@ pub struct ProductionReleaseQualificationBundleReport {
     pub vector_matrix: ProductionVectorMatrixArtifactAssessment,
     pub morsel_matrix: ProductionMorselMatrixArtifactAssessment,
     pub blocking_operators: ProductionArtifactAssessment,
+    pub storage_crash_recovery: ProductionArtifactAssessment,
+    pub release_controls: ProductionArtifactAssessment,
 }
 
 impl ProductionReleaseQualificationBundleReport {
@@ -115,6 +203,8 @@ impl ProductionReleaseQualificationBundleReport {
             "vector_matrix": self.vector_matrix,
             "morsel_matrix": self.morsel_matrix,
             "blocking_operators": self.blocking_operators,
+            "storage_crash_recovery": self.storage_crash_recovery,
+            "release_controls": self.release_controls,
         })
     }
 }
@@ -134,14 +224,28 @@ pub fn evaluate_production_release_qualification_bundle(
         artifacts.search.as_ref(),
         |artifact| graph_search::validate_search(artifact, &expected_identity),
     );
-    let vector_matrix =
-        vector::evaluate_matrix(&artifacts.vector_targets, &expected_identity, policy);
+    let vector_matrix = vector::evaluate_matrix(
+        &artifacts.vector_targets,
+        artifacts.search.as_ref(),
+        &expected_identity,
+        policy,
+    );
     let morsel_matrix =
         runtime::evaluate_morsel_matrix(&artifacts.morsel_profiles, &expected_identity, policy);
     let blocking_operators = evaluate_optional(
         "active_route_blocking_operators",
         artifacts.blocking_operators.as_ref(),
         |artifact| runtime::validate_blocking(artifact, &expected_identity),
+    );
+    let storage_crash_recovery = evaluate_optional(
+        "storage_crash_recovery_matrix",
+        artifacts.storage_crash_recovery.as_ref(),
+        |artifact| durability::validate_crash_recovery(artifact, &expected_identity),
+    );
+    let release_controls = evaluate_optional(
+        "exact_revision_release_controls",
+        artifacts.release_controls.as_ref(),
+        |artifact| durability::validate_release_controls(artifact, &expected_identity),
     );
 
     let mut blocker_codes = expected_identity
@@ -155,6 +259,8 @@ pub fn evaluate_production_release_qualification_bundle(
         ("vector_matrix", vector_matrix.ready),
         ("morsel_matrix", morsel_matrix.ready),
         ("blocking_operators", blocking_operators.ready),
+        ("storage_crash_recovery", storage_crash_recovery.ready),
+        ("release_controls", release_controls.ready),
     ] {
         if !ready {
             blocker_codes.push(format!("{prefix}_not_ready"));
@@ -173,6 +279,8 @@ pub fn evaluate_production_release_qualification_bundle(
         vector_matrix,
         morsel_matrix,
         blocking_operators,
+        storage_crash_recovery,
+        release_controls,
     }
 }
 

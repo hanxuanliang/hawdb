@@ -6,8 +6,9 @@ use skein::{
     ProcessMemorySnapshot, ProductionEvidenceBinding, ProductionQualificationIdentity,
     SearchAccessControlContext, SearchIndex, SearchLexicalFeasibilityCoverage,
     SearchLexicalFeasibilityMetrics, SearchLexicalProductionQualificationReport, SearchMode,
-    SearchOutOfCoreConfig, SearchOutOfCoreMetrics, SearchOutOfCoreOutput, SearchOutOfCoreReader,
-    SearchProjectionDelta, SearchQueryOptions, SearchResultSet, SearchTopKScoreParity,
+    SearchOutOfCoreConfig, SearchOutOfCoreGenerationBuildOptions, SearchOutOfCoreMetrics,
+    SearchOutOfCoreOutput, SearchOutOfCoreReader, SearchProjectionDelta, SearchQueryOptions,
+    SearchResultSet, SearchTopKScoreParity,
 };
 use std::collections::BTreeSet;
 use std::error::Error;
@@ -63,6 +64,7 @@ pub struct ProductionSearchLifecycleConfig {
     /// This disposable copy is intentionally corrupted and cannot be reused.
     pub corruption_replica_path: PathBuf,
     pub delta: SearchProjectionDelta,
+    pub generation_build_options: SearchOutOfCoreGenerationBuildOptions,
     pub expected_upsert_document_id: String,
     pub expected_deleted_document_id: String,
     pub upsert_verification: ProductionSearchQueryCase,
@@ -75,6 +77,8 @@ pub struct ProductionSearchLifecycleConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProductionSearchOutOfCoreQualificationConfig {
     pub search_projection_path: PathBuf,
+    /// Full-residency canonical oracle. Production serving must not open it.
+    pub reference_projection_path: PathBuf,
     pub out_of_core_config: SearchOutOfCoreConfig,
     pub search_memory_budget_bytes: u64,
     pub warmup_runs: usize,
@@ -90,6 +94,11 @@ impl ProductionSearchOutOfCoreQualificationConfig {
         if !self.search_projection_path.is_dir() {
             return Err(ProductionSearchQualificationError::new(
                 "production search qualification requires an existing projection directory",
+            ));
+        }
+        if !self.reference_projection_path.is_dir() {
+            return Err(ProductionSearchQualificationError::new(
+                "production search qualification requires an existing reference projection directory",
             ));
         }
         if self.search_memory_budget_bytes == 0 {
@@ -229,6 +238,7 @@ impl ProductionSearchQueryEvidence {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProductionSearchLifecycleReport {
+    pub bounded_generation_update: bool,
     pub incremental_upsert_delete: bool,
     pub checkpoint_reopen: bool,
     pub stale_generation: bool,
@@ -238,11 +248,20 @@ pub struct ProductionSearchLifecycleReport {
     pub checkpoint_latency: LatencyPercentiles,
     pub reopen_latency: LatencyPercentiles,
     pub checkpoint_write_amplification_per_million: u64,
+    pub max_update_resident_document_count: usize,
+    pub max_update_peak_segment_document_bytes: u64,
+    pub turboquant_serving: bool,
+    pub turboquant_preferred_serving: bool,
+    pub turboquant_raw_rerank: bool,
+    pub turboquant_metadata_filter_pushdown: bool,
+    pub turboquant_payload_bytes_read: u64,
+    pub process_memory: ProcessMemoryProfile,
 }
 
 impl ProductionSearchLifecycleReport {
     fn json(&self) -> serde_json::Value {
         serde_json::json!({
+            "bounded_generation_update": self.bounded_generation_update,
             "incremental_upsert_delete": self.incremental_upsert_delete,
             "checkpoint_reopen": self.checkpoint_reopen,
             "stale_generation": self.stale_generation,
@@ -252,6 +271,14 @@ impl ProductionSearchLifecycleReport {
             "checkpoint_latency": self.checkpoint_latency,
             "reopen_latency": self.reopen_latency,
             "checkpoint_write_amplification_per_million": self.checkpoint_write_amplification_per_million,
+            "max_update_resident_document_count": self.max_update_resident_document_count,
+            "max_update_peak_segment_document_bytes": self.max_update_peak_segment_document_bytes,
+            "turboquant_serving": self.turboquant_serving,
+            "turboquant_preferred_serving": self.turboquant_preferred_serving,
+            "turboquant_raw_rerank": self.turboquant_raw_rerank,
+            "turboquant_metadata_filter_pushdown": self.turboquant_metadata_filter_pushdown,
+            "turboquant_payload_bytes_read": self.turboquant_payload_bytes_read,
+            "process_memory": process_memory_json(self.process_memory),
         })
     }
 }
@@ -292,6 +319,15 @@ struct QueryRun {
     selective_matching_document_count: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct TurboQuantServingProbe {
+    required_serving: bool,
+    preferred_serving: bool,
+    raw_rerank: bool,
+    metadata_filter_pushdown: bool,
+    payload_bytes_read: u64,
+}
+
 pub fn run_production_search_out_of_core_qualification(
     config: ProductionSearchOutOfCoreQualificationConfig,
 ) -> Result<ProductionSearchOutOfCoreQualificationReport, ProductionSearchQualificationError> {
@@ -313,6 +349,16 @@ pub fn run_production_search_out_of_core_qualification(
         ));
     }
     let projection_payload_bytes = candidate_reader.projection_payload_bytes();
+    let compressed_vector_probe = config
+        .query_cases
+        .iter()
+        .find(|query_case| {
+            query_case.kind == ProductionSearchCaseKind::Vector
+                && !query_case.request.metadata_filters.is_empty()
+        })
+        .expect("validated production search cases include a filtered vector case");
+    let source_turboquant =
+        run_turboquant_serving_probe(&candidate_reader, compressed_vector_probe)?;
     let process_start =
         ProcessMemorySnapshot::capture().map_err(ProductionSearchQualificationError::from_error)?;
     for _ in 0..config.warmup_runs {
@@ -332,7 +378,34 @@ pub fn run_production_search_out_of_core_qualification(
     let process_memory = ProcessMemoryProfile::between(process_start, process_end);
     drop(candidate_reader);
 
-    let reference = SearchIndex::open(&config.search_projection_path)
+    let reference_projection_identity =
+        SearchOutOfCoreReader::open(&config.reference_projection_path)
+            .map_err(ProductionSearchQualificationError::from_error)?
+            .production_qualification_identity();
+    if !same_search_document_identity(&projection_identity, &reference_projection_identity) {
+        return Err(ProductionSearchQualificationError::new(
+            "production search reference projection document identity does not match the serving generation",
+        ));
+    }
+
+    // Keep lifecycle memory evidence ahead of the full-residency oracle. Opening
+    // the oracle first would permanently raise the process lifetime peak and
+    // hide a later generation-update peak.
+    let mut lifecycle = lifecycle::run_lifecycle_probes(
+        &config.lifecycle,
+        &projection_identity,
+        &config.out_of_core_config,
+        compressed_vector_probe,
+    )?;
+    lifecycle.turboquant_serving &= source_turboquant.required_serving;
+    lifecycle.turboquant_preferred_serving &= source_turboquant.preferred_serving;
+    lifecycle.turboquant_raw_rerank &= source_turboquant.raw_rerank;
+    lifecycle.turboquant_metadata_filter_pushdown &= source_turboquant.metadata_filter_pushdown;
+    lifecycle.turboquant_payload_bytes_read = lifecycle
+        .turboquant_payload_bytes_read
+        .saturating_add(source_turboquant.payload_bytes_read);
+
+    let reference = SearchIndex::open(&config.reference_projection_path)
         .map_err(ProductionSearchQualificationError::from_error)?;
     let reference_runs = config
         .query_cases
@@ -341,11 +414,6 @@ pub fn run_production_search_out_of_core_qualification(
         .collect::<Result<Vec<_>, _>>()?;
     drop(reference);
 
-    let lifecycle = lifecycle::run_lifecycle_probes(
-        &config.lifecycle,
-        &projection_identity,
-        &config.out_of_core_config,
-    )?;
     let query_evidence =
         build_query_evidence(&config.query_cases, &reference_runs, &candidate_runs);
     let parity = parity_by_mode(&query_evidence);
@@ -483,6 +551,68 @@ fn execute_out_of_core(
     .map_err(ProductionSearchQualificationError::from_error)
 }
 
+fn run_turboquant_serving_probe(
+    reader: &SearchOutOfCoreReader,
+    query_case: &ProductionSearchQueryCase,
+) -> Result<TurboQuantServingProbe, ProductionSearchQualificationError> {
+    let execute = |mode| {
+        reader.search_with_options_compressed_vector_projection_mode(
+            &query_case.request.query_text,
+            query_case.request.query_embedding.as_deref(),
+            query_case.request.mode,
+            query_options(query_case),
+            mode,
+        )
+    };
+    let required = execute(CompressedVectorSearchMode::Required)
+        .map_err(ProductionSearchQualificationError::from_error)?;
+    let preferred = execute(CompressedVectorSearchMode::Preferred)
+        .map_err(ProductionSearchQualificationError::from_error)?;
+    let inspect = |output: &SearchOutOfCoreOutput| {
+        output
+            .result
+            .retrievers
+            .iter()
+            .find(|retriever| retriever.name == "vector")
+            .map(|retriever| {
+                (
+                    retriever.backend == "skein_turboquant_out_of_core_candidate_projection"
+                        && retriever.fallback_reason_codes.is_empty(),
+                    retriever.candidate_score_source == "quantized_projection"
+                        && retriever.final_score_source == "raw_vector"
+                        && retriever.reranked_candidate_count > 0,
+                    retriever.candidate_scan_filtered_document_count > 0,
+                )
+            })
+            .unwrap_or_default()
+    };
+    let (required_serving, required_raw_rerank, required_filter_pushdown) = inspect(&required);
+    let (preferred_serving, preferred_raw_rerank, preferred_filter_pushdown) = inspect(&preferred);
+    Ok(TurboQuantServingProbe {
+        required_serving,
+        preferred_serving,
+        raw_rerank: required_raw_rerank && preferred_raw_rerank,
+        metadata_filter_pushdown: required_filter_pushdown && preferred_filter_pushdown,
+        payload_bytes_read: required
+            .metrics
+            .turboquant_payload_bytes_read
+            .saturating_add(preferred.metrics.turboquant_payload_bytes_read),
+    })
+}
+
+fn same_search_document_identity(
+    left: &skein::SearchProjectionQualificationIdentity,
+    right: &skein::SearchProjectionQualificationIdentity,
+) -> bool {
+    left.source_graph_commit_epoch == right.source_graph_commit_epoch
+        && left.document_count == right.document_count
+        && left.documents_digest == right.documents_digest
+        && left.analyzer_digest == right.analyzer_digest
+        && left.embedding_model == right.embedding_model
+        && left.embedding_version == right.embedding_version
+        && left.embedding_dimension == right.embedding_dimension
+}
+
 fn execute_reference(
     index: &SearchIndex,
     query_case: &ProductionSearchQueryCase,
@@ -577,6 +707,12 @@ fn coverage_from_evidence(
         metadata_filter: has(ProductionSearchCaseKind::MetadataFilter),
         acl_filter: has(ProductionSearchCaseKind::AclFilter),
         hybrid_rrf: has(ProductionSearchCaseKind::Hybrid),
+        bounded_generation_update: lifecycle.bounded_generation_update,
+        bounded_turboquant_serving: lifecycle.turboquant_serving
+            && lifecycle.turboquant_preferred_serving
+            && lifecycle.turboquant_raw_rerank
+            && lifecycle.turboquant_metadata_filter_pushdown
+            && lifecycle.turboquant_payload_bytes_read > 0,
         incremental_upsert_delete: lifecycle.incremental_upsert_delete,
         checkpoint_reopen: lifecycle.checkpoint_reopen,
         corrupt_artifact: lifecycle.corrupt_artifact_rejected,
@@ -702,6 +838,15 @@ fn validate_query_cases(
     {
         return Err(ProductionSearchQualificationError::new(
             "production search qualification requires an ACL case when acl is enabled",
+        ));
+    }
+    if !query_cases.iter().any(|query_case| {
+        query_case.kind == ProductionSearchCaseKind::Vector
+            && !query_case.request.metadata_filters.is_empty()
+            && query_case.access_control.is_none()
+    }) {
+        return Err(ProductionSearchQualificationError::new(
+            "production search qualification requires a metadata-filtered vector case for TurboQuant allowlist pushdown",
         ));
     }
     Ok(())
@@ -959,6 +1104,9 @@ fn add_out_of_core_metrics(
     aggregate.vector_bytes_read = aggregate
         .vector_bytes_read
         .saturating_add(metrics.vector_bytes_read);
+    aggregate.turboquant_payload_bytes_read = aggregate
+        .turboquant_payload_bytes_read
+        .saturating_add(metrics.turboquant_payload_bytes_read);
     aggregate.hydrated_documents = aggregate
         .hydrated_documents
         .saturating_add(metrics.hydrated_documents);
@@ -1012,6 +1160,7 @@ fn out_of_core_metrics_json(metrics: &SearchOutOfCoreMetrics) -> serde_json::Val
         "candidate_block_reads": metrics.candidate_block_reads,
         "candidate_bytes_read": metrics.candidate_bytes_read,
         "vector_bytes_read": metrics.vector_bytes_read,
+        "turboquant_payload_bytes_read": metrics.turboquant_payload_bytes_read,
         "hydrated_documents": metrics.hydrated_documents,
         "hydrated_bytes": metrics.hydrated_bytes,
     })
@@ -1021,8 +1170,8 @@ fn out_of_core_metrics_json(metrics: &SearchOutOfCoreMetrics) -> serde_json::Val
 mod tests {
     use super::*;
     use skein::{
-        SearchEmbeddingManifest, SearchProjectionKind, SearchProjectionRow,
-        PRODUCTION_QUALIFICATION_POLICY_VERSION,
+        SearchDocument, SearchEmbeddingManifest, SearchOutOfCoreGenerationWriter,
+        SearchProjectionKind, SearchProjectionRow, PRODUCTION_QUALIFICATION_POLICY_VERSION,
     };
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1033,11 +1182,13 @@ mod tests {
     fn representative_runner_collects_parity_and_lifecycle_evidence() {
         let root = test_root("runner");
         let source = root.join("source");
+        let reference = root.join("reference");
         let lifecycle_paths = (0..3)
             .map(|index| root.join(format!("lifecycle-{index}")))
             .collect::<Vec<_>>();
         let corruption = root.join("corruption");
-        build_projection(&source);
+        build_projection(&reference);
+        build_out_of_core_projection(&source);
         for path in lifecycle_paths.iter().chain(std::iter::once(&corruption)) {
             copy_projection(&source, path);
         }
@@ -1045,6 +1196,7 @@ mod tests {
         let report = run_production_search_out_of_core_qualification(
             ProductionSearchOutOfCoreQualificationConfig {
                 search_projection_path: source,
+                reference_projection_path: reference,
                 out_of_core_config: SearchOutOfCoreConfig {
                     spill_directory: root.join("spill"),
                     ..SearchOutOfCoreConfig::default()
@@ -1068,6 +1220,7 @@ mod tests {
                         max_operations: Some(2),
                         source_graph_commit_epoch: Some(42),
                     },
+                    generation_build_options: SearchOutOfCoreGenerationBuildOptions::default(),
                     expected_upsert_document_id: "memory:added".to_string(),
                     expected_deleted_document_id: "memory:delete".to_string(),
                     upsert_verification: text_case(
@@ -1159,6 +1312,35 @@ mod tests {
         index.checkpoint().unwrap();
     }
 
+    fn build_out_of_core_projection(path: &Path) {
+        let options = SearchOutOfCoreGenerationBuildOptions {
+            source_graph_commit_epoch: Some(42),
+            embedding_manifest: Some(SearchEmbeddingManifest {
+                model: "test-embedding".to_string(),
+                version: Some("v1".to_string()),
+                dimension: 2,
+            }),
+            ..SearchOutOfCoreGenerationBuildOptions::default()
+        };
+        let mut writer = SearchOutOfCoreGenerationWriter::create(path, options).unwrap();
+        let mut documents = vec![
+            projection_row(
+                "delete",
+                "selective-alpha",
+                "common \u{4e2d}\u{6587} token",
+                [1.0, 0.0],
+                "a",
+            )
+            .into_document(),
+            projection_row("keep", "common beta", "common body", [0.0, 1.0], "b").into_document(),
+        ];
+        documents.sort_unstable_by(|left: &SearchDocument, right| left.id.cmp(&right.id));
+        for document in documents {
+            writer.push(document).unwrap();
+        }
+        writer.finish().unwrap();
+    }
+
     fn copy_projection(source: &Path, destination: &Path) {
         std::fs::create_dir_all(destination).unwrap();
         for entry in std::fs::read_dir(source).unwrap() {
@@ -1192,7 +1374,11 @@ mod tests {
             ProductionSearchQueryCase {
                 name: "vector".to_string(),
                 kind: ProductionSearchCaseKind::Vector,
-                request: NowledgeMemSearchCandidateRequest::vector(vec![1.0, 0.0], 2),
+                request: NowledgeMemSearchCandidateRequest::vector(vec![1.0, 0.0], 2)
+                    .with_metadata_filters(BTreeMap::from([(
+                        "group".to_string(),
+                        "a".to_string(),
+                    )])),
                 access_control: None,
             },
             ProductionSearchQueryCase {

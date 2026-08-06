@@ -7387,6 +7387,7 @@ impl NowledgeMemOutOfCoreSearchProjection {
     ) -> u64 {
         let config = self.reader.config();
         working_memory_bytes
+            .saturating_add(config.max_vector_search_working_bytes.get() as u64)
             .saturating_add(config.max_uncompressed_segment_bytes.get())
             .saturating_add(config.max_candidate_block_bytes.get())
             .saturating_add(config.max_hydrated_bytes.get().min(result_budget_bytes))
@@ -7413,46 +7414,22 @@ impl NowledgeMemOutOfCoreSearchProjection {
     ) -> Result<NowledgeMemOutOfCoreSearchCandidateOutput> {
         let effective_compressed_vector_search_mode =
             request.effective_compressed_vector_search_mode();
-        if effective_compressed_vector_search_mode == CompressedVectorSearchMode::Required {
-            return Err(SkeinError::Storage(
-                "out-of-core search currently provides exact scalar vector segment scans; a required compressed vector projection is unavailable"
-                    .to_string(),
-            ));
-        }
-        let mut output = self.reader.search_with_options(
-            &request.query_text,
-            request.query_embedding.as_deref(),
-            request.mode,
-            SearchQueryOptions {
-                limit: request.limit,
-                offset: request.offset,
-                rank_window: request.rank_window,
-                fusion_weights: request.fusion_weights,
-                metadata_filters: request.metadata_filters.clone(),
-                policy_epoch: None,
-            },
-        )?;
-        if effective_compressed_vector_search_mode == CompressedVectorSearchMode::Preferred
-            && request.mode != SearchMode::Text
-        {
-            let code = SearchFallbackReasonCode::CompressedVectorProjectionUnavailable;
-            let reason = "out-of-core search used an exact scalar vector segment scan because the compressed projection is not attached to this reader".to_string();
-            output.result.fallback_reason_codes.push(code);
-            output.result.fallback_reasons.push(reason.clone());
-            for hit in &mut output.result.hits {
-                hit.fallback_reason_codes.push(code);
-                hit.fallback_reasons.push(reason.clone());
-            }
-            if let Some(retriever) = output
-                .result
-                .retrievers
-                .iter_mut()
-                .find(|retriever| retriever.name == "vector")
-            {
-                retriever.fallback_reason_codes.push(code);
-                retriever.fallback_reasons.push(reason);
-            }
-        }
+        let output = self
+            .reader
+            .search_with_options_compressed_vector_projection_mode(
+                &request.query_text,
+                request.query_embedding.as_deref(),
+                request.mode,
+                SearchQueryOptions {
+                    limit: request.limit,
+                    offset: request.offset,
+                    rank_window: request.rank_window,
+                    fusion_weights: request.fusion_weights,
+                    metadata_filters: request.metadata_filters.clone(),
+                    policy_epoch: None,
+                },
+                effective_compressed_vector_search_mode,
+            )?;
         let report = nowledge_mem_search_candidate_report(
             request,
             effective_compressed_vector_search_mode,

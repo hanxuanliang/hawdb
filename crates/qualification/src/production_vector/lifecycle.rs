@@ -189,11 +189,13 @@ pub(super) fn run_lifecycle(
         stale_generation_isolated,
         corrupt_projection_rejected,
         cancellation_propagated,
+        serving_cancellation_propagated: false,
         mixed_foreground_background,
         update_latency: latency_percentiles(&update_micros),
         checkpoint_latency: latency_percentiles(&checkpoint_micros),
         reopen_latency: latency_percentiles(&reopen_micros),
         cancellation_latency: latency_percentiles(&[cancellation_micros]),
+        serving_cancellation_latency: crate::LatencyPercentiles::default(),
         checkpoint_write_amplification_per_million,
     })
 }
