@@ -778,10 +778,10 @@ applied_at`. The wrapper validates non-empty migration ids before WAL, reports
 already-applied and duplicate rows without writing, preserves existing
 `applied_at` values, and commits eligible new migration rows through one grouped
 WAL batch.
-Schema migration log reads are covered by
-`Database::knowledge_schema_migrations`, which returns applied migration ids
-with optional `applied_at`, deterministic id ordering, bounded limits, and the
-current graph commit epoch without writing WAL.
+Schema migration log reads use host-owned fixed parameterized Cypher. A host
+that needs both the total and a bounded page executes named count and page
+statements through one `DatabaseReadTransaction`; the page orders by migration
+id and projects only `id`, node id, and `applied_at`.
 AugmentationJob lifecycle writes are covered by a typed batch for Nowledge job
 creation, pending-to-running starts, running progress updates,
 running-to-completed results, and pending/running-to-failed errors. The wrapper

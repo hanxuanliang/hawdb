@@ -1,5 +1,13 @@
 use super::*;
 
+const SCHEMA_MIGRATION_COUNT_QUERY: &str = "MATCH (m:SchemaMigrationLog) RETURN count(m) AS total";
+const SCHEMA_MIGRATION_ALL_QUERY: &str = "MATCH (m:SchemaMigrationLog) \
+     RETURN m.id AS migration_id, id(m) AS node_id, m.applied_at AS applied_at \
+     ORDER BY migration_id ASC";
+const SCHEMA_MIGRATION_PAGE_QUERY: &str = "MATCH (m:SchemaMigrationLog) \
+     RETURN m.id AS migration_id, id(m) AS node_id, m.applied_at AS applied_at \
+     ORDER BY migration_id ASC LIMIT $limit";
+
 #[test]
 fn applies_schema_migration_log_batch_idempotently() {
     let mut db = Database::new();
@@ -61,38 +69,50 @@ fn applies_schema_migration_log_batch_idempotently() {
     );
     assert_eq!(rows.rows[2].get("applied_at"), Some(&Value::Int(103)));
 
-    let graph_commit_epoch = db.store.commit_epoch();
-    let applied = db
-        .knowledge_schema_migrations(&KnowledgeSchemaMigrationListRequest { limit: 0 })
+    let mut read = db.begin_read_transaction();
+    let count = read
+        .query_with_params_bounded(SCHEMA_MIGRATION_COUNT_QUERY, &BTreeMap::new(), Some(1))
         .unwrap();
-    assert_eq!(applied.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(applied.matched_count, 3);
-    assert_eq!(applied.returned_count, 3);
+    assert_eq!(count.rows[0].get("total"), Some(&Value::Int(3)));
+    let applied = read
+        .query_with_params_bounded(SCHEMA_MIGRATION_ALL_QUERY, &BTreeMap::new(), Some(3))
+        .unwrap();
+    assert_eq!(read.commit_epoch(), db.store.commit_epoch());
+    assert_eq!(applied.rows.len(), 3);
     assert_eq!(
         applied
             .rows
             .iter()
-            .map(|row| row.migration_id.as_str())
+            .map(|row| row.get("migration_id").unwrap())
             .collect::<Vec<_>>(),
-        vec!["existing", "new_1", "new_2"]
+        vec![
+            &Value::String("existing".to_string()),
+            &Value::String("new_1".to_string()),
+            &Value::String("new_2".to_string())
+        ]
     );
-    assert_eq!(applied.rows[0].applied_at, Some(Value::Int(10)));
-    assert_eq!(applied.rows[1].applied_at, Some(Value::Int(101)));
-    assert_eq!(applied.rows[2].applied_at, Some(Value::Int(103)));
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+    assert_eq!(applied.rows[0].get("applied_at"), Some(&Value::Int(10)));
+    assert_eq!(applied.rows[1].get("applied_at"), Some(&Value::Int(101)));
+    assert_eq!(applied.rows[2].get("applied_at"), Some(&Value::Int(103)));
 
-    let limited = db
-        .knowledge_schema_migrations(&KnowledgeSchemaMigrationListRequest { limit: 2 })
+    let limited = read
+        .query_with_params_bounded(
+            SCHEMA_MIGRATION_PAGE_QUERY,
+            &BTreeMap::from([("limit".to_string(), Value::Int(2))]),
+            Some(2),
+        )
         .unwrap();
-    assert_eq!(limited.matched_count, 3);
-    assert_eq!(limited.returned_count, 2);
+    assert_eq!(limited.rows.len(), 2);
     assert_eq!(
         limited
             .rows
             .iter()
-            .map(|row| row.migration_id.as_str())
+            .map(|row| row.get("migration_id").unwrap())
             .collect::<Vec<_>>(),
-        vec!["existing", "new_1"]
+        vec![
+            &Value::String("existing".to_string()),
+            &Value::String("new_1".to_string())
+        ]
     );
 }
 

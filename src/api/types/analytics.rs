@@ -333,26 +333,6 @@ pub struct KnowledgeSchemaMigrationApplyBatchOutput {
     pub duplicate_count: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct KnowledgeSchemaMigrationListRequest {
-    pub limit: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSchemaMigrationRow {
-    pub migration_id: String,
-    pub node_id: u64,
-    pub applied_at: Option<Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSchemaMigrationListOutput {
-    pub graph_commit_epoch: u64,
-    pub rows: Vec<KnowledgeSchemaMigrationRow>,
-    pub matched_count: usize,
-    pub returned_count: usize,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum KnowledgeAugmentationJobLifecycleTransition {
     Create {

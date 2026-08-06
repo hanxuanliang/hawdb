@@ -3383,13 +3383,6 @@ impl Database {
         apply_knowledge_schema_migrations_batch_for(self, request)
     }
 
-    pub fn knowledge_schema_migrations(
-        &self,
-        request: &KnowledgeSchemaMigrationListRequest,
-    ) -> Result<KnowledgeSchemaMigrationListOutput> {
-        knowledge_schema_migrations_for(&self.catalog, &self.store, request)
-    }
-
     pub fn update_knowledge_augmentation_jobs_batch(
         &mut self,
         request: &KnowledgeAugmentationJobLifecycleBatchRequest,
@@ -24295,44 +24288,6 @@ fn apply_knowledge_schema_migrations_batch_for(
         created_count,
         already_applied_count,
         duplicate_count,
-    })
-}
-
-fn knowledge_schema_migrations_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeSchemaMigrationListRequest,
-) -> Result<KnowledgeSchemaMigrationListOutput> {
-    let Some(label_id) = catalog.label_id("SchemaMigrationLog") else {
-        return Ok(KnowledgeSchemaMigrationListOutput {
-            graph_commit_epoch: store.commit_epoch(),
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-        });
-    };
-    let mut rows = Vec::new();
-    store.visit_nodes_owned(Some(label_id), |node| {
-        if let Some(migration_id) = node_external_id(&node) {
-            rows.push(KnowledgeSchemaMigrationRow {
-                migration_id,
-                node_id: node.id.0,
-                applied_at: node.properties.get("applied_at").cloned(),
-            });
-        }
-        crate::store::GraphScanControl::Continue
-    })?;
-    rows.sort_by(|left, right| left.migration_id.cmp(&right.migration_id));
-    let matched_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-    Ok(KnowledgeSchemaMigrationListOutput {
-        graph_commit_epoch: store.commit_epoch(),
-        rows,
-        matched_count,
-        returned_count,
     })
 }
 
