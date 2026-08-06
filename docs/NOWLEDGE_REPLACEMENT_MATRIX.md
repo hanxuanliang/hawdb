@@ -373,11 +373,10 @@ skill-memory guard shape `MATCH (m:Memory) WHERE m.id STARTS WITH $p RETURN
 m.id, m.space_id LIMIT n`, requires a non-empty prefix, returns raw and
 normalized `space_id` values, supports pinned read snapshots, and does not write
 WAL.
-Memory title/content id-list reads are covered by
-`Database::knowledge_memory_title_contents`. The typed read accepts Memory ids,
-returns title/content rows ordered by `created_at` ascending for the REST Skills
-write-path source preview, reports missing Memory ids, supports pinned read
-snapshots, and does not write WAL.
+Memory title/content id-list reads use one fixed parameterized, id-bounded
+Cypher statement with explicit projection, created-at ordering, `LIMIT`, row
+budget, and a pinned snapshot. Host code derives missing ids and shapes the
+response; no route-specific typed database API is exposed.
 Memory EVOLVES latest reads are covered by
 `Database::knowledge_memory_evolves_latest`. The typed read accepts old Memory
 ids, follows outgoing `EVOLVES` edges to Memory targets, returns distinct

@@ -47,7 +47,7 @@ use super::{
     KnowledgeMemoryListRequest, KnowledgeMemoryMetadataBatchRequest,
     KnowledgeMemoryMetadataRelatedProjectedListRequest, KnowledgeMemoryMetadataUpdate,
     KnowledgeMemoryPrefixOwnershipRequest, KnowledgeMemoryProjectedListRequest,
-    KnowledgeMemoryTitleContentRequest, KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
+    KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
     KnowledgeNormalizedSpaceMoveBatchRequest, KnowledgePageRankClearRequest,
     KnowledgePageRankScoreBatchRequest, KnowledgePageRankScoreUpdate, KnowledgePathRequest,
     KnowledgePropertyBatchRequest, KnowledgePropertyUpdateBatchRequest,

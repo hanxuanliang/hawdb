@@ -82,9 +82,6 @@ and algorithms outside active routes are not implied backlog items.
     the workspace and the Mem host have no remaining references.
   - Preserve typed APIs for grouped WAL atomicity, recovery, admission,
     generation publication, and bounded multi-statement workflows.
-  - Prioritize the remaining read-only Thread facades after their
-    host queries have bounded row/payload contracts and pinned-snapshot
-    coverage.
 
 - [ ] Qualify default parallel morsel execution on production-shaped workloads.
   - Require higher throughput without a p99, peak RSS, cancellation-latency, or

@@ -522,10 +522,9 @@ Memory prefix ownership guard reads are available as
 `Database::knowledge_memory_prefix_ownership`, covering MCP skill-memory prefix
 ownership checks with raw and normalized `space_id` projection and no WAL
 writes.
-Memory title/content reads are available as
-`Database::knowledge_memory_title_contents`, covering REST Skills write-path
-Memory id-list source previews with `created_at` ascending ordering and no WAL
-writes.
+Memory title/content reads use one fixed parameterized, id-bounded Cypher
+statement with explicit projection, created-at ordering, `LIMIT`, and pinned
+snapshot semantics; host code shapes missing ids.
 Memory EVOLVES latest reads are available as
 `Database::knowledge_memory_evolves_latest`, covering REST Skills successor
 checks over old Memory id lists with distinct latest-state rows and no WAL

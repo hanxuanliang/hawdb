@@ -613,29 +613,6 @@ pub struct KnowledgeMemoryPrefixOwnershipOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryTitleContentRequest {
-    pub memory_ids: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryTitleContentRow {
-    pub memory_id: Option<String>,
-    pub node_id: u64,
-    pub title: Option<String>,
-    pub content: Option<String>,
-    pub created_at: Option<Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryTitleContentOutput {
-    pub graph_commit_epoch: u64,
-    pub rows: Vec<KnowledgeMemoryTitleContentRow>,
-    pub matched_count: usize,
-    pub returned_count: usize,
-    pub missing_memory_ids: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeMemoryEvolvesLatestRequest {
     pub old_memory_ids: Vec<String>,
 }
