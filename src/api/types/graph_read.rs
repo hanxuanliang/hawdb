@@ -426,41 +426,6 @@ pub struct KnowledgeRelatedEntityNameListOutput {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KnowledgeContextMemoryLatestFilter {
-    NullOrTrue,
-    TrueOnly,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeContextMemoryPreviewRequest {
-    pub unit_types: Vec<String>,
-    pub latest_filter: KnowledgeContextMemoryLatestFilter,
-    pub include_labels: bool,
-    pub limit: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeContextMemoryPreviewRow {
-    pub memory_id: Option<String>,
-    pub memory_node_id: u64,
-    pub title: Option<String>,
-    pub unit_type: Option<String>,
-    pub created_at: Option<Value>,
-    pub label_id: Option<String>,
-    pub label_node_id: Option<u64>,
-    pub label_canonical_name: Option<String>,
-    pub label_name: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeContextMemoryPreviewOutput {
-    pub graph_commit_epoch: u64,
-    pub rows: Vec<KnowledgeContextMemoryPreviewRow>,
-    pub matched_memory_count: usize,
-    pub returned_count: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnowledgeCrystalListOrder {
     ExternalIdAsc,
     ImportanceDescCreatedAtDesc,

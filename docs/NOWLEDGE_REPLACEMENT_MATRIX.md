@@ -337,13 +337,11 @@ non-empty Memory id list or one Thread id with physical `id` or logical
 order for the Nowledge REST list `Memory` id and `Thread` `COMPACTS_TO` ->
 `MENTIONS` shapes, reports missing Memory ids or missing Thread status,
 supports bounded limits, and does not write WAL.
-Context memory preview reads are covered by
-`Database::knowledge_context_memory_preview`. The typed read validates
-non-empty unit types, applies the Nowledge context-wiring filters for latest
-Memory rows and non-crystal rows, orders by `created_at` descending, supports
-bounded limits, can either return Memory title/unit-type preview rows or expand
-outgoing `HAS_LABEL` rows to Label id/canonical-name/name fields, reports
-matched Memory counts and the graph commit epoch, and does not write WAL.
+Context memory previews use two fixed parameterized Cypher statements: one for
+title/unit-type rows and one for `HAS_LABEL` expansion. Each statement owns its
+latest-state predicate, explicit projection, deterministic ordering, `LIMIT`,
+matching row budget, and pinned snapshot; no mode-switching typed database API
+is exposed.
 Memory bulk detail, filtered list, and feature-specific projections use fixed
 parameterized Cypher statements. Each statement owns its exact Memory fields,
 space/unit/latest/crystal filters, score or created-at ordering, `LIMIT`, and
