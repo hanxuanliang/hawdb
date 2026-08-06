@@ -474,12 +474,12 @@ label list surfaces are available as typed APIs:
 `Database::knowledge_label_usage`, and
 `Database::knowledge_label_canonical_usage`. They scan only `Label` nodes,
 validate non-empty lookup filters, and compute `HAS_LABEL` usage counts over
-any source node type. Label Memory distribution reads are available as
-`Database::knowledge_label_memory_distribution`, covering Nowledge
-`COUNT(DISTINCT m)` label stats and OKF label row shapes with Memory-only
+any source node type. Label Memory distribution reads use one fixed
+parameterized, row-bounded Cypher statement for the Nowledge
+`COUNT(DISTINCT m)` label stats and OKF label row shapes, with Memory-only
 counts, duplicate edge de-duplication, offset/limit pagination, and no WAL
-writes. Memory label cleanup writes are available as
-`Database::delete_knowledge_memory_labels`, covering exact
+writes. No route-specific typed read API is exposed. Memory label cleanup
+writes are available as `Database::delete_knowledge_memory_labels`, covering exact
 `(:Memory)-[:HAS_LABEL]->(:Label)` edge removal and all-label edge cleanup for
 one Memory through grouped WAL-backed relationship deletes. Label merge
 transfer writes are available as `Database::transfer_knowledge_label_memory_edges`,

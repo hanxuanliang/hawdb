@@ -549,11 +549,11 @@ handles duplicate/collision checks, `Database::scan_knowledge_labels_missing_can
 handles canonical backfill scans, and `Database::knowledge_label_usage` plus
 `Database::knowledge_label_canonical_usage` expose single-row and canonical
 usage rows with `HAS_LABEL` counts over any source node type.
-`Database::knowledge_label_memory_distribution` covers the Nowledge label
-distribution and OKF label-row stats shapes by counting distinct Memory nodes
-per Label over `HAS_LABEL`, de-duplicating repeated edges, sorting by
-Memory-count descending then label name ascending, supporting offset/limit, and
-not writing WAL.
+Label Memory distribution reads use one fixed parameterized Cypher statement
+that counts distinct Memory nodes per Label over `HAS_LABEL`, orders by count
+and stable Label identity, and applies `SKIP`, `LIMIT`, and a matching row
+budget. A caller that needs a total count issues a separate bounded aggregate
+query; no route-specific typed read API is exposed.
 Label regex Memory connection reads use one fixed parameterized Cypher
 statement with explicit Memory/Label projection, grouped `HAS_LABEL` counts,
 deterministic ordering, `SKIP`, `LIMIT`, a matching row budget, and a pinned

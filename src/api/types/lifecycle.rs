@@ -395,12 +395,6 @@ pub struct KnowledgeLabelUsageListRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeLabelMemoryDistributionRequest {
-    pub offset: usize,
-    pub limit: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeLabelUsageRow {
     pub label_id: Option<String>,
     pub node_id: u64,
@@ -424,22 +418,6 @@ pub struct KnowledgeLabelUsageOutput {
 pub struct KnowledgeLabelUsageListOutput {
     pub graph_commit_epoch: u64,
     pub rows: Vec<KnowledgeLabelUsageRow>,
-    pub matched_count: usize,
-    pub returned_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeLabelMemoryDistributionRow {
-    pub label_id: Option<String>,
-    pub label_node_id: u64,
-    pub label_name: Option<String>,
-    pub memory_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeLabelMemoryDistributionOutput {
-    pub graph_commit_epoch: u64,
-    pub rows: Vec<KnowledgeLabelMemoryDistributionRow>,
     pub matched_count: usize,
     pub returned_count: usize,
 }

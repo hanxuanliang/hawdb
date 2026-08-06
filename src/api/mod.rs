@@ -2915,13 +2915,6 @@ impl Database {
         knowledge_label_canonical_usage_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_label_memory_distribution(
-        &self,
-        request: &KnowledgeLabelMemoryDistributionRequest,
-    ) -> Result<KnowledgeLabelMemoryDistributionOutput> {
-        knowledge_label_memory_distribution_via_query_runtime(self, request)
-    }
-
     pub fn delete_knowledge_memory_labels(
         &mut self,
         request: &KnowledgeMemoryLabelDeleteRequest,
@@ -12136,66 +12129,6 @@ fn knowledge_label_usage_row_from_query(row: &Row) -> Result<KnowledgeLabelUsage
     })
 }
 
-fn knowledge_label_memory_distribution_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeLabelMemoryDistributionRequest,
-) -> Result<KnowledgeLabelMemoryDistributionOutput> {
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (m:Memory)-[:HAS_LABEL]->(l:Label) \
-         WITH l.id AS label_id, id(l) AS label_node_id, l.name AS label_name, \
-         count(DISTINCT m) AS memory_count \
-         RETURN label_id, label_node_id, label_name, memory_count",
-        &BTreeMap::new(),
-        None,
-    )?;
-    let mut rows = output
-        .rows
-        .iter()
-        .map(knowledge_label_memory_distribution_row_from_query)
-        .collect::<Result<Vec<_>>>()?;
-    sort_label_memory_distribution_rows(&mut rows);
-    let matched_count = rows.len();
-    let mut rows = rows.into_iter().skip(request.offset).collect::<Vec<_>>();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-
-    Ok(KnowledgeLabelMemoryDistributionOutput {
-        graph_commit_epoch: db.store.commit_epoch(),
-        rows,
-        matched_count,
-        returned_count,
-    })
-}
-
-fn knowledge_label_memory_distribution_row_from_query(
-    row: &Row,
-) -> Result<KnowledgeLabelMemoryDistributionRow> {
-    let label_node_id = row
-        .get("label_node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge label memory distribution row is missing label_node_id".to_string(),
-            )
-        })?;
-    let memory_count = row
-        .get("memory_count")
-        .and_then(value_to_non_negative_usize)
-        .ok_or_else(|| {
-            SkeinError::Execution(
-                "knowledge label memory distribution row is missing memory_count".to_string(),
-            )
-        })?;
-    Ok(KnowledgeLabelMemoryDistributionRow {
-        label_id: optional_string_cell(row, "label_id"),
-        label_node_id,
-        label_name: optional_string_cell(row, "label_name"),
-        memory_count,
-    })
-}
-
 fn delete_knowledge_memory_labels_for(
     db: &mut Database,
     request: &KnowledgeMemoryLabelDeleteRequest,
@@ -12929,17 +12862,6 @@ fn node_property_equals_external_id(node: &NodeRecord, key: &str, expected: &str
     node.properties
         .get(key)
         .is_some_and(|value| value_to_external_id(value) == expected)
-}
-
-fn sort_label_memory_distribution_rows(rows: &mut [KnowledgeLabelMemoryDistributionRow]) {
-    rows.sort_by(|left, right| {
-        right
-            .memory_count
-            .cmp(&left.memory_count)
-            .then_with(|| left.label_name.cmp(&right.label_name))
-            .then_with(|| left.label_id.cmp(&right.label_id))
-            .then_with(|| left.label_node_id.cmp(&right.label_node_id))
-    });
 }
 
 fn knowledge_entity_labels_via_query_runtime(
