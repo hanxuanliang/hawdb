@@ -206,6 +206,24 @@ mod tests {
     }
 
     #[test]
+    fn automatic_and_explicit_selection_match_target_capabilities() {
+        let automatic = select_kernel(KernelPreference::Auto).unwrap();
+        let expected = if avx2_available() {
+            ScanKernel::Avx2
+        } else if neon_available() {
+            ScanKernel::Neon
+        } else {
+            ScanKernel::Scalar
+        };
+        assert_eq!(automatic, expected);
+
+        let avx2 = select_kernel(KernelPreference::Avx2);
+        assert_eq!(avx2.is_ok(), avx2_available());
+        let neon = select_kernel(KernelPreference::Neon);
+        assert_eq!(neon.is_ok(), neon_available());
+    }
+
+    #[test]
     fn available_simd_kernels_match_scalar_over_deterministic_corpus() {
         let kernels = [ScanKernel::Avx2, ScanKernel::Neon]
             .into_iter()

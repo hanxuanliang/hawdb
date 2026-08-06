@@ -113,6 +113,12 @@ payload bytes, build amplification, cancellation, mixed-load behavior, and
 reopen/corruption recovery. Until that evidence passes, the capability is
 eligible for shadow or canary use but is not independently production-qualified.
 
+Cross-platform kernel CI MUST execute the deterministic scalar/SIMD corpus
+natively on Linux x86_64, Linux AArch64, macOS AArch64, and Windows x86_64.
+Cross-compiling the AArch64 crate is useful syntax coverage but is insufficient
+because it does not execute NEON selection or scoring. Every target MUST also
+prove that explicit unsupported-kernel requests fail rather than falling back.
+
 The typed production evidence protocol is
 `skein-vector-recall-production-qualification-v1`. It wraps, but does not
 replace, the bounded recall probe. Validation recomputes readiness against the

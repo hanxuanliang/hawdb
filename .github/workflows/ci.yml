@@ -773,12 +773,20 @@ jobs:
         run: cargo test -p skein-runtime-tokio
 
   vector-projection-platform:
-    name: Vector Projection (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    name: Vector Projection (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - target: linux-x86_64
+            runner: ubuntu-24.04
+          - target: linux-aarch64
+            runner: ubuntu-24.04-arm
+          - target: macos-aarch64
+            runner: macos-15
+          - target: windows-x86_64
+            runner: windows-2025
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -801,23 +809,8 @@ jobs:
         run: cargo test -p skein-qualification production_vector
 
       - name: Test upstream differential oracle
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.target == 'linux-x86_64'
         run: cargo test -p skein-qualification production_vector --features turbovec-oracle
-
-  vector-projection-aarch64:
-    name: Vector Projection (Linux AArch64 Compile)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.97.1
-        with:
-          targets: aarch64-unknown-linux-gnu
-
-      - name: Check AArch64 NEON projection
-        run: cargo check -p skein-vector-projection --target aarch64-unknown-linux-gnu
 
   storage-platform:
     name: Storage Platform (${{ matrix.os }})
