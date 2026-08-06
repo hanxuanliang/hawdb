@@ -562,58 +562,14 @@ walk, but projects only caller-allowlisted Thread and relationship properties
 plus stable Memory/Thread/relationship identity and normalized Thread space. It
 preserves missing-Memory rows, supports pinned snapshots, and does not write
 WAL.
-Thread list and source reads are covered by `Database::knowledge_threads` for
-Nowledge bounded Thread page, source lookup, source page, normalized-space
-count/list, favorite metadata page, id/thread-id bulk lookup, and
-message-count ranking shapes. The typed read supports physical `id` and
-logical `thread_id` filters, lookup-key matching, source filters,
-normalized-space filters, metadata substring markers, after-id pagination,
-thread-id presence filtering, offset/limit, id, thread-id, message-count, and
-recent-update ordering, display-title and message-count fallbacks, missing-id
-reporting, and no WAL writes.
-Distinct Thread source listing is covered by
-`Database::knowledge_thread_sources`. The typed read scans Thread nodes,
-filters missing and empty `source` values, returns sorted distinct source
-strings with optional bounded truncation, supports pinned read snapshots, and
-does not write WAL.
-Thread attachment title lookup is covered by
-`Database::knowledge_thread_title`. The typed read resolves exact physical
-`id` or logical `thread_id`, returns the first stable node-id ordered title for
-the Nowledge REST agent attached-source shape, reports total matched Thread
-rows for ambiguity diagnostics, supports pinned read snapshots, and does not
-write WAL.
-Thread source summary lookup is covered by
-`Database::knowledge_thread_source`. The typed read resolves exact physical
-`id` or logical `thread_id`, returns the first stable node-id ordered
-thread-id/title/source/created-at projection for the Nowledge REST export
-source-thread shape, reports total matched Thread rows for ambiguity
-diagnostics, supports pinned read snapshots, and does not write WAL.
-Thread message-render lookup is covered by
-`Database::knowledge_thread_message_lookup`. The typed read applies the
-Nowledge REST FS `id = key OR id STARTS WITH key OR id CONTAINS key` lookup
-against Thread physical ids, keeps the exact source filter, returns the first
-stable node-id ordered id/message-count/raw-space projection, preserves raw
-empty `space_id`, reports total matched Thread rows for ambiguity diagnostics,
-supports pinned read snapshots, and does not write WAL.
-Thread metadata-render lookup is covered by
-`Database::knowledge_thread_meta_lookup`. The typed read applies the same
-Thread physical-id exact/prefix/contains plus exact-source REST FS lookup,
-returns the first stable node-id ordered id/thread-id/title/summary/
-message-count/source/created-at/updated-at/raw-space/project/workspace
-projection, preserves raw empty `space_id`, reports total matched Thread rows
-for ambiguity diagnostics, supports pinned read snapshots, and does not write
-WAL.
-ThreadIdentity exact resolution is covered by
-`Database::knowledge_thread_identity`. The typed read resolves one
-`ThreadIdentity` by external id, returns the Nowledge repo fields
-`thread_node_id`, `thread_id`, normalized/raw space, source, identity node id,
-missing-identity state, supports pinned read snapshots, and does not write WAL.
-Thread sync metadata reads are covered by
-`Database::knowledge_thread_sync_metadata`. The typed read resolves one Thread
-by physical `id`, returns title/source/project/workspace/space strings with
-the same `COALESCE(..., '')` and `COALESCE(space_id, 'default')` fallback
-semantics as the Nowledge repo query, reports missing-Thread state, supports
-pinned read snapshots, and does not write WAL.
+Thread list, distinct-source, attachment, source-summary, render metadata,
+identity, and sync metadata reads use fixed parameterized Cypher through the
+bounded query APIs. Predicates cover physical and logical ids, source, space,
+metadata markers, pagination, and exact/prefix/contains lookup; ordering,
+projection, `COALESCE` behavior, and per-phase `LIMIT` clauses remain visible
+in each statement. Callers use pinned read transactions when several phases
+must observe one snapshot. These business reads intentionally have no
+route-specific typed database API.
 Label lifecycle writes are covered by a typed batch for Nowledge metadata
 updates, canonical-name backfill, and rename/canonical-name updates. The
 wrapper validates Label ids, non-empty names, and non-empty canonical names

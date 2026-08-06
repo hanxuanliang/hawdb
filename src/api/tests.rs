@@ -85,14 +85,10 @@ use super::{
     KnowledgeThreadCompactedMemoryListRequest, KnowledgeThreadCompactedMemoryProjectedListRequest,
     KnowledgeThreadCompactionLinkRequest, KnowledgeThreadDeleteBatchRequest,
     KnowledgeThreadDistillationCandidateRequest, KnowledgeThreadIdentityCascadeDeleteKeys,
-    KnowledgeThreadIdentityDeleteRequest, KnowledgeThreadIdentityRequest, KnowledgeThreadListOrder,
-    KnowledgeThreadListRequest, KnowledgeThreadMessageCountBatchRequest,
+    KnowledgeThreadIdentityDeleteRequest, KnowledgeThreadMessageCountBatchRequest,
     KnowledgeThreadMessageCountUpdate, KnowledgeThreadMessageDeleteRequest,
-    KnowledgeThreadMessageListRequest, KnowledgeThreadMessageLookupRequest,
-    KnowledgeThreadMetaLookupRequest, KnowledgeThreadMetadataBatchRequest,
-    KnowledgeThreadMetadataUpdate, KnowledgeThreadSourceListRequest,
-    KnowledgeThreadSourceLookupRequest, KnowledgeThreadSyncMetadataRequest,
-    KnowledgeThreadTitleLookupRequest, KnowledgeTraversalFallbackReasonCode,
+    KnowledgeThreadMessageListRequest, KnowledgeThreadMetadataBatchRequest,
+    KnowledgeThreadMetadataUpdate, KnowledgeTraversalFallbackReasonCode,
     KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphStatement,
     PlanCacheBypassReason, PlanCacheLookup, QueryOutput, QueryStreamOptions, RecoveryMode,
     SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
@@ -194,6 +190,7 @@ mod statistics;
 mod storage_recovery;
 mod synthesized_source_reads;
 mod system_variables;
+mod thread_metadata_reads;
 mod transaction_control;
 mod transaction_merge;
 
@@ -7883,21 +7880,9 @@ fn deletes_threads_for_nowledge_compensation_delete_shape() {
     assert!(output.rows[4].matched);
 
     for thread_id in ["thread_1", "thread_2"] {
-        assert!(
-            !db.knowledge_thread_sync_metadata(&KnowledgeThreadSyncMetadataRequest {
-                id: thread_id.to_string(),
-            })
-            .unwrap()
-            .found_thread
-        );
+        assert!(!test_thread_exists(&db, thread_id));
     }
-    assert!(
-        db.knowledge_thread_sync_metadata(&KnowledgeThreadSyncMetadataRequest {
-            id: "thread_3".to_string(),
-        })
-        .unwrap()
-        .found_thread
-    );
+    assert!(test_thread_exists(&db, "thread_3"));
     assert_eq!(
         db.query("MATCH (t:Thread)-[r:CONTAINS]->(m:Message) RETURN count(r) AS relationships")
             .unwrap()
@@ -7965,13 +7950,7 @@ fn typed_thread_delete_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         for thread_id in ["thread_1", "thread_2"] {
-            assert!(
-                !db.knowledge_thread_sync_metadata(&KnowledgeThreadSyncMetadataRequest {
-                    id: thread_id.to_string(),
-                })
-                .unwrap()
-                .found_thread
-            );
+            assert!(!test_thread_exists(&db, thread_id));
         }
         assert!(db
             .knowledge_entity(&KnowledgeEntityRequest {
@@ -8015,13 +7994,7 @@ fn deletes_thread_messages_for_nowledge_cleanup_shape() {
     assert!(output.thread_node_id.is_some());
     assert_eq!(output.matched_relationship_count, 3);
     assert_eq!(output.deleted_message_count, 2);
-    assert!(
-        db.knowledge_thread_sync_metadata(&KnowledgeThreadSyncMetadataRequest {
-            id: "thread_1".to_string(),
-        })
-        .unwrap()
-        .found_thread
-    );
+    assert!(test_thread_exists(&db, "thread_1"));
     assert_eq!(
         db.query("MATCH (m:Message) RETURN m.id AS id ORDER BY id")
             .unwrap()
@@ -8106,13 +8079,7 @@ fn typed_thread_message_delete_persists_as_one_wal_batch_and_replays() {
     assert!(wal.contains("delete_node"));
     {
         let mut db = Database::open(&path).unwrap();
-        assert!(
-            db.knowledge_thread_sync_metadata(&KnowledgeThreadSyncMetadataRequest {
-                id: "thread_1".to_string(),
-            })
-            .unwrap()
-            .found_thread
-        );
+        assert!(test_thread_exists(&db, "thread_1"));
         assert_eq!(
             db.query("MATCH (m:Message) RETURN count(m) AS messages")
                 .unwrap()
@@ -9347,726 +9314,6 @@ fn thread_message_read_rejects_empty_thread_id() {
 }
 
 #[test]
-fn lists_threads_for_nowledge_source_page_space_and_lookup_shapes() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Thread {id: 'thread_a', thread_id: 'logical_a', title: 'Alpha Thread', summary: 'Alpha summary', source: 'slack', project: 'graph', workspace: 'local', space_id: '', metadata: 'is_favorite:true', message_count: 5, created_at: 10, updated_at: 30})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_b', thread_id: 'logical_b', title: 'Beta Thread', source: 'slack', space_id: 'archive', message_count: 2, created_at: 20, updated_at: 40})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_c', thread_id: 'logical_c', source: 'email', space_id: 'default', message_count: 9, created_at: 30, import_date: 50})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_d', source: '', space_id: 'default', created_at: 1})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let bulk = db
-        .knowledge_threads(&KnowledgeThreadListRequest {
-            ids: vec![
-                "thread_b".to_string(),
-                "missing".to_string(),
-                "thread_a".to_string(),
-            ],
-            limit: 0,
-            order: KnowledgeThreadListOrder::IdAsc,
-            ..KnowledgeThreadListRequest::default()
-        })
-        .unwrap();
-    assert_eq!(bulk.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(bulk.matched_count, 2);
-    assert_eq!(bulk.returned_count, 2);
-    assert_eq!(bulk.missing_ids, vec!["missing".to_string()]);
-    assert_eq!(bulk.rows[0].id.as_deref(), Some("thread_a"));
-    assert_eq!(bulk.rows[0].thread_id.as_deref(), Some("logical_a"));
-    assert_eq!(bulk.rows[0].display_title, "Alpha Thread");
-    assert_eq!(bulk.rows[0].summary.as_deref(), Some("Alpha summary"));
-    assert_eq!(bulk.rows[0].source.as_deref(), Some("slack"));
-    assert_eq!(bulk.rows[0].project.as_deref(), Some("graph"));
-    assert_eq!(bulk.rows[0].workspace.as_deref(), Some("local"));
-    assert_eq!(bulk.rows[0].raw_space_id, None);
-    assert_eq!(bulk.rows[0].normalized_space_id, "default");
-    assert_eq!(bulk.rows[0].message_count, 5);
-    assert_eq!(
-        bulk.rows[0].metadata,
-        Some(Value::String("is_favorite:true".to_string()))
-    );
-
-    let lookup = db
-        .knowledge_threads(&KnowledgeThreadListRequest {
-            lookup_key: Some("logical_b".to_string()),
-            limit: 1,
-            order: KnowledgeThreadListOrder::IdAsc,
-            ..KnowledgeThreadListRequest::default()
-        })
-        .unwrap();
-    assert_eq!(lookup.matched_count, 1);
-    assert_eq!(lookup.rows[0].id.as_deref(), Some("thread_b"));
-
-    let source_page = db
-        .knowledge_threads(&KnowledgeThreadListRequest {
-            source: Some("slack".to_string()),
-            after_id: Some("thread_a".to_string()),
-            limit: 10,
-            order: KnowledgeThreadListOrder::IdAsc,
-            ..KnowledgeThreadListRequest::default()
-        })
-        .unwrap();
-    assert_eq!(source_page.matched_count, 1);
-    assert_eq!(source_page.rows[0].id.as_deref(), Some("thread_b"));
-
-    let default_space = db
-        .knowledge_threads(&KnowledgeThreadListRequest {
-            normalized_space_id: Some("default".to_string()),
-            require_thread_id: true,
-            limit: 10,
-            order: KnowledgeThreadListOrder::UpdatedAtDesc,
-            ..KnowledgeThreadListRequest::default()
-        })
-        .unwrap();
-    assert_eq!(default_space.matched_count, 2);
-    assert_eq!(
-        default_space
-            .rows
-            .iter()
-            .map(|row| row.thread_id.as_deref().unwrap())
-            .collect::<Vec<_>>(),
-        vec!["logical_c", "logical_a"]
-    );
-
-    let favorite = db
-        .knowledge_threads(&KnowledgeThreadListRequest {
-            metadata_contains: Some("is_favorite".to_string()),
-            limit: 10,
-            order: KnowledgeThreadListOrder::UpdatedAtDesc,
-            ..KnowledgeThreadListRequest::default()
-        })
-        .unwrap();
-    assert_eq!(favorite.matched_count, 1);
-    assert_eq!(favorite.rows[0].thread_id.as_deref(), Some("logical_a"));
-
-    let ranked = db
-        .knowledge_threads(&KnowledgeThreadListRequest {
-            limit: 1,
-            order: KnowledgeThreadListOrder::MessageCountDesc,
-            ..KnowledgeThreadListRequest::default()
-        })
-        .unwrap();
-    assert_eq!(ranked.matched_count, 4);
-    assert_eq!(ranked.rows[0].thread_id.as_deref(), Some("logical_c"));
-
-    let cache_before_lookup = db.plan_cache_stats();
-    let cached_request = KnowledgeThreadListRequest {
-        thread_ids: vec!["logical_a".to_string()],
-        limit: 10,
-        order: KnowledgeThreadListOrder::IdAsc,
-        ..KnowledgeThreadListRequest::default()
-    };
-    db.knowledge_threads(&cached_request).unwrap();
-    db.knowledge_threads(&cached_request).unwrap();
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, cache_before_lookup.entries + 1);
-    assert_eq!(stats.misses, cache_before_lookup.misses + 1);
-    assert_eq!(stats.hits, cache_before_lookup.hits + 1);
-
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-}
-
-#[test]
-fn thread_list_rejects_unbounded_or_empty_filters() {
-    let db = Database::new();
-
-    let unbounded = db
-        .knowledge_threads(&KnowledgeThreadListRequest::default())
-        .unwrap_err();
-    assert!(unbounded.to_string().contains("bounded limit or a filter"));
-
-    let empty_id = db
-        .knowledge_threads(&KnowledgeThreadListRequest {
-            ids: vec![String::new()],
-            limit: 10,
-            ..KnowledgeThreadListRequest::default()
-        })
-        .unwrap_err();
-    assert!(empty_id.to_string().contains("non-empty ids"));
-
-    let empty_thread_id = db
-        .knowledge_threads(&KnowledgeThreadListRequest {
-            thread_ids: vec![String::new()],
-            limit: 10,
-            ..KnowledgeThreadListRequest::default()
-        })
-        .unwrap_err();
-    assert!(empty_thread_id.to_string().contains("non-empty thread ids"));
-
-    let empty_source = db
-        .knowledge_threads(&KnowledgeThreadListRequest {
-            source: Some(String::new()),
-            limit: 10,
-            ..KnowledgeThreadListRequest::default()
-        })
-        .unwrap_err();
-    assert!(empty_source.to_string().contains("non-empty source"));
-}
-
-#[test]
-fn lists_distinct_thread_sources_for_rest_fs_shape() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Thread {id: 'thread_a', source: 'slack'})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_b', source: 'codex'})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_c', source: 'slack'})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_d', source: ''})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_e'})").unwrap();
-    db.query("CREATE (:Memory {id: 'memory_source', source: 'ignored'})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let cache_before_lookup = db.plan_cache_stats();
-
-    let output = db
-        .knowledge_thread_sources(&KnowledgeThreadSourceListRequest { limit: 0 })
-        .unwrap();
-    assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(output.matched_count, 2);
-    assert_eq!(output.returned_count, 2);
-    assert_eq!(
-        output.sources,
-        vec!["codex".to_string(), "slack".to_string()]
-    );
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    let repeated = db
-        .knowledge_thread_sources(&KnowledgeThreadSourceListRequest { limit: 0 })
-        .unwrap();
-    assert_eq!(output, repeated);
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, cache_before_lookup.entries + 1);
-    assert_eq!(stats.misses, cache_before_lookup.misses + 1);
-    assert_eq!(stats.hits, cache_before_lookup.hits + 1);
-
-    let limited = db
-        .knowledge_thread_sources(&KnowledgeThreadSourceListRequest { limit: 1 })
-        .unwrap();
-    assert_eq!(limited.matched_count, 2);
-    assert_eq!(limited.returned_count, 1);
-    assert_eq!(limited.sources, vec!["codex".to_string()]);
-
-    let tx = db.begin_read_transaction();
-    db.query("CREATE (:Thread {id: 'thread_after', source: 'after'})")
-        .unwrap();
-    let snapshot = tx
-        .knowledge_thread_sources(&KnowledgeThreadSourceListRequest { limit: 0 })
-        .unwrap();
-    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(
-        snapshot.sources,
-        vec!["codex".to_string(), "slack".to_string()]
-    );
-}
-
-#[test]
-fn reads_thread_title_for_rest_agent_attachment_shape() {
-    let mut db = Database::new();
-    db.query("CREATE (:Thread {id: 'thread_a', thread_id: 'logical_a', title: 'Alpha Thread'})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_b', thread_id: 'logical_b', title: 'Beta Thread'})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_c', thread_id: 'logical_a', title: 'Later Duplicate'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'logical_a', title: 'Ignored Memory'})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let by_logical = db
-        .knowledge_thread_title(&KnowledgeThreadTitleLookupRequest {
-            id: "logical_a".to_string(),
-        })
-        .unwrap();
-    assert_eq!(by_logical.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(by_logical.id, "logical_a");
-    assert!(by_logical.thread_node_id.is_some());
-    assert!(by_logical.found_thread);
-    assert_eq!(by_logical.title.as_deref(), Some("Alpha Thread"));
-    assert_eq!(by_logical.matched_count, 2);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-
-    let by_physical = db
-        .knowledge_thread_title(&KnowledgeThreadTitleLookupRequest {
-            id: "thread_b".to_string(),
-        })
-        .unwrap();
-    assert_eq!(by_physical.title.as_deref(), Some("Beta Thread"));
-    assert_eq!(by_physical.matched_count, 1);
-
-    let missing = db
-        .knowledge_thread_title(&KnowledgeThreadTitleLookupRequest {
-            id: "missing_thread".to_string(),
-        })
-        .unwrap();
-    assert!(!missing.found_thread);
-    assert_eq!(missing.thread_node_id, None);
-    assert_eq!(missing.title, None);
-    assert_eq!(missing.matched_count, 0);
-
-    let tx = db.begin_read_transaction();
-    db.query("MATCH (t:Thread {id: 'thread_a'}) SET t.title = 'Changed'")
-        .unwrap();
-    let snapshot = tx
-        .knowledge_thread_title(&KnowledgeThreadTitleLookupRequest {
-            id: "logical_a".to_string(),
-        })
-        .unwrap();
-    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot.title.as_deref(), Some("Alpha Thread"));
-}
-
-#[test]
-fn thread_title_read_rejects_empty_id() {
-    let db = Database::new();
-    let error = db
-        .knowledge_thread_title(&KnowledgeThreadTitleLookupRequest { id: String::new() })
-        .unwrap_err();
-    assert!(error.to_string().contains("non-empty thread id"));
-}
-
-#[test]
-fn reads_thread_source_summary_for_rest_export_memory_shape() {
-    let mut db = Database::new();
-    db.query("CREATE (:Thread {id: 'thread_a', thread_id: 'logical_a', title: 'Alpha Thread', source: 'codex', created_at: 10})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_b', thread_id: 'logical_b', title: 'Beta Thread', source: 'slack', created_at: 20})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_c', thread_id: 'logical_a', title: 'Later Duplicate', source: 'email', created_at: 30})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'logical_a', title: 'Ignored Memory', source: 'ignored'})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let by_logical = db
-        .knowledge_thread_source(&KnowledgeThreadSourceLookupRequest {
-            sid: "logical_a".to_string(),
-        })
-        .unwrap();
-    assert_eq!(by_logical.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(by_logical.sid, "logical_a");
-    assert!(by_logical.thread_node_id.is_some());
-    assert!(by_logical.found_thread);
-    assert_eq!(by_logical.thread_id.as_deref(), Some("logical_a"));
-    assert_eq!(by_logical.title.as_deref(), Some("Alpha Thread"));
-    assert_eq!(by_logical.source.as_deref(), Some("codex"));
-    assert_eq!(by_logical.created_at, Some(Value::Int(10)));
-    assert_eq!(by_logical.matched_count, 2);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-
-    let by_physical = db
-        .knowledge_thread_source(&KnowledgeThreadSourceLookupRequest {
-            sid: "thread_b".to_string(),
-        })
-        .unwrap();
-    assert_eq!(by_physical.thread_id.as_deref(), Some("logical_b"));
-    assert_eq!(by_physical.title.as_deref(), Some("Beta Thread"));
-    assert_eq!(by_physical.source.as_deref(), Some("slack"));
-    assert_eq!(by_physical.created_at, Some(Value::Int(20)));
-    assert_eq!(by_physical.matched_count, 1);
-
-    let missing = db
-        .knowledge_thread_source(&KnowledgeThreadSourceLookupRequest {
-            sid: "missing_thread".to_string(),
-        })
-        .unwrap();
-    assert!(!missing.found_thread);
-    assert_eq!(missing.thread_node_id, None);
-    assert_eq!(missing.thread_id, None);
-    assert_eq!(missing.matched_count, 0);
-
-    let tx = db.begin_read_transaction();
-    db.query("MATCH (t:Thread {id: 'thread_a'}) SET t.source = 'changed'")
-        .unwrap();
-    let snapshot = tx
-        .knowledge_thread_source(&KnowledgeThreadSourceLookupRequest {
-            sid: "logical_a".to_string(),
-        })
-        .unwrap();
-    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot.source.as_deref(), Some("codex"));
-}
-
-#[test]
-fn thread_source_read_rejects_empty_sid() {
-    let db = Database::new();
-    let error = db
-        .knowledge_thread_source(&KnowledgeThreadSourceLookupRequest { sid: String::new() })
-        .unwrap_err();
-    assert!(error.to_string().contains("non-empty thread id"));
-}
-
-#[test]
-fn thread_title_and_source_reads_use_query_runtime_plan_cache() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Thread {id: 'thread-cache-a', thread_id: 'logical-cache-a', title: 'Alpha Thread', source: 'codex', created_at: 10})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread-cache-b', thread_id: 'logical-cache-b', title: 'Beta Thread', source: 'slack', created_at: 20})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread-cache-c', thread_id: 'logical-cache-a', title: 'Later Duplicate', source: 'email', created_at: 30})")
-        .unwrap();
-    db.query(
-        "CREATE (:Memory {id: 'logical-cache-a', title: 'Ignored Memory', source: 'ignored'})",
-    )
-    .unwrap();
-    let title_request = KnowledgeThreadTitleLookupRequest {
-        id: "logical-cache-a".to_string(),
-    };
-    let source_request = KnowledgeThreadSourceLookupRequest {
-        sid: "logical-cache-a".to_string(),
-    };
-
-    let first_title = db.knowledge_thread_title(&title_request).unwrap();
-    let first_source = db.knowledge_thread_source(&source_request).unwrap();
-    let second_title = db.knowledge_thread_title(&title_request).unwrap();
-    let second_source = db.knowledge_thread_source(&source_request).unwrap();
-
-    assert_eq!(first_title, second_title);
-    assert_eq!(first_source, second_source);
-    assert!(first_title.found_thread);
-    assert_eq!(first_title.title.as_deref(), Some("Alpha Thread"));
-    assert_eq!(first_title.matched_count, 2);
-    assert!(first_source.found_thread);
-    assert_eq!(first_source.thread_id.as_deref(), Some("logical-cache-a"));
-    assert_eq!(first_source.title.as_deref(), Some("Alpha Thread"));
-    assert_eq!(first_source.source.as_deref(), Some("codex"));
-    assert_eq!(first_source.created_at, Some(Value::Int(10)));
-    assert_eq!(first_source.matched_count, 2);
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, 2);
-    assert_eq!(stats.misses, 2);
-    assert_eq!(stats.hits, 2);
-
-    let by_physical = db
-        .knowledge_thread_title(&KnowledgeThreadTitleLookupRequest {
-            id: "thread-cache-b".to_string(),
-        })
-        .unwrap();
-    assert_eq!(by_physical.title.as_deref(), Some("Beta Thread"));
-    assert_eq!(by_physical.matched_count, 1);
-}
-
-#[test]
-fn reads_thread_message_lookup_for_rest_fs_shape() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Thread {id: 'alpha-thread-1', thread_id: 'logical_a', source: 'codex', message_count: 3, space_id: 'team'})")
-        .unwrap();
-    db.query(
-        "CREATE (:Thread {id: 'beta-thread-1', source: 'codex', message_count: 5, space_id: ''})",
-    )
-    .unwrap();
-    db.query("CREATE (:Thread {id: 'alpha-thread-2', source: 'slack', message_count: 7, space_id: 'other'})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'gamma-thread-1', source: 'codex'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'alpha-thread-1', source: 'codex', message_count: 99})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let cache_before_lookup = db.plan_cache_stats();
-
-    let exact = db
-        .knowledge_thread_message_lookup(&KnowledgeThreadMessageLookupRequest {
-            key: "alpha-thread-1".to_string(),
-            source: "codex".to_string(),
-        })
-        .unwrap();
-    assert_eq!(exact.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(exact.key, "alpha-thread-1");
-    assert_eq!(exact.source_filter, "codex");
-    assert!(exact.thread_node_id.is_some());
-    assert!(exact.found_thread);
-    assert_eq!(exact.id.as_deref(), Some("alpha-thread-1"));
-    assert_eq!(exact.message_count, Some(Value::Int(3)));
-    assert_eq!(exact.raw_space_id.as_deref(), Some("team"));
-    assert_eq!(exact.matched_count, 1);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    let repeated_exact = db
-        .knowledge_thread_message_lookup(&KnowledgeThreadMessageLookupRequest {
-            key: "alpha-thread-1".to_string(),
-            source: "codex".to_string(),
-        })
-        .unwrap();
-    assert_eq!(exact, repeated_exact);
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, cache_before_lookup.entries + 1);
-    assert_eq!(stats.misses, cache_before_lookup.misses + 1);
-    assert_eq!(stats.hits, cache_before_lookup.hits + 1);
-
-    let prefix = db
-        .knowledge_thread_message_lookup(&KnowledgeThreadMessageLookupRequest {
-            key: "beta".to_string(),
-            source: "codex".to_string(),
-        })
-        .unwrap();
-    assert_eq!(prefix.id.as_deref(), Some("beta-thread-1"));
-    assert_eq!(prefix.message_count, Some(Value::Int(5)));
-    assert_eq!(prefix.raw_space_id.as_deref(), Some(""));
-
-    let contains = db
-        .knowledge_thread_message_lookup(&KnowledgeThreadMessageLookupRequest {
-            key: "thread".to_string(),
-            source: "codex".to_string(),
-        })
-        .unwrap();
-    assert_eq!(contains.id.as_deref(), Some("alpha-thread-1"));
-    assert_eq!(contains.matched_count, 3);
-
-    let missing = db
-        .knowledge_thread_message_lookup(&KnowledgeThreadMessageLookupRequest {
-            key: "alpha".to_string(),
-            source: "email".to_string(),
-        })
-        .unwrap();
-    assert!(!missing.found_thread);
-    assert_eq!(missing.thread_node_id, None);
-    assert_eq!(missing.matched_count, 0);
-
-    let tx = db.begin_read_transaction();
-    db.query("MATCH (t:Thread {id: 'alpha-thread-1'}) SET t.message_count = 42")
-        .unwrap();
-    let snapshot = tx
-        .knowledge_thread_message_lookup(&KnowledgeThreadMessageLookupRequest {
-            key: "alpha-thread-1".to_string(),
-            source: "codex".to_string(),
-        })
-        .unwrap();
-    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot.message_count, Some(Value::Int(3)));
-}
-
-#[test]
-fn thread_message_lookup_rejects_empty_filters() {
-    let db = Database::new();
-    let empty_key = db
-        .knowledge_thread_message_lookup(&KnowledgeThreadMessageLookupRequest {
-            key: String::new(),
-            source: "codex".to_string(),
-        })
-        .unwrap_err();
-    assert!(empty_key.to_string().contains("non-empty key"));
-
-    let empty_source = db
-        .knowledge_thread_message_lookup(&KnowledgeThreadMessageLookupRequest {
-            key: "thread".to_string(),
-            source: String::new(),
-        })
-        .unwrap_err();
-    assert!(empty_source.to_string().contains("non-empty source"));
-}
-
-#[test]
-fn reads_thread_meta_lookup_for_rest_fs_shape() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Thread {id: 'alpha-thread-1', thread_id: 'logical_a', title: 'Alpha Thread', summary: 'Alpha Summary', message_count: 3, source: 'codex', created_at: 10, updated_at: 20, space_id: 'team', project: 'graph', workspace: 'local'})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'beta-thread-1', title: 'Beta Thread', message_count: 5, source: 'codex', space_id: '', project: '', workspace: 'remote'})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'alpha-thread-2', title: 'Other Source', source: 'slack', message_count: 7, space_id: 'other'})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'gamma-thread-1', source: 'codex'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'alpha-thread-1', source: 'codex', message_count: 99})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let cache_before_lookup = db.plan_cache_stats();
-
-    let exact = db
-        .knowledge_thread_meta_lookup(&KnowledgeThreadMetaLookupRequest {
-            key: "alpha-thread-1".to_string(),
-            source: "codex".to_string(),
-        })
-        .unwrap();
-    assert_eq!(exact.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(exact.key, "alpha-thread-1");
-    assert_eq!(exact.source_filter, "codex");
-    assert!(exact.thread_node_id.is_some());
-    assert!(exact.found_thread);
-    assert_eq!(exact.id.as_deref(), Some("alpha-thread-1"));
-    assert_eq!(exact.thread_id.as_deref(), Some("logical_a"));
-    assert_eq!(exact.title.as_deref(), Some("Alpha Thread"));
-    assert_eq!(exact.summary.as_deref(), Some("Alpha Summary"));
-    assert_eq!(exact.message_count, Some(Value::Int(3)));
-    assert_eq!(exact.source.as_deref(), Some("codex"));
-    assert_eq!(exact.created_at, Some(Value::Int(10)));
-    assert_eq!(exact.updated_at, Some(Value::Int(20)));
-    assert_eq!(exact.raw_space_id.as_deref(), Some("team"));
-    assert_eq!(exact.project.as_deref(), Some("graph"));
-    assert_eq!(exact.workspace.as_deref(), Some("local"));
-    assert_eq!(exact.matched_count, 1);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    let repeated_exact = db
-        .knowledge_thread_meta_lookup(&KnowledgeThreadMetaLookupRequest {
-            key: "alpha-thread-1".to_string(),
-            source: "codex".to_string(),
-        })
-        .unwrap();
-    assert_eq!(exact, repeated_exact);
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, cache_before_lookup.entries + 1);
-    assert_eq!(stats.misses, cache_before_lookup.misses + 1);
-    assert_eq!(stats.hits, cache_before_lookup.hits + 1);
-
-    let prefix = db
-        .knowledge_thread_meta_lookup(&KnowledgeThreadMetaLookupRequest {
-            key: "beta".to_string(),
-            source: "codex".to_string(),
-        })
-        .unwrap();
-    assert_eq!(prefix.id.as_deref(), Some("beta-thread-1"));
-    assert_eq!(prefix.raw_space_id.as_deref(), Some(""));
-    assert_eq!(prefix.project, None);
-    assert_eq!(prefix.workspace.as_deref(), Some("remote"));
-
-    let contains = db
-        .knowledge_thread_meta_lookup(&KnowledgeThreadMetaLookupRequest {
-            key: "thread".to_string(),
-            source: "codex".to_string(),
-        })
-        .unwrap();
-    assert_eq!(contains.id.as_deref(), Some("alpha-thread-1"));
-    assert_eq!(contains.matched_count, 3);
-
-    let missing = db
-        .knowledge_thread_meta_lookup(&KnowledgeThreadMetaLookupRequest {
-            key: "alpha".to_string(),
-            source: "email".to_string(),
-        })
-        .unwrap();
-    assert!(!missing.found_thread);
-    assert_eq!(missing.thread_node_id, None);
-    assert_eq!(missing.matched_count, 0);
-
-    let tx = db.begin_read_transaction();
-    db.query("MATCH (t:Thread {id: 'alpha-thread-1'}) SET t.summary = 'Changed'")
-        .unwrap();
-    let snapshot = tx
-        .knowledge_thread_meta_lookup(&KnowledgeThreadMetaLookupRequest {
-            key: "alpha-thread-1".to_string(),
-            source: "codex".to_string(),
-        })
-        .unwrap();
-    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot.summary.as_deref(), Some("Alpha Summary"));
-}
-
-#[test]
-fn thread_meta_lookup_rejects_empty_filters() {
-    let db = Database::new();
-    let empty_key = db
-        .knowledge_thread_meta_lookup(&KnowledgeThreadMetaLookupRequest {
-            key: String::new(),
-            source: "codex".to_string(),
-        })
-        .unwrap_err();
-    assert!(empty_key.to_string().contains("non-empty key"));
-
-    let empty_source = db
-        .knowledge_thread_meta_lookup(&KnowledgeThreadMetaLookupRequest {
-            key: "thread".to_string(),
-            source: String::new(),
-        })
-        .unwrap_err();
-    assert!(empty_source.to_string().contains("non-empty source"));
-}
-
-#[test]
-fn resolves_thread_identity_for_nowledge_repo_shape() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:ThreadIdentity {id: 'identity_public', thread_node_id: 'thread_uuid', thread_id: 'logical_a', space_id: '', source: 'codex'})")
-        .unwrap();
-    db.query("CREATE (:ThreadIdentity {id: 'identity_other', thread_node_id: 'other_uuid', thread_id: 'logical_b', space_id: 'team', source: 'slack'})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let cache_before_lookup = db.plan_cache_stats();
-
-    let output = db
-        .knowledge_thread_identity(&KnowledgeThreadIdentityRequest {
-            identity_key: "identity_public".to_string(),
-        })
-        .unwrap();
-    assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(output.identity_key, "identity_public");
-    assert!(output.identity_node_id.is_some());
-    assert!(output.found_identity);
-    assert_eq!(output.thread_node_id.as_deref(), Some("thread_uuid"));
-    assert_eq!(output.thread_id.as_deref(), Some("logical_a"));
-    assert_eq!(output.raw_space_id, None);
-    assert_eq!(output.normalized_space_id.as_deref(), Some("default"));
-    assert_eq!(output.source.as_deref(), Some("codex"));
-    let repeated = db
-        .knowledge_thread_identity(&KnowledgeThreadIdentityRequest {
-            identity_key: "identity_public".to_string(),
-        })
-        .unwrap();
-    assert_eq!(output, repeated);
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, cache_before_lookup.entries + 1);
-    assert_eq!(stats.misses, cache_before_lookup.misses + 1);
-    assert_eq!(stats.hits, cache_before_lookup.hits + 1);
-
-    let missing = db
-        .knowledge_thread_identity(&KnowledgeThreadIdentityRequest {
-            identity_key: "missing_identity".to_string(),
-        })
-        .unwrap();
-    assert_eq!(missing.graph_commit_epoch, graph_commit_epoch);
-    assert!(!missing.found_identity);
-    assert_eq!(missing.identity_node_id, None);
-    assert_eq!(missing.thread_node_id, None);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-
-    let tx = db.begin_read_transaction();
-    db.query("MATCH (ti:ThreadIdentity {id: 'identity_public'}) SET ti.source = 'changed'")
-        .unwrap();
-    let snapshot = tx
-        .knowledge_thread_identity(&KnowledgeThreadIdentityRequest {
-            identity_key: "identity_public".to_string(),
-        })
-        .unwrap();
-    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot.source.as_deref(), Some("codex"));
-}
-
-#[test]
-fn thread_identity_read_rejects_empty_key() {
-    let db = Database::new();
-    let error = db
-        .knowledge_thread_identity(&KnowledgeThreadIdentityRequest {
-            identity_key: String::new(),
-        })
-        .unwrap_err();
-    assert!(error.to_string().contains("non-empty identity key"));
-}
-
-#[test]
 fn deletes_thread_identities_for_nowledge_compensation_and_cascade_shapes() {
     let mut db = Database::new();
     db.query("CREATE (:ThreadIdentity {id: 'identity_compensation', thread_node_id: 'thread_a', thread_id: 'logical_a'})")
@@ -10130,21 +9377,9 @@ fn deletes_thread_identities_for_nowledge_compensation_and_cascade_shapes() {
         "identity_by_node",
         "identity_duplicate",
     ] {
-        assert!(
-            !db.knowledge_thread_identity(&KnowledgeThreadIdentityRequest {
-                identity_key: identity_key.to_string(),
-            })
-            .unwrap()
-            .found_identity
-        );
+        assert!(!test_thread_identity_exists(&db, identity_key));
     }
-    assert!(
-        db.knowledge_thread_identity(&KnowledgeThreadIdentityRequest {
-            identity_key: "identity_survivor".to_string(),
-        })
-        .unwrap()
-        .found_identity
-    );
+    assert!(test_thread_identity_exists(&db, "identity_survivor"));
 
     let missing = db
         .delete_knowledge_thread_identities(&KnowledgeThreadIdentityDeleteRequest {
@@ -10238,97 +9473,10 @@ fn typed_thread_identity_delete_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         for identity_key in ["identity_public", "identity_by_node"] {
-            assert!(
-                !db.knowledge_thread_identity(&KnowledgeThreadIdentityRequest {
-                    identity_key: identity_key.to_string(),
-                })
-                .unwrap()
-                .found_identity
-            );
+            assert!(!test_thread_identity_exists(&db, identity_key));
         }
     }
     std::fs::remove_dir_all(path).unwrap();
-}
-
-#[test]
-fn reads_thread_sync_metadata_for_nowledge_repo_shape() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Thread {id: 'thread_a', title: 'Alpha', source: 'codex', project: 'graph', workspace: 'local', space_id: ''})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_b'})").unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let cache_before_lookup = db.plan_cache_stats();
-
-    let output = db
-        .knowledge_thread_sync_metadata(&KnowledgeThreadSyncMetadataRequest {
-            id: "thread_a".to_string(),
-        })
-        .unwrap();
-    assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(output.id, "thread_a");
-    assert!(output.thread_node_id.is_some());
-    assert!(output.found_thread);
-    assert_eq!(output.title, "Alpha");
-    assert_eq!(output.source, "codex");
-    assert_eq!(output.project, "graph");
-    assert_eq!(output.workspace, "local");
-    assert_eq!(output.space_id, "");
-    let repeated = db
-        .knowledge_thread_sync_metadata(&KnowledgeThreadSyncMetadataRequest {
-            id: "thread_a".to_string(),
-        })
-        .unwrap();
-    assert_eq!(output, repeated);
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, cache_before_lookup.entries + 1);
-    assert_eq!(stats.misses, cache_before_lookup.misses + 1);
-    assert_eq!(stats.hits, cache_before_lookup.hits + 1);
-
-    let defaults = db
-        .knowledge_thread_sync_metadata(&KnowledgeThreadSyncMetadataRequest {
-            id: "thread_b".to_string(),
-        })
-        .unwrap();
-    assert!(defaults.found_thread);
-    assert_eq!(defaults.title, "");
-    assert_eq!(defaults.source, "");
-    assert_eq!(defaults.project, "");
-    assert_eq!(defaults.workspace, "");
-    assert_eq!(defaults.space_id, "default");
-
-    let missing = db
-        .knowledge_thread_sync_metadata(&KnowledgeThreadSyncMetadataRequest {
-            id: "missing_thread".to_string(),
-        })
-        .unwrap();
-    assert!(!missing.found_thread);
-    assert_eq!(missing.thread_node_id, None);
-    assert_eq!(missing.space_id, "default");
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-
-    let tx = db.begin_read_transaction();
-    db.query("MATCH (t:Thread {id: 'thread_a'}) SET t.title = 'Changed'")
-        .unwrap();
-    let snapshot = tx
-        .knowledge_thread_sync_metadata(&KnowledgeThreadSyncMetadataRequest {
-            id: "thread_a".to_string(),
-        })
-        .unwrap();
-    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot.title, "Alpha");
-}
-
-#[test]
-fn thread_sync_metadata_read_rejects_empty_thread_id() {
-    let db = Database::new();
-    let error = db
-        .knowledge_thread_sync_metadata(&KnowledgeThreadSyncMetadataRequest { id: String::new() })
-        .unwrap_err();
-    assert!(error.to_string().contains("non-empty thread id"));
 }
 
 #[test]
@@ -11991,6 +11139,36 @@ fn label_read_requests_validate_non_empty_filters() {
     assert!(external_ids_error
         .to_string()
         .contains("non-empty external ids"));
+}
+
+fn test_thread_exists(db: &Database, thread_id: &str) -> bool {
+    let parameters = BTreeMap::from([(
+        "thread_id".to_string(),
+        Value::String(thread_id.to_string()),
+    )]);
+    !db.query_read_only_with_params_bounded(
+        "MATCH (t:Thread {id: $thread_id}) RETURN id(t) AS node_id LIMIT 1",
+        &parameters,
+        Some(1),
+    )
+    .unwrap()
+    .rows
+    .is_empty()
+}
+
+fn test_thread_identity_exists(db: &Database, identity_key: &str) -> bool {
+    let parameters = BTreeMap::from([(
+        "identity_key".to_string(),
+        Value::String(identity_key.to_string()),
+    )]);
+    !db.query_read_only_with_params_bounded(
+        "MATCH (ti:ThreadIdentity {id: $identity_key}) RETURN id(ti) AS node_id LIMIT 1",
+        &parameters,
+        Some(1),
+    )
+    .unwrap()
+    .rows
+    .is_empty()
 }
 
 fn unique_test_dir(name: &str) -> std::path::PathBuf {

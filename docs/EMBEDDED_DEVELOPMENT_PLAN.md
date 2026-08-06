@@ -218,24 +218,14 @@ Message and Memory endpoint nodes. Thread metadata updates are exposed as a
 typed batch for Nowledge `metadata` writes with optional `updated_at`
 stamping. Thread denormalized message-count refreshes are exposed as a typed
 batch for Nowledge `message_count` writes with optional timestamp stamping and
-preserve-newer `updated_at` behavior. ThreadIdentity exact-id resolution is exposed as a typed
-`knowledge_thread_identity` API for Nowledge legacy identity lookup without
-WAL writes. ThreadIdentity compensation and cascade cleanup are exposed as a
-typed `delete_knowledge_thread_identities` API for exact identity-key deletes
-and the Nowledge `public_thread_id`/`input_thread_id`/`thread_uuid` cascade
-shape. Thread sync metadata reads are exposed as a typed
-`knowledge_thread_sync_metadata` API for exact physical Thread ids and
-Cypher-compatible `COALESCE` fallbacks without WAL writes. Distinct Thread
-source listing is exposed as a typed `knowledge_thread_sources` API for REST FS
-source directories without WAL writes. Thread attachment title lookup is
-exposed as a typed `knowledge_thread_title` API for exact physical/logical
-Thread ids without WAL writes. Thread source summary lookup is exposed as a
-typed `knowledge_thread_source` API for exact physical/logical Thread ids
-without WAL writes. Thread message-render lookup is exposed as a typed
-`knowledge_thread_message_lookup` API for REST FS id lookup plus source filters
-without WAL writes. Thread metadata-render lookup is exposed as a typed
-`knowledge_thread_meta_lookup` API for REST FS id lookup plus source filters
-without WAL writes. Thread distilled-memory links are exposed as a typed
+preserve-newer `updated_at` behavior. Thread list, source, attachment,
+render-metadata, ThreadIdentity, and sync-metadata reads use fixed parameterized
+Cypher with explicit row and payload budgets; pinned read transactions provide
+snapshot consistency for multi-phase host workflows. ThreadIdentity
+compensation and cascade cleanup are exposed as a typed
+`delete_knowledge_thread_identities` API for exact identity-key deletes and the
+Nowledge `public_thread_id`/`input_thread_id`/`thread_uuid` cascade shape.
+Thread distilled-memory links are exposed as a typed
 `create_knowledge_thread_compaction_link` API for the Nowledge
 `(:Thread)-[:COMPACTS_TO]->(:Memory)` write shape with compaction metadata.
 Thread-owned Message cleanup is exposed as a typed `delete_knowledge_thread_messages`
@@ -647,11 +637,11 @@ Thread ordered message reads are available as
 `Database::knowledge_thread_messages`, covering Nowledge `Thread` outgoing
 `CONTAINS` transcript/list shapes with `COALESCE(c.order_index, m.order_index)`
 ordering and no WAL writes.
-Bounded Thread list and source reads are available as
-`Database::knowledge_threads`, covering Nowledge Thread page, source lookup,
-source page, normalized-space count/list, favorite metadata, id/thread-id bulk
-lookup, and message-count ranking shapes with explicit filters, ordering,
-missing-id reporting, display-title fallbacks, and no WAL writes.
+Bounded Thread list and source reads use fixed parameterized Cypher covering
+Thread page, source lookup, normalized-space filtering, favorite metadata,
+id/thread-id bulk lookup, and message-count ranking shapes. The statement owns
+filters, ordering, projection, and limits; host code owns response shaping and
+cross-statement budgets.
 Thread compacted-memory reads are available as
 `Database::knowledge_thread_compacted_memories`, covering Nowledge `COMPACTS_TO`
 count/id-list/summary/full-row read shapes by physical `id` or logical
