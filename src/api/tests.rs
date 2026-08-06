@@ -28,9 +28,9 @@ use super::{
     KnowledgeInducedEdgeListRequest, KnowledgeLabelBackfillScanRequest,
     KnowledgeLabelCanonicalLookupRequest, KnowledgeLabelLifecycleBatchRequest,
     KnowledgeLabelLifecycleUpdate, KnowledgeLabelMemoryDistributionRequest,
-    KnowledgeLabelMemoryTransferRequest, KnowledgeLabelRegexMemoryConnectionsRequest,
-    KnowledgeLabelUsageListRequest, KnowledgeLabelUsageRequest, KnowledgeMemoryAccessBatchRequest,
-    KnowledgeMemoryAccessTouch, KnowledgeMemoryContentBatchRequest, KnowledgeMemoryContentUpdate,
+    KnowledgeLabelMemoryTransferRequest, KnowledgeLabelUsageListRequest,
+    KnowledgeLabelUsageRequest, KnowledgeMemoryAccessBatchRequest, KnowledgeMemoryAccessTouch,
+    KnowledgeMemoryContentBatchRequest, KnowledgeMemoryContentUpdate,
     KnowledgeMemoryDecayRefreshBatchRequest, KnowledgeMemoryDecayRefreshUpdate,
     KnowledgeMemoryDedupReviewedBatchRequest, KnowledgeMemoryEvolvesCreate,
     KnowledgeMemoryEvolvesCreateBatchRequest, KnowledgeMemoryLabelDeleteRequest,
@@ -123,6 +123,7 @@ mod knowledge_entity_batch_deletes;
 mod knowledge_entity_deletes;
 mod knowledge_entity_mention_counts;
 mod knowledge_entity_reads;
+mod knowledge_label_regex_memory_connections;
 mod knowledge_memory_cleanup_fingerprints;
 mod knowledge_memory_crystal_synthesis_counts;
 mod knowledge_memory_decay_detail;
@@ -8166,160 +8167,6 @@ fn reads_label_memory_distribution_for_nowledge_label_stats_shapes() {
         repeated_stats.hits + repeated_stats.misses,
         stats.hits + stats.misses + 1
     );
-}
-
-#[test]
-fn reads_label_regex_memory_connections_for_nowledge_label_stats_shapes() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Memory {id: 'memory_alpha', title: 'Alpha Memory', importance: 0.9})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'memory_beta', title: 'Beta Memory', importance: 0.8})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'memory_gamma', title: 'Gamma Memory', importance: 0.7})")
-        .unwrap();
-    db.query("CREATE (:Source {id: 'source_alpha', title: 'Not a memory'})")
-        .unwrap();
-    db.query("CREATE (:Label {id: 'label_alpha', name: 'regex-alpha'})")
-        .unwrap();
-    db.query("CREATE (:Label {id: 'label_beta', name: 'regex-beta'})")
-        .unwrap();
-    db.query("CREATE (:Label {id: 'label_gamma', name: 'regex-gamma'})")
-        .unwrap();
-    db.query("MATCH (m:Memory {id: 'memory_alpha'}), (l:Label {id: 'label_alpha'}) CREATE (m)-[:HAS_LABEL {source: 'first'}]->(l)")
-        .unwrap();
-    db.query("MATCH (m:Memory {id: 'memory_alpha'}), (l:Label {id: 'label_alpha'}) CREATE (m)-[:HAS_LABEL {source: 'duplicate'}]->(l)")
-        .unwrap();
-    db.query("MATCH (m:Memory {id: 'memory_beta'}), (l:Label {id: 'label_beta'}) CREATE (m)-[:HAS_LABEL]->(l)")
-        .unwrap();
-    db.query("MATCH (m:Memory {id: 'memory_gamma'}), (l:Label {id: 'label_gamma'}) CREATE (m)-[:HAS_LABEL]->(l)")
-        .unwrap();
-    db.query("MATCH (s:Source {id: 'source_alpha'}), (l:Label {id: 'label_alpha'}) CREATE (s)-[:HAS_LABEL]->(l)")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let output = db
-        .knowledge_label_regex_memory_connections(&KnowledgeLabelRegexMemoryConnectionsRequest {
-            label_name_pattern: "^regex-(alpha|beta)$".to_string(),
-            memory_property_names: vec!["title".to_string(), "importance".to_string()],
-            offset: 0,
-            limit: 10,
-        })
-        .unwrap();
-
-    assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(output.matched_count, 2);
-    assert_eq!(output.returned_count, 2);
-    assert_eq!(output.rows[0].memory_id.as_deref(), Some("memory_alpha"));
-    assert_eq!(output.rows[0].label_id.as_deref(), Some("label_alpha"));
-    assert_eq!(output.rows[0].label_name.as_deref(), Some("regex-alpha"));
-    assert_eq!(output.rows[0].label_connections, 2);
-    assert_eq!(
-        output.rows[0].memory_properties.get("title"),
-        Some(&Value::String("Alpha Memory".to_string()))
-    );
-    assert_eq!(
-        output.rows[0].memory_properties.get("importance"),
-        Some(&Value::Float(0.9))
-    );
-    assert_eq!(output.rows[1].memory_id.as_deref(), Some("memory_beta"));
-    assert_eq!(output.rows[1].label_connections, 1);
-
-    let page = db
-        .knowledge_label_regex_memory_connections(&KnowledgeLabelRegexMemoryConnectionsRequest {
-            label_name_pattern: "^regex-(alpha|beta)$".to_string(),
-            memory_property_names: vec!["title".to_string()],
-            offset: 1,
-            limit: 1,
-        })
-        .unwrap();
-    assert_eq!(page.matched_count, 2);
-    assert_eq!(page.returned_count, 1);
-    assert_eq!(page.rows[0].memory_id.as_deref(), Some("memory_beta"));
-
-    let stats = db.plan_cache_stats();
-    let repeated_page = db
-        .knowledge_label_regex_memory_connections(&KnowledgeLabelRegexMemoryConnectionsRequest {
-            label_name_pattern: "^regex-(alpha|beta)$".to_string(),
-            memory_property_names: vec!["title".to_string()],
-            offset: 1,
-            limit: 1,
-        })
-        .unwrap();
-    assert_eq!(repeated_page, page);
-    let repeated_stats = db.plan_cache_stats();
-    assert_eq!(
-        repeated_stats.entries, stats.entries,
-        "{stats:?} {repeated_stats:?}"
-    );
-    assert_eq!(
-        repeated_stats.misses, stats.misses,
-        "{stats:?} {repeated_stats:?}"
-    );
-    assert_eq!(
-        repeated_stats.hits,
-        stats.hits + 2,
-        "{stats:?} {repeated_stats:?}"
-    );
-}
-
-#[test]
-fn label_regex_memory_connections_support_snapshots_and_validate_requests() {
-    let mut db = Database::new();
-    db.query("CREATE (:Memory {id: 'snapshot_memory', title: 'Before'})")
-        .unwrap();
-    db.query("CREATE (:Label {id: 'snapshot_label', name: 'regex-snapshot'})")
-        .unwrap();
-    db.query("MATCH (m:Memory {id: 'snapshot_memory'}), (l:Label {id: 'snapshot_label'}) CREATE (m)-[:HAS_LABEL]->(l)")
-        .unwrap();
-    let read_tx = db.begin_read_transaction();
-    db.query("CREATE (:Memory {id: 'live_memory', title: 'After'})")
-        .unwrap();
-    db.query("MATCH (m:Memory {id: 'live_memory'}), (l:Label {id: 'snapshot_label'}) CREATE (m)-[:HAS_LABEL]->(l)")
-        .unwrap();
-
-    let snapshot = read_tx
-        .knowledge_label_regex_memory_connections(&KnowledgeLabelRegexMemoryConnectionsRequest {
-            label_name_pattern: "^regex-snapshot$".to_string(),
-            memory_property_names: vec!["title".to_string()],
-            offset: 0,
-            limit: 0,
-        })
-        .unwrap();
-    assert_eq!(snapshot.graph_commit_epoch, 3);
-    assert_eq!(snapshot.matched_count, 1);
-    assert_eq!(
-        snapshot.rows[0].memory_id.as_deref(),
-        Some("snapshot_memory")
-    );
-
-    let invalid_pattern =
-        db.knowledge_label_regex_memory_connections(&KnowledgeLabelRegexMemoryConnectionsRequest {
-            label_name_pattern: "(".to_string(),
-            memory_property_names: Vec::new(),
-            offset: 0,
-            limit: 10,
-        });
-    assert!(invalid_pattern
-        .unwrap_err()
-        .to_string()
-        .contains("invalid regex pattern"));
-
-    let empty_property =
-        db.knowledge_label_regex_memory_connections(&KnowledgeLabelRegexMemoryConnectionsRequest {
-            label_name_pattern: "^regex-snapshot$".to_string(),
-            memory_property_names: vec![String::new()],
-            offset: 0,
-            limit: 10,
-        });
-    assert!(empty_property
-        .unwrap_err()
-        .to_string()
-        .contains("non-empty memory property names"));
 }
 
 #[test]

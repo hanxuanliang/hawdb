@@ -42,7 +42,6 @@ pub mod store;
 pub mod telemetry;
 pub mod workload_fixtures;
 
-mod regex_cache;
 pub mod search_projection_evidence;
 
 pub mod error {

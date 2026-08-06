@@ -1595,7 +1595,6 @@ dependencies = [
  "chrono",
  "jieba-rs",
  "loom",
- "regex",
  "serde",
  "serde_json",
  "simsimd",
