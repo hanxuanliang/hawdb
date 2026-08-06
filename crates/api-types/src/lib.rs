@@ -44,36 +44,6 @@ pub struct KnowledgeMemoryDecayRefreshBatchOutput {
     pub updated_property_count: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryEvolvesNeighborRequest {
-    pub memory_id: String,
-    pub direction: KnowledgeNeighborDirection,
-    pub neighbor_property_names: Vec<String>,
-    pub relationship_property_names: Vec<String>,
-    pub limit: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryEvolvesNeighborRow {
-    pub anchor_memory_id: String,
-    pub anchor_node_id: u64,
-    pub neighbor_memory_id: Option<String>,
-    pub neighbor_node_id: u64,
-    pub neighbor_properties: BTreeMap<String, Value>,
-    pub relationship_id: u64,
-    pub relationship_properties: BTreeMap<String, Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryEvolvesNeighborOutput {
-    pub graph_commit_epoch: u64,
-    pub anchor_found: bool,
-    pub anchor_node_id: Option<u64>,
-    pub rows: Vec<KnowledgeMemoryEvolvesNeighborRow>,
-    pub matched_relationship_count: usize,
-    pub returned_count: usize,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum KnowledgeMemoryEvolvesProjectedSuccessorOrder {
     #[default]

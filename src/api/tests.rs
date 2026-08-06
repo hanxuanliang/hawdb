@@ -33,8 +33,8 @@ use super::{
     KnowledgeMemoryAccessTouch, KnowledgeMemoryContentBatchRequest, KnowledgeMemoryContentUpdate,
     KnowledgeMemoryDecayRefreshBatchRequest, KnowledgeMemoryDecayRefreshUpdate,
     KnowledgeMemoryDedupReviewedBatchRequest, KnowledgeMemoryEvolvesCreate,
-    KnowledgeMemoryEvolvesCreateBatchRequest, KnowledgeMemoryEvolvesNeighborRequest,
-    KnowledgeMemoryEvolvesProjectedSuccessorCursor, KnowledgeMemoryEvolvesProjectedSuccessorOrder,
+    KnowledgeMemoryEvolvesCreateBatchRequest, KnowledgeMemoryEvolvesProjectedSuccessorCursor,
+    KnowledgeMemoryEvolvesProjectedSuccessorOrder,
     KnowledgeMemoryEvolvesProjectedSuccessorPageCursor,
     KnowledgeMemoryEvolvesProjectedSuccessorRequest, KnowledgeMemoryLabelDeleteRequest,
     KnowledgeMemoryLabelTransferRequest, KnowledgeMemoryLatestBatchRequest,
@@ -132,6 +132,7 @@ mod knowledge_memory_crystal_synthesis_counts;
 mod knowledge_memory_decay_detail;
 mod knowledge_memory_entities;
 mod knowledge_memory_evolves_latest;
+mod knowledge_memory_evolves_neighbors;
 mod knowledge_memory_evolves_relation_counts;
 mod knowledge_memory_lists;
 mod knowledge_memory_metadata_related;
@@ -319,177 +320,6 @@ fn returns_relationship_endpoint_properties() {
         output.rows[0].get("e2.id"),
         Some(&Value::String("right".to_string()))
     );
-}
-
-#[test]
-fn reads_memory_evolves_neighbors_for_mcp_shapes_with_projected_fields() {
-    let mut db = Database::new();
-    db.query("CREATE (:Memory {id: 'mcp-evolves-source', title: 'MCP Evolves Source', is_latest: false})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'mcp-evolves-target', title: 'MCP Evolves Target', is_latest: true, extra_status: 'ready'})")
-        .unwrap();
-    db.query(
-        "CREATE (:Memory {id: 'mcp-evolves-other', title: 'MCP Evolves Other', is_latest: true})",
-    )
-    .unwrap();
-    db.query("CREATE (:Source {id: 'mcp-evolves-non-memory'})")
-        .unwrap();
-    db.query("MATCH (a:Memory {id: 'mcp-evolves-source'}), (b:Memory {id: 'mcp-evolves-target'}) CREATE (a)-[:EVOLVES {content_relation: 'supersedes', confidence: 0.82, reviewed: true, reason: 'better evidence'}]->(b)")
-        .unwrap();
-    db.query("MATCH (a:Memory {id: 'mcp-evolves-other'}), (b:Memory {id: 'mcp-evolves-target'}) CREATE (a)-[:EVOLVES {content_relation: 'confirms', confidence: 0.64, reviewed: false}]->(b)")
-        .unwrap();
-    db.query("MATCH (a:Memory {id: 'mcp-evolves-source'}), (s:Source {id: 'mcp-evolves-non-memory'}) CREATE (a)-[:EVOLVES {content_relation: 'ignored'}]->(s)")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let outgoing = db
-        .knowledge_memory_evolves_neighbors(&KnowledgeMemoryEvolvesNeighborRequest {
-            memory_id: "mcp-evolves-source".to_string(),
-            direction: KnowledgeNeighborDirection::Outgoing,
-            neighbor_property_names: vec![
-                "title".to_string(),
-                "is_latest".to_string(),
-                "extra_status".to_string(),
-                "title".to_string(),
-            ],
-            relationship_property_names: vec![
-                "content_relation".to_string(),
-                "confidence".to_string(),
-                "reviewed".to_string(),
-                "reason".to_string(),
-            ],
-            limit: 0,
-        })
-        .unwrap();
-
-    assert_eq!(outgoing.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert!(outgoing.anchor_found);
-    assert_eq!(outgoing.matched_relationship_count, 1);
-    assert_eq!(outgoing.returned_count, 1);
-    assert_eq!(
-        outgoing.rows[0].neighbor_memory_id.as_deref(),
-        Some("mcp-evolves-target")
-    );
-    assert_eq!(
-        outgoing.rows[0].neighbor_properties.get("title"),
-        Some(&Value::String("MCP Evolves Target".to_string()))
-    );
-    assert_eq!(
-        outgoing.rows[0].neighbor_properties.get("is_latest"),
-        Some(&Value::Bool(true))
-    );
-    assert_eq!(
-        outgoing.rows[0].neighbor_properties.get("extra_status"),
-        Some(&Value::String("ready".to_string()))
-    );
-    assert_eq!(
-        outgoing.rows[0]
-            .relationship_properties
-            .get("content_relation"),
-        Some(&Value::String("supersedes".to_string()))
-    );
-    assert_eq!(
-        outgoing.rows[0].relationship_properties.get("confidence"),
-        Some(&Value::Float(0.82))
-    );
-    assert_eq!(
-        outgoing.rows[0].relationship_properties.get("reviewed"),
-        Some(&Value::Bool(true))
-    );
-    assert_eq!(
-        outgoing.rows[0].relationship_properties.get("reason"),
-        Some(&Value::String("better evidence".to_string()))
-    );
-
-    let cached_outgoing = db
-        .knowledge_memory_evolves_neighbors(&KnowledgeMemoryEvolvesNeighborRequest {
-            memory_id: "mcp-evolves-source".to_string(),
-            direction: KnowledgeNeighborDirection::Outgoing,
-            neighbor_property_names: vec![
-                "title".to_string(),
-                "is_latest".to_string(),
-                "extra_status".to_string(),
-                "title".to_string(),
-            ],
-            relationship_property_names: vec![
-                "content_relation".to_string(),
-                "confidence".to_string(),
-                "reviewed".to_string(),
-                "reason".to_string(),
-            ],
-            limit: 0,
-        })
-        .unwrap();
-    assert_eq!(cached_outgoing, outgoing);
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.misses, 2);
-    assert_eq!(stats.hits, 2);
-
-    let incoming = db
-        .knowledge_memory_evolves_neighbors(&KnowledgeMemoryEvolvesNeighborRequest {
-            memory_id: "mcp-evolves-target".to_string(),
-            direction: KnowledgeNeighborDirection::Incoming,
-            neighbor_property_names: vec!["title".to_string(), "is_latest".to_string()],
-            relationship_property_names: vec![
-                "content_relation".to_string(),
-                "confidence".to_string(),
-                "reviewed".to_string(),
-            ],
-            limit: 1,
-        })
-        .unwrap();
-    assert_eq!(incoming.matched_relationship_count, 2);
-    assert_eq!(incoming.returned_count, 1);
-    assert_eq!(
-        incoming.rows[0].neighbor_memory_id.as_deref(),
-        Some("mcp-evolves-other")
-    );
-    assert_eq!(
-        incoming.rows[0].neighbor_properties.get("title"),
-        Some(&Value::String("MCP Evolves Other".to_string()))
-    );
-
-    let snapshot = db.begin_read_transaction();
-    db.query("CREATE (:Memory {id: 'mcp-evolves-late', title: 'Late'})")
-        .unwrap();
-    db.query("MATCH (a:Memory {id: 'mcp-evolves-late'}), (b:Memory {id: 'mcp-evolves-target'}) CREATE (a)-[:EVOLVES {content_relation: 'late'}]->(b)")
-        .unwrap();
-    let snapshot_output = snapshot
-        .knowledge_memory_evolves_neighbors(&KnowledgeMemoryEvolvesNeighborRequest {
-            memory_id: "mcp-evolves-target".to_string(),
-            direction: KnowledgeNeighborDirection::Incoming,
-            neighbor_property_names: vec!["title".to_string()],
-            relationship_property_names: vec!["content_relation".to_string()],
-            limit: 0,
-        })
-        .unwrap();
-    assert_eq!(snapshot_output.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot_output.matched_relationship_count, 2);
-}
-
-#[test]
-fn memory_evolves_neighbors_rejects_empty_projection_fields_without_wal() {
-    let path = unique_test_dir("memory_evolves_neighbors_empty_projection_without_wal");
-    let mut db = Database::open(&path).unwrap();
-    db.query("CREATE (:Memory {id: 'mcp-evolves-source'})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let wal_before = read_test_wal(&path).unwrap();
-
-    let error = db
-        .knowledge_memory_evolves_neighbors(&KnowledgeMemoryEvolvesNeighborRequest {
-            memory_id: "mcp-evolves-source".to_string(),
-            direction: KnowledgeNeighborDirection::Outgoing,
-            neighbor_property_names: vec![String::new()],
-            relationship_property_names: Vec::new(),
-            limit: 10,
-        })
-        .unwrap_err();
-
-    assert!(error.to_string().contains("non-empty property names"));
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
 }
 
 #[test]

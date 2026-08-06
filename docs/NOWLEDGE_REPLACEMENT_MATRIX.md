@@ -390,13 +390,10 @@ Cypher statement with explicit projection, stable ordering, `LIMIT`, a matching
 row budget, and a pinned snapshot. The cleanup scheduler owns request-order
 shaping and missing-id calculation; no scheduler-specific typed database API is
 exposed.
-Memory EVOLVES neighbor reads are covered by
-`Database::knowledge_memory_evolves_neighbors`. The typed read covers the MCP
-outgoing and incoming `Memory-[:EVOLVES]-Memory` shapes, anchors by one physical
-Memory id, scans only that node's EVOLVES adjacency, projects caller-selected
-neighbor and relationship properties through explicit allowlists for future
-field growth, supports bounded limits and pinned read snapshots, and does not
-write WAL.
+Memory EVOLVES neighbor reads use separate fixed outgoing and incoming Cypher
+statements. Each owns its node and relationship projection, deterministic
+ordering, `LIMIT`, matching row budget, and pinned snapshot; no dynamic
+direction or caller-projection typed database API is exposed.
 Memory EVOLVES projected successor reads are covered by
 `Database::knowledge_memory_evolves_projected_successors`. The typed read
 accepts old Memory id batches, preserves caller-order groups including missing

@@ -542,12 +542,9 @@ Memory cleanup fingerprint reads use one fixed parameterized `m.id IN $ids`
 Cypher statement with explicit projection, stable ordering, `LIMIT`, a matching
 row budget, and a pinned snapshot. Request-order shaping and missing-id
 calculation remain outside the embedded database facade.
-Memory EVOLVES neighbor reads are available as
-`Database::knowledge_memory_evolves_neighbors`, covering MCP outgoing/incoming
-EVOLVES adjacency reads over one anchor Memory with explicit node and
-relationship property allowlists so future fields can be projected without
-adding another raw-Cypher path. The read scans only the anchor adjacency and
-does not write WAL.
+Memory EVOLVES neighbor reads use separate fixed outgoing and incoming Cypher
+statements. Each owns its node and relationship projection, deterministic
+ordering, `LIMIT`, matching row budget, and pinned snapshot.
 Memory EVOLVES projected successor reads are available as
 `Database::knowledge_memory_evolves_projected_successors`, covering old-Memory
 id batches with caller-order groups, missing-old rows, per-old limits, and
