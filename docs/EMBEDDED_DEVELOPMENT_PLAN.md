@@ -1215,8 +1215,8 @@ agent context activity task reads,
 agent context stale crystal and EVOLVES cluster reads,
 health stale memory count reads,
 entity lifecycle impact counts, detail projections, relation/label/community
-preview reads, REST write Entity pre-delete guard counts, and entity-node
-`DETACH DELETE` cascade checks,
+preview reads, REST write Entity pre-delete guard counts expressed as five
+fixed queries on one snapshot, and entity-node `DETACH DELETE` cascade checks,
 graph orphan entity reads and cleanup-candidate reads with one-hop relationship
 existence predicates,
 AugmentationJob lifecycle create/running/progress/completed/failed writes and

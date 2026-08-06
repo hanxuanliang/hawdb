@@ -306,13 +306,13 @@ for the first page and cursor pages. Both scan only named, id-bearing `Entity`
 nodes, preserve zero-mention Entities, count incoming `Memory` `MENTIONS`, use
 deterministic ordering, apply `LIMIT` with a matching row budget, and run on a
 pinned read transaction. No route-specific typed read API is exposed.
-REST write Entity delete guards are covered by
-`Database::knowledge_entity_delete_guard`. The typed read resolves one
-`Entity.id`, returns the Nowledge pre-delete counts for other Memory mentions,
-HAS_LABEL relationships, and the distinct relationship orphan guard, preserves
-the current incoming-edge double-counting implied by the production
-`COUNT(DISTINCT r1) + COUNT(DISTINCT r2)` shape, supports read-transaction
-snapshots, and does not write WAL.
+REST write Entity delete guards use five small fixed Cypher statements on one
+pinned read transaction: Entity resolution, other-Memory mentions, `HAS_LABEL`
+relationships, all incident relationships, and incoming relationships. The
+host preserves the current incoming-edge double-counting implied by the
+production `COUNT(DISTINCT r1) + COUNT(DISTINCT r2)` shape. The actual Entity
+delete remains a typed WAL mutation; no route-specific typed guard API is
+exposed.
 Community Entity visibility reads are covered by
 `Database::knowledge_community_entity_visibility`. The typed read scans Entity
 nodes in explicit community scopes and preserves the Nowledge optional incoming

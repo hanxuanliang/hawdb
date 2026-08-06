@@ -18,12 +18,11 @@ use super::{
     KnowledgeCrystalListOrder, KnowledgeCrystalListRequest, KnowledgeCrystalSourceMergeRequest,
     KnowledgeCrystalSourceVisibilityRequest, KnowledgeEntityBatchRequest,
     KnowledgeEntityCreateBatchRequest, KnowledgeEntityCreateRequest,
-    KnowledgeEntityDeleteBatchRequest, KnowledgeEntityDeleteGuardRequest,
-    KnowledgeEntityDeleteRequest, KnowledgeEntityLabelListRequest,
-    KnowledgeEntityLabelProjectedListRequest, KnowledgeEntityRequest,
-    KnowledgeEntityUpsertBatchRequest, KnowledgeEntityUpsertRequest, KnowledgeFallbackReasonCode,
-    KnowledgeFanoutReasonCode, KnowledgeGraphMetaRequest, KnowledgeGraphMetaStamp,
-    KnowledgeGraphMetaStampBatchRequest, KnowledgeGraphPathDirection,
+    KnowledgeEntityDeleteBatchRequest, KnowledgeEntityDeleteRequest,
+    KnowledgeEntityLabelListRequest, KnowledgeEntityLabelProjectedListRequest,
+    KnowledgeEntityRequest, KnowledgeEntityUpsertBatchRequest, KnowledgeEntityUpsertRequest,
+    KnowledgeFallbackReasonCode, KnowledgeFanoutReasonCode, KnowledgeGraphMetaRequest,
+    KnowledgeGraphMetaStamp, KnowledgeGraphMetaStampBatchRequest, KnowledgeGraphPathDirection,
     KnowledgeInducedEdgeListRequest, KnowledgeLabelBackfillScanRequest,
     KnowledgeLabelCanonicalLookupRequest, KnowledgeLabelLifecycleBatchRequest,
     KnowledgeLabelLifecycleUpdate, KnowledgeLabelMemoryTransferRequest,
@@ -118,6 +117,7 @@ mod knowledge_community_entity_visibility;
 mod knowledge_community_memories;
 mod knowledge_context_memory_preview;
 mod knowledge_entity_batch_deletes;
+mod knowledge_entity_delete_guard;
 mod knowledge_entity_deletes;
 mod knowledge_entity_mention_counts;
 mod knowledge_entity_reads;

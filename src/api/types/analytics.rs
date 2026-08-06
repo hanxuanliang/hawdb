@@ -475,23 +475,6 @@ pub struct KnowledgeEntityDeleteBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeEntityDeleteGuardRequest {
-    pub entity_id: String,
-    pub excluded_memory_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeEntityDeleteGuardOutput {
-    pub graph_commit_epoch: u64,
-    pub entity_id: String,
-    pub entity_node_id: Option<u64>,
-    pub found_entity: bool,
-    pub other_memory_mention_count: usize,
-    pub label_relationship_count: usize,
-    pub distinct_relationship_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeRelationshipCreateRequest {
     pub source: KnowledgeEntityRequest,
     pub target: KnowledgeEntityRequest,
