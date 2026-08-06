@@ -1,6 +1,8 @@
 use super::super::*;
+#[cfg(test)]
 use super::*;
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeNeighborsRequest {
     pub label: String,
@@ -11,12 +13,14 @@ pub struct KnowledgeNeighborsRequest {
     pub max_hops: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeScopedNeighborsRequest {
     pub navigation: KnowledgeNeighborsRequest,
     pub metadata_filters: BTreeMap<String, String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeNeighborsOutput {
     pub graph_commit_epoch: u64,
@@ -28,6 +32,7 @@ pub struct KnowledgeNeighborsOutput {
     pub diagnostics: KnowledgeTraversalDiagnostics,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeRelationshipsRequest {
     pub seeds: Vec<KnowledgeEntityRequest>,
@@ -36,12 +41,14 @@ pub struct KnowledgeRelationshipsRequest {
     pub limit_per_seed: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeScopedRelationshipsRequest {
     pub relationships: KnowledgeRelationshipsRequest,
     pub metadata_filters: BTreeMap<String, String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeRelationshipGroup {
     pub seed: KnowledgeEntityRequest,
@@ -53,6 +60,7 @@ pub struct KnowledgeRelationshipGroup {
     pub fanout_reasons: Vec<String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeRelationshipsOutput {
     pub graph_commit_epoch: u64,
@@ -91,6 +99,7 @@ pub struct KnowledgeInducedEdgeListOutput {
     pub returned_count: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgePathRequest {
     pub source_label: String,
@@ -103,6 +112,7 @@ pub struct KnowledgePathRequest {
     pub limit: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeScopedPathRequest {
     pub navigation: KnowledgePathRequest,
@@ -110,6 +120,7 @@ pub struct KnowledgeScopedPathRequest {
     pub target_metadata_filters: BTreeMap<String, String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgePathOutput {
     pub graph_commit_epoch: u64,
@@ -122,11 +133,13 @@ pub struct KnowledgePathOutput {
     pub diagnostics: KnowledgeTraversalDiagnostics,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeGraphPath {
     pub segments: Vec<KnowledgeGraphContextPath>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeSubgraphRequest {
     pub label: String,
@@ -138,12 +151,14 @@ pub struct KnowledgeSubgraphRequest {
     pub relationship_limit: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeScopedSubgraphRequest {
     pub navigation: KnowledgeSubgraphRequest,
     pub metadata_filters: BTreeMap<String, String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgeSubgraphOutput {
     pub graph_commit_epoch: u64,
@@ -156,6 +171,7 @@ pub struct KnowledgeSubgraphOutput {
     pub diagnostics: KnowledgeTraversalDiagnostics,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeTraversalDiagnostics {
     pub seed_found: bool,
@@ -177,6 +193,7 @@ pub struct KnowledgeTraversalDiagnostics {
     pub relationship_limit: Option<usize>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnowledgeTraversalFallbackReasonCode {
     SeedNotFound,
@@ -189,6 +206,7 @@ pub enum KnowledgeTraversalFallbackReasonCode {
     QueryRuntimeFailed,
 }
 
+#[cfg(test)]
 impl KnowledgeTraversalFallbackReasonCode {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -204,6 +222,7 @@ impl KnowledgeTraversalFallbackReasonCode {
     }
 }
 
+#[cfg(test)]
 impl FromStr for KnowledgeTraversalFallbackReasonCode {
     type Err = &'static str;
 

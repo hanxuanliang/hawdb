@@ -212,7 +212,7 @@ fn typed_reads_and_mutations_include_checkpointed_canonical_rows() {
         );
 
         let neighbors = db
-            .knowledge_neighbors(&KnowledgeNeighborsRequest {
+            .test_query_neighbors(&KnowledgeNeighborsRequest {
                 label: "Memory".to_string(),
                 external_id: "memory:one".to_string(),
                 relationship_type: Some("LINKS".to_string()),
@@ -245,7 +245,7 @@ fn typed_reads_and_mutations_include_checkpointed_canonical_rows() {
         assert_eq!(created.created_relationship_count, 1);
 
         let relationships = db
-            .knowledge_relationships(&KnowledgeRelationshipsRequest {
+            .test_query_relationships(&KnowledgeRelationshipsRequest {
                 seeds: vec![KnowledgeEntityRequest {
                     label: "Memory".to_string(),
                     external_id: "memory:one".to_string(),
@@ -262,7 +262,7 @@ fn typed_reads_and_mutations_include_checkpointed_canonical_rows() {
     {
         let db = Database::open_with_config(&path, config).unwrap();
         let neighbors = db
-            .knowledge_neighbors(&KnowledgeNeighborsRequest {
+            .test_query_neighbors(&KnowledgeNeighborsRequest {
                 label: "Memory".to_string(),
                 external_id: "memory:one".to_string(),
                 relationship_type: Some("MENTIONS".to_string()),

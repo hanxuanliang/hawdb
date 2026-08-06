@@ -597,6 +597,7 @@ impl KnowledgeFanoutReasonDetail {
         }
     }
 
+    #[cfg(test)]
     pub(in crate::api) fn path_limit(operation: &str, limit: usize, target: &str) -> Self {
         Self {
             code: KnowledgeFanoutReasonCode::PathLimitReached,
@@ -612,6 +613,7 @@ impl KnowledgeFanoutReasonDetail {
         }
     }
 
+    #[cfg(test)]
     pub(in crate::api) fn node_limit(limit: usize) -> Self {
         Self {
             code: KnowledgeFanoutReasonCode::NodeLimitReached,
@@ -627,6 +629,7 @@ impl KnowledgeFanoutReasonDetail {
         }
     }
 
+    #[cfg(test)]
     pub(in crate::api) fn relationship_limit(limit: usize) -> Self {
         Self {
             code: KnowledgeFanoutReasonCode::RelationshipLimitReached,

@@ -72,7 +72,7 @@ fn knowledge_relationships_fail_soft_for_unknown_relationship_type() {
         .unwrap();
 
     let output = db
-        .knowledge_relationships(&KnowledgeRelationshipsRequest {
+        .test_query_relationships(&KnowledgeRelationshipsRequest {
             seeds: vec![KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "memory_1".to_string(),
@@ -102,7 +102,7 @@ fn typed_knowledge_navigation_uses_projected_identity_for_idless_seed() {
     .unwrap();
 
     let neighbors = db
-        .knowledge_neighbors(&KnowledgeNeighborsRequest {
+        .test_query_neighbors(&KnowledgeNeighborsRequest {
             label: "Memory".to_string(),
             external_id: "0".to_string(),
             relationship_type: Some("LINKS".to_string()),
@@ -120,7 +120,7 @@ fn typed_knowledge_navigation_uses_projected_identity_for_idless_seed() {
     );
 
     let paths = db
-        .knowledge_paths(&KnowledgePathRequest {
+        .test_query_paths(&KnowledgePathRequest {
             source_label: "Memory".to_string(),
             source_external_id: "0".to_string(),
             target_label: "Entity".to_string(),
@@ -140,7 +140,7 @@ fn typed_knowledge_navigation_uses_projected_identity_for_idless_seed() {
     );
 
     let subgraph = db
-        .knowledge_subgraph(&KnowledgeSubgraphRequest {
+        .test_query_subgraph(&KnowledgeSubgraphRequest {
             label: "Memory".to_string(),
             external_id: "0".to_string(),
             relationship_type: Some("LINKS".to_string()),
@@ -210,7 +210,7 @@ fn retrieves_knowledge_neighbors_without_search_projection() {
         .unwrap();
 
     let outgoing = db
-        .knowledge_neighbors(&KnowledgeNeighborsRequest {
+        .test_query_neighbors(&KnowledgeNeighborsRequest {
             label: "Memory".to_string(),
             external_id: "root".to_string(),
             relationship_type: Some("LINKS".to_string()),
@@ -266,7 +266,7 @@ fn retrieves_knowledge_neighbors_without_search_projection() {
         && path.relationship_properties.get("weight") == Some(&Value::Int(2))));
 
     let incoming = db
-        .knowledge_neighbors(&KnowledgeNeighborsRequest {
+        .test_query_neighbors(&KnowledgeNeighborsRequest {
             label: "Memory".to_string(),
             external_id: "root".to_string(),
             relationship_type: None,
@@ -283,7 +283,7 @@ fn retrieves_knowledge_neighbors_without_search_projection() {
     );
 
     let unknown_type = db
-        .knowledge_neighbors(&KnowledgeNeighborsRequest {
+        .test_query_neighbors(&KnowledgeNeighborsRequest {
             label: "Memory".to_string(),
             external_id: "root".to_string(),
             relationship_type: Some("DOES_NOT_EXIST".to_string()),
@@ -332,7 +332,7 @@ fn scoped_knowledge_neighbors_filters_seed_by_metadata() {
         },
         metadata_filters: BTreeMap::from([("space_id".to_string(), "default".to_string())]),
     };
-    let scoped = db.knowledge_scoped_neighbors(&scoped_request).unwrap();
+    let scoped = db.test_query_scoped_neighbors(&scoped_request).unwrap();
 
     assert_eq!(scoped.paths.len(), 1);
     assert!(scoped.diagnostics.seed_found);
@@ -348,7 +348,7 @@ fn scoped_knowledge_neighbors_filters_seed_by_metadata() {
     );
 
     let stats = db.plan_cache_stats();
-    let repeated_scoped = db.knowledge_scoped_neighbors(&scoped_request).unwrap();
+    let repeated_scoped = db.test_query_scoped_neighbors(&scoped_request).unwrap();
     assert_eq!(repeated_scoped, scoped);
     let repeated_stats = db.plan_cache_stats();
     assert_eq!(repeated_stats.entries, stats.entries);
@@ -356,7 +356,7 @@ fn scoped_knowledge_neighbors_filters_seed_by_metadata() {
     assert!(repeated_stats.hits > stats.hits);
 
     let filtered = db
-        .knowledge_scoped_neighbors(&KnowledgeScopedNeighborsRequest {
+        .test_query_scoped_neighbors(&KnowledgeScopedNeighborsRequest {
             navigation: KnowledgeNeighborsRequest {
                 label: "Memory".to_string(),
                 external_id: "root".to_string(),
@@ -495,7 +495,7 @@ fn retrieves_knowledge_relationships_grouped_by_seed() {
         direction: KnowledgeNeighborDirection::Outgoing,
         limit_per_seed: 4,
     };
-    let output = db.knowledge_relationships(&request).unwrap();
+    let output = db.test_query_relationships(&request).unwrap();
 
     assert_eq!(output.graph_commit_epoch, 2);
     assert!(output.relationship_type_found);
@@ -523,7 +523,7 @@ fn retrieves_knowledge_relationships_grouped_by_seed() {
     );
 
     let stats = db.plan_cache_stats();
-    let repeated_output = db.knowledge_relationships(&request).unwrap();
+    let repeated_output = db.test_query_relationships(&request).unwrap();
     assert_eq!(repeated_output, output);
     let repeated_stats = db.plan_cache_stats();
     assert_eq!(repeated_stats.entries, stats.entries);
@@ -568,7 +568,7 @@ fn scoped_knowledge_relationships_report_filtered_seeds() {
             ("space_id".to_string(), "default".to_string()),
         ]),
     };
-    let output = db.knowledge_scoped_relationships(&request).unwrap();
+    let output = db.test_query_scoped_relationships(&request).unwrap();
 
     assert_eq!(output.graph_commit_epoch, 2);
     assert!(output.relationship_type_found);
@@ -582,7 +582,7 @@ fn scoped_knowledge_relationships_report_filtered_seeds() {
     assert!(output.groups[1].relationships.is_empty());
 
     let stats = db.plan_cache_stats();
-    let repeated_output = db.knowledge_scoped_relationships(&request).unwrap();
+    let repeated_output = db.test_query_scoped_relationships(&request).unwrap();
     assert_eq!(repeated_output, output);
     let repeated_stats = db.plan_cache_stats();
     assert_eq!(repeated_stats.entries, stats.entries);
@@ -622,7 +622,7 @@ fn knowledge_neighbors_reports_limit_and_missing_seed() {
         limit: 1,
         max_hops: 1,
     };
-    let limited = db.knowledge_neighbors(&limited_request).unwrap();
+    let limited = db.test_query_neighbors(&limited_request).unwrap();
     assert_eq!(limited.paths.len(), 1);
     assert!(limited.diagnostics.seed_found);
     assert_eq!(limited.diagnostics.path_count, 1);
@@ -644,7 +644,7 @@ fn knowledge_neighbors_reports_limit_and_missing_seed() {
     assert_eq!(limited.diagnostics.fanout_reasons, limited.fanout_reasons);
 
     let stats = db.plan_cache_stats();
-    let repeated_limited = db.knowledge_neighbors(&limited_request).unwrap();
+    let repeated_limited = db.test_query_neighbors(&limited_request).unwrap();
     assert_eq!(repeated_limited, limited);
     let repeated_stats = db.plan_cache_stats();
     assert_eq!(repeated_stats.entries, stats.entries);
@@ -652,7 +652,7 @@ fn knowledge_neighbors_reports_limit_and_missing_seed() {
     assert!(repeated_stats.hits > stats.hits);
 
     let disabled = db
-        .knowledge_neighbors(&KnowledgeNeighborsRequest {
+        .test_query_neighbors(&KnowledgeNeighborsRequest {
             label: "Memory".to_string(),
             external_id: "root".to_string(),
             relationship_type: None,
@@ -674,7 +674,7 @@ fn knowledge_neighbors_reports_limit_and_missing_seed() {
     assert_eq!(disabled.diagnostics.fanout_reasons, disabled.fanout_reasons);
 
     let missing = db
-        .knowledge_neighbors(&KnowledgeNeighborsRequest {
+        .test_query_neighbors(&KnowledgeNeighborsRequest {
             label: "Memory".to_string(),
             external_id: "missing".to_string(),
             relationship_type: None,
@@ -723,7 +723,7 @@ fn typed_knowledge_navigation_reports_dense_adjacency_groups() {
     }
 
     let neighbors = db
-        .knowledge_neighbors(&KnowledgeNeighborsRequest {
+        .test_query_neighbors(&KnowledgeNeighborsRequest {
             label: "Memory".to_string(),
             external_id: "root".to_string(),
             relationship_type: Some("LINKS".to_string()),
@@ -774,7 +774,7 @@ fn typed_knowledge_navigation_reports_dense_adjacency_groups() {
     );
 
     let untyped_neighbors = db
-        .knowledge_neighbors(&KnowledgeNeighborsRequest {
+        .test_query_neighbors(&KnowledgeNeighborsRequest {
             label: "Memory".to_string(),
             external_id: "root".to_string(),
             relationship_type: None,
@@ -796,7 +796,7 @@ fn typed_knowledge_navigation_reports_dense_adjacency_groups() {
     );
 
     let subgraph = db
-        .knowledge_subgraph(&KnowledgeSubgraphRequest {
+        .test_query_subgraph(&KnowledgeSubgraphRequest {
             label: "Memory".to_string(),
             external_id: "root".to_string(),
             relationship_type: Some("LINKS".to_string()),
@@ -845,7 +845,7 @@ fn retrieves_bounded_knowledge_paths_without_search_projection() {
         .unwrap();
 
     let output = db
-        .knowledge_paths(&KnowledgePathRequest {
+        .test_query_paths(&KnowledgePathRequest {
             source_label: "Memory".to_string(),
             source_external_id: "root".to_string(),
             target_label: "Entity".to_string(),
@@ -940,7 +940,7 @@ fn scoped_knowledge_paths_filter_source_and_target_by_metadata() {
         )]),
         target_metadata_filters: BTreeMap::from([("space_id".to_string(), "default".to_string())]),
     };
-    let scoped = db.knowledge_scoped_paths(&scoped_request).unwrap();
+    let scoped = db.test_query_scoped_paths(&scoped_request).unwrap();
 
     assert_eq!(scoped.paths.len(), 1);
     assert!(scoped.diagnostics.seed_found);
@@ -966,7 +966,7 @@ fn scoped_knowledge_paths_filter_source_and_target_by_metadata() {
     );
 
     let stats = db.plan_cache_stats();
-    let repeated_scoped = db.knowledge_scoped_paths(&scoped_request).unwrap();
+    let repeated_scoped = db.test_query_scoped_paths(&scoped_request).unwrap();
     assert_eq!(repeated_scoped, scoped);
     let repeated_stats = db.plan_cache_stats();
     assert_eq!(repeated_stats.entries, stats.entries);
@@ -974,7 +974,7 @@ fn scoped_knowledge_paths_filter_source_and_target_by_metadata() {
     assert!(repeated_stats.hits > stats.hits);
 
     let filtered = db
-        .knowledge_scoped_paths(&KnowledgeScopedPathRequest {
+        .test_query_scoped_paths(&KnowledgeScopedPathRequest {
             navigation: KnowledgePathRequest {
                 source_label: "Memory".to_string(),
                 source_external_id: "root".to_string(),
@@ -1051,7 +1051,7 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
         .unwrap();
 
     let wrong_direction = db
-        .knowledge_paths(&KnowledgePathRequest {
+        .test_query_paths(&KnowledgePathRequest {
             source_label: "Memory".to_string(),
             source_external_id: "root".to_string(),
             target_label: "Entity".to_string(),
@@ -1068,7 +1068,7 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
     assert_eq!(wrong_direction.diagnostics.path_count, 0);
 
     let unknown_type = db
-        .knowledge_paths(&KnowledgePathRequest {
+        .test_query_paths(&KnowledgePathRequest {
             source_label: "Memory".to_string(),
             source_external_id: "root".to_string(),
             target_label: "Entity".to_string(),
@@ -1101,7 +1101,7 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
         max_hops: 1,
         limit: 1,
     };
-    let limited = db.knowledge_paths(&limited_request).unwrap();
+    let limited = db.test_query_paths(&limited_request).unwrap();
     assert_eq!(limited.paths.len(), 1);
     assert_eq!(limited.diagnostics.path_count, 1);
     assert_eq!(limited.diagnostics.node_count, 2);
@@ -1122,7 +1122,7 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
     assert_eq!(limited.diagnostics.fanout_reasons, limited.fanout_reasons);
 
     let stats = db.plan_cache_stats();
-    let repeated_limited = db.knowledge_paths(&limited_request).unwrap();
+    let repeated_limited = db.test_query_paths(&limited_request).unwrap();
     assert_eq!(repeated_limited, limited);
     let repeated_stats = db.plan_cache_stats();
     assert_eq!(repeated_stats.entries, stats.entries);
@@ -1130,7 +1130,7 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
     assert!(repeated_stats.hits > stats.hits);
 
     let disabled = db
-        .knowledge_paths(&KnowledgePathRequest {
+        .test_query_paths(&KnowledgePathRequest {
             source_label: "Memory".to_string(),
             source_external_id: "root".to_string(),
             target_label: "Entity".to_string(),
@@ -1153,7 +1153,7 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
     );
 
     let missing = db
-        .knowledge_paths(&KnowledgePathRequest {
+        .test_query_paths(&KnowledgePathRequest {
             source_label: "Memory".to_string(),
             source_external_id: "root".to_string(),
             target_label: "Entity".to_string(),
@@ -1180,7 +1180,7 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
     assert!(missing.paths.is_empty());
 
     let missing_source = db
-        .knowledge_paths(&KnowledgePathRequest {
+        .test_query_paths(&KnowledgePathRequest {
             source_label: "Memory".to_string(),
             source_external_id: "missing".to_string(),
             target_label: "Entity".to_string(),
@@ -1207,7 +1207,7 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
     assert!(missing_source.paths.is_empty());
 
     let missing_both = db
-        .knowledge_paths(&KnowledgePathRequest {
+        .test_query_paths(&KnowledgePathRequest {
             source_label: "Memory".to_string(),
             source_external_id: "missing-source".to_string(),
             target_label: "Entity".to_string(),
@@ -1283,7 +1283,7 @@ fn retrieves_bounded_knowledge_subgraph_without_search_projection() {
         .unwrap();
 
     let output = db
-        .knowledge_subgraph(&KnowledgeSubgraphRequest {
+        .test_query_subgraph(&KnowledgeSubgraphRequest {
             label: "Memory".to_string(),
             external_id: "root".to_string(),
             relationship_type: Some("LINKS".to_string()),
@@ -1368,7 +1368,7 @@ fn scoped_knowledge_subgraph_filters_seed_by_metadata() {
         },
         metadata_filters: BTreeMap::from([("source_id".to_string(), "thread_1".to_string())]),
     };
-    let scoped = db.knowledge_scoped_subgraph(&scoped_request).unwrap();
+    let scoped = db.test_query_scoped_subgraph(&scoped_request).unwrap();
 
     assert_eq!(scoped.nodes.len(), 2);
     assert_eq!(scoped.relationships.len(), 1);
@@ -1385,7 +1385,7 @@ fn scoped_knowledge_subgraph_filters_seed_by_metadata() {
     );
 
     let stats = db.plan_cache_stats();
-    let repeated_scoped = db.knowledge_scoped_subgraph(&scoped_request).unwrap();
+    let repeated_scoped = db.test_query_scoped_subgraph(&scoped_request).unwrap();
     assert_eq!(repeated_scoped, scoped);
     let repeated_stats = db.plan_cache_stats();
     assert_eq!(repeated_stats.entries, stats.entries);
@@ -1393,7 +1393,7 @@ fn scoped_knowledge_subgraph_filters_seed_by_metadata() {
     assert!(repeated_stats.hits > stats.hits);
 
     let filtered = db
-        .knowledge_scoped_subgraph(&KnowledgeScopedSubgraphRequest {
+        .test_query_scoped_subgraph(&KnowledgeScopedSubgraphRequest {
             navigation: KnowledgeSubgraphRequest {
                 label: "Memory".to_string(),
                 external_id: "root".to_string(),
@@ -1452,7 +1452,7 @@ fn knowledge_subgraph_reports_limits_and_missing_seed() {
         .unwrap();
 
     let node_limited = db
-        .knowledge_subgraph(&KnowledgeSubgraphRequest {
+        .test_query_subgraph(&KnowledgeSubgraphRequest {
             label: "Memory".to_string(),
             external_id: "root".to_string(),
             relationship_type: None,
@@ -1494,7 +1494,7 @@ fn knowledge_subgraph_reports_limits_and_missing_seed() {
         relationship_limit: 1,
     };
     let relationship_limited = db
-        .knowledge_subgraph(&relationship_limited_request)
+        .test_query_subgraph(&relationship_limited_request)
         .unwrap();
     assert_eq!(relationship_limited.relationships.len(), 1);
     assert_eq!(relationship_limited.diagnostics.node_count, 2);
@@ -1518,7 +1518,7 @@ fn knowledge_subgraph_reports_limits_and_missing_seed() {
 
     let stats = db.plan_cache_stats();
     let repeated_relationship_limited = db
-        .knowledge_subgraph(&relationship_limited_request)
+        .test_query_subgraph(&relationship_limited_request)
         .unwrap();
     assert_eq!(repeated_relationship_limited, relationship_limited);
     let repeated_stats = db.plan_cache_stats();
@@ -1527,7 +1527,7 @@ fn knowledge_subgraph_reports_limits_and_missing_seed() {
     assert!(repeated_stats.hits > stats.hits);
 
     let node_disabled = db
-        .knowledge_subgraph(&KnowledgeSubgraphRequest {
+        .test_query_subgraph(&KnowledgeSubgraphRequest {
             label: "Memory".to_string(),
             external_id: "root".to_string(),
             relationship_type: None,
@@ -1549,7 +1549,7 @@ fn knowledge_subgraph_reports_limits_and_missing_seed() {
     );
 
     let relationship_disabled = db
-        .knowledge_subgraph(&KnowledgeSubgraphRequest {
+        .test_query_subgraph(&KnowledgeSubgraphRequest {
             label: "Memory".to_string(),
             external_id: "root".to_string(),
             relationship_type: None,
@@ -1571,7 +1571,7 @@ fn knowledge_subgraph_reports_limits_and_missing_seed() {
     );
 
     let unknown_type = db
-        .knowledge_subgraph(&KnowledgeSubgraphRequest {
+        .test_query_subgraph(&KnowledgeSubgraphRequest {
             label: "Memory".to_string(),
             external_id: "root".to_string(),
             relationship_type: Some("DOES_NOT_EXIST".to_string()),
@@ -1598,7 +1598,7 @@ fn knowledge_subgraph_reports_limits_and_missing_seed() {
     );
 
     let missing = db
-        .knowledge_subgraph(&KnowledgeSubgraphRequest {
+        .test_query_subgraph(&KnowledgeSubgraphRequest {
             label: "Memory".to_string(),
             external_id: "missing".to_string(),
             relationship_type: None,

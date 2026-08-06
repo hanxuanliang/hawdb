@@ -823,7 +823,7 @@ graph-native seed candidates. Filter keys align with graph-derived
 projection metadata:
 `kind` accepts canonical node labels or lowercase projection names, `external_id`
 maps to the projected node identity (non-empty `id` when present, otherwise the
-canonical node id string) used by search hits, typed knowledge navigation, and graph context path endpoints,
+canonical node id string) used by search hits and graph context path endpoints,
 `source_id` maps through the same non-empty `source_id`/`thread_id`/`source`
 projection fallback as search documents, and other keys map to same-name scalar
 node properties. `space_id` follows the Nowledge normalized-space rule: missing,
@@ -940,25 +940,15 @@ so QoS rejection cannot create partial import state.
 Knowledge reads can bypass the search projection when the caller already has
 graph identity. Direct entity lookup and property projection use bounded,
 parameterized Cypher on a pinned snapshot instead of route-specific typed read
-facades. `Database::knowledge_neighbors` accepts the same identity plus optional
-relationship type, direction, hop bound, and result limit, then returns the same
-path evidence structure plus fan-out reasons and typed traversal diagnostics.
-`Database::knowledge_paths` accepts
-source and target identities plus the same traversal budget and returns bounded
-graph paths as ordered evidence segments with source/target presence and path
-count diagnostics. Neighbor and path diagnostics count distinct canonical nodes
-covered by returned path segments as well as returned relationships, and report
-fallback reasons when traversal budgets are explicitly disabled or requested
-source/target graph identities are missing. Unknown relationship-type filters
-return empty typed navigation results with a diagnostic reason instead of
-falling back to untyped relationship expansion.
-`Database::knowledge_subgraph` expands a bounded typed subgraph from one
-identity, returning canonical node snapshots, relationship evidence segments,
-node/relationship fan-out reasons, and node/relationship count diagnostics.
+facades. Relationship, neighborhood, path, and bounded-subgraph reads follow the
+same rule. Each phase is a small named statement with parameterized identities,
+relationship types, metadata predicates, hop bounds, and explicit result
+limits. Variable-length expansion and shortest-path statements remain governed
+by executor memory admission and query-runtime row and payload budgets.
 `DatabaseReadTransaction` exposes the same bounded query runtime over its pinned
 catalog and graph snapshot. Application integration should use parameterized
-Cypher and query-runtime reports. This keeps snapshot
-semantics available without making typed APIs the primary extension point.
+Cypher and query-runtime reports. This keeps snapshot semantics available
+without making typed APIs the primary extension point.
 
 ## Implemented Milestones
 

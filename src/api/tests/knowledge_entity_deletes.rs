@@ -38,7 +38,7 @@ fn deletes_knowledge_entity_through_typed_api() {
         .entity
         .is_some());
     let relationships = db
-        .knowledge_relationships(&KnowledgeRelationshipsRequest {
+        .test_query_relationships(&KnowledgeRelationshipsRequest {
             seeds: vec![KnowledgeEntityRequest {
                 label: "Entity".to_string(),
                 external_id: "entity_1".to_string(),

@@ -3155,28 +3155,32 @@ impl Database {
         delete_knowledge_source_reference_relationships_for(self, request)
     }
 
-    pub fn knowledge_neighbors(
+    #[cfg(test)]
+    pub(crate) fn test_query_neighbors(
         &self,
         request: &KnowledgeNeighborsRequest,
     ) -> Result<KnowledgeNeighborsOutput> {
         knowledge_neighbors_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_scoped_neighbors(
+    #[cfg(test)]
+    pub(crate) fn test_query_scoped_neighbors(
         &self,
         request: &KnowledgeScopedNeighborsRequest,
     ) -> Result<KnowledgeNeighborsOutput> {
         knowledge_scoped_neighbors_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_relationships(
+    #[cfg(test)]
+    pub(crate) fn test_query_relationships(
         &self,
         request: &KnowledgeRelationshipsRequest,
     ) -> Result<KnowledgeRelationshipsOutput> {
         knowledge_relationships_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_scoped_relationships(
+    #[cfg(test)]
+    pub(crate) fn test_query_scoped_relationships(
         &self,
         request: &KnowledgeScopedRelationshipsRequest,
     ) -> Result<KnowledgeRelationshipsOutput> {
@@ -3190,25 +3194,32 @@ impl Database {
         knowledge_induced_edges_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_paths(&self, request: &KnowledgePathRequest) -> Result<KnowledgePathOutput> {
+    #[cfg(test)]
+    pub(crate) fn test_query_paths(
+        &self,
+        request: &KnowledgePathRequest,
+    ) -> Result<KnowledgePathOutput> {
         knowledge_paths_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_scoped_paths(
+    #[cfg(test)]
+    pub(crate) fn test_query_scoped_paths(
         &self,
         request: &KnowledgeScopedPathRequest,
     ) -> Result<KnowledgePathOutput> {
         knowledge_scoped_paths_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_subgraph(
+    #[cfg(test)]
+    pub(crate) fn test_query_subgraph(
         &self,
         request: &KnowledgeSubgraphRequest,
     ) -> Result<KnowledgeSubgraphOutput> {
         knowledge_subgraph_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_scoped_subgraph(
+    #[cfg(test)]
+    pub(crate) fn test_query_scoped_subgraph(
         &self,
         request: &KnowledgeScopedSubgraphRequest,
     ) -> Result<KnowledgeSubgraphOutput> {
@@ -16264,6 +16275,7 @@ fn validate_cypher_identifier(value: &str, kind: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn knowledge_neighbors_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -16279,6 +16291,7 @@ fn knowledge_neighbors_for(
     )
 }
 
+#[cfg(test)]
 fn knowledge_neighbors_via_query_runtime(
     db: &Database,
     request: &KnowledgeNeighborsRequest,
@@ -16292,6 +16305,7 @@ fn knowledge_neighbors_via_query_runtime(
     )
 }
 
+#[cfg(test)]
 fn knowledge_scoped_neighbors_via_query_runtime(
     db: &Database,
     request: &KnowledgeScopedNeighborsRequest,
@@ -16441,6 +16455,7 @@ fn knowledge_scoped_neighbors_via_query_runtime(
     })
 }
 
+#[cfg(test)]
 fn expand_knowledge_neighbors_via_query_runtime(
     db: &Database,
     seed_hit_id: &str,
@@ -16510,6 +16525,7 @@ fn expand_knowledge_neighbors_via_query_runtime(
     Ok((paths, fanout_reason_details))
 }
 
+#[cfg(test)]
 fn knowledge_scoped_neighbors_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -16659,6 +16675,7 @@ fn knowledge_scoped_neighbors_for(
     })
 }
 
+#[cfg(test)]
 fn knowledge_relationships_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -16674,6 +16691,7 @@ fn knowledge_relationships_for(
     )
 }
 
+#[cfg(test)]
 fn knowledge_relationships_via_query_runtime(
     db: &Database,
     request: &KnowledgeRelationshipsRequest,
@@ -16685,6 +16703,7 @@ fn knowledge_relationships_via_query_runtime(
     knowledge_scoped_relationships_via_query_runtime(db, &scoped_request)
 }
 
+#[cfg(test)]
 fn knowledge_scoped_relationships_via_query_runtime(
     db: &Database,
     request: &KnowledgeScopedRelationshipsRequest,
@@ -16765,6 +16784,7 @@ fn knowledge_scoped_relationships_via_query_runtime(
     })
 }
 
+#[cfg(test)]
 fn knowledge_relationship_seed_via_query_runtime(
     db: &Database,
     seed: &KnowledgeEntityRequest,
@@ -16785,6 +16805,7 @@ fn knowledge_relationship_seed_via_query_runtime(
         .find(|entity| entity.external_id.as_deref() == Some(seed.external_id.as_str())))
 }
 
+#[cfg(test)]
 fn knowledge_empty_relationship_group(
     seed: &KnowledgeEntityRequest,
     seed_node_id: Option<u64>,
@@ -16801,6 +16822,7 @@ fn knowledge_empty_relationship_group(
     }
 }
 
+#[cfg(test)]
 fn knowledge_relationship_rows_via_query_runtime(
     db: &Database,
     seed_hit_id: &str,
@@ -16891,6 +16913,7 @@ fn knowledge_relationship_rows_via_query_runtime(
     Ok((paths, fanout_reason_details))
 }
 
+#[cfg(test)]
 struct KnowledgeRelationshipDirectionQuery<'a> {
     db: &'a Database,
     query: &'a str,
@@ -16903,6 +16926,7 @@ struct KnowledgeRelationshipDirectionQuery<'a> {
     fanout_reason_details: &'a mut Vec<KnowledgeFanoutReasonDetail>,
 }
 
+#[cfg(test)]
 fn knowledge_relationship_rows_for_direction_via_query_runtime(
     context: KnowledgeRelationshipDirectionQuery<'_>,
 ) -> Result<()> {
@@ -16942,6 +16966,7 @@ fn knowledge_relationship_rows_for_direction_via_query_runtime(
     Ok(())
 }
 
+#[cfg(test)]
 fn knowledge_context_path_from_query_row(
     row: &Row,
     seed_hit_id: &str,
@@ -16995,6 +17020,7 @@ fn knowledge_context_path_from_query_row(
     })
 }
 
+#[cfg(test)]
 fn knowledge_scoped_relationships_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -17091,6 +17117,7 @@ fn knowledge_scoped_relationships_for(
     })
 }
 
+#[cfg(test)]
 fn knowledge_empty_relationship_groups_for_missing_type(
     store: &GraphStore,
     request: &KnowledgeScopedRelationshipsRequest,
@@ -17120,6 +17147,7 @@ fn knowledge_empty_relationship_groups_for_missing_type(
     }
 }
 
+#[cfg(test)]
 fn knowledge_paths_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -17136,6 +17164,7 @@ fn knowledge_paths_for(
     )
 }
 
+#[cfg(test)]
 fn knowledge_paths_via_query_runtime(
     db: &Database,
     request: &KnowledgePathRequest,
@@ -17150,6 +17179,7 @@ fn knowledge_paths_via_query_runtime(
     )
 }
 
+#[cfg(test)]
 fn knowledge_scoped_paths_via_query_runtime(
     db: &Database,
     request: &KnowledgeScopedPathRequest,
@@ -17376,6 +17406,7 @@ fn knowledge_scoped_paths_via_query_runtime(
     })
 }
 
+#[cfg(test)]
 fn expand_knowledge_paths_via_query_runtime(
     db: &Database,
     source_node_id: u64,
@@ -17450,6 +17481,7 @@ fn expand_knowledge_paths_via_query_runtime(
     Ok((paths, fanout_reason_details))
 }
 
+#[cfg(test)]
 fn knowledge_path_segments_from_node_via_query_runtime(
     db: &Database,
     current_node_id: u64,
@@ -17510,6 +17542,7 @@ fn knowledge_path_segments_from_node_via_query_runtime(
     Ok(segments)
 }
 
+#[cfg(test)]
 fn knowledge_path_segments_for_direction_via_query_runtime(
     db: &Database,
     query: &str,
@@ -17539,6 +17572,7 @@ fn knowledge_path_segments_for_direction_via_query_runtime(
     Ok(())
 }
 
+#[cfg(test)]
 fn knowledge_scoped_paths_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -17775,6 +17809,7 @@ fn knowledge_scoped_paths_for(
     })
 }
 
+#[cfg(test)]
 fn knowledge_subgraph_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -17790,6 +17825,7 @@ fn knowledge_subgraph_for(
     )
 }
 
+#[cfg(test)]
 fn knowledge_subgraph_via_query_runtime(
     db: &Database,
     request: &KnowledgeSubgraphRequest,
@@ -17803,6 +17839,7 @@ fn knowledge_subgraph_via_query_runtime(
     )
 }
 
+#[cfg(test)]
 fn knowledge_scoped_subgraph_via_query_runtime(
     db: &Database,
     request: &KnowledgeScopedSubgraphRequest,
@@ -17958,6 +17995,7 @@ fn knowledge_scoped_subgraph_via_query_runtime(
     })
 }
 
+#[cfg(test)]
 fn expand_knowledge_subgraph_via_query_runtime(
     db: &Database,
     seed: &KnowledgeEntity,
@@ -18028,11 +18066,13 @@ fn expand_knowledge_subgraph_via_query_runtime(
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg(test)]
 enum KnowledgeSubgraphNextEndpoint {
     Source,
     Target,
 }
 
+#[cfg(test)]
 struct ExpandKnowledgeSubgraphNodeQuery<'a> {
     db: &'a Database,
     current_node: NodeId,
@@ -18050,6 +18090,7 @@ struct ExpandKnowledgeSubgraphNodeQuery<'a> {
     fanout_reason_details: &'a mut Vec<KnowledgeFanoutReasonDetail>,
 }
 
+#[cfg(test)]
 struct KnowledgeSubgraphDirectionQuery<'a> {
     db: &'a Database,
     query: &'a str,
@@ -18068,6 +18109,7 @@ struct KnowledgeSubgraphDirectionQuery<'a> {
     fanout_reason_details: &'a mut Vec<KnowledgeFanoutReasonDetail>,
 }
 
+#[cfg(test)]
 fn expand_knowledge_subgraph_node_via_query_runtime(
     context: ExpandKnowledgeSubgraphNodeQuery<'_>,
 ) -> Result<bool> {
@@ -18146,6 +18188,7 @@ fn expand_knowledge_subgraph_node_via_query_runtime(
     Ok(false)
 }
 
+#[cfg(test)]
 fn knowledge_subgraph_for_direction_via_query_runtime(
     context: KnowledgeSubgraphDirectionQuery<'_>,
 ) -> Result<bool> {
@@ -18212,6 +18255,7 @@ fn knowledge_subgraph_for_direction_via_query_runtime(
     Ok(false)
 }
 
+#[cfg(test)]
 fn knowledge_scoped_subgraph_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -18364,6 +18408,7 @@ fn knowledge_scoped_subgraph_for(
     })
 }
 
+#[cfg(test)]
 struct KnowledgeTraversalDiagnosticInput {
     graph_commit_epoch: u64,
     seed_found: bool,
@@ -18381,6 +18426,7 @@ struct KnowledgeTraversalDiagnosticInput {
     relationship_limit: Option<usize>,
 }
 
+#[cfg(test)]
 fn knowledge_traversal_diagnostics(
     input: KnowledgeTraversalDiagnosticInput,
 ) -> KnowledgeTraversalDiagnostics {
@@ -18409,6 +18455,7 @@ fn knowledge_traversal_diagnostics(
     }
 }
 
+#[cfg(test)]
 fn attach_traversal_metadata_filters(
     diagnostics: &mut KnowledgeTraversalDiagnostics,
     metadata_filters: &BTreeMap<String, String>,
@@ -18421,6 +18468,7 @@ fn attach_traversal_metadata_filters(
     diagnostics.input_candidate_set.filtered_out_count = filtered_out_count;
 }
 
+#[cfg(test)]
 fn attach_path_endpoint_metadata_filters(
     diagnostics: &mut KnowledgeTraversalDiagnostics,
     source_metadata_filters: &BTreeMap<String, String>,
@@ -18438,6 +18486,7 @@ fn attach_path_endpoint_metadata_filters(
     diagnostics.input_candidate_set.filtered_out_count = filtered_out_count;
 }
 
+#[cfg(test)]
 fn prefixed_path_endpoint_metadata_filters(
     source_metadata_filters: &BTreeMap<String, String>,
     target_metadata_filters: &BTreeMap<String, String>,
@@ -18453,6 +18502,7 @@ fn prefixed_path_endpoint_metadata_filters(
         .collect()
 }
 
+#[cfg(test)]
 fn knowledge_traversal_input_candidate_set_report(
     input: &KnowledgeTraversalDiagnosticInput,
 ) -> SearchCandidateSetReport {
@@ -18473,6 +18523,7 @@ fn knowledge_traversal_input_candidate_set_report(
     }
 }
 
+#[cfg(test)]
 fn knowledge_traversal_candidate_set_report(
     input: &KnowledgeTraversalDiagnosticInput,
 ) -> SearchRetrieverCandidateSetReport {
@@ -18502,6 +18553,7 @@ fn knowledge_traversal_candidate_set_report(
     }
 }
 
+#[cfg(test)]
 fn knowledge_traversal_fallback_reason_codes(
     input: &KnowledgeTraversalDiagnosticInput,
 ) -> Vec<KnowledgeTraversalFallbackReasonCode> {
@@ -18530,6 +18582,7 @@ fn knowledge_traversal_fallback_reason_codes(
     codes
 }
 
+#[cfg(test)]
 fn knowledge_traversal_fallback_reasons(input: &KnowledgeTraversalDiagnosticInput) -> Vec<String> {
     let mut reasons = Vec::new();
     if let Some(seed_identity) = &input.missing_seed_identity {
@@ -18556,6 +18609,7 @@ fn knowledge_traversal_fallback_reasons(input: &KnowledgeTraversalDiagnosticInpu
     reasons
 }
 
+#[cfg(test)]
 fn knowledge_identity_description(label: &str, external_id: &str) -> String {
     format!("{label}:{external_id}")
 }
@@ -18568,6 +18622,7 @@ fn knowledge_context_path_node_count(paths: &[KnowledgeGraphContextPath]) -> usi
         .len()
 }
 
+#[cfg(test)]
 fn knowledge_graph_path_node_count(paths: &[KnowledgeGraphPath]) -> usize {
     paths
         .iter()
@@ -18577,6 +18632,7 @@ fn knowledge_graph_path_node_count(paths: &[KnowledgeGraphPath]) -> usize {
         .len()
 }
 
+#[cfg(test)]
 struct KnowledgeNeighborExpansion<'a> {
     seed_hit_id: &'a str,
     seed_node_id: NodeId,
@@ -18586,6 +18642,7 @@ struct KnowledgeNeighborExpansion<'a> {
     max_hops: usize,
 }
 
+#[cfg(test)]
 struct KnowledgePathExpansion {
     source_node_id: NodeId,
     target_node_id: NodeId,
@@ -18595,6 +18652,7 @@ struct KnowledgePathExpansion {
     limit: usize,
 }
 
+#[cfg(test)]
 struct KnowledgeSubgraphExpansion {
     seed_node_id: NodeId,
     requested_direction: KnowledgeNeighborDirection,
@@ -18618,6 +18676,7 @@ struct DenseAdjacencyDiagnosticContext<'a> {
     requested_direction: KnowledgeNeighborDirection,
 }
 
+#[cfg(test)]
 fn expand_knowledge_neighbors_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -18689,6 +18748,7 @@ fn expand_knowledge_neighbors_for(
     Ok((paths, fanout_reasons))
 }
 
+#[cfg(test)]
 fn expand_knowledge_paths_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -18766,6 +18826,7 @@ fn expand_knowledge_paths_for(
     Ok((paths, fanout_reasons))
 }
 
+#[cfg(test)]
 fn expand_knowledge_subgraph_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -19305,6 +19366,7 @@ fn knowledge_entity_from_value(value: &Value) -> Option<KnowledgeEntity> {
     })
 }
 
+#[cfg(test)]
 fn knowledge_entity_matches_filters(
     entity: &KnowledgeEntity,
     metadata_filters: &BTreeMap<String, String>,
@@ -19314,6 +19376,7 @@ fn knowledge_entity_matches_filters(
         .all(|(key, value)| knowledge_entity_matches_filter_value(entity, key, value))
 }
 
+#[cfg(test)]
 fn knowledge_entity_matches_filter_value(entity: &KnowledgeEntity, key: &str, value: &str) -> bool {
     match key {
         "kind" => search_kind_to_label(value)
@@ -19328,6 +19391,7 @@ fn knowledge_entity_matches_filter_value(entity: &KnowledgeEntity, key: &str, va
     }
 }
 
+#[cfg(test)]
 fn knowledge_entity_normalized_space_id(entity: &KnowledgeEntity) -> String {
     entity
         .properties
@@ -19337,6 +19401,7 @@ fn knowledge_entity_normalized_space_id(entity: &KnowledgeEntity) -> String {
         .unwrap_or_else(|| "default".to_string())
 }
 
+#[cfg(test)]
 fn knowledge_entity_projection_source_id(entity: &KnowledgeEntity) -> Option<String> {
     ["source_id", "thread_id", "source"]
         .into_iter()
@@ -20799,57 +20864,36 @@ impl DatabaseReadTransaction {
         knowledge_property_batch_for(&self.catalog, &self.store, request)
     }
 
-    pub fn knowledge_neighbors(
+    #[cfg(test)]
+    pub(crate) fn test_query_neighbors(
         &self,
         request: &KnowledgeNeighborsRequest,
     ) -> Result<KnowledgeNeighborsOutput> {
         knowledge_neighbors_for(&self.catalog, &self.store, request)
     }
 
-    pub fn knowledge_scoped_neighbors(
-        &self,
-        request: &KnowledgeScopedNeighborsRequest,
-    ) -> Result<KnowledgeNeighborsOutput> {
-        knowledge_scoped_neighbors_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_relationships(
+    #[cfg(test)]
+    pub(crate) fn test_query_relationships(
         &self,
         request: &KnowledgeRelationshipsRequest,
     ) -> Result<KnowledgeRelationshipsOutput> {
         knowledge_relationships_for(&self.catalog, &self.store, request)
     }
 
-    pub fn knowledge_scoped_relationships(
+    #[cfg(test)]
+    pub(crate) fn test_query_paths(
         &self,
-        request: &KnowledgeScopedRelationshipsRequest,
-    ) -> Result<KnowledgeRelationshipsOutput> {
-        knowledge_scoped_relationships_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_paths(&self, request: &KnowledgePathRequest) -> Result<KnowledgePathOutput> {
+        request: &KnowledgePathRequest,
+    ) -> Result<KnowledgePathOutput> {
         knowledge_paths_for(&self.catalog, &self.store, request)
     }
 
-    pub fn knowledge_scoped_paths(
-        &self,
-        request: &KnowledgeScopedPathRequest,
-    ) -> Result<KnowledgePathOutput> {
-        knowledge_scoped_paths_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_subgraph(
+    #[cfg(test)]
+    pub(crate) fn test_query_subgraph(
         &self,
         request: &KnowledgeSubgraphRequest,
     ) -> Result<KnowledgeSubgraphOutput> {
         knowledge_subgraph_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_scoped_subgraph(
-        &self,
-        request: &KnowledgeScopedSubgraphRequest,
-    ) -> Result<KnowledgeSubgraphOutput> {
-        knowledge_scoped_subgraph_for(&self.catalog, &self.store, request)
     }
 
     pub fn statistics(&self) -> GraphStatistics {

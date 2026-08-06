@@ -30,7 +30,7 @@ fn deletes_knowledge_relationship_through_typed_api() {
     assert!(!output.target_filtered_out);
     assert_eq!(output.deleted_relationship_count, 1);
     let relationships = db
-        .knowledge_relationships(&KnowledgeRelationshipsRequest {
+        .test_query_relationships(&KnowledgeRelationshipsRequest {
             seeds: vec![KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "memory_1".to_string(),
@@ -87,7 +87,7 @@ fn typed_knowledge_relationship_delete_filters_relationship_properties() {
 
     assert_eq!(output.deleted_relationship_count, 1);
     let relationships = db
-        .knowledge_relationships(&KnowledgeRelationshipsRequest {
+        .test_query_relationships(&KnowledgeRelationshipsRequest {
             seeds: vec![KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "memory_1".to_string(),
@@ -143,7 +143,7 @@ fn scoped_knowledge_relationship_delete_does_not_write_filtered_endpoint() {
     assert!(!output.target_filtered_out);
     assert_eq!(output.deleted_relationship_count, 0);
     let relationships = db
-        .knowledge_relationships(&KnowledgeRelationshipsRequest {
+        .test_query_relationships(&KnowledgeRelationshipsRequest {
             seeds: vec![KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "memory_1".to_string(),
@@ -243,7 +243,7 @@ fn typed_knowledge_relationship_delete_persists_and_replays_from_wal() {
     {
         let db = Database::open(&path).unwrap();
         let output = db
-            .knowledge_relationships(&KnowledgeRelationshipsRequest {
+            .test_query_relationships(&KnowledgeRelationshipsRequest {
                 seeds: vec![KnowledgeEntityRequest {
                     label: "Memory".to_string(),
                     external_id: "memory_1".to_string(),
