@@ -557,23 +557,6 @@ pub struct KnowledgeSourceParsedCreateBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSourceVersionLookupRequest {
-    pub original_name: Option<String>,
-    pub sha256: Option<String>,
-    pub space_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSourceVersionLookupOutput {
-    pub graph_commit_epoch: u64,
-    pub found: bool,
-    pub source_id: Option<String>,
-    pub node_id: Option<u64>,
-    pub version: Option<i64>,
-    pub row: Option<KnowledgeSourceListRow>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeSourceRevisionCreate {
     pub newer_source_id: String,
     pub older_source_id: String,
@@ -827,12 +810,6 @@ pub struct KnowledgeSourceIdListOutput {
     pub source_ids: Vec<String>,
     pub matched_count: usize,
     pub returned_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeSourceCountOutput {
-    pub graph_commit_epoch: u64,
-    pub count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

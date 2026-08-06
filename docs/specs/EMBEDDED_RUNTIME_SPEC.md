@@ -125,6 +125,17 @@ atomicity, recovery, runtime admission, projection generation publication, or a
 bounded multi-statement workflow. New single-query route wrappers and their
 request/output DTOs MUST NOT be added to the embedded facade.
 
+Business algorithms that need several independent reads MUST keep those reads
+as small named Cypher statements in the host. When all phases require one graph
+version, the host MUST execute them through one `DatabaseReadTransaction` and
+may record `DatabaseReadTransaction::commit_epoch` with the derived result.
+Skein MUST NOT add an algorithm-specific read DTO merely to assemble those
+statement outputs. PageRank planning, membership, visibility, and central-node
+reads follow this rule; its grouped score-update and clear mutations remain
+typed transaction contracts. GraphMeta state reads also follow this rule:
+hosts MUST choose fixed property projections and bind `meta_id`, while stamp
+batches and deletes remain typed for grouped WAL and mutation validation.
+
 ## Concurrency Model
 
 Skein MUST support concurrent readers and a concurrent writer through

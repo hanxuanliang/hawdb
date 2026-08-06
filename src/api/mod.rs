@@ -2893,13 +2893,6 @@ impl Database {
         create_knowledge_source_parsed_batch_for(self, request)
     }
 
-    pub fn knowledge_source_latest_version(
-        &self,
-        request: &KnowledgeSourceVersionLookupRequest,
-    ) -> Result<KnowledgeSourceVersionLookupOutput> {
-        knowledge_source_latest_version_via_query_runtime(self, request)
-    }
-
     pub fn create_knowledge_source_revision_batch(
         &mut self,
         request: &KnowledgeSourceRevisionCreateBatchRequest,
@@ -2954,10 +2947,6 @@ impl Database {
         request: &KnowledgeSourceProjectedListRequest,
     ) -> Result<KnowledgeSourceProjectedListOutput> {
         knowledge_source_projected_list_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_source_count(&self) -> KnowledgeSourceCountOutput {
-        knowledge_source_count_via_query_runtime(self)
     }
 
     pub fn knowledge_source_sourced_memory_count(
@@ -3331,34 +3320,6 @@ impl Database {
         clear_knowledge_pagerank_scores_for(self, request)
     }
 
-    pub fn knowledge_pagerank_plan(
-        &self,
-        request: &KnowledgePageRankPlanRequest,
-    ) -> Result<KnowledgePageRankPlanOutput> {
-        knowledge_pagerank_plan_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_pagerank_membership(
-        &self,
-        request: &KnowledgePageRankMembershipRequest,
-    ) -> Result<KnowledgePageRankMembershipOutput> {
-        knowledge_pagerank_membership_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_pagerank_memory_visibility(
-        &self,
-        request: &KnowledgePageRankMemoryVisibilityRequest,
-    ) -> Result<KnowledgePageRankMemoryVisibilityOutput> {
-        knowledge_pagerank_memory_visibility_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_pagerank_central_entity(
-        &self,
-        request: &KnowledgePageRankCentralEntityRequest,
-    ) -> Result<KnowledgePageRankCentralEntityOutput> {
-        knowledge_pagerank_central_entity_via_query_runtime(self, request)
-    }
-
     pub fn clear_knowledge_community_assignments(
         &mut self,
         request: &KnowledgeCommunityAssignmentClearRequest,
@@ -3408,20 +3369,6 @@ impl Database {
         stamp_knowledge_graph_meta_batch_for(self, request)
     }
 
-    pub fn knowledge_graph_meta(
-        &self,
-        request: &KnowledgeGraphMetaRequest,
-    ) -> Result<KnowledgeGraphMetaOutput> {
-        knowledge_graph_meta_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_graph_meta_projected(
-        &self,
-        request: &KnowledgeGraphMetaProjectedRequest,
-    ) -> Result<KnowledgeGraphMetaProjectedOutput> {
-        knowledge_graph_meta_projected_via_query_runtime(self, request)
-    }
-
     pub fn delete_knowledge_graph_meta(
         &mut self,
         request: &KnowledgeGraphMetaRequest,
@@ -3448,20 +3395,6 @@ impl Database {
         request: &KnowledgeAugmentationJobLifecycleBatchRequest,
     ) -> Result<KnowledgeAugmentationJobLifecycleBatchOutput> {
         update_knowledge_augmentation_jobs_batch_for(self, request)
-    }
-
-    pub fn knowledge_augmentation_job(
-        &self,
-        request: &KnowledgeAugmentationJobRequest,
-    ) -> Result<KnowledgeAugmentationJobOutput> {
-        knowledge_augmentation_job_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_augmentation_jobs(
-        &self,
-        request: &KnowledgeAugmentationJobListRequest,
-    ) -> Result<KnowledgeAugmentationJobListOutput> {
-        knowledge_augmentation_jobs_via_query_runtime(self, request)
     }
 
     pub fn interrupt_knowledge_augmentation_jobs(
@@ -14001,100 +13934,6 @@ fn knowledge_source_parsed_entity_create(
     }
 }
 
-fn knowledge_source_latest_version_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeSourceVersionLookupRequest,
-) -> Result<KnowledgeSourceVersionLookupOutput> {
-    validate_knowledge_source_version_lookup(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let mut parameters = BTreeMap::from([(
-        "space_id".to_string(),
-        Value::String(request.space_id.clone()),
-    )]);
-    let lookup_predicate = if let Some(original_name) = &request.original_name {
-        parameters.insert(
-            "original_name".to_string(),
-            Value::String(original_name.clone()),
-        );
-        "s.original_name = $original_name"
-    } else if let Some(sha256) = &request.sha256 {
-        parameters.insert("sha256".to_string(), Value::String(sha256.clone()));
-        "s.sha256 = $sha256"
-    } else {
-        return Err(SkeinError::Semantic(
-            "knowledge source version lookup requires exactly one original name or sha256"
-                .to_string(),
-        ));
-    };
-
-    let query = format!(
-        "MATCH (s:Source) \
-         WHERE s.space_id = $space_id AND {lookup_predicate} \
-         OPTIONAL MATCH (m:Memory)-[r:SOURCED_FROM]->(s) \
-         WITH s, count(r) AS sourced_memory_count \
-         RETURN s.id AS source_id, id(s) AS node_id, s.original_name AS original_name, \
-         s.title AS title, s.summary AS summary, s.source_type AS source_type, \
-         s.lifecycle_state AS lifecycle_state, s.space_id AS raw_space_id, \
-         s.parsed_path AS parsed_path, s.file_path AS file_path, s.mime_type AS mime_type, \
-         s.source_url AS source_url, s.metadata AS metadata, s.memory_count AS memory_count, \
-         s.chunk_count AS chunk_count, s.size_bytes AS size_bytes, \
-         COALESCE(s.version, 1) AS version, \
-         s.created_at AS created_at, s.updated_at AS updated_at, \
-         sourced_memory_count AS sourced_memory_count \
-         ORDER BY version DESC, source_id ASC, node_id ASC LIMIT 1"
-    );
-    let output = db.query_read_only_with_params_bounded(&query, &parameters, Some(1))?;
-    let row = output
-        .rows
-        .first()
-        .map(knowledge_source_list_row_from_query)
-        .transpose()?;
-
-    Ok(KnowledgeSourceVersionLookupOutput {
-        graph_commit_epoch,
-        found: row.is_some(),
-        source_id: row.as_ref().and_then(|row| row.source_id.clone()),
-        node_id: row.as_ref().map(|row| row.node_id),
-        version: row.as_ref().map(|row| row.version),
-        row,
-    })
-}
-
-fn validate_knowledge_source_version_lookup(
-    request: &KnowledgeSourceVersionLookupRequest,
-) -> Result<()> {
-    let has_original_name = match request.original_name.as_deref() {
-        Some("") => {
-            return Err(SkeinError::Semantic(
-                "knowledge source version lookup requires a non-empty original name".to_string(),
-            ));
-        }
-        Some(_) => true,
-        None => false,
-    };
-    let has_sha256 = match request.sha256.as_deref() {
-        Some("") => {
-            return Err(SkeinError::Semantic(
-                "knowledge source version lookup requires a non-empty sha256".to_string(),
-            ));
-        }
-        Some(_) => true,
-        None => false,
-    };
-    if has_original_name == has_sha256 {
-        return Err(SkeinError::Semantic(
-            "knowledge source version lookup requires exactly one original name or sha256"
-                .to_string(),
-        ));
-    }
-    if request.space_id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge source version lookup requires a non-empty space id".to_string(),
-        ));
-    }
-    Ok(())
-}
-
 fn create_knowledge_source_revision_batch_for(
     db: &mut Database,
     request: &KnowledgeSourceRevisionCreateBatchRequest,
@@ -14615,30 +14454,6 @@ fn knowledge_source_ids_via_query_runtime(
     })
 }
 
-fn knowledge_source_count_via_query_runtime(db: &Database) -> KnowledgeSourceCountOutput {
-    let graph_commit_epoch = db.store.commit_epoch();
-    let Ok(output) = db.query_read_only_with_params_bounded(
-        "MATCH (s:Source) RETURN count(s) AS count",
-        &BTreeMap::new(),
-        Some(1),
-    ) else {
-        return KnowledgeSourceCountOutput {
-            graph_commit_epoch,
-            count: 0,
-        };
-    };
-    let count = output
-        .rows
-        .first()
-        .and_then(|row| row.get("count"))
-        .and_then(value_to_non_negative_usize)
-        .unwrap_or(0);
-    KnowledgeSourceCountOutput {
-        graph_commit_epoch,
-        count,
-    }
-}
-
 fn validate_knowledge_source_id_list_request(request: &KnowledgeSourceIdListRequest) -> Result<()> {
     if request
         .lifecycle_state
@@ -14759,13 +14574,6 @@ fn optional_string_cell(row: &Row, column: &str) -> Option<String> {
         .filter(|value| !matches!(value, Value::Null))
         .map(value_to_external_id)
         .filter(|value| !value.is_empty())
-}
-
-fn optional_raw_string_cell(row: &Row, column: &str) -> Option<String> {
-    match row.get(column) {
-        Some(Value::String(value)) => Some(value.clone()),
-        _ => None,
-    }
 }
 
 fn optional_i64_cell(row: &Row, column: &str) -> Option<i64> {
@@ -23340,233 +23148,6 @@ fn clear_knowledge_pagerank_scores_for(
     })
 }
 
-fn knowledge_pagerank_plan_via_query_runtime(
-    db: &Database,
-    request: &KnowledgePageRankPlanRequest,
-) -> Result<KnowledgePageRankPlanOutput> {
-    let graph_commit_epoch = db.store.commit_epoch();
-    let memory_node_count = pagerank_count_via_query_runtime(
-        db,
-        "MATCH (m:Memory) RETURN count(m) AS total",
-        BTreeMap::new(),
-    )?;
-    let entity_node_count = pagerank_count_via_query_runtime(
-        db,
-        "MATCH (e:Entity) RETURN count(e) AS total",
-        BTreeMap::new(),
-    )?;
-    let entity_relation_count = pagerank_count_via_query_runtime(
-        db,
-        "MATCH (:Entity)-[r:RELATES_TO]->(:Entity) RETURN count(r) AS total",
-        BTreeMap::new(),
-    )?;
-    let mention_edge_count = pagerank_count_via_query_runtime(
-        db,
-        "MATCH (:Memory)-[r:MENTIONS]->(:Entity) RETURN count(r) AS total",
-        BTreeMap::new(),
-    )?;
-    let active_memory_relation_count = pagerank_count_via_query_runtime(
-        db,
-        "MATCH (:Memory)-[r:MEMORY_RELATES_TO]->(:Memory) WHERE r.status = 'active' RETURN count(r) AS total",
-        BTreeMap::new(),
-    )?;
-
-    let (
-        changed_memory_count,
-        changed_entity_count,
-        changed_mention_edge_count,
-        changed_entity_relation_count,
-        changed_memory_relation_count,
-    ) = if let Some(cutoff) = request.changed_since_epoch_nanos {
-        let parameters = BTreeMap::from([("cutoff".to_string(), Value::Int(cutoff))]);
-        (
-            pagerank_count_via_query_runtime(
-                db,
-                "MATCH (m:Memory) WHERE m.created_at > $cutoff OR m.updated_at > $cutoff RETURN count(m) AS total",
-                parameters.clone(),
-            )?,
-            pagerank_count_via_query_runtime(
-                db,
-                "MATCH (e:Entity) WHERE e.created_at > $cutoff OR e.updated_at > $cutoff RETURN count(e) AS total",
-                parameters.clone(),
-            )?,
-            pagerank_count_via_query_runtime(
-                db,
-                "MATCH (:Memory)-[r:MENTIONS]->(:Entity) WHERE r.created_at > $cutoff OR r.updated_at > $cutoff RETURN count(r) AS total",
-                parameters.clone(),
-            )?,
-            pagerank_count_via_query_runtime(
-                db,
-                "MATCH (:Entity)-[r:RELATES_TO]->(:Entity) WHERE r.created_at > $cutoff OR r.updated_at > $cutoff RETURN count(r) AS total",
-                parameters.clone(),
-            )?,
-            pagerank_count_via_query_runtime(
-                db,
-                "MATCH (:Memory)-[r:MEMORY_RELATES_TO]->(:Memory) WHERE r.status = 'active' AND (r.created_at > $cutoff OR r.updated_at > $cutoff) RETURN count(r) AS total",
-                parameters,
-            )?,
-        )
-    } else {
-        (0, 0, 0, 0, 0)
-    };
-
-    Ok(KnowledgePageRankPlanOutput {
-        graph_commit_epoch,
-        memory_node_count,
-        entity_node_count,
-        entity_relation_count,
-        mention_edge_count,
-        active_memory_relation_count,
-        changed_memory_count,
-        changed_entity_count,
-        changed_mention_edge_count,
-        changed_entity_relation_count,
-        changed_memory_relation_count,
-    })
-}
-
-fn pagerank_count_via_query_runtime(
-    db: &Database,
-    query: &str,
-    parameters: BTreeMap<String, Value>,
-) -> Result<usize> {
-    let output = db.query_read_only_with_params_bounded(query, &parameters, Some(1))?;
-    output
-        .rows
-        .first()
-        .and_then(|row| row.get("total"))
-        .and_then(value_to_non_negative_usize)
-        .ok_or_else(|| SkeinError::Execution("pagerank count query returned no total".to_string()))
-}
-
-fn knowledge_pagerank_membership_via_query_runtime(
-    db: &Database,
-    request: &KnowledgePageRankMembershipRequest,
-) -> Result<KnowledgePageRankMembershipOutput> {
-    validate_pagerank_label(request.label.as_str())?;
-    validate_non_empty_external_ids(
-        &request.external_ids,
-        "knowledge pagerank membership requires non-empty external ids",
-    )?;
-    let label = pagerank_label(request.label.as_str()).to_string();
-    let entities = request
-        .external_ids
-        .iter()
-        .map(|external_id| KnowledgeEntityRequest {
-            label: label.clone(),
-            external_id: external_id.clone(),
-        })
-        .collect::<Vec<_>>();
-    let (graph_commit_epoch, found) = lookup_entities_via_query_runtime_strict(db, &entities)?;
-    let mut rows = Vec::with_capacity(request.external_ids.len());
-    let mut matched_count = 0;
-    let mut missing_count = 0;
-    for external_id in &request.external_ids {
-        if let Some(entity) = found.get(&(label.clone(), external_id.clone())) {
-            matched_count += 1;
-            rows.push(KnowledgePageRankMembershipRow {
-                label: label.clone(),
-                external_id: external_id.clone(),
-                node_id: Some(entity.node_id),
-                matched: true,
-            });
-        } else {
-            missing_count += 1;
-            rows.push(KnowledgePageRankMembershipRow {
-                label: label.clone(),
-                external_id: external_id.clone(),
-                node_id: None,
-                matched: false,
-            });
-        }
-    }
-
-    Ok(KnowledgePageRankMembershipOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        missing_count,
-    })
-}
-
-fn knowledge_pagerank_memory_visibility_via_query_runtime(
-    db: &Database,
-    request: &KnowledgePageRankMemoryVisibilityRequest,
-) -> Result<KnowledgePageRankMemoryVisibilityOutput> {
-    validate_non_empty_external_ids(
-        &request.memory_ids,
-        "knowledge pagerank memory visibility requires non-empty memory ids",
-    )?;
-    let entities = request
-        .memory_ids
-        .iter()
-        .map(|memory_id| KnowledgeEntityRequest {
-            label: "Memory".to_string(),
-            external_id: memory_id.clone(),
-        })
-        .collect::<Vec<_>>();
-    let (graph_commit_epoch, found) = lookup_entities_via_query_runtime_strict(db, &entities)?;
-    let mut rows = Vec::with_capacity(request.memory_ids.len());
-    let mut matched_count = 0;
-    let mut missing_count = 0;
-    for memory_id in &request.memory_ids {
-        if let Some(entity) = found.get(&("Memory".to_string(), memory_id.clone())) {
-            matched_count += 1;
-            rows.push(KnowledgePageRankMemoryVisibilityRow {
-                memory_id: memory_id.clone(),
-                node_id: Some(entity.node_id),
-                matched: true,
-                metadata: entity.properties.get("metadata").cloned(),
-                is_latest: entity.properties.get("is_latest") != Some(&Value::Bool(false)),
-            });
-        } else {
-            missing_count += 1;
-            rows.push(KnowledgePageRankMemoryVisibilityRow {
-                memory_id: memory_id.clone(),
-                node_id: None,
-                matched: false,
-                metadata: None,
-                is_latest: true,
-            });
-        }
-    }
-
-    Ok(KnowledgePageRankMemoryVisibilityOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        missing_count,
-    })
-}
-
-fn knowledge_pagerank_central_entity_via_query_runtime(
-    db: &Database,
-    request: &KnowledgePageRankCentralEntityRequest,
-) -> Result<KnowledgePageRankCentralEntityOutput> {
-    if request.entity_id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge pagerank central entity requires a non-empty entity id".to_string(),
-        ));
-    }
-    let (graph_commit_epoch, found) = lookup_entities_via_query_runtime_strict(
-        db,
-        &[KnowledgeEntityRequest {
-            label: "Entity".to_string(),
-            external_id: request.entity_id.clone(),
-        }],
-    )?;
-    let entity = found.get(&("Entity".to_string(), request.entity_id.clone()));
-    Ok(KnowledgePageRankCentralEntityOutput {
-        graph_commit_epoch,
-        found: entity.is_some(),
-        node_id: entity.map(|entity| entity.node_id),
-        name: entity
-            .and_then(|entity| entity.properties.get("name"))
-            .map(value_to_external_id)
-            .filter(|name| !name.is_empty()),
-    })
-}
-
 fn validate_non_empty_external_ids(external_ids: &[String], message: &str) -> Result<()> {
     if external_ids.iter().any(String::is_empty) {
         return Err(SkeinError::Semantic(message.to_string()));
@@ -24375,74 +23956,6 @@ fn knowledge_community_cleanup_statement(
     ))
 }
 
-fn knowledge_graph_meta_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeGraphMetaRequest,
-) -> Result<KnowledgeGraphMetaOutput> {
-    validate_graph_meta_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let meta = knowledge_graph_meta_entity_via_query_runtime(db, &request.meta_id)?
-        .map(knowledge_graph_meta_from_entity);
-    Ok(KnowledgeGraphMetaOutput {
-        graph_commit_epoch,
-        found: meta.is_some(),
-        meta,
-    })
-}
-
-fn knowledge_graph_meta_projected_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeGraphMetaProjectedRequest,
-) -> Result<KnowledgeGraphMetaProjectedOutput> {
-    validate_graph_meta_projected_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let meta = try_node_by_label_property_external_id(
-        catalog,
-        store,
-        "GraphMeta",
-        "meta_id",
-        &request.meta.meta_id,
-    )?
-    .map(|node| knowledge_graph_meta_projected_from_node(&node, &request.property_names));
-    Ok(KnowledgeGraphMetaProjectedOutput {
-        graph_commit_epoch,
-        found: meta.is_some(),
-        meta,
-    })
-}
-
-fn knowledge_graph_meta_projected_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeGraphMetaProjectedRequest,
-) -> Result<KnowledgeGraphMetaProjectedOutput> {
-    validate_graph_meta_projected_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let meta = knowledge_graph_meta_entity_via_query_runtime(db, &request.meta.meta_id)?
-        .map(|entity| knowledge_graph_meta_projected_from_entity(&entity, &request.property_names));
-    Ok(KnowledgeGraphMetaProjectedOutput {
-        graph_commit_epoch,
-        found: meta.is_some(),
-        meta,
-    })
-}
-
-fn knowledge_graph_meta_entity_via_query_runtime(
-    db: &Database,
-    meta_id: &str,
-) -> Result<Option<KnowledgeEntity>> {
-    let parameters = BTreeMap::from([("meta_id".to_string(), Value::String(meta_id.to_string()))]);
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (m:GraphMeta) WHERE m.meta_id = $meta_id RETURN m AS meta ORDER BY id(m) ASC LIMIT 1",
-        &parameters,
-        Some(1),
-    )?;
-    Ok(output
-        .rows
-        .first()
-        .and_then(|row| row.get("meta").and_then(knowledge_entity_from_value)))
-}
-
 fn delete_knowledge_graph_meta_for(
     db: &mut Database,
     request: &KnowledgeGraphMetaRequest,
@@ -24488,60 +24001,6 @@ fn validate_graph_meta_request(request: &KnowledgeGraphMetaRequest) -> Result<()
         ));
     }
     Ok(())
-}
-
-fn validate_graph_meta_projected_request(
-    request: &KnowledgeGraphMetaProjectedRequest,
-) -> Result<()> {
-    validate_graph_meta_request(&request.meta)?;
-    if request.property_names.iter().any(String::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge graph meta projected read requires non-empty property names".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn knowledge_graph_meta_from_entity(entity: KnowledgeEntity) -> KnowledgeGraphMeta {
-    KnowledgeGraphMeta {
-        meta_id: knowledge_entity_graph_meta_id(&entity),
-        node_id: entity.node_id,
-        properties: entity.properties,
-    }
-}
-
-fn knowledge_graph_meta_projected_from_node(
-    node: &NodeRecord,
-    property_names: &[String],
-) -> KnowledgeGraphMetaProjected {
-    KnowledgeGraphMetaProjected {
-        meta_id: node
-            .properties
-            .get("meta_id")
-            .map(value_to_external_id)
-            .filter(|meta_id| !meta_id.is_empty()),
-        node_id: node.id.0,
-        properties: projected_properties(&node.properties, property_names),
-    }
-}
-
-fn knowledge_graph_meta_projected_from_entity(
-    entity: &KnowledgeEntity,
-    property_names: &[String],
-) -> KnowledgeGraphMetaProjected {
-    KnowledgeGraphMetaProjected {
-        meta_id: knowledge_entity_graph_meta_id(entity),
-        node_id: entity.node_id,
-        properties: projected_properties(&entity.properties, property_names),
-    }
-}
-
-fn knowledge_entity_graph_meta_id(entity: &KnowledgeEntity) -> Option<String> {
-    entity
-        .properties
-        .get("meta_id")
-        .map(value_to_external_id)
-        .filter(|meta_id| !meta_id.is_empty())
 }
 
 fn knowledge_graph_meta_delete_statement(
@@ -25261,157 +24720,9 @@ fn augmentation_job_create_statement(
     (cypher, parameters)
 }
 
-fn knowledge_augmentation_job_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeAugmentationJobRequest,
-) -> Result<KnowledgeAugmentationJobOutput> {
-    validate_knowledge_augmentation_job_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let parameters =
-        BTreeMap::from([("job_id".to_string(), Value::String(request.job_id.clone()))]);
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (j:AugmentationJob) WHERE j.job_id = $job_id \
-         RETURN j.job_id AS job_id, id(j) AS node_id, j.job_type AS job_type, \
-         j.status AS status, j.progress AS progress, j.message AS message, \
-         j.result AS result, j.error_message AS error_message, j.started_at AS started_at, \
-         j.completed_at AS completed_at, j.created_at AS created_at \
-         ORDER BY node_id ASC LIMIT 1",
-        &parameters,
-        Some(1),
-    )?;
-    let job = output
-        .rows
-        .first()
-        .map(knowledge_augmentation_job_from_query)
-        .transpose()?;
-    Ok(KnowledgeAugmentationJobOutput {
-        graph_commit_epoch,
-        found: job.is_some(),
-        job,
-    })
-}
-
-fn knowledge_augmentation_jobs_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeAugmentationJobListRequest,
-) -> Result<KnowledgeAugmentationJobListOutput> {
-    validate_knowledge_augmentation_job_list_request(request)?;
-    let graph_commit_epoch = db.store.commit_epoch();
-    let mut parameters = BTreeMap::new();
-    let predicate = augmentation_job_list_predicate(request, &mut parameters);
-    let count_query = format!("MATCH (j:AugmentationJob){predicate} RETURN count(j) AS total");
-    let matched_count = pagerank_count_via_query_runtime(db, &count_query, parameters.clone())?;
-    if request.limit == 0 {
-        return Ok(KnowledgeAugmentationJobListOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_count,
-            returned_count: 0,
-        });
-    }
-
-    parameters.insert(
-        "limit".to_string(),
-        Value::Int(i64::try_from(request.limit).unwrap_or(i64::MAX)),
-    );
-    let order_column = match request.order_by {
-        KnowledgeAugmentationJobListOrder::StartedAtDesc => "j.started_at",
-        KnowledgeAugmentationJobListOrder::CreatedAtDesc => "j.created_at",
-    };
-    let query = format!(
-        "MATCH (j:AugmentationJob){predicate} \
-         RETURN j.job_id AS job_id, id(j) AS node_id, j.job_type AS job_type, \
-         j.status AS status, j.progress AS progress, j.message AS message, \
-         j.result AS result, j.error_message AS error_message, j.started_at AS started_at, \
-         j.completed_at AS completed_at, j.created_at AS created_at \
-         ORDER BY {order_column} DESC, node_id ASC LIMIT $limit"
-    );
-    let output = db.query_read_only_with_params_bounded(&query, &parameters, None)?;
-    let rows = output
-        .rows
-        .iter()
-        .map(knowledge_augmentation_job_from_query)
-        .collect::<Result<Vec<_>>>()?;
-    let returned_count = rows.len();
-
-    Ok(KnowledgeAugmentationJobListOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        returned_count,
-    })
-}
-
-fn validate_knowledge_augmentation_job_request(
-    request: &KnowledgeAugmentationJobRequest,
-) -> Result<()> {
-    if request.job_id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge augmentation job read requires a non-empty job id".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_knowledge_augmentation_job_list_request(
-    request: &KnowledgeAugmentationJobListRequest,
-) -> Result<()> {
-    if request
-        .status_filter
-        .as_ref()
-        .is_some_and(|status| status.is_empty())
-    {
-        return Err(SkeinError::Semantic(
-            "knowledge augmentation job list requires a non-empty status filter".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn augmentation_job_list_predicate(
-    request: &KnowledgeAugmentationJobListRequest,
-    parameters: &mut BTreeMap<String, Value>,
-) -> String {
-    let Some(status) = &request.status_filter else {
-        return String::new();
-    };
-    parameters.insert("status".to_string(), Value::String(status.clone()));
-    " WHERE j.status = $status".to_string()
-}
-
-fn knowledge_augmentation_job_from_query(row: &Row) -> Result<KnowledgeAugmentationJob> {
-    let node_id = row
-        .get("node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution("knowledge augmentation job row is missing node_id".to_string())
-        })?;
-    Ok(KnowledgeAugmentationJob {
-        job_id: optional_string_cell(row, "job_id"),
-        node_id,
-        job_type: optional_raw_string_cell(row, "job_type"),
-        status: optional_raw_string_cell(row, "status"),
-        progress: row.get("progress").and_then(value_to_finite_f64),
-        message: optional_raw_string_cell(row, "message"),
-        result: row.get("result").cloned(),
-        error_message: optional_raw_string_cell(row, "error_message"),
-        started_at: row.get("started_at").cloned(),
-        completed_at: row.get("completed_at").cloned(),
-        created_at: row.get("created_at").cloned(),
-    })
-}
-
 fn node_string_property(node: &NodeRecord, property_name: &str) -> Option<String> {
     match node.properties.get(property_name) {
         Some(Value::String(value)) => Some(value.clone()),
-        _ => None,
-    }
-}
-
-fn value_to_finite_f64(value: &Value) -> Option<f64> {
-    match value {
-        Value::Int(value) => Some(*value as f64),
-        Value::Float(value) if value.is_finite() => Some(*value),
         _ => None,
     }
 }
@@ -31502,6 +30813,10 @@ fn mutation_command_for_statement(
 }
 
 impl DatabaseReadTransaction {
+    pub fn commit_epoch(&self) -> u64 {
+        self.store.commit_epoch()
+    }
+
     pub fn query(&mut self, cypher_text: &str) -> Result<QueryOutput> {
         self.query_with_params(cypher_text, &BTreeMap::new())
     }
@@ -32282,13 +31597,6 @@ impl DatabaseReadTransaction {
         request: &KnowledgeEntityLabelProjectedListRequest,
     ) -> Result<KnowledgeEntityLabelProjectedListOutput> {
         knowledge_entity_label_projected_list_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_graph_meta_projected(
-        &self,
-        request: &KnowledgeGraphMetaProjectedRequest,
-    ) -> Result<KnowledgeGraphMetaProjectedOutput> {
-        knowledge_graph_meta_projected_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_skills(

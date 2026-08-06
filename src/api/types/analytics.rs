@@ -60,83 +60,6 @@ pub struct KnowledgePageRankClearOutput {
     pub non_writable_count: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct KnowledgePageRankPlanRequest {
-    pub changed_since_epoch_nanos: Option<i64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgePageRankPlanOutput {
-    pub graph_commit_epoch: u64,
-    pub memory_node_count: usize,
-    pub entity_node_count: usize,
-    pub entity_relation_count: usize,
-    pub mention_edge_count: usize,
-    pub active_memory_relation_count: usize,
-    pub changed_memory_count: usize,
-    pub changed_entity_count: usize,
-    pub changed_mention_edge_count: usize,
-    pub changed_entity_relation_count: usize,
-    pub changed_memory_relation_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgePageRankMembershipRequest {
-    pub label: String,
-    pub external_ids: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgePageRankMembershipRow {
-    pub label: String,
-    pub external_id: String,
-    pub node_id: Option<u64>,
-    pub matched: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgePageRankMembershipOutput {
-    pub graph_commit_epoch: u64,
-    pub rows: Vec<KnowledgePageRankMembershipRow>,
-    pub matched_count: usize,
-    pub missing_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgePageRankMemoryVisibilityRequest {
-    pub memory_ids: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgePageRankMemoryVisibilityRow {
-    pub memory_id: String,
-    pub node_id: Option<u64>,
-    pub matched: bool,
-    pub metadata: Option<Value>,
-    pub is_latest: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgePageRankMemoryVisibilityOutput {
-    pub graph_commit_epoch: u64,
-    pub rows: Vec<KnowledgePageRankMemoryVisibilityRow>,
-    pub matched_count: usize,
-    pub missing_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgePageRankCentralEntityRequest {
-    pub entity_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgePageRankCentralEntityOutput {
-    pub graph_commit_epoch: u64,
-    pub found: bool,
-    pub node_id: Option<u64>,
-    pub name: Option<String>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCommunityAssignmentClearRequest {
     pub labels: Vec<String>,
@@ -372,40 +295,6 @@ pub struct KnowledgeGraphMetaRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeGraphMeta {
-    pub meta_id: Option<String>,
-    pub node_id: u64,
-    pub properties: BTreeMap<String, Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeGraphMetaOutput {
-    pub graph_commit_epoch: u64,
-    pub found: bool,
-    pub meta: Option<KnowledgeGraphMeta>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeGraphMetaProjectedRequest {
-    pub meta: KnowledgeGraphMetaRequest,
-    pub property_names: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeGraphMetaProjected {
-    pub meta_id: Option<String>,
-    pub node_id: u64,
-    pub properties: BTreeMap<String, Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeGraphMetaProjectedOutput {
-    pub graph_commit_epoch: u64,
-    pub found: bool,
-    pub meta: Option<KnowledgeGraphMetaProjected>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeGraphMetaDeleteOutput {
     pub graph_commit_epoch_before: u64,
     pub graph_commit_epoch_after: u64,
@@ -549,54 +438,6 @@ pub struct KnowledgeAugmentationJobInterruptOutput {
     pub candidate_count: usize,
     pub interrupted_count: usize,
     pub updated_property_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeAugmentationJobRequest {
-    pub job_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum KnowledgeAugmentationJobListOrder {
-    StartedAtDesc,
-    CreatedAtDesc,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeAugmentationJobListRequest {
-    pub status_filter: Option<String>,
-    pub order_by: KnowledgeAugmentationJobListOrder,
-    pub limit: usize,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct KnowledgeAugmentationJob {
-    pub job_id: Option<String>,
-    pub node_id: u64,
-    pub job_type: Option<String>,
-    pub status: Option<String>,
-    pub progress: Option<f64>,
-    pub message: Option<String>,
-    pub result: Option<Value>,
-    pub error_message: Option<String>,
-    pub started_at: Option<Value>,
-    pub completed_at: Option<Value>,
-    pub created_at: Option<Value>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct KnowledgeAugmentationJobOutput {
-    pub graph_commit_epoch: u64,
-    pub found: bool,
-    pub job: Option<KnowledgeAugmentationJob>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct KnowledgeAugmentationJobListOutput {
-    pub graph_commit_epoch: u64,
-    pub rows: Vec<KnowledgeAugmentationJob>,
-    pub matched_count: usize,
-    pub returned_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

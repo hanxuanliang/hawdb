@@ -1,11 +1,10 @@
 use super::{
     nowledge_deep_search_graph_seed_limit, validate_graph_lightning_graph_stream,
     BackgroundMaintenanceKind, BackgroundMaintenanceOptions, CanonicalStableIdMapping, Database,
-    DatabaseConfig, DerivedArtifactJobStatus, ExternalContentArtifactJobCompletion,
-    ExternalContentArtifactRuntimeManifest, KnowledgeAugmentationJobInterruptRequest,
-    KnowledgeAugmentationJobLifecycleBatchRequest, KnowledgeAugmentationJobLifecycleTransition,
-    KnowledgeAugmentationJobLifecycleUpdate, KnowledgeAugmentationJobListOrder,
-    KnowledgeAugmentationJobListRequest, KnowledgeAugmentationJobRequest,
+    DatabaseConfig, DatabaseReadTransaction, DerivedArtifactJobStatus,
+    ExternalContentArtifactJobCompletion, ExternalContentArtifactRuntimeManifest,
+    KnowledgeAugmentationJobInterruptRequest, KnowledgeAugmentationJobLifecycleBatchRequest,
+    KnowledgeAugmentationJobLifecycleTransition, KnowledgeAugmentationJobLifecycleUpdate,
     KnowledgeCandidateScoringPolicy, KnowledgeCandidateSource,
     KnowledgeCommunityAssignmentClearRequest, KnowledgeCommunityCleanupRequest,
     KnowledgeCommunityCreate, KnowledgeCommunityEntityVisibilityRequest,
@@ -25,8 +24,8 @@ use super::{
     KnowledgeEntityLabelProjectedListRequest, KnowledgeEntityMentionCountCursor,
     KnowledgeEntityMentionCountListRequest, KnowledgeEntityRequest,
     KnowledgeEntityUpsertBatchRequest, KnowledgeEntityUpsertRequest, KnowledgeFallbackReasonCode,
-    KnowledgeFanoutReasonCode, KnowledgeGraphMetaProjectedRequest, KnowledgeGraphMetaRequest,
-    KnowledgeGraphMetaStamp, KnowledgeGraphMetaStampBatchRequest, KnowledgeGraphPathDirection,
+    KnowledgeFanoutReasonCode, KnowledgeGraphMetaRequest, KnowledgeGraphMetaStamp,
+    KnowledgeGraphMetaStampBatchRequest, KnowledgeGraphPathDirection,
     KnowledgeInducedEdgeListRequest, KnowledgeLabelBackfillScanRequest,
     KnowledgeLabelCanonicalLookupRequest, KnowledgeLabelLifecycleBatchRequest,
     KnowledgeLabelLifecycleUpdate, KnowledgeLabelMemoryDistributionRequest,
@@ -52,9 +51,7 @@ use super::{
     KnowledgeMemoryPrefixOwnershipRequest, KnowledgeMemoryProjectedListRequest,
     KnowledgeMemorySourceAttributionRequest, KnowledgeMemoryTitleContentRequest,
     KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
-    KnowledgeNormalizedSpaceMoveBatchRequest, KnowledgePageRankCentralEntityRequest,
-    KnowledgePageRankClearRequest, KnowledgePageRankMembershipRequest,
-    KnowledgePageRankMemoryVisibilityRequest, KnowledgePageRankPlanRequest,
+    KnowledgeNormalizedSpaceMoveBatchRequest, KnowledgePageRankClearRequest,
     KnowledgePageRankScoreBatchRequest, KnowledgePageRankScoreUpdate, KnowledgePathRequest,
     KnowledgePropertyBatchRequest, KnowledgePropertyUpdateBatchRequest,
     KnowledgePropertyUpdateRequest, KnowledgeRelatedEntityNameListRequest,
@@ -94,25 +91,24 @@ use super::{
     KnowledgeSourceReferenceEntityListRequest, KnowledgeSourceReferenceRelationshipCleanupRequest,
     KnowledgeSourceReferenceRelationshipCountRequest, KnowledgeSourceRequest,
     KnowledgeSourceRevisionCreate, KnowledgeSourceRevisionCreateBatchRequest,
-    KnowledgeSourceSourcedMemoryCountRequest, KnowledgeSourceVersionLookupRequest,
-    KnowledgeSubgraphRequest, KnowledgeSynthesizedSourceCoverageRequest,
-    KnowledgeSynthesizedSourceIdsRequest, KnowledgeThreadCompactedMemoryListRequest,
-    KnowledgeThreadCompactedMemoryProjectedListRequest, KnowledgeThreadCompactionLinkRequest,
-    KnowledgeThreadDeleteBatchRequest, KnowledgeThreadDistillationCandidateRequest,
-    KnowledgeThreadIdentityCascadeDeleteKeys, KnowledgeThreadIdentityDeleteRequest,
-    KnowledgeThreadIdentityRequest, KnowledgeThreadListOrder, KnowledgeThreadListRequest,
-    KnowledgeThreadMessageCountBatchRequest, KnowledgeThreadMessageCountUpdate,
-    KnowledgeThreadMessageDeleteRequest, KnowledgeThreadMessageListRequest,
-    KnowledgeThreadMessageLookupRequest, KnowledgeThreadMetaLookupRequest,
-    KnowledgeThreadMetadataBatchRequest, KnowledgeThreadMetadataUpdate,
-    KnowledgeThreadSourceListRequest, KnowledgeThreadSourceLookupRequest,
-    KnowledgeThreadSyncMetadataRequest, KnowledgeThreadTitleLookupRequest,
-    KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
-    NowledgeGraphStatement, PlanCacheBypassReason, PlanCacheLookup, QueryOutput,
-    QueryStreamOptions, RecoveryMode, SearchProjectionGraphDeltaRequest,
-    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION, NOWLEDGE_DEEP_SEARCH_FILTERED_RANK_WINDOW,
-    NOWLEDGE_DEEP_SEARCH_GRAPH_CONTEXT_MAX_HOPS, NOWLEDGE_DEEP_SEARCH_MIN_GRAPH_SEED_LIMIT,
-    NOWLEDGE_DEEP_SEARCH_MIN_RANK_WINDOW,
+    KnowledgeSourceSourcedMemoryCountRequest, KnowledgeSubgraphRequest,
+    KnowledgeSynthesizedSourceCoverageRequest, KnowledgeSynthesizedSourceIdsRequest,
+    KnowledgeThreadCompactedMemoryListRequest, KnowledgeThreadCompactedMemoryProjectedListRequest,
+    KnowledgeThreadCompactionLinkRequest, KnowledgeThreadDeleteBatchRequest,
+    KnowledgeThreadDistillationCandidateRequest, KnowledgeThreadIdentityCascadeDeleteKeys,
+    KnowledgeThreadIdentityDeleteRequest, KnowledgeThreadIdentityRequest, KnowledgeThreadListOrder,
+    KnowledgeThreadListRequest, KnowledgeThreadMessageCountBatchRequest,
+    KnowledgeThreadMessageCountUpdate, KnowledgeThreadMessageDeleteRequest,
+    KnowledgeThreadMessageListRequest, KnowledgeThreadMessageLookupRequest,
+    KnowledgeThreadMetaLookupRequest, KnowledgeThreadMetadataBatchRequest,
+    KnowledgeThreadMetadataUpdate, KnowledgeThreadSourceListRequest,
+    KnowledgeThreadSourceLookupRequest, KnowledgeThreadSyncMetadataRequest,
+    KnowledgeThreadTitleLookupRequest, KnowledgeTraversalFallbackReasonCode,
+    KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphStatement,
+    PlanCacheBypassReason, PlanCacheLookup, QueryOutput, QueryStreamOptions, RecoveryMode,
+    SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    NOWLEDGE_DEEP_SEARCH_FILTERED_RANK_WINDOW, NOWLEDGE_DEEP_SEARCH_GRAPH_CONTEXT_MAX_HOPS,
+    NOWLEDGE_DEEP_SEARCH_MIN_GRAPH_SEED_LIMIT, NOWLEDGE_DEEP_SEARCH_MIN_RANK_WINDOW,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{
@@ -5906,8 +5902,24 @@ fn typed_source_parsed_create_batch_persists_as_one_wal_batch_and_replays() {
     std::fs::remove_dir_all(path).unwrap();
 }
 
+const SOURCE_LATEST_BY_NAME_QUERY: &str = "MATCH (s:Source) \
+     WHERE s.space_id = $space_id AND s.original_name = $original_name \
+     OPTIONAL MATCH (m:Memory)-[r:SOURCED_FROM]->(s) \
+     WITH s, count(r) AS sourced_memory_count \
+     RETURN s.id AS source_id, id(s) AS node_id, s.original_name AS original_name, \
+     COALESCE(s.version, 1) AS version, sourced_memory_count AS sourced_memory_count \
+     ORDER BY version DESC, source_id ASC, node_id ASC LIMIT 1";
+
+const SOURCE_LATEST_BY_SHA_QUERY: &str = "MATCH (s:Source) \
+     WHERE s.space_id = $space_id AND s.sha256 = $sha256 \
+     OPTIONAL MATCH (m:Memory)-[r:SOURCED_FROM]->(s) \
+     WITH s, count(r) AS sourced_memory_count \
+     RETURN s.id AS source_id, id(s) AS node_id, s.original_name AS original_name, \
+     COALESCE(s.version, 1) AS version, sourced_memory_count AS sourced_memory_count \
+     ORDER BY version DESC, source_id ASC, node_id ASC LIMIT 1";
+
 #[test]
-fn reads_source_latest_version_for_nowledge_version_lookups() {
+fn reads_source_latest_version_with_fixed_parameterized_queries() {
     let mut db = Database::new();
     db.query("CREATE (:Source {id: 'source-v1', original_name: 'Doc.md', sha256: 'sha-a', space_id: 'default', version: 1, created_at: 10})")
         .unwrap();
@@ -5917,64 +5929,77 @@ fn reads_source_latest_version_for_nowledge_version_lookups() {
         .unwrap();
     db.query("CREATE (:Source {id: 'source-sha-v4', original_name: 'Other.md', sha256: 'sha-a', space_id: 'default', version: 4, created_at: 40})")
         .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let by_name = db
-        .knowledge_source_latest_version(&KnowledgeSourceVersionLookupRequest {
-            original_name: Some("Doc.md".to_string()),
-            sha256: None,
-            space_id: "default".to_string(),
-        })
+    let graph_commit_epoch = db.commit_epoch();
+    let mut read = db.begin_read_transaction();
+    let by_name_parameters = BTreeMap::from([
+        (
+            "original_name".to_string(),
+            Value::String("Doc.md".to_string()),
+        ),
+        ("space_id".to_string(), Value::String("default".to_string())),
+    ]);
+    let by_name = read
+        .query_with_params_bounded(SOURCE_LATEST_BY_NAME_QUERY, &by_name_parameters, Some(1))
         .unwrap();
-    assert_eq!(by_name.graph_commit_epoch, graph_commit_epoch);
-    assert!(by_name.found);
-    assert_eq!(by_name.source_id.as_deref(), Some("source-v3"));
-    assert_eq!(by_name.version, Some(3));
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-
-    let by_sha = db
-        .knowledge_source_latest_version(&KnowledgeSourceVersionLookupRequest {
-            original_name: None,
-            sha256: Some("sha-a".to_string()),
-            space_id: "default".to_string(),
-        })
-        .unwrap();
-    assert!(by_sha.found);
-    assert_eq!(by_sha.source_id.as_deref(), Some("source-sha-v4"));
-    assert_eq!(by_sha.version, Some(4));
+    assert_eq!(read.commit_epoch(), graph_commit_epoch);
     assert_eq!(
-        by_sha.row.unwrap().original_name.as_deref(),
-        Some("Other.md")
+        by_name.rows[0].get("source_id"),
+        Some(&Value::String("source-v3".to_string()))
+    );
+    assert_eq!(by_name.rows[0].get("version"), Some(&Value::Int(3)));
+
+    let by_sha_parameters = BTreeMap::from([
+        ("sha256".to_string(), Value::String("sha-a".to_string())),
+        ("space_id".to_string(), Value::String("default".to_string())),
+    ]);
+    let by_sha = read
+        .query_with_params_bounded(SOURCE_LATEST_BY_SHA_QUERY, &by_sha_parameters, Some(1))
+        .unwrap();
+    assert_eq!(
+        by_sha.rows[0].get("source_id"),
+        Some(&Value::String("source-sha-v4".to_string()))
+    );
+    assert_eq!(by_sha.rows[0].get("version"), Some(&Value::Int(4)));
+    assert_eq!(
+        by_sha.rows[0].get("original_name"),
+        Some(&Value::String("Other.md".to_string()))
     );
 
-    let missing = db
-        .knowledge_source_latest_version(&KnowledgeSourceVersionLookupRequest {
-            original_name: Some("Missing.md".to_string()),
-            sha256: None,
-            space_id: "default".to_string(),
-        })
+    let missing_parameters = BTreeMap::from([
+        (
+            "original_name".to_string(),
+            Value::String("Missing.md".to_string()),
+        ),
+        ("space_id".to_string(), Value::String("default".to_string())),
+    ]);
+    let missing = read
+        .query_with_params_bounded(SOURCE_LATEST_BY_NAME_QUERY, &missing_parameters, Some(1))
         .unwrap();
-    assert!(!missing.found);
-    assert_eq!(missing.source_id, None);
+    assert!(missing.rows.is_empty());
 }
 
 #[test]
-fn source_latest_version_rejects_ambiguous_lookup() {
-    let db = Database::new();
-    let error = db
-        .knowledge_source_latest_version(&KnowledgeSourceVersionLookupRequest {
-            original_name: Some("Doc.md".to_string()),
-            sha256: Some("sha-a".to_string()),
-            space_id: "default".to_string(),
-        })
-        .unwrap_err();
-
-    assert!(error.to_string().contains("exactly one"));
-    assert_eq!(db.store.commit_epoch(), 0);
+fn source_latest_version_values_remain_parameters() {
+    let mut db = Database::new();
+    db.query("CREATE (:Source {id: 'source-v1', original_name: 'Doc.md', space_id: 'default', version: 1})")
+        .unwrap();
+    let mut read = db.begin_read_transaction();
+    let parameters = BTreeMap::from([
+        (
+            "original_name".to_string(),
+            Value::String("Doc.md') MATCH (n) RETURN n //".to_string()),
+        ),
+        ("space_id".to_string(), Value::String("default".to_string())),
+    ]);
+    assert!(read
+        .query_with_params_bounded(SOURCE_LATEST_BY_NAME_QUERY, &parameters, Some(1))
+        .unwrap()
+        .rows
+        .is_empty());
 }
 
 #[test]
-fn knowledge_source_latest_version_uses_query_runtime_plan_cache() {
+fn source_latest_version_query_uses_plan_cache() {
     let mut db = Database::new_with_config(DatabaseConfig {
         max_plan_cache_entries: Some(8),
         statement_summary_capacity: 8,
@@ -5988,19 +6013,26 @@ fn knowledge_source_latest_version_uses_query_runtime_plan_cache() {
         "CREATE (:Source {id: 'source-unversioned', original_name: 'Doc.md', space_id: 'default'})",
     )
     .unwrap();
-    let request = KnowledgeSourceVersionLookupRequest {
-        original_name: Some("Doc.md".to_string()),
-        sha256: None,
-        space_id: "default".to_string(),
-    };
-
-    let first = db.knowledge_source_latest_version(&request).unwrap();
-    let second = db.knowledge_source_latest_version(&request).unwrap();
+    let parameters = BTreeMap::from([
+        (
+            "original_name".to_string(),
+            Value::String("Doc.md".to_string()),
+        ),
+        ("space_id".to_string(), Value::String("default".to_string())),
+    ]);
+    let first = db
+        .query_read_only_with_params_bounded(SOURCE_LATEST_BY_NAME_QUERY, &parameters, Some(1))
+        .unwrap();
+    let second = db
+        .query_read_only_with_params_bounded(SOURCE_LATEST_BY_NAME_QUERY, &parameters, Some(1))
+        .unwrap();
 
     assert_eq!(first, second);
-    assert!(first.found);
-    assert_eq!(first.source_id.as_deref(), Some("source-v2"));
-    assert_eq!(first.version, Some(2));
+    assert_eq!(
+        first.rows[0].get("source_id"),
+        Some(&Value::String("source-v2".to_string()))
+    );
+    assert_eq!(first.rows[0].get("version"), Some(&Value::Int(2)));
     let stats = db.plan_cache_stats();
     assert_eq!(stats.entries, 1);
     assert_eq!(stats.misses, 1);
@@ -6254,9 +6286,14 @@ fn reads_source_detail_count_and_id_lists_for_nowledge_shapes() {
         .unwrap();
     let graph_commit_epoch = db.store.commit_epoch();
 
-    let count = db.knowledge_source_count();
-    assert_eq!(count.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(count.count, 2);
+    let count = db
+        .query_read_only_with_params_bounded(
+            "MATCH (s:Source) RETURN count(s) AS count",
+            &BTreeMap::new(),
+            Some(1),
+        )
+        .unwrap();
+    assert_eq!(count.rows[0].get("count"), Some(&Value::Int(2)));
 
     let detail = db
         .knowledge_source(&KnowledgeSourceRequest {
@@ -14005,6 +14042,22 @@ fn read_test_wal(path: impl AsRef<std::path::Path>) -> std::io::Result<String> {
     Ok(wal
         .split_once('\n')
         .map_or_else(String::new, |(_, records)| records.to_string()))
+}
+
+fn read_test_plan_cache_metric(read: &DatabaseReadTransaction, metric: &str) -> i64 {
+    let output = read
+        .query_sql("SELECT metric, value FROM system.plan_cache")
+        .unwrap();
+    output
+        .rows
+        .iter()
+        .find(|row| row.get("metric") == Some(&Value::String(metric.to_string())))
+        .and_then(|row| row.get("value"))
+        .and_then(|value| match value {
+            Value::Int(value) => Some(*value),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("missing plan-cache metric {metric}"))
 }
 
 fn active_generation_path(

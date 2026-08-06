@@ -716,11 +716,10 @@ Parsed Source creation is available as
 `Database::create_knowledge_source_parsed_batch`, covering Nowledge markdown,
 URL, PDF, generic file, and markdown import create shapes with fixed parsed
 lifecycle defaults and one grouped WAL batch for eligible new Source nodes.
-Source version-chain operations are available as
-`Database::knowledge_source_latest_version` for Nowledge original-name/checksum
-latest-version reads without WAL writes and
-`Database::create_knowledge_source_revision_batch` for fixed-property
-`REVISED_AS` edge creation through one grouped WAL batch.
+Source latest-version reads use separate fixed parameterized Cypher statements
+for original-name/checksum plus space filters. Source revision writes remain
+available as `Database::create_knowledge_source_revision_batch` for
+fixed-property `REVISED_AS` edge creation through one grouped WAL batch.
 Source node cleanup is available as `Database::delete_knowledge_sources`,
 covering Nowledge Source `DETACH DELETE` cleanup through the typed entity
 delete path and one grouped WAL batch.
@@ -771,17 +770,15 @@ covering Nowledge wiki/MCP single Community lookups by numeric `community_id`
 or external `id`, returning id, community_id, name, description, ai_summary,
 member_count, updated_at, summary-presence metadata, pinned read-transaction
 snapshots, and no WAL writes.
-GraphMeta state reads and cleanup deletes used by PageRank, community
-detection, and fixture reset paths are available as
-`Database::knowledge_graph_meta` and `Database::delete_knowledge_graph_meta`.
-They use `meta_id` as the explicit identity, reject empty identities before
-WAL, preserve missing-row no-write semantics, and route eligible deletes
-through the WAL-backed `DELETE` path.
-Field-extensible GraphMeta state reads are available as
-`Database::knowledge_graph_meta_projected`. Callers provide an explicit
-property allowlist so future GraphMeta fields can be adopted without expanding
-every read response, while read-transaction snapshots remain pinned and no WAL
-writes are produced.
+GraphMeta state reads used by PageRank and community detection use host-owned
+fixed, parameterized Cypher projections with explicit row budgets. Callers add
+a new fixed projection when state grows and use one
+`DatabaseReadTransaction` when related reads must remain pinned to a graph
+version; property identifiers are never interpolated into query text.
+GraphMeta stamp batches and cleanup deletes remain typed. Stamps own grouped
+WAL validation and atomicity. Deletes use `meta_id` as the explicit identity,
+reject empty identities before WAL, preserve missing-row no-write semantics,
+and route eligible cleanup through the WAL-backed `DELETE` path.
 Community node cleanup for replace-community and undo-community flows is
 available as `Database::delete_knowledge_communities`. It scans only
 `Community` nodes, supports the two Nowledge cleanup modes (`DELETE` and
@@ -794,12 +791,10 @@ available as `Database::interrupt_knowledge_augmentation_jobs`. It scans only
 interruption reason before WAL, marks eligible jobs as `failed` with the
 production interruption message, does not write WAL when no eligible jobs
 exist, and commits eligible updates through one grouped WAL batch.
-AugmentationJob status and list reads are available as
-`Database::knowledge_augmentation_job` and
-`Database::knowledge_augmentation_jobs`. They cover the Nowledge graph and REST
-graph job status/list shapes, including optional status filtering, bounded
-limits, and the two production orderings by `started_at DESC` or
-`created_at DESC`, without requiring application-side Cypher construction.
+AugmentationJob status and list reads use host-owned fixed parameterized Cypher
+for exact lookup and separate count/page phases. Hosts select the fixed
+`started_at DESC` or `created_at DESC` query variant and bind status and limit
+values; they do not interpolate identifiers or rely on route-specific DTOs.
 Two exact node patterns without a relationship are supported for Nowledge
 source-provenance endpoint checks, for example
 `MATCH (m:Memory {id: $memory_id}), (s:Source {id: $source_id}) RETURN count(m)`.

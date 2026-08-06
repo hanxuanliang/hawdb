@@ -50,10 +50,15 @@ fn knowledge_source_count_uses_query_runtime_plan_cache() {
     db.query("CREATE (:Source {id: 'source_a'})").unwrap();
     db.query("CREATE (:Source {id: 'source_b'})").unwrap();
 
-    let first = db.knowledge_source_count();
-    let second = db.knowledge_source_count();
+    let query = "MATCH (s:Source) RETURN count(s) AS count";
+    let first = db
+        .query_read_only_with_params_bounded(query, &BTreeMap::new(), Some(1))
+        .unwrap();
+    let second = db
+        .query_read_only_with_params_bounded(query, &BTreeMap::new(), Some(1))
+        .unwrap();
 
-    assert_eq!(first.count, 2);
+    assert_eq!(first.rows[0].get("count"), Some(&Value::Int(2)));
     assert_eq!(first, second);
     let stats = db.plan_cache_stats();
     assert_eq!(stats.entries, 1);

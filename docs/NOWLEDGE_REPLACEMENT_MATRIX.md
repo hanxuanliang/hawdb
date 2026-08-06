@@ -222,12 +222,11 @@ empty error messages, validates ids, type/name/mime/parsed-path/checksum/space,
 non-negative sizes, and positive versions before WAL, reports existing or
 duplicate Source ids, and commits eligible Source nodes through one grouped WAL
 batch.
-Source version lookups and revision edges are covered by typed Source APIs for
-the Nowledge same-name/same-space latest-version read, same-checksum/same-space
-latest Source read, and `REVISED_AS` edge creation. The lookup API requires
-exactly one original-name or checksum key, orders by `version DESC`, returns a
-bounded Source projection without WAL writes, and reports graph commit epoch.
-The revision create wrapper validates endpoint ids before WAL, resolves exact
+Source latest-version lookups use two fixed parameterized Cypher statements:
+one for original-name plus space and one for checksum plus space. Both order by
+`COALESCE(version, 1) DESC` and use a bounded projection; the host selects the
+statement rather than interpolating a predicate. `REVISED_AS` creation remains
+typed: the wrapper validates endpoint ids before WAL, resolves exact
 Source endpoints, reports missing or idless endpoints without writing, creates
 the fixed `REVISED_AS` properties used by Nowledge, and commits eligible
 revision edges through one grouped WAL batch.
@@ -245,8 +244,8 @@ the Source/Label/HAS_LABEL endpoints, validate ids and assignment origins
 before WAL, report missing or projected-idless endpoints without writing, keep
 existing label edges create-only, preserve endpoint nodes on cleanup, and route
 eligible relationship writes through one grouped WAL batch.
-Source operational reads are covered by typed APIs for Nowledge source detail,
-source count, extracted-source id list, and normalized-space id list paths.
+Source operational reads are covered by typed compatibility APIs for Nowledge
+source detail, extracted-source id list, and normalized-space id list paths.
 `Database::knowledge_source` returns the Source identity, display fields,
 normalized space, lifecycle fields, size/count fields, timestamps, and
 `SOURCED_FROM` Memory count for one Source id.
@@ -254,9 +253,9 @@ normalized space, lifecycle fields, size/count fields, timestamps, and
 `SOURCED_FROM` fan-in count as a lightweight count-only read for Nowledge
 guards that do not need the full Source projection. `Database::knowledge_source_ids`
 returns sorted Source ids filtered by lifecycle state and/or normalized space
-with bounded limits, while `Database::knowledge_source_count` exposes the total
-Source node count. These reads report the graph commit epoch and do not write
-WAL.
+with bounded limits. The total Source node count is the bounded Cypher statement
+`MATCH (s:Source) RETURN count(s) AS count`; query failures propagate instead of
+being converted to a zero count. These reads do not write WAL.
 Source list and summary reads are covered by `Database::knowledge_sources` for
 Nowledge bounded Source page, bulk summary, memory-count overview ranking,
 parsed-path list, lifecycle attention, and metadata-marker page shapes. The
@@ -749,31 +748,30 @@ Entity `pagerank_score` persistence and clear operations. The wrapper accepts
 only finite non-negative scores for Memory/Entity identities, reports missing,
 idless, duplicate, and clear-only non-writable rows without writing, and commits
 eligible score writes or clears through one grouped WAL batch.
-PageRank plan and read-side helpers are also covered by typed APIs:
-`Database::knowledge_pagerank_plan` exposes the Nowledge Memory/Entity node
-counts, `MENTIONS`, `RELATES_TO`, active `MEMORY_RELATES_TO`, and cutoff-based
-changed-count shapes; `Database::knowledge_pagerank_membership` covers
-Memory/Entity id membership splitting; `Database::knowledge_pagerank_memory_visibility`
-covers default-visible Memory metadata/latest checks; and
-`Database::knowledge_pagerank_central_entity` covers the central-entity name
-lookup without constructing application-side Cypher. These reads report the
-current graph commit epoch and do not write WAL.
+PageRank planning and read-side business logic uses host-owned, parameterized
+Cypher instead of PageRank-specific request/output DTOs. Node and relationship
+counts are separate named statements, while membership, Memory visibility, and
+central-entity lookups use bounded list/equality parameters. A host that needs
+all count phases from one graph version executes them through one
+`DatabaseReadTransaction` and records its `commit_epoch`. PageRank score and
+clear mutations remain typed because they validate the whole batch and commit
+eligible changes through one grouped WAL boundary.
 GraphMeta algorithm stamps are covered by a typed batch for Nowledge PageRank
 and community-detection state updates shaped as `MERGE (m:GraphMeta {meta_id})
 SET ...`. The wrapper validates non-empty `meta_id` values and property names,
 rejects attempts to mutate `meta_id`, creates missing GraphMeta rows, updates
 existing rows, reports duplicate stamps without writing, and commits eligible
 stamps through one grouped WAL batch.
-GraphMeta state reads and cleanup deletes are covered by
-`Database::knowledge_graph_meta` and `Database::delete_knowledge_graph_meta`.
-Both use the Nowledge `meta_id` identity rather than the generic `id`
-property; deletes reject empty identities before WAL, do not write WAL for
-missing rows, and persist eligible cleanup through the WAL-backed `DELETE`
-path.
-Field-extensible GraphMeta state reads are covered by
-`Database::knowledge_graph_meta_projected`. Callers provide an explicit
-property allowlist so Nowledge can add future state fields without forcing
-full-map GraphMeta reads, while snapshot reads remain pinned and WAL-free.
+GraphMeta state reads use host-owned fixed, parameterized Cypher projections
+selected for each algorithm state shape. Queries bind the Nowledge `meta_id`
+identity, declare an explicit row budget, and share a
+`DatabaseReadTransaction` when multiple state reads must observe one graph
+version. New state fields are adopted by adding a readable fixed projection,
+not by passing property identifiers through a generic typed facade.
+GraphMeta stamps and cleanup deletes remain typed contracts. Stamps validate
+and commit an eligible batch through one grouped WAL boundary. Deletes reject
+empty identities before WAL, do not write WAL for missing rows, and persist
+eligible cleanup through the WAL-backed `DELETE` path.
 Schema migration log writes are covered by a typed create-once batch for
 Nowledge `SchemaMigrationLog` ids shaped as `MERGE ... ON CREATE SET
 applied_at`. The wrapper validates non-empty migration ids before WAL, reports
@@ -791,11 +789,12 @@ validates job ids, job types, progress percentages, progress messages, and
 failure messages before WAL, reports missing, existing, status-mismatched, and
 duplicate jobs without writing, and commits eligible creates/updates through
 one grouped WAL batch.
-AugmentationJob status and list reads are covered by typed APIs for Nowledge
-graph and REST graph surfaces. `Database::knowledge_augmentation_job` resolves
-one job by `job_id`, while `Database::knowledge_augmentation_jobs` supports the
-production filtered/all list shapes with `started_at DESC` or `created_at DESC`
-ordering and bounded limits without constructing application-side Cypher.
+AugmentationJob status and list reads use host-owned, named parameterized
+Cypher. Exact lookup binds `job_id`; list routes execute separate count and page
+statements on one read transaction, bind status and limit values, and choose a
+fixed `started_at DESC` or `created_at DESC` statement rather than interpolating
+an order identifier. Lifecycle and interrupt mutations remain typed because
+they validate and commit multiple state transitions through one WAL boundary.
 AugmentationJob stale/orphan interrupt writes are covered by
 `Database::interrupt_knowledge_augmentation_jobs` for the Nowledge
 `interrupt_orphaned_jobs` shape. The wrapper scans only `AugmentationJob`
