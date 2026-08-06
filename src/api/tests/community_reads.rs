@@ -18,7 +18,7 @@ fn reads_communities_for_nowledge_summary_list_shapes() {
     let graph_commit_epoch = db.store.commit_epoch();
 
     let summary_only = db
-        .knowledge_communities(&KnowledgeCommunityListRequest {
+        .test_query_communities(&KnowledgeCommunityListRequest {
             require_summary: true,
             require_non_negative_community_id: false,
             order: KnowledgeCommunityListOrder::MemberCountDesc,
@@ -46,7 +46,7 @@ fn reads_communities_for_nowledge_summary_list_shapes() {
     assert_eq!(summary_only.rows[1].updated_at, Some(Value::Int(10)));
 
     let presence_ranked = db
-        .knowledge_communities(&KnowledgeCommunityListRequest {
+        .test_query_communities(&KnowledgeCommunityListRequest {
             require_summary: false,
             require_non_negative_community_id: true,
             order: KnowledgeCommunityListOrder::SummaryPresenceThenMemberCountDesc,
@@ -62,7 +62,7 @@ fn reads_communities_for_nowledge_summary_list_shapes() {
 
     let stats = db.plan_cache_stats();
     let repeated_presence_ranked = db
-        .knowledge_communities(&KnowledgeCommunityListRequest {
+        .test_query_communities(&KnowledgeCommunityListRequest {
             require_summary: false,
             require_non_negative_community_id: true,
             order: KnowledgeCommunityListOrder::SummaryPresenceThenMemberCountDesc,
@@ -79,7 +79,7 @@ fn reads_communities_for_nowledge_summary_list_shapes() {
     db.query("CREATE (:Community {id: 'community_later', community_id: 4, name: 'Later', ai_summary: 'later summary', member_count: 200})")
         .unwrap();
     let snapshot_rows = snapshot
-        .knowledge_communities(&KnowledgeCommunityListRequest {
+        .test_query_communities(&KnowledgeCommunityListRequest {
             require_summary: true,
             require_non_negative_community_id: false,
             order: KnowledgeCommunityListOrder::MemberCountDesc,
@@ -96,7 +96,7 @@ fn community_list_read_returns_empty_without_community_label() {
     let db = Database::new();
 
     let output = db
-        .knowledge_communities(&KnowledgeCommunityListRequest {
+        .test_query_communities(&KnowledgeCommunityListRequest {
             require_summary: true,
             require_non_negative_community_id: true,
             order: KnowledgeCommunityListOrder::SummaryPresenceThenMemberCountDesc,
@@ -126,7 +126,7 @@ fn reads_community_detail_for_wiki_and_mcp_shapes() {
     let community_id_request = KnowledgeCommunityRequest {
         key: KnowledgeCommunityLookupKey::CommunityId(7),
     };
-    let by_community_id = db.knowledge_community(&community_id_request).unwrap();
+    let by_community_id = db.test_query_community(&community_id_request).unwrap();
     assert_eq!(by_community_id.graph_commit_epoch, graph_commit_epoch);
     assert!(by_community_id.found);
     let row = by_community_id.row.as_ref().unwrap();
@@ -146,7 +146,7 @@ fn reads_community_detail_for_wiki_and_mcp_shapes() {
     assert!(row.has_summary);
 
     let stats = db.plan_cache_stats();
-    let repeated_by_community_id = db.knowledge_community(&community_id_request).unwrap();
+    let repeated_by_community_id = db.test_query_community(&community_id_request).unwrap();
     assert_eq!(repeated_by_community_id, by_community_id);
     let repeated_stats = db.plan_cache_stats();
     assert_eq!(repeated_stats.entries, stats.entries);
@@ -154,7 +154,7 @@ fn reads_community_detail_for_wiki_and_mcp_shapes() {
     assert_eq!(repeated_stats.hits, stats.hits + 1);
 
     let by_id = db
-        .knowledge_community(&KnowledgeCommunityRequest {
+        .test_query_community(&KnowledgeCommunityRequest {
             key: KnowledgeCommunityLookupKey::Id("community_b".to_string()),
         })
         .unwrap();
@@ -167,7 +167,7 @@ fn reads_community_detail_for_wiki_and_mcp_shapes() {
     db.query("CREATE (:Community {id: 'community_later', community_id: 9, name: 'Later'})")
         .unwrap();
     let missing_in_snapshot = snapshot
-        .knowledge_community(&KnowledgeCommunityRequest {
+        .test_query_community(&KnowledgeCommunityRequest {
             key: KnowledgeCommunityLookupKey::CommunityId(9),
         })
         .unwrap();
@@ -176,7 +176,7 @@ fn reads_community_detail_for_wiki_and_mcp_shapes() {
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch + 1);
 
     let missing = db
-        .knowledge_community(&KnowledgeCommunityRequest {
+        .test_query_community(&KnowledgeCommunityRequest {
             key: KnowledgeCommunityLookupKey::CommunityId(99),
         })
         .unwrap();
@@ -189,7 +189,7 @@ fn community_detail_read_rejects_empty_id() {
     let db = Database::new();
 
     let error = db
-        .knowledge_community(&KnowledgeCommunityRequest {
+        .test_query_community(&KnowledgeCommunityRequest {
             key: KnowledgeCommunityLookupKey::Id(String::new()),
         })
         .unwrap_err();

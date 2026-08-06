@@ -12,12 +12,11 @@ use crate::qos::{
     WorkPriority, WorkRequest,
 };
 use crate::schema::{
-    BasicGraphStatistics, Catalog, GraphStatistics, IndexKind, LabelId, RelTypeId,
-    SchemaObjectState,
+    BasicGraphStatistics, Catalog, GraphStatistics, IndexKind, LabelId, SchemaObjectState,
 };
 #[cfg(test)]
 use crate::schema::{
-    CompositeIndexDescriptor, ConstraintDescriptor, IndexDescriptor, PropertyDescriptor,
+    CompositeIndexDescriptor, ConstraintDescriptor, IndexDescriptor, PropertyDescriptor, RelTypeId,
     TableDescriptor,
 };
 use crate::search::{
@@ -705,6 +704,7 @@ impl Database {
         &self.system_variables
     }
 
+    #[cfg(test)]
     fn query_read_only_with_params_bounded(
         &self,
         cypher_text: &str,
@@ -2542,21 +2542,24 @@ impl Database {
         knowledge_entity_batch_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_community_entity_visibility(
+    #[cfg(test)]
+    pub(crate) fn test_query_community_entity_visibility(
         &self,
         request: &KnowledgeCommunityEntityVisibilityRequest,
     ) -> Result<KnowledgeCommunityEntityVisibilityOutput> {
         knowledge_community_entity_visibility_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_community_memories(
+    #[cfg(test)]
+    pub(crate) fn test_query_community_memories(
         &self,
         request: &KnowledgeCommunityMemoryListRequest,
     ) -> Result<KnowledgeCommunityMemoryListOutput> {
         knowledge_community_memories_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_crystals(
+    #[cfg(test)]
+    pub(crate) fn test_query_crystals(
         &self,
         request: &KnowledgeCrystalListRequest,
     ) -> Result<KnowledgeCrystalListOutput> {
@@ -2570,14 +2573,16 @@ impl Database {
         merge_knowledge_crystal_source_for(self, request)
     }
 
-    pub fn knowledge_crystal_communities(
+    #[cfg(test)]
+    pub(crate) fn test_query_crystal_communities(
         &self,
         request: &KnowledgeCrystalCommunityListRequest,
     ) -> Result<KnowledgeCrystalCommunityListOutput> {
         knowledge_crystal_communities_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_crystal_source_visibility(
+    #[cfg(test)]
+    pub(crate) fn test_query_crystal_source_visibility(
         &self,
         request: &KnowledgeCrystalSourceVisibilityRequest,
     ) -> Result<KnowledgeCrystalSourceVisibilityOutput> {
@@ -2954,14 +2959,16 @@ impl Database {
         update_knowledge_communities_batch_for(self, request)
     }
 
-    pub fn knowledge_communities(
+    #[cfg(test)]
+    pub(crate) fn test_query_communities(
         &self,
         request: &KnowledgeCommunityListRequest,
     ) -> Result<KnowledgeCommunityListOutput> {
         knowledge_communities_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_community(
+    #[cfg(test)]
+    pub(crate) fn test_query_community(
         &self,
         request: &KnowledgeCommunityRequest,
     ) -> Result<KnowledgeCommunityOutput> {
@@ -4826,6 +4833,7 @@ fn knowledge_scoped_entity_batch_for(
     })
 }
 
+#[cfg(test)]
 fn knowledge_community_entity_visibility_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -4896,6 +4904,7 @@ fn knowledge_community_entity_visibility_for(
     })
 }
 
+#[cfg(test)]
 fn knowledge_community_entity_visibility_via_query_runtime(
     db: &Database,
     request: &KnowledgeCommunityEntityVisibilityRequest,
@@ -4998,6 +5007,7 @@ fn knowledge_community_entity_visibility_via_query_runtime(
 }
 
 #[derive(Debug, Clone)]
+#[cfg(test)]
 struct CommunityEntityVisibilityEntityRow {
     community_id: Value,
     entity_id: Option<String>,
@@ -5006,6 +5016,7 @@ struct CommunityEntityVisibilityEntityRow {
     entity_type: Option<String>,
 }
 
+#[cfg(test)]
 impl CommunityEntityVisibilityEntityRow {
     fn with_memory(
         self,
@@ -5032,6 +5043,7 @@ impl CommunityEntityVisibilityEntityRow {
 }
 
 #[derive(Debug, Clone)]
+#[cfg(test)]
 struct CommunityEntityVisibilityMemoryRow {
     entity_node_id: u64,
     memory_id: Option<String>,
@@ -5041,6 +5053,7 @@ struct CommunityEntityVisibilityMemoryRow {
     memory_lifecycle_state: Option<String>,
 }
 
+#[cfg(test)]
 fn community_entity_visibility_entity_row_from_query(
     row: &Row,
 ) -> Result<CommunityEntityVisibilityEntityRow> {
@@ -5066,6 +5079,7 @@ fn community_entity_visibility_entity_row_from_query(
     })
 }
 
+#[cfg(test)]
 fn community_entity_visibility_memory_row_from_query(
     row: &Row,
 ) -> Result<CommunityEntityVisibilityMemoryRow> {
@@ -5106,6 +5120,7 @@ fn community_entity_visibility_memory_row_from_query(
     })
 }
 
+#[cfg(test)]
 fn empty_community_entity_visibility_output(
     graph_commit_epoch: u64,
 ) -> KnowledgeCommunityEntityVisibilityOutput {
@@ -5118,6 +5133,7 @@ fn empty_community_entity_visibility_output(
     }
 }
 
+#[cfg(test)]
 fn validate_knowledge_community_entity_visibility_request(
     request: &KnowledgeCommunityEntityVisibilityRequest,
 ) -> Result<()> {
@@ -5138,6 +5154,7 @@ fn validate_knowledge_community_entity_visibility_request(
     Ok(())
 }
 
+#[cfg(test)]
 fn community_entity_visibility_memory_rows(
     store: &GraphStore,
     memory_label_id: LabelId,
@@ -5167,6 +5184,7 @@ fn community_entity_visibility_memory_rows(
     Ok(rows)
 }
 
+#[cfg(test)]
 fn community_entity_visibility_row(
     entity: &NodeRecord,
     memory: Option<&NodeRecord>,
@@ -5189,6 +5207,7 @@ fn community_entity_visibility_row(
     }
 }
 
+#[cfg(test)]
 fn sort_community_entity_visibility_rows(rows: &mut [KnowledgeCommunityEntityVisibilityRow]) {
     rows.sort_by(|left, right| {
         left.community_id
@@ -5201,6 +5220,7 @@ fn sort_community_entity_visibility_rows(rows: &mut [KnowledgeCommunityEntityVis
     });
 }
 
+#[cfg(test)]
 struct KnowledgeCommunityMemoryAccumulator {
     community_id: Value,
     memory: NodeRecord,
@@ -5208,6 +5228,7 @@ struct KnowledgeCommunityMemoryAccumulator {
     mention_count: usize,
 }
 
+#[cfg(test)]
 fn knowledge_community_memories_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -5269,6 +5290,7 @@ fn knowledge_community_memories_for(
     })
 }
 
+#[cfg(test)]
 fn knowledge_community_memories_via_query_runtime(
     db: &Database,
     request: &KnowledgeCommunityMemoryListRequest,
@@ -5308,6 +5330,7 @@ fn knowledge_community_memories_via_query_runtime(
     })
 }
 
+#[cfg(test)]
 fn empty_community_memory_list_output(
     graph_commit_epoch: u64,
 ) -> KnowledgeCommunityMemoryListOutput {
@@ -5319,6 +5342,7 @@ fn empty_community_memory_list_output(
     }
 }
 
+#[cfg(test)]
 fn validate_knowledge_community_memory_list_request(
     request: &KnowledgeCommunityMemoryListRequest,
 ) -> Result<()> {
@@ -5344,6 +5368,7 @@ fn validate_knowledge_community_memory_list_request(
     Ok(())
 }
 
+#[cfg(test)]
 fn community_memory_unit_type_filter_values(
     request: &KnowledgeCommunityMemoryListRequest,
 ) -> Option<BTreeSet<String>> {
@@ -5354,6 +5379,7 @@ fn community_memory_unit_type_filter_values(
     }
 }
 
+#[cfg(test)]
 fn mentioned_community_memory_rows_via_query_runtime(
     db: &Database,
     request: &KnowledgeCommunityMemoryListRequest,
@@ -5380,6 +5406,7 @@ fn mentioned_community_memory_rows_via_query_runtime(
         .collect()
 }
 
+#[cfg(test)]
 fn direct_community_memory_rows_via_query_runtime(
     db: &Database,
     request: &KnowledgeCommunityMemoryListRequest,
@@ -5404,6 +5431,7 @@ fn direct_community_memory_rows_via_query_runtime(
         .collect()
 }
 
+#[cfg(test)]
 fn knowledge_community_memory_query_parameters(
     request: &KnowledgeCommunityMemoryListRequest,
 ) -> BTreeMap<String, Value> {
@@ -5427,6 +5455,7 @@ fn knowledge_community_memory_query_parameters(
     parameters
 }
 
+#[cfg(test)]
 fn knowledge_community_memory_query_predicate(
     alias: &str,
     request: &KnowledgeCommunityMemoryListRequest,
@@ -5455,6 +5484,7 @@ fn knowledge_community_memory_query_predicate(
     }
 }
 
+#[cfg(test)]
 fn mentioned_community_memory_rows(
     catalog: &Catalog,
     store: &GraphStore,
@@ -5538,6 +5568,7 @@ fn mentioned_community_memory_rows(
         .collect())
 }
 
+#[cfg(test)]
 fn direct_community_memory_rows(
     _catalog: &Catalog,
     store: &GraphStore,
@@ -5569,6 +5600,7 @@ fn direct_community_memory_rows(
     Ok(rows)
 }
 
+#[cfg(test)]
 fn memory_matches_community_memory_crystal_filter(
     memory: &NodeRecord,
     crystal_filter: KnowledgeCommunityMemoryCrystalFilter,
@@ -5584,6 +5616,7 @@ fn memory_matches_community_memory_crystal_filter(
     }
 }
 
+#[cfg(test)]
 fn memory_matches_community_memory_unit_types(
     memory: &NodeRecord,
     unit_types: &Option<BTreeSet<String>>,
@@ -5594,6 +5627,7 @@ fn memory_matches_community_memory_unit_types(
     })
 }
 
+#[cfg(test)]
 fn knowledge_community_memory_row(
     memory: &NodeRecord,
     community_id: Value,
@@ -5625,6 +5659,7 @@ fn knowledge_community_memory_row(
     }
 }
 
+#[cfg(test)]
 fn knowledge_community_memory_row_from_query(
     row: &Row,
     source: KnowledgeCommunityMemoryRowSource,
@@ -5681,6 +5716,7 @@ fn knowledge_community_memory_row_from_query(
     })
 }
 
+#[cfg(test)]
 fn sort_community_memory_rows(
     rows: &mut [KnowledgeCommunityMemoryRow],
     order: KnowledgeCommunityMemoryListOrder,
@@ -5725,6 +5761,7 @@ fn sort_community_memory_rows(
     });
 }
 
+#[cfg(test)]
 fn compare_community_memory_importance_desc(
     left: &KnowledgeCommunityMemoryRow,
     right: &KnowledgeCommunityMemoryRow,
@@ -5734,6 +5771,7 @@ fn compare_community_memory_importance_desc(
     compare_knowledge_values(&right_importance, &left_importance)
 }
 
+#[cfg(test)]
 fn compare_community_memory_ids(
     left: &KnowledgeCommunityMemoryRow,
     right: &KnowledgeCommunityMemoryRow,
@@ -5761,6 +5799,7 @@ fn projected_properties(
     projected
 }
 
+#[cfg(test)]
 fn boolean_property(node: &NodeRecord, property: &str) -> Option<bool> {
     match node.properties.get(property) {
         Some(Value::Bool(value)) => Some(*value),
@@ -5768,6 +5807,7 @@ fn boolean_property(node: &NodeRecord, property: &str) -> Option<bool> {
     }
 }
 
+#[cfg(test)]
 fn boolean_property_value(properties: &BTreeMap<String, Value>, property: &str) -> Option<bool> {
     match properties.get(property) {
         Some(Value::Bool(value)) => Some(*value),
@@ -5775,6 +5815,7 @@ fn boolean_property_value(properties: &BTreeMap<String, Value>, property: &str) 
     }
 }
 
+#[cfg(test)]
 fn integer_property_value(properties: &BTreeMap<String, Value>, property: &str) -> Option<i64> {
     match properties.get(property) {
         Some(Value::Int(value)) => Some(*value),
@@ -5782,6 +5823,7 @@ fn integer_property_value(properties: &BTreeMap<String, Value>, property: &str) 
     }
 }
 
+#[cfg(test)]
 fn knowledge_crystals_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -5822,6 +5864,7 @@ fn knowledge_crystals_for(
     })
 }
 
+#[cfg(test)]
 fn knowledge_crystals_via_query_runtime(
     db: &Database,
     request: &KnowledgeCrystalListRequest,
@@ -5856,6 +5899,7 @@ fn knowledge_crystals_via_query_runtime(
     })
 }
 
+#[cfg(test)]
 fn validate_knowledge_crystal_list_request(request: &KnowledgeCrystalListRequest) -> Result<()> {
     if request.key_match.as_ref().is_some_and(String::is_empty) {
         return Err(SkeinError::Semantic(
@@ -5875,6 +5919,7 @@ fn validate_knowledge_crystal_list_request(request: &KnowledgeCrystalListRequest
     Ok(())
 }
 
+#[cfg(test)]
 fn knowledge_crystal_list_query_predicate(
     request: &KnowledgeCrystalListRequest,
     parameters: &mut BTreeMap<String, Value>,
@@ -5892,6 +5937,7 @@ fn knowledge_crystal_list_query_predicate(
     format!(" WHERE {}", predicates.join(" AND "))
 }
 
+#[cfg(test)]
 fn memory_matches_crystal_list(memory: &NodeRecord, request: &KnowledgeCrystalListRequest) -> bool {
     let memory_id = node_external_id(memory).unwrap_or_default();
     request.key_match.as_ref().is_none_or(|key| {
@@ -5902,6 +5948,7 @@ fn memory_matches_crystal_list(memory: &NodeRecord, request: &KnowledgeCrystalLi
         .is_none_or(|after_id| memory_id > *after_id)
 }
 
+#[cfg(test)]
 fn knowledge_crystal_row(memory: &NodeRecord) -> KnowledgeCrystalRow {
     let crystal_title = string_property(memory, "crystal_title");
     let title = string_property(memory, "title");
@@ -5926,6 +5973,7 @@ fn knowledge_crystal_row(memory: &NodeRecord) -> KnowledgeCrystalRow {
     }
 }
 
+#[cfg(test)]
 fn knowledge_crystal_row_from_entity(memory: &KnowledgeEntity) -> KnowledgeCrystalRow {
     let crystal_title = string_property_value(&memory.properties, "crystal_title");
     let title = string_property_value(&memory.properties, "title");
@@ -5950,6 +5998,7 @@ fn knowledge_crystal_row_from_entity(memory: &KnowledgeEntity) -> KnowledgeCryst
     }
 }
 
+#[cfg(test)]
 fn sort_crystal_rows(rows: &mut [KnowledgeCrystalRow], request: &KnowledgeCrystalListRequest) {
     rows.sort_by(|left, right| {
         crystal_key_match_rank(left, request)
@@ -6034,6 +6083,7 @@ fn validate_knowledge_crystal_source_weight(weight: &Value) -> Result<()> {
     }
 }
 
+#[cfg(test)]
 fn crystal_key_match_rank(row: &KnowledgeCrystalRow, request: &KnowledgeCrystalListRequest) -> u8 {
     let Some(key) = &request.key_match else {
         return 0;
@@ -6050,6 +6100,7 @@ fn crystal_key_match_rank(row: &KnowledgeCrystalRow, request: &KnowledgeCrystalL
     }
 }
 
+#[cfg(test)]
 fn compare_crystal_ids(
     left: &KnowledgeCrystalRow,
     right: &KnowledgeCrystalRow,
@@ -6059,6 +6110,7 @@ fn compare_crystal_ids(
         .then_with(|| left.node_id.cmp(&right.node_id))
 }
 
+#[cfg(test)]
 fn compare_crystal_importance_created_at(
     left: &KnowledgeCrystalRow,
     right: &KnowledgeCrystalRow,
@@ -6074,11 +6126,13 @@ fn compare_crystal_importance_created_at(
     )
 }
 
+#[cfg(test)]
 struct KnowledgeCrystalCommunityAccumulator {
     row: KnowledgeCrystalCommunityRow,
     source_memory_ids: BTreeSet<u64>,
 }
 
+#[cfg(test)]
 fn knowledge_crystal_communities_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -6178,6 +6232,7 @@ fn knowledge_crystal_communities_for(
     })
 }
 
+#[cfg(test)]
 fn knowledge_crystal_communities_via_query_runtime(
     db: &Database,
     request: &KnowledgeCrystalCommunityListRequest,
@@ -6222,6 +6277,7 @@ fn knowledge_crystal_communities_via_query_runtime(
     })
 }
 
+#[cfg(test)]
 fn empty_crystal_community_output(graph_commit_epoch: u64) -> KnowledgeCrystalCommunityListOutput {
     KnowledgeCrystalCommunityListOutput {
         graph_commit_epoch,
@@ -6232,6 +6288,7 @@ fn empty_crystal_community_output(graph_commit_epoch: u64) -> KnowledgeCrystalCo
     }
 }
 
+#[cfg(test)]
 fn validate_knowledge_crystal_community_list_request(
     request: &KnowledgeCrystalCommunityListRequest,
 ) -> Result<()> {
@@ -6256,6 +6313,7 @@ fn validate_knowledge_crystal_community_list_request(
     Ok(())
 }
 
+#[cfg(test)]
 fn knowledge_crystal_community_query_predicate(
     request: &KnowledgeCrystalCommunityListRequest,
     parameters: &mut BTreeMap<String, Value>,
@@ -6274,6 +6332,7 @@ fn knowledge_crystal_community_query_predicate(
     }
 }
 
+#[cfg(test)]
 fn crystal_community_filter_values(
     request: &KnowledgeCrystalCommunityListRequest,
 ) -> Option<BTreeSet<Value>> {
@@ -6285,12 +6344,14 @@ fn crystal_community_filter_values(
     }
 }
 
+#[cfg(test)]
 fn crystal_community_scope_matches(community_id: &Value, filter: &Option<BTreeSet<Value>>) -> bool {
     filter
         .as_ref()
         .is_none_or(|community_ids| community_ids.contains(community_id))
 }
 
+#[cfg(test)]
 fn knowledge_crystal_community_row(
     crystal: &NodeRecord,
     community_id: Value,
@@ -6318,6 +6379,7 @@ fn knowledge_crystal_community_row(
     }
 }
 
+#[cfg(test)]
 fn knowledge_crystal_community_row_from_query(row: &Row) -> Result<KnowledgeCrystalCommunityRow> {
     let crystal_memory_id = row
         .get("crystal_memory_id")
@@ -6378,6 +6440,7 @@ fn knowledge_crystal_community_row_from_query(row: &Row) -> Result<KnowledgeCrys
     })
 }
 
+#[cfg(test)]
 fn sort_crystal_community_rows(
     rows: &mut [KnowledgeCrystalCommunityRow],
     order: KnowledgeCrystalCommunityListOrder,
@@ -6396,6 +6459,7 @@ fn sort_crystal_community_rows(
     });
 }
 
+#[cfg(test)]
 fn compare_crystal_community_ids(
     left: &KnowledgeCrystalCommunityRow,
     right: &KnowledgeCrystalCommunityRow,
@@ -6406,6 +6470,7 @@ fn compare_crystal_community_ids(
         .then_with(|| left.crystal_node_id.cmp(&right.crystal_node_id))
 }
 
+#[cfg(test)]
 fn knowledge_crystal_source_visibility_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -6494,6 +6559,7 @@ fn knowledge_crystal_source_visibility_for(
     })
 }
 
+#[cfg(test)]
 fn knowledge_crystal_source_visibility_via_query_runtime(
     db: &Database,
     request: &KnowledgeCrystalSourceVisibilityRequest,
@@ -6532,6 +6598,7 @@ fn knowledge_crystal_source_visibility_via_query_runtime(
     })
 }
 
+#[cfg(test)]
 fn empty_crystal_source_visibility_output(
     graph_commit_epoch: u64,
 ) -> KnowledgeCrystalSourceVisibilityOutput {
@@ -6543,6 +6610,7 @@ fn empty_crystal_source_visibility_output(
     }
 }
 
+#[cfg(test)]
 fn validate_knowledge_crystal_source_visibility_request(
     request: &KnowledgeCrystalSourceVisibilityRequest,
 ) -> Result<()> {
@@ -6563,6 +6631,7 @@ fn validate_knowledge_crystal_source_visibility_request(
     Ok(())
 }
 
+#[cfg(test)]
 fn knowledge_crystal_source_visibility_row(
     crystal: &NodeRecord,
     source_memory: &NodeRecord,
@@ -6597,6 +6666,7 @@ fn knowledge_crystal_source_visibility_row(
     }
 }
 
+#[cfg(test)]
 fn knowledge_crystal_source_visibility_row_from_query(
     row: &Row,
 ) -> Result<KnowledgeCrystalSourceVisibilityRow> {
@@ -6663,6 +6733,7 @@ fn knowledge_crystal_source_visibility_row_from_query(
     })
 }
 
+#[cfg(test)]
 fn sort_crystal_source_visibility_rows(rows: &mut [KnowledgeCrystalSourceVisibilityRow]) {
     rows.sort_by(|left, right| {
         left.community_id
@@ -9579,6 +9650,7 @@ fn validate_knowledge_source_label_delete(delete: &KnowledgeSourceLabelDelete) -
     Ok(())
 }
 
+#[cfg(test)]
 fn value_to_non_negative_usize(value: &Value) -> Option<usize> {
     match value {
         Value::Int(value) if *value >= 0 => usize::try_from(*value).ok(),
@@ -9586,6 +9658,7 @@ fn value_to_non_negative_usize(value: &Value) -> Option<usize> {
     }
 }
 
+#[cfg(test)]
 fn value_to_non_negative_u64(value: &Value) -> Option<u64> {
     match value {
         Value::Int(value) if *value >= 0 => u64::try_from(*value).ok(),
@@ -9593,6 +9666,7 @@ fn value_to_non_negative_u64(value: &Value) -> Option<u64> {
     }
 }
 
+#[cfg(test)]
 fn value_to_bool(value: &Value) -> Option<bool> {
     match value {
         Value::Bool(value) => Some(*value),
@@ -9600,6 +9674,7 @@ fn value_to_bool(value: &Value) -> Option<bool> {
     }
 }
 
+#[cfg(test)]
 fn optional_external_id_value(value: &Value) -> Option<String> {
     if matches!(value, Value::Null) {
         return None;
@@ -9608,6 +9683,7 @@ fn optional_external_id_value(value: &Value) -> Option<String> {
     (!external_id.is_empty()).then_some(external_id)
 }
 
+#[cfg(test)]
 fn optional_non_null_value(value: &Value) -> Option<Value> {
     (!matches!(value, Value::Null)).then(|| value.clone())
 }
@@ -9620,6 +9696,7 @@ fn value_to_map(value: &Value) -> Option<&BTreeMap<String, Value>> {
     }
 }
 
+#[cfg(test)]
 fn value_to_string_list(value: &Value) -> Option<Vec<String>> {
     let Value::List(values) = value else {
         return None;
@@ -9634,6 +9711,7 @@ fn value_to_string_list(value: &Value) -> Option<Vec<String>> {
     )
 }
 
+#[cfg(test)]
 fn optional_string_cell(row: &Row, column: &str) -> Option<String> {
     row.get(column)
         .filter(|value| !matches!(value, Value::Null))
@@ -9641,6 +9719,7 @@ fn optional_string_cell(row: &Row, column: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+#[cfg(test)]
 fn optional_value_cell(row: &Row, column: &str) -> Option<Value> {
     row.get(column)
         .filter(|value| !matches!(value, Value::Null))
@@ -9654,6 +9733,7 @@ fn string_property(node: &NodeRecord, property: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+#[cfg(test)]
 fn string_property_value(properties: &BTreeMap<String, Value>, property: &str) -> Option<String> {
     properties
         .get(property)
@@ -9661,6 +9741,7 @@ fn string_property_value(properties: &BTreeMap<String, Value>, property: &str) -
         .filter(|value| !value.is_empty())
 }
 
+#[cfg(test)]
 fn integer_property(node: &NodeRecord, property: &str) -> Option<i64> {
     match node.properties.get(property) {
         Some(Value::Int(value)) => Some(*value),
@@ -10942,10 +11023,12 @@ fn value_is_greater(left: &Value, right: &Value) -> bool {
 }
 
 #[derive(Clone, Copy)]
+#[cfg(test)]
 enum KnowledgeCreatedAtOrder {
     Descending,
 }
 
+#[cfg(test)]
 fn compare_knowledge_created_at(
     left: &Option<Value>,
     right: &Option<Value>,
@@ -10968,6 +11051,7 @@ fn compare_knowledge_created_at(
     }
 }
 
+#[cfg(test)]
 fn compare_knowledge_values(left: &Value, right: &Value) -> std::cmp::Ordering {
     match (left, right) {
         (Value::Int(left), Value::Int(right)) => left.cmp(right),
@@ -13088,6 +13172,7 @@ fn knowledge_community_membership_relationship_create(
     }
 }
 
+#[cfg(test)]
 fn knowledge_communities_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -13130,6 +13215,7 @@ fn knowledge_communities_for(
     })
 }
 
+#[cfg(test)]
 fn knowledge_communities_via_query_runtime(
     db: &Database,
     request: &KnowledgeCommunityListRequest,
@@ -13167,6 +13253,7 @@ fn knowledge_communities_via_query_runtime(
     })
 }
 
+#[cfg(test)]
 fn knowledge_community_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -13202,6 +13289,7 @@ fn knowledge_community_for(
     })
 }
 
+#[cfg(test)]
 fn knowledge_community_via_query_runtime(
     db: &Database,
     request: &KnowledgeCommunityRequest,
@@ -13238,6 +13326,7 @@ fn knowledge_community_via_query_runtime(
     })
 }
 
+#[cfg(test)]
 fn validate_knowledge_community_request(request: &KnowledgeCommunityRequest) -> Result<()> {
     if let KnowledgeCommunityLookupKey::Id(id) = &request.key
         && id.is_empty()
@@ -13249,6 +13338,7 @@ fn validate_knowledge_community_request(request: &KnowledgeCommunityRequest) -> 
     Ok(())
 }
 
+#[cfg(test)]
 fn knowledge_community_row_from_entity(community: &KnowledgeEntity) -> KnowledgeCommunityRow {
     let ai_summary = community.properties.get("ai_summary").cloned();
     KnowledgeCommunityRow {
@@ -13267,6 +13357,7 @@ fn knowledge_community_row_from_entity(community: &KnowledgeEntity) -> Knowledge
     }
 }
 
+#[cfg(test)]
 fn community_matches_lookup_key(node: &NodeRecord, key: &KnowledgeCommunityLookupKey) -> bool {
     match key {
         KnowledgeCommunityLookupKey::Id(id) => node_external_id(node).as_deref() == Some(id),
@@ -13276,6 +13367,7 @@ fn community_matches_lookup_key(node: &NodeRecord, key: &KnowledgeCommunityLooku
     }
 }
 
+#[cfg(test)]
 fn knowledge_community_row(node: &NodeRecord) -> KnowledgeCommunityRow {
     let ai_summary = node.properties.get("ai_summary").cloned();
     KnowledgeCommunityRow {
@@ -13293,6 +13385,7 @@ fn knowledge_community_row(node: &NodeRecord) -> KnowledgeCommunityRow {
     }
 }
 
+#[cfg(test)]
 fn compare_knowledge_community_rows(
     left: &KnowledgeCommunityRow,
     right: &KnowledgeCommunityRow,
@@ -13313,6 +13406,7 @@ fn compare_knowledge_community_rows(
     .then_with(|| left.node_id.cmp(&right.node_id))
 }
 
+#[cfg(test)]
 fn compare_optional_i64_desc(left: Option<i64>, right: Option<i64>) -> std::cmp::Ordering {
     match (left, right) {
         (Some(left), Some(right)) => right.cmp(&left),
@@ -14407,6 +14501,7 @@ fn node_string_property(node: &NodeRecord, property_name: &str) -> Option<String
     }
 }
 
+#[cfg(test)]
 fn compare_optional_values_desc(left: Option<&Value>, right: Option<&Value>) -> std::cmp::Ordering {
     match (
         left.and_then(value_sort_key),
@@ -14421,6 +14516,7 @@ fn compare_optional_values_desc(left: Option<&Value>, right: Option<&Value>) -> 
     }
 }
 
+#[cfg(test)]
 fn value_sort_key(value: &Value) -> Option<f64> {
     match value {
         Value::Int(value) => Some(*value as f64),
@@ -19365,6 +19461,7 @@ fn knowledge_entity_from_node(catalog: &Catalog, node: &NodeRecord) -> Knowledge
     }
 }
 
+#[cfg(test)]
 fn knowledge_entity_from_value(value: &Value) -> Option<KnowledgeEntity> {
     let Value::Map(values) = value else {
         return None;
@@ -20816,35 +20913,40 @@ impl DatabaseReadTransaction {
         knowledge_entity_batch_for(&self.catalog, &self.store, request)
     }
 
-    pub fn knowledge_community_entity_visibility(
+    #[cfg(test)]
+    pub(crate) fn test_query_community_entity_visibility(
         &self,
         request: &KnowledgeCommunityEntityVisibilityRequest,
     ) -> Result<KnowledgeCommunityEntityVisibilityOutput> {
         knowledge_community_entity_visibility_for(&self.catalog, &self.store, request)
     }
 
-    pub fn knowledge_community_memories(
+    #[cfg(test)]
+    pub(crate) fn test_query_community_memories(
         &self,
         request: &KnowledgeCommunityMemoryListRequest,
     ) -> Result<KnowledgeCommunityMemoryListOutput> {
         knowledge_community_memories_for(&self.catalog, &self.store, request)
     }
 
-    pub fn knowledge_crystals(
+    #[cfg(test)]
+    pub(crate) fn test_query_crystals(
         &self,
         request: &KnowledgeCrystalListRequest,
     ) -> Result<KnowledgeCrystalListOutput> {
         knowledge_crystals_for(&self.catalog, &self.store, request)
     }
 
-    pub fn knowledge_crystal_communities(
+    #[cfg(test)]
+    pub(crate) fn test_query_crystal_communities(
         &self,
         request: &KnowledgeCrystalCommunityListRequest,
     ) -> Result<KnowledgeCrystalCommunityListOutput> {
         knowledge_crystal_communities_for(&self.catalog, &self.store, request)
     }
 
-    pub fn knowledge_crystal_source_visibility(
+    #[cfg(test)]
+    pub(crate) fn test_query_crystal_source_visibility(
         &self,
         request: &KnowledgeCrystalSourceVisibilityRequest,
     ) -> Result<KnowledgeCrystalSourceVisibilityOutput> {
@@ -20859,14 +20961,16 @@ impl DatabaseReadTransaction {
         knowledge_entity_label_projected_list_for(&self.catalog, &self.store, request)
     }
 
-    pub fn knowledge_communities(
+    #[cfg(test)]
+    pub(crate) fn test_query_communities(
         &self,
         request: &KnowledgeCommunityListRequest,
     ) -> Result<KnowledgeCommunityListOutput> {
         knowledge_communities_for(&self.catalog, &self.store, request)
     }
 
-    pub fn knowledge_community(
+    #[cfg(test)]
+    pub(crate) fn test_query_community(
         &self,
         request: &KnowledgeCommunityRequest,
     ) -> Result<KnowledgeCommunityOutput> {

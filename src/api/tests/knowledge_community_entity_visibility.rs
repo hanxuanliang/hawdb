@@ -30,7 +30,7 @@ fn reads_community_entity_visibility_for_wiki_anchor_shapes() {
     let graph_commit_epoch = db.store.commit_epoch();
 
     let visibility = db
-        .knowledge_community_entity_visibility(&KnowledgeCommunityEntityVisibilityRequest {
+        .test_query_community_entity_visibility(&KnowledgeCommunityEntityVisibilityRequest {
             community_ids: vec![Value::Int(7), Value::Int(8)],
             limit: 0,
         })
@@ -82,7 +82,7 @@ fn reads_community_entity_visibility_for_wiki_anchor_shapes() {
     assert!(visibility.rows[3].memory_is_latest);
 
     let cached_visibility = db
-        .knowledge_community_entity_visibility(&KnowledgeCommunityEntityVisibilityRequest {
+        .test_query_community_entity_visibility(&KnowledgeCommunityEntityVisibilityRequest {
             community_ids: vec![Value::Int(7), Value::Int(8)],
             limit: 0,
         })
@@ -98,7 +98,7 @@ fn reads_community_entity_visibility_for_wiki_anchor_shapes() {
     db.query("MATCH (m:Memory {id: 'memory_alpha_after'}), (e:Entity {id: 'entity_alpha'}) CREATE (m)-[:MENTIONS]->(e)")
         .unwrap();
     let snapshot = tx
-        .knowledge_community_entity_visibility(&KnowledgeCommunityEntityVisibilityRequest {
+        .test_query_community_entity_visibility(&KnowledgeCommunityEntityVisibilityRequest {
             community_ids: vec![Value::Int(7)],
             limit: 2,
         })
@@ -117,7 +117,7 @@ fn community_entity_visibility_rejects_invalid_scope() {
     let db = Database::new();
 
     let empty_ids_error = db
-        .knowledge_community_entity_visibility(&KnowledgeCommunityEntityVisibilityRequest {
+        .test_query_community_entity_visibility(&KnowledgeCommunityEntityVisibilityRequest {
             community_ids: Vec::new(),
             limit: 0,
         })
@@ -127,7 +127,7 @@ fn community_entity_visibility_rejects_invalid_scope() {
         .contains("non-empty community ids"));
 
     let null_id_error = db
-        .knowledge_community_entity_visibility(&KnowledgeCommunityEntityVisibilityRequest {
+        .test_query_community_entity_visibility(&KnowledgeCommunityEntityVisibilityRequest {
             community_ids: vec![Value::Null],
             limit: 0,
         })

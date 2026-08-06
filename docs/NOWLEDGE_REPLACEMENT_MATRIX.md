@@ -262,25 +262,13 @@ Lightweight Memory metadata replacement writes are covered by
 optional `updated_at` update shapes. The wrapper validates Memory ids before
 WAL, reports missing, projected-idless, and duplicate rows without writing, and
 commits eligible Memory rows through one grouped WAL batch.
-Crystal Memory reads are covered by `Database::knowledge_crystals`. The typed
-read scans only `Memory` nodes with `is_crystal = true`, supports wiki key
-lookup by exact/prefix/contains id matching, crystal page `id > after`
-pagination, OKF importance/created-at ordering, display-title fallback from
-`crystal_title` to `title`, read-transaction snapshots, and no WAL writes.
-Crystal community aggregation reads are covered by
-`Database::knowledge_crystal_communities`. The typed read scans only
-`is_crystal = true` Memory nodes, follows `SYNTHESIZED_FROM` to source Memory
-nodes and `MENTIONS` to Entity nodes, filters by explicit community ids or
-non-null communities, returns hit counts and distinct source-memory counts for
-each crystal/community pair, supports topic-ranking and OKF mapping orderings,
-read-transaction snapshots, and no WAL writes.
-Crystal source visibility reads are covered by
-`Database::knowledge_crystal_source_visibility`. The typed read uses the same
-Crystal/source/entity community path but preserves one row per visible path,
-returning Crystal fields plus source Memory metadata, `COALESCE(is_latest,
-true)` semantics, and lifecycle state for Nowledge wiki community crystal
-rendering; it supports explicit community-id scopes, read-transaction
-snapshots, and no WAL writes.
+Crystal Memory lists, key lookups, community aggregations, and source visibility
+reads use separate fixed parameterized Cypher statements. Each statement owns
+its `is_crystal` predicate, cursor or community scope, concrete projection,
+ordering, `LIMIT`, row and payload budgets, and pinned snapshot. Aggregation and
+path-visibility phases remain separate so one query does not accumulate an
+unbounded intermediate result. No Crystal route-specific read API or DTO is
+exposed, and these reads do not write WAL.
 MCP crystal source-link writes are covered by
 `Database::merge_knowledge_crystal_source`. The typed write resolves exact
 physical `Memory.id` endpoints for the crystal and source Memory nodes, merges
@@ -313,21 +301,12 @@ host preserves the current incoming-edge double-counting implied by the
 production `COUNT(DISTINCT r1) + COUNT(DISTINCT r2)` shape. The actual Entity
 delete remains a typed WAL mutation; no route-specific typed guard API is
 exposed.
-Community Entity visibility reads are covered by
-`Database::knowledge_community_entity_visibility`. The typed read scans Entity
-nodes in explicit community scopes and preserves the Nowledge optional incoming
-`Memory` `MENTIONS` row shape, including zero-Memory Entity rows, Memory
-metadata, `COALESCE(is_latest, true)` semantics, lifecycle state,
-read-transaction snapshots, and no WAL writes.
-Community Memory ranking reads are covered by
-`Database::knowledge_community_memories`. The typed read validates explicit
-non-null community scopes, returns Nowledge wiki ranking/export rows from either
-incoming `Memory` `MENTIONS` over Entity communities or direct
-`Memory.community_id` assignment, preserves distinct mentioned Entity ids,
-supports false-only and null-or-false crystal filters plus Nowledge
-`unit_type IN $types` filters, applies importance and latest-state fallbacks,
-supports the Nowledge ordering variants, read-transaction snapshots, and no WAL
-writes.
+Community Entity visibility and Memory ranking reads use separate fixed
+parameterized Cypher statements for optional incoming `Memory` `MENTIONS`,
+direct `Memory.community_id`, unit-type filters, and crystal filters. Each phase
+has an explicit community scope, deterministic ordering, `LIMIT`, row and
+payload budgets, and a pinned snapshot. The host performs only bounded
+cross-statement shaping; no Community visibility route API or DTO is exposed.
 Related Entity name reads use separate fixed parameterized Cypher statements
 for Memory-id batches and Thread-compaction paths. Each has explicit labels,
 distinct-name projection, deterministic ordering, `LIMIT`, a matching row
@@ -650,19 +629,11 @@ non-empty Community ids and names, non-negative `community_id` and
 to the Nowledge `louvain` algorithm marker, reports existing, missing,
 duplicate, and non-writable rows, and commits eligible creates plus summary
 updates through one grouped WAL batch.
-Community summary list reads are covered by `Database::knowledge_communities`.
-The typed read scans only `Community` nodes, supports the Nowledge REST
-summary-only list and library summary-presence ranked shapes, filters optional
-non-negative `community_id`, orders by member count or summary presence then
-member count, returns id/community_id/name/description/ai_summary/member_count/
-updated_at fields, supports bounded limits and read-transaction snapshots, and
-does not write WAL.
-Community detail reads are covered by `Database::knowledge_community`. The
-typed read scans only `Community` nodes, supports the Nowledge wiki/MCP single
-row lookup shapes by numeric `community_id` or external `id`, returns the same
-Community row fields as the list facade plus summary-presence metadata,
-reports found/missing state, supports read-transaction snapshots, and does not
-write WAL.
+Community summary lists and detail lookups use fixed parameterized Cypher
+statements. Summary-only and summary-presence rankings are distinct bounded
+statements; numeric `community_id` and external `id` detail lookups are also
+distinct statements with a one-row budget. No Community list/detail route API
+or DTO is exposed, and these reads do not write WAL.
 Community node cleanup is covered by `Database::delete_knowledge_communities`
 for Nowledge replace-community and undo-community flows. It scans only
 `Community` nodes, supports the two production cleanup modes (`DELETE` and

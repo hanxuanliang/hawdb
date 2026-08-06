@@ -303,12 +303,14 @@ pub struct KnowledgeEntityBatchOutput {
     pub filtered_out_count: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCommunityEntityVisibilityRequest {
     pub community_ids: Vec<Value>,
     pub limit: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCommunityEntityVisibilityRow {
     pub community_id: Value,
@@ -323,6 +325,7 @@ pub struct KnowledgeCommunityEntityVisibilityRow {
     pub memory_lifecycle_state: Option<String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCommunityEntityVisibilityOutput {
     pub graph_commit_epoch: u64,
@@ -332,6 +335,7 @@ pub struct KnowledgeCommunityEntityVisibilityOutput {
     pub returned_count: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnowledgeCommunityMemorySource {
     MentionedEntities,
@@ -339,6 +343,7 @@ pub enum KnowledgeCommunityMemorySource {
     Both,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnowledgeCommunityMemoryCrystalFilter {
     Any,
@@ -346,6 +351,7 @@ pub enum KnowledgeCommunityMemoryCrystalFilter {
     NullOrFalse,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnowledgeCommunityMemoryListOrder {
     CommunityBreadthImportanceCreatedAt,
@@ -353,6 +359,7 @@ pub enum KnowledgeCommunityMemoryListOrder {
     CommunityImportanceCreatedAt,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCommunityMemoryListRequest {
     pub community_ids: Vec<Value>,
@@ -363,12 +370,14 @@ pub struct KnowledgeCommunityMemoryListRequest {
     pub limit: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum KnowledgeCommunityMemoryRowSource {
     MentionedEntities,
     DirectMemoryCommunity,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCommunityMemoryRow {
     pub community_id: Value,
@@ -391,6 +400,7 @@ pub struct KnowledgeCommunityMemoryRow {
     pub entity_ids: Vec<String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCommunityMemoryListOutput {
     pub graph_commit_epoch: u64,
@@ -399,12 +409,14 @@ pub struct KnowledgeCommunityMemoryListOutput {
     pub returned_count: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnowledgeCrystalListOrder {
     ExternalIdAsc,
     ImportanceDescCreatedAtDesc,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCrystalListRequest {
     pub key_match: Option<String>,
@@ -413,6 +425,7 @@ pub struct KnowledgeCrystalListRequest {
     pub order: KnowledgeCrystalListOrder,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCrystalRow {
     pub memory_id: Option<String>,
@@ -430,6 +443,7 @@ pub struct KnowledgeCrystalRow {
     pub is_crystal: Option<bool>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCrystalListOutput {
     pub graph_commit_epoch: u64,
@@ -463,18 +477,21 @@ pub struct KnowledgeCrystalSourceMergeOutput {
     pub created_relationship_count: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KnowledgeCrystalCommunityScope {
     CommunityIds(Vec<Value>),
     NonNullCommunity,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnowledgeCrystalCommunityListOrder {
     CommunityIdAscCrystalIdAsc,
     HitsDescImportanceDesc,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCrystalCommunityListRequest {
     pub scope: KnowledgeCrystalCommunityScope,
@@ -482,6 +499,7 @@ pub struct KnowledgeCrystalCommunityListRequest {
     pub order: KnowledgeCrystalCommunityListOrder,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCrystalCommunityRow {
     pub crystal_memory_id: Option<String>,
@@ -499,6 +517,7 @@ pub struct KnowledgeCrystalCommunityRow {
     pub lifecycle_state: Option<String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCrystalCommunityListOutput {
     pub graph_commit_epoch: u64,
@@ -508,12 +527,14 @@ pub struct KnowledgeCrystalCommunityListOutput {
     pub returned_count: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCrystalSourceVisibilityRequest {
     pub community_ids: Vec<Value>,
     pub limit: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCrystalSourceVisibilityRow {
     pub crystal_memory_id: Option<String>,
@@ -536,6 +557,7 @@ pub struct KnowledgeCrystalSourceVisibilityRow {
     pub source_lifecycle_state: Option<String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCrystalSourceVisibilityOutput {
     pub graph_commit_epoch: u64,

@@ -183,12 +183,14 @@ pub struct KnowledgeCommunityLifecycleBatchOutput {
     pub updated_property_count: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnowledgeCommunityListOrder {
     MemberCountDesc,
     SummaryPresenceThenMemberCountDesc,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCommunityListRequest {
     pub require_summary: bool,
@@ -197,17 +199,20 @@ pub struct KnowledgeCommunityListRequest {
     pub limit: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KnowledgeCommunityLookupKey {
     Id(String),
     CommunityId(i64),
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCommunityRequest {
     pub key: KnowledgeCommunityLookupKey,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCommunityRow {
     pub id: Option<String>,
@@ -221,6 +226,7 @@ pub struct KnowledgeCommunityRow {
     pub has_summary: bool,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCommunityListOutput {
     pub graph_commit_epoch: u64,
@@ -229,6 +235,7 @@ pub struct KnowledgeCommunityListOutput {
     pub returned_count: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCommunityOutput {
     pub graph_commit_epoch: u64,

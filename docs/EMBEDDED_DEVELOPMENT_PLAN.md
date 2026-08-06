@@ -543,23 +543,11 @@ Memory EVOLVES creates are available as
 `Database::create_knowledge_memory_evolves_batch`, covering Nowledge
 `add_evolves_edge` and replacement-relation create shapes with caller-supplied
 relationship metadata, fixed Memory endpoints, and grouped WAL writes.
-Crystal Memory reads are available as `Database::knowledge_crystals`, covering
-Nowledge wiki crystal detail key lookup, crystal page `id > after` pagination,
-and OKF crystal list rows with `crystal_title`, display-title fallback,
-importance/created-at ordering, pinned read-transaction snapshots, and no WAL
-writes.
-Crystal-to-Community aggregation reads are available as
-`Database::knowledge_crystal_communities`, covering Nowledge
-`SYNTHESIZED_FROM` source Memory to `MENTIONS` Entity community paths for wiki
-topic crystal ranking and OKF crystal community mapping, with hit counts,
-distinct source-memory counts, pinned read-transaction snapshots, and no WAL
-writes.
-Crystal source visibility reads are available as
-`Database::knowledge_crystal_source_visibility`, covering the Nowledge wiki
-community crystal row shape that returns Crystal fields alongside source
-Memory metadata, latest-state fallback, and lifecycle state over the same
-`SYNTHESIZED_FROM` to `MENTIONS` community path, with pinned read-transaction
-snapshots and no WAL writes.
+Crystal Memory lists, key lookups, community aggregations, and source visibility
+reads use separate fixed parameterized Cypher statements. The statements own
+their concrete projection, cursor or community scope, deterministic ordering,
+`LIMIT`, row and payload budgets, and pinned snapshot. No Crystal route-specific
+read API or DTO is exposed, and these reads do not write WAL.
 Memory entity mention reads use one fixed parameterized Cypher statement per
 Memory with explicit projection, deterministic ordering, `LIMIT`, a matching
 row budget, and a shared pinned snapshot. Grouping, missing-id handling, and
@@ -569,20 +557,11 @@ statements for first-page and cursor shapes, with non-empty Entity id/name
 filtering, incoming `Memory` `MENTIONS` counts including zero-mention Entities,
 deterministic ordering, bounded limits, pinned read-transaction snapshots, and
 no WAL writes. No route-specific typed read API is exposed.
-Community Entity visibility reads are available as
-`Database::knowledge_community_entity_visibility`, covering the Nowledge wiki
-community anchor row shape for Entity nodes in explicit communities plus
-row-preserving optional incoming `Memory` `MENTIONS` metadata, latest-state
-fallback, and lifecycle fields with pinned read-transaction snapshots and no
-WAL writes.
-Community Memory ranking reads are available as
-`Database::knowledge_community_memories`, covering Nowledge wiki community
-memory ranking and export shapes over explicit community scopes. The typed read
-supports incoming `Memory` -> `MENTIONS` -> `Entity` mention breadth, direct
-`Memory.community_id` ranking, `is_crystal` false/null-or-false filters,
-Nowledge `unit_type IN $types` filters, importance and `created_at` fallbacks,
-distinct mentioned Entity ids, pinned read-transaction snapshots, and no WAL
-writes.
+Community Entity visibility and Memory ranking reads use separate fixed
+parameterized Cypher statements for optional incoming `Memory` `MENTIONS`,
+direct `Memory.community_id`, unit-type filters, and crystal filters. Every
+phase has an explicit scope, deterministic ordering, `LIMIT`, row and payload
+budgets, and a pinned snapshot. No route-specific read API or DTO is exposed.
 Related Entity name reads use separate fixed parameterized Cypher statements
 for Memory-id batches and Thread-compaction paths. Each owns its distinct-name
 projection, deterministic ordering, `LIMIT`, matching row budget, and pinned
@@ -660,16 +639,10 @@ non-empty Community ids and names, non-negative numeric counters, and finite
 resolutions before WAL, reports existing, missing, duplicate, and non-writable
 rows, fixes detection-result `algorithm` to `louvain`, and commits eligible
 creates plus summary updates through one grouped WAL batch.
-Community summary list reads are available as
-`Database::knowledge_communities`, covering Nowledge REST community list and
-library summary-ranked shapes with `ai_summary` presence filtering, optional
-non-negative `community_id` filtering, member-count and summary-presence
-ordering, bounded limits, pinned read-transaction snapshots, and no WAL writes.
-Community detail reads are available as `Database::knowledge_community`,
-covering Nowledge wiki/MCP single Community lookups by numeric `community_id`
-or external `id`, returning id, community_id, name, description, ai_summary,
-member_count, updated_at, summary-presence metadata, pinned read-transaction
-snapshots, and no WAL writes.
+Community summary lists and detail lookups use fixed parameterized Cypher.
+Summary-only and summary-presence rankings remain distinct bounded statements;
+numeric `community_id` and external `id` detail lookups use separate one-row
+statements. No Community list/detail route API or DTO is exposed.
 GraphMeta state reads used by PageRank and community detection use host-owned
 fixed, parameterized Cypher projections with explicit row budgets. Callers add
 a new fixed projection when state grows and use one

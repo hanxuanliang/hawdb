@@ -334,7 +334,7 @@ fn reads_crystals_for_wiki_and_okf_shapes() {
     let graph_commit_epoch = db.store.commit_epoch();
 
     let wiki_detail = db
-        .knowledge_crystals(&KnowledgeCrystalListRequest {
+        .test_query_crystals(&KnowledgeCrystalListRequest {
             key_match: Some("crystal-a".to_string()),
             after_id: None,
             limit: 1,
@@ -364,7 +364,7 @@ fn reads_crystals_for_wiki_and_okf_shapes() {
     assert_eq!(wiki_detail.rows[0].created_at, Some(Value::Int(10)));
 
     let page = db
-        .knowledge_crystals(&KnowledgeCrystalListRequest {
+        .test_query_crystals(&KnowledgeCrystalListRequest {
             key_match: None,
             after_id: Some("crystal-alpha".to_string()),
             limit: 10,
@@ -386,7 +386,7 @@ fn reads_crystals_for_wiki_and_okf_shapes() {
     db.query("CREATE (:Memory {id: 'crystal-top', is_crystal: true, crystal_title: 'Top Crystal', importance: 9.0, created_at: 100})")
         .unwrap();
     let okf = tx
-        .knowledge_crystals(&KnowledgeCrystalListRequest {
+        .test_query_crystals(&KnowledgeCrystalListRequest {
             key_match: None,
             after_id: None,
             limit: 0,
@@ -406,7 +406,7 @@ fn crystal_read_rejects_invalid_filters() {
     let db = Database::new();
 
     let empty_key_error = db
-        .knowledge_crystals(&KnowledgeCrystalListRequest {
+        .test_query_crystals(&KnowledgeCrystalListRequest {
             key_match: Some(String::new()),
             after_id: None,
             limit: 1,
@@ -416,7 +416,7 @@ fn crystal_read_rejects_invalid_filters() {
     assert!(empty_key_error.to_string().contains("non-empty key match"));
 
     let empty_after_error = db
-        .knowledge_crystals(&KnowledgeCrystalListRequest {
+        .test_query_crystals(&KnowledgeCrystalListRequest {
             key_match: None,
             after_id: Some(String::new()),
             limit: 1,
@@ -426,7 +426,7 @@ fn crystal_read_rejects_invalid_filters() {
     assert!(empty_after_error.to_string().contains("non-empty after id"));
 
     let mixed_filter_error = db
-        .knowledge_crystals(&KnowledgeCrystalListRequest {
+        .test_query_crystals(&KnowledgeCrystalListRequest {
             key_match: Some("crystal".to_string()),
             after_id: Some("crystal-alpha".to_string()),
             limit: 1,
@@ -458,8 +458,8 @@ fn crystal_reads_use_query_runtime_plan_cache() {
         order: KnowledgeCrystalListOrder::ImportanceDescCreatedAtDesc,
     };
 
-    let first = db.knowledge_crystals(&request).unwrap();
-    let second = db.knowledge_crystals(&request).unwrap();
+    let first = db.test_query_crystals(&request).unwrap();
+    let second = db.test_query_crystals(&request).unwrap();
 
     assert_eq!(first, second);
     assert_eq!(first.matched_count, 2);
@@ -698,7 +698,7 @@ fn reads_crystal_communities_for_topic_ranking_and_okf_mapping() {
     let graph_commit_epoch = db.store.commit_epoch();
 
     let topic = db
-        .knowledge_crystal_communities(&KnowledgeCrystalCommunityListRequest {
+        .test_query_crystal_communities(&KnowledgeCrystalCommunityListRequest {
             scope: KnowledgeCrystalCommunityScope::CommunityIds(vec![Value::Int(7)]),
             limit: 10,
             order: KnowledgeCrystalCommunityListOrder::HitsDescImportanceDesc,
@@ -738,7 +738,7 @@ fn reads_crystal_communities_for_topic_ranking_and_okf_mapping() {
     )
     .unwrap();
     let okf = tx
-        .knowledge_crystal_communities(&KnowledgeCrystalCommunityListRequest {
+        .test_query_crystal_communities(&KnowledgeCrystalCommunityListRequest {
             scope: KnowledgeCrystalCommunityScope::NonNullCommunity,
             limit: 0,
             order: KnowledgeCrystalCommunityListOrder::CommunityIdAscCrystalIdAsc,
@@ -773,7 +773,7 @@ fn crystal_community_read_rejects_invalid_scope() {
     let db = Database::new();
 
     let empty_ids_error = db
-        .knowledge_crystal_communities(&KnowledgeCrystalCommunityListRequest {
+        .test_query_crystal_communities(&KnowledgeCrystalCommunityListRequest {
             scope: KnowledgeCrystalCommunityScope::CommunityIds(Vec::new()),
             limit: 10,
             order: KnowledgeCrystalCommunityListOrder::HitsDescImportanceDesc,
@@ -784,7 +784,7 @@ fn crystal_community_read_rejects_invalid_scope() {
         .contains("non-empty community ids"));
 
     let null_id_error = db
-        .knowledge_crystal_communities(&KnowledgeCrystalCommunityListRequest {
+        .test_query_crystal_communities(&KnowledgeCrystalCommunityListRequest {
             scope: KnowledgeCrystalCommunityScope::CommunityIds(vec![Value::Null]),
             limit: 10,
             order: KnowledgeCrystalCommunityListOrder::HitsDescImportanceDesc,
@@ -826,8 +826,8 @@ fn crystal_community_reads_use_query_runtime_plan_cache() {
         order: KnowledgeCrystalCommunityListOrder::HitsDescImportanceDesc,
     };
 
-    let first = db.knowledge_crystal_communities(&request).unwrap();
-    let second = db.knowledge_crystal_communities(&request).unwrap();
+    let first = db.test_query_crystal_communities(&request).unwrap();
+    let second = db.test_query_crystal_communities(&request).unwrap();
 
     assert_eq!(first, second);
     assert_eq!(first.matched_path_count, 3);
@@ -906,7 +906,7 @@ fn reads_crystal_source_visibility_for_wiki_community_rows() {
     let graph_commit_epoch = db.store.commit_epoch();
 
     let visibility = db
-        .knowledge_crystal_source_visibility(&KnowledgeCrystalSourceVisibilityRequest {
+        .test_query_crystal_source_visibility(&KnowledgeCrystalSourceVisibilityRequest {
             community_ids: vec![Value::Int(7), Value::Int(8)],
             limit: 0,
         })
@@ -971,7 +971,7 @@ fn reads_crystal_source_visibility_for_wiki_community_rows() {
     )
     .unwrap();
     let snapshot = tx
-        .knowledge_crystal_source_visibility(&KnowledgeCrystalSourceVisibilityRequest {
+        .test_query_crystal_source_visibility(&KnowledgeCrystalSourceVisibilityRequest {
             community_ids: vec![Value::Int(7)],
             limit: 2,
         })
@@ -990,7 +990,7 @@ fn crystal_source_visibility_rejects_invalid_scope() {
     let db = Database::new();
 
     let empty_ids_error = db
-        .knowledge_crystal_source_visibility(&KnowledgeCrystalSourceVisibilityRequest {
+        .test_query_crystal_source_visibility(&KnowledgeCrystalSourceVisibilityRequest {
             community_ids: Vec::new(),
             limit: 0,
         })
@@ -1000,7 +1000,7 @@ fn crystal_source_visibility_rejects_invalid_scope() {
         .contains("non-empty community ids"));
 
     let null_id_error = db
-        .knowledge_crystal_source_visibility(&KnowledgeCrystalSourceVisibilityRequest {
+        .test_query_crystal_source_visibility(&KnowledgeCrystalSourceVisibilityRequest {
             community_ids: vec![Value::Null],
             limit: 0,
         })
@@ -1032,8 +1032,8 @@ fn crystal_source_visibility_uses_query_runtime_plan_cache() {
         limit: 0,
     };
 
-    let first = db.knowledge_crystal_source_visibility(&request).unwrap();
-    let second = db.knowledge_crystal_source_visibility(&request).unwrap();
+    let first = db.test_query_crystal_source_visibility(&request).unwrap();
+    let second = db.test_query_crystal_source_visibility(&request).unwrap();
 
     assert_eq!(first, second);
     assert_eq!(first.matched_path_count, 1);
