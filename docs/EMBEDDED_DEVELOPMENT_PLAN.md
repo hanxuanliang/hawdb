@@ -545,18 +545,11 @@ calculation remain outside the embedded database facade.
 Memory EVOLVES neighbor reads use separate fixed outgoing and incoming Cypher
 statements. Each owns its node and relationship projection, deterministic
 ordering, `LIMIT`, matching row budget, and pinned snapshot.
-Memory EVOLVES projected successor reads are available as
-`Database::knowledge_memory_evolves_projected_successors`, covering old-Memory
-id batches with caller-order groups, missing-old rows, per-old limits, and
-caller-allowlisted successor Memory and `EVOLVES` relationship properties. This
-keeps evolution workflows bounded per parent while allowing future successor
-payload fields without cloning whole Memory nodes or scanning outside requested
-old Memories. Successors support stable id ordering and Nowledge's
-`updated_at DESC` ordering; `updated_at` is kept as an internal sort key unless
-the caller explicitly requests it in the projection allowlist. Per-old cursors
-can resume a sorted successor page without rereading already-returned
-successors, and duplicate `EVOLVES` edges remain pageable through the
-relationship id embedded in each returned cursor.
+Memory EVOLVES projected successor reads use separate fixed per-parent Cypher
+statements for stable-id and `updated_at DESC` ordering. Each statement owns its
+projection, deterministic tie-breakers, `SKIP`, `LIMIT`, matching row budget,
+and pinned snapshot. Parent grouping and missing-id shaping remain outside the
+embedded database facade.
 Memory EVOLVES creates are available as
 `Database::create_knowledge_memory_evolves_batch`, covering Nowledge
 `add_evolves_edge` and replacement-relation create shapes with caller-supplied

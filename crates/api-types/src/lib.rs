@@ -44,67 +44,6 @@ pub struct KnowledgeMemoryDecayRefreshBatchOutput {
     pub updated_property_count: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum KnowledgeMemoryEvolvesProjectedSuccessorOrder {
-    #[default]
-    StableMemoryIdAsc,
-    UpdatedAtDesc,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryEvolvesProjectedSuccessorCursor {
-    pub new_memory_id: Option<String>,
-    pub new_node_id: u64,
-    pub relationship_id: u64,
-    pub updated_at: Option<Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryEvolvesProjectedSuccessorPageCursor {
-    pub old_memory_id: String,
-    pub cursor: KnowledgeMemoryEvolvesProjectedSuccessorCursor,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryEvolvesProjectedSuccessorRequest {
-    pub old_memory_ids: Vec<String>,
-    pub limit_per_old_memory: usize,
-    pub order: KnowledgeMemoryEvolvesProjectedSuccessorOrder,
-    pub page_cursors: Vec<KnowledgeMemoryEvolvesProjectedSuccessorPageCursor>,
-    pub new_memory_property_names: Vec<String>,
-    pub relationship_property_names: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryEvolvesProjectedSuccessorRow {
-    pub new_memory_id: Option<String>,
-    pub new_node_id: u64,
-    pub relationship_id: u64,
-    pub page_cursor: KnowledgeMemoryEvolvesProjectedSuccessorCursor,
-    pub new_memory_properties: BTreeMap<String, Value>,
-    pub relationship_properties: BTreeMap<String, Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryEvolvesProjectedSuccessorGroup {
-    pub old_memory_id: String,
-    pub old_node_id: Option<u64>,
-    pub found_old_memory: bool,
-    pub rows: Vec<KnowledgeMemoryEvolvesProjectedSuccessorRow>,
-    pub matched_relationship_count: usize,
-    pub returned_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryEvolvesProjectedSuccessorOutput {
-    pub graph_commit_epoch: u64,
-    pub groups: Vec<KnowledgeMemoryEvolvesProjectedSuccessorGroup>,
-    pub found_old_memory_count: usize,
-    pub missing_old_memory_count: usize,
-    pub matched_relationship_count: usize,
-    pub returned_count: usize,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeLabelRegexMemoryConnectionsRequest {
     pub label_name_pattern: String,
