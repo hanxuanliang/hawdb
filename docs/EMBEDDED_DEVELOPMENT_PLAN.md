@@ -688,22 +688,10 @@ same per-Memory incoming `COMPACTS_TO` attribution shape while projecting only
 caller-allowlisted Thread and relationship fields. It preserves missing-Memory
 rows, per-Memory limits, stable Thread identity, normalized-space fallback, and
 snapshot/no-WAL semantics without broadening the fixed attribution row.
-Source attribution memory reads are available as
-`Database::knowledge_source_memories`, covering the Nowledge
-`Source`-to-`Memory` incoming `SOURCED_FROM` detail/id-list shapes with
-Memory display fields, chunk attribution metadata, bounded limits, stable
-ordering, and no WAL writes.
-Field-extensible Source attribution memory reads are available as
-`Database::knowledge_source_memory_projected_list`, covering the same bounded
-incoming `SOURCED_FROM` adjacency while projecting only caller-allowlisted
-Memory and relationship fields. This keeps future Source-memory attribution
-field growth on an explicit projection surface without widening the fixed row,
-cloning whole nodes, or scanning outside the target Source.
-Bulk Memory/Source attribution reads are available as
-`Database::knowledge_memory_source_attributions`, covering Nowledge Memory id to
-Source id reads and Source id to Memory summary/library rows over
-`SOURCED_FROM`, with bounded filters, missing-id reporting, Memory display/rank
-fields, chunk metadata, and no WAL writes.
+Source attribution memory reads use host-owned fixed parameterized Cypher over
+incoming `SOURCED_FROM`. Hosts run separate count and page statements, bind a
+bounded Source or Memory id set, project only required Memory/Source/edge
+fields, and keep related phases on one pinned transaction.
 Source metadata timestamp writes are available as
 `Database::update_knowledge_source_metadata_batch`, covering Nowledge auto-OCR
 metadata updates through one grouped WAL batch.
@@ -728,15 +716,11 @@ Source label assignment and cleanup writes are available as
 `Database::delete_knowledge_source_labels_batch`, covering Nowledge
 `Source`-to-`Label` `HAS_LABEL` merge/delete shapes with fixed create-only
 edge properties and one grouped WAL batch for eligible relationship writes.
-Bounded Source list and summary reads are available as
-`Database::knowledge_sources`, covering Nowledge Source page, bulk summary,
-overview ranking, parsed-path list, lifecycle attention, and metadata-marker
-page shapes with explicit filters, ordering, missing-id reporting, display-name
-fallbacks, numeric defaults, and no WAL writes.
-Field-extensible Source list reads are also available as
-`Database::knowledge_source_projected_list`, reusing the same bounded filters,
-pagination, and ordering while returning only caller-selected Source properties
-through an explicit allowlist for future field growth.
+Bounded Source list and summary reads use named host-owned Cypher statements.
+Exact detail, count, id page, summary page, and projected page remain distinct
+query shapes with bound values, explicit row budgets, and pinned-snapshot
+coverage. New Source fields extend a fixed projection rather than a typed route
+DTO or dynamic property identifier.
 Source-reference relationship cleanup for Nowledge memory/source delete flows
 is available as `Database::delete_knowledge_source_reference_relationships`.
 It is intentionally scoped to `RELATES_TO.source_reference`, rejects empty

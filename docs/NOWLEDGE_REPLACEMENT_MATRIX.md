@@ -244,50 +244,14 @@ the Source/Label/HAS_LABEL endpoints, validate ids and assignment origins
 before WAL, report missing or projected-idless endpoints without writing, keep
 existing label edges create-only, preserve endpoint nodes on cleanup, and route
 eligible relationship writes through one grouped WAL batch.
-Source operational reads are covered by typed compatibility APIs for Nowledge
-source detail, extracted-source id list, and normalized-space id list paths.
-`Database::knowledge_source` returns the Source identity, display fields,
-normalized space, lifecycle fields, size/count fields, timestamps, and
-`SOURCED_FROM` Memory count for one Source id.
-`Database::knowledge_source_sourced_memory_count` exposes the same
-`SOURCED_FROM` fan-in count as a lightweight count-only read for Nowledge
-guards that do not need the full Source projection. `Database::knowledge_source_ids`
-returns sorted Source ids filtered by lifecycle state and/or normalized space
-with bounded limits. The total Source node count is the bounded Cypher statement
-`MATCH (s:Source) RETURN count(s) AS count`; query failures propagate instead of
-being converted to a zero count. These reads do not write WAL.
-Source list and summary reads are covered by `Database::knowledge_sources` for
-Nowledge bounded Source page, bulk summary, memory-count overview ranking,
-parsed-path list, lifecycle attention, and metadata-marker page shapes. The
-typed read supports id-bounded bulk rows with missing-id reporting, after-id
-pagination, lifecycle-state sets, normalized-space and source-type filters,
-metadata substring markers, parsed-path-only selection, offset/limit, Source id,
-memory-count, or created-at ordering, display-name and numeric fallback fields,
-and no WAL writes.
-Field-extensible Source list reads are covered by
-`Database::knowledge_source_projected_list`. The typed read reuses the same
-bounded Source filters, pagination, and ordering, but returns only
-caller-selected Source properties through an explicit allowlist so REST FS and
-MCP Source fields can grow without cloning whole Source nodes or adding
-raw-Cypher paths.
-Source attribution reads are covered by `Database::knowledge_source_memories`.
-The typed read resolves one Source id, scans incoming `SOURCED_FROM` Memory
-edges, returns Memory id/title/content/unit type/confidence plus chunk
-index/range/source version/created-at relationship metadata ordered by chunk
-index and Memory id, supports bounded limits, reports found/matched/returned
-counts and the graph commit epoch, and does not write WAL.
-Field-extensible Source attribution reads are covered by
-`Database::knowledge_source_memory_projected_list`. The typed read preserves the
-same one-Source incoming `SOURCED_FROM` adjacency bound and stable ordering, but
-returns only caller-allowlisted Memory and relationship properties so future
-Nowledge attribution fields can be added without cloning whole records or
-widening the fixed row.
-Bulk Memory/Source attribution reads are covered by
-`Database::knowledge_memory_source_attributions`. The typed read scans
-`SOURCED_FROM` edges by bounded Memory ids, Source ids, or both, returning
-Memory and Source endpoint ids, relationship ids, chunk metadata, Source display
-fields, Memory display title/content preview/rank/community/space/source/time
-fields, missing-id reporting, bounded limits, and no WAL writes.
+Source operational, list, and attribution reads use host-owned fixed
+parameterized Cypher. Exact detail, total/count, id page, summary page, and
+projected page are separate named statements; hosts select a fixed filter and
+ordering variant rather than interpolating identifiers. Source-to-Memory reads
+use separate count and bounded page statements over incoming `SOURCED_FROM`,
+while bulk Memory/Source attribution binds bounded endpoint id lists. Related
+phases execute on one `DatabaseReadTransaction`, project only response fields,
+and preserve query errors instead of converting them to empty results.
 Memory lifecycle metadata writes are covered by a typed batch for the Nowledge
 `metadata`, `is_latest`, `lifecycle_state`, and `updated_at` update shape. The
 wrapper validates Memory ids and non-empty lifecycle states before WAL, reports
