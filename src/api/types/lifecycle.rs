@@ -371,40 +371,6 @@ pub struct KnowledgeLabelLifecycleBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeLabelCanonicalLookupRequest {
-    pub canonical_name: String,
-    pub exclude_label_id: Option<String>,
-    pub limit: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeLabelBackfillScanRequest {
-    pub exclude_label_id: Option<String>,
-    pub limit: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeLabelUsageRow {
-    pub label_id: Option<String>,
-    pub node_id: u64,
-    pub name: Option<String>,
-    pub canonical_name: Option<String>,
-    pub color: Option<Value>,
-    pub description: Option<Value>,
-    pub created_at: Option<Value>,
-    pub updated_at: Option<Value>,
-    pub usage_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeLabelUsageListOutput {
-    pub graph_commit_epoch: u64,
-    pub rows: Vec<KnowledgeLabelUsageRow>,
-    pub matched_count: usize,
-    pub returned_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeMemoryLabelDeleteRequest {
     pub memory_id: String,
     pub label_id: Option<String>,

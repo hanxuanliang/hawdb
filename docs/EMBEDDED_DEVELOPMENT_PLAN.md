@@ -467,14 +467,11 @@ available as `Database::update_knowledge_memory_latest_batch`, which updates
 only `is_latest`, supports the exact `space_id` filter used by in-space
 demotion, reports non-writable and duplicate rows, and commits eligible updates
 through one grouped WAL batch.
-Label canonical and usage reads used by label merge, canonical backfill, and
-label list surfaces are available as typed APIs:
-`Database::lookup_knowledge_labels_by_canonical_name` and
-`Database::scan_knowledge_labels_missing_canonical_name`. They scan only
-`Label` nodes and validate non-empty lookup filters. Single-Label,
-canonical-only, and all-Label usage reads use three fixed parameterized Cypher
-statements that compute `HAS_LABEL` counts over any source node type. Label
-Memory distribution reads use one fixed
+Label canonical collision lookup, missing-canonical backfill, single-Label
+usage, canonical-only usage, and all-Label usage reads use seven fixed
+parameterized Cypher statements. They scan only `Label` nodes, compute
+`HAS_LABEL` counts over any source node type, and expose no route-specific
+typed read API. Label Memory distribution reads use one fixed
 parameterized, row-bounded Cypher statement for the Nowledge
 `COUNT(DISTINCT m)` label stats and OKF label row shapes, with Memory-only
 counts, duplicate edge de-duplication, offset/limit pagination, and no WAL

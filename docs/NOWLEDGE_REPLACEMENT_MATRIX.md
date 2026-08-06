@@ -541,13 +541,12 @@ predicate before writing, scans distinct Label targets from the older Memory,
 skips projected-idless Labels without writing, and idempotently MERGEs
 `newer` `HAS_LABEL` edges with create-only `assigned_by = 'system'`,
 `created_at`, and `properties = '{}'` through one grouped WAL batch.
-Label canonical and usage reads are covered by typed APIs for Nowledge label
-merge and list surfaces. `Database::lookup_knowledge_labels_by_canonical_name`
-handles duplicate/collision checks, `Database::scan_knowledge_labels_missing_canonical_name`
-handles canonical backfill scans. Single-Label, canonical-only, and all-Label
-usage reads use three fixed parameterized Cypher statements with `HAS_LABEL`
-counts over any source node type, deterministic ordering, explicit `LIMIT`, and
-matching row budgets; no route-specific usage API is exposed.
+Label canonical collision lookup and missing-canonical backfill use four fixed
+parameterized Cypher statements for their include/exclude variants. Single-
+Label, canonical-only, and all-Label usage reads use another three fixed
+statements with `HAS_LABEL` counts over any source node type, deterministic
+ordering, explicit `LIMIT`, and matching row budgets. No route-specific Label
+read API is exposed.
 Label Memory distribution reads use one fixed parameterized Cypher statement
 that counts distinct Memory nodes per Label over `HAS_LABEL`, orders by count
 and stable Label identity, and applies `SKIP`, `LIMIT`, and a matching row

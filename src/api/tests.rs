@@ -23,8 +23,7 @@ use super::{
     KnowledgeEntityRequest, KnowledgeEntityUpsertBatchRequest, KnowledgeEntityUpsertRequest,
     KnowledgeFallbackReasonCode, KnowledgeFanoutReasonCode, KnowledgeGraphMetaRequest,
     KnowledgeGraphMetaStamp, KnowledgeGraphMetaStampBatchRequest, KnowledgeGraphPathDirection,
-    KnowledgeInducedEdgeListRequest, KnowledgeLabelBackfillScanRequest,
-    KnowledgeLabelCanonicalLookupRequest, KnowledgeLabelLifecycleBatchRequest,
+    KnowledgeInducedEdgeListRequest, KnowledgeLabelLifecycleBatchRequest,
     KnowledgeLabelLifecycleUpdate, KnowledgeLabelMemoryTransferRequest,
     KnowledgeMemoryAccessBatchRequest, KnowledgeMemoryAccessTouch,
     KnowledgeMemoryContentBatchRequest, KnowledgeMemoryContentUpdate,
@@ -121,6 +120,7 @@ mod knowledge_entity_delete_guard;
 mod knowledge_entity_deletes;
 mod knowledge_entity_mention_counts;
 mod knowledge_entity_reads;
+mod knowledge_label_canonical_reads;
 mod knowledge_label_memory_distribution;
 mod knowledge_label_regex_memory_connections;
 mod knowledge_label_usage;
@@ -7928,90 +7928,6 @@ fn typed_label_lifecycle_batch_persists_as_one_wal_batch_and_replays() {
 }
 
 #[test]
-fn reads_labels_by_canonical_name_for_nowledge_collision_checks() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Label {id: 'source', name: 'Source', canonical_name: 'canonical_source'})")
-        .unwrap();
-    db.query("CREATE (:Label {id: 'target', name: 'Target', canonical_name: 'canonical_target'})")
-        .unwrap();
-    db.query(
-        "CREATE (:Label {id: 'target_2', name: 'Target 2', canonical_name: 'canonical_target'})",
-    )
-    .unwrap();
-
-    let request = KnowledgeLabelCanonicalLookupRequest {
-        canonical_name: "canonical_target".to_string(),
-        exclude_label_id: Some("source".to_string()),
-        limit: 1,
-    };
-    let output = db
-        .lookup_knowledge_labels_by_canonical_name(&request)
-        .unwrap();
-
-    assert_eq!(output.graph_commit_epoch, 3);
-    assert_eq!(output.matched_count, 2);
-    assert_eq!(output.returned_count, 1);
-    assert_eq!(output.rows[0].label_id.as_deref(), Some("target"));
-    assert_eq!(
-        output.rows[0].canonical_name.as_deref(),
-        Some("canonical_target")
-    );
-
-    let stats = db.plan_cache_stats();
-    let repeated = db
-        .lookup_knowledge_labels_by_canonical_name(&request)
-        .unwrap();
-    assert_eq!(repeated, output);
-    let repeated_stats = db.plan_cache_stats();
-    assert_eq!(repeated_stats.entries, stats.entries);
-    assert_eq!(repeated_stats.misses, stats.misses);
-    assert_eq!(repeated_stats.hits, stats.hits + 1);
-}
-
-#[test]
-fn scans_labels_missing_canonical_name_for_nowledge_backfill() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Label {id: 'missing_1', name: 'Missing 1', canonical_name: NULL})")
-        .unwrap();
-    db.query("CREATE (:Label {id: 'missing_2', name: 'Missing 2'})")
-        .unwrap();
-    db.query("CREATE (:Label {id: 'present', name: 'Present', canonical_name: 'present'})")
-        .unwrap();
-
-    let request = KnowledgeLabelBackfillScanRequest {
-        exclude_label_id: Some("missing_1".to_string()),
-        limit: 10,
-    };
-    let output = db
-        .scan_knowledge_labels_missing_canonical_name(&request)
-        .unwrap();
-
-    assert_eq!(output.matched_count, 1);
-    assert_eq!(output.returned_count, 1);
-    assert_eq!(output.rows[0].label_id.as_deref(), Some("missing_2"));
-    assert_eq!(output.rows[0].name.as_deref(), Some("Missing 2"));
-    assert_eq!(output.rows[0].canonical_name, None);
-
-    let stats = db.plan_cache_stats();
-    let repeated = db
-        .scan_knowledge_labels_missing_canonical_name(&request)
-        .unwrap();
-    assert_eq!(repeated, output);
-    let repeated_stats = db.plan_cache_stats();
-    assert_eq!(repeated_stats.entries, stats.entries);
-    assert_eq!(repeated_stats.misses, stats.misses);
-    assert_eq!(repeated_stats.hits, stats.hits + 1);
-}
-
-#[test]
 fn projects_entity_labels_for_nowledge_growth() {
     let mut db = Database::new_with_config(DatabaseConfig {
         max_plan_cache_entries: Some(8),
@@ -8871,29 +8787,8 @@ fn reads_entity_labels_for_nowledge_has_label_shapes() {
 }
 
 #[test]
-fn label_read_requests_validate_non_empty_filters() {
+fn entity_label_read_requests_validate_non_empty_filters() {
     let db = Database::new();
-    let canonical_error = db
-        .lookup_knowledge_labels_by_canonical_name(&KnowledgeLabelCanonicalLookupRequest {
-            canonical_name: String::new(),
-            exclude_label_id: None,
-            limit: 10,
-        })
-        .unwrap_err();
-    assert!(canonical_error
-        .to_string()
-        .contains("non-empty canonical name"));
-
-    let exclude_error = db
-        .scan_knowledge_labels_missing_canonical_name(&KnowledgeLabelBackfillScanRequest {
-            exclude_label_id: Some(String::new()),
-            limit: 10,
-        })
-        .unwrap_err();
-    assert!(exclude_error
-        .to_string()
-        .contains("non-empty excluded label id"));
-
     let entity_label_error = db
         .knowledge_entity_labels(&KnowledgeEntityLabelListRequest {
             entity_label: "Bad Label".to_string(),

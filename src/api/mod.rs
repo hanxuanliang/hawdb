@@ -2873,20 +2873,6 @@ impl Database {
         update_knowledge_label_lifecycle_batch_for(self, request)
     }
 
-    pub fn lookup_knowledge_labels_by_canonical_name(
-        &self,
-        request: &KnowledgeLabelCanonicalLookupRequest,
-    ) -> Result<KnowledgeLabelUsageListOutput> {
-        lookup_knowledge_labels_by_canonical_name_via_query_runtime(self, request)
-    }
-
-    pub fn scan_knowledge_labels_missing_canonical_name(
-        &self,
-        request: &KnowledgeLabelBackfillScanRequest,
-    ) -> Result<KnowledgeLabelUsageListOutput> {
-        scan_knowledge_labels_missing_canonical_name_via_query_runtime(self, request)
-    }
-
     pub fn delete_knowledge_memory_labels(
         &mut self,
         request: &KnowledgeMemoryLabelDeleteRequest,
@@ -11447,134 +11433,6 @@ fn label_lifecycle_assignments(update: &KnowledgeLabelLifecycleUpdate) -> BTreeM
     assignments
 }
 
-fn lookup_knowledge_labels_by_canonical_name_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeLabelCanonicalLookupRequest,
-) -> Result<KnowledgeLabelUsageListOutput> {
-    if request.canonical_name.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge label canonical lookup requires a non-empty canonical name".to_string(),
-        ));
-    }
-    validate_optional_label_id(request.exclude_label_id.as_deref())?;
-
-    let mut parameters = BTreeMap::from([(
-        "canonical_name".to_string(),
-        Value::String(request.canonical_name.clone()),
-    )]);
-    let exclude_predicate = if let Some(exclude_label_id) = &request.exclude_label_id {
-        parameters.insert(
-            "exclude_label_id".to_string(),
-            Value::String(exclude_label_id.clone()),
-        );
-        " AND l.id <> $exclude_label_id"
-    } else {
-        ""
-    };
-    let query = format!(
-        "MATCH (l:Label) \
-         WHERE l.canonical_name = $canonical_name{exclude_predicate} \
-         OPTIONAL MATCH (l)<-[r:HAS_LABEL]-(n) \
-         WITH l, count(r) AS usage_count \
-         RETURN l.id AS label_id, id(l) AS node_id, l.name AS name, \
-         l.canonical_name AS canonical_name, l.color AS color, \
-         l.description AS description, l.created_at AS created_at, \
-         l.updated_at AS updated_at, usage_count \
-         ORDER BY node_id ASC"
-    );
-    knowledge_label_usage_list_output_via_query_runtime(
-        db,
-        query.as_str(),
-        &parameters,
-        request.limit,
-    )
-}
-
-fn scan_knowledge_labels_missing_canonical_name_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeLabelBackfillScanRequest,
-) -> Result<KnowledgeLabelUsageListOutput> {
-    validate_optional_label_id(request.exclude_label_id.as_deref())?;
-
-    let mut parameters = BTreeMap::new();
-    let exclude_predicate = if let Some(exclude_label_id) = &request.exclude_label_id {
-        parameters.insert(
-            "exclude_label_id".to_string(),
-            Value::String(exclude_label_id.clone()),
-        );
-        " AND l.id <> $exclude_label_id"
-    } else {
-        ""
-    };
-    let query = format!(
-        "MATCH (l:Label) \
-         WHERE l.canonical_name IS NULL{exclude_predicate} \
-         OPTIONAL MATCH (l)<-[r:HAS_LABEL]-(n) \
-         WITH l, count(r) AS usage_count \
-         RETURN l.id AS label_id, id(l) AS node_id, l.name AS name, \
-         l.canonical_name AS canonical_name, l.color AS color, \
-         l.description AS description, l.created_at AS created_at, \
-         l.updated_at AS updated_at, usage_count \
-         ORDER BY node_id ASC"
-    );
-    knowledge_label_usage_list_output_via_query_runtime(
-        db,
-        query.as_str(),
-        &parameters,
-        request.limit,
-    )
-}
-
-fn knowledge_label_usage_list_output_via_query_runtime(
-    db: &Database,
-    query: &str,
-    parameters: &BTreeMap<String, Value>,
-    limit: usize,
-) -> Result<KnowledgeLabelUsageListOutput> {
-    let output = db.query_read_only_with_params_bounded(query, parameters, None)?;
-    let matched_count = output.rows.len();
-    let mut rows = output
-        .rows
-        .iter()
-        .map(knowledge_label_usage_row_from_query)
-        .collect::<Result<Vec<_>>>()?;
-    if limit > 0 {
-        rows.truncate(limit);
-    } else {
-        rows.clear();
-    }
-    let returned_count = rows.len();
-    Ok(KnowledgeLabelUsageListOutput {
-        graph_commit_epoch: db.store.commit_epoch(),
-        rows,
-        matched_count,
-        returned_count,
-    })
-}
-
-fn knowledge_label_usage_row_from_query(row: &Row) -> Result<KnowledgeLabelUsageRow> {
-    let node_id = row
-        .get("node_id")
-        .and_then(value_to_non_negative_u64)
-        .ok_or_else(|| {
-            SkeinError::Execution("knowledge label usage row is missing node_id".to_string())
-        })?;
-    Ok(KnowledgeLabelUsageRow {
-        label_id: optional_string_cell(row, "label_id"),
-        node_id,
-        name: optional_string_cell(row, "name"),
-        canonical_name: optional_string_cell(row, "canonical_name"),
-        color: optional_value_cell(row, "color"),
-        description: optional_value_cell(row, "description"),
-        created_at: optional_value_cell(row, "created_at"),
-        updated_at: optional_value_cell(row, "updated_at"),
-        usage_count: row
-            .get("usage_count")
-            .and_then(value_to_non_negative_usize)
-            .unwrap_or_default(),
-    })
-}
-
 fn delete_knowledge_memory_labels_for(
     db: &mut Database,
     request: &KnowledgeMemoryLabelDeleteRequest,
@@ -12501,15 +12359,6 @@ fn validate_knowledge_entity_label_projected_list_request(
     {
         return Err(SkeinError::Semantic(
             "knowledge entity label projected read requires non-empty property names".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_optional_label_id(label_id: Option<&str>) -> Result<()> {
-    if label_id.is_some_and(str::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge label read requires a non-empty excluded label id".to_string(),
         ));
     }
     Ok(())
