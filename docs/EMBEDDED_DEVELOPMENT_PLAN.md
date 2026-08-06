@@ -782,11 +782,11 @@ is supported as a single-node update-return path over already matched rows; it
 does not add generic row-binding relationship updates.
 Nowledge thread distillation reads support the optional source filter shape
 `($source IS NULL OR t.source = $source)` by binding parameter null checks into
-constant predicates before planning. The same Nowledge business path is
-available as the typed `Database::knowledge_thread_distillation_candidates`
-read, which combines the exact matched count with an optional bounded candidate
-page ordered by the production recency expression and does not write WAL;
-`limit = 0` is count-only.
+constant predicates before planning. The business path uses separate fixed
+parameterized count and bounded page statements in one pinned read transaction.
+The page orders by the production recency expression and carries explicit
+offset, limit, row, and payload budgets; no route-specific typed database API
+is exposed.
 The companion distilled-memory link write is available as
 `Database::create_knowledge_thread_compaction_link`, which fixes the
 `Thread`/`Memory`/`COMPACTS_TO` shape, validates endpoint ids and compaction

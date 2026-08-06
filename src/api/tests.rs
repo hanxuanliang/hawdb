@@ -84,16 +84,15 @@ use super::{
     KnowledgeSourceRevisionCreateBatchRequest, KnowledgeSubgraphRequest,
     KnowledgeThreadCompactedMemoryListRequest, KnowledgeThreadCompactedMemoryProjectedListRequest,
     KnowledgeThreadCompactionLinkRequest, KnowledgeThreadDeleteBatchRequest,
-    KnowledgeThreadDistillationCandidateRequest, KnowledgeThreadIdentityCascadeDeleteKeys,
-    KnowledgeThreadIdentityDeleteRequest, KnowledgeThreadMessageCountBatchRequest,
-    KnowledgeThreadMessageCountUpdate, KnowledgeThreadMessageDeleteRequest,
-    KnowledgeThreadMetadataBatchRequest, KnowledgeThreadMetadataUpdate,
-    KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
-    NowledgeGraphStatement, PlanCacheBypassReason, PlanCacheLookup, QueryOutput,
-    QueryStreamOptions, RecoveryMode, SearchProjectionGraphDeltaRequest,
-    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION, NOWLEDGE_DEEP_SEARCH_FILTERED_RANK_WINDOW,
-    NOWLEDGE_DEEP_SEARCH_GRAPH_CONTEXT_MAX_HOPS, NOWLEDGE_DEEP_SEARCH_MIN_GRAPH_SEED_LIMIT,
-    NOWLEDGE_DEEP_SEARCH_MIN_RANK_WINDOW,
+    KnowledgeThreadIdentityCascadeDeleteKeys, KnowledgeThreadIdentityDeleteRequest,
+    KnowledgeThreadMessageCountBatchRequest, KnowledgeThreadMessageCountUpdate,
+    KnowledgeThreadMessageDeleteRequest, KnowledgeThreadMetadataBatchRequest,
+    KnowledgeThreadMetadataUpdate, KnowledgeTraversalFallbackReasonCode,
+    KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphStatement,
+    PlanCacheBypassReason, PlanCacheLookup, QueryOutput, QueryStreamOptions, RecoveryMode,
+    SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    NOWLEDGE_DEEP_SEARCH_FILTERED_RANK_WINDOW, NOWLEDGE_DEEP_SEARCH_GRAPH_CONTEXT_MAX_HOPS,
+    NOWLEDGE_DEEP_SEARCH_MIN_GRAPH_SEED_LIMIT, NOWLEDGE_DEEP_SEARCH_MIN_RANK_WINDOW,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{
@@ -190,6 +189,7 @@ mod statistics;
 mod storage_recovery;
 mod synthesized_source_reads;
 mod system_variables;
+mod thread_distillation_reads;
 mod thread_message_reads;
 mod thread_metadata_reads;
 mod transaction_control;
@@ -9377,141 +9377,6 @@ fn typed_thread_identity_delete_persists_as_one_wal_batch_and_replays() {
         }
     }
     std::fs::remove_dir_all(path).unwrap();
-}
-
-#[test]
-fn reads_thread_distillation_candidates_for_optional_source_shapes() {
-    let mut db = Database::new();
-    db.query("CREATE (:Thread {id: 'thread_a', thread_id: 'logical_a', source: 'slack', space_id: '', created_at: 10, updated_at: 40})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_b', thread_id: 'logical_b', source: 'email', space_id: 'default', created_at: 30, import_date: 50})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_c', thread_id: 'logical_c', source: 'slack', space_id: 'default', created_at: 20})")
-        .unwrap();
-    db.query(
-        "CREATE (:Thread {id: 'thread_d', source: 'slack', space_id: 'default', updated_at: 100})",
-    )
-    .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_e', thread_id: 'logical_e', source: 'slack', space_id: 'archive', updated_at: 90})")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let count_only = db
-        .knowledge_thread_distillation_candidates(&KnowledgeThreadDistillationCandidateRequest {
-            normalized_space_id: "default".to_string(),
-            source: None,
-            limit: 0,
-            offset: 0,
-        })
-        .unwrap();
-    assert_eq!(count_only.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(count_only.matched_count, 3);
-    assert_eq!(count_only.returned_count, 0);
-    assert!(count_only.rows.is_empty());
-
-    let filtered = db
-        .knowledge_thread_distillation_candidates(&KnowledgeThreadDistillationCandidateRequest {
-            normalized_space_id: "default".to_string(),
-            source: Some("slack".to_string()),
-            limit: 10,
-            offset: 0,
-        })
-        .unwrap();
-    assert_eq!(filtered.matched_count, 2);
-    assert_eq!(filtered.returned_count, 2);
-    assert_eq!(
-        filtered
-            .rows
-            .iter()
-            .map(|row| row.thread_id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["logical_a", "logical_c"]
-    );
-    assert_eq!(filtered.rows[0].id.as_deref(), Some("thread_a"));
-    assert_eq!(filtered.rows[0].source.as_deref(), Some("slack"));
-    assert_eq!(filtered.rows[0].raw_space_id, None);
-    assert_eq!(filtered.rows[0].normalized_space_id, "default");
-
-    let paged = db
-        .knowledge_thread_distillation_candidates(&KnowledgeThreadDistillationCandidateRequest {
-            normalized_space_id: "default".to_string(),
-            source: None,
-            limit: 1,
-            offset: 1,
-        })
-        .unwrap();
-    assert_eq!(paged.matched_count, 3);
-    assert_eq!(paged.returned_count, 1);
-    assert_eq!(paged.rows[0].thread_id, "logical_a");
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-}
-
-#[test]
-fn thread_distillation_candidates_use_query_runtime_plan_cache() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Thread {id: 'distill-cache-a', thread_id: 'logical_a', source: 'codex', space_id: '', updated_at: 40})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'distill-cache-b', thread_id: 'logical_b', source: 'codex', space_id: 'default', import_date: 50})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'distill-cache-c', thread_id: 'logical_c', source: 'email', space_id: 'default', created_at: 60})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'distill-cache-skip', source: 'codex', space_id: 'default', updated_at: 90})")
-        .unwrap();
-    let request = KnowledgeThreadDistillationCandidateRequest {
-        normalized_space_id: "default".to_string(),
-        source: Some("codex".to_string()),
-        limit: 1,
-        offset: 1,
-    };
-
-    let first = db
-        .knowledge_thread_distillation_candidates(&request)
-        .unwrap();
-    let second = db
-        .knowledge_thread_distillation_candidates(&request)
-        .unwrap();
-
-    assert_eq!(first, second);
-    assert_eq!(first.matched_count, 2);
-    assert_eq!(first.returned_count, 1);
-    assert_eq!(first.rows[0].thread_id, "logical_a");
-    let stats = db.plan_cache_stats();
-    assert_eq!(stats.entries, 1);
-    assert_eq!(stats.misses, 1);
-    assert_eq!(stats.hits, 1);
-}
-
-#[test]
-fn thread_distillation_candidate_read_rejects_empty_filters() {
-    let db = Database::new();
-
-    let empty_space = db
-        .knowledge_thread_distillation_candidates(&KnowledgeThreadDistillationCandidateRequest {
-            normalized_space_id: String::new(),
-            source: None,
-            limit: 10,
-            offset: 0,
-        })
-        .unwrap_err();
-    assert!(empty_space
-        .to_string()
-        .contains("non-empty normalized space id"));
-
-    let empty_source =
-        db.knowledge_thread_distillation_candidates(&KnowledgeThreadDistillationCandidateRequest {
-            normalized_space_id: "default".to_string(),
-            source: Some(String::new()),
-            limit: 10,
-            offset: 0,
-        });
-    assert!(empty_source
-        .unwrap_err()
-        .to_string()
-        .contains("non-empty source"));
 }
 
 #[test]

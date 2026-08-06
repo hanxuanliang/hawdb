@@ -294,33 +294,6 @@ pub struct KnowledgeThreadIdentityDeleteOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeThreadDistillationCandidateRequest {
-    pub normalized_space_id: String,
-    pub source: Option<String>,
-    pub limit: usize,
-    pub offset: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeThreadDistillationCandidateRow {
-    pub id: Option<String>,
-    pub thread_id: String,
-    pub node_id: u64,
-    pub source: Option<String>,
-    pub raw_space_id: Option<String>,
-    pub normalized_space_id: String,
-    pub recent_at: Option<Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeThreadDistillationCandidateOutput {
-    pub graph_commit_epoch: u64,
-    pub rows: Vec<KnowledgeThreadDistillationCandidateRow>,
-    pub matched_count: usize,
-    pub returned_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeThreadCompactedMemoryListRequest {
     pub thread_id: String,
     pub identity_property: String,
