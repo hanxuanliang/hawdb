@@ -165,9 +165,12 @@ memory:
   shape cannot exceed the limit.
 
 `SortExec`, `TopNExec`, and grouped `AggregateExec` use byte- and run-bounded
-ordered spill. `DistinctExec` uses ordered spill runs followed by bounded merge
-deduplication. `NodeCartesianProductExec` partitions an oversized build side
-into bounded spill runs and replays those runs for each streamed probe row.
+ordered spill. Mergeable grouped aggregates spill partial states. Other grouped
+aggregates spill only the group key and one normalized operand per aggregate;
+they MUST NOT retain or serialize unrelated variables or properties from the
+upstream binding. `DistinctExec` uses ordered spill runs followed by bounded
+merge deduplication. `NodeCartesianProductExec` partitions an oversized build
+side into bounded spill runs and replays those runs for each streamed probe row.
 `GraphAlgorithm` admits the direction-specific projection together with a
 conservative algorithm scratch and result estimate before PageRank or Louvain
 allocates that state. It fails with a stable resource error rather than spilling,

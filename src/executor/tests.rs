@@ -489,6 +489,96 @@ fn collect_aggregate_rejects_unbounded_group_state() {
 }
 
 #[test]
+fn grouped_mixed_aggregate_spills_only_required_operands() {
+    let mut catalog = Catalog::default();
+    let mut store = GraphStore::in_memory();
+    for value in 0..64i64 {
+        store
+            .create_node(
+                &mut catalog,
+                "Item",
+                properties([
+                    ("group", Value::Int(value % 4)),
+                    ("value", Value::Int(value)),
+                    ("payload", Value::String("x".repeat(16 * 1024))),
+                ]),
+            )
+            .unwrap();
+    }
+    let plan = PhysicalPlan::AggregateExec {
+        group_keys: vec![Projection {
+            expression: ProjectionExpression::Property {
+                variable: "n".to_string(),
+                property: "group".to_string(),
+            },
+            name: "group".to_string(),
+        }],
+        items: vec![
+            Aggregation {
+                function: AggregateFunction::Collect,
+                target: AggregateTarget::Property {
+                    variable: "n".to_string(),
+                    property: "value".to_string(),
+                },
+                distinct: false,
+                name: "values".to_string(),
+            },
+            Aggregation {
+                function: AggregateFunction::Count,
+                target: AggregateTarget::Property {
+                    variable: "n".to_string(),
+                    property: "value".to_string(),
+                },
+                distinct: true,
+                name: "distinct_values".to_string(),
+            },
+        ],
+        input: Box::new(PhysicalPlan::SeqNodeScan {
+            variable: "n".to_string(),
+            label: "Item".to_string(),
+        }),
+    };
+    let memory = ExecutionMemoryConfig {
+        blocking_operator_bytes: NonZeroUsize::new(4 * 1024).unwrap(),
+        ..spill_test_config("aggregate-compact-operands")
+    };
+    let mut external = NoExternalReadOperator;
+    let output = execute_with_row_limit_profile_and_external_and_memory(
+        &plan,
+        &mut catalog,
+        &mut store,
+        &BTreeMap::new(),
+        &mut external,
+        None,
+        &memory,
+    )
+    .unwrap();
+
+    assert_eq!(output.rows.len(), 4);
+    for row in &output.rows {
+        assert_eq!(row["distinct_values"], Value::Int(16));
+        let Value::List(values) = &row["values"] else {
+            panic!("collect must return a list");
+        };
+        assert_eq!(values.len(), 16);
+    }
+    let report = output
+        .profile
+        .blocking_operator_memory_reports
+        .iter()
+        .find(|report| report.operator == "AggregateExec")
+        .unwrap();
+    assert!(report.spilled_bytes > 0);
+    assert!(report.spilled_bytes < 64 * 16 * 1024);
+    assert!(report.peak_tracked_bytes <= report.budget_bytes);
+    assert!(std::fs::read_dir(&memory.spill_directory)
+        .unwrap()
+        .next()
+        .is_none());
+    std::fs::remove_dir(memory.spill_directory).unwrap();
+}
+
+#[test]
 fn cartesian_product_spills_an_oversized_build_side() {
     let mut catalog = Catalog::default();
     let mut store = GraphStore::in_memory();

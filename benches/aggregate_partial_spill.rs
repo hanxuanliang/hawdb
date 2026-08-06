@@ -31,6 +31,7 @@ fn main() {
                 "Item".to_string(),
                 BTreeMap::from([
                     ("group".to_string(), Value::Int((row % GROUP_COUNT) as i64)),
+                    ("value".to_string(), Value::Int(row as i64)),
                     ("payload".to_string(), Value::String(payload.clone())),
                 ]),
             )
@@ -51,6 +52,28 @@ fn main() {
             function: AggregateFunction::Count,
             target: AggregateTarget::All,
             distinct: false,
+            name: "count".to_string(),
+        }],
+        input: Box::new(PhysicalPlan::SeqNodeScan {
+            variable: "n".to_string(),
+            label: "Item".to_string(),
+        }),
+    };
+    let compact_plan = PhysicalPlan::AggregateExec {
+        group_keys: vec![Projection {
+            expression: ProjectionExpression::Property {
+                variable: "n".to_string(),
+                property: "group".to_string(),
+            },
+            name: "group".to_string(),
+        }],
+        items: vec![Aggregation {
+            function: AggregateFunction::Count,
+            target: AggregateTarget::Property {
+                variable: "n".to_string(),
+                property: "value".to_string(),
+            },
+            distinct: true,
             name: "count".to_string(),
         }],
         input: Box::new(PhysicalPlan::SeqNodeScan {
@@ -107,8 +130,38 @@ fn main() {
         black_box(output.rows);
     }
     samples.sort_unstable();
+    let mut compact_samples = Vec::with_capacity(SAMPLES);
+    let mut compact_spill_bytes = 0u64;
+    let mut compact_spill_runs = 0usize;
+    for _ in 0..SAMPLES {
+        let started = Instant::now();
+        let mut external = NoExternalReadOperator;
+        let output = execute_with_row_limit_profile_and_external_and_memory(
+            &compact_plan,
+            &mut catalog,
+            &mut store,
+            &BTreeMap::new(),
+            &mut external,
+            None,
+            &memory,
+        )
+        .expect("benchmark compact aggregation must succeed");
+        compact_samples.push(started.elapsed().as_nanos());
+        assert_eq!(output.rows.len(), GROUP_COUNT);
+        let report = output
+            .profile
+            .blocking_operator_memory_reports
+            .iter()
+            .find(|report| report.operator == "AggregateExec")
+            .expect("benchmark compact aggregation must report memory");
+        compact_spill_bytes = report.spilled_bytes;
+        compact_spill_runs = report.spill_run_count;
+        black_box(output.rows);
+    }
+    compact_samples.sort_unstable();
     let full_binding_payload_bytes = (INPUT_ROWS * UNUSED_PAYLOAD_BYTES) as u64;
     assert!(spill_bytes < full_binding_payload_bytes);
+    assert!(compact_spill_bytes < full_binding_payload_bytes);
     println!(
         "aggregate_partial_spill {}",
         json!({
@@ -119,6 +172,12 @@ fn main() {
             "partial_spill_bytes": spill_bytes,
             "spill_reduction_ratio": full_binding_payload_bytes as f64 / spill_bytes as f64,
             "spill_run_count": spill_runs,
+            "compact_spill_bytes": compact_spill_bytes,
+            "compact_spill_reduction_ratio": full_binding_payload_bytes as f64 / compact_spill_bytes as f64,
+            "compact_spill_run_count": compact_spill_runs,
+            "compact_median_nanoseconds": compact_samples[compact_samples.len() / 2],
+            "compact_min_nanoseconds": compact_samples[0],
+            "compact_max_nanoseconds": compact_samples[compact_samples.len() - 1],
             "samples": SAMPLES,
             "median_nanoseconds": samples[samples.len() / 2],
             "min_nanoseconds": samples[0],

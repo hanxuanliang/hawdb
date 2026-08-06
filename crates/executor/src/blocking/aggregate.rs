@@ -6,6 +6,13 @@ enum AggregateDistinctValue {
     Value(Value),
 }
 
+enum AggregateInput {
+    Missing,
+    Present,
+    Identity(u8, u64),
+    Value(Value),
+}
+
 #[derive(Clone)]
 enum AggregateState {
     Count {
@@ -69,44 +76,28 @@ impl AggregateState {
     }
 
     fn update(&mut self, item: &Aggregation, catalog: &Catalog, binding: &Binding) -> MemoryDelta {
+        self.update_input(aggregate_input(item, catalog, binding))
+    }
+
+    fn update_input(&mut self, input: AggregateInput) -> MemoryDelta {
         match self {
             Self::Count { count, distinct } => {
                 if distinct.is_none() {
-                    let matched = match &item.target {
-                        AggregateTarget::All => true,
-                        AggregateTarget::Variable(variable) => {
-                            binding_has_variable(binding, variable)
-                        }
-                        AggregateTarget::Property { variable, property } => {
-                            binding_property(binding, variable, property)
-                                .is_some_and(|value| value != &Value::Null)
-                        }
-                    };
-                    if matched {
+                    if !matches!(input, AggregateInput::Missing) {
                         *count = count.saturating_add(1);
                     }
                     return MemoryDelta::default();
                 }
-                let value = match &item.target {
-                    AggregateTarget::All => {
+                let value = match input {
+                    AggregateInput::Present => {
                         *count = count.saturating_add(1);
                         return MemoryDelta::default();
                     }
-                    AggregateTarget::Variable(variable) => binding_identity_key(binding, variable)
-                        .map(|(kind, id)| AggregateDistinctValue::Identity(kind, id)),
-                    AggregateTarget::Property { variable, property } => binding
-                        .nodes
-                        .get(variable)
-                        .and_then(|node| node.properties.get(property))
-                        .or_else(|| {
-                            binding
-                                .relationships
-                                .get(variable)
-                                .and_then(|relationship| relationship.properties.get(property))
-                        })
-                        .filter(|value| *value != &Value::Null)
-                        .cloned()
-                        .map(AggregateDistinctValue::Value),
+                    AggregateInput::Identity(kind, id) => {
+                        Some(AggregateDistinctValue::Identity(kind, id))
+                    }
+                    AggregateInput::Value(value) => Some(AggregateDistinctValue::Value(value)),
+                    AggregateInput::Missing => None,
                 };
                 let Some(value) = value else {
                     return MemoryDelta::default();
@@ -127,7 +118,7 @@ impl AggregateState {
                 MemoryDelta::default()
             }
             Self::Min(current) => {
-                if let Some(value) = aggregate_property_value(&item.target, binding)
+                if let AggregateInput::Value(value) = input
                     && current.as_ref().is_none_or(|current| value < *current)
                 {
                     let previous = current.as_ref().map_or(0, value_memory_bytes);
@@ -138,7 +129,7 @@ impl AggregateState {
                 MemoryDelta::default()
             }
             Self::Max(current) => {
-                if let Some(value) = aggregate_property_value(&item.target, binding)
+                if let AggregateInput::Value(value) = input
                     && current.as_ref().is_none_or(|current| value > *current)
                 {
                     let previous = current.as_ref().map_or(0, value_memory_bytes);
@@ -149,7 +140,7 @@ impl AggregateState {
                 MemoryDelta::default()
             }
             Self::Avg { sum, count } => {
-                if let Some(value) = aggregate_property_value(&item.target, binding) {
+                if let AggregateInput::Value(value) = input {
                     match value {
                         Value::Int(value) => {
                             *sum += value as f64;
@@ -165,16 +156,7 @@ impl AggregateState {
                 MemoryDelta::default()
             }
             Self::Collect { values, distinct } => {
-                let value = match &item.target {
-                    AggregateTarget::Variable(variable) => {
-                        binding_value(binding, catalog, variable)
-                    }
-                    AggregateTarget::Property { .. } => {
-                        aggregate_property_value(&item.target, binding)
-                    }
-                    AggregateTarget::All => None,
-                };
-                let Some(value) = value.filter(|value| value != &Value::Null) else {
+                let AggregateInput::Value(value) = input else {
                     return MemoryDelta::default();
                 };
                 let value_bytes =
@@ -295,6 +277,42 @@ fn aggregate_property_value(target: &AggregateTarget, binding: &Binding) -> Opti
         .cloned()
 }
 
+fn aggregate_input(item: &Aggregation, catalog: &Catalog, binding: &Binding) -> AggregateInput {
+    match &item.target {
+        AggregateTarget::All => AggregateInput::Present,
+        AggregateTarget::Variable(variable) => match item.function {
+            AggregateFunction::Count if item.distinct => binding_identity_key(binding, variable)
+                .map_or(AggregateInput::Missing, |(kind, id)| {
+                    AggregateInput::Identity(kind, id)
+                }),
+            AggregateFunction::Count => {
+                if binding_has_variable(binding, variable) {
+                    AggregateInput::Present
+                } else {
+                    AggregateInput::Missing
+                }
+            }
+            AggregateFunction::Collect => binding_value(binding, catalog, variable)
+                .filter(|value| value != &Value::Null)
+                .map_or(AggregateInput::Missing, AggregateInput::Value),
+            AggregateFunction::Min | AggregateFunction::Max | AggregateFunction::Avg => {
+                AggregateInput::Missing
+            }
+        },
+        AggregateTarget::Property { .. } => aggregate_property_value(&item.target, binding)
+            .map_or(AggregateInput::Missing, AggregateInput::Value),
+    }
+}
+
+fn aggregate_input_memory_bytes(input: &AggregateInput) -> usize {
+    std::mem::size_of::<AggregateInput>().saturating_add(match input {
+        AggregateInput::Value(value) => {
+            value_memory_bytes(value).saturating_sub(std::mem::size_of::<Value>())
+        }
+        AggregateInput::Missing | AggregateInput::Present | AggregateInput::Identity(_, _) => 0,
+    })
+}
+
 struct GroupAccumulator<'a> {
     key: Vec<Value>,
     group_keys: &'a [Projection],
@@ -332,6 +350,19 @@ impl<'a> GroupAccumulator<'a> {
         delta
     }
 
+    fn update_inputs(&mut self, inputs: Vec<AggregateInput>) -> Result<MemoryDelta> {
+        if inputs.len() != self.states.len() {
+            return Err(SkeinError::Execution(
+                "AggregateExec compact input width mismatch".to_string(),
+            ));
+        }
+        let mut delta = MemoryDelta::default();
+        for (state, input) in self.states.iter_mut().zip(inputs) {
+            delta.combine(state.update_input(input));
+        }
+        Ok(delta)
+    }
+
     fn finish(self) -> Binding {
         let mut values = BTreeMap::new();
         for (item, value) in self.group_keys.iter().zip(self.key) {
@@ -351,7 +382,7 @@ impl<'a> GroupAccumulator<'a> {
 struct GroupRunRow {
     key: Vec<Value>,
     ordinal: u64,
-    binding: Binding,
+    inputs: Vec<AggregateInput>,
 }
 
 impl GroupRunRow {
@@ -362,13 +393,13 @@ impl GroupRunRow {
     }
 
     fn memory_bytes(&self) -> usize {
-        binding_memory_bytes(&self.binding).saturating_add(
-            self.key
-                .iter()
-                .fold(std::mem::size_of::<Vec<Value>>(), |total, value| {
-                    total.saturating_add(value_memory_bytes(value))
-                }),
-        )
+        std::mem::size_of::<Self>()
+            .saturating_add(self.key.iter().fold(0usize, |total, value| {
+                total.saturating_add(value_memory_bytes(value))
+            }))
+            .saturating_add(self.inputs.iter().fold(0usize, |total, input| {
+                total.saturating_add(aggregate_input_memory_bytes(input))
+            }))
     }
 }
 
@@ -377,8 +408,10 @@ struct GroupMergeEntry {
     run_index: usize,
 }
 
+mod compact;
 mod partial;
 
+use compact::{decode_compact_group_binding, encode_compact_group_binding};
 use partial::{partial_aggregation_is_mergeable, stream_partial_aggregate_batches};
 
 #[derive(Clone, Copy)]
@@ -489,22 +522,23 @@ pub fn stream_aggregate_batches(
                 .iter()
                 .map(|item| group_key_value(item, catalog, &binding))
                 .collect::<Vec<_>>();
-            let bytes = binding_memory_bytes(&binding).saturating_add(
-                key.iter().fold(0usize, |total, value| {
-                    total.saturating_add(value_memory_bytes(value))
-                }),
-            );
+            let inputs = items
+                .iter()
+                .map(|item| aggregate_input(item, catalog, &binding))
+                .collect::<Vec<_>>();
+            let row = GroupRunRow {
+                key,
+                ordinal,
+                inputs,
+            };
+            let bytes = row.memory_bytes();
             ensure_operator_item_fits("AggregateExec", bytes, &tracker)?;
             if tracker.would_exceed(bytes) {
                 runs.push(spill_group_run(&mut rows, &mut spill_budget, task_context)?);
                 tracker.reset();
             }
             tracker.charge(bytes);
-            rows.push(GroupRunRow {
-                key,
-                ordinal,
-                binding,
-            });
+            rows.push(row);
             ordinal = ordinal.saturating_add(1);
         }
         Ok(BatchControl::Continue)
@@ -533,14 +567,7 @@ pub fn stream_aggregate_batches(
     if !rows.is_empty() {
         runs.push(spill_group_run(&mut rows, &mut spill_budget, task_context)?);
     }
-    runs = compact_group_runs(
-        runs,
-        group_keys,
-        catalog,
-        memory,
-        &mut spill_budget,
-        task_context,
-    )?;
+    runs = compact_group_runs(runs, items.len(), memory, &mut spill_budget, task_context)?;
     observer.record_blocking_memory_report(spill_backed_report(
         "AggregateExec",
         &tracker,
@@ -571,7 +598,8 @@ fn spill_group_run(
     let (run, mut writer) = spill_budget.create_run("aggregate")?;
     for row in rows.drain(..) {
         runtime_checkpoint(task_context)?;
-        writer.write(row.ordinal, &row.binding, spill_budget)?;
+        let binding = encode_compact_group_binding(row.key, row.inputs);
+        writer.write(row.ordinal, &binding, spill_budget)?;
     }
     runtime_checkpoint(task_context)?;
     writer.finish()?;
@@ -580,8 +608,7 @@ fn spill_group_run(
 
 fn compact_group_runs(
     mut runs: Vec<spill::SpillRun>,
-    group_keys: &[Projection],
-    catalog: &Catalog,
+    aggregate_input_count: usize,
     memory: &ExecutionMemoryConfig,
     spill_budget: &mut SpillBudgetTracker,
     task_context: Option<&RuntimeTaskContext>,
@@ -598,8 +625,7 @@ fn compact_group_runs(
             compacted.push(merge_group_run_pair(
                 &left,
                 &right,
-                group_keys,
-                catalog,
+                aggregate_input_count,
                 memory,
                 spill_budget,
                 task_context,
@@ -614,8 +640,7 @@ fn compact_group_runs(
 fn merge_group_run_pair(
     left: &spill::SpillRun,
     right: &spill::SpillRun,
-    group_keys: &[Projection],
-    catalog: &Catalog,
+    aggregate_input_count: usize,
     memory: &ExecutionMemoryConfig,
     spill_budget: &mut SpillBudgetTracker,
     task_context: Option<&RuntimeTaskContext>,
@@ -627,18 +652,8 @@ fn merge_group_run_pair(
     let per_row_budget = memory.blocking_operator_bytes.get() / 2;
     for (run_index, reader) in readers.iter_mut().enumerate() {
         if let Some((ordinal, binding)) = reader.read(memory.blocking_operator_bytes.get())? {
-            let key = group_keys
-                .iter()
-                .map(|item| group_key_value(item, catalog, &binding))
-                .collect();
-            let entry = GroupMergeEntry {
-                row: GroupRunRow {
-                    key,
-                    ordinal,
-                    binding,
-                },
-                run_index,
-            };
+            let row = decode_compact_group_binding(ordinal, binding, aggregate_input_count)?;
+            let entry = GroupMergeEntry { row, run_index };
             let bytes = entry.row.memory_bytes();
             if bytes > per_row_budget {
                 return Err(SkeinError::Execution(format!(
@@ -655,22 +670,13 @@ fn merge_group_run_pair(
         runtime_checkpoint(task_context)?;
         tracker.release(entry.row.memory_bytes());
         let run_index = entry.run_index;
-        writer.write(entry.row.ordinal, &entry.row.binding, spill_budget)?;
+        let binding = encode_compact_group_binding(entry.row.key, entry.row.inputs);
+        writer.write(entry.row.ordinal, &binding, spill_budget)?;
         if let Some((ordinal, binding)) =
             readers[run_index].read(memory.blocking_operator_bytes.get())?
         {
-            let key = group_keys
-                .iter()
-                .map(|item| group_key_value(item, catalog, &binding))
-                .collect();
-            let next = GroupMergeEntry {
-                row: GroupRunRow {
-                    key,
-                    ordinal,
-                    binding,
-                },
-                run_index,
-            };
+            let row = decode_compact_group_binding(ordinal, binding, aggregate_input_count)?;
+            let next = GroupMergeEntry { row, run_index };
             let bytes = next.row.memory_bytes();
             if bytes > per_row_budget || tracker.would_exceed(bytes) {
                 return Err(SkeinError::Execution(format!(
@@ -694,7 +700,7 @@ fn aggregate_sorted_group_rows(
     let AggregateExecutionContext {
         group_keys,
         items,
-        catalog,
+        catalog: _,
         batch_rows,
         memory_budget,
         execution_limit,
@@ -727,10 +733,9 @@ fn aggregate_sorted_group_rows(
             tracker.charge(base_bytes);
             accumulator = Some(next);
         }
-        update_group_accumulator(
+        update_group_accumulator_inputs(
             accumulator.as_mut().expect("group exists"),
-            catalog,
-            &row.binding,
+            row.inputs,
             &mut tracker,
         )?;
     }
@@ -752,7 +757,7 @@ fn merge_group_runs(
     let AggregateExecutionContext {
         group_keys,
         items,
-        catalog,
+        catalog: _,
         batch_rows,
         memory_budget,
         execution_limit,
@@ -769,18 +774,8 @@ fn merge_group_runs(
     for (run_index, reader) in readers.iter_mut().enumerate() {
         runtime_checkpoint(task_context)?;
         if let Some((ordinal, binding)) = reader.read(memory_budget.get())? {
-            let key = group_keys
-                .iter()
-                .map(|item| group_key_value(item, catalog, &binding))
-                .collect();
-            let entry = GroupMergeEntry {
-                row: GroupRunRow {
-                    key,
-                    ordinal,
-                    binding,
-                },
-                run_index,
-            };
+            let row = decode_compact_group_binding(ordinal, binding, items.len())?;
+            let entry = GroupMergeEntry { row, run_index };
             let bytes = entry.row.memory_bytes();
             ensure_operator_item_fits("AggregateExec merge", bytes, &merge_tracker)?;
             if merge_tracker.would_exceed(bytes) {
@@ -825,25 +820,14 @@ fn merge_group_runs(
             accumulator_tracker.charge(base_bytes);
             accumulator = Some(next);
         }
-        update_group_accumulator(
+        update_group_accumulator_inputs(
             accumulator.as_mut().expect("group exists"),
-            catalog,
-            &row.binding,
+            row.inputs,
             &mut accumulator_tracker,
         )?;
         if let Some((ordinal, binding)) = readers[run_index].read(memory_budget.get())? {
-            let key = group_keys
-                .iter()
-                .map(|item| group_key_value(item, catalog, &binding))
-                .collect();
-            let next = GroupMergeEntry {
-                row: GroupRunRow {
-                    key,
-                    ordinal,
-                    binding,
-                },
-                run_index,
-            };
+            let row = decode_compact_group_binding(ordinal, binding, items.len())?;
+            let next = GroupMergeEntry { row, run_index };
             let bytes = next.row.memory_bytes();
             ensure_operator_item_fits("AggregateExec merge", bytes, &merge_tracker)?;
             if merge_tracker.would_exceed(bytes) {
@@ -873,6 +857,23 @@ fn update_group_accumulator(
     tracker: &mut OperatorMemoryTracker,
 ) -> Result<()> {
     let delta = accumulator.update(catalog, binding);
+    tracker.release(delta.released_bytes);
+    if tracker.would_exceed(delta.added_bytes) {
+        return Err(SkeinError::Execution(format!(
+            "AggregateExec state exceeds blocking_operator_bytes {}",
+            tracker.budget_bytes
+        )));
+    }
+    tracker.charge(delta.added_bytes);
+    Ok(())
+}
+
+fn update_group_accumulator_inputs(
+    accumulator: &mut GroupAccumulator<'_>,
+    inputs: Vec<AggregateInput>,
+    tracker: &mut OperatorMemoryTracker,
+) -> Result<()> {
+    let delta = accumulator.update_inputs(inputs)?;
     tracker.release(delta.released_bytes);
     if tracker.would_exceed(delta.added_bytes) {
         return Err(SkeinError::Execution(format!(
