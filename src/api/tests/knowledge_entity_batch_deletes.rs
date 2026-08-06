@@ -38,7 +38,7 @@ fn deletes_knowledge_entity_batch_through_typed_api() {
     assert!(output.rows[2].matched);
     for external_id in ["memory_1", "memory_2"] {
         assert!(db
-            .knowledge_entity(&KnowledgeEntityRequest {
+            .test_query_entity(&KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: external_id.to_string(),
             })
@@ -47,7 +47,7 @@ fn deletes_knowledge_entity_batch_through_typed_api() {
             .is_none());
     }
     assert!(db
-        .knowledge_entity(&KnowledgeEntityRequest {
+        .test_query_entity(&KnowledgeEntityRequest {
             label: "Memory".to_string(),
             external_id: "memory_3".to_string(),
         })
@@ -91,7 +91,7 @@ fn scoped_knowledge_entity_batch_delete_does_not_write_filtered_rows() {
     assert!(!output.rows[1].matched);
     assert!(output.rows[1].filtered_out);
     assert!(db
-        .knowledge_entity(&KnowledgeEntityRequest {
+        .test_query_entity(&KnowledgeEntityRequest {
             label: "Memory".to_string(),
             external_id: "memory_1".to_string(),
         })
@@ -99,7 +99,7 @@ fn scoped_knowledge_entity_batch_delete_does_not_write_filtered_rows() {
         .entity
         .is_none());
     assert!(db
-        .knowledge_entity(&KnowledgeEntityRequest {
+        .test_query_entity(&KnowledgeEntityRequest {
             label: "Memory".to_string(),
             external_id: "memory_2".to_string(),
         })
@@ -125,7 +125,7 @@ fn knowledge_entity_batch_delete_deduplicates_writes() {
     assert_eq!(output.rows.len(), 2);
     assert!(output.rows.iter().all(|row| row.matched));
     assert!(db
-        .knowledge_entity(&KnowledgeEntityRequest {
+        .test_query_entity(&KnowledgeEntityRequest {
             label: "Memory".to_string(),
             external_id: "memory_1".to_string(),
         })
@@ -154,7 +154,7 @@ fn knowledge_entity_batch_delete_does_not_write_projected_idless_identity() {
     assert_eq!(output.deleted_node_count, 0);
     assert!(output.rows[0].non_writable);
     assert!(db
-        .knowledge_entity(&KnowledgeEntityRequest {
+        .test_query_entity(&KnowledgeEntityRequest {
             label: "Memory".to_string(),
             external_id: "0".to_string(),
         })
@@ -226,7 +226,7 @@ fn typed_knowledge_entity_batch_delete_persists_and_replays_from_wal() {
         let db = Database::open(&path).unwrap();
         for external_id in ["memory_1", "memory_2"] {
             assert!(db
-                .knowledge_entity(&KnowledgeEntityRequest {
+                .test_query_entity(&KnowledgeEntityRequest {
                     label: "Memory".to_string(),
                     external_id: external_id.to_string(),
                 })
@@ -235,7 +235,7 @@ fn typed_knowledge_entity_batch_delete_persists_and_replays_from_wal() {
                 .is_none());
         }
         assert!(db
-            .knowledge_entity(&KnowledgeEntityRequest {
+            .test_query_entity(&KnowledgeEntityRequest {
                 label: "Entity".to_string(),
                 external_id: "entity_1".to_string(),
             })

@@ -83,7 +83,7 @@ fn deletes_knowledge_relationship_batch_through_typed_api() {
         .unwrap();
     assert_eq!(relationships.relationship_count, 0);
     assert!(db
-        .knowledge_entity(&KnowledgeEntityRequest {
+        .test_query_entity(&KnowledgeEntityRequest {
             label: "Label".to_string(),
             external_id: "label_1".to_string(),
         })

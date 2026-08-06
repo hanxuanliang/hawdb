@@ -42,7 +42,7 @@ fn deletes_knowledge_relationship_through_typed_api() {
         .unwrap();
     assert_eq!(relationships.relationship_count, 0);
     assert!(db
-        .knowledge_entity(&KnowledgeEntityRequest {
+        .test_query_entity(&KnowledgeEntityRequest {
             label: "Memory".to_string(),
             external_id: "memory_1".to_string(),
         })
@@ -50,7 +50,7 @@ fn deletes_knowledge_relationship_through_typed_api() {
         .entity
         .is_some());
     assert!(db
-        .knowledge_entity(&KnowledgeEntityRequest {
+        .test_query_entity(&KnowledgeEntityRequest {
             label: "Label".to_string(),
             external_id: "label_1".to_string(),
         })

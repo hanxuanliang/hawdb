@@ -51,7 +51,7 @@ fn updates_and_clears_pagerank_scores_for_nowledge_shapes() {
     assert!(!output.rows[3].matched);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -88,7 +88,7 @@ fn updates_and_clears_pagerank_scores_for_nowledge_shapes() {
     assert_eq!(clear.rows.iter().filter(|row| row.non_writable).count(), 1);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -170,7 +170,7 @@ fn typed_pagerank_score_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),

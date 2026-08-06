@@ -937,13 +937,13 @@ projection, parser, schema, and analytics maintenance before attempting
 admission. Deferred background export does not generate stable-ID mapping files,
 so QoS rejection cannot create partial import state.
 
-Typed knowledge operations can bypass the search projection entirely when the
-caller already has graph identity. `Database::knowledge_entity` returns a
-canonical node snapshot by label and external ID, including node id, labels,
-external ID, graph commit epoch, and scalar properties. `Database::knowledge_neighbors`
-accepts the same identity plus optional relationship type, direction, hop bound,
-and result limit, then returns the same path evidence structure plus fan-out
-reasons and typed traversal diagnostics. `Database::knowledge_paths` accepts
+Knowledge reads can bypass the search projection when the caller already has
+graph identity. Direct entity lookup and property projection use bounded,
+parameterized Cypher on a pinned snapshot instead of route-specific typed read
+facades. `Database::knowledge_neighbors` accepts the same identity plus optional
+relationship type, direction, hop bound, and result limit, then returns the same
+path evidence structure plus fan-out reasons and typed traversal diagnostics.
+`Database::knowledge_paths` accepts
 source and target identities plus the same traversal budget and returns bounded
 graph paths as ordered evidence segments with source/target presence and path
 count diagnostics. Neighbor and path diagnostics count distinct canonical nodes
@@ -955,9 +955,9 @@ falling back to untyped relationship expansion.
 `Database::knowledge_subgraph` expands a bounded typed subgraph from one
 identity, returning canonical node snapshots, relationship evidence segments,
 node/relationship fan-out reasons, and node/relationship count diagnostics.
-`DatabaseReadTransaction` can continue to expose compatibility typed reads over
-its pinned catalog and graph snapshot, but new application integration should
-prefer parameterized Cypher and query-runtime reports. This keeps snapshot
+`DatabaseReadTransaction` exposes the same bounded query runtime over its pinned
+catalog and graph snapshot. Application integration should use parameterized
+Cypher and query-runtime reports. This keeps snapshot
 semantics available without making typed APIs the primary extension point.
 
 ## Implemented Milestones

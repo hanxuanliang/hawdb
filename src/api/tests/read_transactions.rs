@@ -57,7 +57,7 @@ fn read_transaction_keeps_typed_knowledge_snapshot() {
         .unwrap();
 
     let entity = read_tx
-        .knowledge_entity(&KnowledgeEntityRequest {
+        .test_query_entity(&KnowledgeEntityRequest {
             label: "Memory".to_string(),
             external_id: "root".to_string(),
         })
@@ -68,7 +68,7 @@ fn read_transaction_keeps_typed_knowledge_snapshot() {
         Some(&Value::String("Before snapshot".to_string()))
     );
     let scoped_entity = read_tx
-        .knowledge_scoped_entity(&KnowledgeScopedEntityRequest {
+        .test_query_scoped_entity(&KnowledgeScopedEntityRequest {
             entity: KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "root".to_string(),
@@ -82,7 +82,7 @@ fn read_transaction_keeps_typed_knowledge_snapshot() {
     assert_eq!(scoped_entity.graph_commit_epoch, 1);
     assert!(scoped_entity.entity.is_some());
     let entity_batch = read_tx
-        .knowledge_entity_batch(&KnowledgeEntityBatchRequest {
+        .test_query_entity_batch(&KnowledgeEntityBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -102,7 +102,7 @@ fn read_transaction_keeps_typed_knowledge_snapshot() {
     assert!(entity_batch.entities[0].is_some());
     assert!(entity_batch.entities[1].is_none());
     let property_batch = read_tx
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),

@@ -53,6 +53,7 @@ use plan_cache::{
     OptimizerPlanningCache, PlanCache, PlanCacheContext, PlanCacheMode,
     DEFAULT_PLAN_CACHE_MAX_ENTRIES,
 };
+#[cfg(test)]
 use query_domains::*;
 pub use skein_api_types::{
     KnowledgeMemoryDecayRefreshBatchOutput, KnowledgeMemoryDecayRefreshBatchRequest,
@@ -79,6 +80,7 @@ mod explain;
 mod explain_format;
 mod observability;
 mod plan_cache;
+#[cfg(test)]
 mod query_domains;
 mod query_runtime;
 mod resource_profile;
@@ -2516,21 +2518,24 @@ impl Database {
         .retrieve_knowledge_from_search(search, projection_freshness, request)
     }
 
-    pub fn knowledge_entity(
+    #[cfg(test)]
+    pub(crate) fn test_query_entity(
         &self,
         request: &KnowledgeEntityRequest,
     ) -> Result<KnowledgeEntityOutput> {
         knowledge_entity_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_entity_details(
+    #[cfg(test)]
+    pub(crate) fn test_query_entity_details(
         &self,
         request: &KnowledgeEntityDetailsRequest,
     ) -> Result<KnowledgeEntityDetailsOutput> {
         knowledge_entity_details_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_entity_batch(
+    #[cfg(test)]
+    pub(crate) fn test_query_entity_batch(
         &self,
         request: &KnowledgeEntityBatchRequest,
     ) -> Result<KnowledgeEntityBatchOutput> {
@@ -2579,14 +2584,16 @@ impl Database {
         knowledge_crystal_source_visibility_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_scoped_entity(
+    #[cfg(test)]
+    pub(crate) fn test_query_scoped_entity(
         &self,
         request: &KnowledgeScopedEntityRequest,
     ) -> Result<KnowledgeEntityOutput> {
         knowledge_scoped_entity_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_scoped_entity_batch(
+    #[cfg(test)]
+    pub(crate) fn test_query_scoped_entity_batch(
         &self,
         request: &KnowledgeScopedEntityBatchRequest,
     ) -> Result<KnowledgeEntityBatchOutput> {
@@ -2621,14 +2628,16 @@ impl Database {
         upsert_knowledge_entity_batch_for(self, request)
     }
 
-    pub fn knowledge_property_batch(
+    #[cfg(test)]
+    pub(crate) fn test_query_property_batch(
         &self,
         request: &KnowledgePropertyBatchRequest,
     ) -> Result<KnowledgePropertyBatchOutput> {
         knowledge_property_batch_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_scoped_property_batch(
+    #[cfg(test)]
+    pub(crate) fn test_query_scoped_property_batch(
         &self,
         request: &KnowledgeScopedPropertyBatchRequest,
     ) -> Result<KnowledgePropertyBatchOutput> {
@@ -4710,6 +4719,7 @@ fn knowledge_query_terms(text: &str) -> BTreeSet<String> {
         .collect()
 }
 
+#[cfg(test)]
 fn knowledge_entity_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -4725,6 +4735,7 @@ fn knowledge_entity_for(
     })
 }
 
+#[cfg(test)]
 fn knowledge_scoped_entity_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -4745,6 +4756,7 @@ fn knowledge_scoped_entity_for(
     })
 }
 
+#[cfg(test)]
 fn knowledge_entity_batch_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -4760,6 +4772,7 @@ fn knowledge_entity_batch_for(
     )
 }
 
+#[cfg(test)]
 fn knowledge_scoped_entity_batch_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -6648,12 +6661,14 @@ fn sort_crystal_source_visibility_rows(rows: &mut [KnowledgeCrystalSourceVisibil
     });
 }
 
+#[cfg(test)]
 enum KnowledgeScopedEntityMatch {
     Found(KnowledgeEntity),
     Missing,
     FilteredOut,
 }
 
+#[cfg(test)]
 fn knowledge_scoped_entity_match(
     catalog: &Catalog,
     store: &GraphStore,
@@ -7159,6 +7174,7 @@ fn knowledge_entity_upsert_update_properties(
         .collect()
 }
 
+#[cfg(test)]
 fn knowledge_property_batch_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -7174,6 +7190,7 @@ fn knowledge_property_batch_for(
     )
 }
 
+#[cfg(test)]
 fn knowledge_scoped_property_batch_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -7236,6 +7253,7 @@ fn knowledge_scoped_property_batch_for(
     })
 }
 
+#[cfg(test)]
 fn dedup_property_names(property_names: &[String]) -> Vec<String> {
     let mut seen = BTreeSet::new();
     property_names
@@ -7245,6 +7263,7 @@ fn dedup_property_names(property_names: &[String]) -> Vec<String> {
         .collect()
 }
 
+#[cfg(test)]
 fn empty_property_projection(property_names: &[String]) -> BTreeMap<String, Option<Value>> {
     property_names
         .iter()
@@ -7253,6 +7272,7 @@ fn empty_property_projection(property_names: &[String]) -> BTreeMap<String, Opti
         .collect()
 }
 
+#[cfg(test)]
 fn project_node_properties(
     node: &NodeRecord,
     property_names: &[String],
@@ -7267,6 +7287,7 @@ fn project_node_properties(
         .collect()
 }
 
+#[cfg(test)]
 fn project_knowledge_entity_properties(
     entity: &KnowledgeEntity,
     property_names: &[String],
@@ -20690,14 +20711,16 @@ impl DatabaseReadTransaction {
         .try_retrieve_knowledge(search_index, request)
     }
 
-    pub fn knowledge_entity(
+    #[cfg(test)]
+    pub(crate) fn test_query_entity(
         &self,
         request: &KnowledgeEntityRequest,
     ) -> Result<KnowledgeEntityOutput> {
         knowledge_entity_for(&self.catalog, &self.store, request)
     }
 
-    pub fn knowledge_entity_batch(
+    #[cfg(test)]
+    pub(crate) fn test_query_entity_batch(
         &self,
         request: &KnowledgeEntityBatchRequest,
     ) -> Result<KnowledgeEntityBatchOutput> {
@@ -20760,32 +20783,20 @@ impl DatabaseReadTransaction {
         knowledge_community_for(&self.catalog, &self.store, request)
     }
 
-    pub fn knowledge_scoped_entity(
+    #[cfg(test)]
+    pub(crate) fn test_query_scoped_entity(
         &self,
         request: &KnowledgeScopedEntityRequest,
     ) -> Result<KnowledgeEntityOutput> {
         knowledge_scoped_entity_for(&self.catalog, &self.store, request)
     }
 
-    pub fn knowledge_scoped_entity_batch(
-        &self,
-        request: &KnowledgeScopedEntityBatchRequest,
-    ) -> Result<KnowledgeEntityBatchOutput> {
-        knowledge_scoped_entity_batch_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_property_batch(
+    #[cfg(test)]
+    pub(crate) fn test_query_property_batch(
         &self,
         request: &KnowledgePropertyBatchRequest,
     ) -> Result<KnowledgePropertyBatchOutput> {
         knowledge_property_batch_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_scoped_property_batch(
-        &self,
-        request: &KnowledgeScopedPropertyBatchRequest,
-    ) -> Result<KnowledgePropertyBatchOutput> {
-        knowledge_scoped_property_batch_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_neighbors(

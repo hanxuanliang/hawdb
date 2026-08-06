@@ -7,7 +7,7 @@ fn knowledge_entity_returns_none_for_missing_seed() {
         .unwrap();
 
     let output = db
-        .knowledge_entity(&KnowledgeEntityRequest {
+        .test_query_entity(&KnowledgeEntityRequest {
             label: "Entity".to_string(),
             external_id: "missing".to_string(),
         })
@@ -24,7 +24,7 @@ fn knowledge_entity_uses_projected_identity_for_idless_nodes() {
         .unwrap();
 
     let output = db
-        .knowledge_entity(&KnowledgeEntityRequest {
+        .test_query_entity(&KnowledgeEntityRequest {
             label: "Entity".to_string(),
             external_id: "0".to_string(),
         })

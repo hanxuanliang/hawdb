@@ -228,35 +228,41 @@ pub struct KnowledgeEntityRequest {
     pub external_id: String,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeScopedEntityRequest {
     pub entity: KnowledgeEntityRequest,
     pub metadata_filters: BTreeMap<String, String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeEntityBatchRequest {
     pub entities: Vec<KnowledgeEntityRequest>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeScopedEntityBatchRequest {
     pub entities: Vec<KnowledgeEntityRequest>,
     pub metadata_filters: BTreeMap<String, String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgeEntityOutput {
     pub graph_commit_epoch: u64,
     pub entity: Option<KnowledgeEntity>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeEntityDetailsRequest {
     pub label: String,
     pub external_id: String,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgeEntityDetailsOutput {
     pub graph_commit_epoch: u64,
@@ -265,6 +271,7 @@ pub struct KnowledgeEntityDetailsOutput {
     pub relationship_count: u64,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgeEntityBatchOutput {
     pub graph_commit_epoch: u64,

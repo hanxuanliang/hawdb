@@ -93,18 +93,21 @@ pub struct KnowledgeEntityUpsertBatchOutput {
     pub updated_property_count: usize,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgePropertyBatchRequest {
     pub entities: Vec<KnowledgeEntityRequest>,
     pub property_names: Vec<String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeScopedPropertyBatchRequest {
     pub projection: KnowledgePropertyBatchRequest,
     pub metadata_filters: BTreeMap<String, String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgePropertyRow {
     pub entity: KnowledgeEntityRequest,
@@ -113,6 +116,7 @@ pub struct KnowledgePropertyRow {
     pub properties: BTreeMap<String, Option<Value>>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgePropertyBatchOutput {
     pub graph_commit_epoch: u64,

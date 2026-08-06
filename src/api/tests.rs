@@ -1059,7 +1059,7 @@ fn scoped_knowledge_entity_batch_reports_filtered_and_missing_items() {
         .unwrap();
 
     let output = db
-        .knowledge_scoped_entity_batch(&KnowledgeScopedEntityBatchRequest {
+        .test_query_scoped_entity_batch(&KnowledgeScopedEntityBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -1128,8 +1128,8 @@ fn scoped_knowledge_entity_batch_uses_query_runtime_plan_cache() {
         ]),
     };
 
-    let first = db.knowledge_scoped_entity_batch(&request).unwrap();
-    let second = db.knowledge_scoped_entity_batch(&request).unwrap();
+    let first = db.test_query_scoped_entity_batch(&request).unwrap();
+    let second = db.test_query_scoped_entity_batch(&request).unwrap();
 
     assert_eq!(first, second);
     assert_eq!(first.found_count, 1);
@@ -1166,7 +1166,7 @@ fn creates_knowledge_entity_through_typed_api() {
     assert!(!output.already_exists);
     assert_eq!(output.created_node_count, 1);
     let entity = db
-        .knowledge_entity(&KnowledgeEntityRequest {
+        .test_query_entity(&KnowledgeEntityRequest {
             label: "Memory".to_string(),
             external_id: "memory_1".to_string(),
         })
@@ -1204,7 +1204,7 @@ fn create_knowledge_entity_reports_existing_identity_without_writing() {
     assert!(output.already_exists);
     assert_eq!(output.created_node_count, 0);
     let entity = db
-        .knowledge_entity(&KnowledgeEntityRequest {
+        .test_query_entity(&KnowledgeEntityRequest {
             label: "Memory".to_string(),
             external_id: "memory_1".to_string(),
         })
@@ -1266,7 +1266,7 @@ fn creates_knowledge_entity_batch_through_typed_api() {
     assert_eq!(output.rows[1].node_id, Some(0));
     assert!(output.rows[2].created);
     let created = db
-        .knowledge_entity_batch(&KnowledgeEntityBatchRequest {
+        .test_query_entity_batch(&KnowledgeEntityBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -1317,7 +1317,7 @@ fn create_knowledge_entity_batch_deduplicates_pending_identity() {
     assert!(output.rows[1].already_exists);
     assert_eq!(output.rows[1].node_id, None);
     let entities = db
-        .knowledge_entity_batch(&KnowledgeEntityBatchRequest {
+        .test_query_entity_batch(&KnowledgeEntityBatchRequest {
             entities: vec![KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "memory_1".to_string(),
@@ -1419,7 +1419,7 @@ fn typed_knowledge_entity_batch_create_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let output = db
-            .knowledge_entity_batch(&KnowledgeEntityBatchRequest {
+            .test_query_entity_batch(&KnowledgeEntityBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),
@@ -1487,7 +1487,7 @@ fn upserts_knowledge_entity_through_typed_api() {
     assert_eq!(existing.node_id, Some(0));
     assert_eq!(existing.updated_property_count, 1);
     let entity = db
-        .knowledge_entity(&KnowledgeEntityRequest {
+        .test_query_entity(&KnowledgeEntityRequest {
             label: "Memory".to_string(),
             external_id: "memory_1".to_string(),
         })
@@ -1552,7 +1552,7 @@ fn knowledge_entity_upsert_does_not_write_projected_idless_identity() {
     assert!(output.non_writable);
     assert!(!output.updated);
     let entity = db
-        .knowledge_entity(&KnowledgeEntityRequest {
+        .test_query_entity(&KnowledgeEntityRequest {
             label: "Entity".to_string(),
             external_id: "0".to_string(),
         })
@@ -1623,7 +1623,7 @@ fn upserts_knowledge_entity_batch_through_typed_api() {
     assert_eq!(output.rows[2].node_id, None);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -1715,7 +1715,7 @@ fn typed_knowledge_entity_batch_upsert_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),
@@ -1751,7 +1751,7 @@ fn retrieves_knowledge_property_batch_without_hydrating_full_entities() {
         .unwrap();
 
     let output = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -1830,8 +1830,8 @@ fn knowledge_property_batch_uses_query_runtime_plan_cache() {
         property_names: vec!["title".to_string(), "source_id".to_string()],
     };
 
-    let first = db.knowledge_property_batch(&request).unwrap();
-    let second = db.knowledge_property_batch(&request).unwrap();
+    let first = db.test_query_property_batch(&request).unwrap();
+    let second = db.test_query_property_batch(&request).unwrap();
 
     assert_eq!(first, second);
     assert_eq!(first.found_count, 2);
@@ -1857,7 +1857,7 @@ fn scoped_knowledge_property_batch_reports_filtered_rows() {
         .unwrap();
 
     let output = db
-        .knowledge_scoped_property_batch(&KnowledgeScopedPropertyBatchRequest {
+        .test_query_scoped_property_batch(&KnowledgeScopedPropertyBatchRequest {
             projection: KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
@@ -1926,8 +1926,8 @@ fn scoped_knowledge_property_batch_uses_query_runtime_plan_cache() {
         ]),
     };
 
-    let first = db.knowledge_scoped_property_batch(&request).unwrap();
-    let second = db.knowledge_scoped_property_batch(&request).unwrap();
+    let first = db.test_query_scoped_property_batch(&request).unwrap();
+    let second = db.test_query_scoped_property_batch(&request).unwrap();
 
     assert_eq!(first, second);
     assert_eq!(first.found_count, 1);
@@ -1973,7 +1973,7 @@ fn updates_knowledge_properties_through_typed_api() {
     assert!(!output.filtered_out);
     assert_eq!(output.updated_property_count, 2);
     let row = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "memory_1".to_string(),
@@ -2025,7 +2025,7 @@ fn scoped_knowledge_property_update_does_not_write_filtered_seed() {
     assert!(output.filtered_out);
     assert_eq!(output.updated_property_count, 0);
     let row = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "memory_1".to_string(),
@@ -2117,7 +2117,7 @@ fn typed_knowledge_property_update_persists_and_replays_from_wal() {
     {
         let db = Database::open(&path).unwrap();
         let output = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![KnowledgeEntityRequest {
                     label: "Memory".to_string(),
                     external_id: "memory_1".to_string(),
@@ -2194,7 +2194,7 @@ fn updates_knowledge_properties_batch_through_typed_api() {
     assert_eq!(output.rows[2].node_id, None);
 
     let row = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -2333,7 +2333,7 @@ fn typed_knowledge_normalized_space_move_persists_as_one_wal_batch_and_replays()
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),
@@ -2408,7 +2408,7 @@ fn touches_memory_access_batch_with_incremental_counters() {
     assert!(!output.rows[3].matched);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -2514,7 +2514,7 @@ fn typed_knowledge_memory_access_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),
@@ -2614,7 +2614,7 @@ fn updates_memory_content_batch_for_nowledge_full_update_shape() {
     assert!(output.rows[3].duplicate);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "memory_1".to_string(),
@@ -2756,7 +2756,7 @@ fn updates_memory_metadata_batch_for_nowledge_replace_shapes() {
     assert!(output.rows[4].duplicate);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -2844,7 +2844,7 @@ fn typed_memory_metadata_update_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),
@@ -2938,7 +2938,7 @@ fn typed_memory_content_update_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),
@@ -3013,7 +3013,7 @@ fn updates_memory_dedup_reviewed_batch_for_scheduler_shape() {
     assert!(output.rows[4].duplicate);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -3077,7 +3077,7 @@ fn typed_memory_dedup_reviewed_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),
@@ -3174,7 +3174,7 @@ fn updates_memory_decay_refresh_batch_for_scheduler_shapes() {
     assert!(output.rows[4].duplicate);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -3287,7 +3287,7 @@ fn typed_memory_decay_refresh_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),
@@ -3383,7 +3383,7 @@ fn adjusts_source_memory_count_batch_with_floor_decrements() {
     assert!(output.rows[6].invalid_current_count);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Source".to_string(),
@@ -3458,7 +3458,7 @@ fn typed_source_memory_count_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Source".to_string(),
@@ -3555,7 +3555,7 @@ fn updates_source_lifecycle_batch_for_nowledge_shapes() {
     assert!(!output.rows[4].matched);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Source".to_string(),
@@ -3663,7 +3663,7 @@ fn typed_source_lifecycle_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Source".to_string(),
@@ -3757,7 +3757,7 @@ fn updates_source_metadata_batch_for_nowledge_auto_ocr_shape() {
     assert!(output.rows[4].duplicate);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Source".to_string(),
@@ -3843,7 +3843,7 @@ fn typed_source_metadata_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Source".to_string(),
@@ -3990,7 +3990,7 @@ fn typed_source_delete_persists_as_one_wal_batch_and_replays() {
             .unwrap();
         assert_eq!(sources.rows[0].get("total"), Some(&Value::Int(0)));
         assert!(db
-            .knowledge_entity(&KnowledgeEntityRequest {
+            .test_query_entity(&KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "memory_1".to_string(),
             })
@@ -4415,7 +4415,7 @@ fn updates_source_parsed_metadata_batch_for_nowledge_parser_shapes() {
     assert!(output.rows[4].duplicate);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Source".to_string(),
@@ -4553,7 +4553,7 @@ fn typed_source_parsed_metadata_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Source".to_string(),
@@ -4667,7 +4667,7 @@ fn creates_source_parsed_batch_for_nowledge_ingest_shapes() {
     assert!(output.rows[0].node_id.is_some());
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Source".to_string(),
@@ -4800,7 +4800,7 @@ fn typed_source_parsed_create_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Source".to_string(),
@@ -5195,7 +5195,7 @@ fn updates_memory_lifecycle_batch_for_metadata_state() {
     assert!(!output.rows[3].matched);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -5296,7 +5296,7 @@ fn typed_memory_lifecycle_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),
@@ -5380,7 +5380,7 @@ fn updates_memory_latest_batch_for_nowledge_evolution_shapes() {
     assert!(output.rows[3].duplicate);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -5482,7 +5482,7 @@ fn typed_memory_latest_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),
@@ -5837,7 +5837,7 @@ fn updates_skill_usage_stats_batch_for_nowledge_shapes() {
     assert!(!output.rows[3].matched);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Skill".to_string(),
@@ -5949,7 +5949,7 @@ fn typed_skill_usage_stats_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Skill".to_string(),
@@ -6053,7 +6053,7 @@ fn updates_skill_metadata_batch_for_nowledge_shape() {
     assert!(output.rows[4].duplicate);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Skill".to_string(),
@@ -6139,7 +6139,7 @@ fn typed_skill_metadata_update_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Skill".to_string(),
@@ -6283,7 +6283,7 @@ fn updates_skill_lifecycle_batch_for_nowledge_shapes() {
     assert!(!output.rows[6].matched);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Skill".to_string(),
@@ -6430,7 +6430,7 @@ fn typed_skill_lifecycle_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Skill".to_string(),
@@ -6591,7 +6591,7 @@ fn typed_skill_delete_persists_as_one_wal_batch_and_replays() {
             .unwrap();
         assert_eq!(skills.rows[0].get("total"), Some(&Value::Int(0)));
         assert!(db
-            .knowledge_entity(&KnowledgeEntityRequest {
+            .test_query_entity(&KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "memory_1".to_string(),
             })
@@ -6794,7 +6794,7 @@ fn updates_thread_metadata_batch_for_nowledge_shapes() {
     assert!(!output.rows[3].matched);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Thread".to_string(),
@@ -6882,7 +6882,7 @@ fn typed_thread_metadata_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Thread".to_string(),
@@ -6984,7 +6984,7 @@ fn updates_thread_message_count_batch_with_preserve_newer_timestamp() {
     assert!(!output.rows[4].matched);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Thread".to_string(),
@@ -7085,7 +7085,7 @@ fn typed_thread_message_count_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Thread".to_string(),
@@ -7236,7 +7236,7 @@ fn typed_thread_delete_persists_as_one_wal_batch_and_replays() {
             assert!(!test_thread_exists(&db, thread_id));
         }
         assert!(db
-            .knowledge_entity(&KnowledgeEntityRequest {
+            .test_query_entity(&KnowledgeEntityRequest {
                 label: "Message".to_string(),
                 external_id: "message_1".to_string(),
             })
@@ -7779,7 +7779,7 @@ fn updates_label_lifecycle_batch_for_nowledge_shapes() {
     assert!(!output.rows[4].matched);
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Label".to_string(),
@@ -7888,7 +7888,7 @@ fn typed_label_lifecycle_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Label".to_string(),

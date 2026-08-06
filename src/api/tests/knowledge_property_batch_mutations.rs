@@ -48,7 +48,7 @@ fn scoped_knowledge_property_batch_update_does_not_write_filtered_rows() {
     assert!(output.rows[0].matched);
     assert!(output.rows[1].filtered_out);
     let row = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -225,7 +225,7 @@ fn typed_knowledge_property_batch_update_persists_as_one_wal_batch_and_replays()
     {
         let db = Database::open(&path).unwrap();
         let output = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),

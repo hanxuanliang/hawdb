@@ -23,7 +23,7 @@ fn clears_community_assignments_for_nowledge_shapes() {
     assert!(scoped.rows.iter().all(|row| row.cleared));
 
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -66,7 +66,7 @@ fn clears_community_assignments_for_nowledge_shapes() {
         Some("source_community_1".to_string())
     );
     let rows = db
-        .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        .test_query_property_batch(&KnowledgePropertyBatchRequest {
             entities: vec![KnowledgeEntityRequest {
                 label: "Source".to_string(),
                 external_id: "source_community_1".to_string(),
@@ -123,7 +123,7 @@ fn typed_community_assignment_clear_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            .test_query_property_batch(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),

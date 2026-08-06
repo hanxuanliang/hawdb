@@ -280,7 +280,7 @@ mod tests {
         .unwrap();
 
         let output = db
-            .knowledge_entity_details(&KnowledgeEntityDetailsRequest {
+            .test_query_entity_details(&KnowledgeEntityDetailsRequest {
                 label: "Entity".to_string(),
                 external_id: "details-entity".to_string(),
             })
