@@ -469,12 +469,12 @@ demotion, reports non-writable and duplicate rows, and commits eligible updates
 through one grouped WAL batch.
 Label canonical and usage reads used by label merge, canonical backfill, and
 label list surfaces are available as typed APIs:
-`Database::lookup_knowledge_labels_by_canonical_name`,
-`Database::scan_knowledge_labels_missing_canonical_name`,
-`Database::knowledge_label_usage`, and
-`Database::knowledge_label_canonical_usage`. They scan only `Label` nodes,
-validate non-empty lookup filters, and compute `HAS_LABEL` usage counts over
-any source node type. Label Memory distribution reads use one fixed
+`Database::lookup_knowledge_labels_by_canonical_name` and
+`Database::scan_knowledge_labels_missing_canonical_name`. They scan only
+`Label` nodes and validate non-empty lookup filters. Single-Label,
+canonical-only, and all-Label usage reads use three fixed parameterized Cypher
+statements that compute `HAS_LABEL` counts over any source node type. Label
+Memory distribution reads use one fixed
 parameterized, row-bounded Cypher statement for the Nowledge
 `COUNT(DISTINCT m)` label stats and OKF label row shapes, with Memory-only
 counts, duplicate edge de-duplication, offset/limit pagination, and no WAL

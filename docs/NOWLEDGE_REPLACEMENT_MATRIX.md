@@ -544,9 +544,10 @@ skips projected-idless Labels without writing, and idempotently MERGEs
 Label canonical and usage reads are covered by typed APIs for Nowledge label
 merge and list surfaces. `Database::lookup_knowledge_labels_by_canonical_name`
 handles duplicate/collision checks, `Database::scan_knowledge_labels_missing_canonical_name`
-handles canonical backfill scans, and `Database::knowledge_label_usage` plus
-`Database::knowledge_label_canonical_usage` expose single-row and canonical
-usage rows with `HAS_LABEL` counts over any source node type.
+handles canonical backfill scans. Single-Label, canonical-only, and all-Label
+usage reads use three fixed parameterized Cypher statements with `HAS_LABEL`
+counts over any source node type, deterministic ordering, explicit `LIMIT`, and
+matching row budgets; no route-specific usage API is exposed.
 Label Memory distribution reads use one fixed parameterized Cypher statement
 that counts distinct Memory nodes per Label over `HAS_LABEL`, orders by count
 and stable Label identity, and applies `SKIP`, `LIMIT`, and a matching row

@@ -2887,20 +2887,6 @@ impl Database {
         scan_knowledge_labels_missing_canonical_name_via_query_runtime(self, request)
     }
 
-    pub fn knowledge_label_usage(
-        &self,
-        request: &KnowledgeLabelUsageRequest,
-    ) -> Result<KnowledgeLabelUsageOutput> {
-        knowledge_label_usage_via_query_runtime(self, request)
-    }
-
-    pub fn knowledge_label_canonical_usage(
-        &self,
-        request: &KnowledgeLabelUsageListRequest,
-    ) -> Result<KnowledgeLabelUsageListOutput> {
-        knowledge_label_canonical_usage_via_query_runtime(self, request)
-    }
-
     pub fn delete_knowledge_memory_labels(
         &mut self,
         request: &KnowledgeMemoryLabelDeleteRequest,
@@ -11554,83 +11540,6 @@ fn knowledge_label_usage_list_output_via_query_runtime(
         .collect::<Result<Vec<_>>>()?;
     if limit > 0 {
         rows.truncate(limit);
-    } else {
-        rows.clear();
-    }
-    let returned_count = rows.len();
-    Ok(KnowledgeLabelUsageListOutput {
-        graph_commit_epoch: db.store.commit_epoch(),
-        rows,
-        matched_count,
-        returned_count,
-    })
-}
-
-fn knowledge_label_usage_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeLabelUsageRequest,
-) -> Result<KnowledgeLabelUsageOutput> {
-    if request.label_id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge label usage requires a non-empty label id".to_string(),
-        ));
-    }
-    let parameters = BTreeMap::from([(
-        "label_id".to_string(),
-        Value::String(request.label_id.clone()),
-    )]);
-    let output = db.query_read_only_with_params_bounded(
-        "MATCH (l:Label {id: $label_id}) \
-         OPTIONAL MATCH (l)<-[r:HAS_LABEL]-(n) \
-         WITH l, count(r) AS usage_count \
-         RETURN l.id AS label_id, id(l) AS node_id, l.name AS name, \
-         l.canonical_name AS canonical_name, l.color AS color, \
-         l.description AS description, l.created_at AS created_at, \
-         l.updated_at AS updated_at, usage_count \
-         LIMIT 1",
-        &parameters,
-        Some(1),
-    )?;
-    let row = output
-        .rows
-        .first()
-        .map(knowledge_label_usage_row_from_query)
-        .transpose()?;
-    Ok(KnowledgeLabelUsageOutput {
-        graph_commit_epoch: db.store.commit_epoch(),
-        found: row.is_some(),
-        row,
-    })
-}
-
-fn knowledge_label_canonical_usage_via_query_runtime(
-    db: &Database,
-    request: &KnowledgeLabelUsageListRequest,
-) -> Result<KnowledgeLabelUsageListOutput> {
-    let predicate = if request.canonical_only {
-        " WHERE l.canonical_name IS NOT NULL"
-    } else {
-        ""
-    };
-    let query = format!(
-        "MATCH (l:Label){predicate} \
-         OPTIONAL MATCH (l)<-[r:HAS_LABEL]-(n) \
-         WITH l, count(r) AS usage_count \
-         RETURN l.id AS label_id, id(l) AS node_id, l.name AS name, \
-         l.canonical_name AS canonical_name, l.color AS color, \
-         l.description AS description, l.created_at AS created_at, \
-         l.updated_at AS updated_at, usage_count \
-         ORDER BY node_id ASC"
-    );
-    let output = db.query_read_only_with_params_bounded(&query, &BTreeMap::new(), None)?;
-    let matched_count = output.rows.len();
-    let mut rows = output
-        .rows
-        .iter()
-        .map(knowledge_label_usage_row_from_query)
-        .collect::<Result<Vec<_>>>()?;
-    if request.limit > 0 {
-        rows.truncate(request.limit);
     } else {
         rows.clear();
     }

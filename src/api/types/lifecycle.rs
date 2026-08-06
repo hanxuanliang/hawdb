@@ -384,17 +384,6 @@ pub struct KnowledgeLabelBackfillScanRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeLabelUsageRequest {
-    pub label_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeLabelUsageListRequest {
-    pub canonical_only: bool,
-    pub limit: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeLabelUsageRow {
     pub label_id: Option<String>,
     pub node_id: u64,
@@ -405,13 +394,6 @@ pub struct KnowledgeLabelUsageRow {
     pub created_at: Option<Value>,
     pub updated_at: Option<Value>,
     pub usage_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeLabelUsageOutput {
-    pub graph_commit_epoch: u64,
-    pub found: bool,
-    pub row: Option<KnowledgeLabelUsageRow>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
