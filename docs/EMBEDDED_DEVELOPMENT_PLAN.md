@@ -642,17 +642,10 @@ Thread page, source lookup, normalized-space filtering, favorite metadata,
 id/thread-id bulk lookup, and message-count ranking shapes. The statement owns
 filters, ordering, projection, and limits; host code owns response shaping and
 cross-statement budgets.
-Thread compacted-memory reads are available as
-`Database::knowledge_thread_compacted_memories`, covering Nowledge `COMPACTS_TO`
-count/id-list/summary/full-row read shapes by physical `id` or logical
-`thread_id`, with Memory display/rank/reindex/review/temporal/access fields,
-relationship metadata, bounded limits, and no WAL writes.
-Field-extensible Thread compacted-memory reads are available as
-`Database::knowledge_thread_compacted_memory_projected_list`, covering the same
-bounded `COMPACTS_TO` adjacency shape while projecting only caller-allowlisted
-Memory and relationship fields. Ordering remains driven by internal Memory
-importance and created-at keys, so Nowledge can add compacted-memory detail
-fields without widening the fixed row or scanning outside the target Thread.
+Thread compacted-memory reads use fixed Thread identity and bounded outgoing
+`COMPACTS_TO` statements in one pinned read transaction. Each named business
+phase owns its projection and ordering, avoiding both route-specific typed APIs
+and the former wide fixed row.
 Memory compacting-Thread reads are available as
 `Database::knowledge_memory_compacting_threads`, covering Nowledge Memory id to
 Thread id/source/metadata reads over incoming `COMPACTS_TO` relationships with

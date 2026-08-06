@@ -526,21 +526,12 @@ without writing, counts matched `CONTAINS` relationships and unique Message
 targets without materializing complete Message rows, preserves the Thread node,
 deletes only outgoing Message target nodes through the WAL-backed Cypher
 mutation path, and keeps empty-thread cleanup read-only.
-Thread compacted-memory reads are covered by
-`Database::knowledge_thread_compacted_memories`. The typed read resolves one
-Thread by physical `id` or logical `thread_id`, scans outgoing `COMPACTS_TO`
-Memory edges, returns Memory id/title/content previews, rank/time/space/
-review/reindex/temporal/access fields, relationship metadata, count/id-list/
-summary/full-row compatible fallbacks, importance/created-at ordering, bounded
-limits, and no WAL writes.
-Field-extensible Thread compacted-memory reads are covered by
-`Database::knowledge_thread_compacted_memory_projected_list`. The typed read
-reuses the same Thread identity and bounded adjacency walk, but projects only
-caller-allowlisted Memory and `COMPACTS_TO` relationship properties plus stable
-Thread, Memory, relationship, and normalized-space identity fields. It keeps
-importance and created-at as internal ordering keys even when they are not
-projected, preserving Nowledge detail-field growth without broad row copies or
-WAL writes.
+Thread compacted-memory reads use a fixed physical- or logical-Thread identity
+query followed by a fixed bounded `COMPACTS_TO` page query in one pinned read
+transaction. Each business phase selects the Memory and relationship fields it
+needs instead of materializing the former wide row, while keeping importance,
+created-at, identity, and relationship id ordering in the statement. These
+reads intentionally have no route-specific or caller-projection typed API.
 Thread distilled-memory link writes are covered by
 `Database::create_knowledge_thread_compaction_link`. This typed facade fixes
 the Nowledge `(:Thread)-[:COMPACTS_TO]->(:Memory)` write shape, validates

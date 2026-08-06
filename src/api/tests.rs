@@ -82,7 +82,6 @@ use super::{
     KnowledgeSourceParsedMetadataBatchRequest, KnowledgeSourceParsedMetadataUpdate,
     KnowledgeSourceReferenceRelationshipCleanupRequest, KnowledgeSourceRevisionCreate,
     KnowledgeSourceRevisionCreateBatchRequest, KnowledgeSubgraphRequest,
-    KnowledgeThreadCompactedMemoryListRequest, KnowledgeThreadCompactedMemoryProjectedListRequest,
     KnowledgeThreadCompactionLinkRequest, KnowledgeThreadDeleteBatchRequest,
     KnowledgeThreadIdentityCascadeDeleteKeys, KnowledgeThreadIdentityDeleteRequest,
     KnowledgeThreadMessageCountBatchRequest, KnowledgeThreadMessageCountUpdate,
@@ -189,6 +188,7 @@ mod statistics;
 mod storage_recovery;
 mod synthesized_source_reads;
 mod system_variables;
+mod thread_compaction_reads;
 mod thread_distillation_reads;
 mod thread_message_reads;
 mod thread_metadata_reads;
@@ -8124,26 +8124,23 @@ fn creates_thread_compaction_link_for_nowledge_distill_shape() {
     assert!(created.memory_node_id.is_some());
     assert_eq!(created.created_relationship_count, 1);
 
-    let compacted = db
-        .knowledge_thread_compacted_memories(&KnowledgeThreadCompactedMemoryListRequest {
-            thread_id: "thread_1".to_string(),
-            identity_property: "id".to_string(),
-            limit: 10,
-        })
-        .unwrap();
-    assert_eq!(compacted.matched_count, 1);
-    assert_eq!(compacted.rows[0].memory_id.as_deref(), Some("memory_1"));
+    let compacted = test_thread_compaction_links(&db, "thread_1");
+    assert_eq!(compacted.rows.len(), 1);
     assert_eq!(
-        compacted.rows[0].compaction_method.as_deref(),
-        Some("manual_distillation")
+        compacted.rows[0].get("memory_id"),
+        Some(&Value::String("memory_1".to_string()))
     );
     assert_eq!(
-        compacted.rows[0].relationship_created_at,
-        Some(Value::Int(1_700_000_070))
+        compacted.rows[0].get("compaction_method"),
+        Some(&Value::String("manual_distillation".to_string()))
     );
     assert_eq!(
-        compacted.rows[0].relationship_properties,
-        Some(Value::String("{\"mode\":\"manual\"}".to_string()))
+        compacted.rows[0].get("created_at"),
+        Some(&Value::Int(1_700_000_070))
+    );
+    assert_eq!(
+        compacted.rows[0].get("properties"),
+        Some(&Value::String("{\"mode\":\"manual\"}".to_string()))
     );
 
     let missing = db
@@ -8250,180 +8247,18 @@ fn typed_thread_compaction_link_persists_as_one_wal_batch_and_replays() {
     assert!(wal.contains("create_rel"));
     {
         let db = Database::open(&path).unwrap();
-        let output = db
-            .knowledge_thread_compacted_memories(&KnowledgeThreadCompactedMemoryListRequest {
-                thread_id: "thread_1".to_string(),
-                identity_property: "id".to_string(),
-                limit: 10,
-            })
-            .unwrap();
-        assert_eq!(output.matched_count, 1);
-        assert_eq!(output.rows[0].memory_id.as_deref(), Some("memory_1"));
+        let output = test_thread_compaction_links(&db, "thread_1");
+        assert_eq!(output.rows.len(), 1);
         assert_eq!(
-            output.rows[0].compaction_method.as_deref(),
-            Some("manual_distillation")
+            output.rows[0].get("memory_id"),
+            Some(&Value::String("memory_1".to_string()))
+        );
+        assert_eq!(
+            output.rows[0].get("compaction_method"),
+            Some(&Value::String("manual_distillation".to_string()))
         );
     }
     std::fs::remove_dir_all(path).unwrap();
-}
-
-#[test]
-fn reads_thread_compacted_memories_for_nowledge_summary_and_full_shapes() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Thread {id: 'thread_a', thread_id: 'logical_a', title: 'Thread A'})")
-        .unwrap();
-    db.query("CREATE (:Thread {id: 'thread_b', thread_id: 'logical_b'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'memory_a', title: 'Memory Alpha', content: 'Alpha compacted memory content', importance: 0.8, pagerank_score: 0.9, confidence: 0.7, source_range: '1..2', source: 'agent', created_at: 10, updated_at: 20, metadata: '{}', space_id: '', last_reindexed_at: 21, reindex_needed: true, unit_type: 'decision', is_latest: false, version: 4, is_crystal: true, crystal_title: 'Crystal Alpha', source_unit_count: 3, extraction_method: 'agent', access_count: 5, appearances: 6, clicks: 7, decay_score_cached: 0.2, event_end: 30, event_start: 25, last_accessed_at: 31, last_clicked_at: 32, last_evaluated_at: 33, review_status: 'reviewed', temporal_confidence: 0.6, temporal_context: 'past', temporal_precision: 'day', temporal_type: 'event', total_dwell_time_ms: 800})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'memory_b', content: 'Beta compacted memory content', importance: 0.4, created_at: 30})")
-        .unwrap();
-    db.query("MATCH (t:Thread {id: 'thread_a'}), (m:Memory {id: 'memory_a'}) CREATE (t)-[:COMPACTS_TO {compaction_method: 'manual', created_at: 100, properties: '{}'}]->(m)")
-        .unwrap();
-    db.query("MATCH (t:Thread {id: 'thread_a'}), (m:Memory {id: 'memory_b'}) CREATE (t)-[:COMPACTS_TO {compaction_method: 'auto', created_at: 90}]->(m)")
-        .unwrap();
-    db.query("MATCH (t:Thread {id: 'thread_b'}), (m:Memory {id: 'memory_b'}) CREATE (t)-[:COMPACTS_TO]->(m)")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-
-    let request = KnowledgeThreadCompactedMemoryListRequest {
-        thread_id: "thread_a".to_string(),
-        identity_property: "id".to_string(),
-        limit: 0,
-    };
-    let output = db.knowledge_thread_compacted_memories(&request).unwrap();
-    assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
-    assert!(output.found);
-    assert_eq!(output.thread_id, "thread_a");
-    assert!(output.thread_node_id.is_some());
-    assert_eq!(output.matched_count, 2);
-    assert_eq!(output.returned_count, 2);
-    assert_eq!(output.rows[0].thread_id.as_deref(), Some("thread_a"));
-    assert_eq!(
-        output.rows[0].thread_logical_id.as_deref(),
-        Some("logical_a")
-    );
-    assert_eq!(output.rows[0].memory_id.as_deref(), Some("memory_a"));
-    assert_eq!(output.rows[0].display_title, "Memory Alpha");
-    assert_eq!(output.rows[0].title.as_deref(), Some("Memory Alpha"));
-    assert_eq!(
-        output.rows[0].content.as_deref(),
-        Some("Alpha compacted memory content")
-    );
-    assert_eq!(
-        output.rows[0].content_preview.as_deref(),
-        Some("Alpha compacted memory content")
-    );
-    assert_eq!(output.rows[0].importance, Some(Value::Float(0.8)));
-    assert_eq!(output.rows[0].pagerank_score, Some(Value::Float(0.9)));
-    assert_eq!(output.rows[0].confidence, Some(Value::Float(0.7)));
-    assert_eq!(
-        output.rows[0].source_range,
-        Some(Value::String("1..2".to_string()))
-    );
-    assert_eq!(output.rows[0].source.as_deref(), Some("agent"));
-    assert_eq!(output.rows[0].created_at, Some(Value::Int(10)));
-    assert_eq!(output.rows[0].updated_at, Some(Value::Int(20)));
-    assert_eq!(
-        output.rows[0].metadata,
-        Some(Value::String("{}".to_string()))
-    );
-    assert_eq!(output.rows[0].raw_space_id, None);
-    assert_eq!(output.rows[0].normalized_space_id, "default");
-    assert_eq!(output.rows[0].last_reindexed_at, Some(Value::Int(21)));
-    assert_eq!(output.rows[0].reindex_needed, Some(true));
-    assert_eq!(output.rows[0].unit_type, "decision");
-    assert!(!output.rows[0].is_latest);
-    assert_eq!(output.rows[0].version, 4);
-    assert!(output.rows[0].is_crystal);
-    assert_eq!(
-        output.rows[0].crystal_title.as_deref(),
-        Some("Crystal Alpha")
-    );
-    assert_eq!(output.rows[0].source_unit_count, Some(3));
-    assert_eq!(output.rows[0].extraction_method, "agent");
-    assert_eq!(output.rows[0].access_count, 5);
-    assert_eq!(output.rows[0].appearances, 6);
-    assert_eq!(output.rows[0].clicks, 7);
-    assert_eq!(output.rows[0].decay_score_cached, Some(Value::Float(0.2)));
-    assert_eq!(output.rows[0].event_end, Some(Value::Int(30)));
-    assert_eq!(output.rows[0].event_start, Some(Value::Int(25)));
-    assert_eq!(output.rows[0].last_accessed_at, Some(Value::Int(31)));
-    assert_eq!(output.rows[0].last_clicked_at, Some(Value::Int(32)));
-    assert_eq!(output.rows[0].last_evaluated_at, Some(Value::Int(33)));
-    assert_eq!(output.rows[0].review_status, "reviewed");
-    assert_eq!(output.rows[0].temporal_confidence, Some(Value::Float(0.6)));
-    assert_eq!(output.rows[0].temporal_context.as_deref(), Some("past"));
-    assert_eq!(output.rows[0].temporal_precision.as_deref(), Some("day"));
-    assert_eq!(output.rows[0].temporal_type.as_deref(), Some("event"));
-    assert_eq!(output.rows[0].total_dwell_time_ms, 800);
-    assert_eq!(output.rows[0].compaction_method.as_deref(), Some("manual"));
-    assert_eq!(
-        output.rows[0].relationship_created_at,
-        Some(Value::Int(100))
-    );
-    assert_eq!(
-        output.rows[0].relationship_properties,
-        Some(Value::String("{}".to_string()))
-    );
-    assert_eq!(output.rows[1].memory_id.as_deref(), Some("memory_b"));
-    assert_eq!(
-        output.rows[1].display_title,
-        "Beta compacted memory content"
-    );
-    assert_eq!(output.rows[1].unit_type, "fact");
-    assert!(output.rows[1].is_latest);
-    assert_eq!(output.rows[1].version, 1);
-    assert!(!output.rows[1].is_crystal);
-    assert_eq!(output.rows[1].extraction_method, "manual");
-
-    let stats = db.plan_cache_stats();
-    let repeated = db.knowledge_thread_compacted_memories(&request).unwrap();
-    assert_eq!(repeated, output);
-    let repeated_stats = db.plan_cache_stats();
-    assert_eq!(repeated_stats.entries, stats.entries);
-    assert_eq!(repeated_stats.misses, stats.misses);
-    assert_eq!(repeated_stats.hits, stats.hits + 2);
-
-    let by_logical_thread = db
-        .knowledge_thread_compacted_memories(&KnowledgeThreadCompactedMemoryListRequest {
-            thread_id: "logical_b".to_string(),
-            identity_property: "thread_id".to_string(),
-            limit: 10,
-        })
-        .unwrap();
-    assert!(by_logical_thread.found);
-    assert_eq!(by_logical_thread.matched_count, 1);
-    assert_eq!(
-        by_logical_thread.rows[0].thread_logical_id.as_deref(),
-        Some("logical_b")
-    );
-
-    let limited = db
-        .knowledge_thread_compacted_memories(&KnowledgeThreadCompactedMemoryListRequest {
-            thread_id: "thread_a".to_string(),
-            identity_property: "id".to_string(),
-            limit: 1,
-        })
-        .unwrap();
-    assert_eq!(limited.matched_count, 2);
-    assert_eq!(limited.returned_count, 1);
-
-    let missing = db
-        .knowledge_thread_compacted_memories(&KnowledgeThreadCompactedMemoryListRequest {
-            thread_id: "missing".to_string(),
-            identity_property: "id".to_string(),
-            limit: 10,
-        })
-        .unwrap();
-    assert!(!missing.found);
-    assert_eq!(missing.thread_node_id, None);
-    assert_eq!(missing.matched_count, 0);
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
 }
 
 #[test]
@@ -8728,199 +8563,6 @@ fn memory_cleanup_fingerprints_reject_empty_inputs_without_wal() {
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
     assert_eq!(read_test_wal(&path).unwrap(), wal_before);
     std::fs::remove_dir_all(path).unwrap();
-}
-
-#[test]
-fn projects_thread_compacted_memory_fields_for_nowledge_growth() {
-    let mut db = Database::new_with_config(DatabaseConfig {
-        max_plan_cache_entries: Some(8),
-        statement_summary_capacity: 8,
-        ..DatabaseConfig::default()
-    });
-    db.query("CREATE (:Thread {id: 'projected_thread_a', thread_id: 'projected_logical_a'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'projected_memory_a', title: 'Projected Alpha', content: 'alpha body', importance: 0.8, created_at: 10, space_id: '', future_field: 'future-a'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'projected_memory_b', title: 'Projected Beta', content: 'beta body', importance: 0.4, created_at: 20, space_id: 'team', future_field: 'future-b'})")
-        .unwrap();
-    db.query("MATCH (t:Thread {id: 'projected_thread_a'}), (m:Memory {id: 'projected_memory_a'}) CREATE (t)-[:COMPACTS_TO {compaction_method: 'manual', created_at: 100, future_edge_field: 'edge-a'}]->(m)")
-        .unwrap();
-    db.query("MATCH (t:Thread {id: 'projected_thread_a'}), (m:Memory {id: 'projected_memory_b'}) CREATE (t)-[:COMPACTS_TO {compaction_method: 'auto', created_at: 90, future_edge_field: 'edge-b'}]->(m)")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let snapshot = db.begin_read_transaction();
-
-    db.query("CREATE (:Memory {id: 'projected_memory_c', title: 'Projected Gamma', importance: 2.0, created_at: 30, future_field: 'future-c'})")
-        .unwrap();
-    db.query("MATCH (t:Thread {id: 'projected_thread_a'}), (m:Memory {id: 'projected_memory_c'}) CREATE (t)-[:COMPACTS_TO {compaction_method: 'late', created_at: 110, future_edge_field: 'edge-c'}]->(m)")
-        .unwrap();
-
-    let request = KnowledgeThreadCompactedMemoryProjectedListRequest {
-        list: KnowledgeThreadCompactedMemoryListRequest {
-            thread_id: "projected_thread_a".to_string(),
-            identity_property: "id".to_string(),
-            limit: 2,
-        },
-        memory_property_names: vec![
-            "title".to_string(),
-            "future_field".to_string(),
-            "space_id".to_string(),
-            "title".to_string(),
-        ],
-        relationship_property_names: vec![
-            "compaction_method".to_string(),
-            "future_edge_field".to_string(),
-            "_id".to_string(),
-        ],
-    };
-    let projected = db
-        .knowledge_thread_compacted_memory_projected_list(&request)
-        .unwrap();
-
-    assert!(projected.found);
-    assert_eq!(projected.thread_node_id, Some(0));
-    assert_eq!(projected.matched_count, 3);
-    assert_eq!(projected.returned_count, 2);
-    assert_eq!(
-        projected
-            .rows
-            .iter()
-            .map(|row| row.memory_id.as_deref())
-            .collect::<Vec<_>>(),
-        vec![Some("projected_memory_c"), Some("projected_memory_a")]
-    );
-    assert_eq!(
-        projected.rows[0].memory_properties.get("future_field"),
-        Some(&Value::String("future-c".to_string()))
-    );
-    assert_eq!(
-        projected.rows[1].memory_properties.get("title"),
-        Some(&Value::String("Projected Alpha".to_string()))
-    );
-    assert_eq!(projected.rows[1].normalized_space_id, "default");
-    assert!(!projected.rows[1]
-        .memory_properties
-        .contains_key("importance"));
-    assert_eq!(
-        projected.rows[1]
-            .relationship_properties
-            .get("future_edge_field"),
-        Some(&Value::String("edge-a".to_string()))
-    );
-    assert!(!projected.rows[1]
-        .relationship_properties
-        .contains_key("_id"));
-
-    let stats = db.plan_cache_stats();
-    let repeated = db
-        .knowledge_thread_compacted_memory_projected_list(&request)
-        .unwrap();
-    assert_eq!(repeated, projected);
-    let repeated_stats = db.plan_cache_stats();
-    assert_eq!(repeated_stats.entries, stats.entries);
-    assert_eq!(repeated_stats.misses, stats.misses);
-    assert_eq!(repeated_stats.hits, stats.hits + 2);
-
-    let snapshot_projected = snapshot
-        .knowledge_thread_compacted_memory_projected_list(
-            &KnowledgeThreadCompactedMemoryProjectedListRequest {
-                list: KnowledgeThreadCompactedMemoryListRequest {
-                    thread_id: "projected_logical_a".to_string(),
-                    identity_property: "thread_id".to_string(),
-                    limit: 10,
-                },
-                memory_property_names: vec!["title".to_string()],
-                relationship_property_names: vec!["compaction_method".to_string()],
-            },
-        )
-        .unwrap();
-    assert_eq!(snapshot_projected.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot_projected.matched_count, 2);
-    assert_eq!(
-        snapshot_projected
-            .rows
-            .iter()
-            .map(|row| row.memory_id.as_deref())
-            .collect::<Vec<_>>(),
-        vec![Some("projected_memory_a"), Some("projected_memory_b")]
-    );
-    assert!(!snapshot_projected.rows[0]
-        .memory_properties
-        .contains_key("created_at"));
-}
-
-#[test]
-fn thread_compacted_memory_projected_read_rejects_empty_property_names_without_wal() {
-    let path = unique_test_dir("thread_compacted_memory_projected_empty_property_without_wal");
-    let mut db = Database::open(&path).unwrap();
-    db.query("CREATE (:Thread {id: 'projected_thread_wal'})")
-        .unwrap();
-    db.query("CREATE (:Memory {id: 'projected_memory_wal'})")
-        .unwrap();
-    db.query("MATCH (t:Thread {id: 'projected_thread_wal'}), (m:Memory {id: 'projected_memory_wal'}) CREATE (t)-[:COMPACTS_TO]->(m)")
-        .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let wal_before = read_test_wal(&path).unwrap();
-
-    let memory_property_error = db
-        .knowledge_thread_compacted_memory_projected_list(
-            &KnowledgeThreadCompactedMemoryProjectedListRequest {
-                list: KnowledgeThreadCompactedMemoryListRequest {
-                    thread_id: "projected_thread_wal".to_string(),
-                    identity_property: "id".to_string(),
-                    limit: 10,
-                },
-                memory_property_names: vec![String::new()],
-                relationship_property_names: Vec::new(),
-            },
-        )
-        .unwrap_err();
-    assert!(memory_property_error
-        .to_string()
-        .contains("non-empty property names"));
-
-    let relationship_property_error = db
-        .knowledge_thread_compacted_memory_projected_list(
-            &KnowledgeThreadCompactedMemoryProjectedListRequest {
-                list: KnowledgeThreadCompactedMemoryListRequest {
-                    thread_id: "projected_thread_wal".to_string(),
-                    identity_property: "id".to_string(),
-                    limit: 10,
-                },
-                memory_property_names: Vec::new(),
-                relationship_property_names: vec![String::new()],
-            },
-        )
-        .unwrap_err();
-    assert!(relationship_property_error
-        .to_string()
-        .contains("non-empty property names"));
-    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
-    assert_eq!(read_test_wal(&path).unwrap(), wal_before);
-}
-
-#[test]
-fn thread_compacted_memory_read_rejects_invalid_identity() {
-    let db = Database::new();
-    let empty_thread = db
-        .knowledge_thread_compacted_memories(&KnowledgeThreadCompactedMemoryListRequest {
-            thread_id: String::new(),
-            identity_property: "id".to_string(),
-            limit: 10,
-        })
-        .unwrap_err();
-    assert!(empty_thread.to_string().contains("non-empty thread id"));
-
-    let invalid_identity = db
-        .knowledge_thread_compacted_memories(&KnowledgeThreadCompactedMemoryListRequest {
-            thread_id: "thread_a".to_string(),
-            identity_property: "metadata".to_string(),
-            limit: 10,
-        })
-        .unwrap_err();
-    assert!(invalid_identity
-        .to_string()
-        .contains("id or thread_id identity"));
 }
 
 #[test]
@@ -10950,6 +10592,22 @@ fn test_thread_message_count(db: &Database, thread_id: &str) -> usize {
     .unwrap()
     .rows
     .len()
+}
+
+fn test_thread_compaction_links(db: &Database, thread_id: &str) -> QueryOutput {
+    let parameters = BTreeMap::from([(
+        "thread_id".to_string(),
+        Value::String(thread_id.to_string()),
+    )]);
+    db.query_read_only_with_params_bounded(
+        "MATCH (t:Thread {id: $thread_id})-[r:COMPACTS_TO]->(m:Memory) \
+         RETURN m.id AS memory_id, r.compaction_method AS compaction_method, \
+         r.created_at AS created_at, r.properties AS properties \
+         ORDER BY id(r) ASC",
+        &parameters,
+        None,
+    )
+    .unwrap()
 }
 
 fn unique_test_dir(name: &str) -> std::path::PathBuf {
