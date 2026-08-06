@@ -296,13 +296,11 @@ and projects matching crystal ids/titles plus matched source ids. Bounded and
 unbounded host variants are separate statements so query shape remains static.
 Callers use a pinned read transaction when coverage and hydration must share a
 graph version.
-Memory entity mention reads are covered by
-`Database::knowledge_memory_entities`. The typed read validates a non-empty
-Memory id list, resolves each Memory in caller order, scans outgoing `MENTIONS`
-edges to Entity nodes, returns Entity id/name/type/confidence plus relationship
-confidence and mention count rows sorted by Entity name/id/relationship id,
-supports per-Memory limits and distinct Entity name limits, reports
-found/missing Memory counts and the graph commit epoch, and does not write WAL.
+Memory entity mention reads use one fixed parameterized Cypher statement per
+Memory with explicit Memory/Entity labels, node and relationship projection,
+deterministic ordering, `LIMIT`, a matching row budget, and a shared pinned
+snapshot. Grouping, missing-id handling, and distinct-name shaping stay in the
+host; no route-specific typed database API is exposed.
 Entity mention-count list reads are covered by
 `Database::knowledge_entity_mention_counts`. The typed read scans only `Entity`
 nodes with non-empty `id` and `name`, counts incoming `MENTIONS` relationships

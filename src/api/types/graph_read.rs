@@ -275,45 +275,6 @@ pub struct KnowledgeEntityBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryEntityListRequest {
-    pub memory_ids: Vec<String>,
-    pub limit_per_memory: usize,
-    pub distinct_name_limit: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryEntityRow {
-    pub entity_id: Option<String>,
-    pub node_id: u64,
-    pub relationship_id: u64,
-    pub name: Option<String>,
-    pub entity_type: Option<String>,
-    pub confidence: Option<Value>,
-    pub relationship_confidence: Option<Value>,
-    pub mention_count: Option<i64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryEntityGroup {
-    pub memory_id: String,
-    pub memory_node_id: Option<u64>,
-    pub found: bool,
-    pub entities: Vec<KnowledgeMemoryEntityRow>,
-    pub matched_count: usize,
-    pub returned_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KnowledgeMemoryEntityListOutput {
-    pub graph_commit_epoch: u64,
-    pub groups: Vec<KnowledgeMemoryEntityGroup>,
-    pub distinct_entity_names: Vec<String>,
-    pub found_memory_count: usize,
-    pub missing_memory_count: usize,
-    pub entity_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeEntityMentionCountCursor {
     pub after_count: usize,
     pub after_name: String,

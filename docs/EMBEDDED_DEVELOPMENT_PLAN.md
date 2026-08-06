@@ -581,10 +581,10 @@ community crystal row shape that returns Crystal fields alongside source
 Memory metadata, latest-state fallback, and lifecycle state over the same
 `SYNTHESIZED_FROM` to `MENTIONS` community path, with pinned read-transaction
 snapshots and no WAL writes.
-Memory entity mention reads are available as
-`Database::knowledge_memory_entities`, covering Nowledge `Memory` outgoing
-`MENTIONS` Entity name/detail list shapes with grouped rows, distinct names,
-bounded limits, and no WAL writes.
+Memory entity mention reads use one fixed parameterized Cypher statement per
+Memory with explicit projection, deterministic ordering, `LIMIT`, a matching
+row budget, and a shared pinned snapshot. Grouping, missing-id handling, and
+distinct-name shaping remain outside the embedded database facade.
 Entity mention-count list reads are available as
 `Database::knowledge_entity_mention_counts`, covering Nowledge wiki Entity
 listing and cursor shapes with non-empty Entity id/name filtering, incoming
