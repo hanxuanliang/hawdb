@@ -32,6 +32,7 @@ pub mod query {
 }
 pub mod query_family_evidence;
 pub mod query_runtime_preflight;
+mod relational_sql;
 pub mod replacement_summary;
 pub mod route_ownership;
 pub mod search;
