@@ -52,11 +52,6 @@ use plan_cache::{
 };
 #[cfg(test)]
 use query_domains::*;
-pub use skein_api_types::{
-    KnowledgeMemoryDecayRefreshBatchOutput, KnowledgeMemoryDecayRefreshBatchRequest,
-    KnowledgeMemoryDecayRefreshBatchRow, KnowledgeMemoryDecayRefreshUpdate,
-    KnowledgeNeighborDirection,
-};
 use skein_optimizer::{
     normalize_search_enum_value, search_field_is_enum_like, SearchPredicate, SearchPredicateOp,
     SearchPredicateSet,

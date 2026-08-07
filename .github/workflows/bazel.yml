@@ -102,7 +102,6 @@ jobs:
       - name: Test
         run: |
           bazel test --test_output=errors \
-            //crates/api-types:skein_api_types_tests \
             //crates/core:skein_core_tests \
             //crates/cypher:skein_cypher_tests \
             //crates/ddl:skein_ddl_tests \

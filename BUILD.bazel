@@ -24,7 +24,6 @@ rust_library(
     edition = "2024",
     aliases = aliases(),
     deps = all_crate_deps(normal = True) + [
-        "//crates/api-types:skein_api_types",
         "//crates/core:skein_core",
         "//crates/cypher:skein_cypher",
         "//crates/ddl:skein_ddl",

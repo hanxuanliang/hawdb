@@ -2,13 +2,21 @@ use super::super::*;
 #[cfg(test)]
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) enum KnowledgeNeighborDirection {
+    Outgoing,
+    Incoming,
+    Both,
+}
+
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeNeighborsRequest {
     pub label: String,
     pub external_id: String,
     pub relationship_type: Option<String>,
-    pub direction: KnowledgeNeighborDirection,
+    pub(crate) direction: KnowledgeNeighborDirection,
     pub limit: usize,
     pub max_hops: usize,
 }
@@ -37,7 +45,7 @@ pub struct KnowledgeNeighborsOutput {
 pub struct KnowledgeRelationshipsRequest {
     pub seeds: Vec<KnowledgeEntityRequest>,
     pub relationship_type: Option<String>,
-    pub direction: KnowledgeNeighborDirection,
+    pub(crate) direction: KnowledgeNeighborDirection,
     pub limit_per_seed: usize,
 }
 
@@ -110,7 +118,7 @@ pub struct KnowledgePathRequest {
     pub target_label: String,
     pub target_external_id: String,
     pub relationship_type: Option<String>,
-    pub direction: KnowledgeNeighborDirection,
+    pub(crate) direction: KnowledgeNeighborDirection,
     pub max_hops: usize,
     pub limit: usize,
 }
@@ -148,7 +156,7 @@ pub struct KnowledgeSubgraphRequest {
     pub label: String,
     pub external_id: String,
     pub relationship_type: Option<String>,
-    pub direction: KnowledgeNeighborDirection,
+    pub(crate) direction: KnowledgeNeighborDirection,
     pub max_hops: usize,
     pub node_limit: usize,
     pub relationship_limit: usize,
