@@ -8090,6 +8090,31 @@ impl NowledgeMemEmbeddedStoreHandle {
         })
     }
 
+    /// Executes caller-owned Cypher and SQL statements in one canonical
+    /// graph/relational transaction.
+    ///
+    /// The callback receives the ordinary query-first transaction surface;
+    /// no route-specific mutation API or second durability boundary is
+    /// introduced. Returning an error rolls back every staged statement.
+    pub fn with_transaction<T>(
+        &self,
+        operation: impl FnOnce(&mut crate::DatabaseTransaction<'_>) -> Result<T>,
+    ) -> Result<T> {
+        let _permit = self.admit_typed_mutation()?;
+        let mut store = self.write_store()?;
+        let mut transaction = store.graph_mut().database_mut().begin_transaction();
+        match operation(&mut transaction) {
+            Ok(output) => {
+                transaction.commit()?;
+                Ok(output)
+            }
+            Err(error) => {
+                transaction.rollback();
+                Err(error)
+            }
+        }
+    }
+
     pub fn graph_lightning_initial_import_apply_with_document_identities(
         &self,
         encoded_graph_stream: &str,
@@ -14544,6 +14569,85 @@ mod tests {
             .query("MATCH (m:Memory) RETURN m.id AS id")
             .unwrap();
         assert!(output.rows.is_empty());
+    }
+
+    #[test]
+    fn embedded_handle_query_transaction_commits_graph_and_relational_state_once() {
+        let graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::WritableCutover);
+        let handle =
+            NowledgeMemEmbeddedStoreHandle::new(NowledgeMemEmbeddedStore::new(graph, None));
+
+        handle
+            .with_transaction(|transaction| {
+                transaction.query("CREATE (:Memory {id: 'memory-1'})")?;
+                transaction.query_sql(
+                    "CREATE TABLE anchors (\
+                       anchor_id TEXT PRIMARY KEY,\
+                       memory_id TEXT NOT NULL\
+                     )",
+                )?;
+                transaction.query_sql_with_params(
+                    "INSERT INTO anchors (anchor_id, memory_id) VALUES ($1, $2)",
+                    &[
+                        Value::String("anchor-1".to_string()),
+                        Value::String("memory-1".to_string()),
+                    ],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(handle.runtime_status().unwrap().graph_commit_epoch, 1);
+        let mut store = handle.write_store().unwrap();
+        assert_eq!(
+            store
+                .graph_mut()
+                .database_mut()
+                .query("MATCH (m:Memory) RETURN m.id AS id")
+                .unwrap()
+                .rows
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .graph_mut()
+                .database_mut()
+                .query_sql("SELECT anchor_id, memory_id FROM anchors")
+                .unwrap()
+                .rows
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn embedded_handle_query_transaction_rolls_back_callback_errors() {
+        let graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::WritableCutover);
+        let handle =
+            NowledgeMemEmbeddedStoreHandle::new(NowledgeMemEmbeddedStore::new(graph, None));
+
+        let error = handle
+            .with_transaction(|transaction| {
+                transaction.query("CREATE (:Memory {id: 'rolled-back'})")?;
+                Err::<(), _>(crate::SkeinError::Execution(
+                    "injected callback failure".to_string(),
+                ))
+            })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("injected callback failure"));
+        assert_eq!(handle.runtime_status().unwrap().graph_commit_epoch, 0);
+        let mut store = handle.write_store().unwrap();
+        assert!(store
+            .graph_mut()
+            .database_mut()
+            .query("MATCH (m:Memory) RETURN m.id AS id")
+            .unwrap()
+            .rows
+            .is_empty());
     }
 
     #[test]
