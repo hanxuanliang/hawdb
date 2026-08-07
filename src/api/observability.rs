@@ -141,6 +141,8 @@ impl Database {
                 self.config.max_read_result_payload_bytes,
                 &system_sql::SystemSqlContext {
                     catalog: &self.catalog,
+                    store: &self.store,
+                    runtime: system_sql::SystemRuntimeSnapshot::from_config(&self.config),
                     plan_cache_stats: &plan_cache_stats,
                     slow_queries: &slow_queries,
                     statement_summaries: &statement_summaries,

@@ -312,7 +312,7 @@ impl SkeinEmbedded {
         changed
     }
 
-    pub fn runtime_capabilities(&self) -> RuntimeCapabilities {
+    pub(crate) fn runtime_capabilities(&self) -> RuntimeCapabilities {
         self.database.runtime_capabilities()
     }
 

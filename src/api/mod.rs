@@ -11,9 +11,7 @@ use crate::qos::{
     LocalQosScheduler, LocalQosSnapshot, LocalQosState, QosAdmission, QosAdmissionCode, WorkClass,
     WorkPriority, WorkRequest,
 };
-use crate::schema::{
-    BasicGraphStatistics, Catalog, GraphStatistics, IndexKind, LabelId, SchemaObjectState,
-};
+use crate::schema::{Catalog, GraphStatistics, IndexKind, LabelId, SchemaObjectState};
 #[cfg(test)]
 use crate::schema::{
     CompositeIndexDescriptor, ConstraintDescriptor, IndexDescriptor, PropertyDescriptor, RelTypeId,
@@ -35,10 +33,10 @@ use crate::store::{
     BasicStatisticsConsistencyReport, DegreeStatisticsConsistencyReport,
     DistinctValueStatisticsConsistencyReport, DurabilityPolicy, GraphMutation,
     GraphSnapshotNodeImport, GraphSnapshotRelationshipImport, GraphStore, NodeId, NodeRecord,
-    ProjectedGraphStatus, PropertyIndexConsistencyReport, PropertyIndexProjectionRebuildAction,
-    RecoveryMode, RelId, RelRecord, SchemaMaintenanceAction, SegmentCacheSnapshot,
-    StorageBackupReport, StorageReclamationWatermark, StorageRecoveryReport, StorageRestoreReport,
-    StorageScrubReport, StoreStableIdMapping, WalReplayConfig,
+    PropertyIndexConsistencyReport, PropertyIndexProjectionRebuildAction, RecoveryMode, RelId,
+    RelRecord, SchemaMaintenanceAction, SegmentCacheSnapshot, StorageBackupReport,
+    StorageReclamationWatermark, StorageRecoveryReport, StorageRestoreReport, StorageScrubReport,
+    StoreStableIdMapping, WalReplayConfig,
 };
 use crate::telemetry::{
     operations_telemetry_readiness, qos_telemetry_sink, KernelTelemetry, KernelTelemetryOperation,
@@ -578,7 +576,7 @@ impl Database {
         self.store.commit_epoch()
     }
 
-    pub fn search_projection_changefeed_status(
+    pub(crate) fn search_projection_changefeed_status(
         &self,
     ) -> skein_storage::SearchProjectionChangefeedStatus {
         self.store.search_projection_changefeed_status()
@@ -679,7 +677,7 @@ impl Database {
         &self.config
     }
 
-    pub fn runtime_capabilities(&self) -> skein_core::RuntimeCapabilities {
+    pub(crate) fn runtime_capabilities(&self) -> skein_core::RuntimeCapabilities {
         self.config.runtime_capabilities
     }
 
@@ -1482,7 +1480,8 @@ impl Database {
         self.store.storage_version()
     }
 
-    pub fn statistics(&self) -> GraphStatistics {
+    #[cfg(test)]
+    pub(crate) fn statistics(&self) -> GraphStatistics {
         self.store.statistics()
     }
 
@@ -1504,7 +1503,8 @@ impl Database {
         Ok(report)
     }
 
-    pub fn basic_statistics(&self) -> BasicGraphStatistics {
+    #[cfg(test)]
+    pub(crate) fn basic_statistics(&self) -> crate::schema::BasicGraphStatistics {
         self.store.basic_statistics()
     }
 
@@ -1981,7 +1981,8 @@ impl Database {
         used_estimated_operations
     }
 
-    pub fn projected_graph_statuses(&self) -> Vec<ProjectedGraphStatus> {
+    #[cfg(test)]
+    pub(crate) fn projected_graph_statuses(&self) -> Vec<crate::store::ProjectedGraphStatus> {
         self.store.projected_graph_statuses()
     }
 
@@ -20927,6 +20928,8 @@ impl DatabaseReadTransaction {
                 self.config.max_read_result_payload_bytes,
                 &system_sql::SystemSqlContext {
                     catalog: &self.catalog,
+                    store: &self.store,
+                    runtime: system_sql::SystemRuntimeSnapshot::from_config(&self.config),
                     plan_cache_stats: &self.plan_cache.borrow().stats(),
                     slow_queries: &self.slow_query_snapshot,
                     statement_summaries: &self.statement_summary_snapshot,
@@ -21212,11 +21215,13 @@ impl DatabaseReadTransaction {
         knowledge_subgraph_for(&self.catalog, &self.store, request)
     }
 
-    pub fn statistics(&self) -> GraphStatistics {
+    #[cfg(test)]
+    pub(crate) fn statistics(&self) -> GraphStatistics {
         self.store.statistics()
     }
 
-    pub fn basic_statistics(&self) -> BasicGraphStatistics {
+    #[cfg(test)]
+    pub(crate) fn basic_statistics(&self) -> crate::schema::BasicGraphStatistics {
         self.store.basic_statistics()
     }
 }

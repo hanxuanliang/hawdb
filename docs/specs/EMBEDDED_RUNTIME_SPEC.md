@@ -109,10 +109,14 @@ and incremental base indexes are never optional features.
 Application graph reads and writes MUST use parameterized Cypher through an
 admitted embedded query entrypoint. Catalog and operational introspection MUST
 use bounded read-only SQL over `system.*` tables when the information is
-representable as rows. The initial catalog tables are `system.tables`,
-`system.properties`, `system.indexes`, and `system.constraints`; the existing
-observability tables are `system.plan_cache`, `system.slow_queries`, and
-`system.statement_summary`.
+representable as rows. Catalog tables are `system.tables`, `system.properties`,
+`system.indexes`, and `system.constraints`. Runtime and graph introspection use
+`system.runtime_status`, `system.runtime_capabilities`,
+`system.graph_statistics`, `system.projected_graphs`, and
+`system.search_projection_changefeed`. Observability tables are
+`system.plan_cache`, `system.slow_queries`, and `system.statement_summary`.
+Every table is subject to the configured row and payload budgets; exceeding a
+budget fails the statement instead of returning partial introspection state.
 
 The live database and a pinned read transaction MUST execute the same system
 SQL surface against their respective catalog snapshots. A read transaction MUST

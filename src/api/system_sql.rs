@@ -1,4 +1,4 @@
-use super::{PlanCacheStats, QueryOutput};
+use super::{DatabaseConfig, PlanCacheStats, QueryOutput};
 use crate::error::{Result, SkeinError};
 use crate::executor::Row;
 use crate::schema::{
@@ -9,8 +9,11 @@ use crate::sql::{
     SelectProjection, SelectStatement, SqlBound, SqlColumnRef, SqlComparisonOp, SqlOrderDirection,
     SqlPredicate, SqlStatement, SqlValue,
 };
+use crate::store::GraphStore;
 use crate::value::Value;
+use skein_core::{GraphStatistics, RuntimeCapabilities};
 use skein_query::QueryIdentity;
+use skein_storage::{ProjectedGraphStatus, SearchProjectionChangefeedStatus, StorageResidencyMode};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -103,9 +106,32 @@ pub(crate) struct StatementSummary {
 
 pub(crate) struct SystemSqlContext<'a> {
     pub(crate) catalog: &'a Catalog,
+    pub(crate) store: &'a GraphStore,
+    pub(crate) runtime: SystemRuntimeSnapshot,
     pub(crate) plan_cache_stats: &'a PlanCacheStats,
     pub(crate) slow_queries: &'a [SlowQueryRecord],
     pub(crate) statement_summaries: &'a [StatementSummaryRecord],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SystemRuntimeSnapshot {
+    read_only: bool,
+    max_read_result_rows: Option<usize>,
+    max_read_result_payload_bytes: Option<usize>,
+    storage_residency_mode: StorageResidencyMode,
+    runtime_capabilities: RuntimeCapabilities,
+}
+
+impl SystemRuntimeSnapshot {
+    pub(crate) fn from_config(config: &DatabaseConfig) -> Self {
+        Self {
+            read_only: config.read_only,
+            max_read_result_rows: config.max_read_result_rows,
+            max_read_result_payload_bytes: config.max_read_result_payload_bytes,
+            storage_residency_mode: config.storage_residency_mode,
+            runtime_capabilities: config.runtime_capabilities,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,6 +160,11 @@ enum SystemTable {
     Properties,
     Indexes,
     Constraints,
+    RuntimeStatus,
+    RuntimeCapabilities,
+    GraphStatistics,
+    ProjectedGraphs,
+    SearchProjectionChangefeed,
     PlanCache,
     SlowQueries,
     StatementSummary,
@@ -609,6 +640,17 @@ fn execute_system_table_scan(
         SystemTable::Properties => property_rows(context.catalog),
         SystemTable::Indexes => index_rows(context.catalog),
         SystemTable::Constraints => constraint_rows(context.catalog),
+        SystemTable::RuntimeStatus => runtime_status_rows(context),
+        SystemTable::RuntimeCapabilities => runtime_capability_rows(context.runtime),
+        SystemTable::GraphStatistics => {
+            graph_statistics_rows(context.catalog, &context.store.statistics())
+        }
+        SystemTable::ProjectedGraphs => {
+            projected_graph_rows(context.store.projected_graph_statuses())
+        }
+        SystemTable::SearchProjectionChangefeed => {
+            search_projection_changefeed_rows(context.store.search_projection_changefeed_status())
+        }
         SystemTable::PlanCache => plan_cache_rows(context.plan_cache_stats),
         SystemTable::SlowQueries => slow_query_rows(context.slow_queries),
         SystemTable::StatementSummary => statement_summary_rows(context.statement_summaries),
@@ -837,6 +879,381 @@ fn constraint_rows(catalog: &Catalog) -> Vec<Row> {
         .collect::<Vec<_>>();
     rows.sort_by_key(|row| row.get("constraint_id").cloned());
     rows
+}
+
+fn runtime_status_rows(context: &SystemSqlContext<'_>) -> Vec<Row> {
+    vec![BTreeMap::from([
+        (
+            "commit_epoch".to_string(),
+            u64_value(context.store.commit_epoch()),
+        ),
+        (
+            "read_only".to_string(),
+            Value::Bool(context.runtime.read_only),
+        ),
+        (
+            "max_read_result_rows".to_string(),
+            option_usize_value(context.runtime.max_read_result_rows),
+        ),
+        (
+            "max_read_result_payload_bytes".to_string(),
+            option_usize_value(context.runtime.max_read_result_payload_bytes),
+        ),
+        (
+            "storage_residency_mode".to_string(),
+            Value::String(
+                storage_residency_mode_name(context.runtime.storage_residency_mode).to_string(),
+            ),
+        ),
+    ])]
+}
+
+fn runtime_capability_rows(runtime: SystemRuntimeSnapshot) -> Vec<Row> {
+    [
+        (
+            "access_control",
+            runtime.runtime_capabilities.access_control,
+        ),
+        (
+            "full_text_search",
+            runtime.runtime_capabilities.full_text_search,
+        ),
+        ("vector_search", runtime.runtime_capabilities.vector_search),
+        (
+            "graph_analytics",
+            runtime.runtime_capabilities.graph_analytics,
+        ),
+        (
+            "background_maintenance",
+            runtime.runtime_capabilities.background_maintenance,
+        ),
+    ]
+    .into_iter()
+    .map(|(capability, enabled)| {
+        BTreeMap::from([
+            (
+                "capability".to_string(),
+                Value::String(capability.to_string()),
+            ),
+            ("enabled".to_string(), Value::Bool(enabled)),
+        ])
+    })
+    .collect()
+}
+
+fn graph_statistics_rows(catalog: &Catalog, statistics: &GraphStatistics) -> Vec<Row> {
+    let mut rows = Vec::with_capacity(
+        2usize
+            .saturating_add(statistics.label_counts.len())
+            .saturating_add(statistics.rel_type_counts.len())
+            .saturating_add(statistics.rel_type_source_counts.len())
+            .saturating_add(statistics.rel_type_target_counts.len())
+            .saturating_add(statistics.path_counts.len())
+            .saturating_add(statistics.path_source_distinct_counts.len())
+            .saturating_add(statistics.path_target_distinct_counts.len())
+            .saturating_add(statistics.bounded_path_counts.len())
+            .saturating_add(statistics.bounded_path_source_distinct_counts.len())
+            .saturating_add(statistics.bounded_path_target_distinct_counts.len())
+            .saturating_add(statistics.property_distinct_counts.len())
+            .saturating_add(statistics.rel_property_distinct_counts.len())
+            .saturating_add(statistics.property_histograms.len())
+            .saturating_add(statistics.rel_property_histograms.len()),
+    );
+    rows.push(graph_statistic_count_row(
+        statistics,
+        "node_count",
+        statistics.node_count,
+    ));
+    rows.push(graph_statistic_count_row(
+        statistics,
+        "relationship_count",
+        statistics.relationship_count,
+    ));
+
+    for (label_id, count) in &statistics.label_counts {
+        let mut row = graph_statistic_count_row(statistics, "label_count", *count);
+        row.insert(
+            "label_name".to_string(),
+            optional_string_value(catalog.label_name(*label_id)),
+        );
+        rows.push(row);
+    }
+    for (rel_type_id, count) in &statistics.rel_type_counts {
+        let mut row = graph_statistic_count_row(statistics, "relationship_type_count", *count);
+        row.insert(
+            "relationship_type_name".to_string(),
+            optional_string_value(catalog.rel_type_name(*rel_type_id)),
+        );
+        rows.push(row);
+    }
+    for (kind, counts) in [
+        (
+            "relationship_source_count",
+            &statistics.rel_type_source_counts,
+        ),
+        (
+            "relationship_target_count",
+            &statistics.rel_type_target_counts,
+        ),
+    ] {
+        for (rel_type_id, count) in counts {
+            let mut row = graph_statistic_count_row(statistics, kind, *count);
+            row.insert(
+                "relationship_type_name".to_string(),
+                optional_string_value(catalog.rel_type_name(*rel_type_id)),
+            );
+            rows.push(row);
+        }
+    }
+    for (kind, counts) in [
+        ("path_count", &statistics.path_counts),
+        (
+            "path_source_distinct_count",
+            &statistics.path_source_distinct_counts,
+        ),
+        (
+            "path_target_distinct_count",
+            &statistics.path_target_distinct_counts,
+        ),
+    ] {
+        for ((source_label_id, rel_type_id, target_label_id), count) in counts {
+            let mut row = graph_statistic_count_row(statistics, kind, *count);
+            populate_path_statistic_names(
+                &mut row,
+                catalog,
+                *source_label_id,
+                *rel_type_id,
+                *target_label_id,
+            );
+            rows.push(row);
+        }
+    }
+    for (kind, counts) in [
+        ("bounded_path_count", &statistics.bounded_path_counts),
+        (
+            "bounded_path_source_distinct_count",
+            &statistics.bounded_path_source_distinct_counts,
+        ),
+        (
+            "bounded_path_target_distinct_count",
+            &statistics.bounded_path_target_distinct_counts,
+        ),
+    ] {
+        for ((source_label_id, rel_type_id, target_label_id, depth), count) in counts {
+            let mut row = graph_statistic_count_row(statistics, kind, *count);
+            populate_path_statistic_names(
+                &mut row,
+                catalog,
+                *source_label_id,
+                *rel_type_id,
+                *target_label_id,
+            );
+            row.insert("depth".to_string(), usize_value(*depth));
+            rows.push(row);
+        }
+    }
+    for ((label_id, property_name), count) in &statistics.property_distinct_counts {
+        let mut row = graph_statistic_count_row(statistics, "node_property_distinct_count", *count);
+        row.insert(
+            "label_name".to_string(),
+            optional_string_value(catalog.label_name(*label_id)),
+        );
+        row.insert(
+            "property_name".to_string(),
+            Value::String(property_name.clone()),
+        );
+        rows.push(row);
+    }
+    for ((rel_type_id, property_name), count) in &statistics.rel_property_distinct_counts {
+        let mut row =
+            graph_statistic_count_row(statistics, "relationship_property_distinct_count", *count);
+        row.insert(
+            "relationship_type_name".to_string(),
+            optional_string_value(catalog.rel_type_name(*rel_type_id)),
+        );
+        row.insert(
+            "property_name".to_string(),
+            Value::String(property_name.clone()),
+        );
+        rows.push(row);
+    }
+    for ((label_id, property_name), histogram) in &statistics.property_histograms {
+        let mut row = graph_statistic_base_row(statistics, "node_property_histogram");
+        row.insert(
+            "label_name".to_string(),
+            optional_string_value(catalog.label_name(*label_id)),
+        );
+        row.insert(
+            "property_name".to_string(),
+            Value::String(property_name.clone()),
+        );
+        row.insert("histogram".to_string(), Value::List(histogram.clone()));
+        row.insert(
+            "sampled".to_string(),
+            Value::Bool(
+                statistics
+                    .sampled_property_histograms
+                    .get(&(*label_id, property_name.clone()))
+                    .copied()
+                    .unwrap_or(false),
+            ),
+        );
+        rows.push(row);
+    }
+    for ((rel_type_id, property_name), histogram) in &statistics.rel_property_histograms {
+        let mut row = graph_statistic_base_row(statistics, "relationship_property_histogram");
+        row.insert(
+            "relationship_type_name".to_string(),
+            optional_string_value(catalog.rel_type_name(*rel_type_id)),
+        );
+        row.insert(
+            "property_name".to_string(),
+            Value::String(property_name.clone()),
+        );
+        row.insert("histogram".to_string(), Value::List(histogram.clone()));
+        row.insert(
+            "sampled".to_string(),
+            Value::Bool(
+                statistics
+                    .sampled_rel_property_histograms
+                    .get(&(*rel_type_id, property_name.clone()))
+                    .copied()
+                    .unwrap_or(false),
+            ),
+        );
+        rows.push(row);
+    }
+    rows
+}
+
+fn graph_statistic_count_row(statistics: &GraphStatistics, kind: &str, count: u64) -> Row {
+    let mut row = graph_statistic_base_row(statistics, kind);
+    row.insert("count".to_string(), u64_value(count));
+    row
+}
+
+fn graph_statistic_base_row(statistics: &GraphStatistics, kind: &str) -> Row {
+    BTreeMap::from([
+        (
+            "statistic_kind".to_string(),
+            Value::String(kind.to_string()),
+        ),
+        (
+            "computed_at_commit_epoch".to_string(),
+            u64_value(statistics.computed_at_commit_epoch),
+        ),
+        (
+            "advanced_statistics_complete".to_string(),
+            Value::Bool(statistics.advanced_statistics_complete),
+        ),
+        (
+            "histogram_sample_limit".to_string(),
+            usize_value(statistics.histogram_sample_limit),
+        ),
+        ("label_name".to_string(), Value::Null),
+        ("relationship_type_name".to_string(), Value::Null),
+        ("source_label_name".to_string(), Value::Null),
+        ("target_label_name".to_string(), Value::Null),
+        ("depth".to_string(), Value::Null),
+        ("property_name".to_string(), Value::Null),
+        ("count".to_string(), Value::Null),
+        ("histogram".to_string(), Value::Null),
+        ("sampled".to_string(), Value::Null),
+    ])
+}
+
+fn populate_path_statistic_names(
+    row: &mut Row,
+    catalog: &Catalog,
+    source_label_id: crate::schema::LabelId,
+    rel_type_id: crate::schema::RelTypeId,
+    target_label_id: crate::schema::LabelId,
+) {
+    row.insert(
+        "source_label_name".to_string(),
+        optional_string_value(catalog.label_name(source_label_id)),
+    );
+    row.insert(
+        "relationship_type_name".to_string(),
+        optional_string_value(catalog.rel_type_name(rel_type_id)),
+    );
+    row.insert(
+        "target_label_name".to_string(),
+        optional_string_value(catalog.label_name(target_label_id)),
+    );
+}
+
+fn projected_graph_rows(statuses: Vec<ProjectedGraphStatus>) -> Vec<Row> {
+    statuses
+        .into_iter()
+        .map(|status| {
+            BTreeMap::from([
+                ("name".to_string(), Value::String(status.name)),
+                (
+                    "node_labels".to_string(),
+                    Value::List(status.node_labels.into_iter().map(Value::String).collect()),
+                ),
+                (
+                    "relationship_types".to_string(),
+                    Value::List(status.rel_types.into_iter().map(Value::String).collect()),
+                ),
+                (
+                    "projection_epoch".to_string(),
+                    option_u64_value(status.projection_epoch),
+                ),
+                (
+                    "commit_epoch".to_string(),
+                    option_u64_value(status.commit_epoch),
+                ),
+                (
+                    "node_count".to_string(),
+                    option_usize_value(status.node_count),
+                ),
+                (
+                    "edge_count".to_string(),
+                    option_usize_value(status.edge_count),
+                ),
+                ("reusable".to_string(), Value::Bool(status.reusable)),
+            ])
+        })
+        .collect()
+}
+
+fn search_projection_changefeed_rows(status: SearchProjectionChangefeedStatus) -> Vec<Row> {
+    vec![BTreeMap::from([
+        (
+            "graph_commit_epoch".to_string(),
+            u64_value(status.graph_commit_epoch),
+        ),
+        (
+            "resume_floor_commit_epoch".to_string(),
+            u64_value(status.resume_floor_commit_epoch),
+        ),
+        (
+            "oldest_retained_mutation_id".to_string(),
+            option_u64_value(
+                status
+                    .oldest_retained_mutation_id
+                    .map(|id| id.commit_epoch()),
+            ),
+        ),
+        (
+            "newest_retained_mutation_id".to_string(),
+            option_u64_value(
+                status
+                    .newest_retained_mutation_id
+                    .map(|id| id.commit_epoch()),
+            ),
+        ),
+        (
+            "retained_mutation_count".to_string(),
+            usize_value(status.retained_mutation_count),
+        ),
+        (
+            "restart_recoverable".to_string(),
+            Value::Bool(status.restart_recoverable),
+        ),
+    ])]
 }
 
 fn optional_string_value(value: Option<&str>) -> Value {
@@ -1138,6 +1555,13 @@ fn system_table(select: &SelectStatement) -> Result<SystemTable> {
         (Some("system"), "properties") => Ok(SystemTable::Properties),
         (Some("system"), "indexes") => Ok(SystemTable::Indexes),
         (Some("system"), "constraints") => Ok(SystemTable::Constraints),
+        (Some("system"), "runtime_status") => Ok(SystemTable::RuntimeStatus),
+        (Some("system"), "runtime_capabilities") => Ok(SystemTable::RuntimeCapabilities),
+        (Some("system"), "graph_statistics") => Ok(SystemTable::GraphStatistics),
+        (Some("system"), "projected_graphs") => Ok(SystemTable::ProjectedGraphs),
+        (Some("system"), "search_projection_changefeed") => {
+            Ok(SystemTable::SearchProjectionChangefeed)
+        }
         (Some("system"), "plan_cache") => Ok(SystemTable::PlanCache),
         (Some("system"), "slow_queries") => Ok(SystemTable::SlowQueries),
         (Some("system"), "statement_summary") => Ok(SystemTable::StatementSummary),
@@ -1197,6 +1621,11 @@ fn validate_column(table: SystemTable, column: &SqlColumnRef) -> Result<()> {
             SystemTable::Properties => "properties",
             SystemTable::Indexes => "indexes",
             SystemTable::Constraints => "constraints",
+            SystemTable::RuntimeStatus => "runtime_status",
+            SystemTable::RuntimeCapabilities => "runtime_capabilities",
+            SystemTable::GraphStatistics => "graph_statistics",
+            SystemTable::ProjectedGraphs => "projected_graphs",
+            SystemTable::SearchProjectionChangefeed => "search_projection_changefeed",
             SystemTable::PlanCache => "plan_cache",
             SystemTable::SlowQueries => "slow_queries",
             SystemTable::StatementSummary => "statement_summary",
@@ -1245,6 +1674,47 @@ fn table_columns(table: SystemTable) -> &'static [&'static str] {
             "subject_name",
             "property_name",
             "constraint_kind",
+        ],
+        SystemTable::RuntimeStatus => &[
+            "commit_epoch",
+            "read_only",
+            "max_read_result_rows",
+            "max_read_result_payload_bytes",
+            "storage_residency_mode",
+        ],
+        SystemTable::RuntimeCapabilities => &["capability", "enabled"],
+        SystemTable::GraphStatistics => &[
+            "statistic_kind",
+            "computed_at_commit_epoch",
+            "advanced_statistics_complete",
+            "histogram_sample_limit",
+            "label_name",
+            "relationship_type_name",
+            "source_label_name",
+            "target_label_name",
+            "depth",
+            "property_name",
+            "count",
+            "histogram",
+            "sampled",
+        ],
+        SystemTable::ProjectedGraphs => &[
+            "name",
+            "node_labels",
+            "relationship_types",
+            "projection_epoch",
+            "commit_epoch",
+            "node_count",
+            "edge_count",
+            "reusable",
+        ],
+        SystemTable::SearchProjectionChangefeed => &[
+            "graph_commit_epoch",
+            "resume_floor_commit_epoch",
+            "oldest_retained_mutation_id",
+            "newest_retained_mutation_id",
+            "retained_mutation_count",
+            "restart_recoverable",
         ],
         SystemTable::PlanCache => &["metric", "value"],
         SystemTable::SlowQueries => &[
@@ -1295,6 +1765,10 @@ fn option_usize_value(value: Option<usize>) -> Value {
     value.map(usize_value).unwrap_or(Value::Null)
 }
 
+fn option_u64_value(value: Option<u64>) -> Value {
+    value.map(u64_value).unwrap_or(Value::Null)
+}
+
 fn usize_value(value: usize) -> Value {
     Value::Int(i64::try_from(value).unwrap_or(i64::MAX))
 }
@@ -1305,6 +1779,14 @@ fn u32_value(value: u32) -> Value {
 
 fn u64_value(value: u64) -> Value {
     Value::Int(i64::try_from(value).unwrap_or(i64::MAX))
+}
+
+const fn storage_residency_mode_name(mode: StorageResidencyMode) -> &'static str {
+    match mode {
+        StorageResidencyMode::Auto => "auto",
+        StorageResidencyMode::Materialized => "materialized",
+        StorageResidencyMode::OutOfCore => "out_of_core",
+    }
 }
 
 fn avg_i64(total: i64, count: i64) -> i64 {
@@ -1345,6 +1827,7 @@ mod tests {
     #[test]
     fn query_plan_cache_virtual_table_with_predicate_and_projection() {
         let catalog = Catalog::default();
+        let store = GraphStore::default();
         let stats = PlanCacheStats {
             max_entries: Some(128),
             entries: 3,
@@ -1363,6 +1846,8 @@ mod tests {
             None,
             &SystemSqlContext {
                 catalog: &catalog,
+                store: &store,
+                runtime: SystemRuntimeSnapshot::from_config(&DatabaseConfig::default()),
                 plan_cache_stats: &stats,
                 slow_queries: &[],
                 statement_summaries: &[],
@@ -1379,6 +1864,7 @@ mod tests {
     #[test]
     fn query_system_table_with_postgres_parameters() {
         let catalog = Catalog::default();
+        let store = GraphStore::default();
         let stats = PlanCacheStats {
             max_entries: Some(128),
             entries: 3,
@@ -1392,6 +1878,8 @@ mod tests {
         };
         let context = SystemSqlContext {
             catalog: &catalog,
+            store: &store,
+            runtime: SystemRuntimeSnapshot::from_config(&DatabaseConfig::default()),
             plan_cache_stats: &stats,
             slow_queries: &[],
             statement_summaries: &[],
@@ -1424,6 +1912,7 @@ mod tests {
     #[test]
     fn query_system_table_rejects_parameter_contract_mismatch() {
         let catalog = Catalog::default();
+        let store = GraphStore::default();
         let stats = PlanCacheStats {
             max_entries: None,
             entries: 0,
@@ -1437,6 +1926,8 @@ mod tests {
         };
         let context = SystemSqlContext {
             catalog: &catalog,
+            store: &store,
+            runtime: SystemRuntimeSnapshot::from_config(&DatabaseConfig::default()),
             plan_cache_stats: &stats,
             slow_queries: &[],
             statement_summaries: &[],
@@ -1468,6 +1959,7 @@ mod tests {
     #[test]
     fn query_slow_queries_pushes_filter_order_and_limit_into_scan() {
         let catalog = Catalog::default();
+        let store = GraphStore::default();
         let stats = PlanCacheStats {
             max_entries: None,
             entries: 0,
@@ -1538,6 +2030,8 @@ mod tests {
             None,
             &SystemSqlContext {
                 catalog: &catalog,
+                store: &store,
+                runtime: SystemRuntimeSnapshot::from_config(&DatabaseConfig::default()),
                 plan_cache_stats: &stats,
                 slow_queries: &records,
                 statement_summaries: &[],
@@ -1557,6 +2051,7 @@ mod tests {
     #[test]
     fn query_catalog_virtual_tables_expose_schema_without_typed_getters() {
         let mut catalog = Catalog::default();
+        let store = GraphStore::default();
         let memory_label = catalog.get_or_create_label("Memory");
         let memory_table = catalog.get_or_create_table(TableKind::Node, "Memory");
         catalog.get_or_create_property(
@@ -1580,6 +2075,8 @@ mod tests {
         };
         let context = SystemSqlContext {
             catalog: &catalog,
+            store: &store,
+            runtime: SystemRuntimeSnapshot::from_config(&DatabaseConfig::default()),
             plan_cache_stats: &stats,
             slow_queries: &[],
             statement_summaries: &[],
