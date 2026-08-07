@@ -8115,6 +8115,19 @@ impl NowledgeMemEmbeddedStoreHandle {
         }
     }
 
+    /// Executes a caller-owned group of bounded Cypher reads against one
+    /// immutable graph snapshot.
+    pub fn with_read_transaction<T>(
+        &self,
+        max_estimated_payload_bytes: usize,
+        operation: impl FnOnce(&mut crate::DatabaseReadTransaction) -> Result<T>,
+    ) -> Result<T> {
+        let _permit = self.admit_typed_read(max_estimated_payload_bytes)?;
+        let store = self.read_store()?;
+        let mut transaction = store.graph().database().begin_read_transaction();
+        operation(&mut transaction)
+    }
+
     pub fn graph_lightning_initial_import_apply_with_document_identities(
         &self,
         encoded_graph_stream: &str,
@@ -8644,6 +8657,33 @@ impl NowledgeMemEmbeddedStoreHandle {
             .try_admit_runtime(RuntimeWorkRequest::foreground_mutation(
                 estimated_memory_bytes,
             ))
+    }
+
+    fn admit_typed_read(&self, max_estimated_payload_bytes: usize) -> Result<RuntimePermit> {
+        let store = self.read_store()?;
+        let config = store.graph.database().config();
+        let configured_result_bytes = config.max_read_result_payload_bytes.ok_or_else(|| {
+            SkeinError::Execution(
+                "admitted typed read requires max_read_result_payload_bytes".to_string(),
+            )
+        })?;
+        if max_estimated_payload_bytes > configured_result_bytes {
+            return Err(SkeinError::Execution(format!(
+                "typed read payload budget {max_estimated_payload_bytes} exceeds configured limit {configured_result_bytes}"
+            )));
+        }
+        let result_bytes = u64::try_from(max_estimated_payload_bytes).unwrap_or(u64::MAX);
+        let working_memory_bytes =
+            u64::try_from(config.execution_memory.blocking_operator_bytes.get())
+                .unwrap_or(u64::MAX);
+        store.graph.try_admit_runtime(
+            RuntimeWorkRequest::foreground_query(
+                working_memory_bytes.saturating_add(result_bytes),
+                result_bytes,
+            )
+            .with_io_slots(1)
+            .with_blocking(true),
+        )
     }
 
     fn admit_typed_maintenance(
@@ -14810,6 +14850,41 @@ mod tests {
                 .get(),
             2
         );
+    }
+
+    #[test]
+    fn embedded_handle_read_transaction_runs_against_one_admitted_snapshot() {
+        let graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::WritableCutover);
+        let handle =
+            NowledgeMemEmbeddedStoreHandle::new(NowledgeMemEmbeddedStore::new(graph, None));
+        handle
+            .query_with_report("CREATE (:Memory {id: 'memory-1'})")
+            .unwrap();
+
+        let (epoch, rows) = handle
+            .with_read_transaction(64 * 1024, |transaction| {
+                let epoch = transaction.commit_epoch();
+                let rows = transaction
+                    .query_with_params_bounded(
+                        "MATCH (m:Memory) RETURN m.id AS id LIMIT 2",
+                        &BTreeMap::new(),
+                        Some(2),
+                    )?
+                    .rows;
+                Ok((epoch, rows))
+            })
+            .unwrap();
+
+        assert_eq!(epoch, 1);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].get("id"),
+            Some(&Value::String("memory-1".to_string()))
+        );
+        let snapshot = handle.runtime_governor_snapshot().unwrap();
+        assert_eq!(snapshot.active_foreground_tasks, 0);
+        assert_eq!(snapshot.admitted_memory_bytes, 0);
     }
 
     #[test]
