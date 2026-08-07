@@ -35,12 +35,12 @@ fn read_transaction_keeps_snapshot_before_later_commit() {
 }
 
 #[test]
-fn read_transaction_keeps_typed_knowledge_snapshot() {
+fn read_transaction_keeps_parameterized_query_snapshot() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 'root', title: 'Before snapshot'})-[:LINKS]->(:Entity {id: 'mid', name: 'Mid'})")
             .unwrap();
 
-    let read_tx = db.begin_read_transaction();
+    let mut read_tx = db.begin_read_transaction();
     let leaf = db
         .store
         .create_node(
@@ -56,159 +56,115 @@ fn read_transaction_keeps_typed_knowledge_snapshot() {
         .create_relationship(&mut db.catalog, NodeId(0), leaf, "LINKS", BTreeMap::new())
         .unwrap();
 
+    let parameters = BTreeMap::from([("id".to_string(), Value::String("root".to_string()))]);
     let entity = read_tx
-        .test_query_entity(&KnowledgeEntityRequest {
-            label: "Memory".to_string(),
-            external_id: "root".to_string(),
-        })
+        .query_with_params(
+            "MATCH (m:Memory) WHERE m.id = $id RETURN m.title AS title",
+            &parameters,
+        )
         .unwrap();
-    assert_eq!(entity.graph_commit_epoch, 1);
     assert_eq!(
-        entity.entity.as_ref().unwrap().properties.get("title"),
+        entity.rows[0].get("title"),
         Some(&Value::String("Before snapshot".to_string()))
     );
     let scoped_entity = read_tx
-        .test_query_scoped_entity(&KnowledgeScopedEntityRequest {
-            entity: KnowledgeEntityRequest {
-                label: "Memory".to_string(),
-                external_id: "root".to_string(),
-            },
-            metadata_filters: BTreeMap::from([(
-                "title".to_string(),
-                "Before snapshot".to_string(),
-            )]),
-        })
+        .query_with_params(
+            "MATCH (m:Memory) WHERE m.id = $id AND m.title = $title RETURN m.id AS id",
+            &BTreeMap::from([
+                ("id".to_string(), Value::String("root".to_string())),
+                (
+                    "title".to_string(),
+                    Value::String("Before snapshot".to_string()),
+                ),
+            ]),
+        )
         .unwrap();
-    assert_eq!(scoped_entity.graph_commit_epoch, 1);
-    assert!(scoped_entity.entity.is_some());
+    assert_eq!(scoped_entity.rows.len(), 1);
     let entity_batch = read_tx
-        .test_query_entity_batch(&KnowledgeEntityBatchRequest {
-            entities: vec![
-                KnowledgeEntityRequest {
-                    label: "Memory".to_string(),
-                    external_id: "root".to_string(),
-                },
-                KnowledgeEntityRequest {
-                    label: "Entity".to_string(),
-                    external_id: "leaf".to_string(),
-                },
-            ],
-        })
+        .query_with_params(
+            "MATCH (n) WHERE n.id IN $ids RETURN n.id AS id ORDER BY id",
+            &BTreeMap::from([(
+                "ids".to_string(),
+                Value::List(vec![
+                    Value::String("root".to_string()),
+                    Value::String("leaf".to_string()),
+                ]),
+            )]),
+        )
         .unwrap();
-    assert_eq!(entity_batch.graph_commit_epoch, 1);
-    assert_eq!(entity_batch.found_count, 1);
-    assert_eq!(entity_batch.missing_count, 1);
-    assert_eq!(entity_batch.filtered_out_count, 0);
-    assert!(entity_batch.entities[0].is_some());
-    assert!(entity_batch.entities[1].is_none());
-    let property_batch = read_tx
-        .test_query_property_batch(&KnowledgePropertyBatchRequest {
-            entities: vec![
-                KnowledgeEntityRequest {
-                    label: "Memory".to_string(),
-                    external_id: "root".to_string(),
-                },
-                KnowledgeEntityRequest {
-                    label: "Entity".to_string(),
-                    external_id: "leaf".to_string(),
-                },
-            ],
-            property_names: vec!["title".to_string(), "name".to_string()],
-        })
-        .unwrap();
-    assert_eq!(property_batch.graph_commit_epoch, 1);
-    assert_eq!(property_batch.found_count, 1);
-    assert_eq!(property_batch.missing_count, 1);
-    assert_eq!(property_batch.filtered_out_count, 0);
+    assert_eq!(entity_batch.rows.len(), 1);
     assert_eq!(
-        property_batch.rows[0].properties.get("title"),
-        Some(&Some(Value::String("Before snapshot".to_string())))
+        entity_batch.rows[0].get("id"),
+        Some(&Value::String("root".to_string()))
     );
-    assert_eq!(property_batch.rows[1].properties.get("name"), Some(&None));
+    let property_batch = read_tx
+        .query_with_params(
+            "MATCH (n) WHERE n.id IN $ids RETURN n.id AS id, n.title AS title, n.name AS name",
+            &BTreeMap::from([(
+                "ids".to_string(),
+                Value::List(vec![
+                    Value::String("root".to_string()),
+                    Value::String("leaf".to_string()),
+                ]),
+            )]),
+        )
+        .unwrap();
+    assert_eq!(property_batch.rows.len(), 1);
+    assert_eq!(
+        property_batch.rows[0].get("title"),
+        Some(&Value::String("Before snapshot".to_string()))
+    );
 
     let snapshot_neighbors = read_tx
-        .test_query_neighbors(&KnowledgeNeighborsRequest {
-            label: "Memory".to_string(),
-            external_id: "root".to_string(),
-            relationship_type: Some("LINKS".to_string()),
-            direction: KnowledgeNeighborDirection::Outgoing,
-            limit: 8,
-            max_hops: 1,
-        })
+        .query_with_params(
+            "MATCH (m:Memory)-[:LINKS]->(e:Entity) WHERE m.id = $id \
+             RETURN e.id AS id ORDER BY id LIMIT 8",
+            &parameters,
+        )
         .unwrap();
-    assert_eq!(snapshot_neighbors.graph_commit_epoch, 1);
-    assert_eq!(snapshot_neighbors.paths.len(), 1);
+    assert_eq!(snapshot_neighbors.rows.len(), 1);
     assert_eq!(
-        snapshot_neighbors.paths[0].target_external_id.as_deref(),
-        Some("mid")
-    );
-    let snapshot_relationships = read_tx
-        .test_query_relationships(&KnowledgeRelationshipsRequest {
-            seeds: vec![KnowledgeEntityRequest {
-                label: "Memory".to_string(),
-                external_id: "root".to_string(),
-            }],
-            relationship_type: Some("LINKS".to_string()),
-            direction: KnowledgeNeighborDirection::Outgoing,
-            limit_per_seed: 8,
-        })
-        .unwrap();
-    assert_eq!(snapshot_relationships.graph_commit_epoch, 1);
-    assert_eq!(snapshot_relationships.relationship_count, 1);
-    assert_eq!(
-        snapshot_relationships.groups[0].relationships[0]
-            .target_external_id
-            .as_deref(),
-        Some("mid")
+        snapshot_neighbors.rows[0].get("id"),
+        Some(&Value::String("mid".to_string()))
     );
 
     let latest_neighbors = db
-        .test_query_neighbors(&KnowledgeNeighborsRequest {
-            label: "Memory".to_string(),
-            external_id: "root".to_string(),
-            relationship_type: Some("LINKS".to_string()),
-            direction: KnowledgeNeighborDirection::Outgoing,
-            limit: 8,
-            max_hops: 1,
-        })
+        .query_with_params(
+            "MATCH (m:Memory)-[:LINKS]->(e:Entity) WHERE m.id = $id \
+             RETURN e.id AS id ORDER BY id LIMIT 8",
+            &parameters,
+        )
         .unwrap();
-    assert_eq!(latest_neighbors.graph_commit_epoch, 3);
-    assert_eq!(latest_neighbors.paths.len(), 2);
+    assert_eq!(latest_neighbors.rows.len(), 2);
     assert!(latest_neighbors
-        .paths
+        .rows
         .iter()
-        .any(|path| path.target_external_id.as_deref() == Some("leaf")));
+        .any(|row| row.get("id") == Some(&Value::String("leaf".to_string()))));
 
     let snapshot_paths = read_tx
-        .test_query_paths(&KnowledgePathRequest {
-            source_label: "Memory".to_string(),
-            source_external_id: "root".to_string(),
-            target_label: "Entity".to_string(),
-            target_external_id: "leaf".to_string(),
-            relationship_type: Some("LINKS".to_string()),
-            direction: KnowledgeNeighborDirection::Outgoing,
-            max_hops: 1,
-            limit: 4,
-        })
+        .query_with_params(
+            "MATCH (m:Memory)-[:LINKS]->(e:Entity) \
+             WHERE m.id = $source_id AND e.id = $target_id RETURN e.id AS id LIMIT 4",
+            &BTreeMap::from([
+                ("source_id".to_string(), Value::String("root".to_string())),
+                ("target_id".to_string(), Value::String("leaf".to_string())),
+            ]),
+        )
         .unwrap();
-    assert!(snapshot_paths.paths.is_empty());
+    assert!(snapshot_paths.rows.is_empty());
 
     let snapshot_subgraph = read_tx
-        .test_query_subgraph(&KnowledgeSubgraphRequest {
-            label: "Memory".to_string(),
-            external_id: "root".to_string(),
-            relationship_type: Some("LINKS".to_string()),
-            direction: KnowledgeNeighborDirection::Outgoing,
-            max_hops: 1,
-            node_limit: 8,
-            relationship_limit: 8,
-        })
+        .query_with_params(
+            "MATCH (m:Memory)-[:LINKS]->(e:Entity) WHERE m.id = $id \
+             RETURN m.id AS source_id, e.id AS target_id LIMIT 8",
+            &parameters,
+        )
         .unwrap();
-    assert_eq!(snapshot_subgraph.nodes.len(), 2);
-    assert!(snapshot_subgraph
-        .nodes
-        .iter()
-        .all(|node| node.external_id.as_deref() != Some("leaf")));
+    assert_eq!(snapshot_subgraph.rows.len(), 1);
+    assert_eq!(
+        snapshot_subgraph.rows[0].get("target_id"),
+        Some(&Value::String("mid".to_string()))
+    );
 }
 
 #[test]

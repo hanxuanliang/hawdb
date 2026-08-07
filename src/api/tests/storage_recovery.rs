@@ -187,7 +187,7 @@ fn typed_reads_and_mutations_include_checkpointed_canonical_rows() {
         assert_eq!(residency.delta_relationship_count, 0);
 
         let entity = db
-            .test_query_entity(&KnowledgeEntityRequest {
+            .query_entity_via_cypher(&KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "memory:one".to_string(),
             })
@@ -198,7 +198,7 @@ fn typed_reads_and_mutations_include_checkpointed_canonical_rows() {
         );
 
         let properties = db
-            .test_query_property_batch(&KnowledgePropertyBatchRequest {
+            .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
                 entities: vec![KnowledgeEntityRequest {
                     label: "Entity".to_string(),
                     external_id: "entity:rust".to_string(),
@@ -212,7 +212,7 @@ fn typed_reads_and_mutations_include_checkpointed_canonical_rows() {
         );
 
         let neighbors = db
-            .test_query_neighbors(&KnowledgeNeighborsRequest {
+            .query_neighbors_via_cypher(&KnowledgeNeighborsRequest {
                 label: "Memory".to_string(),
                 external_id: "memory:one".to_string(),
                 relationship_type: Some("LINKS".to_string()),
@@ -245,7 +245,7 @@ fn typed_reads_and_mutations_include_checkpointed_canonical_rows() {
         assert_eq!(created.created_relationship_count, 1);
 
         let relationships = db
-            .test_query_relationships(&KnowledgeRelationshipsRequest {
+            .query_relationships_via_cypher(&KnowledgeRelationshipsRequest {
                 seeds: vec![KnowledgeEntityRequest {
                     label: "Memory".to_string(),
                     external_id: "memory:one".to_string(),
@@ -262,7 +262,7 @@ fn typed_reads_and_mutations_include_checkpointed_canonical_rows() {
     {
         let db = Database::open_with_config(&path, config).unwrap();
         let neighbors = db
-            .test_query_neighbors(&KnowledgeNeighborsRequest {
+            .query_neighbors_via_cypher(&KnowledgeNeighborsRequest {
                 label: "Memory".to_string(),
                 external_id: "memory:one".to_string(),
                 relationship_type: Some("MENTIONS".to_string()),
@@ -302,7 +302,7 @@ fn typed_read_fails_closed_when_an_out_of_core_segment_is_corrupted() {
     std::fs::write(&canonical_path, bytes).unwrap();
 
     let error = db
-        .test_query_entity(&KnowledgeEntityRequest {
+        .query_entity_via_cypher(&KnowledgeEntityRequest {
             label: "Memory".to_string(),
             external_id: "memory:one".to_string(),
         })

@@ -1,4 +1,4 @@
-use super::super::*;
+use super::super::super::*;
 
 type EntityKey = (String, String);
 pub(in crate::api) type KnowledgeEntityLookup = (u64, BTreeMap<EntityKey, KnowledgeEntity>);
@@ -279,12 +279,14 @@ mod tests {
         )
         .unwrap();
 
-        let output = db
-            .test_query_entity_details(&KnowledgeEntityDetailsRequest {
+        let output = knowledge_entity_details_via_query_runtime(
+            &db,
+            &KnowledgeEntityDetailsRequest {
                 label: "Entity".to_string(),
                 external_id: "details-entity".to_string(),
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
 
         assert_eq!(
             output.entity.unwrap().external_id.as_deref(),

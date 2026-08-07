@@ -1,4 +1,5 @@
-use super::super::*;
+use super::super::super::*;
+use super::entities::lookup_entities_via_query_runtime_strict;
 
 pub(in crate::api) fn knowledge_property_batch_via_query_runtime(
     db: &Database,

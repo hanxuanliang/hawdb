@@ -65,7 +65,7 @@ fn deletes_knowledge_relationship_batch_through_typed_api() {
     assert_eq!(output.rows[2].target_node_id, Some(1));
 
     let relationships = db
-        .test_query_relationships(&KnowledgeRelationshipsRequest {
+        .query_relationships_via_cypher(&KnowledgeRelationshipsRequest {
             seeds: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -83,7 +83,7 @@ fn deletes_knowledge_relationship_batch_through_typed_api() {
         .unwrap();
     assert_eq!(relationships.relationship_count, 0);
     assert!(db
-        .test_query_entity(&KnowledgeEntityRequest {
+        .query_entity_via_cypher(&KnowledgeEntityRequest {
             label: "Label".to_string(),
             external_id: "label_1".to_string(),
         })
@@ -123,7 +123,7 @@ fn typed_knowledge_relationship_batch_delete_filters_relationship_properties() {
     assert_eq!(output.matched_count, 1);
     assert_eq!(output.deleted_relationship_count, 1);
     let relationships = db
-        .test_query_relationships(&KnowledgeRelationshipsRequest {
+        .query_relationships_via_cypher(&KnowledgeRelationshipsRequest {
             seeds: vec![KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "memory_1".to_string(),
@@ -197,7 +197,7 @@ fn scoped_knowledge_relationship_batch_delete_does_not_write_filtered_endpoint()
     assert!(!output.rows[1].matched);
     assert!(output.rows[1].source_filtered_out);
     let relationships = db
-        .test_query_relationships(&KnowledgeRelationshipsRequest {
+        .query_relationships_via_cypher(&KnowledgeRelationshipsRequest {
             seeds: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -365,7 +365,7 @@ fn typed_knowledge_relationship_batch_delete_persists_as_one_wal_batch_and_repla
     {
         let db = Database::open(&path).unwrap();
         let output = db
-            .test_query_relationships(&KnowledgeRelationshipsRequest {
+            .query_relationships_via_cypher(&KnowledgeRelationshipsRequest {
                 seeds: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),

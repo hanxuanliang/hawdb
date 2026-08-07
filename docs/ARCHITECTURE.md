@@ -550,12 +550,14 @@ The preferred front door for new Nowledge integration is parameterized Cypher
 through the query runtime. `NowledgeGraphAdapter` keeps
 `NowledgeGraphStatement` values for query, explain, and grouped mutation
 transaction execution through the same planner and storage paths as `Database`.
-Older query-shape-specific typed APIs are compatibility surfaces for existing
-callers and fixture coverage; they should not expand unless an active migration
-caller cannot be expressed safely through Cypher. This keeps the compatibility
-boundary parameterized and reviewable without adding an ACL layer to the
-embedded built-in core, while preserving the rule that search projections stay
-outside canonical graph state.
+Single-query knowledge read facades are not part of `Database` or
+`DatabaseReadTransaction`. Compatibility response-shape tests execute their
+parameterized Cypher through a test-only extension, while application callers
+use the admitted query runtime directly. Typed operations remain only for
+grouped WAL atomicity, recovery, admission, generation publication, and bounded
+multi-statement workflows. This keeps the compatibility boundary reviewable
+without adding an ACL layer to the embedded built-in core, while preserving the
+rule that search projections stay outside canonical graph state.
 
 Mem integration should start with side-by-side writes to Kuzu/Ladybug and
 Skein, then select the read engine through runtime configuration. Kuzu/Ladybug

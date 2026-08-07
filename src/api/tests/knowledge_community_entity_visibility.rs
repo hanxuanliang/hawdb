@@ -30,7 +30,7 @@ fn reads_community_entity_visibility_for_wiki_anchor_shapes() {
     let graph_commit_epoch = db.store.commit_epoch();
 
     let visibility = db
-        .test_query_community_entity_visibility(&KnowledgeCommunityEntityVisibilityRequest {
+        .query_community_entity_visibility_via_cypher(&KnowledgeCommunityEntityVisibilityRequest {
             community_ids: vec![Value::Int(7), Value::Int(8)],
             limit: 0,
         })
@@ -82,7 +82,7 @@ fn reads_community_entity_visibility_for_wiki_anchor_shapes() {
     assert!(visibility.rows[3].memory_is_latest);
 
     let cached_visibility = db
-        .test_query_community_entity_visibility(&KnowledgeCommunityEntityVisibilityRequest {
+        .query_community_entity_visibility_via_cypher(&KnowledgeCommunityEntityVisibilityRequest {
             community_ids: vec![Value::Int(7), Value::Int(8)],
             limit: 0,
         })
@@ -91,25 +91,6 @@ fn reads_community_entity_visibility_for_wiki_anchor_shapes() {
     let stats = db.plan_cache_stats();
     assert_eq!(stats.misses, 2);
     assert_eq!(stats.hits, 2);
-
-    let tx = db.begin_read_transaction();
-    db.query("CREATE (:Memory {id: 'memory_alpha_after', metadata: '{\"rank\":4}'})")
-        .unwrap();
-    db.query("MATCH (m:Memory {id: 'memory_alpha_after'}), (e:Entity {id: 'entity_alpha'}) CREATE (m)-[:MENTIONS]->(e)")
-        .unwrap();
-    let snapshot = tx
-        .test_query_community_entity_visibility(&KnowledgeCommunityEntityVisibilityRequest {
-            community_ids: vec![Value::Int(7)],
-            limit: 2,
-        })
-        .unwrap();
-    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot.matched_row_count, 3);
-    assert_eq!(snapshot.returned_count, 2);
-    assert_eq!(
-        snapshot.rows[0].memory_id.as_deref(),
-        Some("memory_alpha_new")
-    );
 }
 
 #[test]
@@ -117,7 +98,7 @@ fn community_entity_visibility_rejects_invalid_scope() {
     let db = Database::new();
 
     let empty_ids_error = db
-        .test_query_community_entity_visibility(&KnowledgeCommunityEntityVisibilityRequest {
+        .query_community_entity_visibility_via_cypher(&KnowledgeCommunityEntityVisibilityRequest {
             community_ids: Vec::new(),
             limit: 0,
         })
@@ -127,7 +108,7 @@ fn community_entity_visibility_rejects_invalid_scope() {
         .contains("non-empty community ids"));
 
     let null_id_error = db
-        .test_query_community_entity_visibility(&KnowledgeCommunityEntityVisibilityRequest {
+        .query_community_entity_visibility_via_cypher(&KnowledgeCommunityEntityVisibilityRequest {
             community_ids: vec![Value::Null],
             limit: 0,
         })

@@ -7,7 +7,7 @@ fn retrieves_knowledge_entity_without_search_projection() {
         .unwrap();
 
     let output = db
-        .test_query_entity(&KnowledgeEntityRequest {
+        .query_entity_via_cypher(&KnowledgeEntityRequest {
             label: "Entity".to_string(),
             external_id: "entity_1".to_string(),
         })
@@ -34,7 +34,7 @@ fn scoped_knowledge_entity_filters_by_metadata() {
     .unwrap();
 
     let scoped = db
-        .test_query_scoped_entity(&KnowledgeScopedEntityRequest {
+        .query_scoped_entity_via_cypher(&KnowledgeScopedEntityRequest {
             entity: KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "memory_1".to_string(),
@@ -51,7 +51,7 @@ fn scoped_knowledge_entity_filters_by_metadata() {
     assert_eq!(entity.external_id.as_deref(), Some("memory_1"));
 
     let filtered = db
-        .test_query_scoped_entity(&KnowledgeScopedEntityRequest {
+        .query_scoped_entity_via_cypher(&KnowledgeScopedEntityRequest {
             entity: KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "memory_1".to_string(),
@@ -73,7 +73,7 @@ fn retrieves_knowledge_entity_batch_in_request_order() {
         .unwrap();
 
     let output = db
-        .test_query_entity_batch(&KnowledgeEntityBatchRequest {
+        .query_entity_batch_via_cypher(&KnowledgeEntityBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -139,8 +139,8 @@ fn knowledge_entity_batch_uses_query_runtime_plan_cache() {
         ],
     };
 
-    let first = db.test_query_entity_batch(&request).unwrap();
-    let second = db.test_query_entity_batch(&request).unwrap();
+    let first = db.query_entity_batch_via_cypher(&request).unwrap();
+    let second = db.query_entity_batch_via_cypher(&request).unwrap();
 
     assert_eq!(first, second);
     assert_eq!(first.found_count, 2);

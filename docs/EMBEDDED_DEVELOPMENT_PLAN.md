@@ -159,19 +159,16 @@ Exit gate:
 - missing parameters fail before mutation or storage access
 - the first read and mutation fixture families match Ladybug behavior
 
-Status: parameter binding is implemented. `NowledgeGraphAdapter` now exposes a
+Status: parameter binding is implemented. `NowledgeGraphAdapter` exposes a
 parameterized query front door for query, explain, work-request inspection, and
 grouped mutation transaction execution without requiring raw string
-interpolation. The remaining query-shape-specific typed knowledge facade is a
-legacy compatibility surface on `Database`, not the adapter extension model. It
-currently covers endpoint-known entity lookup,
-create/upsert/update/delete, relationship lookup/create/upsert/update/delete,
-normalized-space batch moves, memory access/click-dwell touches, ordered batch
-mutation, source memory-count adjustments, source lifecycle updates, source
-metadata updates, source parsed metadata updates, parsed Source creates, source
-detail/count/id-list reads, source version lookups, Source revision-edge
-creates, Source detach deletes, and grouped WAL commits for eligible lifecycle/
-metadata/parser/create/revision/delete rows.
+interpolation. Query-shape-specific knowledge read methods have been removed
+from `Database` and `DatabaseReadTransaction`; compatibility response-shape
+tests execute the same bounded parameterized Cypher through test-only support.
+Stable typed mutations remain for entity and relationship lifecycle work,
+normalized-space moves, memory access and content updates, source lifecycle and
+metadata work, parsed Source and revision creation, deletes, and grouped WAL
+commits.
 Memory content/edit updates are exposed as a typed batch for Nowledge content,
 title, semantic field, scoring, source, normalized-space, review status,
 extraction method, and `reindex_needed` writes.
@@ -1291,10 +1288,10 @@ Scope:
   storage, search, compatibility, and executor boundaries; use internal module
   splits first when public contracts are still moving, and promote boundaries to
   workspace packages only when the dependency direction is acyclic and stable
-- avoid growing query-shape-specific typed facade DTOs; keep existing typed
-  surfaces only where they preserve migration compatibility, and route new
-  integration work through parameterized Cypher, query reports, and the shared
-  planner/executor boundary
+- keep query-shape-specific read DTOs out of the public facade; retain typed
+  surfaces only for grouped WAL, recovery, admission, generation publication,
+  and bounded multi-statement contracts, and route integration work through
+  parameterized Cypher, query reports, and the shared planner/executor boundary
 - `skein-cypher` owns syntax-only AST and parser modules, while root
   `src/cypher.rs` remains a compatibility re-export facade
 - Chryso-style rule and cost interfaces

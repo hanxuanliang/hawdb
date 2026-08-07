@@ -73,16 +73,6 @@ and algorithms outside active routes are not implied backlog items.
 
 ## P1: Runtime And Availability Hardening
 
-- [ ] Complete the query-first public API convergence.
-  - Migrate the remaining single-query `Database::knowledge_*` compatibility
-    wrappers and their tests to parameterized Cypher.
-  - Add bounded `system.*` tables before removing any remaining typed catalog,
-    statistics, runtime, or projection introspection surface.
-  - Remove route-only request/output DTOs and the `skein-api-types` crate after
-    the workspace and the Mem host have no remaining references.
-  - Preserve typed APIs for grouped WAL atomicity, recovery, admission,
-    generation publication, and bounded multi-statement workflows.
-
 - [ ] Qualify default parallel morsel execution on production-shaped workloads.
   - Require higher throughput without a p99, peak RSS, cancellation-latency, or
     foreground-admission regression across 4, 8, and 16 workers.

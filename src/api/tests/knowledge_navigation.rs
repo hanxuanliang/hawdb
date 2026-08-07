@@ -7,7 +7,7 @@ fn knowledge_entity_returns_none_for_missing_seed() {
         .unwrap();
 
     let output = db
-        .test_query_entity(&KnowledgeEntityRequest {
+        .query_entity_via_cypher(&KnowledgeEntityRequest {
             label: "Entity".to_string(),
             external_id: "missing".to_string(),
         })
@@ -24,7 +24,7 @@ fn knowledge_entity_uses_projected_identity_for_idless_nodes() {
         .unwrap();
 
     let output = db
-        .test_query_entity(&KnowledgeEntityRequest {
+        .query_entity_via_cypher(&KnowledgeEntityRequest {
             label: "Entity".to_string(),
             external_id: "0".to_string(),
         })
@@ -45,7 +45,7 @@ fn induced_edge_read_rejects_empty_external_ids() {
     let db = Database::new();
 
     let empty_list_error = db
-        .test_query_induced_edges(&KnowledgeInducedEdgeListRequest {
+        .query_induced_edges_via_cypher(&KnowledgeInducedEdgeListRequest {
             external_ids: Vec::new(),
             limit: 10,
         })
@@ -55,7 +55,7 @@ fn induced_edge_read_rejects_empty_external_ids() {
         .contains("non-empty external ids"));
 
     let empty_id_error = db
-        .test_query_induced_edges(&KnowledgeInducedEdgeListRequest {
+        .query_induced_edges_via_cypher(&KnowledgeInducedEdgeListRequest {
             external_ids: vec![String::new()],
             limit: 10,
         })
@@ -72,7 +72,7 @@ fn knowledge_relationships_fail_soft_for_unknown_relationship_type() {
         .unwrap();
 
     let output = db
-        .test_query_relationships(&KnowledgeRelationshipsRequest {
+        .query_relationships_via_cypher(&KnowledgeRelationshipsRequest {
             seeds: vec![KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "memory_1".to_string(),
@@ -102,7 +102,7 @@ fn typed_knowledge_navigation_uses_projected_identity_for_idless_seed() {
     .unwrap();
 
     let neighbors = db
-        .test_query_neighbors(&KnowledgeNeighborsRequest {
+        .query_neighbors_via_cypher(&KnowledgeNeighborsRequest {
             label: "Memory".to_string(),
             external_id: "0".to_string(),
             relationship_type: Some("LINKS".to_string()),
@@ -120,7 +120,7 @@ fn typed_knowledge_navigation_uses_projected_identity_for_idless_seed() {
     );
 
     let paths = db
-        .test_query_paths(&KnowledgePathRequest {
+        .query_paths_via_cypher(&KnowledgePathRequest {
             source_label: "Memory".to_string(),
             source_external_id: "0".to_string(),
             target_label: "Entity".to_string(),
@@ -140,7 +140,7 @@ fn typed_knowledge_navigation_uses_projected_identity_for_idless_seed() {
     );
 
     let subgraph = db
-        .test_query_subgraph(&KnowledgeSubgraphRequest {
+        .query_subgraph_via_cypher(&KnowledgeSubgraphRequest {
             label: "Memory".to_string(),
             external_id: "0".to_string(),
             relationship_type: Some("LINKS".to_string()),
@@ -210,7 +210,7 @@ fn retrieves_knowledge_neighbors_without_search_projection() {
         .unwrap();
 
     let outgoing = db
-        .test_query_neighbors(&KnowledgeNeighborsRequest {
+        .query_neighbors_via_cypher(&KnowledgeNeighborsRequest {
             label: "Memory".to_string(),
             external_id: "root".to_string(),
             relationship_type: Some("LINKS".to_string()),
@@ -266,7 +266,7 @@ fn retrieves_knowledge_neighbors_without_search_projection() {
         && path.relationship_properties.get("weight") == Some(&Value::Int(2))));
 
     let incoming = db
-        .test_query_neighbors(&KnowledgeNeighborsRequest {
+        .query_neighbors_via_cypher(&KnowledgeNeighborsRequest {
             label: "Memory".to_string(),
             external_id: "root".to_string(),
             relationship_type: None,
@@ -283,7 +283,7 @@ fn retrieves_knowledge_neighbors_without_search_projection() {
     );
 
     let unknown_type = db
-        .test_query_neighbors(&KnowledgeNeighborsRequest {
+        .query_neighbors_via_cypher(&KnowledgeNeighborsRequest {
             label: "Memory".to_string(),
             external_id: "root".to_string(),
             relationship_type: Some("DOES_NOT_EXIST".to_string()),
@@ -332,7 +332,9 @@ fn scoped_knowledge_neighbors_filters_seed_by_metadata() {
         },
         metadata_filters: BTreeMap::from([("space_id".to_string(), "default".to_string())]),
     };
-    let scoped = db.test_query_scoped_neighbors(&scoped_request).unwrap();
+    let scoped = db
+        .query_scoped_neighbors_via_cypher(&scoped_request)
+        .unwrap();
 
     assert_eq!(scoped.paths.len(), 1);
     assert!(scoped.diagnostics.seed_found);
@@ -348,7 +350,9 @@ fn scoped_knowledge_neighbors_filters_seed_by_metadata() {
     );
 
     let stats = db.plan_cache_stats();
-    let repeated_scoped = db.test_query_scoped_neighbors(&scoped_request).unwrap();
+    let repeated_scoped = db
+        .query_scoped_neighbors_via_cypher(&scoped_request)
+        .unwrap();
     assert_eq!(repeated_scoped, scoped);
     let repeated_stats = db.plan_cache_stats();
     assert_eq!(repeated_stats.entries, stats.entries);
@@ -356,7 +360,7 @@ fn scoped_knowledge_neighbors_filters_seed_by_metadata() {
     assert!(repeated_stats.hits > stats.hits);
 
     let filtered = db
-        .test_query_scoped_neighbors(&KnowledgeScopedNeighborsRequest {
+        .query_scoped_neighbors_via_cypher(&KnowledgeScopedNeighborsRequest {
             navigation: KnowledgeNeighborsRequest {
                 label: "Memory".to_string(),
                 external_id: "root".to_string(),
@@ -409,7 +413,7 @@ fn reads_induced_edges_for_nowledge_overview_and_subgraph_shapes() {
     let graph_commit_epoch = db.store.commit_epoch();
 
     let output = db
-        .test_query_induced_edges(&KnowledgeInducedEdgeListRequest {
+        .query_induced_edges_via_cypher(&KnowledgeInducedEdgeListRequest {
             external_ids: vec![
                 "memory_1".to_string(),
                 "entity_1".to_string(),
@@ -447,12 +451,12 @@ fn reads_induced_edges_for_nowledge_overview_and_subgraph_shapes() {
         ],
         limit: 2,
     };
-    let limited = db.test_query_induced_edges(&limited_request).unwrap();
+    let limited = db.query_induced_edges_via_cypher(&limited_request).unwrap();
     assert_eq!(limited.matched_count, 3);
     assert_eq!(limited.returned_count, 2);
 
     let stats = db.plan_cache_stats();
-    let repeated_limited = db.test_query_induced_edges(&limited_request).unwrap();
+    let repeated_limited = db.query_induced_edges_via_cypher(&limited_request).unwrap();
     assert_eq!(repeated_limited, limited);
     let repeated_stats = db.plan_cache_stats();
     assert_eq!(repeated_stats.entries, stats.entries);
@@ -495,7 +499,7 @@ fn retrieves_knowledge_relationships_grouped_by_seed() {
         direction: KnowledgeNeighborDirection::Outgoing,
         limit_per_seed: 4,
     };
-    let output = db.test_query_relationships(&request).unwrap();
+    let output = db.query_relationships_via_cypher(&request).unwrap();
 
     assert_eq!(output.graph_commit_epoch, 2);
     assert!(output.relationship_type_found);
@@ -523,7 +527,7 @@ fn retrieves_knowledge_relationships_grouped_by_seed() {
     );
 
     let stats = db.plan_cache_stats();
-    let repeated_output = db.test_query_relationships(&request).unwrap();
+    let repeated_output = db.query_relationships_via_cypher(&request).unwrap();
     assert_eq!(repeated_output, output);
     let repeated_stats = db.plan_cache_stats();
     assert_eq!(repeated_stats.entries, stats.entries);
@@ -568,7 +572,7 @@ fn scoped_knowledge_relationships_report_filtered_seeds() {
             ("space_id".to_string(), "default".to_string()),
         ]),
     };
-    let output = db.test_query_scoped_relationships(&request).unwrap();
+    let output = db.query_scoped_relationships_via_cypher(&request).unwrap();
 
     assert_eq!(output.graph_commit_epoch, 2);
     assert!(output.relationship_type_found);
@@ -582,7 +586,7 @@ fn scoped_knowledge_relationships_report_filtered_seeds() {
     assert!(output.groups[1].relationships.is_empty());
 
     let stats = db.plan_cache_stats();
-    let repeated_output = db.test_query_scoped_relationships(&request).unwrap();
+    let repeated_output = db.query_scoped_relationships_via_cypher(&request).unwrap();
     assert_eq!(repeated_output, output);
     let repeated_stats = db.plan_cache_stats();
     assert_eq!(repeated_stats.entries, stats.entries);
@@ -622,7 +626,7 @@ fn knowledge_neighbors_reports_limit_and_missing_seed() {
         limit: 1,
         max_hops: 1,
     };
-    let limited = db.test_query_neighbors(&limited_request).unwrap();
+    let limited = db.query_neighbors_via_cypher(&limited_request).unwrap();
     assert_eq!(limited.paths.len(), 1);
     assert!(limited.diagnostics.seed_found);
     assert_eq!(limited.diagnostics.path_count, 1);
@@ -644,7 +648,7 @@ fn knowledge_neighbors_reports_limit_and_missing_seed() {
     assert_eq!(limited.diagnostics.fanout_reasons, limited.fanout_reasons);
 
     let stats = db.plan_cache_stats();
-    let repeated_limited = db.test_query_neighbors(&limited_request).unwrap();
+    let repeated_limited = db.query_neighbors_via_cypher(&limited_request).unwrap();
     assert_eq!(repeated_limited, limited);
     let repeated_stats = db.plan_cache_stats();
     assert_eq!(repeated_stats.entries, stats.entries);
@@ -652,7 +656,7 @@ fn knowledge_neighbors_reports_limit_and_missing_seed() {
     assert!(repeated_stats.hits > stats.hits);
 
     let disabled = db
-        .test_query_neighbors(&KnowledgeNeighborsRequest {
+        .query_neighbors_via_cypher(&KnowledgeNeighborsRequest {
             label: "Memory".to_string(),
             external_id: "root".to_string(),
             relationship_type: None,
@@ -674,7 +678,7 @@ fn knowledge_neighbors_reports_limit_and_missing_seed() {
     assert_eq!(disabled.diagnostics.fanout_reasons, disabled.fanout_reasons);
 
     let missing = db
-        .test_query_neighbors(&KnowledgeNeighborsRequest {
+        .query_neighbors_via_cypher(&KnowledgeNeighborsRequest {
             label: "Memory".to_string(),
             external_id: "missing".to_string(),
             relationship_type: None,
@@ -723,7 +727,7 @@ fn typed_knowledge_navigation_reports_dense_adjacency_groups() {
     }
 
     let neighbors = db
-        .test_query_neighbors(&KnowledgeNeighborsRequest {
+        .query_neighbors_via_cypher(&KnowledgeNeighborsRequest {
             label: "Memory".to_string(),
             external_id: "root".to_string(),
             relationship_type: Some("LINKS".to_string()),
@@ -774,7 +778,7 @@ fn typed_knowledge_navigation_reports_dense_adjacency_groups() {
     );
 
     let untyped_neighbors = db
-        .test_query_neighbors(&KnowledgeNeighborsRequest {
+        .query_neighbors_via_cypher(&KnowledgeNeighborsRequest {
             label: "Memory".to_string(),
             external_id: "root".to_string(),
             relationship_type: None,
@@ -796,7 +800,7 @@ fn typed_knowledge_navigation_reports_dense_adjacency_groups() {
     );
 
     let subgraph = db
-        .test_query_subgraph(&KnowledgeSubgraphRequest {
+        .query_subgraph_via_cypher(&KnowledgeSubgraphRequest {
             label: "Memory".to_string(),
             external_id: "root".to_string(),
             relationship_type: Some("LINKS".to_string()),
@@ -845,7 +849,7 @@ fn retrieves_bounded_knowledge_paths_without_search_projection() {
         .unwrap();
 
     let output = db
-        .test_query_paths(&KnowledgePathRequest {
+        .query_paths_via_cypher(&KnowledgePathRequest {
             source_label: "Memory".to_string(),
             source_external_id: "root".to_string(),
             target_label: "Entity".to_string(),
@@ -940,7 +944,7 @@ fn scoped_knowledge_paths_filter_source_and_target_by_metadata() {
         )]),
         target_metadata_filters: BTreeMap::from([("space_id".to_string(), "default".to_string())]),
     };
-    let scoped = db.test_query_scoped_paths(&scoped_request).unwrap();
+    let scoped = db.query_scoped_paths_via_cypher(&scoped_request).unwrap();
 
     assert_eq!(scoped.paths.len(), 1);
     assert!(scoped.diagnostics.seed_found);
@@ -966,7 +970,7 @@ fn scoped_knowledge_paths_filter_source_and_target_by_metadata() {
     );
 
     let stats = db.plan_cache_stats();
-    let repeated_scoped = db.test_query_scoped_paths(&scoped_request).unwrap();
+    let repeated_scoped = db.query_scoped_paths_via_cypher(&scoped_request).unwrap();
     assert_eq!(repeated_scoped, scoped);
     let repeated_stats = db.plan_cache_stats();
     assert_eq!(repeated_stats.entries, stats.entries);
@@ -974,7 +978,7 @@ fn scoped_knowledge_paths_filter_source_and_target_by_metadata() {
     assert!(repeated_stats.hits > stats.hits);
 
     let filtered = db
-        .test_query_scoped_paths(&KnowledgeScopedPathRequest {
+        .query_scoped_paths_via_cypher(&KnowledgeScopedPathRequest {
             navigation: KnowledgePathRequest {
                 source_label: "Memory".to_string(),
                 source_external_id: "root".to_string(),
@@ -1051,7 +1055,7 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
         .unwrap();
 
     let wrong_direction = db
-        .test_query_paths(&KnowledgePathRequest {
+        .query_paths_via_cypher(&KnowledgePathRequest {
             source_label: "Memory".to_string(),
             source_external_id: "root".to_string(),
             target_label: "Entity".to_string(),
@@ -1068,7 +1072,7 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
     assert_eq!(wrong_direction.diagnostics.path_count, 0);
 
     let unknown_type = db
-        .test_query_paths(&KnowledgePathRequest {
+        .query_paths_via_cypher(&KnowledgePathRequest {
             source_label: "Memory".to_string(),
             source_external_id: "root".to_string(),
             target_label: "Entity".to_string(),
@@ -1101,7 +1105,7 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
         max_hops: 1,
         limit: 1,
     };
-    let limited = db.test_query_paths(&limited_request).unwrap();
+    let limited = db.query_paths_via_cypher(&limited_request).unwrap();
     assert_eq!(limited.paths.len(), 1);
     assert_eq!(limited.diagnostics.path_count, 1);
     assert_eq!(limited.diagnostics.node_count, 2);
@@ -1122,7 +1126,7 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
     assert_eq!(limited.diagnostics.fanout_reasons, limited.fanout_reasons);
 
     let stats = db.plan_cache_stats();
-    let repeated_limited = db.test_query_paths(&limited_request).unwrap();
+    let repeated_limited = db.query_paths_via_cypher(&limited_request).unwrap();
     assert_eq!(repeated_limited, limited);
     let repeated_stats = db.plan_cache_stats();
     assert_eq!(repeated_stats.entries, stats.entries);
@@ -1130,7 +1134,7 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
     assert!(repeated_stats.hits > stats.hits);
 
     let disabled = db
-        .test_query_paths(&KnowledgePathRequest {
+        .query_paths_via_cypher(&KnowledgePathRequest {
             source_label: "Memory".to_string(),
             source_external_id: "root".to_string(),
             target_label: "Entity".to_string(),
@@ -1153,7 +1157,7 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
     );
 
     let missing = db
-        .test_query_paths(&KnowledgePathRequest {
+        .query_paths_via_cypher(&KnowledgePathRequest {
             source_label: "Memory".to_string(),
             source_external_id: "root".to_string(),
             target_label: "Entity".to_string(),
@@ -1180,7 +1184,7 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
     assert!(missing.paths.is_empty());
 
     let missing_source = db
-        .test_query_paths(&KnowledgePathRequest {
+        .query_paths_via_cypher(&KnowledgePathRequest {
             source_label: "Memory".to_string(),
             source_external_id: "missing".to_string(),
             target_label: "Entity".to_string(),
@@ -1207,7 +1211,7 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
     assert!(missing_source.paths.is_empty());
 
     let missing_both = db
-        .test_query_paths(&KnowledgePathRequest {
+        .query_paths_via_cypher(&KnowledgePathRequest {
             source_label: "Memory".to_string(),
             source_external_id: "missing-source".to_string(),
             target_label: "Entity".to_string(),
@@ -1283,7 +1287,7 @@ fn retrieves_bounded_knowledge_subgraph_without_search_projection() {
         .unwrap();
 
     let output = db
-        .test_query_subgraph(&KnowledgeSubgraphRequest {
+        .query_subgraph_via_cypher(&KnowledgeSubgraphRequest {
             label: "Memory".to_string(),
             external_id: "root".to_string(),
             relationship_type: Some("LINKS".to_string()),
@@ -1368,7 +1372,9 @@ fn scoped_knowledge_subgraph_filters_seed_by_metadata() {
         },
         metadata_filters: BTreeMap::from([("source_id".to_string(), "thread_1".to_string())]),
     };
-    let scoped = db.test_query_scoped_subgraph(&scoped_request).unwrap();
+    let scoped = db
+        .query_scoped_subgraph_via_cypher(&scoped_request)
+        .unwrap();
 
     assert_eq!(scoped.nodes.len(), 2);
     assert_eq!(scoped.relationships.len(), 1);
@@ -1385,7 +1391,9 @@ fn scoped_knowledge_subgraph_filters_seed_by_metadata() {
     );
 
     let stats = db.plan_cache_stats();
-    let repeated_scoped = db.test_query_scoped_subgraph(&scoped_request).unwrap();
+    let repeated_scoped = db
+        .query_scoped_subgraph_via_cypher(&scoped_request)
+        .unwrap();
     assert_eq!(repeated_scoped, scoped);
     let repeated_stats = db.plan_cache_stats();
     assert_eq!(repeated_stats.entries, stats.entries);
@@ -1393,7 +1401,7 @@ fn scoped_knowledge_subgraph_filters_seed_by_metadata() {
     assert!(repeated_stats.hits > stats.hits);
 
     let filtered = db
-        .test_query_scoped_subgraph(&KnowledgeScopedSubgraphRequest {
+        .query_scoped_subgraph_via_cypher(&KnowledgeScopedSubgraphRequest {
             navigation: KnowledgeSubgraphRequest {
                 label: "Memory".to_string(),
                 external_id: "root".to_string(),
@@ -1452,7 +1460,7 @@ fn knowledge_subgraph_reports_limits_and_missing_seed() {
         .unwrap();
 
     let node_limited = db
-        .test_query_subgraph(&KnowledgeSubgraphRequest {
+        .query_subgraph_via_cypher(&KnowledgeSubgraphRequest {
             label: "Memory".to_string(),
             external_id: "root".to_string(),
             relationship_type: None,
@@ -1494,7 +1502,7 @@ fn knowledge_subgraph_reports_limits_and_missing_seed() {
         relationship_limit: 1,
     };
     let relationship_limited = db
-        .test_query_subgraph(&relationship_limited_request)
+        .query_subgraph_via_cypher(&relationship_limited_request)
         .unwrap();
     assert_eq!(relationship_limited.relationships.len(), 1);
     assert_eq!(relationship_limited.diagnostics.node_count, 2);
@@ -1518,7 +1526,7 @@ fn knowledge_subgraph_reports_limits_and_missing_seed() {
 
     let stats = db.plan_cache_stats();
     let repeated_relationship_limited = db
-        .test_query_subgraph(&relationship_limited_request)
+        .query_subgraph_via_cypher(&relationship_limited_request)
         .unwrap();
     assert_eq!(repeated_relationship_limited, relationship_limited);
     let repeated_stats = db.plan_cache_stats();
@@ -1527,7 +1535,7 @@ fn knowledge_subgraph_reports_limits_and_missing_seed() {
     assert!(repeated_stats.hits > stats.hits);
 
     let node_disabled = db
-        .test_query_subgraph(&KnowledgeSubgraphRequest {
+        .query_subgraph_via_cypher(&KnowledgeSubgraphRequest {
             label: "Memory".to_string(),
             external_id: "root".to_string(),
             relationship_type: None,
@@ -1549,7 +1557,7 @@ fn knowledge_subgraph_reports_limits_and_missing_seed() {
     );
 
     let relationship_disabled = db
-        .test_query_subgraph(&KnowledgeSubgraphRequest {
+        .query_subgraph_via_cypher(&KnowledgeSubgraphRequest {
             label: "Memory".to_string(),
             external_id: "root".to_string(),
             relationship_type: None,
@@ -1571,7 +1579,7 @@ fn knowledge_subgraph_reports_limits_and_missing_seed() {
     );
 
     let unknown_type = db
-        .test_query_subgraph(&KnowledgeSubgraphRequest {
+        .query_subgraph_via_cypher(&KnowledgeSubgraphRequest {
             label: "Memory".to_string(),
             external_id: "root".to_string(),
             relationship_type: Some("DOES_NOT_EXIST".to_string()),
@@ -1598,7 +1606,7 @@ fn knowledge_subgraph_reports_limits_and_missing_seed() {
     );
 
     let missing = db
-        .test_query_subgraph(&KnowledgeSubgraphRequest {
+        .query_subgraph_via_cypher(&KnowledgeSubgraphRequest {
             label: "Memory".to_string(),
             external_id: "missing".to_string(),
             relationship_type: None,

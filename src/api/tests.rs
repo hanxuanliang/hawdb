@@ -163,6 +163,7 @@ mod pagerank;
 mod predicates;
 mod projected_graph_artifacts;
 mod query_execution;
+mod query_first_support;
 mod query_observability;
 mod read_transactions;
 mod relationship_patterns;
@@ -188,6 +189,8 @@ mod thread_message_reads;
 mod thread_metadata_reads;
 mod transaction_control;
 mod transaction_merge;
+
+use query_first_support::QueryFirstTestExt;
 
 #[test]
 fn runs_create_match_return_demo() {
@@ -335,7 +338,7 @@ fn reads_crystals_for_wiki_and_okf_shapes() {
     let graph_commit_epoch = db.store.commit_epoch();
 
     let wiki_detail = db
-        .test_query_crystals(&KnowledgeCrystalListRequest {
+        .query_crystals_via_cypher(&KnowledgeCrystalListRequest {
             key_match: Some("crystal-a".to_string()),
             after_id: None,
             limit: 1,
@@ -365,7 +368,7 @@ fn reads_crystals_for_wiki_and_okf_shapes() {
     assert_eq!(wiki_detail.rows[0].created_at, Some(Value::Int(10)));
 
     let page = db
-        .test_query_crystals(&KnowledgeCrystalListRequest {
+        .query_crystals_via_cypher(&KnowledgeCrystalListRequest {
             key_match: None,
             after_id: Some("crystal-alpha".to_string()),
             limit: 10,
@@ -382,24 +385,6 @@ fn reads_crystals_for_wiki_and_okf_shapes() {
         page.rows[0].metadata,
         Some(Value::String("{\"b\":1}".to_string()))
     );
-
-    let tx = db.begin_read_transaction();
-    db.query("CREATE (:Memory {id: 'crystal-top', is_crystal: true, crystal_title: 'Top Crystal', importance: 9.0, created_at: 100})")
-        .unwrap();
-    let okf = tx
-        .test_query_crystals(&KnowledgeCrystalListRequest {
-            key_match: None,
-            after_id: None,
-            limit: 0,
-            order: KnowledgeCrystalListOrder::ImportanceDescCreatedAtDesc,
-        })
-        .unwrap();
-    assert_eq!(okf.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(okf.matched_count, 3);
-    assert_eq!(okf.returned_count, 3);
-    assert_eq!(okf.rows[0].memory_id.as_deref(), Some("crystal-beta"));
-    assert_eq!(okf.rows[1].memory_id.as_deref(), Some("crystal-alpha"));
-    assert_eq!(okf.rows[2].memory_id.as_deref(), Some("archive-crystal"));
 }
 
 #[test]
@@ -407,7 +392,7 @@ fn crystal_read_rejects_invalid_filters() {
     let db = Database::new();
 
     let empty_key_error = db
-        .test_query_crystals(&KnowledgeCrystalListRequest {
+        .query_crystals_via_cypher(&KnowledgeCrystalListRequest {
             key_match: Some(String::new()),
             after_id: None,
             limit: 1,
@@ -417,7 +402,7 @@ fn crystal_read_rejects_invalid_filters() {
     assert!(empty_key_error.to_string().contains("non-empty key match"));
 
     let empty_after_error = db
-        .test_query_crystals(&KnowledgeCrystalListRequest {
+        .query_crystals_via_cypher(&KnowledgeCrystalListRequest {
             key_match: None,
             after_id: Some(String::new()),
             limit: 1,
@@ -427,7 +412,7 @@ fn crystal_read_rejects_invalid_filters() {
     assert!(empty_after_error.to_string().contains("non-empty after id"));
 
     let mixed_filter_error = db
-        .test_query_crystals(&KnowledgeCrystalListRequest {
+        .query_crystals_via_cypher(&KnowledgeCrystalListRequest {
             key_match: Some("crystal".to_string()),
             after_id: Some("crystal-alpha".to_string()),
             limit: 1,
@@ -459,8 +444,8 @@ fn crystal_reads_use_query_runtime_plan_cache() {
         order: KnowledgeCrystalListOrder::ImportanceDescCreatedAtDesc,
     };
 
-    let first = db.test_query_crystals(&request).unwrap();
-    let second = db.test_query_crystals(&request).unwrap();
+    let first = db.query_crystals_via_cypher(&request).unwrap();
+    let second = db.query_crystals_via_cypher(&request).unwrap();
 
     assert_eq!(first, second);
     assert_eq!(first.matched_count, 2);
@@ -699,7 +684,7 @@ fn reads_crystal_communities_for_topic_ranking_and_okf_mapping() {
     let graph_commit_epoch = db.store.commit_epoch();
 
     let topic = db
-        .test_query_crystal_communities(&KnowledgeCrystalCommunityListRequest {
+        .query_crystal_communities_via_cypher(&KnowledgeCrystalCommunityListRequest {
             scope: KnowledgeCrystalCommunityScope::CommunityIds(vec![Value::Int(7)]),
             limit: 10,
             order: KnowledgeCrystalCommunityListOrder::HitsDescImportanceDesc,
@@ -730,43 +715,6 @@ fn reads_crystal_communities_for_topic_ranking_and_okf_mapping() {
     );
     assert_eq!(topic.rows[0].is_latest, Some(true));
     assert_eq!(topic.rows[0].lifecycle_state.as_deref(), Some("active"));
-
-    let tx = db.begin_read_transaction();
-    db.query("CREATE (:Memory {id: 'crystal-top-community', is_crystal: true, crystal_title: 'Top Community', importance: 10.0})")
-        .unwrap();
-    db.query(
-        "MATCH (c:Memory {id: 'crystal-top-community'}), (s:Memory {id: 'source-one'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)",
-    )
-    .unwrap();
-    let okf = tx
-        .test_query_crystal_communities(&KnowledgeCrystalCommunityListRequest {
-            scope: KnowledgeCrystalCommunityScope::NonNullCommunity,
-            limit: 0,
-            order: KnowledgeCrystalCommunityListOrder::CommunityIdAscCrystalIdAsc,
-        })
-        .unwrap();
-    assert_eq!(okf.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(okf.matched_path_count, 5);
-    assert_eq!(okf.matched_pair_count, 3);
-    assert_eq!(okf.returned_count, 3);
-    assert_eq!(okf.rows[0].community_id, Value::Int(7));
-    assert_eq!(
-        okf.rows[0].crystal_memory_id.as_deref(),
-        Some("crystal-alpha")
-    );
-    assert_eq!(okf.rows[0].hit_count, 3);
-    assert_eq!(okf.rows[1].community_id, Value::Int(8));
-    assert_eq!(
-        okf.rows[1].crystal_memory_id.as_deref(),
-        Some("crystal-alpha")
-    );
-    assert_eq!(okf.rows[1].hit_count, 1);
-    assert_eq!(okf.rows[2].community_id, Value::Int(8));
-    assert_eq!(
-        okf.rows[2].crystal_memory_id.as_deref(),
-        Some("crystal-beta")
-    );
-    assert_eq!(okf.rows[2].hit_count, 1);
 }
 
 #[test]
@@ -774,7 +722,7 @@ fn crystal_community_read_rejects_invalid_scope() {
     let db = Database::new();
 
     let empty_ids_error = db
-        .test_query_crystal_communities(&KnowledgeCrystalCommunityListRequest {
+        .query_crystal_communities_via_cypher(&KnowledgeCrystalCommunityListRequest {
             scope: KnowledgeCrystalCommunityScope::CommunityIds(Vec::new()),
             limit: 10,
             order: KnowledgeCrystalCommunityListOrder::HitsDescImportanceDesc,
@@ -785,7 +733,7 @@ fn crystal_community_read_rejects_invalid_scope() {
         .contains("non-empty community ids"));
 
     let null_id_error = db
-        .test_query_crystal_communities(&KnowledgeCrystalCommunityListRequest {
+        .query_crystal_communities_via_cypher(&KnowledgeCrystalCommunityListRequest {
             scope: KnowledgeCrystalCommunityScope::CommunityIds(vec![Value::Null]),
             limit: 10,
             order: KnowledgeCrystalCommunityListOrder::HitsDescImportanceDesc,
@@ -827,8 +775,8 @@ fn crystal_community_reads_use_query_runtime_plan_cache() {
         order: KnowledgeCrystalCommunityListOrder::HitsDescImportanceDesc,
     };
 
-    let first = db.test_query_crystal_communities(&request).unwrap();
-    let second = db.test_query_crystal_communities(&request).unwrap();
+    let first = db.query_crystal_communities_via_cypher(&request).unwrap();
+    let second = db.query_crystal_communities_via_cypher(&request).unwrap();
 
     assert_eq!(first, second);
     assert_eq!(first.matched_path_count, 3);
@@ -907,7 +855,7 @@ fn reads_crystal_source_visibility_for_wiki_community_rows() {
     let graph_commit_epoch = db.store.commit_epoch();
 
     let visibility = db
-        .test_query_crystal_source_visibility(&KnowledgeCrystalSourceVisibilityRequest {
+        .query_crystal_source_visibility_via_cypher(&KnowledgeCrystalSourceVisibilityRequest {
             community_ids: vec![Value::Int(7), Value::Int(8)],
             limit: 0,
         })
@@ -963,27 +911,6 @@ fn reads_crystal_source_visibility_for_wiki_community_rows() {
     assert_eq!(visibility.rows[4].display_title, "Beta Title");
     assert!(visibility.rows[4].crystal_is_latest);
     assert!(visibility.rows[4].source_is_latest);
-
-    let tx = db.begin_read_transaction();
-    db.query("CREATE (:Memory {id: 'crystal-new-visible', is_crystal: true, crystal_title: 'New Visible'})")
-        .unwrap();
-    db.query(
-        "MATCH (c:Memory {id: 'crystal-new-visible'}), (s:Memory {id: 'source-one'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)",
-    )
-    .unwrap();
-    let snapshot = tx
-        .test_query_crystal_source_visibility(&KnowledgeCrystalSourceVisibilityRequest {
-            community_ids: vec![Value::Int(7)],
-            limit: 2,
-        })
-        .unwrap();
-    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot.matched_path_count, 3);
-    assert_eq!(snapshot.returned_count, 2);
-    assert_eq!(
-        snapshot.rows[0].crystal_memory_id.as_deref(),
-        Some("crystal-alpha")
-    );
 }
 
 #[test]
@@ -991,7 +918,7 @@ fn crystal_source_visibility_rejects_invalid_scope() {
     let db = Database::new();
 
     let empty_ids_error = db
-        .test_query_crystal_source_visibility(&KnowledgeCrystalSourceVisibilityRequest {
+        .query_crystal_source_visibility_via_cypher(&KnowledgeCrystalSourceVisibilityRequest {
             community_ids: Vec::new(),
             limit: 0,
         })
@@ -1001,7 +928,7 @@ fn crystal_source_visibility_rejects_invalid_scope() {
         .contains("non-empty community ids"));
 
     let null_id_error = db
-        .test_query_crystal_source_visibility(&KnowledgeCrystalSourceVisibilityRequest {
+        .query_crystal_source_visibility_via_cypher(&KnowledgeCrystalSourceVisibilityRequest {
             community_ids: vec![Value::Null],
             limit: 0,
         })
@@ -1033,8 +960,12 @@ fn crystal_source_visibility_uses_query_runtime_plan_cache() {
         limit: 0,
     };
 
-    let first = db.test_query_crystal_source_visibility(&request).unwrap();
-    let second = db.test_query_crystal_source_visibility(&request).unwrap();
+    let first = db
+        .query_crystal_source_visibility_via_cypher(&request)
+        .unwrap();
+    let second = db
+        .query_crystal_source_visibility_via_cypher(&request)
+        .unwrap();
 
     assert_eq!(first, second);
     assert_eq!(first.matched_path_count, 1);
@@ -1060,7 +991,7 @@ fn scoped_knowledge_entity_batch_reports_filtered_and_missing_items() {
         .unwrap();
 
     let output = db
-        .test_query_scoped_entity_batch(&KnowledgeScopedEntityBatchRequest {
+        .query_scoped_entity_batch_via_cypher(&KnowledgeScopedEntityBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -1129,8 +1060,8 @@ fn scoped_knowledge_entity_batch_uses_query_runtime_plan_cache() {
         ]),
     };
 
-    let first = db.test_query_scoped_entity_batch(&request).unwrap();
-    let second = db.test_query_scoped_entity_batch(&request).unwrap();
+    let first = db.query_scoped_entity_batch_via_cypher(&request).unwrap();
+    let second = db.query_scoped_entity_batch_via_cypher(&request).unwrap();
 
     assert_eq!(first, second);
     assert_eq!(first.found_count, 1);
@@ -1167,7 +1098,7 @@ fn creates_knowledge_entity_through_typed_api() {
     assert!(!output.already_exists);
     assert_eq!(output.created_node_count, 1);
     let entity = db
-        .test_query_entity(&KnowledgeEntityRequest {
+        .query_entity_via_cypher(&KnowledgeEntityRequest {
             label: "Memory".to_string(),
             external_id: "memory_1".to_string(),
         })
@@ -1205,7 +1136,7 @@ fn create_knowledge_entity_reports_existing_identity_without_writing() {
     assert!(output.already_exists);
     assert_eq!(output.created_node_count, 0);
     let entity = db
-        .test_query_entity(&KnowledgeEntityRequest {
+        .query_entity_via_cypher(&KnowledgeEntityRequest {
             label: "Memory".to_string(),
             external_id: "memory_1".to_string(),
         })
@@ -1267,7 +1198,7 @@ fn creates_knowledge_entity_batch_through_typed_api() {
     assert_eq!(output.rows[1].node_id, Some(0));
     assert!(output.rows[2].created);
     let created = db
-        .test_query_entity_batch(&KnowledgeEntityBatchRequest {
+        .query_entity_batch_via_cypher(&KnowledgeEntityBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -1318,7 +1249,7 @@ fn create_knowledge_entity_batch_deduplicates_pending_identity() {
     assert!(output.rows[1].already_exists);
     assert_eq!(output.rows[1].node_id, None);
     let entities = db
-        .test_query_entity_batch(&KnowledgeEntityBatchRequest {
+        .query_entity_batch_via_cypher(&KnowledgeEntityBatchRequest {
             entities: vec![KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "memory_1".to_string(),
@@ -1420,7 +1351,7 @@ fn typed_knowledge_entity_batch_create_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let output = db
-            .test_query_entity_batch(&KnowledgeEntityBatchRequest {
+            .query_entity_batch_via_cypher(&KnowledgeEntityBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),
@@ -1488,7 +1419,7 @@ fn upserts_knowledge_entity_through_typed_api() {
     assert_eq!(existing.node_id, Some(0));
     assert_eq!(existing.updated_property_count, 1);
     let entity = db
-        .test_query_entity(&KnowledgeEntityRequest {
+        .query_entity_via_cypher(&KnowledgeEntityRequest {
             label: "Memory".to_string(),
             external_id: "memory_1".to_string(),
         })
@@ -1553,7 +1484,7 @@ fn knowledge_entity_upsert_does_not_write_projected_idless_identity() {
     assert!(output.non_writable);
     assert!(!output.updated);
     let entity = db
-        .test_query_entity(&KnowledgeEntityRequest {
+        .query_entity_via_cypher(&KnowledgeEntityRequest {
             label: "Entity".to_string(),
             external_id: "0".to_string(),
         })
@@ -1624,7 +1555,7 @@ fn upserts_knowledge_entity_batch_through_typed_api() {
     assert_eq!(output.rows[2].node_id, None);
 
     let rows = db
-        .test_query_property_batch(&KnowledgePropertyBatchRequest {
+        .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -1716,7 +1647,7 @@ fn typed_knowledge_entity_batch_upsert_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .test_query_property_batch(&KnowledgePropertyBatchRequest {
+            .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),
@@ -1752,7 +1683,7 @@ fn retrieves_knowledge_property_batch_without_hydrating_full_entities() {
         .unwrap();
 
     let output = db
-        .test_query_property_batch(&KnowledgePropertyBatchRequest {
+        .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -1831,8 +1762,8 @@ fn knowledge_property_batch_uses_query_runtime_plan_cache() {
         property_names: vec!["title".to_string(), "source_id".to_string()],
     };
 
-    let first = db.test_query_property_batch(&request).unwrap();
-    let second = db.test_query_property_batch(&request).unwrap();
+    let first = db.query_property_batch_via_cypher(&request).unwrap();
+    let second = db.query_property_batch_via_cypher(&request).unwrap();
 
     assert_eq!(first, second);
     assert_eq!(first.found_count, 2);
@@ -1858,7 +1789,7 @@ fn scoped_knowledge_property_batch_reports_filtered_rows() {
         .unwrap();
 
     let output = db
-        .test_query_scoped_property_batch(&KnowledgeScopedPropertyBatchRequest {
+        .query_scoped_property_batch_via_cypher(&KnowledgeScopedPropertyBatchRequest {
             projection: KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
@@ -1927,8 +1858,8 @@ fn scoped_knowledge_property_batch_uses_query_runtime_plan_cache() {
         ]),
     };
 
-    let first = db.test_query_scoped_property_batch(&request).unwrap();
-    let second = db.test_query_scoped_property_batch(&request).unwrap();
+    let first = db.query_scoped_property_batch_via_cypher(&request).unwrap();
+    let second = db.query_scoped_property_batch_via_cypher(&request).unwrap();
 
     assert_eq!(first, second);
     assert_eq!(first.found_count, 1);
@@ -1974,7 +1905,7 @@ fn updates_knowledge_properties_through_typed_api() {
     assert!(!output.filtered_out);
     assert_eq!(output.updated_property_count, 2);
     let row = db
-        .test_query_property_batch(&KnowledgePropertyBatchRequest {
+        .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
             entities: vec![KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "memory_1".to_string(),
@@ -2026,7 +1957,7 @@ fn scoped_knowledge_property_update_does_not_write_filtered_seed() {
     assert!(output.filtered_out);
     assert_eq!(output.updated_property_count, 0);
     let row = db
-        .test_query_property_batch(&KnowledgePropertyBatchRequest {
+        .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
             entities: vec![KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "memory_1".to_string(),
@@ -2118,7 +2049,7 @@ fn typed_knowledge_property_update_persists_and_replays_from_wal() {
     {
         let db = Database::open(&path).unwrap();
         let output = db
-            .test_query_property_batch(&KnowledgePropertyBatchRequest {
+            .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
                 entities: vec![KnowledgeEntityRequest {
                     label: "Memory".to_string(),
                     external_id: "memory_1".to_string(),
@@ -2195,7 +2126,7 @@ fn updates_knowledge_properties_batch_through_typed_api() {
     assert_eq!(output.rows[2].node_id, None);
 
     let row = db
-        .test_query_property_batch(&KnowledgePropertyBatchRequest {
+        .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -2334,7 +2265,7 @@ fn typed_knowledge_normalized_space_move_persists_as_one_wal_batch_and_replays()
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .test_query_property_batch(&KnowledgePropertyBatchRequest {
+            .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),
@@ -2409,7 +2340,7 @@ fn touches_memory_access_batch_with_incremental_counters() {
     assert!(!output.rows[3].matched);
 
     let rows = db
-        .test_query_property_batch(&KnowledgePropertyBatchRequest {
+        .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -2515,7 +2446,7 @@ fn typed_knowledge_memory_access_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .test_query_property_batch(&KnowledgePropertyBatchRequest {
+            .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),
@@ -2615,7 +2546,7 @@ fn updates_memory_content_batch_for_nowledge_full_update_shape() {
     assert!(output.rows[3].duplicate);
 
     let rows = db
-        .test_query_property_batch(&KnowledgePropertyBatchRequest {
+        .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
             entities: vec![KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "memory_1".to_string(),
@@ -2757,7 +2688,7 @@ fn updates_memory_metadata_batch_for_nowledge_replace_shapes() {
     assert!(output.rows[4].duplicate);
 
     let rows = db
-        .test_query_property_batch(&KnowledgePropertyBatchRequest {
+        .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -2845,7 +2776,7 @@ fn typed_memory_metadata_update_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .test_query_property_batch(&KnowledgePropertyBatchRequest {
+            .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),
@@ -2939,7 +2870,7 @@ fn typed_memory_content_update_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .test_query_property_batch(&KnowledgePropertyBatchRequest {
+            .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),
@@ -3014,7 +2945,7 @@ fn updates_memory_dedup_reviewed_batch_for_scheduler_shape() {
     assert!(output.rows[4].duplicate);
 
     let rows = db
-        .test_query_property_batch(&KnowledgePropertyBatchRequest {
+        .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -3078,7 +3009,7 @@ fn typed_memory_dedup_reviewed_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .test_query_property_batch(&KnowledgePropertyBatchRequest {
+            .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),
@@ -3175,7 +3106,7 @@ fn updates_memory_decay_refresh_batch_for_scheduler_shapes() {
     assert!(output.rows[4].duplicate);
 
     let rows = db
-        .test_query_property_batch(&KnowledgePropertyBatchRequest {
+        .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -3288,7 +3219,7 @@ fn typed_memory_decay_refresh_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .test_query_property_batch(&KnowledgePropertyBatchRequest {
+            .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),
@@ -3384,7 +3315,7 @@ fn adjusts_source_memory_count_batch_with_floor_decrements() {
     assert!(output.rows[6].invalid_current_count);
 
     let rows = db
-        .test_query_property_batch(&KnowledgePropertyBatchRequest {
+        .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Source".to_string(),
@@ -3459,7 +3390,7 @@ fn typed_source_memory_count_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .test_query_property_batch(&KnowledgePropertyBatchRequest {
+            .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Source".to_string(),
@@ -3556,7 +3487,7 @@ fn updates_source_lifecycle_batch_for_nowledge_shapes() {
     assert!(!output.rows[4].matched);
 
     let rows = db
-        .test_query_property_batch(&KnowledgePropertyBatchRequest {
+        .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Source".to_string(),
@@ -3664,7 +3595,7 @@ fn typed_source_lifecycle_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .test_query_property_batch(&KnowledgePropertyBatchRequest {
+            .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Source".to_string(),
@@ -3758,7 +3689,7 @@ fn updates_source_metadata_batch_for_nowledge_auto_ocr_shape() {
     assert!(output.rows[4].duplicate);
 
     let rows = db
-        .test_query_property_batch(&KnowledgePropertyBatchRequest {
+        .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Source".to_string(),
@@ -3844,7 +3775,7 @@ fn typed_source_metadata_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .test_query_property_batch(&KnowledgePropertyBatchRequest {
+            .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Source".to_string(),
@@ -3991,7 +3922,7 @@ fn typed_source_delete_persists_as_one_wal_batch_and_replays() {
             .unwrap();
         assert_eq!(sources.rows[0].get("total"), Some(&Value::Int(0)));
         assert!(db
-            .test_query_entity(&KnowledgeEntityRequest {
+            .query_entity_via_cypher(&KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "memory_1".to_string(),
             })
@@ -4416,7 +4347,7 @@ fn updates_source_parsed_metadata_batch_for_nowledge_parser_shapes() {
     assert!(output.rows[4].duplicate);
 
     let rows = db
-        .test_query_property_batch(&KnowledgePropertyBatchRequest {
+        .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Source".to_string(),
@@ -4554,7 +4485,7 @@ fn typed_source_parsed_metadata_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .test_query_property_batch(&KnowledgePropertyBatchRequest {
+            .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Source".to_string(),
@@ -4668,7 +4599,7 @@ fn creates_source_parsed_batch_for_nowledge_ingest_shapes() {
     assert!(output.rows[0].node_id.is_some());
 
     let rows = db
-        .test_query_property_batch(&KnowledgePropertyBatchRequest {
+        .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Source".to_string(),
@@ -4801,7 +4732,7 @@ fn typed_source_parsed_create_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .test_query_property_batch(&KnowledgePropertyBatchRequest {
+            .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Source".to_string(),
@@ -5196,7 +5127,7 @@ fn updates_memory_lifecycle_batch_for_metadata_state() {
     assert!(!output.rows[3].matched);
 
     let rows = db
-        .test_query_property_batch(&KnowledgePropertyBatchRequest {
+        .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -5297,7 +5228,7 @@ fn typed_memory_lifecycle_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .test_query_property_batch(&KnowledgePropertyBatchRequest {
+            .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),
@@ -5381,7 +5312,7 @@ fn updates_memory_latest_batch_for_nowledge_evolution_shapes() {
     assert!(output.rows[3].duplicate);
 
     let rows = db
-        .test_query_property_batch(&KnowledgePropertyBatchRequest {
+        .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Memory".to_string(),
@@ -5483,7 +5414,7 @@ fn typed_memory_latest_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .test_query_property_batch(&KnowledgePropertyBatchRequest {
+            .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Memory".to_string(),
@@ -5838,7 +5769,7 @@ fn updates_skill_usage_stats_batch_for_nowledge_shapes() {
     assert!(!output.rows[3].matched);
 
     let rows = db
-        .test_query_property_batch(&KnowledgePropertyBatchRequest {
+        .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Skill".to_string(),
@@ -5950,7 +5881,7 @@ fn typed_skill_usage_stats_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .test_query_property_batch(&KnowledgePropertyBatchRequest {
+            .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Skill".to_string(),
@@ -6054,7 +5985,7 @@ fn updates_skill_metadata_batch_for_nowledge_shape() {
     assert!(output.rows[4].duplicate);
 
     let rows = db
-        .test_query_property_batch(&KnowledgePropertyBatchRequest {
+        .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Skill".to_string(),
@@ -6140,7 +6071,7 @@ fn typed_skill_metadata_update_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .test_query_property_batch(&KnowledgePropertyBatchRequest {
+            .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Skill".to_string(),
@@ -6284,7 +6215,7 @@ fn updates_skill_lifecycle_batch_for_nowledge_shapes() {
     assert!(!output.rows[6].matched);
 
     let rows = db
-        .test_query_property_batch(&KnowledgePropertyBatchRequest {
+        .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Skill".to_string(),
@@ -6431,7 +6362,7 @@ fn typed_skill_lifecycle_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .test_query_property_batch(&KnowledgePropertyBatchRequest {
+            .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Skill".to_string(),
@@ -6592,7 +6523,7 @@ fn typed_skill_delete_persists_as_one_wal_batch_and_replays() {
             .unwrap();
         assert_eq!(skills.rows[0].get("total"), Some(&Value::Int(0)));
         assert!(db
-            .test_query_entity(&KnowledgeEntityRequest {
+            .query_entity_via_cypher(&KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "memory_1".to_string(),
             })
@@ -6795,7 +6726,7 @@ fn updates_thread_metadata_batch_for_nowledge_shapes() {
     assert!(!output.rows[3].matched);
 
     let rows = db
-        .test_query_property_batch(&KnowledgePropertyBatchRequest {
+        .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Thread".to_string(),
@@ -6883,7 +6814,7 @@ fn typed_thread_metadata_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .test_query_property_batch(&KnowledgePropertyBatchRequest {
+            .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Thread".to_string(),
@@ -6985,7 +6916,7 @@ fn updates_thread_message_count_batch_with_preserve_newer_timestamp() {
     assert!(!output.rows[4].matched);
 
     let rows = db
-        .test_query_property_batch(&KnowledgePropertyBatchRequest {
+        .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Thread".to_string(),
@@ -7086,7 +7017,7 @@ fn typed_thread_message_count_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .test_query_property_batch(&KnowledgePropertyBatchRequest {
+            .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Thread".to_string(),
@@ -7237,7 +7168,7 @@ fn typed_thread_delete_persists_as_one_wal_batch_and_replays() {
             assert!(!test_thread_exists(&db, thread_id));
         }
         assert!(db
-            .test_query_entity(&KnowledgeEntityRequest {
+            .query_entity_via_cypher(&KnowledgeEntityRequest {
                 label: "Message".to_string(),
                 external_id: "message_1".to_string(),
             })
@@ -7780,7 +7711,7 @@ fn updates_label_lifecycle_batch_for_nowledge_shapes() {
     assert!(!output.rows[4].matched);
 
     let rows = db
-        .test_query_property_batch(&KnowledgePropertyBatchRequest {
+        .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
             entities: vec![
                 KnowledgeEntityRequest {
                     label: "Label".to_string(),
@@ -7889,7 +7820,7 @@ fn typed_label_lifecycle_batch_persists_as_one_wal_batch_and_replays() {
     {
         let db = Database::open(&path).unwrap();
         let rows = db
-            .test_query_property_batch(&KnowledgePropertyBatchRequest {
+            .query_property_batch_via_cypher(&KnowledgePropertyBatchRequest {
                 entities: vec![
                     KnowledgeEntityRequest {
                         label: "Label".to_string(),
@@ -7957,9 +7888,6 @@ fn projects_entity_labels_for_nowledge_growth() {
         .unwrap();
     db.query("MATCH (s:Source {id: 'projected_label_source_a'}), (l:Label {id: 'label_source'}) CREATE (s)-[:HAS_LABEL {assigned_by: 'source', future_edge_field: 'edge-source'}]->(l)")
         .unwrap();
-    let graph_commit_epoch = db.store.commit_epoch();
-    let snapshot = db.begin_read_transaction();
-
     db.query("CREATE (:Label {id: 'label_alpha', name: 'Alpha', canonical_name: 'alpha', color: '#f00', future_label_field: 'label-a'})")
         .unwrap();
     db.query("MATCH (m:Memory {id: 'projected_label_memory_a'}), (l:Label {id: 'label_alpha'}) CREATE (m)-[:HAS_LABEL {assigned_by: 'later', weight: 9, future_edge_field: 'edge-a'}]->(l)")
@@ -7987,7 +7915,7 @@ fn projects_entity_labels_for_nowledge_growth() {
         ],
     };
     let projected = db
-        .test_query_entity_label_projected_list(&projected_request)
+        .query_entity_label_projected_list_via_cypher(&projected_request)
         .unwrap();
     assert_eq!(projected.found_entity_count, 2);
     assert_eq!(projected.missing_entity_count, 1);
@@ -8025,7 +7953,7 @@ fn projects_entity_labels_for_nowledge_growth() {
 
     let stats = db.plan_cache_stats();
     let repeated_projected = db
-        .test_query_entity_label_projected_list(&projected_request)
+        .query_entity_label_projected_list_via_cypher(&projected_request)
         .unwrap();
     assert_eq!(repeated_projected, projected);
     let repeated_stats = db.plan_cache_stats();
@@ -8034,7 +7962,7 @@ fn projects_entity_labels_for_nowledge_growth() {
     assert_eq!(repeated_stats.hits, stats.hits + 3);
 
     let source_projected = db
-        .test_query_entity_label_projected_list(&KnowledgeEntityLabelProjectedListRequest {
+        .query_entity_label_projected_list_via_cypher(&KnowledgeEntityLabelProjectedListRequest {
             list: KnowledgeEntityLabelListRequest {
                 entity_label: "Source".to_string(),
                 external_ids: vec!["projected_label_source_a".to_string()],
@@ -8049,28 +7977,6 @@ fn projects_entity_labels_for_nowledge_growth() {
     assert_eq!(
         source_projected.groups[0].labels[0].label_id.as_deref(),
         Some("label_source")
-    );
-
-    let snapshot_projected = snapshot
-        .test_query_entity_label_projected_list(&KnowledgeEntityLabelProjectedListRequest {
-            list: KnowledgeEntityLabelListRequest {
-                entity_label: "Memory".to_string(),
-                external_ids: vec!["projected_label_memory_a".to_string()],
-                limit_per_entity: 0,
-            },
-            label_property_names: vec!["name".to_string()],
-            relationship_property_names: vec!["future_edge_field".to_string()],
-        })
-        .unwrap();
-    assert_eq!(snapshot_projected.graph_commit_epoch, graph_commit_epoch);
-    assert_eq!(snapshot_projected.label_count, 2);
-    assert_eq!(
-        snapshot_projected.groups[0]
-            .labels
-            .iter()
-            .map(|row| row.label_id.as_deref())
-            .collect::<Vec<_>>(),
-        vec![Some("label_beta"), Some("label_zeta")]
     );
 }
 
@@ -8088,7 +7994,7 @@ fn entity_label_projected_read_rejects_empty_property_names_without_wal() {
     let wal_before = read_test_wal(&path).unwrap();
 
     let label_property_error = db
-        .test_query_entity_label_projected_list(&KnowledgeEntityLabelProjectedListRequest {
+        .query_entity_label_projected_list_via_cypher(&KnowledgeEntityLabelProjectedListRequest {
             list: KnowledgeEntityLabelListRequest {
                 entity_label: "Memory".to_string(),
                 external_ids: vec!["projected_label_wal_memory".to_string()],
@@ -8103,7 +8009,7 @@ fn entity_label_projected_read_rejects_empty_property_names_without_wal() {
         .contains("non-empty property names"));
 
     let relationship_property_error = db
-        .test_query_entity_label_projected_list(&KnowledgeEntityLabelProjectedListRequest {
+        .query_entity_label_projected_list_via_cypher(&KnowledgeEntityLabelProjectedListRequest {
             list: KnowledgeEntityLabelListRequest {
                 entity_label: "Memory".to_string(),
                 external_ids: vec!["projected_label_wal_memory".to_string()],
@@ -8722,7 +8628,9 @@ fn reads_entity_labels_for_nowledge_has_label_shapes() {
         ],
         limit_per_entity: 0,
     };
-    let memories = db.test_query_entity_labels(&memories_request).unwrap();
+    let memories = db
+        .query_entity_labels_via_cypher(&memories_request)
+        .unwrap();
 
     assert_eq!(memories.graph_commit_epoch, graph_commit_epoch);
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
@@ -8760,7 +8668,9 @@ fn reads_entity_labels_for_nowledge_has_label_shapes() {
     assert_eq!(memories.groups[2].node_id, None);
 
     let stats = db.plan_cache_stats();
-    let repeated_memories = db.test_query_entity_labels(&memories_request).unwrap();
+    let repeated_memories = db
+        .query_entity_labels_via_cypher(&memories_request)
+        .unwrap();
     assert_eq!(repeated_memories, memories);
     let repeated_stats = db.plan_cache_stats();
     assert_eq!(repeated_stats.entries, stats.entries);
@@ -8768,7 +8678,7 @@ fn reads_entity_labels_for_nowledge_has_label_shapes() {
     assert_eq!(repeated_stats.hits, stats.hits + 3);
 
     let sources = db
-        .test_query_entity_labels(&KnowledgeEntityLabelListRequest {
+        .query_entity_labels_via_cypher(&KnowledgeEntityLabelListRequest {
             entity_label: "Source".to_string(),
             external_ids: vec!["source_1".to_string()],
             limit_per_entity: 1,
@@ -8791,7 +8701,7 @@ fn reads_entity_labels_for_nowledge_has_label_shapes() {
 fn entity_label_read_requests_validate_non_empty_filters() {
     let db = Database::new();
     let entity_label_error = db
-        .test_query_entity_labels(&KnowledgeEntityLabelListRequest {
+        .query_entity_labels_via_cypher(&KnowledgeEntityLabelListRequest {
             entity_label: "Bad Label".to_string(),
             external_ids: vec!["memory_1".to_string()],
             limit_per_entity: 10,
@@ -8802,7 +8712,7 @@ fn entity_label_read_requests_validate_non_empty_filters() {
         .contains("knowledge entity label"));
 
     let external_ids_error = db
-        .test_query_entity_labels(&KnowledgeEntityLabelListRequest {
+        .query_entity_labels_via_cypher(&KnowledgeEntityLabelListRequest {
             entity_label: "Memory".to_string(),
             external_ids: Vec::new(),
             limit_per_entity: 10,

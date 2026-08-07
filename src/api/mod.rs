@@ -14,7 +14,7 @@ use crate::qos::{
 use crate::schema::{Catalog, GraphStatistics, IndexKind, LabelId, SchemaObjectState};
 #[cfg(test)]
 use crate::schema::{
-    CompositeIndexDescriptor, ConstraintDescriptor, IndexDescriptor, PropertyDescriptor, RelTypeId,
+    CompositeIndexDescriptor, ConstraintDescriptor, IndexDescriptor, PropertyDescriptor,
     TableDescriptor,
 };
 use crate::search::{
@@ -50,8 +50,6 @@ use plan_cache::{
     OptimizerEnvironmentKey, OptimizerPlanningCache, PlanCache, PlanCacheContext, PlanCacheMode,
     DEFAULT_PLAN_CACHE_MAX_ENTRIES,
 };
-#[cfg(test)]
-use query_domains::*;
 use skein_optimizer::{
     normalize_search_enum_value, search_field_is_enum_like, SearchPredicate, SearchPredicateOp,
     SearchPredicateSet,
@@ -72,8 +70,6 @@ mod explain;
 mod explain_format;
 mod observability;
 mod plan_cache;
-#[cfg(test)]
-mod query_domains;
 mod query_runtime;
 mod resource_profile;
 mod schema_guidance;
@@ -2548,91 +2544,11 @@ impl Database {
         .retrieve_knowledge_from_search(search, projection_freshness, request)
     }
 
-    #[cfg(test)]
-    pub(crate) fn test_query_entity(
-        &self,
-        request: &KnowledgeEntityRequest,
-    ) -> Result<KnowledgeEntityOutput> {
-        knowledge_entity_via_query_runtime(self, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_entity_details(
-        &self,
-        request: &KnowledgeEntityDetailsRequest,
-    ) -> Result<KnowledgeEntityDetailsOutput> {
-        knowledge_entity_details_via_query_runtime(self, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_entity_batch(
-        &self,
-        request: &KnowledgeEntityBatchRequest,
-    ) -> Result<KnowledgeEntityBatchOutput> {
-        knowledge_entity_batch_via_query_runtime(self, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_community_entity_visibility(
-        &self,
-        request: &KnowledgeCommunityEntityVisibilityRequest,
-    ) -> Result<KnowledgeCommunityEntityVisibilityOutput> {
-        knowledge_community_entity_visibility_via_query_runtime(self, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_community_memories(
-        &self,
-        request: &KnowledgeCommunityMemoryListRequest,
-    ) -> Result<KnowledgeCommunityMemoryListOutput> {
-        knowledge_community_memories_via_query_runtime(self, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_crystals(
-        &self,
-        request: &KnowledgeCrystalListRequest,
-    ) -> Result<KnowledgeCrystalListOutput> {
-        knowledge_crystals_via_query_runtime(self, request)
-    }
-
     pub fn merge_knowledge_crystal_source(
         &mut self,
         request: &KnowledgeCrystalSourceMergeRequest,
     ) -> Result<KnowledgeCrystalSourceMergeOutput> {
         merge_knowledge_crystal_source_for(self, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_crystal_communities(
-        &self,
-        request: &KnowledgeCrystalCommunityListRequest,
-    ) -> Result<KnowledgeCrystalCommunityListOutput> {
-        knowledge_crystal_communities_via_query_runtime(self, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_crystal_source_visibility(
-        &self,
-        request: &KnowledgeCrystalSourceVisibilityRequest,
-    ) -> Result<KnowledgeCrystalSourceVisibilityOutput> {
-        knowledge_crystal_source_visibility_via_query_runtime(self, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_scoped_entity(
-        &self,
-        request: &KnowledgeScopedEntityRequest,
-    ) -> Result<KnowledgeEntityOutput> {
-        knowledge_scoped_entity_via_query_runtime(self, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_scoped_entity_batch(
-        &self,
-        request: &KnowledgeScopedEntityBatchRequest,
-    ) -> Result<KnowledgeEntityBatchOutput> {
-        knowledge_scoped_entity_batch_via_query_runtime(self, request)
     }
 
     pub fn create_knowledge_entity(
@@ -2661,22 +2577,6 @@ impl Database {
         request: &KnowledgeEntityUpsertBatchRequest,
     ) -> Result<KnowledgeEntityUpsertBatchOutput> {
         upsert_knowledge_entity_batch_for(self, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_property_batch(
-        &self,
-        request: &KnowledgePropertyBatchRequest,
-    ) -> Result<KnowledgePropertyBatchOutput> {
-        knowledge_property_batch_via_query_runtime(self, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_scoped_property_batch(
-        &self,
-        request: &KnowledgeScopedPropertyBatchRequest,
-    ) -> Result<KnowledgePropertyBatchOutput> {
-        knowledge_scoped_property_batch_via_query_runtime(self, request)
     }
 
     pub fn update_knowledge_properties(
@@ -2938,22 +2838,6 @@ impl Database {
         transfer_knowledge_memory_label_edges_for(self, request)
     }
 
-    #[cfg(test)]
-    pub(crate) fn test_query_entity_labels(
-        &self,
-        request: &KnowledgeEntityLabelListRequest,
-    ) -> Result<KnowledgeEntityLabelListOutput> {
-        knowledge_entity_labels_via_query_runtime(self, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_entity_label_projected_list(
-        &self,
-        request: &KnowledgeEntityLabelProjectedListRequest,
-    ) -> Result<KnowledgeEntityLabelProjectedListOutput> {
-        knowledge_entity_label_projected_list_via_query_runtime(self, request)
-    }
-
     pub fn update_knowledge_pagerank_scores_batch(
         &mut self,
         request: &KnowledgePageRankScoreBatchRequest,
@@ -2987,22 +2871,6 @@ impl Database {
         request: &KnowledgeCommunityLifecycleBatchRequest,
     ) -> Result<KnowledgeCommunityLifecycleBatchOutput> {
         update_knowledge_communities_batch_for(self, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_communities(
-        &self,
-        request: &KnowledgeCommunityListRequest,
-    ) -> Result<KnowledgeCommunityListOutput> {
-        knowledge_communities_via_query_runtime(self, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_community(
-        &self,
-        request: &KnowledgeCommunityRequest,
-    ) -> Result<KnowledgeCommunityOutput> {
-        knowledge_community_via_query_runtime(self, request)
     }
 
     pub fn delete_knowledge_communities(
@@ -3192,78 +3060,6 @@ impl Database {
         request: &KnowledgeSourceReferenceRelationshipCleanupRequest,
     ) -> Result<KnowledgeSourceReferenceRelationshipCleanupOutput> {
         delete_knowledge_source_reference_relationships_for(self, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_neighbors(
-        &self,
-        request: &KnowledgeNeighborsRequest,
-    ) -> Result<KnowledgeNeighborsOutput> {
-        knowledge_neighbors_via_query_runtime(self, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_scoped_neighbors(
-        &self,
-        request: &KnowledgeScopedNeighborsRequest,
-    ) -> Result<KnowledgeNeighborsOutput> {
-        knowledge_scoped_neighbors_via_query_runtime(self, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_relationships(
-        &self,
-        request: &KnowledgeRelationshipsRequest,
-    ) -> Result<KnowledgeRelationshipsOutput> {
-        knowledge_relationships_via_query_runtime(self, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_scoped_relationships(
-        &self,
-        request: &KnowledgeScopedRelationshipsRequest,
-    ) -> Result<KnowledgeRelationshipsOutput> {
-        knowledge_scoped_relationships_via_query_runtime(self, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_induced_edges(
-        &self,
-        request: &KnowledgeInducedEdgeListRequest,
-    ) -> Result<KnowledgeInducedEdgeListOutput> {
-        knowledge_induced_edges_via_query_runtime(self, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_paths(
-        &self,
-        request: &KnowledgePathRequest,
-    ) -> Result<KnowledgePathOutput> {
-        knowledge_paths_via_query_runtime(self, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_scoped_paths(
-        &self,
-        request: &KnowledgeScopedPathRequest,
-    ) -> Result<KnowledgePathOutput> {
-        knowledge_scoped_paths_via_query_runtime(self, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_subgraph(
-        &self,
-        request: &KnowledgeSubgraphRequest,
-    ) -> Result<KnowledgeSubgraphOutput> {
-        knowledge_subgraph_via_query_runtime(self, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_scoped_subgraph(
-        &self,
-        request: &KnowledgeScopedSubgraphRequest,
-    ) -> Result<KnowledgeSubgraphOutput> {
-        knowledge_scoped_subgraph_via_query_runtime(self, request)
     }
 
     fn ensure_writable(&self) -> Result<()> {
@@ -4771,170 +4567,6 @@ fn knowledge_query_terms(text: &str) -> BTreeSet<String> {
 }
 
 #[cfg(test)]
-fn knowledge_entity_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeEntityRequest,
-) -> Result<KnowledgeEntityOutput> {
-    let entity = match knowledge_scoped_entity_match(catalog, store, request, &BTreeMap::new())? {
-        KnowledgeScopedEntityMatch::Found(entity) => Some(entity),
-        KnowledgeScopedEntityMatch::Missing | KnowledgeScopedEntityMatch::FilteredOut => None,
-    };
-    Ok(KnowledgeEntityOutput {
-        graph_commit_epoch: store.commit_epoch(),
-        entity,
-    })
-}
-
-#[cfg(test)]
-fn knowledge_scoped_entity_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeScopedEntityRequest,
-) -> Result<KnowledgeEntityOutput> {
-    let entity = match knowledge_scoped_entity_match(
-        catalog,
-        store,
-        &request.entity,
-        &request.metadata_filters,
-    )? {
-        KnowledgeScopedEntityMatch::Found(entity) => Some(entity),
-        KnowledgeScopedEntityMatch::Missing | KnowledgeScopedEntityMatch::FilteredOut => None,
-    };
-    Ok(KnowledgeEntityOutput {
-        graph_commit_epoch: store.commit_epoch(),
-        entity,
-    })
-}
-
-#[cfg(test)]
-fn knowledge_entity_batch_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeEntityBatchRequest,
-) -> Result<KnowledgeEntityBatchOutput> {
-    knowledge_scoped_entity_batch_for(
-        catalog,
-        store,
-        &KnowledgeScopedEntityBatchRequest {
-            entities: request.entities.clone(),
-            metadata_filters: BTreeMap::new(),
-        },
-    )
-}
-
-#[cfg(test)]
-fn knowledge_scoped_entity_batch_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeScopedEntityBatchRequest,
-) -> Result<KnowledgeEntityBatchOutput> {
-    let mut entities = Vec::with_capacity(request.entities.len());
-    let mut found_count = 0;
-    let mut missing_count = 0;
-    let mut filtered_out_count = 0;
-    for entity_request in &request.entities {
-        match knowledge_scoped_entity_match(
-            catalog,
-            store,
-            entity_request,
-            &request.metadata_filters,
-        )? {
-            KnowledgeScopedEntityMatch::Found(entity) => {
-                found_count += 1;
-                entities.push(Some(entity));
-            }
-            KnowledgeScopedEntityMatch::Missing => {
-                missing_count += 1;
-                entities.push(None);
-            }
-            KnowledgeScopedEntityMatch::FilteredOut => {
-                filtered_out_count += 1;
-                entities.push(None);
-            }
-        }
-    }
-    Ok(KnowledgeEntityBatchOutput {
-        graph_commit_epoch: store.commit_epoch(),
-        entities,
-        found_count,
-        missing_count,
-        filtered_out_count,
-    })
-}
-
-#[cfg(test)]
-fn knowledge_community_entity_visibility_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeCommunityEntityVisibilityRequest,
-) -> Result<KnowledgeCommunityEntityVisibilityOutput> {
-    validate_knowledge_community_entity_visibility_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(entity_label_id) = catalog.label_id("Entity") else {
-        return Ok(empty_community_entity_visibility_output(graph_commit_epoch));
-    };
-    let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Ok(empty_community_entity_visibility_output(graph_commit_epoch));
-    };
-    let mentions_type_id = catalog.rel_type_id("MENTIONS");
-    let community_ids = request
-        .community_ids
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let mut matched_entity_count = 0;
-    let mut rows = Vec::new();
-
-    store.try_visit_nodes_owned(Some(entity_label_id), |entity| {
-        if !entity
-            .properties
-            .get("community_id")
-            .is_some_and(|community_id| community_ids.contains(community_id))
-        {
-            return Ok(crate::store::GraphScanControl::Continue);
-        }
-        matched_entity_count += 1;
-        let community_id = entity
-            .properties
-            .get("community_id")
-            .cloned()
-            .unwrap_or(Value::Null);
-        let memory_rows = match mentions_type_id {
-            Some(rel_type_id) => community_entity_visibility_memory_rows(
-                store,
-                memory_label_id,
-                &entity,
-                rel_type_id,
-                &community_id,
-            )?,
-            None => Vec::new(),
-        };
-        if memory_rows.is_empty() {
-            rows.push(community_entity_visibility_row(&entity, None, community_id));
-        } else {
-            rows.extend(memory_rows);
-        }
-        Ok(crate::store::GraphScanControl::Continue)
-    })?;
-
-    sort_community_entity_visibility_rows(&mut rows);
-    let matched_row_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-
-    Ok(KnowledgeCommunityEntityVisibilityOutput {
-        graph_commit_epoch,
-        rows,
-        matched_entity_count,
-        matched_row_count,
-        returned_count,
-    })
-}
-
-#[cfg(test)]
 fn knowledge_community_entity_visibility_via_query_runtime(
     db: &Database,
     request: &KnowledgeCommunityEntityVisibilityRequest,
@@ -5185,59 +4817,6 @@ fn validate_knowledge_community_entity_visibility_request(
 }
 
 #[cfg(test)]
-fn community_entity_visibility_memory_rows(
-    store: &GraphStore,
-    memory_label_id: LabelId,
-    entity: &NodeRecord,
-    rel_type_id: RelTypeId,
-    community_id: &Value,
-) -> Result<Vec<KnowledgeCommunityEntityVisibilityRow>> {
-    let mut rows = Vec::new();
-    store.try_visit_adjacent_relationships_owned(
-        entity.id,
-        Some(rel_type_id),
-        AdjacencyDirection::Incoming,
-        |relationship| {
-            if let Some(memory) = store
-                .node_owned(relationship.source)?
-                .filter(|memory| memory.labels.contains(&memory_label_id))
-            {
-                rows.push(community_entity_visibility_row(
-                    entity,
-                    Some(&memory),
-                    community_id.clone(),
-                ));
-            }
-            Ok(crate::store::GraphScanControl::Continue)
-        },
-    )?;
-    Ok(rows)
-}
-
-#[cfg(test)]
-fn community_entity_visibility_row(
-    entity: &NodeRecord,
-    memory: Option<&NodeRecord>,
-    community_id: Value,
-) -> KnowledgeCommunityEntityVisibilityRow {
-    KnowledgeCommunityEntityVisibilityRow {
-        community_id,
-        entity_id: node_external_id(entity),
-        entity_node_id: entity.id.0,
-        entity_name: string_property(entity, "name"),
-        entity_type: string_property(entity, "entity_type"),
-        memory_id: memory.and_then(node_external_id),
-        memory_node_id: memory.map(|memory| memory.id.0),
-        memory_metadata: memory.and_then(|memory| memory.properties.get("metadata").cloned()),
-        memory_is_latest: memory
-            .and_then(|memory| boolean_property(memory, "is_latest"))
-            .unwrap_or(true),
-        memory_lifecycle_state: memory
-            .and_then(|memory| string_property(memory, "lifecycle_state")),
-    }
-}
-
-#[cfg(test)]
 fn sort_community_entity_visibility_rows(rows: &mut [KnowledgeCommunityEntityVisibilityRow]) {
     rows.sort_by(|left, right| {
         left.community_id
@@ -5248,76 +4827,6 @@ fn sort_community_entity_visibility_rows(rows: &mut [KnowledgeCommunityEntityVis
             .then_with(|| left.entity_node_id.cmp(&right.entity_node_id))
             .then_with(|| left.memory_node_id.cmp(&right.memory_node_id))
     });
-}
-
-#[cfg(test)]
-struct KnowledgeCommunityMemoryAccumulator {
-    community_id: Value,
-    memory: NodeRecord,
-    entity_ids: BTreeSet<String>,
-    mention_count: usize,
-}
-
-#[cfg(test)]
-fn knowledge_community_memories_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeCommunityMemoryListRequest,
-) -> Result<KnowledgeCommunityMemoryListOutput> {
-    validate_knowledge_community_memory_list_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Ok(empty_community_memory_list_output(graph_commit_epoch));
-    };
-    let community_ids = request
-        .community_ids
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let unit_types = community_memory_unit_type_filter_values(request);
-    let mut rows = Vec::new();
-
-    if matches!(
-        request.source,
-        KnowledgeCommunityMemorySource::MentionedEntities | KnowledgeCommunityMemorySource::Both
-    ) {
-        rows.extend(mentioned_community_memory_rows(
-            catalog,
-            store,
-            memory_label_id,
-            &community_ids,
-            request.crystal_filter,
-            &unit_types,
-        )?);
-    }
-    if matches!(
-        request.source,
-        KnowledgeCommunityMemorySource::DirectMemoryCommunity
-            | KnowledgeCommunityMemorySource::Both
-    ) {
-        rows.extend(direct_community_memory_rows(
-            catalog,
-            store,
-            memory_label_id,
-            &community_ids,
-            request.crystal_filter,
-            &unit_types,
-        )?);
-    }
-
-    sort_community_memory_rows(&mut rows, request.order);
-    let matched_row_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-
-    Ok(KnowledgeCommunityMemoryListOutput {
-        graph_commit_epoch,
-        rows,
-        matched_row_count,
-        returned_count,
-    })
 }
 
 #[cfg(test)]
@@ -5361,18 +4870,6 @@ fn knowledge_community_memories_via_query_runtime(
 }
 
 #[cfg(test)]
-fn empty_community_memory_list_output(
-    graph_commit_epoch: u64,
-) -> KnowledgeCommunityMemoryListOutput {
-    KnowledgeCommunityMemoryListOutput {
-        graph_commit_epoch,
-        rows: Vec::new(),
-        matched_row_count: 0,
-        returned_count: 0,
-    }
-}
-
-#[cfg(test)]
 fn validate_knowledge_community_memory_list_request(
     request: &KnowledgeCommunityMemoryListRequest,
 ) -> Result<()> {
@@ -5396,17 +4893,6 @@ fn validate_knowledge_community_memory_list_request(
         ));
     }
     Ok(())
-}
-
-#[cfg(test)]
-fn community_memory_unit_type_filter_values(
-    request: &KnowledgeCommunityMemoryListRequest,
-) -> Option<BTreeSet<String>> {
-    if request.unit_types.is_empty() {
-        None
-    } else {
-        Some(request.unit_types.iter().cloned().collect())
-    }
 }
 
 #[cfg(test)]
@@ -5511,181 +4997,6 @@ fn knowledge_community_memory_query_predicate(
         "true".to_string()
     } else {
         predicates.join(" AND ")
-    }
-}
-
-#[cfg(test)]
-fn mentioned_community_memory_rows(
-    catalog: &Catalog,
-    store: &GraphStore,
-    memory_label_id: LabelId,
-    community_ids: &BTreeSet<Value>,
-    crystal_filter: KnowledgeCommunityMemoryCrystalFilter,
-    unit_types: &Option<BTreeSet<String>>,
-) -> Result<Vec<KnowledgeCommunityMemoryRow>> {
-    let Some(entity_label_id) = catalog.label_id("Entity") else {
-        return Ok(Vec::new());
-    };
-    let Some(mentions_type_id) = catalog.rel_type_id("MENTIONS") else {
-        return Ok(Vec::new());
-    };
-    let mut groups: BTreeMap<(Value, NodeId), KnowledgeCommunityMemoryAccumulator> =
-        BTreeMap::new();
-    store.try_visit_nodes_owned(Some(entity_label_id), |entity| {
-        if !entity
-            .properties
-            .get("community_id")
-            .is_some_and(|community_id| community_ids.contains(community_id))
-        {
-            return Ok(crate::store::GraphScanControl::Continue);
-        }
-        let community_id = entity
-            .properties
-            .get("community_id")
-            .cloned()
-            .unwrap_or(Value::Null);
-        store.try_visit_adjacent_relationships_owned(
-            entity.id,
-            Some(mentions_type_id),
-            AdjacencyDirection::Incoming,
-            |relationship| {
-                let Some(memory) = store
-                    .node_owned(relationship.source)?
-                    .filter(|memory| memory.labels.contains(&memory_label_id))
-                    .filter(|memory| {
-                        memory_matches_community_memory_crystal_filter(memory, crystal_filter)
-                    })
-                    .filter(|memory| {
-                        memory_matches_community_memory_unit_types(memory, unit_types)
-                    })
-                else {
-                    return Ok(crate::store::GraphScanControl::Continue);
-                };
-                let accumulator = groups
-                    .entry((community_id.clone(), memory.id))
-                    .or_insert_with(|| KnowledgeCommunityMemoryAccumulator {
-                        community_id: community_id.clone(),
-                        memory,
-                        entity_ids: BTreeSet::new(),
-                        mention_count: 0,
-                    });
-                accumulator.mention_count += 1;
-                if let Some(entity_id) = node_external_id(&entity) {
-                    accumulator.entity_ids.insert(entity_id);
-                }
-                Ok(crate::store::GraphScanControl::Continue)
-            },
-        )?;
-        Ok(crate::store::GraphScanControl::Continue)
-    })?;
-    Ok(groups
-        .into_values()
-        .map(|accumulator| {
-            let entity_ids = accumulator.entity_ids.into_iter().collect::<Vec<_>>();
-            let mention_breadth = if entity_ids.is_empty() {
-                accumulator.mention_count
-            } else {
-                entity_ids.len()
-            };
-            knowledge_community_memory_row(
-                &accumulator.memory,
-                accumulator.community_id,
-                KnowledgeCommunityMemoryRowSource::MentionedEntities,
-                mention_breadth,
-                entity_ids,
-            )
-        })
-        .collect())
-}
-
-#[cfg(test)]
-fn direct_community_memory_rows(
-    _catalog: &Catalog,
-    store: &GraphStore,
-    memory_label_id: LabelId,
-    community_ids: &BTreeSet<Value>,
-    crystal_filter: KnowledgeCommunityMemoryCrystalFilter,
-    unit_types: &Option<BTreeSet<String>>,
-) -> Result<Vec<KnowledgeCommunityMemoryRow>> {
-    let mut rows = Vec::new();
-    store.visit_nodes_owned(Some(memory_label_id), |memory| {
-        if memory
-            .properties
-            .get("community_id")
-            .is_some_and(|community_id| community_ids.contains(community_id))
-            && memory_matches_community_memory_crystal_filter(&memory, crystal_filter)
-            && memory_matches_community_memory_unit_types(&memory, unit_types)
-            && let Some(community_id) = memory.properties.get("community_id").cloned()
-        {
-            rows.push(knowledge_community_memory_row(
-                &memory,
-                community_id,
-                KnowledgeCommunityMemoryRowSource::DirectMemoryCommunity,
-                0,
-                Vec::new(),
-            ));
-        }
-        crate::store::GraphScanControl::Continue
-    })?;
-    Ok(rows)
-}
-
-#[cfg(test)]
-fn memory_matches_community_memory_crystal_filter(
-    memory: &NodeRecord,
-    crystal_filter: KnowledgeCommunityMemoryCrystalFilter,
-) -> bool {
-    match crystal_filter {
-        KnowledgeCommunityMemoryCrystalFilter::Any => true,
-        KnowledgeCommunityMemoryCrystalFilter::FalseOnly => {
-            boolean_property(memory, "is_crystal") == Some(false)
-        }
-        KnowledgeCommunityMemoryCrystalFilter::NullOrFalse => {
-            boolean_property(memory, "is_crystal") != Some(true)
-        }
-    }
-}
-
-#[cfg(test)]
-fn memory_matches_community_memory_unit_types(
-    memory: &NodeRecord,
-    unit_types: &Option<BTreeSet<String>>,
-) -> bool {
-    unit_types.as_ref().is_none_or(|unit_types| {
-        string_property(memory, "unit_type")
-            .is_some_and(|unit_type| unit_types.contains(&unit_type))
-    })
-}
-
-#[cfg(test)]
-fn knowledge_community_memory_row(
-    memory: &NodeRecord,
-    community_id: Value,
-    source: KnowledgeCommunityMemoryRowSource,
-    mention_breadth: usize,
-    entity_ids: Vec<String>,
-) -> KnowledgeCommunityMemoryRow {
-    let title = string_property(memory, "title");
-    let content = string_property(memory, "content");
-    KnowledgeCommunityMemoryRow {
-        community_id,
-        source,
-        memory_id: node_external_id(memory),
-        memory_node_id: memory.id.0,
-        title_or_empty: title.clone().unwrap_or_default(),
-        title,
-        content_or_empty: content.clone().unwrap_or_default(),
-        content,
-        unit_type: string_property(memory, "unit_type"),
-        metadata: memory.properties.get("metadata").cloned(),
-        is_latest: boolean_property(memory, "is_latest").unwrap_or(true),
-        lifecycle_state: string_property(memory, "lifecycle_state"),
-        importance: memory.properties.get("importance").cloned(),
-        created_at: memory.properties.get("created_at").cloned(),
-        is_crystal: boolean_property(memory, "is_crystal"),
-        pagerank_score: memory.properties.get("pagerank_score").cloned(),
-        mention_breadth,
-        entity_ids,
     }
 }
 
@@ -5830,14 +5141,6 @@ fn projected_properties(
 }
 
 #[cfg(test)]
-fn boolean_property(node: &NodeRecord, property: &str) -> Option<bool> {
-    match node.properties.get(property) {
-        Some(Value::Bool(value)) => Some(*value),
-        _ => None,
-    }
-}
-
-#[cfg(test)]
 fn boolean_property_value(properties: &BTreeMap<String, Value>, property: &str) -> Option<bool> {
     match properties.get(property) {
         Some(Value::Bool(value)) => Some(*value),
@@ -5851,47 +5154,6 @@ fn integer_property_value(properties: &BTreeMap<String, Value>, property: &str) 
         Some(Value::Int(value)) => Some(*value),
         _ => None,
     }
-}
-
-#[cfg(test)]
-fn knowledge_crystals_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeCrystalListRequest,
-) -> Result<KnowledgeCrystalListOutput> {
-    validate_knowledge_crystal_list_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Ok(KnowledgeCrystalListOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-        });
-    };
-
-    let mut rows = Vec::new();
-    store.visit_nodes_owned(Some(memory_label_id), |memory| {
-        if boolean_property(&memory, "is_crystal") == Some(true)
-            && memory_matches_crystal_list(&memory, request)
-        {
-            rows.push(knowledge_crystal_row(&memory));
-        }
-        crate::store::GraphScanControl::Continue
-    })?;
-    sort_crystal_rows(&mut rows, request);
-    let matched_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-
-    Ok(KnowledgeCrystalListOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        returned_count,
-    })
 }
 
 #[cfg(test)]
@@ -5965,42 +5227,6 @@ fn knowledge_crystal_list_query_predicate(
         predicates.push("m.id > $after_id");
     }
     format!(" WHERE {}", predicates.join(" AND "))
-}
-
-#[cfg(test)]
-fn memory_matches_crystal_list(memory: &NodeRecord, request: &KnowledgeCrystalListRequest) -> bool {
-    let memory_id = node_external_id(memory).unwrap_or_default();
-    request.key_match.as_ref().is_none_or(|key| {
-        memory_id == *key || memory_id.starts_with(key) || memory_id.contains(key)
-    }) && request
-        .after_id
-        .as_ref()
-        .is_none_or(|after_id| memory_id > *after_id)
-}
-
-#[cfg(test)]
-fn knowledge_crystal_row(memory: &NodeRecord) -> KnowledgeCrystalRow {
-    let crystal_title = string_property(memory, "crystal_title");
-    let title = string_property(memory, "title");
-    let display_title = crystal_title
-        .clone()
-        .or_else(|| title.clone())
-        .unwrap_or_default();
-    KnowledgeCrystalRow {
-        memory_id: node_external_id(memory),
-        node_id: memory.id.0,
-        crystal_title,
-        title,
-        display_title,
-        content: string_property(memory, "content"),
-        importance: memory.properties.get("importance").cloned(),
-        unit_type: string_property(memory, "unit_type"),
-        created_at: memory.properties.get("created_at").cloned(),
-        updated_at: memory.properties.get("updated_at").cloned(),
-        metadata: memory.properties.get("metadata").cloned(),
-        is_latest: boolean_property(memory, "is_latest"),
-        is_crystal: boolean_property(memory, "is_crystal"),
-    }
 }
 
 #[cfg(test)]
@@ -6157,112 +5383,6 @@ fn compare_crystal_importance_created_at(
 }
 
 #[cfg(test)]
-struct KnowledgeCrystalCommunityAccumulator {
-    row: KnowledgeCrystalCommunityRow,
-    source_memory_ids: BTreeSet<u64>,
-}
-
-#[cfg(test)]
-fn knowledge_crystal_communities_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeCrystalCommunityListRequest,
-) -> Result<KnowledgeCrystalCommunityListOutput> {
-    validate_knowledge_crystal_community_list_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Ok(empty_crystal_community_output(graph_commit_epoch));
-    };
-    let Some(entity_label_id) = catalog.label_id("Entity") else {
-        return Ok(empty_crystal_community_output(graph_commit_epoch));
-    };
-    let Some(synthesized_from_type_id) = catalog.rel_type_id("SYNTHESIZED_FROM") else {
-        return Ok(empty_crystal_community_output(graph_commit_epoch));
-    };
-    let Some(mentions_type_id) = catalog.rel_type_id("MENTIONS") else {
-        return Ok(empty_crystal_community_output(graph_commit_epoch));
-    };
-
-    let community_filter = crystal_community_filter_values(request);
-    let mut matched_path_count = 0;
-    let mut groups: BTreeMap<(NodeId, Value), KnowledgeCrystalCommunityAccumulator> =
-        BTreeMap::new();
-
-    store.try_visit_nodes_owned(Some(memory_label_id), |crystal| {
-        if boolean_property(&crystal, "is_crystal") != Some(true) {
-            return Ok(crate::store::GraphScanControl::Continue);
-        }
-        store.try_visit_adjacent_relationships_owned(
-            crystal.id,
-            Some(synthesized_from_type_id),
-            AdjacencyDirection::Outgoing,
-            |source_rel| {
-                let Some(source_memory) = store
-                    .node_owned(source_rel.target)?
-                    .filter(|node| node.labels.contains(&memory_label_id))
-                else {
-                    return Ok(crate::store::GraphScanControl::Continue);
-                };
-                store.try_visit_adjacent_relationships_owned(
-                    source_memory.id,
-                    Some(mentions_type_id),
-                    AdjacencyDirection::Outgoing,
-                    |mention_rel| {
-                        let Some(entity) = store
-                            .node_owned(mention_rel.target)?
-                            .filter(|node| node.labels.contains(&entity_label_id))
-                        else {
-                            return Ok(crate::store::GraphScanControl::Continue);
-                        };
-                        let Some(community_id) = entity.properties.get("community_id").cloned()
-                        else {
-                            return Ok(crate::store::GraphScanControl::Continue);
-                        };
-                        if community_id == Value::Null
-                            || !crystal_community_scope_matches(&community_id, &community_filter)
-                        {
-                            return Ok(crate::store::GraphScanControl::Continue);
-                        }
-                        matched_path_count += 1;
-                        let accumulator = groups
-                            .entry((crystal.id, community_id.clone()))
-                            .or_insert_with(|| KnowledgeCrystalCommunityAccumulator {
-                                row: knowledge_crystal_community_row(&crystal, community_id),
-                                source_memory_ids: BTreeSet::new(),
-                            });
-                        accumulator.row.hit_count += 1;
-                        accumulator.source_memory_ids.insert(source_memory.id.0);
-                        accumulator.row.source_memory_count = accumulator.source_memory_ids.len();
-                        Ok(crate::store::GraphScanControl::Continue)
-                    },
-                )?;
-                Ok(crate::store::GraphScanControl::Continue)
-            },
-        )?;
-        Ok(crate::store::GraphScanControl::Continue)
-    })?;
-
-    let mut rows = groups
-        .into_values()
-        .map(|accumulator| accumulator.row)
-        .collect::<Vec<_>>();
-    sort_crystal_community_rows(&mut rows, request.order);
-    let matched_pair_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-
-    Ok(KnowledgeCrystalCommunityListOutput {
-        graph_commit_epoch,
-        rows,
-        matched_path_count,
-        matched_pair_count,
-        returned_count,
-    })
-}
-
-#[cfg(test)]
 fn knowledge_crystal_communities_via_query_runtime(
     db: &Database,
     request: &KnowledgeCrystalCommunityListRequest,
@@ -6308,17 +5428,6 @@ fn knowledge_crystal_communities_via_query_runtime(
 }
 
 #[cfg(test)]
-fn empty_crystal_community_output(graph_commit_epoch: u64) -> KnowledgeCrystalCommunityListOutput {
-    KnowledgeCrystalCommunityListOutput {
-        graph_commit_epoch,
-        rows: Vec::new(),
-        matched_path_count: 0,
-        matched_pair_count: 0,
-        returned_count: 0,
-    }
-}
-
-#[cfg(test)]
 fn validate_knowledge_crystal_community_list_request(
     request: &KnowledgeCrystalCommunityListRequest,
 ) -> Result<()> {
@@ -6359,53 +5468,6 @@ fn knowledge_crystal_community_query_predicate(
         KnowledgeCrystalCommunityScope::NonNullCommunity => {
             "e.community_id IS NOT NULL".to_string()
         }
-    }
-}
-
-#[cfg(test)]
-fn crystal_community_filter_values(
-    request: &KnowledgeCrystalCommunityListRequest,
-) -> Option<BTreeSet<Value>> {
-    match &request.scope {
-        KnowledgeCrystalCommunityScope::CommunityIds(community_ids) => {
-            Some(community_ids.iter().cloned().collect())
-        }
-        KnowledgeCrystalCommunityScope::NonNullCommunity => None,
-    }
-}
-
-#[cfg(test)]
-fn crystal_community_scope_matches(community_id: &Value, filter: &Option<BTreeSet<Value>>) -> bool {
-    filter
-        .as_ref()
-        .is_none_or(|community_ids| community_ids.contains(community_id))
-}
-
-#[cfg(test)]
-fn knowledge_crystal_community_row(
-    crystal: &NodeRecord,
-    community_id: Value,
-) -> KnowledgeCrystalCommunityRow {
-    let crystal_title = string_property(crystal, "crystal_title");
-    let title = string_property(crystal, "title");
-    let display_title = crystal_title
-        .clone()
-        .or_else(|| title.clone())
-        .unwrap_or_default();
-    KnowledgeCrystalCommunityRow {
-        crystal_memory_id: node_external_id(crystal),
-        crystal_node_id: crystal.id.0,
-        community_id,
-        hit_count: 0,
-        source_memory_count: 0,
-        crystal_title,
-        title,
-        display_title,
-        content: string_property(crystal, "content"),
-        importance: crystal.properties.get("importance").cloned(),
-        metadata: crystal.properties.get("metadata").cloned(),
-        is_latest: boolean_property(crystal, "is_latest"),
-        lifecycle_state: string_property(crystal, "lifecycle_state"),
     }
 }
 
@@ -6501,95 +5563,6 @@ fn compare_crystal_community_ids(
 }
 
 #[cfg(test)]
-fn knowledge_crystal_source_visibility_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeCrystalSourceVisibilityRequest,
-) -> Result<KnowledgeCrystalSourceVisibilityOutput> {
-    validate_knowledge_crystal_source_visibility_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Ok(empty_crystal_source_visibility_output(graph_commit_epoch));
-    };
-    let Some(entity_label_id) = catalog.label_id("Entity") else {
-        return Ok(empty_crystal_source_visibility_output(graph_commit_epoch));
-    };
-    let Some(synthesized_from_type_id) = catalog.rel_type_id("SYNTHESIZED_FROM") else {
-        return Ok(empty_crystal_source_visibility_output(graph_commit_epoch));
-    };
-    let Some(mentions_type_id) = catalog.rel_type_id("MENTIONS") else {
-        return Ok(empty_crystal_source_visibility_output(graph_commit_epoch));
-    };
-
-    let community_ids = request
-        .community_ids
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let mut rows = Vec::new();
-    store.try_visit_nodes_owned(Some(memory_label_id), |crystal| {
-        if boolean_property(&crystal, "is_crystal") != Some(true) {
-            return Ok(crate::store::GraphScanControl::Continue);
-        }
-        store.try_visit_adjacent_relationships_owned(
-            crystal.id,
-            Some(synthesized_from_type_id),
-            AdjacencyDirection::Outgoing,
-            |source_rel| {
-                let Some(source_memory) = store
-                    .node_owned(source_rel.target)?
-                    .filter(|node| node.labels.contains(&memory_label_id))
-                else {
-                    return Ok(crate::store::GraphScanControl::Continue);
-                };
-                store.try_visit_adjacent_relationships_owned(
-                    source_memory.id,
-                    Some(mentions_type_id),
-                    AdjacencyDirection::Outgoing,
-                    |mention_rel| {
-                        let Some(entity) = store
-                            .node_owned(mention_rel.target)?
-                            .filter(|node| node.labels.contains(&entity_label_id))
-                        else {
-                            return Ok(crate::store::GraphScanControl::Continue);
-                        };
-                        let Some(community_id) = entity.properties.get("community_id").cloned()
-                        else {
-                            return Ok(crate::store::GraphScanControl::Continue);
-                        };
-                        if community_ids.contains(&community_id) {
-                            rows.push(knowledge_crystal_source_visibility_row(
-                                &crystal,
-                                &source_memory,
-                                &entity,
-                                community_id,
-                            ));
-                        }
-                        Ok(crate::store::GraphScanControl::Continue)
-                    },
-                )?;
-                Ok(crate::store::GraphScanControl::Continue)
-            },
-        )?;
-        Ok(crate::store::GraphScanControl::Continue)
-    })?;
-
-    sort_crystal_source_visibility_rows(&mut rows);
-    let matched_path_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-
-    Ok(KnowledgeCrystalSourceVisibilityOutput {
-        graph_commit_epoch,
-        rows,
-        matched_path_count,
-        returned_count,
-    })
-}
-
-#[cfg(test)]
 fn knowledge_crystal_source_visibility_via_query_runtime(
     db: &Database,
     request: &KnowledgeCrystalSourceVisibilityRequest,
@@ -6629,18 +5602,6 @@ fn knowledge_crystal_source_visibility_via_query_runtime(
 }
 
 #[cfg(test)]
-fn empty_crystal_source_visibility_output(
-    graph_commit_epoch: u64,
-) -> KnowledgeCrystalSourceVisibilityOutput {
-    KnowledgeCrystalSourceVisibilityOutput {
-        graph_commit_epoch,
-        rows: Vec::new(),
-        matched_path_count: 0,
-        returned_count: 0,
-    }
-}
-
-#[cfg(test)]
 fn validate_knowledge_crystal_source_visibility_request(
     request: &KnowledgeCrystalSourceVisibilityRequest,
 ) -> Result<()> {
@@ -6659,41 +5620,6 @@ fn validate_knowledge_crystal_source_visibility_request(
         ));
     }
     Ok(())
-}
-
-#[cfg(test)]
-fn knowledge_crystal_source_visibility_row(
-    crystal: &NodeRecord,
-    source_memory: &NodeRecord,
-    entity: &NodeRecord,
-    community_id: Value,
-) -> KnowledgeCrystalSourceVisibilityRow {
-    let crystal_title = string_property(crystal, "crystal_title");
-    let title = string_property(crystal, "title");
-    let display_title = crystal_title
-        .clone()
-        .or_else(|| title.clone())
-        .unwrap_or_default();
-    KnowledgeCrystalSourceVisibilityRow {
-        crystal_memory_id: node_external_id(crystal),
-        crystal_node_id: crystal.id.0,
-        source_memory_id: node_external_id(source_memory),
-        source_node_id: source_memory.id.0,
-        entity_id: node_external_id(entity),
-        entity_node_id: entity.id.0,
-        community_id,
-        crystal_title,
-        title,
-        display_title,
-        content: string_property(crystal, "content"),
-        importance: crystal.properties.get("importance").cloned(),
-        crystal_metadata: crystal.properties.get("metadata").cloned(),
-        crystal_is_latest: boolean_property(crystal, "is_latest").unwrap_or(true),
-        crystal_lifecycle_state: string_property(crystal, "lifecycle_state"),
-        source_metadata: source_memory.properties.get("metadata").cloned(),
-        source_is_latest: boolean_property(source_memory, "is_latest").unwrap_or(true),
-        source_lifecycle_state: string_property(source_memory, "lifecycle_state"),
-    }
 }
 
 #[cfg(test)]
@@ -6775,39 +5701,6 @@ fn sort_crystal_source_visibility_rows(rows: &mut [KnowledgeCrystalSourceVisibil
             .then_with(|| left.source_node_id.cmp(&right.source_node_id))
             .then_with(|| left.entity_node_id.cmp(&right.entity_node_id))
     });
-}
-
-#[cfg(test)]
-enum KnowledgeScopedEntityMatch {
-    Found(KnowledgeEntity),
-    Missing,
-    FilteredOut,
-}
-
-#[cfg(test)]
-fn knowledge_scoped_entity_match(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeEntityRequest,
-    metadata_filters: &BTreeMap<String, String>,
-) -> Result<KnowledgeScopedEntityMatch> {
-    let Some(node) = try_seed_node_by_label_and_external_id(
-        catalog,
-        store,
-        request.label.as_str(),
-        request.external_id.as_str(),
-    )?
-    else {
-        return Ok(KnowledgeScopedEntityMatch::Missing);
-    };
-    if !metadata_filters.is_empty()
-        && !knowledge_graph_seed_matches_filters(catalog, store, &node, metadata_filters)
-    {
-        return Ok(KnowledgeScopedEntityMatch::FilteredOut);
-    }
-    Ok(KnowledgeScopedEntityMatch::Found(
-        knowledge_entity_from_node(catalog, &node),
-    ))
 }
 
 fn create_knowledge_entity_for(
@@ -7291,85 +6184,6 @@ fn knowledge_entity_upsert_update_properties(
 }
 
 #[cfg(test)]
-fn knowledge_property_batch_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgePropertyBatchRequest,
-) -> Result<KnowledgePropertyBatchOutput> {
-    knowledge_scoped_property_batch_for(
-        catalog,
-        store,
-        &KnowledgeScopedPropertyBatchRequest {
-            projection: request.clone(),
-            metadata_filters: BTreeMap::new(),
-        },
-    )
-}
-
-#[cfg(test)]
-fn knowledge_scoped_property_batch_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeScopedPropertyBatchRequest,
-) -> Result<KnowledgePropertyBatchOutput> {
-    let property_names = dedup_property_names(&request.projection.property_names);
-    let mut rows = Vec::with_capacity(request.projection.entities.len());
-    let mut found_count = 0;
-    let mut missing_count = 0;
-    let mut filtered_out_count = 0;
-    for entity_request in &request.projection.entities {
-        let node = try_seed_node_by_label_and_external_id(
-            catalog,
-            store,
-            entity_request.label.as_str(),
-            entity_request.external_id.as_str(),
-        )?;
-        let Some(node) = node else {
-            missing_count += 1;
-            rows.push(KnowledgePropertyRow {
-                entity: entity_request.clone(),
-                node_id: None,
-                filtered_out: false,
-                properties: empty_property_projection(&property_names),
-            });
-            continue;
-        };
-        if !request.metadata_filters.is_empty()
-            && !knowledge_graph_seed_matches_filters(
-                catalog,
-                store,
-                &node,
-                &request.metadata_filters,
-            )
-        {
-            filtered_out_count += 1;
-            rows.push(KnowledgePropertyRow {
-                entity: entity_request.clone(),
-                node_id: Some(node.id.0),
-                filtered_out: true,
-                properties: empty_property_projection(&property_names),
-            });
-            continue;
-        }
-        found_count += 1;
-        rows.push(KnowledgePropertyRow {
-            entity: entity_request.clone(),
-            node_id: Some(node.id.0),
-            filtered_out: false,
-            properties: project_node_properties(&node, &property_names),
-        });
-    }
-    Ok(KnowledgePropertyBatchOutput {
-        graph_commit_epoch: store.commit_epoch(),
-        rows,
-        found_count,
-        missing_count,
-        filtered_out_count,
-        property_names,
-    })
-}
-
-#[cfg(test)]
 fn dedup_property_names(property_names: &[String]) -> Vec<String> {
     let mut seen = BTreeSet::new();
     property_names
@@ -7385,21 +6199,6 @@ fn empty_property_projection(property_names: &[String]) -> BTreeMap<String, Opti
         .iter()
         .cloned()
         .map(|name| (name, None))
-        .collect()
-}
-
-#[cfg(test)]
-fn project_node_properties(
-    node: &NodeRecord,
-    property_names: &[String],
-) -> BTreeMap<String, Option<Value>> {
-    property_names
-        .iter()
-        .cloned()
-        .map(|name| {
-            let value = node.properties.get(&name).cloned();
-            (name, value)
-        })
         .collect()
 }
 
@@ -9769,14 +8568,6 @@ fn string_property_value(properties: &BTreeMap<String, Value>, property: &str) -
         .get(property)
         .map(value_to_external_id)
         .filter(|value| !value.is_empty())
-}
-
-#[cfg(test)]
-fn integer_property(node: &NodeRecord, property: &str) -> Option<i64> {
-    match node.properties.get(property) {
-        Some(Value::Int(value)) => Some(*value),
-        _ => None,
-    }
 }
 
 fn update_knowledge_memory_lifecycle_batch_for(
@@ -12371,65 +11162,6 @@ fn knowledge_entity_labels_via_query_runtime(
 }
 
 #[cfg(test)]
-fn knowledge_entity_label_projected_list_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeEntityLabelProjectedListRequest,
-) -> Result<KnowledgeEntityLabelProjectedListOutput> {
-    validate_knowledge_entity_label_projected_list_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let mut groups = Vec::with_capacity(request.list.external_ids.len());
-    let mut found_entity_count = 0;
-    let mut missing_entity_count = 0;
-    let mut label_count = 0;
-
-    for external_id in &request.list.external_ids {
-        let Some(entity) = try_seed_node_by_label_and_external_id(
-            catalog,
-            store,
-            &request.list.entity_label,
-            external_id,
-        )?
-        else {
-            missing_entity_count += 1;
-            groups.push(KnowledgeEntityLabelProjectedGroup {
-                external_id: external_id.clone(),
-                node_id: None,
-                found: false,
-                labels: Vec::new(),
-                returned_count: 0,
-            });
-            continue;
-        };
-        found_entity_count += 1;
-        let labels = entity_label_projected_rows(
-            catalog,
-            store,
-            &entity,
-            request.list.limit_per_entity,
-            &request.label_property_names,
-            &request.relationship_property_names,
-        )?;
-        label_count += labels.len();
-        groups.push(KnowledgeEntityLabelProjectedGroup {
-            external_id: external_id.clone(),
-            node_id: Some(entity.id.0),
-            found: true,
-            returned_count: labels.len(),
-            labels,
-        });
-    }
-
-    Ok(KnowledgeEntityLabelProjectedListOutput {
-        graph_commit_epoch,
-        groups,
-        found_entity_count,
-        missing_entity_count,
-        label_count,
-    })
-}
-
-#[cfg(test)]
 fn knowledge_entity_label_projected_list_via_query_runtime(
     db: &Database,
     request: &KnowledgeEntityLabelProjectedListRequest,
@@ -12584,57 +11316,6 @@ fn entity_label_rows_via_query_runtime(
 }
 
 #[cfg(test)]
-fn entity_label_projected_rows(
-    catalog: &Catalog,
-    store: &GraphStore,
-    entity: &NodeRecord,
-    limit: usize,
-    label_property_names: &[String],
-    relationship_property_names: &[String],
-) -> Result<Vec<KnowledgeEntityLabelProjectedRow>> {
-    let Some(rel_type_id) = catalog.rel_type_id("HAS_LABEL") else {
-        return Ok(Vec::new());
-    };
-    let Some(label_label_id) = catalog.label_id("Label") else {
-        return Ok(Vec::new());
-    };
-    let mut rows = Vec::new();
-    store.try_visit_adjacent_relationships_owned(
-        entity.id,
-        Some(rel_type_id),
-        AdjacencyDirection::Outgoing,
-        |relationship| {
-            if let Some(label) = store
-                .node_owned(relationship.target)?
-                .filter(|node| node.labels.contains(&label_label_id))
-            {
-                rows.push((
-                    entity_label_projected_row(
-                        &label,
-                        &relationship,
-                        label_property_names,
-                        relationship_property_names,
-                    ),
-                    node_string_property(&label, "name"),
-                ));
-            }
-            Ok(crate::store::GraphScanControl::Continue)
-        },
-    )?;
-    rows.sort_by(|left, right| {
-        left.1
-            .cmp(&right.1)
-            .then_with(|| left.0.label_id.cmp(&right.0.label_id))
-            .then_with(|| left.0.relationship_id.cmp(&right.0.relationship_id))
-            .then_with(|| left.0.label_node_id.cmp(&right.0.label_node_id))
-    });
-    if limit > 0 {
-        rows.truncate(limit);
-    }
-    Ok(rows.into_iter().map(|(row, _name)| row).collect())
-}
-
-#[cfg(test)]
 fn entity_label_projected_rows_via_query_runtime(
     db: &Database,
     entity_node_id: u64,
@@ -12736,25 +11417,6 @@ fn entity_label_row_from_query_row(row: &Row) -> Result<KnowledgeEntityLabelRow>
 #[cfg(test)]
 fn knowledge_entity_string_property(entity: &KnowledgeEntity, key: &str) -> Option<String> {
     entity.properties.get(key).map(value_to_external_id)
-}
-
-#[cfg(test)]
-fn entity_label_projected_row(
-    label: &NodeRecord,
-    relationship: &RelRecord,
-    label_property_names: &[String],
-    relationship_property_names: &[String],
-) -> KnowledgeEntityLabelProjectedRow {
-    KnowledgeEntityLabelProjectedRow {
-        label_id: node_external_id(label),
-        label_node_id: label.id.0,
-        relationship_id: relationship.id.0,
-        label_properties: projected_properties(&label.properties, label_property_names),
-        relationship_properties: projected_properties(
-            &relationship.properties,
-            relationship_property_names,
-        ),
-    }
 }
 
 fn update_knowledge_pagerank_scores_batch_for(
@@ -13203,49 +11865,6 @@ fn knowledge_community_membership_relationship_create(
 }
 
 #[cfg(test)]
-fn knowledge_communities_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeCommunityListRequest,
-) -> Result<KnowledgeCommunityListOutput> {
-    let Some(label_id) = catalog.label_id("Community") else {
-        return Ok(KnowledgeCommunityListOutput {
-            graph_commit_epoch: store.commit_epoch(),
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-        });
-    };
-
-    let mut rows = Vec::new();
-    store.visit_nodes_owned(Some(label_id), |node| {
-        let row = knowledge_community_row(&node);
-        if (!request.require_summary || row.has_summary)
-            && (!request.require_non_negative_community_id
-                || row
-                    .community_id
-                    .is_some_and(|community_id| community_id >= 0))
-        {
-            rows.push(row);
-        }
-        crate::store::GraphScanControl::Continue
-    })?;
-    let matched_count = rows.len();
-    rows.sort_by(|left, right| compare_knowledge_community_rows(left, right, request.order));
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-
-    Ok(KnowledgeCommunityListOutput {
-        graph_commit_epoch: store.commit_epoch(),
-        rows,
-        matched_count,
-        returned_count,
-    })
-}
-
-#[cfg(test)]
 fn knowledge_communities_via_query_runtime(
     db: &Database,
     request: &KnowledgeCommunityListRequest,
@@ -13280,42 +11899,6 @@ fn knowledge_communities_via_query_runtime(
         rows,
         matched_count,
         returned_count,
-    })
-}
-
-#[cfg(test)]
-fn knowledge_community_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeCommunityRequest,
-) -> Result<KnowledgeCommunityOutput> {
-    validate_knowledge_community_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(label_id) = catalog.label_id("Community") else {
-        return Ok(KnowledgeCommunityOutput {
-            graph_commit_epoch,
-            row: None,
-            found: false,
-        });
-    };
-
-    let mut matched = None;
-    store.visit_nodes_owned(Some(label_id), |node| {
-        if community_matches_lookup_key(&node, &request.key)
-            && matched
-                .as_ref()
-                .is_none_or(|current: &NodeRecord| node.id < current.id)
-        {
-            matched = Some(node);
-        }
-        crate::store::GraphScanControl::Continue
-    })?;
-    let row = matched.as_ref().map(knowledge_community_row);
-    let found = row.is_some();
-    Ok(KnowledgeCommunityOutput {
-        graph_commit_epoch,
-        row,
-        found,
     })
 }
 
@@ -13384,34 +11967,6 @@ fn knowledge_community_row_from_entity(community: &KnowledgeEntity) -> Knowledge
         ai_summary,
         member_count: integer_property_value(&community.properties, "member_count"),
         updated_at: community.properties.get("updated_at").cloned(),
-    }
-}
-
-#[cfg(test)]
-fn community_matches_lookup_key(node: &NodeRecord, key: &KnowledgeCommunityLookupKey) -> bool {
-    match key {
-        KnowledgeCommunityLookupKey::Id(id) => node_external_id(node).as_deref() == Some(id),
-        KnowledgeCommunityLookupKey::CommunityId(community_id) => {
-            integer_property(node, "community_id") == Some(*community_id)
-        }
-    }
-}
-
-#[cfg(test)]
-fn knowledge_community_row(node: &NodeRecord) -> KnowledgeCommunityRow {
-    let ai_summary = node.properties.get("ai_summary").cloned();
-    KnowledgeCommunityRow {
-        id: node_external_id(node),
-        node_id: node.id.0,
-        community_id: integer_property(node, "community_id"),
-        name: string_property(node, "name"),
-        description: node.properties.get("description").cloned(),
-        has_summary: ai_summary.as_ref().is_some_and(|value| {
-            !matches!(value, Value::Null) && !value_to_external_id(value).is_empty()
-        }),
-        ai_summary,
-        member_count: integer_property(node, "member_count"),
-        updated_at: node.properties.get("updated_at").cloned(),
     }
 }
 
@@ -14521,14 +13076,6 @@ fn augmentation_job_create_statement(
     }
     cypher.push_str("})");
     (cypher, parameters)
-}
-
-#[cfg(test)]
-fn node_string_property(node: &NodeRecord, property_name: &str) -> Option<String> {
-    match node.properties.get(property_name) {
-        Some(Value::String(value)) => Some(value.clone()),
-        _ => None,
-    }
 }
 
 #[cfg(test)]
@@ -16422,22 +14969,6 @@ fn validate_cypher_identifier(value: &str, kind: &str) -> Result<()> {
 }
 
 #[cfg(test)]
-fn knowledge_neighbors_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeNeighborsRequest,
-) -> Result<KnowledgeNeighborsOutput> {
-    knowledge_scoped_neighbors_for(
-        catalog,
-        store,
-        &KnowledgeScopedNeighborsRequest {
-            navigation: request.clone(),
-            metadata_filters: BTreeMap::new(),
-        },
-    )
-}
-
-#[cfg(test)]
 fn knowledge_neighbors_via_query_runtime(
     db: &Database,
     request: &KnowledgeNeighborsRequest,
@@ -16669,172 +15200,6 @@ fn expand_knowledge_neighbors_via_query_runtime(
     }
 
     Ok((paths, fanout_reason_details))
-}
-
-#[cfg(test)]
-fn knowledge_scoped_neighbors_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeScopedNeighborsRequest,
-) -> Result<KnowledgeNeighborsOutput> {
-    let navigation = &request.navigation;
-    let Some(seed) = try_seed_node_by_label_and_external_id(
-        catalog,
-        store,
-        navigation.label.as_str(),
-        navigation.external_id.as_str(),
-    )?
-    else {
-        let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
-            graph_commit_epoch: store.commit_epoch(),
-            seed_found: false,
-            target_found: None,
-            path_count: 0,
-            node_count: 0,
-            relationship_count: 0,
-            fanout_reason_details: Vec::new(),
-            missing_seed_identity: Some(knowledge_identity_description(
-                navigation.label.as_str(),
-                navigation.external_id.as_str(),
-            )),
-            missing_target_identity: None,
-            missing_relationship_type: None,
-            max_hops: navigation.max_hops,
-            path_limit: Some(navigation.limit),
-            node_limit: None,
-            relationship_limit: None,
-        });
-        attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 0);
-        return Ok(KnowledgeNeighborsOutput {
-            graph_commit_epoch: store.commit_epoch(),
-            seed_node_id: None,
-            paths: Vec::new(),
-            fanout_reason_codes: Vec::new(),
-            fanout_reason_details: Vec::new(),
-            fanout_reasons: Vec::new(),
-            diagnostics,
-        });
-    };
-    if !request.metadata_filters.is_empty()
-        && !knowledge_graph_seed_matches_filters(catalog, store, &seed, &request.metadata_filters)
-    {
-        let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
-            graph_commit_epoch: store.commit_epoch(),
-            seed_found: false,
-            target_found: None,
-            path_count: 0,
-            node_count: 0,
-            relationship_count: 0,
-            fanout_reason_details: Vec::new(),
-            missing_seed_identity: None,
-            missing_target_identity: None,
-            missing_relationship_type: None,
-            max_hops: navigation.max_hops,
-            path_limit: Some(navigation.limit),
-            node_limit: None,
-            relationship_limit: None,
-        });
-        attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 1);
-        return Ok(KnowledgeNeighborsOutput {
-            graph_commit_epoch: store.commit_epoch(),
-            seed_node_id: Some(seed.id.0),
-            paths: Vec::new(),
-            fanout_reason_codes: Vec::new(),
-            fanout_reason_details: Vec::new(),
-            fanout_reasons: Vec::new(),
-            diagnostics,
-        });
-    }
-
-    let relationship_type = match navigation.relationship_type.as_deref() {
-        Some(name) => match catalog.rel_type_id(name) {
-            Some(rel_type_id) => Some(rel_type_id),
-            None => {
-                let mut diagnostics =
-                    knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
-                        graph_commit_epoch: store.commit_epoch(),
-                        seed_found: true,
-                        target_found: None,
-                        path_count: 0,
-                        node_count: 0,
-                        relationship_count: 0,
-                        fanout_reason_details: Vec::new(),
-                        missing_seed_identity: None,
-                        missing_target_identity: None,
-                        missing_relationship_type: Some(name.to_string()),
-                        max_hops: navigation.max_hops,
-                        path_limit: Some(navigation.limit),
-                        node_limit: None,
-                        relationship_limit: None,
-                    });
-                attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 0);
-                return Ok(KnowledgeNeighborsOutput {
-                    graph_commit_epoch: store.commit_epoch(),
-                    seed_node_id: Some(seed.id.0),
-                    paths: Vec::new(),
-                    fanout_reason_codes: Vec::new(),
-                    fanout_reason_details: Vec::new(),
-                    fanout_reasons: Vec::new(),
-                    diagnostics,
-                });
-            }
-        },
-        None => None,
-    };
-    let (paths, fanout_reason_details) = expand_knowledge_neighbors_for(
-        catalog,
-        store,
-        KnowledgeNeighborExpansion {
-            seed_hit_id: "seed",
-            seed_node_id: seed.id,
-            requested_direction: navigation.direction,
-            relationship_type,
-            limit: navigation.limit,
-            max_hops: navigation.max_hops,
-        },
-    )?;
-    let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
-        graph_commit_epoch: store.commit_epoch(),
-        seed_found: true,
-        target_found: None,
-        path_count: paths.len(),
-        node_count: knowledge_context_path_node_count(&paths),
-        relationship_count: paths.len(),
-        fanout_reason_details: fanout_reason_details.clone(),
-        missing_seed_identity: None,
-        missing_target_identity: None,
-        missing_relationship_type: None,
-        max_hops: navigation.max_hops,
-        path_limit: Some(navigation.limit),
-        node_limit: None,
-        relationship_limit: None,
-    });
-    attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 0);
-    Ok(KnowledgeNeighborsOutput {
-        graph_commit_epoch: store.commit_epoch(),
-        seed_node_id: Some(seed.id.0),
-        diagnostics,
-        paths,
-        fanout_reason_codes: knowledge_fanout_reason_codes(&fanout_reason_details),
-        fanout_reasons: knowledge_fanout_reason_messages(&fanout_reason_details),
-        fanout_reason_details,
-    })
-}
-
-#[cfg(test)]
-fn knowledge_relationships_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeRelationshipsRequest,
-) -> Result<KnowledgeRelationshipsOutput> {
-    knowledge_scoped_relationships_for(
-        catalog,
-        store,
-        &KnowledgeScopedRelationshipsRequest {
-            relationships: request.clone(),
-            metadata_filters: BTreeMap::new(),
-        },
-    )
 }
 
 #[cfg(test)]
@@ -17167,103 +15532,6 @@ fn knowledge_context_path_from_query_row(
 }
 
 #[cfg(test)]
-fn knowledge_scoped_relationships_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeScopedRelationshipsRequest,
-) -> Result<KnowledgeRelationshipsOutput> {
-    let relationship_type = match request.relationships.relationship_type.as_deref() {
-        Some(name) => match catalog.rel_type_id(name) {
-            Some(rel_type_id) => Some(rel_type_id),
-            None => {
-                return Ok(knowledge_empty_relationship_groups_for_missing_type(
-                    store, request,
-                ));
-            }
-        },
-        None => None,
-    };
-    let mut groups = Vec::with_capacity(request.relationships.seeds.len());
-    let mut found_seed_count = 0;
-    let mut missing_seed_count = 0;
-    let mut filtered_out_seed_count = 0;
-    let mut relationship_count = 0;
-    for (index, seed_request) in request.relationships.seeds.iter().enumerate() {
-        let seed = try_seed_node_by_label_and_external_id(
-            catalog,
-            store,
-            seed_request.label.as_str(),
-            seed_request.external_id.as_str(),
-        )?;
-        let Some(seed) = seed else {
-            missing_seed_count += 1;
-            groups.push(KnowledgeRelationshipGroup {
-                seed: seed_request.clone(),
-                seed_node_id: None,
-                filtered_out: false,
-                relationships: Vec::new(),
-                fanout_reason_codes: Vec::new(),
-                fanout_reason_details: Vec::new(),
-                fanout_reasons: Vec::new(),
-            });
-            continue;
-        };
-        if !request.metadata_filters.is_empty()
-            && !knowledge_graph_seed_matches_filters(
-                catalog,
-                store,
-                &seed,
-                &request.metadata_filters,
-            )
-        {
-            filtered_out_seed_count += 1;
-            groups.push(KnowledgeRelationshipGroup {
-                seed: seed_request.clone(),
-                seed_node_id: Some(seed.id.0),
-                filtered_out: true,
-                relationships: Vec::new(),
-                fanout_reason_codes: Vec::new(),
-                fanout_reason_details: Vec::new(),
-                fanout_reasons: Vec::new(),
-            });
-            continue;
-        }
-        found_seed_count += 1;
-        let (relationships, fanout_reason_details) = expand_knowledge_neighbors_for(
-            catalog,
-            store,
-            KnowledgeNeighborExpansion {
-                seed_hit_id: &format!("seed_{index}"),
-                seed_node_id: seed.id,
-                requested_direction: request.relationships.direction,
-                relationship_type,
-                limit: request.relationships.limit_per_seed,
-                max_hops: 1,
-            },
-        )?;
-        relationship_count += relationships.len();
-        groups.push(KnowledgeRelationshipGroup {
-            seed: seed_request.clone(),
-            seed_node_id: Some(seed.id.0),
-            filtered_out: false,
-            relationships,
-            fanout_reason_codes: knowledge_fanout_reason_codes(&fanout_reason_details),
-            fanout_reasons: knowledge_fanout_reason_messages(&fanout_reason_details),
-            fanout_reason_details,
-        });
-    }
-    Ok(KnowledgeRelationshipsOutput {
-        graph_commit_epoch: store.commit_epoch(),
-        groups,
-        relationship_type_found: true,
-        found_seed_count,
-        missing_seed_count,
-        filtered_out_seed_count,
-        relationship_count,
-    })
-}
-
-#[cfg(test)]
 fn knowledge_empty_relationship_groups_for_missing_type(
     store: &GraphStore,
     request: &KnowledgeScopedRelationshipsRequest,
@@ -17291,23 +15559,6 @@ fn knowledge_empty_relationship_groups_for_missing_type(
         filtered_out_seed_count: 0,
         relationship_count: 0,
     }
-}
-
-#[cfg(test)]
-fn knowledge_paths_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgePathRequest,
-) -> Result<KnowledgePathOutput> {
-    knowledge_scoped_paths_for(
-        catalog,
-        store,
-        &KnowledgeScopedPathRequest {
-            navigation: request.clone(),
-            source_metadata_filters: BTreeMap::new(),
-            target_metadata_filters: BTreeMap::new(),
-        },
-    )
 }
 
 #[cfg(test)]
@@ -17716,259 +15967,6 @@ fn knowledge_path_segments_for_direction_via_query_runtime(
         )?);
     }
     Ok(())
-}
-
-#[cfg(test)]
-fn knowledge_scoped_paths_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeScopedPathRequest,
-) -> Result<KnowledgePathOutput> {
-    let navigation = &request.navigation;
-    let source = try_seed_node_by_label_and_external_id(
-        catalog,
-        store,
-        navigation.source_label.as_str(),
-        navigation.source_external_id.as_str(),
-    )?;
-    let target = try_seed_node_by_label_and_external_id(
-        catalog,
-        store,
-        navigation.target_label.as_str(),
-        navigation.target_external_id.as_str(),
-    )?;
-    let source_node_id = source.as_ref().map(|node| node.id.0);
-    let target_node_id = target.as_ref().map(|node| node.id.0);
-
-    let Some(source) = source else {
-        let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
-            graph_commit_epoch: store.commit_epoch(),
-            seed_found: false,
-            target_found: Some(target_node_id.is_some()),
-            path_count: 0,
-            node_count: 0,
-            relationship_count: 0,
-            fanout_reason_details: Vec::new(),
-            missing_seed_identity: Some(knowledge_identity_description(
-                navigation.source_label.as_str(),
-                navigation.source_external_id.as_str(),
-            )),
-            missing_target_identity: target_node_id.is_none().then(|| {
-                knowledge_identity_description(
-                    navigation.target_label.as_str(),
-                    navigation.target_external_id.as_str(),
-                )
-            }),
-            missing_relationship_type: None,
-            max_hops: navigation.max_hops,
-            path_limit: Some(navigation.limit),
-            node_limit: None,
-            relationship_limit: None,
-        });
-        attach_path_endpoint_metadata_filters(
-            &mut diagnostics,
-            &request.source_metadata_filters,
-            &request.target_metadata_filters,
-            0,
-        );
-        return Ok(KnowledgePathOutput {
-            graph_commit_epoch: store.commit_epoch(),
-            source_node_id,
-            target_node_id,
-            paths: Vec::new(),
-            fanout_reason_codes: Vec::new(),
-            fanout_reason_details: Vec::new(),
-            fanout_reasons: Vec::new(),
-            diagnostics,
-        });
-    };
-    let Some(target) = target else {
-        let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
-            graph_commit_epoch: store.commit_epoch(),
-            seed_found: true,
-            target_found: Some(false),
-            path_count: 0,
-            node_count: 0,
-            relationship_count: 0,
-            fanout_reason_details: Vec::new(),
-            missing_seed_identity: None,
-            missing_target_identity: Some(knowledge_identity_description(
-                navigation.target_label.as_str(),
-                navigation.target_external_id.as_str(),
-            )),
-            missing_relationship_type: None,
-            max_hops: navigation.max_hops,
-            path_limit: Some(navigation.limit),
-            node_limit: None,
-            relationship_limit: None,
-        });
-        attach_path_endpoint_metadata_filters(
-            &mut diagnostics,
-            &request.source_metadata_filters,
-            &request.target_metadata_filters,
-            0,
-        );
-        return Ok(KnowledgePathOutput {
-            graph_commit_epoch: store.commit_epoch(),
-            source_node_id,
-            target_node_id,
-            paths: Vec::new(),
-            fanout_reason_codes: Vec::new(),
-            fanout_reason_details: Vec::new(),
-            fanout_reasons: Vec::new(),
-            diagnostics,
-        });
-    };
-    let source_filtered = !request.source_metadata_filters.is_empty()
-        && !knowledge_graph_seed_matches_filters(
-            catalog,
-            store,
-            &source,
-            &request.source_metadata_filters,
-        );
-    let target_filtered = !request.target_metadata_filters.is_empty()
-        && !knowledge_graph_seed_matches_filters(
-            catalog,
-            store,
-            &target,
-            &request.target_metadata_filters,
-        );
-    if source_filtered || target_filtered {
-        let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
-            graph_commit_epoch: store.commit_epoch(),
-            seed_found: !source_filtered,
-            target_found: Some(!target_filtered),
-            path_count: 0,
-            node_count: 0,
-            relationship_count: 0,
-            fanout_reason_details: Vec::new(),
-            missing_seed_identity: None,
-            missing_target_identity: None,
-            missing_relationship_type: None,
-            max_hops: navigation.max_hops,
-            path_limit: Some(navigation.limit),
-            node_limit: None,
-            relationship_limit: None,
-        });
-        attach_path_endpoint_metadata_filters(
-            &mut diagnostics,
-            &request.source_metadata_filters,
-            &request.target_metadata_filters,
-            usize::from(source_filtered) + usize::from(target_filtered),
-        );
-        return Ok(KnowledgePathOutput {
-            graph_commit_epoch: store.commit_epoch(),
-            source_node_id,
-            target_node_id,
-            paths: Vec::new(),
-            fanout_reason_codes: Vec::new(),
-            fanout_reason_details: Vec::new(),
-            fanout_reasons: Vec::new(),
-            diagnostics,
-        });
-    }
-    let relationship_type = match navigation.relationship_type.as_deref() {
-        Some(name) => match catalog.rel_type_id(name) {
-            Some(rel_type_id) => Some(rel_type_id),
-            None => {
-                let mut diagnostics =
-                    knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
-                        graph_commit_epoch: store.commit_epoch(),
-                        seed_found: true,
-                        target_found: Some(true),
-                        path_count: 0,
-                        node_count: 0,
-                        relationship_count: 0,
-                        fanout_reason_details: Vec::new(),
-                        missing_seed_identity: None,
-                        missing_target_identity: None,
-                        missing_relationship_type: Some(name.to_string()),
-                        max_hops: navigation.max_hops,
-                        path_limit: Some(navigation.limit),
-                        node_limit: None,
-                        relationship_limit: None,
-                    });
-                attach_path_endpoint_metadata_filters(
-                    &mut diagnostics,
-                    &request.source_metadata_filters,
-                    &request.target_metadata_filters,
-                    0,
-                );
-                return Ok(KnowledgePathOutput {
-                    graph_commit_epoch: store.commit_epoch(),
-                    source_node_id,
-                    target_node_id,
-                    paths: Vec::new(),
-                    fanout_reason_codes: Vec::new(),
-                    fanout_reason_details: Vec::new(),
-                    fanout_reasons: Vec::new(),
-                    diagnostics,
-                });
-            }
-        },
-        None => None,
-    };
-
-    let (paths, fanout_reason_details) = expand_knowledge_paths_for(
-        catalog,
-        store,
-        KnowledgePathExpansion {
-            source_node_id: source.id,
-            target_node_id: target.id,
-            requested_direction: navigation.direction,
-            relationship_type,
-            max_hops: navigation.max_hops,
-            limit: navigation.limit,
-        },
-    )?;
-    let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
-        graph_commit_epoch: store.commit_epoch(),
-        seed_found: true,
-        target_found: Some(true),
-        path_count: paths.len(),
-        node_count: knowledge_graph_path_node_count(&paths),
-        relationship_count: paths.iter().map(|path| path.segments.len()).sum::<usize>(),
-        fanout_reason_details: fanout_reason_details.clone(),
-        missing_seed_identity: None,
-        missing_target_identity: None,
-        missing_relationship_type: None,
-        max_hops: navigation.max_hops,
-        path_limit: Some(navigation.limit),
-        node_limit: None,
-        relationship_limit: None,
-    });
-    attach_path_endpoint_metadata_filters(
-        &mut diagnostics,
-        &request.source_metadata_filters,
-        &request.target_metadata_filters,
-        0,
-    );
-    Ok(KnowledgePathOutput {
-        graph_commit_epoch: store.commit_epoch(),
-        source_node_id,
-        target_node_id,
-        diagnostics,
-        paths,
-        fanout_reason_codes: knowledge_fanout_reason_codes(&fanout_reason_details),
-        fanout_reasons: knowledge_fanout_reason_messages(&fanout_reason_details),
-        fanout_reason_details,
-    })
-}
-
-#[cfg(test)]
-fn knowledge_subgraph_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeSubgraphRequest,
-) -> Result<KnowledgeSubgraphOutput> {
-    knowledge_scoped_subgraph_for(
-        catalog,
-        store,
-        &KnowledgeScopedSubgraphRequest {
-            navigation: request.clone(),
-            metadata_filters: BTreeMap::new(),
-        },
-    )
 }
 
 #[cfg(test)]
@@ -18402,159 +16400,6 @@ fn knowledge_subgraph_for_direction_via_query_runtime(
 }
 
 #[cfg(test)]
-fn knowledge_scoped_subgraph_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeScopedSubgraphRequest,
-) -> Result<KnowledgeSubgraphOutput> {
-    let navigation = &request.navigation;
-    let Some(seed) = try_seed_node_by_label_and_external_id(
-        catalog,
-        store,
-        navigation.label.as_str(),
-        navigation.external_id.as_str(),
-    )?
-    else {
-        let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
-            graph_commit_epoch: store.commit_epoch(),
-            seed_found: false,
-            target_found: None,
-            path_count: 0,
-            node_count: 0,
-            relationship_count: 0,
-            fanout_reason_details: Vec::new(),
-            missing_seed_identity: Some(knowledge_identity_description(
-                navigation.label.as_str(),
-                navigation.external_id.as_str(),
-            )),
-            missing_target_identity: None,
-            missing_relationship_type: None,
-            max_hops: navigation.max_hops,
-            path_limit: None,
-            node_limit: Some(navigation.node_limit),
-            relationship_limit: Some(navigation.relationship_limit),
-        });
-        attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 0);
-        return Ok(KnowledgeSubgraphOutput {
-            graph_commit_epoch: store.commit_epoch(),
-            seed_node_id: None,
-            nodes: Vec::new(),
-            relationships: Vec::new(),
-            fanout_reason_codes: Vec::new(),
-            fanout_reason_details: Vec::new(),
-            fanout_reasons: Vec::new(),
-            diagnostics,
-        });
-    };
-    if !request.metadata_filters.is_empty()
-        && !knowledge_graph_seed_matches_filters(catalog, store, &seed, &request.metadata_filters)
-    {
-        let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
-            graph_commit_epoch: store.commit_epoch(),
-            seed_found: false,
-            target_found: None,
-            path_count: 0,
-            node_count: 0,
-            relationship_count: 0,
-            fanout_reason_details: Vec::new(),
-            missing_seed_identity: None,
-            missing_target_identity: None,
-            missing_relationship_type: None,
-            max_hops: navigation.max_hops,
-            path_limit: None,
-            node_limit: Some(navigation.node_limit),
-            relationship_limit: Some(navigation.relationship_limit),
-        });
-        attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 1);
-        return Ok(KnowledgeSubgraphOutput {
-            graph_commit_epoch: store.commit_epoch(),
-            seed_node_id: Some(seed.id.0),
-            nodes: Vec::new(),
-            relationships: Vec::new(),
-            fanout_reason_codes: Vec::new(),
-            fanout_reason_details: Vec::new(),
-            fanout_reasons: Vec::new(),
-            diagnostics,
-        });
-    }
-    let relationship_type = match navigation.relationship_type.as_deref() {
-        Some(name) => match catalog.rel_type_id(name) {
-            Some(rel_type_id) => Some(rel_type_id),
-            None => {
-                let mut diagnostics =
-                    knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
-                        graph_commit_epoch: store.commit_epoch(),
-                        seed_found: true,
-                        target_found: None,
-                        path_count: 0,
-                        node_count: 0,
-                        relationship_count: 0,
-                        fanout_reason_details: Vec::new(),
-                        missing_seed_identity: None,
-                        missing_target_identity: None,
-                        missing_relationship_type: Some(name.to_string()),
-                        max_hops: navigation.max_hops,
-                        path_limit: None,
-                        node_limit: Some(navigation.node_limit),
-                        relationship_limit: Some(navigation.relationship_limit),
-                    });
-                attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 0);
-                return Ok(KnowledgeSubgraphOutput {
-                    graph_commit_epoch: store.commit_epoch(),
-                    seed_node_id: Some(seed.id.0),
-                    nodes: Vec::new(),
-                    relationships: Vec::new(),
-                    fanout_reason_codes: Vec::new(),
-                    fanout_reason_details: Vec::new(),
-                    fanout_reasons: Vec::new(),
-                    diagnostics,
-                });
-            }
-        },
-        None => None,
-    };
-    let (nodes, relationships, fanout_reason_details) = expand_knowledge_subgraph_for(
-        catalog,
-        store,
-        KnowledgeSubgraphExpansion {
-            seed_node_id: seed.id,
-            requested_direction: navigation.direction,
-            relationship_type,
-            max_hops: navigation.max_hops,
-            node_limit: navigation.node_limit,
-            relationship_limit: navigation.relationship_limit,
-        },
-    )?;
-    let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
-        graph_commit_epoch: store.commit_epoch(),
-        seed_found: true,
-        target_found: None,
-        path_count: relationships.len(),
-        node_count: nodes.len(),
-        relationship_count: relationships.len(),
-        fanout_reason_details: fanout_reason_details.clone(),
-        missing_seed_identity: None,
-        missing_target_identity: None,
-        missing_relationship_type: None,
-        max_hops: navigation.max_hops,
-        path_limit: None,
-        node_limit: Some(navigation.node_limit),
-        relationship_limit: Some(navigation.relationship_limit),
-    });
-    attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 0);
-    Ok(KnowledgeSubgraphOutput {
-        graph_commit_epoch: store.commit_epoch(),
-        seed_node_id: Some(seed.id.0),
-        diagnostics,
-        nodes,
-        relationships,
-        fanout_reason_codes: knowledge_fanout_reason_codes(&fanout_reason_details),
-        fanout_reasons: knowledge_fanout_reason_messages(&fanout_reason_details),
-        fanout_reason_details,
-    })
-}
-
-#[cfg(test)]
 struct KnowledgeTraversalDiagnosticInput {
     graph_commit_epoch: u64,
     seed_found: bool,
@@ -18778,36 +16623,6 @@ fn knowledge_graph_path_node_count(paths: &[KnowledgeGraphPath]) -> usize {
         .len()
 }
 
-#[cfg(test)]
-struct KnowledgeNeighborExpansion<'a> {
-    seed_hit_id: &'a str,
-    seed_node_id: NodeId,
-    requested_direction: KnowledgeNeighborDirection,
-    relationship_type: Option<crate::schema::RelTypeId>,
-    limit: usize,
-    max_hops: usize,
-}
-
-#[cfg(test)]
-struct KnowledgePathExpansion {
-    source_node_id: NodeId,
-    target_node_id: NodeId,
-    requested_direction: KnowledgeNeighborDirection,
-    relationship_type: Option<crate::schema::RelTypeId>,
-    max_hops: usize,
-    limit: usize,
-}
-
-#[cfg(test)]
-struct KnowledgeSubgraphExpansion {
-    seed_node_id: NodeId,
-    requested_direction: KnowledgeNeighborDirection,
-    relationship_type: Option<crate::schema::RelTypeId>,
-    max_hops: usize,
-    node_limit: usize,
-    relationship_limit: usize,
-}
-
 struct KnowledgeExpansionEdge {
     direction: KnowledgeGraphPathDirection,
     next_node: NodeId,
@@ -18820,246 +16635,6 @@ struct DenseAdjacencyDiagnosticContext<'a> {
     operation: &'a str,
     relationship_type: Option<crate::schema::RelTypeId>,
     requested_direction: KnowledgeNeighborDirection,
-}
-
-#[cfg(test)]
-fn expand_knowledge_neighbors_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    expansion: KnowledgeNeighborExpansion<'_>,
-) -> Result<(
-    Vec<KnowledgeGraphContextPath>,
-    Vec<KnowledgeFanoutReasonDetail>,
-)> {
-    let mut paths = Vec::new();
-    let mut fanout_reasons = Vec::new();
-    let mut seen_relationships = BTreeSet::new();
-    let mut seen_frontier_nodes = BTreeSet::new();
-    let mut reported_dense_groups = BTreeSet::new();
-    let mut frontier = VecDeque::from([(expansion.seed_node_id, 0usize)]);
-    seen_frontier_nodes.insert(expansion.seed_node_id.0);
-
-    while let Some((current_node, depth)) = frontier.pop_front() {
-        if depth >= expansion.max_hops {
-            continue;
-        }
-        record_dense_adjacency_diagnostics(
-            DenseAdjacencyDiagnosticContext {
-                catalog,
-                store,
-                operation: "knowledge_neighbors",
-                relationship_type: expansion.relationship_type,
-                requested_direction: expansion.requested_direction,
-            },
-            current_node,
-            &mut reported_dense_groups,
-            &mut fanout_reasons,
-        );
-        for edge in knowledge_expansion_edges_for_node(
-            store,
-            current_node,
-            expansion.relationship_type,
-            expansion.requested_direction,
-        )? {
-            let relationship = edge.relationship;
-            if !seen_relationships.insert(relationship.id.0) {
-                continue;
-            }
-            if paths.len() >= expansion.limit {
-                fanout_reasons.push(KnowledgeFanoutReasonDetail::path_limit(
-                    "knowledge_neighbors",
-                    expansion.limit,
-                    expansion.seed_hit_id,
-                ));
-                return Ok((paths, fanout_reasons));
-            }
-            let Some(path) = context_path_for_relationship(
-                catalog,
-                store,
-                expansion.seed_hit_id,
-                depth + 1,
-                edge.direction,
-                &relationship,
-            )?
-            else {
-                continue;
-            };
-            paths.push(path);
-            if seen_frontier_nodes.insert(edge.next_node.0) {
-                frontier.push_back((edge.next_node, depth + 1));
-            }
-        }
-    }
-
-    Ok((paths, fanout_reasons))
-}
-
-#[cfg(test)]
-fn expand_knowledge_paths_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    expansion: KnowledgePathExpansion,
-) -> Result<(Vec<KnowledgeGraphPath>, Vec<KnowledgeFanoutReasonDetail>)> {
-    let mut paths = Vec::new();
-    let mut fanout_reasons = Vec::new();
-    let mut reported_dense_groups = BTreeSet::new();
-    let mut frontier = VecDeque::from([(
-        expansion.source_node_id,
-        Vec::<KnowledgeGraphContextPath>::new(),
-        BTreeSet::from([expansion.source_node_id.0]),
-    )]);
-
-    while let Some((current_node, current_path, visited_nodes)) = frontier.pop_front() {
-        if current_path.len() >= expansion.max_hops {
-            continue;
-        }
-        record_dense_adjacency_diagnostics(
-            DenseAdjacencyDiagnosticContext {
-                catalog,
-                store,
-                operation: "knowledge_paths",
-                relationship_type: expansion.relationship_type,
-                requested_direction: expansion.requested_direction,
-            },
-            current_node,
-            &mut reported_dense_groups,
-            &mut fanout_reasons,
-        );
-        for edge in knowledge_expansion_edges_for_node(
-            store,
-            current_node,
-            expansion.relationship_type,
-            expansion.requested_direction,
-        )? {
-            if visited_nodes.contains(&edge.next_node.0)
-                && edge.next_node != expansion.target_node_id
-            {
-                continue;
-            }
-            let Some(segment) = context_path_for_relationship(
-                catalog,
-                store,
-                "path",
-                current_path.len() + 1,
-                edge.direction,
-                &edge.relationship,
-            )?
-            else {
-                continue;
-            };
-            let mut next_path = current_path.clone();
-            next_path.push(segment);
-            if edge.next_node == expansion.target_node_id {
-                if paths.len() >= expansion.limit {
-                    fanout_reasons.push(KnowledgeFanoutReasonDetail::path_limit(
-                        "knowledge_paths",
-                        expansion.limit,
-                        "path",
-                    ));
-                    return Ok((paths, fanout_reasons));
-                }
-                paths.push(KnowledgeGraphPath {
-                    segments: next_path,
-                });
-                continue;
-            }
-            let mut next_visited = visited_nodes.clone();
-            next_visited.insert(edge.next_node.0);
-            frontier.push_back((edge.next_node, next_path, next_visited));
-        }
-    }
-
-    Ok((paths, fanout_reasons))
-}
-
-#[cfg(test)]
-fn expand_knowledge_subgraph_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    expansion: KnowledgeSubgraphExpansion,
-) -> Result<(
-    Vec<KnowledgeEntity>,
-    Vec<KnowledgeGraphContextPath>,
-    Vec<KnowledgeFanoutReasonDetail>,
-)> {
-    let mut nodes = Vec::new();
-    let mut relationships = Vec::new();
-    let mut fanout_reasons = Vec::new();
-    let mut seen_nodes = BTreeSet::new();
-    let mut seen_relationships = BTreeSet::new();
-    let mut reported_dense_groups = BTreeSet::new();
-    let mut frontier = VecDeque::from([(expansion.seed_node_id, 0usize)]);
-
-    if expansion.node_limit == 0 {
-        fanout_reasons.push(KnowledgeFanoutReasonDetail::node_limit(0));
-        return Ok((nodes, relationships, fanout_reasons));
-    }
-    if let Some(seed) = store.node_owned(expansion.seed_node_id)? {
-        nodes.push(knowledge_entity_from_node(catalog, &seed));
-        seen_nodes.insert(expansion.seed_node_id.0);
-    }
-
-    while let Some((current_node, depth)) = frontier.pop_front() {
-        if depth >= expansion.max_hops {
-            continue;
-        }
-        record_dense_adjacency_diagnostics(
-            DenseAdjacencyDiagnosticContext {
-                catalog,
-                store,
-                operation: "knowledge_subgraph",
-                relationship_type: expansion.relationship_type,
-                requested_direction: expansion.requested_direction,
-            },
-            current_node,
-            &mut reported_dense_groups,
-            &mut fanout_reasons,
-        );
-        for edge in knowledge_expansion_edges_for_node(
-            store,
-            current_node,
-            expansion.relationship_type,
-            expansion.requested_direction,
-        )? {
-            let relationship = edge.relationship;
-            if !seen_relationships.insert(relationship.id.0) {
-                continue;
-            }
-            let new_node = !seen_nodes.contains(&edge.next_node.0);
-            if new_node && nodes.len() >= expansion.node_limit {
-                fanout_reasons.push(KnowledgeFanoutReasonDetail::node_limit(
-                    expansion.node_limit,
-                ));
-                return Ok((nodes, relationships, fanout_reasons));
-            }
-            if relationships.len() >= expansion.relationship_limit {
-                fanout_reasons.push(KnowledgeFanoutReasonDetail::relationship_limit(
-                    expansion.relationship_limit,
-                ));
-                return Ok((nodes, relationships, fanout_reasons));
-            }
-            let Some(path) = context_path_for_relationship(
-                catalog,
-                store,
-                "subgraph",
-                depth + 1,
-                edge.direction,
-                &relationship,
-            )?
-            else {
-                continue;
-            };
-            relationships.push(path);
-            if new_node && seen_nodes.insert(edge.next_node.0) {
-                if let Some(node) = store.node_owned(edge.next_node)? {
-                    nodes.push(knowledge_entity_from_node(catalog, &node));
-                }
-                frontier.push_back((edge.next_node, depth + 1));
-            }
-        }
-    }
-
-    Ok((nodes, relationships, fanout_reasons))
 }
 
 fn knowledge_expansion_edges_for_node(
@@ -21080,134 +18655,6 @@ impl DatabaseReadTransaction {
             adaptive_vector_backend_policy: self.config.adaptive_vector_backend_policy,
         }
         .try_retrieve_knowledge(search_index, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_entity(
-        &self,
-        request: &KnowledgeEntityRequest,
-    ) -> Result<KnowledgeEntityOutput> {
-        knowledge_entity_for(&self.catalog, &self.store, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_entity_batch(
-        &self,
-        request: &KnowledgeEntityBatchRequest,
-    ) -> Result<KnowledgeEntityBatchOutput> {
-        knowledge_entity_batch_for(&self.catalog, &self.store, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_community_entity_visibility(
-        &self,
-        request: &KnowledgeCommunityEntityVisibilityRequest,
-    ) -> Result<KnowledgeCommunityEntityVisibilityOutput> {
-        knowledge_community_entity_visibility_for(&self.catalog, &self.store, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_community_memories(
-        &self,
-        request: &KnowledgeCommunityMemoryListRequest,
-    ) -> Result<KnowledgeCommunityMemoryListOutput> {
-        knowledge_community_memories_for(&self.catalog, &self.store, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_crystals(
-        &self,
-        request: &KnowledgeCrystalListRequest,
-    ) -> Result<KnowledgeCrystalListOutput> {
-        knowledge_crystals_for(&self.catalog, &self.store, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_crystal_communities(
-        &self,
-        request: &KnowledgeCrystalCommunityListRequest,
-    ) -> Result<KnowledgeCrystalCommunityListOutput> {
-        knowledge_crystal_communities_for(&self.catalog, &self.store, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_crystal_source_visibility(
-        &self,
-        request: &KnowledgeCrystalSourceVisibilityRequest,
-    ) -> Result<KnowledgeCrystalSourceVisibilityOutput> {
-        knowledge_crystal_source_visibility_for(&self.catalog, &self.store, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_entity_label_projected_list(
-        &self,
-        request: &KnowledgeEntityLabelProjectedListRequest,
-    ) -> Result<KnowledgeEntityLabelProjectedListOutput> {
-        knowledge_entity_label_projected_list_for(&self.catalog, &self.store, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_communities(
-        &self,
-        request: &KnowledgeCommunityListRequest,
-    ) -> Result<KnowledgeCommunityListOutput> {
-        knowledge_communities_for(&self.catalog, &self.store, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_community(
-        &self,
-        request: &KnowledgeCommunityRequest,
-    ) -> Result<KnowledgeCommunityOutput> {
-        knowledge_community_for(&self.catalog, &self.store, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_scoped_entity(
-        &self,
-        request: &KnowledgeScopedEntityRequest,
-    ) -> Result<KnowledgeEntityOutput> {
-        knowledge_scoped_entity_for(&self.catalog, &self.store, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_property_batch(
-        &self,
-        request: &KnowledgePropertyBatchRequest,
-    ) -> Result<KnowledgePropertyBatchOutput> {
-        knowledge_property_batch_for(&self.catalog, &self.store, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_neighbors(
-        &self,
-        request: &KnowledgeNeighborsRequest,
-    ) -> Result<KnowledgeNeighborsOutput> {
-        knowledge_neighbors_for(&self.catalog, &self.store, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_relationships(
-        &self,
-        request: &KnowledgeRelationshipsRequest,
-    ) -> Result<KnowledgeRelationshipsOutput> {
-        knowledge_relationships_for(&self.catalog, &self.store, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_paths(
-        &self,
-        request: &KnowledgePathRequest,
-    ) -> Result<KnowledgePathOutput> {
-        knowledge_paths_for(&self.catalog, &self.store, request)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_query_subgraph(
-        &self,
-        request: &KnowledgeSubgraphRequest,
-    ) -> Result<KnowledgeSubgraphOutput> {
-        knowledge_subgraph_for(&self.catalog, &self.store, request)
     }
 
     #[cfg(test)]

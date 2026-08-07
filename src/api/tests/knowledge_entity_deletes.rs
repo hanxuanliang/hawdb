@@ -22,7 +22,7 @@ fn deletes_knowledge_entity_through_typed_api() {
     assert!(!output.filtered_out);
     assert_eq!(output.deleted_node_count, 1);
     assert!(db
-        .test_query_entity(&KnowledgeEntityRequest {
+        .query_entity_via_cypher(&KnowledgeEntityRequest {
             label: "Memory".to_string(),
             external_id: "memory_1".to_string(),
         })
@@ -30,7 +30,7 @@ fn deletes_knowledge_entity_through_typed_api() {
         .entity
         .is_none());
     assert!(db
-        .test_query_entity(&KnowledgeEntityRequest {
+        .query_entity_via_cypher(&KnowledgeEntityRequest {
             label: "Entity".to_string(),
             external_id: "entity_1".to_string(),
         })
@@ -38,7 +38,7 @@ fn deletes_knowledge_entity_through_typed_api() {
         .entity
         .is_some());
     let relationships = db
-        .test_query_relationships(&KnowledgeRelationshipsRequest {
+        .query_relationships_via_cypher(&KnowledgeRelationshipsRequest {
             seeds: vec![KnowledgeEntityRequest {
                 label: "Entity".to_string(),
                 external_id: "entity_1".to_string(),
@@ -76,7 +76,7 @@ fn scoped_knowledge_entity_delete_does_not_write_filtered_seed() {
     assert!(output.filtered_out);
     assert_eq!(output.deleted_node_count, 0);
     assert!(db
-        .test_query_entity(&KnowledgeEntityRequest {
+        .query_entity_via_cypher(&KnowledgeEntityRequest {
             label: "Memory".to_string(),
             external_id: "memory_1".to_string(),
         })
@@ -175,7 +175,7 @@ fn typed_knowledge_entity_delete_persists_and_replays_from_wal() {
     {
         let db = Database::open(&path).unwrap();
         assert!(db
-            .test_query_entity(&KnowledgeEntityRequest {
+            .query_entity_via_cypher(&KnowledgeEntityRequest {
                 label: "Memory".to_string(),
                 external_id: "memory_1".to_string(),
             })
@@ -183,7 +183,7 @@ fn typed_knowledge_entity_delete_persists_and_replays_from_wal() {
             .entity
             .is_none());
         assert!(db
-            .test_query_entity(&KnowledgeEntityRequest {
+            .query_entity_via_cypher(&KnowledgeEntityRequest {
                 label: "Entity".to_string(),
                 external_id: "entity_1".to_string(),
             })
