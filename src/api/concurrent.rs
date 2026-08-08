@@ -1,4 +1,7 @@
-use super::transaction_locks::{LockMode, LockRequest, LockTable, WaitForGraph};
+mod coordinator;
+
+use self::coordinator::{CommitSequencer, LockManager, TransactionIdAllocator};
+use super::transaction_locks::{LockMode, LockRequest};
 use super::{
     commit_database_transaction_state, execute_database_transaction_query,
     execute_database_transaction_sql, statement_body, Database, DatabaseConfig,
@@ -17,7 +20,7 @@ use skein_storage::{
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::path::Path;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const DEFAULT_PESSIMISTIC_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -64,17 +67,10 @@ pub struct ConcurrentDatabase {
 
 #[derive(Debug)]
 struct ConcurrentDatabaseInner {
-    state: Mutex<ConcurrentDatabaseState>,
+    commits: CommitSequencer,
+    locks: LockManager,
+    transaction_ids: TransactionIdAllocator,
     checkpoint_serial: Mutex<()>,
-    lock_available: Condvar,
-}
-
-#[derive(Debug)]
-struct ConcurrentDatabaseState {
-    database: Database,
-    next_transaction_id: u64,
-    locks: LockTable,
-    wait_for: WaitForGraph,
 }
 
 #[derive(Debug)]
@@ -94,14 +90,10 @@ impl ConcurrentDatabase {
     pub fn new(database: Database) -> Self {
         Self {
             inner: Arc::new(ConcurrentDatabaseInner {
-                state: Mutex::new(ConcurrentDatabaseState {
-                    database,
-                    next_transaction_id: 1,
-                    locks: LockTable::default(),
-                    wait_for: WaitForGraph::default(),
-                }),
+                commits: CommitSequencer::new(database),
+                locks: LockManager::default(),
+                transaction_ids: TransactionIdAllocator::default(),
                 checkpoint_serial: Mutex::new(()),
-                lock_available: Condvar::new(),
             }),
         }
     }
@@ -130,11 +122,11 @@ impl ConcurrentDatabase {
     }
 
     pub fn commit_epoch(&self) -> Result<u64> {
-        Ok(self.lock_state()?.database.commit_epoch())
+        Ok(self.inner.commits.lock()?.commit_epoch())
     }
 
     pub fn begin_read_transaction(&self) -> Result<DatabaseReadTransaction> {
-        Ok(self.lock_state()?.database.begin_read_transaction())
+        Ok(self.inner.commits.lock()?.begin_read_transaction())
     }
 
     pub fn checkpoint(&self) -> Result<()> {
@@ -142,14 +134,15 @@ impl ConcurrentDatabase {
             .inner
             .checkpoint_serial
             .lock()
-            .map_err(|_| coordinator_poisoned_error())?;
-        let source = self.lock_state()?.database.checkpoint_source()?;
+            .map_err(|_| checkpoint_coordinator_poisoned_error())?;
+        let source = self.inner.commits.lock()?.checkpoint_source()?;
         let prepared = source.prepare()?;
         let Some(prepared) = prepared else {
             return Ok(());
         };
-        self.lock_state()?
-            .database
+        self.inner
+            .commits
+            .lock()?
             .publish_prepared_checkpoint(prepared)
     }
 
@@ -157,16 +150,16 @@ impl ConcurrentDatabase {
         &self,
         options: ConcurrentTransactionOptions,
     ) -> Result<ConcurrentDatabaseTransaction> {
-        let mut coordinator = self.lock_state()?;
-        let transaction_id = coordinator.allocate_transaction_id()?;
-        let base_commit_epoch = coordinator.database.commit_epoch();
+        let transaction_id = self.inner.transaction_ids.allocate()?;
+        let database = self.inner.commits.lock()?;
+        let base_commit_epoch = database.commit_epoch();
         Ok(ConcurrentDatabaseTransaction {
             inner: Arc::clone(&self.inner),
             transaction_id,
             base_commit_epoch,
             options,
-            runtime: DatabaseTransactionRuntime::from_database(&coordinator.database),
-            state: DatabaseTransactionState::from_database(&coordinator.database),
+            runtime: DatabaseTransactionRuntime::from_database(&database),
+            state: DatabaseTransactionState::from_database(&database),
             successful_statements: 0,
             abort_reason: None,
             finished: false,
@@ -205,92 +198,20 @@ impl ConcurrentDatabase {
         &self,
         execute: impl FnOnce(&mut Database) -> Result<QueryOutput>,
     ) -> Result<QueryOutput> {
-        let mut coordinator = self.lock_state()?;
-        let transaction_id = coordinator.allocate_transaction_id()?;
-        coordinator = self.inner.acquire_requests(
-            coordinator,
+        let transaction_id = self.inner.transaction_ids.allocate()?;
+        self.inner.locks.acquire(
             transaction_id,
             &[LockRequest::database(LockMode::Exclusive)],
             Instant::now(),
             DEFAULT_PESSIMISTIC_LOCK_TIMEOUT,
         )?;
-        let result = execute(&mut coordinator.database);
-        coordinator.release_transaction(transaction_id);
-        drop(coordinator);
-        self.inner.lock_available.notify_all();
-        result
-    }
-
-    fn lock_state(&self) -> Result<MutexGuard<'_, ConcurrentDatabaseState>> {
-        self.inner
-            .state
+        let result = self
+            .inner
+            .commits
             .lock()
-            .map_err(|_| coordinator_poisoned_error())
-    }
-}
-
-impl ConcurrentDatabaseInner {
-    fn acquire_requests<'a>(
-        &'a self,
-        mut coordinator: MutexGuard<'a, ConcurrentDatabaseState>,
-        transaction_id: u64,
-        requests: &[LockRequest],
-        started: Instant,
-        timeout: Duration,
-    ) -> Result<MutexGuard<'a, ConcurrentDatabaseState>> {
-        let mut requests = requests.to_vec();
-        let mut unique_requests = Vec::with_capacity(requests.len());
-        for request in requests.drain(..) {
-            if !unique_requests.contains(&request) {
-                unique_requests.push(request);
-            }
-        }
-        for request in unique_requests {
-            loop {
-                let blockers = coordinator.locks.blockers(transaction_id, &request);
-                if blockers.is_empty() {
-                    coordinator.wait_for.clear_waiter(transaction_id);
-                    coordinator.locks.grant(transaction_id, request.clone());
-                    break;
-                }
-                coordinator.wait_for.register(transaction_id, &blockers)?;
-                let remaining = timeout.saturating_sub(started.elapsed());
-                if remaining.is_zero() {
-                    coordinator.wait_for.clear_waiter(transaction_id);
-                    return Err(lock_timeout_error(timeout));
-                }
-                let waited = self.lock_available.wait_timeout(coordinator, remaining);
-                let (next, wait) = match waited {
-                    Ok(waited) => waited,
-                    Err(poisoned) => {
-                        let (mut recovered, _) = poisoned.into_inner();
-                        recovered.wait_for.clear_waiter(transaction_id);
-                        return Err(coordinator_poisoned_error());
-                    }
-                };
-                coordinator = next;
-                coordinator.wait_for.clear_waiter(transaction_id);
-                if wait.timed_out() {
-                    return Err(lock_timeout_error(timeout));
-                }
-            }
-        }
-        Ok(coordinator)
-    }
-}
-
-impl ConcurrentDatabaseState {
-    fn allocate_transaction_id(&mut self) -> Result<u64> {
-        let transaction_id = self.next_transaction_id;
-        self.next_transaction_id = transaction_id.checked_add(1).ok_or_else(|| {
-            SkeinError::Execution("concurrent transaction id space is exhausted".to_string())
-        })?;
-        Ok(transaction_id)
-    }
-
-    fn release_transaction(&mut self, transaction_id: u64) {
-        self.locks.release_transaction(transaction_id);
-        self.wait_for.remove_transaction(transaction_id);
+            .and_then(|mut database| execute(&mut database));
+        self.inner.locks.release(transaction_id);
+        result
     }
 }
 
@@ -363,38 +284,31 @@ impl ConcurrentDatabaseTransaction {
     pub fn commit(mut self) -> Result<QueryOutput> {
         self.ensure_active()?;
         let started = Instant::now();
-        let mut coordinator = self
-            .inner
-            .state
-            .lock()
-            .map_err(|_| coordinator_poisoned_error())?;
-        if self.options.mode == ConcurrentTransactionMode::Optimistic {
-            coordinator = match self.inner.acquire_requests(
-                coordinator,
+        if self.options.mode == ConcurrentTransactionMode::Optimistic
+            && let Err(error) = self.inner.locks.acquire(
                 self.transaction_id,
                 &[LockRequest::database(LockMode::Exclusive)],
                 started,
                 self.options.lock_timeout,
-            ) {
-                Ok(coordinator) => coordinator,
-                Err(error) => {
-                    self.finished = true;
-                    return Err(error);
-                }
-            };
+            )
+        {
+            self.finished = true;
+            return Err(error);
         }
 
         let allow_stale_rebase = self.options.mode == ConcurrentTransactionMode::Pessimistic;
-        let result = commit_database_transaction_state(
-            &mut coordinator.database,
-            &mut self.state,
-            allow_stale_rebase,
-        )
+        let inner = Arc::clone(&self.inner);
+        let result = match inner.commits.lock() {
+            Ok(mut database) => commit_database_transaction_state(
+                &mut database,
+                &mut self.state,
+                allow_stale_rebase,
+            ),
+            Err(error) => Err(error),
+        }
         .map_err(|error| self.map_commit_error(error));
-        coordinator.release_transaction(self.transaction_id);
+        self.inner.locks.release(self.transaction_id);
         self.finished = true;
-        drop(coordinator);
-        self.inner.lock_available.notify_all();
         result
     }
 
@@ -406,42 +320,39 @@ impl ConcurrentDatabaseTransaction {
     fn acquire_locks(&mut self, requests: &[LockRequest]) -> Result<()> {
         let started = Instant::now();
         let inner = Arc::clone(&self.inner);
-        let coordinator = inner
-            .state
-            .lock()
-            .map_err(|_| coordinator_poisoned_error())?;
-        let requests_already_covered = coordinator.locks.covers_all(self.transaction_id, requests);
-        let acquired = inner.acquire_requests(
-            coordinator,
+        let requests_already_covered = inner.locks.covers_all(self.transaction_id, requests)?;
+        if let Err(error) = inner.locks.acquire(
             self.transaction_id,
             requests,
             started,
             self.options.lock_timeout,
-        );
-        let mut coordinator = match acquired {
-            Ok(coordinator) => coordinator,
+        ) {
+            self.abort_after_lock_failure(error.to_string());
+            return Err(error);
+        }
+
+        let database = match inner.commits.lock() {
+            Ok(database) => database,
             Err(error) => {
                 self.abort_after_lock_failure(error.to_string());
                 return Err(error);
             }
         };
-
-        let current_epoch = coordinator.database.commit_epoch();
+        let current_epoch = database.commit_epoch();
         if current_epoch != self.base_commit_epoch && !requests_already_covered {
             if self.successful_statements == 0 {
                 self.base_commit_epoch = current_epoch;
-                self.runtime = DatabaseTransactionRuntime::from_database(&coordinator.database);
-                self.state = DatabaseTransactionState::from_database(&coordinator.database);
+                self.runtime = DatabaseTransactionRuntime::from_database(&database);
+                self.state = DatabaseTransactionState::from_database(&database);
             } else {
                 let error = SkeinError::Execution(format!(
                     "pessimistic transaction {} cannot acquire a new lock after its snapshot changed from commit epoch {} to {}; retry the transaction",
                     self.transaction_id, self.base_commit_epoch, current_epoch
                 ));
-                coordinator.release_transaction(self.transaction_id);
+                drop(database);
+                self.inner.locks.release(self.transaction_id);
                 self.state.rollback();
                 self.abort_reason = Some(error.to_string());
-                drop(coordinator);
-                self.inner.lock_available.notify_all();
                 return Err(error);
             }
         }
@@ -451,11 +362,7 @@ impl ConcurrentDatabaseTransaction {
     fn abort_after_lock_failure(&mut self, reason: String) {
         self.state.rollback();
         self.abort_reason = Some(reason);
-        if let Ok(mut coordinator) = self.inner.state.lock() {
-            coordinator.release_transaction(self.transaction_id);
-            drop(coordinator);
-            self.inner.lock_available.notify_all();
-        }
+        self.inner.locks.release(self.transaction_id);
     }
 
     fn ensure_active(&self) -> Result<()> {
@@ -490,15 +397,8 @@ impl ConcurrentDatabaseTransaction {
         if self.finished {
             return;
         }
-        let mut coordinator = self
-            .inner
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        coordinator.release_transaction(self.transaction_id);
+        self.inner.locks.release(self.transaction_id);
         self.finished = true;
-        drop(coordinator);
-        self.inner.lock_available.notify_all();
     }
 }
 
@@ -890,15 +790,8 @@ fn cypher_statement_is_read_only(statement: &crate::cypher::Statement) -> bool {
     }
 }
 
-fn coordinator_poisoned_error() -> SkeinError {
-    SkeinError::Execution("concurrent database coordinator lock is poisoned".to_string())
-}
-
-fn lock_timeout_error(timeout: Duration) -> SkeinError {
-    SkeinError::Execution(format!(
-        "transaction lock wait timed out after {} ms",
-        timeout.as_millis()
-    ))
+fn checkpoint_coordinator_poisoned_error() -> SkeinError {
+    SkeinError::Execution("concurrent checkpoint coordinator is poisoned".to_string())
 }
 
 #[cfg(test)]
