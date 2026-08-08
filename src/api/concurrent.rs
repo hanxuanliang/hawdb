@@ -65,6 +65,7 @@ pub struct ConcurrentDatabase {
 #[derive(Debug)]
 struct ConcurrentDatabaseInner {
     state: Mutex<ConcurrentDatabaseState>,
+    checkpoint_serial: Mutex<()>,
     lock_available: Condvar,
 }
 
@@ -99,6 +100,7 @@ impl ConcurrentDatabase {
                     locks: LockTable::default(),
                     wait_for: WaitForGraph::default(),
                 }),
+                checkpoint_serial: Mutex::new(()),
                 lock_available: Condvar::new(),
             }),
         }
@@ -133,6 +135,22 @@ impl ConcurrentDatabase {
 
     pub fn begin_read_transaction(&self) -> Result<DatabaseReadTransaction> {
         Ok(self.lock_state()?.database.begin_read_transaction())
+    }
+
+    pub fn checkpoint(&self) -> Result<()> {
+        let _checkpoint_serial = self
+            .inner
+            .checkpoint_serial
+            .lock()
+            .map_err(|_| coordinator_poisoned_error())?;
+        let source = self.lock_state()?.database.checkpoint_source()?;
+        let prepared = source.prepare()?;
+        let Some(prepared) = prepared else {
+            return Ok(());
+        };
+        self.lock_state()?
+            .database
+            .publish_prepared_checkpoint(prepared)
     }
 
     pub fn begin_transaction(

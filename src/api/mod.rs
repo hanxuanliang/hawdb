@@ -33,10 +33,11 @@ use crate::store::{
     BasicStatisticsConsistencyReport, DegreeStatisticsConsistencyReport,
     DistinctValueStatisticsConsistencyReport, DurabilityPolicy, GraphMutationTransaction,
     GraphSnapshotNodeImport, GraphSnapshotRelationshipImport, GraphStore, NodeId, NodeRecord,
-    PropertyIndexConsistencyReport, PropertyIndexProjectionRebuildAction, RecoveryMode, RelId,
-    RelRecord, SchemaMaintenanceAction, SegmentCacheSnapshot, StorageBackupReport,
-    StoragePressureSnapshot, StorageReclamationWatermark, StorageRecoveryReport,
-    StorageRestoreReport, StorageScrubReport, StoreStableIdMapping, WalReplayConfig,
+    PreparedCheckpoint, PropertyIndexConsistencyReport, PropertyIndexProjectionRebuildAction,
+    RecoveryMode, RelId, RelRecord, SchemaMaintenanceAction, SegmentCacheSnapshot,
+    StorageBackupReport, StoragePressureSnapshot, StorageReclamationWatermark,
+    StorageRecoveryReport, StorageRestoreReport, StorageScrubReport, StoreStableIdMapping,
+    WalReplayConfig,
 };
 use crate::telemetry::{
     operations_telemetry_readiness, qos_telemetry_sink, KernelTelemetry, KernelTelemetryOperation,
@@ -196,6 +197,17 @@ pub struct Database {
     next_derived_artifact_job_id: u64,
     derived_artifact_jobs: Vec<DerivedArtifactJob>,
     telemetry: Option<Arc<dyn TelemetrySink>>,
+}
+
+pub(crate) struct DatabaseCheckpointSource {
+    catalog: Catalog,
+    store: GraphStore,
+}
+
+impl DatabaseCheckpointSource {
+    pub(crate) fn prepare(self) -> Result<Option<PreparedCheckpoint>> {
+        self.store.prepare_checkpoint(&self.catalog)
+    }
 }
 
 #[derive(Debug)]
@@ -1031,14 +1043,11 @@ impl Database {
         self.ensure_writable()?;
         let started = std::time::Instant::now();
         let durable = self.store.storage_recovery_report().durable;
-        let oldest_reader_epoch = self
-            .reader_pins
-            .lock()
-            .expect("database reader pins lock should not be poisoned")
-            .oldest_epoch();
-        let result = self
-            .store
-            .checkpoint_with_reader_epoch(&self.catalog, oldest_reader_epoch);
+        let prepared = self.checkpoint_source()?.prepare()?;
+        let result = match prepared {
+            Some(prepared) => self.publish_prepared_checkpoint(prepared),
+            None => Ok(()),
+        };
         if durable && let Some(telemetry) = &self.telemetry {
             telemetry.record_kernel(KernelTelemetry {
                 operation: KernelTelemetryOperation::Checkpoint,
@@ -1047,13 +1056,31 @@ impl Database {
                 item_count: 1,
                 byte_count: 0,
                 fsync_micros: 0,
-                generation: self
-                    .store
-                    .storage_reclamation_watermark(oldest_reader_epoch)
-                    .checkpoint_epoch,
+                generation: self.storage_reclamation_watermark().checkpoint_epoch,
             });
         }
         result
+    }
+
+    pub(crate) fn checkpoint_source(&self) -> Result<DatabaseCheckpointSource> {
+        self.ensure_writable()?;
+        Ok(DatabaseCheckpointSource {
+            catalog: self.catalog.clone(),
+            store: self.store.checkpoint_source(),
+        })
+    }
+
+    pub(crate) fn publish_prepared_checkpoint(
+        &mut self,
+        prepared: PreparedCheckpoint,
+    ) -> Result<()> {
+        let oldest_reader_epoch = self
+            .reader_pins
+            .lock()
+            .expect("database reader pins lock should not be poisoned")
+            .oldest_epoch();
+        self.store
+            .publish_prepared_checkpoint(prepared, oldest_reader_epoch)
     }
 
     pub fn backup_to(&mut self, destination: impl AsRef<Path>) -> Result<StorageBackupReport> {

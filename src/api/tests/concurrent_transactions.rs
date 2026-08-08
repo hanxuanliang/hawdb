@@ -3,6 +3,25 @@ use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
 #[test]
+fn concurrent_database_checkpoint_publishes_an_immutable_cut() {
+    let path = super::unique_test_dir("concurrent_checkpoint_immutable_cut");
+    let db = Database::open(&path).unwrap().into_concurrent();
+    db.query("CREATE (:Memory {id: 1})").unwrap();
+    db.checkpoint().unwrap();
+    assert_eq!(db.commit_epoch().unwrap(), 1);
+    drop(db);
+
+    let mut reopened = Database::open(&path).unwrap();
+    let rows = reopened
+        .query("MATCH (m:Memory) RETURN m.id AS id")
+        .unwrap();
+    assert_eq!(rows.rows.len(), 1);
+    assert_eq!(rows.rows[0].get("id"), Some(&Value::Int(1)));
+    drop(reopened);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
 fn optimistic_transactions_prepare_in_parallel_and_reject_the_stale_committer() {
     let db = Database::new().into_concurrent();
     let barrier = Arc::new(Barrier::new(2));

@@ -282,6 +282,42 @@ fn storage_generation_for_file(name: &str) -> Option<u64> {
         .or_else(|| parse_property_projection_manifest_generation_file(name))
 }
 
+fn parse_checkpoint_staging_generation(name: &str) -> Option<u64> {
+    name.strip_prefix(".checkpoint.")?
+        .strip_suffix(".prepare")?
+        .parse()
+        .ok()
+}
+
+fn cleanup_abandoned_checkpoint_preparations(root: &Path, published_generation: u64) -> Result<()> {
+    let mut changed = false;
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if entry.file_type()?.is_dir()
+            && parse_checkpoint_staging_generation(name)
+                .is_some_and(|generation| generation > published_generation)
+        {
+            fs::remove_dir_all(entry.path())?;
+            changed = true;
+            continue;
+        }
+        if storage_generation_for_file(name)
+            .is_some_and(|generation| generation > published_generation)
+        {
+            fs::remove_file(entry.path())?;
+            changed = true;
+        }
+    }
+    if changed {
+        sync_parent_dir(&root.join(MANIFEST_FILE))?;
+    }
+    Ok(())
+}
+
 fn has_storage_artifacts(root: &Path) -> Result<bool> {
     for entry in fs::read_dir(root)? {
         let name = entry?.file_name();
@@ -6165,9 +6201,34 @@ impl GraphStore {
         oldest_reader_commit_epoch: Option<u64>,
         build_config: DerivedArtifactBuildConfig,
     ) -> Result<()> {
-        if self.durable.is_none() {
+        let Some(prepared) = self.prepare_checkpoint_with_build_config(catalog, build_config)?
+        else {
             return Ok(());
-        }
+        };
+        self.publish_prepared_checkpoint(prepared, oldest_reader_commit_epoch)
+    }
+
+    pub(crate) fn checkpoint_source(&self) -> Self {
+        let mut source = self.snapshot();
+        source.durable = self.durable.clone();
+        source
+    }
+
+    pub(crate) fn prepare_checkpoint(
+        &self,
+        catalog: &Catalog,
+    ) -> Result<Option<PreparedCheckpoint>> {
+        self.prepare_checkpoint_with_build_config(catalog, DerivedArtifactBuildConfig::default())
+    }
+
+    fn prepare_checkpoint_with_build_config(
+        &self,
+        catalog: &Catalog,
+        build_config: DerivedArtifactBuildConfig,
+    ) -> Result<Option<PreparedCheckpoint>> {
+        let Some(durable) = self.durable.as_ref() else {
+            return Ok(None);
+        };
         let estimated_record_bytes = self.estimated_logical_record_bytes();
         let checkpoint_out_of_core = match self.residency_mode {
             StorageResidencyMode::Materialized => false,
@@ -6185,7 +6246,7 @@ impl GraphStore {
             let (_, artifacts) = decode_projected_graph_artifacts(&encoded)?;
             (Some(encoded), artifacts)
         };
-        let mut source_scan_projection = (!checkpoint_out_of_core).then(|| {
+        let source_scan_projection = (!checkpoint_out_of_core).then(|| {
             source_scan::build(
                 self.commit_epoch,
                 catalog.label_id("Source"),
@@ -6238,26 +6299,18 @@ impl GraphStore {
         } else {
             self.statistics()
         };
-        let (
-            canonical_base,
-            canonical_adjacency,
-            persistent_property_projection,
-            source_scan_manifest,
-            checkpoint_relational_state,
-        ) = {
-            let durable = self.durable.as_mut().expect("durable store must exist");
-            match projected_graph_artifacts.as_deref() {
-                Some(encoded) => durable.write_projected_graph_artifacts(encoded)?,
-                None => durable.remove_projected_graph_artifacts()?,
+        let generation = durable.checkpoint_epoch.saturating_add(1);
+        let staging_path = durable.prepare_checkpoint_staging(generation)?;
+        let prepared = (|| {
+            if let Some(encoded) = projected_graph_artifacts.as_deref() {
+                durable.write_projected_graph_artifacts_to(
+                    &staging_path.join(PROJECTED_GRAPHS_FILE),
+                    encoded,
+                )?;
             }
             let source_scan_publication = source_scan_projection
-                .as_mut()
-                .map(|projection| source_scan::write(durable.root_path(), projection))
+                .map(|mut projection| source_scan::write(&staging_path, &mut projection))
                 .transpose()?;
-            if source_scan_publication.is_none() {
-                remove_source_scan_artifacts(durable.root_path())?;
-            }
-            let generation = durable.checkpoint_epoch.saturating_add(1);
             let (canonical_manifest_artifact, property_spill_manifest_artifact) =
                 match (merged_nodes, merged_relationships) {
                     (Some(nodes), Some(relationships)) => {
@@ -6305,6 +6358,18 @@ impl GraphStore {
                 commit_epoch,
                 generation,
             )?;
+            let checkpoint_relational_state = relational_checkpoint_artifact
+                .map(|_| {
+                    decode_relational_checkpoint_file(
+                        &durable
+                            .root_path()
+                            .join(relational_checkpoint_generation_file(generation)),
+                        RelationalDecodeLimits::checkpoint(),
+                    )
+                    .map(|checkpoint| checkpoint.state)
+                    .map_err(|error| SkeinError::Storage(error.to_string()))
+                })
+                .transpose()?;
             let checkpoint_artifact = durable.write_checkpoint(
                 CheckpointImage {
                     catalog,
@@ -6326,9 +6391,18 @@ impl GraphStore {
             checkpoint_publish_failpoint(CheckpointPublishStage::CheckpointPersisted)?;
             durable.prepare_wal_generation(generation)?;
             checkpoint_publish_failpoint(CheckpointPublishStage::WalPrepared)?;
-            durable.publish_checkpoint_manifest(
+            Ok(PreparedCheckpoint {
+                source_commit_epoch: commit_epoch,
+                source_checkpoint_epoch: durable.checkpoint_epoch,
+                source_next_lsn: durable.next_lsn,
                 generation,
-                CheckpointManifestArtifacts {
+                checkpoint_out_of_core,
+                projected_graph_artifacts: artifacts,
+                publish_projected_graph_artifacts: projected_graph_artifacts.is_some(),
+                source_scan_publication,
+                checkpoint_statistics,
+                checkpoint_relational_state,
+                manifest_artifacts: CheckpointManifestArtifacts {
                     checkpoint: checkpoint_artifact,
                     relational_checkpoint: relational_checkpoint_artifact,
                     canonical_manifest: canonical_manifest_artifact,
@@ -6336,50 +6410,75 @@ impl GraphStore {
                     property_spill_manifest: property_spill_manifest_artifact,
                     property_projection_manifest: property_projection_manifest_artifact,
                 },
-                commit_epoch,
-                oldest_reader_commit_epoch,
-                source_scan_publication,
-            )?;
-            let source_scan_manifest = source_scan_publication
-                .map(|publication| {
-                    source_scan::load(
-                        durable.root_path(),
-                        commit_epoch,
-                        publication.descriptor_checksum(),
-                    )
-                })
-                .transpose()?
-                .flatten();
-            let checkpoint_relational_state = relational_checkpoint_artifact
-                .map(|_| {
-                    decode_relational_checkpoint_file(
-                        &durable
-                            .root_path()
-                            .join(relational_checkpoint_generation_file(generation)),
-                        RelationalDecodeLimits::checkpoint(),
-                    )
-                    .map(|checkpoint| checkpoint.state)
-                    .map_err(|error| SkeinError::Storage(error.to_string()))
-                })
-                .transpose()?;
-            (
-                durable.canonical_segments.clone(),
-                durable.canonical_adjacency.clone(),
-                durable.persistent_property_projection.clone(),
-                source_scan_manifest,
-                checkpoint_relational_state,
-            )
-        };
-        self.projected_graph_artifacts = artifacts.into();
+                staging_path: staging_path.clone(),
+            })
+        })();
+        if prepared.is_err() {
+            let _ = durable.discard_prepared_checkpoint(generation, &staging_path);
+        }
+        prepared.map(Some)
+    }
+
+    pub(crate) fn publish_prepared_checkpoint(
+        &mut self,
+        prepared: PreparedCheckpoint,
+        oldest_reader_commit_epoch: Option<u64>,
+    ) -> Result<()> {
+        let durable = self.durable.as_mut().ok_or_else(|| {
+            SkeinError::Storage("prepared checkpoint requires durable storage".to_string())
+        })?;
+        if self.commit_epoch != prepared.source_commit_epoch
+            || durable.checkpoint_epoch != prepared.source_checkpoint_epoch
+            || durable.next_lsn != prepared.source_next_lsn
+        {
+            durable.discard_prepared_checkpoint(prepared.generation, &prepared.staging_path)?;
+            return Err(SkeinError::Storage(format!(
+                "checkpoint source changed before publication: prepared commit/checkpoint/lsn=({},{},{}), current=({},{},{}); retry checkpoint",
+                prepared.source_commit_epoch,
+                prepared.source_checkpoint_epoch,
+                prepared.source_next_lsn,
+                self.commit_epoch,
+                durable.checkpoint_epoch,
+                durable.next_lsn,
+            )));
+        }
+        if let Err(error) = durable.publish_checkpoint_sidecars(
+            &prepared.staging_path,
+            prepared.publish_projected_graph_artifacts,
+            prepared.source_scan_publication,
+        ) {
+            let _ =
+                durable.discard_prepared_checkpoint(prepared.generation, &prepared.staging_path);
+            return Err(error);
+        }
+        durable.publish_checkpoint_manifest(
+            prepared.generation,
+            prepared.manifest_artifacts,
+            prepared.source_commit_epoch,
+            oldest_reader_commit_epoch,
+            prepared.source_scan_publication,
+        )?;
+        let source_scan_manifest = prepared
+            .source_scan_publication
+            .map(|publication| {
+                source_scan::load(
+                    durable.root_path(),
+                    prepared.source_commit_epoch,
+                    publication.descriptor_checksum(),
+                )
+            })
+            .transpose()?
+            .flatten();
+        self.projected_graph_artifacts = prepared.projected_graph_artifacts.into();
         self.source_scan_manifest = source_scan_manifest.into();
-        self.checkpoint_statistics = checkpoint_statistics;
-        if let Some(relational_state) = checkpoint_relational_state {
+        self.checkpoint_statistics = prepared.checkpoint_statistics;
+        if let Some(relational_state) = prepared.checkpoint_relational_state {
             self.relational_state = relational_state;
         }
-        if checkpoint_out_of_core {
-            self.canonical_base = canonical_base;
-            self.canonical_adjacency = canonical_adjacency;
-            self.persistent_property_projection = persistent_property_projection;
+        if prepared.checkpoint_out_of_core {
+            self.canonical_base = durable.canonical_segments.clone();
+            self.canonical_adjacency = durable.canonical_adjacency.clone();
+            self.persistent_property_projection = durable.persistent_property_projection.clone();
             self.canonical_base_out_of_core = true;
             self.nodes = CowSegmentedMap::default();
             self.relationships = CowSegmentedMap::default();
@@ -11559,9 +11658,9 @@ impl GraphStore {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct DurableStore {
-    _directory_lease: DatabaseDirectoryLease,
+    _directory_lease: Arc<DatabaseDirectoryLease>,
     root_path: PathBuf,
     checkpoint_path: PathBuf,
     manifest_path: PathBuf,
@@ -11621,6 +11720,22 @@ struct CheckpointImage<'a> {
     projected_graphs: &'a BTreeMap<String, ProjectedGraphDefinition>,
     initial_import_source_fingerprint: Option<&'a str>,
     relational_checkpoint: Option<DurableArtifactMetadata>,
+}
+
+#[derive(Debug)]
+pub(crate) struct PreparedCheckpoint {
+    source_commit_epoch: u64,
+    source_checkpoint_epoch: u64,
+    source_next_lsn: u64,
+    generation: u64,
+    checkpoint_out_of_core: bool,
+    projected_graph_artifacts: BTreeMap<String, ProjectedGraphArtifact>,
+    publish_projected_graph_artifacts: bool,
+    source_scan_publication: Option<source_scan::SourceScanPublication>,
+    checkpoint_statistics: GraphStatistics,
+    checkpoint_relational_state: Option<RelationalState>,
+    manifest_artifacts: CheckpointManifestArtifacts,
+    staging_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -11816,6 +11931,9 @@ impl DurableStore {
             ));
         };
         manifest.validate()?;
+        if !read_only {
+            cleanup_abandoned_checkpoint_preparations(path, manifest.checkpoint_epoch)?;
+        }
         let checkpoint_path = manifest.checkpoint_path(path);
         let wal_path = manifest.wal_path(path);
         let wal_bytes = fs::metadata(&wal_path)
@@ -11869,7 +11987,7 @@ impl DurableStore {
             path.join(source_scan::SOURCE_SCAN_PAYLOAD_FILE),
         );
         Ok(Self {
-            _directory_lease: directory_lease,
+            _directory_lease: Arc::new(directory_lease),
             root_path: path.to_path_buf(),
             checkpoint_path,
             manifest_path,
@@ -13070,17 +13188,90 @@ impl DurableStore {
     }
 
     fn write_projected_graph_artifacts(&self, body: &str) -> Result<()> {
+        self.write_projected_graph_artifacts_to(&self.projected_graphs_path, body)
+    }
+
+    fn write_projected_graph_artifacts_to(&self, path: &Path, body: &str) -> Result<()> {
         let checksum = checksum_bytes(body.as_bytes());
         let data = format!("{body}checksum\t{checksum}\n");
-        let tmp_path = self.projected_graphs_path.with_extension("skein.tmp");
+        let tmp_path = path.with_extension("skein.tmp");
         {
             let mut file = File::create(&tmp_path)?;
             let encoded = encode_durable_text(&data, DurableCompression::default())?;
             file.write_all(&encoded)?;
             file.sync_all()?;
         }
-        durable_replace_file(&tmp_path, &self.projected_graphs_path)?;
+        durable_replace_file(&tmp_path, path)?;
         Ok(())
+    }
+
+    fn prepare_checkpoint_staging(&self, generation: u64) -> Result<PathBuf> {
+        let staging_path = self
+            .root_path
+            .join(format!(".checkpoint.{generation}.prepare"));
+        if staging_path.exists() {
+            fs::remove_dir_all(&staging_path)?;
+        }
+        fs::create_dir(&staging_path)?;
+        Ok(staging_path)
+    }
+
+    fn publish_checkpoint_sidecars(
+        &self,
+        staging_path: &Path,
+        publish_projected_graph_artifacts: bool,
+        source_scan_publication: Option<source_scan::SourceScanPublication>,
+    ) -> Result<()> {
+        if publish_projected_graph_artifacts {
+            durable_replace_file(
+                &staging_path.join(PROJECTED_GRAPHS_FILE),
+                &self.projected_graphs_path,
+            )?;
+        } else {
+            self.remove_projected_graph_artifacts()?;
+        }
+        if source_scan_publication.is_some() {
+            for file in [
+                source_scan::SOURCE_SCAN_PAYLOAD_FILE,
+                source_scan::SOURCE_SCAN_DESCRIPTOR_FILE,
+            ] {
+                durable_replace_file(&staging_path.join(file), &self.root_path.join(file))?;
+            }
+        } else {
+            remove_source_scan_artifacts(&self.root_path)?;
+        }
+        match fs::remove_dir(staging_path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn discard_prepared_checkpoint(&self, generation: u64, staging_path: &Path) -> Result<()> {
+        for file in [
+            checkpoint_generation_file(generation),
+            relational_checkpoint_generation_file(generation),
+            wal_generation_file(generation),
+            canonical_artifact_generation_file(generation),
+            canonical_manifest_generation_file(generation),
+            canonical_adjacency_artifact_generation_file(generation),
+            canonical_adjacency_manifest_generation_file(generation),
+            property_spill_artifact_generation_file(generation),
+            property_spill_manifest_generation_file(generation),
+            property_projection_artifact_generation_file(generation),
+            property_projection_manifest_generation_file(generation),
+        ] {
+            match fs::remove_file(self.root_path.join(file)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        match fs::remove_dir_all(staging_path) {
+            Ok(()) => sync_parent_dir(&self.manifest_path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn remove_projected_graph_artifacts(&self) -> Result<()> {
@@ -21025,6 +21216,72 @@ mod tests {
         assert!(manifest.contains("safe_reclaim_commit_epoch\t2\n"));
         assert!(manifest.contains("wal_replay_start_lsn\t3\n"));
         assert!(manifest.contains("next_lsn\t3\n"));
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn prepared_checkpoint_rejects_stale_source_without_rotating_wal() {
+        let path = unique_test_dir("prepared_checkpoint_stale_source");
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::open(&path, &mut catalog).unwrap();
+        store
+            .create_node(&mut catalog, "Memory", properties([("id", Value::Int(1))]))
+            .unwrap();
+
+        let source = store.checkpoint_source();
+        let prepared = source.prepare_checkpoint(&catalog).unwrap().unwrap();
+        store
+            .create_node(&mut catalog, "Memory", properties([("id", Value::Int(2))]))
+            .unwrap();
+        let error = store
+            .publish_prepared_checkpoint(prepared, None)
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("checkpoint source changed before publication"));
+        assert!(!path.join("checkpoint.1.skein").exists());
+        assert!(!path.join("wal.1.skein").exists());
+        assert!(!path.join(".checkpoint.1.prepare").exists());
+        drop(source);
+        drop(store);
+
+        let mut recovered_catalog = Catalog::default();
+        let recovered = GraphStore::open(&path, &mut recovered_catalog).unwrap();
+        assert_eq!(recovered.commit_epoch(), 2);
+        assert_eq!(
+            recovered.storage_recovery_report().checkpoint_commit_epoch,
+            None
+        );
+        let memory = recovered_catalog.label_id("Memory").unwrap();
+        assert_eq!(recovered.scan_nodes(Some(memory)).count(), 2);
+        drop(recovered);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn writable_open_reclaims_abandoned_future_checkpoint_generation() {
+        let path = unique_test_dir("abandoned_prepared_checkpoint");
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::open(&path, &mut catalog).unwrap();
+        store
+            .create_node(&mut catalog, "Memory", properties([("id", Value::Int(1))]))
+            .unwrap();
+        let source = store.checkpoint_source();
+        let prepared = source.prepare_checkpoint(&catalog).unwrap().unwrap();
+        assert!(path.join("checkpoint.1.skein").exists());
+        assert!(path.join("wal.1.skein").exists());
+        assert!(path.join(".checkpoint.1.prepare").exists());
+        drop(prepared);
+        drop(source);
+        drop(store);
+
+        let mut recovered_catalog = Catalog::default();
+        let recovered = GraphStore::open(&path, &mut recovered_catalog).unwrap();
+        assert_eq!(recovered.commit_epoch(), 1);
+        assert!(!path.join("checkpoint.1.skein").exists());
+        assert!(!path.join("wal.1.skein").exists());
+        assert!(!path.join(".checkpoint.1.prepare").exists());
+        drop(recovered);
         std::fs::remove_dir_all(path).unwrap();
     }
 
