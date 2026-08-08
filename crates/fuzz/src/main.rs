@@ -45,6 +45,13 @@ fn parse_options(args: impl IntoIterator<Item = String>) -> Result<CampaignOptio
                     .parse()
                     .map_err(|_| FuzzError::new("--cases must be a non-negative integer"))?;
             }
+            "--case-index" => {
+                let value = args.next().ok_or_else(|| FuzzError::new(usage()))?;
+                options.case_index =
+                    Some(value.parse().map_err(|_| {
+                        FuzzError::new("--case-index must be a non-negative integer")
+                    })?);
+            }
             "--help" | "-h" => return Err(FuzzError::new(usage())),
             _ => {
                 return Err(FuzzError::new(format!(
@@ -58,7 +65,7 @@ fn parse_options(args: impl IntoIterator<Item = String>) -> Result<CampaignOptio
 }
 
 fn usage() -> &'static str {
-    "usage: skein-fuzz [--seed <u64>] [--cases <usize>]"
+    "usage: skein-fuzz [--seed <u64>] [--cases <usize>] [--case-index <usize>]"
 }
 
 #[cfg(test)]
@@ -77,5 +84,20 @@ mod tests {
 
         assert_eq!(options.seed, 7);
         assert_eq!(options.case_count, 12);
+        assert_eq!(options.case_index, None);
+    }
+
+    #[test]
+    fn parses_exact_case_index() {
+        let options = parse_options([
+            "--seed".to_string(),
+            "7".to_string(),
+            "--case-index".to_string(),
+            "19".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(options.seed, 7);
+        assert_eq!(options.case_index, Some(19));
     }
 }

@@ -1,5 +1,6 @@
 [package]
 name = "skein-fuzz"
+default-run = "skein-fuzz"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

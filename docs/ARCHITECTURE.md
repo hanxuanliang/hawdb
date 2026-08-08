@@ -135,8 +135,18 @@ closed, and bypass the plan cache. The fallback is a differential surface, not
 a correctness authority. A Graph TLP oracle independently checks that a query
 result equals the bag union of its predicate-true, predicate-false, and
 predicate-null partitions on the same snapshot. This supplies a semantic
-relation without maintaining a second Cypher or graph executor. Failures
-include exact typed replay data, a direct reproduction command, and an
+relation without maintaining a second Cypher or graph executor. A separate
+Graph TLP Aggregate oracle applies `count(variable)` to the original and three
+partition queries, then requires the original count to equal their checked
+sum. Plan-fingerprint novelty remains coverage telemetry and never changes an
+oracle verdict. The same campaign generates PostgreSQL-style relational tables
+with primary keys, nullable scalar columns, optional indexes, and parameterized
+inner/left joins. Its predicate shapes cover scalar comparisons, `IN`, column
+comparisons, and nullable boolean composition, with a non-empty unknown
+partition for every shape. SQL row TLP and `COUNT(*)` TLP Aggregate execute
+through the public embedded SQL API on one pinned snapshot and retain
+independent typed replay and fresh-state setup reduction. Failures include
+exact typed replay data, a direct `--case-index` reproduction command, and an
 oracle-specific reduced mutation sequence; `src/nowledge_fuzz.rs` remains a
 readiness smoke rather than a semantic oracle.
 

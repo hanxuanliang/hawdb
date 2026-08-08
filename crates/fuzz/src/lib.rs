@@ -4,21 +4,32 @@ use skein::executor::Row;
 use skein::optimizer::OptimizerSearchDirective;
 use skein::{SkeinError, Value};
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
+mod coverage;
 mod generator;
 mod query_ast;
+mod sql_oracle;
 
+use coverage::PlanCoverageTracker;
 use generator::StateAwareCaseGenerator;
 use query_ast::QueryAst;
 
-pub const CAMPAIGN_PROTOCOL: &str = "skein-multi-oracle-fuzz-v3";
+pub use coverage::PlanCoverageReport;
+pub use sql_oracle::{
+    SqlCaseReport, SqlExecutionObservation, SqlFailureReport, SqlMutation, SqlQueryInvocation,
+    SqlReductionReport, SqlReplayBundle, SqlTlpCase, SqlTlpEvidence, SQL_REPLAY_PROTOCOL,
+    SQL_TLP_AGGREGATE_PROTOCOL, SQL_TLP_PROTOCOL,
+};
+
+pub const CAMPAIGN_PROTOCOL: &str = "skein-multi-oracle-fuzz-v5";
+pub const GRAPH_TLP_AGGREGATE_PROTOCOL: &str = "skein-graph-tlp-aggregate-fuzz-v1";
 pub const GRAPH_TLP_PROTOCOL: &str = "skein-graph-tlp-fuzz-v1";
 pub const METAMORPHIC_PROTOCOL: &str = "skein-graph-metamorphic-fuzz-v1";
 pub const PLAN_DIFFERENTIAL_PROTOCOL: &str = "skein-plan-differential-fuzz-v1";
-pub const REPLAY_BUNDLE_PROTOCOL: &str = "skein-multi-oracle-replay-v3";
+pub const REPLAY_BUNDLE_PROTOCOL: &str = "skein-multi-oracle-replay-v4";
 pub(crate) const QUERY_SHAPE_COUNT: usize = 12;
 const DEFAULT_CASE_COUNT: usize = 128;
 const MAX_CASE_COUNT: usize = 10_000;
@@ -64,6 +75,7 @@ pub struct FuzzCase {
     pub query: QueryInvocation,
     pub(crate) query_ast: QueryAst,
     pub graph_tlp: GraphTlpCase,
+    pub graph_tlp_aggregate: GraphTlpCase,
     pub metamorphic: MetamorphicCase,
     pub index_enabled: bool,
 }
@@ -138,6 +150,20 @@ impl CapabilityProfile {
             compares_duplicates: true,
             compares_missing_and_null: true,
             compares_float_bit_patterns: true,
+            compares_path_values: false,
+        }
+    }
+
+    pub fn graph_tlp_aggregate_v1() -> Self {
+        Self {
+            shapes: vec![
+                "nullable_node_property_count",
+                "node_range_count",
+                "relationship_range_count",
+            ],
+            compares_duplicates: true,
+            compares_missing_and_null: true,
+            compares_float_bit_patterns: false,
             compares_path_values: false,
         }
     }
@@ -221,6 +247,17 @@ pub struct GraphTlpEvidence {
     pub predicate_null: ExecutionObservation,
 }
 
+impl GraphTlpEvidence {
+    fn observations(&self) -> [(&'static str, &ExecutionObservation); 4] {
+        [
+            ("original", &self.original),
+            ("predicate_true", &self.predicate_true),
+            ("predicate_false", &self.predicate_false),
+            ("predicate_null", &self.predicate_null),
+        ]
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphTlpFailureReport {
     pub reason: String,
@@ -228,6 +265,9 @@ pub struct GraphTlpFailureReport {
     pub reduction: ReductionReport,
     pub evidence: GraphTlpEvidence,
 }
+
+pub type GraphTlpAggregateOracleResult = GraphTlpOracleResult;
+pub type GraphTlpAggregateFailureReport = GraphTlpFailureReport;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::large_enum_variant)]
@@ -294,6 +334,7 @@ pub struct ReplayBundle {
     pub query: QueryInvocation,
     pub(crate) query_ast: QueryAst,
     pub graph_tlp: GraphTlpCase,
+    pub graph_tlp_aggregate: GraphTlpCase,
     pub metamorphic: MetamorphicCase,
     pub index_enabled: bool,
 }
@@ -307,6 +348,7 @@ impl ReplayBundle {
             query: case.query.clone(),
             query_ast: case.query_ast.clone(),
             graph_tlp: case.graph_tlp.clone(),
+            graph_tlp_aggregate: case.graph_tlp_aggregate.clone(),
             metamorphic: case.metamorphic.clone(),
             index_enabled: case.index_enabled,
         }
@@ -323,6 +365,7 @@ impl ReplayBundle {
             "query": query_invocation_json(&self.query),
             "query_ast": self.query_ast.json(),
             "graph_tlp": graph_tlp_case_json(&self.graph_tlp),
+            "graph_tlp_aggregate": graph_tlp_case_json(&self.graph_tlp_aggregate),
             "metamorphic": metamorphic_case_json(&self.metamorphic),
         })
     }
@@ -463,6 +506,33 @@ impl Oracle for GraphTlpOracle {
                 reason: failure.reason,
                 replay: ReplayBundle::from_case(case),
                 reduction: reduce_failure(case, OracleKind::GraphTlp, &failure.signature),
+                evidence,
+            })
+        } else {
+            GraphTlpOracleResult::Equivalent(evidence)
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct GraphTlpAggregateOracle;
+
+impl Oracle for GraphTlpAggregateOracle {
+    type Output = GraphTlpAggregateOracleResult;
+
+    fn capability_profile(&self) -> CapabilityProfile {
+        CapabilityProfile::graph_tlp_aggregate_v1()
+    }
+
+    fn evaluate(&self, case: &FuzzCase) -> GraphTlpAggregateOracleResult {
+        let evidence = execute_graph_tlp_queries(case, &case.graph_tlp_aggregate);
+        let failure = classify_graph_tlp_aggregate_failure(&evidence);
+
+        if let Some(failure) = failure {
+            GraphTlpOracleResult::Failure(GraphTlpFailureReport {
+                reason: failure.reason,
+                replay: ReplayBundle::from_case(case),
+                reduction: reduce_failure(case, OracleKind::GraphTlpAggregate, &failure.signature),
                 evidence,
             })
         } else {
@@ -734,6 +804,10 @@ fn execute_snapshot_case(
 }
 
 fn execute_graph_tlp_case(case: &FuzzCase) -> GraphTlpEvidence {
+    execute_graph_tlp_queries(case, &case.graph_tlp)
+}
+
+fn execute_graph_tlp_queries(case: &FuzzCase, queries: &GraphTlpCase) -> GraphTlpEvidence {
     let (mut snapshot, snapshot_epoch) = match prepare_case(case) {
         Ok(prepared) => prepared,
         Err(observation) => {
@@ -756,10 +830,10 @@ fn execute_graph_tlp_case(case: &FuzzCase) -> GraphTlpEvidence {
     };
 
     GraphTlpEvidence {
-        original: execute(&case.graph_tlp.original),
-        predicate_true: execute(&case.graph_tlp.predicate_true),
-        predicate_false: execute(&case.graph_tlp.predicate_false),
-        predicate_null: execute(&case.graph_tlp.predicate_null),
+        original: execute(&queries.original),
+        predicate_true: execute(&queries.predicate_true),
+        predicate_false: execute(&queries.predicate_false),
+        predicate_null: execute(&queries.predicate_null),
     }
 }
 
@@ -800,12 +874,24 @@ enum FailureSignature {
     },
     GraphTlpSnapshotMismatch,
     GraphTlpPartitionMismatch,
+    GraphTlpAggregateErrored {
+        variant: &'static str,
+        phase: &'static str,
+        class: &'static str,
+    },
+    GraphTlpAggregateSnapshotMismatch,
+    GraphTlpAggregateInvalidResult {
+        variant: &'static str,
+    },
+    GraphTlpAggregateOverflow,
+    GraphTlpAggregateMismatch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OracleKind {
     PlanDifferential,
     GraphTlp,
+    GraphTlpAggregate,
 }
 
 impl OracleKind {
@@ -813,17 +899,13 @@ impl OracleKind {
         match self {
             Self::PlanDifferential => "plan_differential",
             Self::GraphTlp => "graph_tlp",
+            Self::GraphTlpAggregate => "graph_tlp_aggregate",
         }
     }
 }
 
 fn classify_graph_tlp_failure(evidence: &GraphTlpEvidence) -> Option<DetectedFailure> {
-    let observations = [
-        ("original", &evidence.original),
-        ("predicate_true", &evidence.predicate_true),
-        ("predicate_false", &evidence.predicate_false),
-        ("predicate_null", &evidence.predicate_null),
-    ];
+    let observations = evidence.observations();
     for (variant, observation) in observations {
         if let ExecutionOutcome::Error { phase, class, .. } = &observation.outcome {
             let phase = *phase;
@@ -868,6 +950,84 @@ fn classify_graph_tlp_failure(evidence: &GraphTlpEvidence) -> Option<DetectedFai
             signature: FailureSignature::GraphTlpPartitionMismatch,
             reason: format!("graph TLP partition mismatch: {reason}"),
         })
+}
+
+fn classify_graph_tlp_aggregate_failure(evidence: &GraphTlpEvidence) -> Option<DetectedFailure> {
+    let observations = evidence.observations();
+    for (variant, observation) in observations {
+        if let ExecutionOutcome::Error { phase, class, .. } = &observation.outcome {
+            let phase = *phase;
+            let class = *class;
+            return Some(DetectedFailure {
+                signature: FailureSignature::GraphTlpAggregateErrored {
+                    variant,
+                    phase,
+                    class,
+                },
+                reason: format!("graph TLP aggregate {variant} failed in {phase}/{class}"),
+            });
+        }
+    }
+
+    let snapshot_epoch = evidence.original.snapshot_epoch;
+    if snapshot_epoch.is_none()
+        || observations
+            .iter()
+            .any(|(_, observation)| observation.snapshot_epoch != snapshot_epoch)
+    {
+        return Some(DetectedFailure {
+            signature: FailureSignature::GraphTlpAggregateSnapshotMismatch,
+            reason: "graph TLP aggregate variants did not execute on one pinned snapshot"
+                .to_string(),
+        });
+    }
+
+    let mut counts = [0_u64; 4];
+    for (index, (variant, observation)) in observations.into_iter().enumerate() {
+        let Some(count) = observation_count(observation) else {
+            return Some(DetectedFailure {
+                signature: FailureSignature::GraphTlpAggregateInvalidResult { variant },
+                reason: format!(
+                    "graph TLP aggregate {variant} must return one non-negative integer count"
+                ),
+            });
+        };
+        counts[index] = count;
+    }
+
+    let Some(partition_count) = counts[1]
+        .checked_add(counts[2])
+        .and_then(|count| count.checked_add(counts[3]))
+    else {
+        return Some(DetectedFailure {
+            signature: FailureSignature::GraphTlpAggregateOverflow,
+            reason: "graph TLP aggregate partition count overflowed u64".to_string(),
+        });
+    };
+
+    (counts[0] != partition_count).then(|| DetectedFailure {
+        signature: FailureSignature::GraphTlpAggregateMismatch,
+        reason: format!(
+            "graph TLP aggregate mismatch: original_count={} partition_count={partition_count}",
+            counts[0]
+        ),
+    })
+}
+
+fn observation_count(observation: &ExecutionObservation) -> Option<u64> {
+    let ExecutionOutcome::Rows(rows) = &observation.outcome else {
+        return None;
+    };
+    let [row] = rows.as_slice() else {
+        return None;
+    };
+    if row.len() != 1 {
+        return None;
+    }
+    let Value::Int(count) = row.get("count")? else {
+        return None;
+    };
+    u64::try_from(*count).ok()
 }
 
 fn error_observation(phase: &'static str, error: SkeinError) -> ExecutionObservation {
@@ -1094,6 +1254,10 @@ fn failure_signature(case: &FuzzCase, oracle: OracleKind) -> Option<FailureSigna
         }
         OracleKind::GraphTlp => classify_graph_tlp_failure(&execute_graph_tlp_case(case))
             .map(|failure| failure.signature),
+        OracleKind::GraphTlpAggregate => classify_graph_tlp_aggregate_failure(
+            &execute_graph_tlp_queries(case, &case.graph_tlp_aggregate),
+        )
+        .map(|failure| failure.signature),
     }
 }
 
@@ -1143,6 +1307,7 @@ fn compare_row(left: &Row, right: &Row) -> Ordering {
 pub struct CampaignOptions {
     pub seed: u64,
     pub case_count: usize,
+    pub case_index: Option<usize>,
 }
 
 impl Default for CampaignOptions {
@@ -1150,6 +1315,7 @@ impl Default for CampaignOptions {
         Self {
             seed: 0x9e37_79b9_7f4a_7c15,
             case_count: DEFAULT_CASE_COUNT,
+            case_index: None,
         }
     }
 }
@@ -1160,17 +1326,22 @@ pub struct CampaignCaseReport {
     pub seed: u64,
     pub shape: String,
     pub graph_tlp_shape: String,
+    pub graph_tlp_aggregate_shape: String,
     pub index_enabled: bool,
     pub success: bool,
     pub plan_differential_success: bool,
     pub graph_tlp_success: bool,
+    pub graph_tlp_aggregate_success: bool,
     pub metamorphic_success: bool,
     pub direction_reversal_applicable: bool,
     pub reproduction_command: Option<String>,
     pub memo_plan_fingerprint: Option<String>,
     pub direct_fallback_plan_fingerprint: Option<String>,
+    pub plan_coverage_novel: bool,
+    pub sql: SqlCaseReport,
     pub failure: Option<FailureReport>,
     pub graph_tlp_failure: Option<GraphTlpFailureReport>,
+    pub graph_tlp_aggregate_failure: Option<GraphTlpAggregateFailureReport>,
     pub metamorphic_failure: Option<MetamorphicFailureReport>,
 }
 
@@ -1181,17 +1352,22 @@ impl CampaignCaseReport {
             "seed": self.seed,
             "shape": self.shape,
             "graph_tlp_shape": self.graph_tlp_shape,
+            "graph_tlp_aggregate_shape": self.graph_tlp_aggregate_shape,
             "index_enabled": self.index_enabled,
             "success": self.success,
             "plan_differential_success": self.plan_differential_success,
             "graph_tlp_success": self.graph_tlp_success,
+            "graph_tlp_aggregate_success": self.graph_tlp_aggregate_success,
             "metamorphic_success": self.metamorphic_success,
             "direction_reversal_applicable": self.direction_reversal_applicable,
             "reproduction_command": self.reproduction_command,
             "memo_plan_fingerprint": self.memo_plan_fingerprint,
             "direct_fallback_plan_fingerprint": self.direct_fallback_plan_fingerprint,
+            "plan_coverage_novel": self.plan_coverage_novel,
+            "sql": self.sql.json(),
             "failure": self.failure.as_ref().map(FailureReport::json),
             "graph_tlp_failure": self.graph_tlp_failure.as_ref().map(GraphTlpFailureReport::json),
+            "graph_tlp_aggregate_failure": self.graph_tlp_aggregate_failure.as_ref().map(GraphTlpAggregateFailureReport::json),
             "metamorphic_failure": self.metamorphic_failure.as_ref().map(MetamorphicFailureReport::json),
         })
     }
@@ -1205,6 +1381,7 @@ pub struct CampaignReport {
     pub passed_case_count: usize,
     pub failed_case_count: usize,
     pub complete_shape_coverage: bool,
+    pub plan_coverage: PlanCoverageReport,
     pub cases: Vec<CampaignCaseReport>,
 }
 
@@ -1216,6 +1393,7 @@ impl CampaignReport {
     pub fn json(&self) -> JsonValue {
         let plan_profile = CapabilityProfile::plan_differential_v1();
         let tlp_profile = CapabilityProfile::graph_tlp_v1();
+        let tlp_aggregate_profile = CapabilityProfile::graph_tlp_aggregate_v1();
         let metamorphic_profile = CapabilityProfile::graph_metamorphic_v1();
         json!({
             "protocol": CAMPAIGN_PROTOCOL,
@@ -1226,16 +1404,23 @@ impl CampaignReport {
             "passed_case_count": self.passed_case_count,
             "failed_case_count": self.failed_case_count,
             "complete_shape_coverage": self.complete_shape_coverage,
-            "oracles": ["plan_differential", "graph_tlp", "graph_metamorphic"],
+            "plan_coverage": self.plan_coverage.json(),
+            "oracles": ["plan_differential", "graph_tlp", "graph_tlp_aggregate", "graph_metamorphic", "sql_tlp", "sql_tlp_aggregate"],
             "oracle_protocols": {
                 "plan_differential": PLAN_DIFFERENTIAL_PROTOCOL,
                 "graph_tlp": GRAPH_TLP_PROTOCOL,
+                "graph_tlp_aggregate": GRAPH_TLP_AGGREGATE_PROTOCOL,
                 "graph_metamorphic": METAMORPHIC_PROTOCOL,
+                "sql_tlp": SQL_TLP_PROTOCOL,
+                "sql_tlp_aggregate": SQL_TLP_AGGREGATE_PROTOCOL,
             },
             "capability_profiles": {
                 "plan_differential": capability_profile_json(&plan_profile),
                 "graph_tlp": capability_profile_json(&tlp_profile),
+                "graph_tlp_aggregate": capability_profile_json(&tlp_aggregate_profile),
                 "graph_metamorphic": capability_profile_json(&metamorphic_profile),
+                "sql_tlp": sql_oracle::sql_capability_profile_json(false),
+                "sql_tlp_aggregate": sql_oracle::sql_capability_profile_json(true),
             },
             "cases": self.cases.iter().map(CampaignCaseReport::json).collect::<Vec<_>>(),
         })
@@ -1243,7 +1428,7 @@ impl CampaignReport {
 }
 
 pub fn run_campaign(options: CampaignOptions) -> Result<CampaignReport, FuzzError> {
-    if options.case_count == 0 {
+    if options.case_index.is_none() && options.case_count == 0 {
         return Err(FuzzError::new("case_count must be greater than zero"));
     }
     if options.case_count > MAX_CASE_COUNT {
@@ -1251,14 +1436,36 @@ pub fn run_campaign(options: CampaignOptions) -> Result<CampaignReport, FuzzErro
             "case_count exceeds the safety limit {MAX_CASE_COUNT}"
         )));
     }
+    if options
+        .case_index
+        .is_some_and(|index| index >= MAX_CASE_COUNT)
+    {
+        return Err(FuzzError::new(format!(
+            "case_index exceeds the safety limit {}",
+            MAX_CASE_COUNT - 1
+        )));
+    }
 
     let plan_oracle = PlanDifferentialOracle;
     let graph_tlp_oracle = GraphTlpOracle;
+    let graph_tlp_aggregate_oracle = GraphTlpAggregateOracle;
     let metamorphic_oracle = GraphMetamorphicOracle;
     let mut generator = StateAwareCaseGenerator::new(options.seed);
-    let mut cases = Vec::with_capacity(options.case_count);
-    for index in 0..options.case_count {
+    let generation_case_count = options
+        .case_index
+        .map_or(options.case_count, |index| index + 1);
+    let requested_case_count = if options.case_index.is_some() {
+        1
+    } else {
+        options.case_count
+    };
+    let mut cases = Vec::with_capacity(requested_case_count);
+    let mut plan_coverage = PlanCoverageTracker::default();
+    for index in 0..generation_case_count {
         let case = generator.case(index);
+        if options.case_index.is_some_and(|target| target != index) {
+            continue;
+        }
         let (
             plan_differential_success,
             memo_plan_fingerprint,
@@ -1282,34 +1489,52 @@ pub fn run_campaign(options: CampaignOptions) -> Result<CampaignReport, FuzzErro
             GraphTlpOracleResult::Equivalent(_) => (true, None),
             GraphTlpOracleResult::Failure(failure) => (false, Some(failure)),
         };
+        let (graph_tlp_aggregate_success, graph_tlp_aggregate_failure) =
+            match graph_tlp_aggregate_oracle.evaluate(&case) {
+                GraphTlpOracleResult::Equivalent(_) => (true, None),
+                GraphTlpOracleResult::Failure(failure) => (false, Some(failure)),
+            };
         let (metamorphic_success, metamorphic_failure) = match metamorphic_oracle.evaluate(&case) {
             MetamorphicOracleResult::Equivalent(_) => (true, None),
             MetamorphicOracleResult::Failure(failure) => (false, Some(failure)),
         };
-        let success = plan_differential_success && graph_tlp_success && metamorphic_success;
+        let sql = sql_oracle::evaluate_sql_case(case.seed, index, case.index_enabled);
+        let success = plan_differential_success
+            && graph_tlp_success
+            && graph_tlp_aggregate_success
+            && metamorphic_success
+            && sql.success;
+        let plan_coverage_novel = plan_coverage.observe(
+            memo_plan_fingerprint.as_deref(),
+            direct_fallback_plan_fingerprint.as_deref(),
+        );
         let direction_reversal_applicable = case.metamorphic.direction_reversal.is_some();
         cases.push(CampaignCaseReport {
             index,
             seed: case.seed,
             shape: case.shape,
             graph_tlp_shape: case.graph_tlp.name,
+            graph_tlp_aggregate_shape: case.graph_tlp_aggregate.name,
             index_enabled: case.index_enabled,
             success,
             plan_differential_success,
             graph_tlp_success,
+            graph_tlp_aggregate_success,
             metamorphic_success,
             direction_reversal_applicable,
             reproduction_command: (!success).then(|| {
                 format!(
-                    "cargo run -p skein-fuzz -- --seed {} --cases {}",
-                    options.seed,
-                    index + 1
+                    "cargo run -p skein-fuzz -- --seed {} --case-index {index}",
+                    options.seed
                 )
             }),
             memo_plan_fingerprint,
             direct_fallback_plan_fingerprint,
+            plan_coverage_novel,
+            sql,
             failure,
             graph_tlp_failure,
+            graph_tlp_aggregate_failure,
             metamorphic_failure,
         });
     }
@@ -1317,13 +1542,43 @@ pub fn run_campaign(options: CampaignOptions) -> Result<CampaignReport, FuzzErro
     let failed_case_count = cases.iter().filter(|case| !case.success).count();
     Ok(CampaignReport {
         seed: options.seed,
-        requested_case_count: options.case_count,
+        requested_case_count,
         executed_case_count: cases.len(),
         passed_case_count: cases.len().saturating_sub(failed_case_count),
         failed_case_count,
-        complete_shape_coverage: options.case_count >= QUERY_SHAPE_COUNT,
+        complete_shape_coverage: options.case_index.is_none()
+            && has_complete_shape_coverage(&cases),
+        plan_coverage: plan_coverage.report(),
         cases,
     })
+}
+
+fn has_complete_shape_coverage(cases: &[CampaignCaseReport]) -> bool {
+    let plan_profile = CapabilityProfile::plan_differential_v1();
+    let graph_tlp_profile = CapabilityProfile::graph_tlp_v1();
+    let graph_tlp_aggregate_profile = CapabilityProfile::graph_tlp_aggregate_v1();
+
+    observes_all_shapes(
+        cases.iter().map(|case| case.shape.as_str()),
+        &plan_profile.shapes,
+    ) && observes_all_shapes(
+        cases.iter().map(|case| case.graph_tlp_shape.as_str()),
+        &graph_tlp_profile.shapes,
+    ) && observes_all_shapes(
+        cases
+            .iter()
+            .map(|case| case.graph_tlp_aggregate_shape.as_str()),
+        &graph_tlp_aggregate_profile.shapes,
+    ) && observes_all_shapes(
+        cases.iter().map(|case| case.sql.shape.as_str()),
+        &sql_oracle::SQL_QUERY_SHAPES,
+    ) && !cases.is_empty()
+        && cases.iter().any(|case| case.direction_reversal_applicable)
+}
+
+fn observes_all_shapes<'a>(observed: impl Iterator<Item = &'a str>, expected: &[&str]) -> bool {
+    let observed = observed.collect::<BTreeSet<_>>();
+    expected.iter().all(|shape| observed.contains(shape))
 }
 
 fn error_class(error: &SkeinError) -> &'static str {
@@ -1508,6 +1763,7 @@ mod tests {
         let report = run_campaign(CampaignOptions {
             seed: 7,
             case_count: QUERY_SHAPE_COUNT,
+            case_index: None,
         })
         .unwrap();
 
@@ -1515,6 +1771,9 @@ mod tests {
         assert!(report.complete_shape_coverage);
         assert_eq!(report.executed_case_count, QUERY_SHAPE_COUNT);
         assert_eq!(report.failed_case_count, 0);
+        assert!(report.plan_coverage.unique_memo_plans > 0);
+        assert!(report.plan_coverage.unique_direct_fallback_plans > 0);
+        assert!(report.plan_coverage.unique_plan_pairs > 0);
         assert!(report
             .cases
             .iter()
@@ -1524,7 +1783,17 @@ mod tests {
             .iter()
             .all(|case| case.direct_fallback_plan_fingerprint.is_some()));
         assert!(report.cases.iter().all(|case| case.graph_tlp_success));
+        assert!(report
+            .cases
+            .iter()
+            .all(|case| case.graph_tlp_aggregate_success));
         assert!(report.cases.iter().all(|case| case.metamorphic_success));
+        assert!(report.cases.iter().all(|case| case.sql.success));
+        assert!(report.cases.iter().all(|case| case.sql.row_tlp_success));
+        assert!(report
+            .cases
+            .iter()
+            .all(|case| case.sql.aggregate_tlp_success));
         assert!(report
             .cases
             .iter()
@@ -1535,15 +1804,27 @@ mod tests {
         assert_eq!(json["protocol"], CAMPAIGN_PROTOCOL);
         assert_eq!(json["oracles"][0], "plan_differential");
         assert_eq!(json["oracles"][1], "graph_tlp");
-        assert_eq!(json["oracles"][2], "graph_metamorphic");
+        assert_eq!(json["oracles"][2], "graph_tlp_aggregate");
+        assert_eq!(json["oracles"][3], "graph_metamorphic");
+        assert_eq!(json["oracles"][4], "sql_tlp");
+        assert_eq!(json["oracles"][5], "sql_tlp_aggregate");
         assert_eq!(
             json["oracle_protocols"]["plan_differential"],
             PLAN_DIFFERENTIAL_PROTOCOL
         );
         assert_eq!(json["oracle_protocols"]["graph_tlp"], GRAPH_TLP_PROTOCOL);
         assert_eq!(
+            json["oracle_protocols"]["graph_tlp_aggregate"],
+            GRAPH_TLP_AGGREGATE_PROTOCOL
+        );
+        assert_eq!(
             json["oracle_protocols"]["graph_metamorphic"],
             METAMORPHIC_PROTOCOL
+        );
+        assert_eq!(json["oracle_protocols"]["sql_tlp"], SQL_TLP_PROTOCOL);
+        assert_eq!(
+            json["oracle_protocols"]["sql_tlp_aggregate"],
+            SQL_TLP_AGGREGATE_PROTOCOL
         );
     }
 
@@ -1584,6 +1865,10 @@ mod tests {
                 &case.graph_tlp.predicate_true,
                 &case.graph_tlp.predicate_false,
                 &case.graph_tlp.predicate_null,
+                &case.graph_tlp_aggregate.original,
+                &case.graph_tlp_aggregate.predicate_true,
+                &case.graph_tlp_aggregate.predicate_false,
+                &case.graph_tlp_aggregate.predicate_null,
                 &case.metamorphic.graph_isomorphism.query,
             ];
             if let Some(direction_reversal) = &case.metamorphic.direction_reversal {
@@ -1642,6 +1927,50 @@ mod tests {
     }
 
     #[test]
+    fn graph_tlp_aggregate_recombines_partition_counts() {
+        let mut generator = StateAwareCaseGenerator::new(7);
+
+        for index in 0..32 {
+            let case = generator.case(index);
+            let GraphTlpAggregateOracleResult::Equivalent(evidence) =
+                GraphTlpAggregateOracle.evaluate(&case)
+            else {
+                panic!("generated graph TLP aggregate relation must be equivalent");
+            };
+            let snapshot_epoch = evidence.original.snapshot_epoch;
+            assert!(snapshot_epoch.is_some());
+            assert!(evidence
+                .observations()
+                .iter()
+                .all(|(_, observation)| observation.snapshot_epoch == snapshot_epoch));
+
+            let counts = evidence
+                .observations()
+                .map(|(_, observation)| observation_count(observation).unwrap());
+            assert_eq!(counts[0], counts[1] + counts[2] + counts[3]);
+        }
+    }
+
+    #[test]
+    fn graph_tlp_aggregate_detects_an_invalid_partition_relation() {
+        let mut generator = StateAwareCaseGenerator::new(7);
+        let mut case = generator.case(0);
+        case.graph_tlp_aggregate.predicate_null = case.graph_tlp_aggregate.original.clone();
+
+        let GraphTlpAggregateOracleResult::Failure(failure) =
+            GraphTlpAggregateOracle.evaluate(&case)
+        else {
+            panic!("graph TLP aggregate must reject an invalid count partition");
+        };
+        assert!(failure.reason.contains("graph TLP aggregate mismatch"));
+        assert_eq!(failure.reduction.oracle, "graph_tlp_aggregate");
+        assert_eq!(
+            failure.replay.graph_tlp_aggregate.predicate_null,
+            failure.replay.graph_tlp_aggregate.original
+        );
+    }
+
+    #[test]
     fn replay_bundle_retains_typed_parameters() {
         let mut generator = StateAwareCaseGenerator::new(9);
         let case = generator.case(2);
@@ -1661,6 +1990,10 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("WHERE"));
+        assert!(replay["graph_tlp_aggregate"]["original"]["cypher"]
+            .as_str()
+            .unwrap()
+            .contains("count("));
     }
 
     #[test]
@@ -1734,6 +2067,7 @@ mod tests {
         let options = CampaignOptions {
             seed: 17,
             case_count: 3,
+            case_index: None,
         };
 
         assert_eq!(
@@ -1743,11 +2077,41 @@ mod tests {
     }
 
     #[test]
+    fn exact_case_replay_preserves_generated_case_and_oracle_results() {
+        let full = run_campaign(CampaignOptions {
+            seed: 17,
+            case_count: 6,
+            case_index: None,
+        })
+        .unwrap();
+        let exact = run_campaign(CampaignOptions {
+            seed: 17,
+            case_count: DEFAULT_CASE_COUNT,
+            case_index: Some(5),
+        })
+        .unwrap();
+
+        assert_eq!(exact.requested_case_count, 1);
+        assert_eq!(exact.executed_case_count, 1);
+        assert!(!exact.complete_shape_coverage);
+        assert_eq!(exact.cases[0].index, 5);
+        assert_eq!(exact.cases[0].seed, full.cases[5].seed);
+        assert_eq!(exact.cases[0].shape, full.cases[5].shape);
+        assert_eq!(
+            exact.cases[0].memo_plan_fingerprint,
+            full.cases[5].memo_plan_fingerprint
+        );
+        assert_eq!(exact.cases[0].success, full.cases[5].success);
+        assert_eq!(exact.cases[0].sql, full.cases[5].sql);
+    }
+
+    #[test]
     fn campaign_rejects_unbounded_or_empty_runs() {
         assert_eq!(
             run_campaign(CampaignOptions {
                 seed: 1,
                 case_count: 0,
+                case_index: None,
             })
             .unwrap_err()
             .to_string(),
@@ -1756,6 +2120,13 @@ mod tests {
         assert!(run_campaign(CampaignOptions {
             seed: 1,
             case_count: MAX_CASE_COUNT + 1,
+            case_index: None,
+        })
+        .is_err());
+        assert!(run_campaign(CampaignOptions {
+            seed: 1,
+            case_count: DEFAULT_CASE_COUNT,
+            case_index: Some(MAX_CASE_COUNT),
         })
         .is_err());
     }

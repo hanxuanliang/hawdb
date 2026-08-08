@@ -176,8 +176,8 @@ qualification justifies moving them.
 
 ## P2: Deferred Correctness Oracles
 
-- [ ] Add NoREC only after the supported Cypher subset can express the general
-  row-wise boolean-count relation without a fuzz-only executor.
+- [ ] Add NoREC only after a supported Cypher or SQL subset can express the
+  general row-wise boolean-count relation without a fuzz-only executor.
 
 ## P2: Deferred Replica Repair
 

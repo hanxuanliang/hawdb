@@ -28,6 +28,7 @@ impl StateAwareCaseGenerator {
         let graph = GeneratedGraphState::from_seed(seed);
         let query = graph.plan_differential_query(seed, index);
         let metamorphic = graph.metamorphic_case(index_enabled, &query.ast);
+        let graph_tlp = graph.graph_tlp_cases(seed);
 
         FuzzCase {
             seed,
@@ -35,7 +36,8 @@ impl StateAwareCaseGenerator {
             mutations: graph.mutations(index_enabled),
             query: query.invocation,
             query_ast: query.ast,
-            graph_tlp: graph.graph_tlp_case(seed),
+            graph_tlp: graph_tlp.rows,
+            graph_tlp_aggregate: graph_tlp.aggregate,
             metamorphic,
             index_enabled,
         }
@@ -432,7 +434,7 @@ impl GeneratedGraphState {
         }
     }
 
-    fn graph_tlp_case(self, seed: u64) -> GraphTlpCase {
+    fn graph_tlp_cases(self, seed: u64) -> GeneratedGraphTlpCases {
         match (seed >> 3) % 3 {
             0 => GraphTlpBuilder::new(
                 "nullable_node_property",
@@ -443,6 +445,7 @@ impl GeneratedGraphState {
                     "tlp_value",
                 ),
                 "m.id AS id, m.optional_note AS optional_note",
+                "m",
             )
             .with_parameter("tlp_value", Value::String("present".to_string()))
             .build(),
@@ -455,6 +458,7 @@ impl GeneratedGraphState {
                     "tlp_value",
                 ),
                 "m.id AS id, m.optional_score AS optional_score",
+                "m",
             )
             .with_parameter(
                 "tlp_value",
@@ -470,6 +474,7 @@ impl GeneratedGraphState {
                     "tlp_value",
                 ),
                 "a.id AS source, b.id AS target, r.weight AS weight",
+                "r",
             )
             .with_parameter("tlp_value", Value::Int((seed % 4) as i64))
             .build(),
@@ -485,11 +490,18 @@ struct GeneratedQuery {
 }
 
 #[derive(Debug)]
+struct GeneratedGraphTlpCases {
+    rows: GraphTlpCase,
+    aggregate: GraphTlpCase,
+}
+
+#[derive(Debug)]
 struct GraphTlpBuilder {
     name: &'static str,
     match_clause: &'static str,
     predicate: GeneratedPredicate,
     projection: &'static str,
+    count_variable: &'static str,
     parameters: Parameters,
 }
 
@@ -499,12 +511,14 @@ impl GraphTlpBuilder {
         match_clause: &'static str,
         predicate: GeneratedPredicate,
         projection: &'static str,
+        count_variable: &'static str,
     ) -> Self {
         Self {
             name,
             match_clause,
             predicate,
             projection,
+            count_variable,
             parameters: Parameters::new(),
         }
     }
@@ -514,27 +528,37 @@ impl GraphTlpBuilder {
         self
     }
 
-    fn build(self) -> GraphTlpCase {
-        let query = |predicate: Option<&GeneratedPredicate>| QueryInvocation {
-            cypher: match predicate {
-                Some(predicate) => format!(
-                    "{} WHERE {} RETURN {}",
-                    self.match_clause,
-                    predicate.render(),
-                    self.projection,
-                ),
-                None => format!("{} RETURN {}", self.match_clause, self.projection),
-            },
-            parameters: self.parameters.clone(),
-            result_semantics: ResultSemantics::Bag,
+    fn build(self) -> GeneratedGraphTlpCases {
+        let build_case = |name: String, projection: String| {
+            let query = |predicate: Option<&GeneratedPredicate>| QueryInvocation {
+                cypher: match predicate {
+                    Some(predicate) => format!(
+                        "{} WHERE {} RETURN {}",
+                        self.match_clause,
+                        predicate.render(),
+                        projection,
+                    ),
+                    None => format!("{} RETURN {}", self.match_clause, projection),
+                },
+                parameters: self.parameters.clone(),
+                result_semantics: ResultSemantics::Bag,
+            };
+
+            GraphTlpCase {
+                name,
+                original: query(None),
+                predicate_true: query(Some(&self.predicate)),
+                predicate_false: query(Some(&self.predicate.clone().negated())),
+                predicate_null: query(Some(&GeneratedPredicate::IsNull(self.predicate.property()))),
+            }
         };
 
-        GraphTlpCase {
-            name: self.name.to_string(),
-            original: query(None),
-            predicate_true: query(Some(&self.predicate)),
-            predicate_false: query(Some(&self.predicate.clone().negated())),
-            predicate_null: query(Some(&GeneratedPredicate::IsNull(self.predicate.property()))),
+        GeneratedGraphTlpCases {
+            rows: build_case(self.name.to_string(), self.projection.to_string()),
+            aggregate: build_case(
+                format!("{}_count", self.name),
+                format!("count({}) AS count", self.count_variable),
+            ),
         }
     }
 }
