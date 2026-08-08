@@ -49,6 +49,83 @@ pub fn execute_mutation_with_limits(
     }
 }
 
+pub fn project_staged_mutation_return_rows(
+    plan: &PhysicalPlan,
+    catalog: &Catalog,
+    store: &GraphStore,
+    mutation_rows: &[Row],
+    limits: MutationLimits,
+) -> Result<Option<Vec<Row>>> {
+    let PhysicalPlan::SetNodePropertiesReturn {
+        variable, returns, ..
+    } = plan
+    else {
+        return Ok(None);
+    };
+
+    let output = match returns {
+        SetNodePropertiesReturnMode::Project(returns) => {
+            let mut output = Vec::with_capacity(mutation_rows.len());
+            let mut payload_bytes = 0usize;
+            for row in mutation_rows {
+                let id = match row.get("node_id") {
+                    Some(Value::Int(id)) => NodeId(u64::try_from(*id).map_err(|_| {
+                        SkeinError::Execution(
+                            "staged SET RETURN produced a negative node id".to_string(),
+                        )
+                    })?),
+                    _ => {
+                        return Err(SkeinError::Execution(
+                            "staged SET RETURN did not produce a node id".to_string(),
+                        ));
+                    }
+                };
+                let node = store.node_owned(id)?.ok_or_else(|| {
+                    SkeinError::Execution(format!(
+                        "updated node {} is missing during staged SET RETURN projection",
+                        id.0
+                    ))
+                })?;
+                let binding = Binding {
+                    values: BTreeMap::new(),
+                    nodes: BTreeMap::from([(variable.clone(), node)]),
+                    relationships: BTreeMap::new(),
+                };
+                let projected = returns
+                    .iter()
+                    .map(|item| {
+                        project_value(item, catalog, &binding)
+                            .map(|value| (item.name.clone(), value))
+                    })
+                    .collect::<Result<BTreeMap<_, _>>>()?;
+                payload_bytes = payload_bytes.saturating_add(map_payload_bytes(&projected));
+                if payload_bytes > limits.max_result_payload_bytes.get() {
+                    return Err(SkeinError::Execution(format!(
+                        "mutation result payload would exceed max_mutation_result_payload_bytes {}",
+                        limits.max_result_payload_bytes
+                    )));
+                }
+                output.push(projected);
+            }
+            output
+        }
+        SetNodePropertiesReturnMode::Count { name } => {
+            let row = BTreeMap::from([(
+                name.clone(),
+                Value::Int(i64::try_from(mutation_rows.len()).unwrap_or(i64::MAX)),
+            )]);
+            if map_payload_bytes(&row) > limits.max_result_payload_bytes.get() {
+                return Err(SkeinError::Execution(format!(
+                    "mutation result payload would exceed max_mutation_result_payload_bytes {}",
+                    limits.max_result_payload_bytes
+                )));
+            }
+            vec![row]
+        }
+    };
+    Ok(Some(output))
+}
+
 fn execute_node_mutation_with_limits(
     plan: &PhysicalPlan,
     catalog: &mut Catalog,
@@ -650,6 +727,22 @@ pub fn mutation_command(plan: &PhysicalPlan) -> Result<Option<GraphMutation>> {
                 assignments: assignments.iter().map(node_set_assignment).collect(),
             }))
         }
+        PhysicalPlan::SetNodePropertiesReturn {
+            label,
+            predicate,
+            assignments,
+            ..
+        } => {
+            let filter = predicate
+                .as_ref()
+                .map(property_filter_from_predicate)
+                .transpose()?;
+            Ok(Some(GraphMutation::SetNodeProperties {
+                label: label.clone(),
+                filter,
+                assignments: assignments.iter().map(node_set_assignment).collect(),
+            }))
+        }
         PhysicalPlan::SetRelationshipProperty {
             source_label,
             predicate,
@@ -805,7 +898,6 @@ pub fn mutation_command(plan: &PhysicalPlan) -> Result<Option<GraphMutation>> {
         | PhysicalPlan::SortExec { .. }
         | PhysicalPlan::TopNExec { .. }
         | PhysicalPlan::LimitExec { .. }
-        | PhysicalPlan::SetNodePropertiesReturn { .. }
         | PhysicalPlan::ProjectGraph { .. }
         | PhysicalPlan::GraphAlgorithm { .. }
         | PhysicalPlan::VectorSeedScan { .. } => Ok(None),

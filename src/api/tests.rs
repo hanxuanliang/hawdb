@@ -107,6 +107,7 @@ mod community_cleanup;
 mod community_lifecycle;
 mod community_memberships;
 mod community_reads;
+mod concurrent_transactions;
 mod delete_mutations;
 mod expression_functions;
 mod external_content_artifacts;
@@ -290,17 +291,29 @@ fn database_session_rolls_back_buffered_transaction() {
 }
 
 #[test]
-fn database_session_rejects_reads_inside_write_transaction() {
+fn database_session_reads_own_writes_inside_transaction() {
     let mut db = Database::new();
-    let mut session = db.session();
-    session.query("BEGIN TRANSACTION").unwrap();
-    let error = session
-        .query("MATCH (m:Memory) RETURN m.id AS id")
-        .unwrap_err();
+    {
+        let mut session = db.session();
+        session.query("BEGIN TRANSACTION").unwrap();
+        session
+            .query("CREATE (:Memory {id: 1, state: 'staged'})")
+            .unwrap();
+        let staged = session
+            .query("MATCH (m:Memory) WHERE m.id = 1 RETURN m.state AS state")
+            .unwrap();
+        assert_eq!(staged.rows.len(), 1);
+        assert_eq!(
+            staged.rows[0].get("state"),
+            Some(&Value::String("staged".to_string()))
+        );
+        session.query("COMMIT").unwrap();
+    }
 
-    assert!(error
-        .to_string()
-        .contains("session transaction query must be a mutation"));
+    let committed = db
+        .query("MATCH (m:Memory) WHERE m.id = 1 RETURN m.state AS state")
+        .unwrap();
+    assert_eq!(committed.rows.len(), 1);
 }
 
 #[test]

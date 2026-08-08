@@ -37,7 +37,8 @@ In scope:
 - physical plan implementation rules for scan, expand, filter, project, and
   create
 - executor for the physical operators above
-- mutation-only transaction facade with commit and rollback
+- transaction-private COW Cypher workspace with read-your-own-writes, grouped
+  commit, and rollback
 - rebuildable in-memory property equality index
 - `IndexNodeSeek` implementation for simple label plus equality predicates
 - deterministic explain output
@@ -48,7 +49,7 @@ In scope:
 
 Out of scope for this task:
 
-- snapshot read transactions and MVCC isolation
+- row-version chains and fine-grained write-write conflict detection
 - persistent property index descriptors and cost-based index selection
 - full openCypher compatibility
 - Nowledge wrapper compatibility layer
@@ -92,7 +93,9 @@ Graph foundations
 
 ## Next Tasks
 
-1. Add snapshot read transactions and MVCC isolation.
+1. Extend the existing PostgreSQL primary-key point/range lock inference to
+   graph indexed predicates only after record-property write footprints and
+   per-key version validation can be proven together.
 2. Add persistent index descriptors and cost-based index selection.
 3. Add sparse/dense adjacency storage with copy-on-write segments.
 4. Add CSR/CSC projection generation as rebuildable checkpoint artifacts.

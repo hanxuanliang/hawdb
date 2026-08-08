@@ -822,6 +822,29 @@ pub struct MutationSummary {
     pub rows: Vec<BTreeMap<String, Value>>,
 }
 
+/// An isolated graph mutation workspace for a single explicit transaction.
+///
+/// The workspace applies each statement to a COW snapshot so subsequent reads
+/// observe prior writes. It also retains the exact low-level operations chosen
+/// by each statement; the live store publishes those operations as one WAL
+/// batch instead of recomputing predicates against the pre-transaction state.
+#[derive(Debug)]
+pub(crate) struct GraphMutationTransaction {
+    base_commit_epoch: u64,
+    catalog: Catalog,
+    store: GraphStore,
+    ops: Vec<WalOp>,
+    rows: Vec<BTreeMap<String, Value>>,
+}
+
+#[derive(Debug)]
+pub(crate) struct GraphMutationSavepoint {
+    catalog: Catalog,
+    store: GraphStore,
+    op_len: usize,
+    row_len: usize,
+}
+
 fn ensure_mutation_commit_limits(
     ops: &[WalOp],
     rows: &[BTreeMap<String, Value>],
@@ -1472,6 +1495,175 @@ impl RelationshipScanPruningCandidate {
             rel_ids,
         }
     }
+}
+
+impl GraphMutationTransaction {
+    pub(crate) fn catalog(&self) -> &Catalog {
+        &self.catalog
+    }
+
+    pub(crate) fn store(&self) -> &GraphStore {
+        &self.store
+    }
+
+    pub(crate) fn catalog_and_store_mut(&mut self) -> (&mut Catalog, &mut GraphStore) {
+        (&mut self.catalog, &mut self.store)
+    }
+
+    pub(crate) fn savepoint(&self) -> GraphMutationSavepoint {
+        GraphMutationSavepoint {
+            catalog: self.catalog.clone(),
+            store: self.store.snapshot(),
+            op_len: self.ops.len(),
+            row_len: self.rows.len(),
+        }
+    }
+
+    pub(crate) fn restore(&mut self, savepoint: GraphMutationSavepoint) {
+        self.catalog = savepoint.catalog;
+        self.store = savepoint.store;
+        self.ops.truncate(savepoint.op_len);
+        self.rows.truncate(savepoint.row_len);
+    }
+
+    pub(crate) fn stage_mutation_with_limits(
+        &mut self,
+        mutation: GraphMutation,
+        limits: MutationLimits,
+    ) -> Result<MutationSummary> {
+        self.stage_mutation(mutation, limits, true)
+    }
+
+    pub(crate) fn stage_mutation_without_commit_rows(
+        &mut self,
+        mutation: GraphMutation,
+        limits: MutationLimits,
+    ) -> Result<MutationSummary> {
+        self.stage_mutation(mutation, limits, false)
+    }
+
+    fn stage_mutation(
+        &mut self,
+        mutation: GraphMutation,
+        limits: MutationLimits,
+        retain_commit_rows: bool,
+    ) -> Result<MutationSummary> {
+        let mut captured_ops = Vec::new();
+        let summary = self.store.commit_mutations_internal(
+            &mut self.catalog,
+            vec![mutation],
+            None,
+            limits,
+            false,
+            Some(&mut captured_ops),
+        )?;
+        self.ops.extend(captured_ops);
+        if retain_commit_rows {
+            self.rows.extend(summary.rows.iter().cloned());
+        }
+        Ok(summary)
+    }
+}
+
+fn compact_transaction_graph_ops(ops: Vec<WalOp>) -> Vec<WalOp> {
+    let mut compacted = Vec::<Option<WalOp>>::with_capacity(ops.len());
+    let mut created_nodes = BTreeMap::<NodeId, usize>::new();
+    let mut created_relationships = BTreeMap::<RelId, usize>::new();
+
+    for op in ops {
+        match op {
+            WalOp::CreateNode {
+                id,
+                label,
+                properties,
+            } => {
+                let index = compacted.len();
+                compacted.push(Some(WalOp::CreateNode {
+                    id,
+                    label,
+                    properties,
+                }));
+                created_nodes.insert(id, index);
+            }
+            WalOp::CreateRelationship {
+                id,
+                source,
+                target,
+                rel_type,
+                properties,
+            } => {
+                let index = compacted.len();
+                compacted.push(Some(WalOp::CreateRelationship {
+                    id,
+                    source,
+                    target,
+                    rel_type,
+                    properties,
+                }));
+                created_relationships.insert(id, index);
+            }
+            WalOp::SetNodeProperty {
+                id,
+                property,
+                value,
+            } => {
+                let folded = created_nodes.get(&id).is_some_and(|index| {
+                    let Some(WalOp::CreateNode { properties, .. }) = compacted[*index].as_mut()
+                    else {
+                        return false;
+                    };
+                    properties.insert(property.clone(), value.clone());
+                    true
+                });
+                if !folded {
+                    compacted.push(Some(WalOp::SetNodeProperty {
+                        id,
+                        property,
+                        value,
+                    }));
+                }
+            }
+            WalOp::SetRelationshipProperty {
+                id,
+                property,
+                value,
+            } => {
+                let folded = created_relationships.get(&id).is_some_and(|index| {
+                    let Some(WalOp::CreateRelationship { properties, .. }) =
+                        compacted[*index].as_mut()
+                    else {
+                        return false;
+                    };
+                    properties.insert(property.clone(), value.clone());
+                    true
+                });
+                if !folded {
+                    compacted.push(Some(WalOp::SetRelationshipProperty {
+                        id,
+                        property,
+                        value,
+                    }));
+                }
+            }
+            WalOp::DeleteRelationship { id } => {
+                if let Some(index) = created_relationships.remove(&id) {
+                    compacted[index] = None;
+                } else {
+                    compacted.push(Some(WalOp::DeleteRelationship { id }));
+                }
+            }
+            WalOp::DeleteNode { id } => {
+                if let Some(index) = created_nodes.remove(&id) {
+                    compacted[index] = None;
+                } else {
+                    compacted.push(Some(WalOp::DeleteNode { id }));
+                }
+            }
+            other => compacted.push(Some(other)),
+        }
+    }
+
+    compacted.into_iter().flatten().collect()
 }
 
 impl GraphStore {
@@ -4079,13 +4271,86 @@ impl GraphStore {
         self.commit_mutations_with_limits(catalog, mutations, MutationLimits::default())
     }
 
+    pub(crate) fn begin_mutation_transaction(&self, catalog: &Catalog) -> GraphMutationTransaction {
+        GraphMutationTransaction {
+            base_commit_epoch: self.commit_epoch,
+            catalog: catalog.clone(),
+            store: self.snapshot(),
+            ops: Vec::new(),
+            rows: Vec::new(),
+        }
+    }
+
+    pub(crate) fn commit_mutation_transaction_and_relational(
+        &mut self,
+        catalog: &mut Catalog,
+        transaction: GraphMutationTransaction,
+        relational_transaction: RelationalTransaction,
+        limits: MutationLimits,
+    ) -> Result<MutationSummary> {
+        self.commit_mutation_transaction_and_relational_internal(
+            catalog,
+            transaction,
+            relational_transaction,
+            limits,
+            false,
+        )
+    }
+
+    pub(crate) fn commit_rebased_mutation_transaction_and_relational(
+        &mut self,
+        catalog: &mut Catalog,
+        transaction: GraphMutationTransaction,
+        relational_transaction: RelationalTransaction,
+        limits: MutationLimits,
+    ) -> Result<MutationSummary> {
+        // The caller must hold locks that cover every read and write in the
+        // staged transaction. Rebase only skips the coarse epoch check; current
+        // graph and relational constraints are still validated before WAL.
+        self.commit_mutation_transaction_and_relational_internal(
+            catalog,
+            transaction,
+            relational_transaction,
+            limits,
+            true,
+        )
+    }
+
+    fn commit_mutation_transaction_and_relational_internal(
+        &mut self,
+        catalog: &mut Catalog,
+        transaction: GraphMutationTransaction,
+        relational_transaction: RelationalTransaction,
+        limits: MutationLimits,
+        allow_stale_rebase: bool,
+    ) -> Result<MutationSummary> {
+        let read_only = transaction.ops.is_empty() && relational_transaction.writes.is_empty();
+        if !read_only && !allow_stale_rebase && self.commit_epoch != transaction.base_commit_epoch {
+            return Err(SkeinError::Execution(format!(
+                "transaction snapshot is stale: started at commit epoch {}, current epoch is {}",
+                transaction.base_commit_epoch, self.commit_epoch
+            )));
+        }
+        let ops = compact_transaction_graph_ops(transaction.ops);
+        self.commit_prepared_mutation_ops(
+            catalog,
+            transaction.catalog,
+            ops,
+            transaction.rows,
+            Some(relational_transaction),
+            limits,
+            false,
+            None,
+        )
+    }
+
     pub fn commit_mutation_with_limits(
         &mut self,
         catalog: &mut Catalog,
         mutation: GraphMutation,
         limits: MutationLimits,
     ) -> Result<MutationSummary> {
-        self.commit_mutations_internal(catalog, vec![mutation], None, limits, true)
+        self.commit_mutations_internal(catalog, vec![mutation], None, limits, true, None)
     }
 
     pub fn commit_mutations_with_limits(
@@ -4094,7 +4359,7 @@ impl GraphStore {
         mutations: Vec<GraphMutation>,
         limits: MutationLimits,
     ) -> Result<MutationSummary> {
-        self.commit_mutations_internal(catalog, mutations, None, limits, false)
+        self.commit_mutations_internal(catalog, mutations, None, limits, false, None)
     }
 
     pub(crate) fn relational_state(&self) -> &RelationalState {
@@ -4121,7 +4386,7 @@ impl GraphStore {
         transaction: RelationalTransaction,
         limits: MutationLimits,
     ) -> Result<MutationSummary> {
-        self.commit_mutations_internal(catalog, mutations, Some(transaction), limits, false)
+        self.commit_mutations_internal(catalog, mutations, Some(transaction), limits, false, None)
     }
 
     fn commit_mutations_internal(
@@ -4131,6 +4396,7 @@ impl GraphStore {
         relational_transaction: Option<RelationalTransaction>,
         limits: MutationLimits,
         preserve_single_create_wal: bool,
+        captured_graph_ops: Option<&mut Vec<WalOp>>,
     ) -> Result<MutationSummary> {
         let mut next_node_id = self.next_node_id;
         let mut next_rel_id = self.next_rel_id;
@@ -5670,7 +5936,34 @@ impl GraphStore {
             ensure_mutation_commit_limits(&ops, &rows, limits)?;
         }
 
+        self.commit_prepared_mutation_ops(
+            catalog,
+            working_catalog,
+            ops,
+            rows,
+            relational_transaction,
+            limits,
+            preserve_single_create_wal,
+            captured_graph_ops,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn commit_prepared_mutation_ops(
+        &mut self,
+        catalog: &mut Catalog,
+        working_catalog: Catalog,
+        mut ops: Vec<WalOp>,
+        rows: Vec<BTreeMap<String, Value>>,
+        relational_transaction: Option<RelationalTransaction>,
+        limits: MutationLimits,
+        preserve_single_create_wal: bool,
+        captured_graph_ops: Option<&mut Vec<WalOp>>,
+    ) -> Result<MutationSummary> {
         ensure_mutation_commit_limits(&ops, &rows, limits)?;
+        if let Some(captured_graph_ops) = captured_graph_ops {
+            captured_graph_ops.extend(ops.iter().cloned());
+        }
         let mut staged_relational_state = None;
         if let Some(transaction) = relational_transaction.filter(|value| !value.writes.is_empty()) {
             staged_relational_state = Some(

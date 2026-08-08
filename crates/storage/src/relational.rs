@@ -680,6 +680,10 @@ impl RelationalState {
         self.schemas.get(table).map(Arc::as_ref)
     }
 
+    pub fn table_schemas(&self) -> impl DoubleEndedIterator<Item = &RelationalTableSchema> {
+        self.schemas.values().map(Arc::as_ref)
+    }
+
     pub fn row(&self, table: &str, key: &RelationalKey) -> Option<&RelationalRow> {
         self.segments.get(table)?.rows.get(key)
     }

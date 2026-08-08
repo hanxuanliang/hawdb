@@ -115,13 +115,25 @@ representable as rows. Catalog tables are `system.tables`, `system.properties`,
 `system.graph_statistics`, `system.projected_graphs`, and
 `system.search_projection_changefeed`. Observability tables are
 `system.plan_cache`, `system.slow_queries`, and `system.statement_summary`.
-Every table is subject to the configured row and payload budgets; exceeding a
-budget fails the statement instead of returning partial introspection state.
+Relational schema discovery SHOULD use the PostgreSQL-compatible read-only
+`information_schema.tables`, `information_schema.columns`,
+`pg_catalog.pg_tables`, and `pg_catalog.pg_indexes` views. Their column names,
+nullability markers, PostgreSQL type names, index presence, and index
+definitions MUST follow PostgreSQL conventions for the relational types and
+indexes Skein supports. The `pg_tables` and `pg_indexes` names MUST also resolve
+without qualification, matching PostgreSQL's implicit `pg_catalog` lookup.
+Skein MUST NOT invent unstable PostgreSQL OIDs or imply
+server-internal catalog semantics that the embedded runtime does not provide.
+Every virtual catalog table is subject to the configured row and payload
+budgets; exceeding a budget fails the statement instead of returning partial
+introspection state.
 
-The live database and a pinned read transaction MUST execute the same system
-SQL surface against their respective catalog snapshots. A read transaction MUST
-NOT expose a second route-shaped catalog getter surface that can drift from SQL
-filtering, projection, ordering, row limits, or payload limits.
+The live database, a database transaction, and a pinned read transaction MUST
+execute the same virtual catalog SQL surface against their respective catalog
+snapshots. A database transaction MUST expose transaction-private relational
+DDL through the compatibility views. A read transaction MUST NOT expose a
+second route-shaped catalog getter surface that can drift from SQL filtering,
+projection, ordering, row limits, or payload limits.
 
 A typed Rust operation remains appropriate only when it owns a stable contract
 that cannot be represented safely by one statement, including grouped WAL

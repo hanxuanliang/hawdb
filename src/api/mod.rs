@@ -31,7 +31,7 @@ use crate::store::{
     restore_storage_backup, AdjacencyConsistencyReport, AdjacencyConsolidationPlan,
     AdjacencyConsolidationReport, AdjacencyDirection, AdjacencyLayout,
     BasicStatisticsConsistencyReport, DegreeStatisticsConsistencyReport,
-    DistinctValueStatisticsConsistencyReport, DurabilityPolicy, GraphMutation,
+    DistinctValueStatisticsConsistencyReport, DurabilityPolicy, GraphMutationTransaction,
     GraphSnapshotNodeImport, GraphSnapshotRelationshipImport, GraphStore, NodeId, NodeRecord,
     PropertyIndexConsistencyReport, PropertyIndexProjectionRebuildAction, RecoveryMode, RelId,
     RelRecord, SchemaMaintenanceAction, SegmentCacheSnapshot, StorageBackupReport,
@@ -66,6 +66,7 @@ use system_variables::{
 mod access_control;
 mod artifact_jobs;
 mod canonical_snapshot;
+mod concurrent;
 mod explain;
 mod explain_format;
 mod observability;
@@ -77,6 +78,7 @@ mod search_projection_catch_up;
 mod source_candidates;
 mod system_sql;
 mod system_variables;
+mod transaction_locks;
 mod types;
 
 pub(crate) use query_runtime::PreparedRuntimeQuery;
@@ -136,6 +138,10 @@ pub use canonical_snapshot::{
     GraphLightningInitialImportStreamingBatchAdvanceReport,
     GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION, GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION,
     GRAPH_LIGHTNING_INITIAL_IMPORT_DURABLE_STATE_PROTOCOL,
+};
+pub use concurrent::{
+    ConcurrentDatabase, ConcurrentDatabaseTransaction, ConcurrentTransactionMode,
+    ConcurrentTransactionOptions, DEFAULT_PESSIMISTIC_LOCK_TIMEOUT,
 };
 pub use plan_cache::{PlanCacheBypassReason, PlanCacheLookup, PlanCacheStats};
 pub use resource_profile::{
@@ -458,16 +464,31 @@ pub struct NowledgeGraphTransactionOutput {
 #[derive(Debug)]
 pub struct DatabaseTransaction<'a> {
     db: &'a mut Database,
-    mutations: Vec<GraphMutation>,
+    runtime: DatabaseTransactionRuntime,
+    state: DatabaseTransactionState,
+}
+
+#[derive(Debug)]
+struct DatabaseTransactionRuntime {
+    optimizer: CascadesOptimizer,
+    plan_cache: SharedState<PlanCache>,
+    optimizer_planning_cache: SharedState<OptimizerPlanningCache>,
+    config: DatabaseConfig,
+    system_variables: QuerySystemVariables,
+}
+
+#[derive(Debug)]
+struct DatabaseTransactionState {
+    graph_transaction: Option<GraphMutationTransaction>,
     relational_transaction: skein_storage::RelationalTransaction,
     relational_state: skein_storage::RelationalState,
-    committed: bool,
 }
 
 #[derive(Debug)]
 pub struct DatabaseSession<'a> {
     db: &'a mut Database,
-    transaction_mutations: Option<Vec<GraphMutation>>,
+    graph_transaction: Option<GraphMutationTransaction>,
+    transaction_runtime: Option<DatabaseTransactionRuntime>,
     system_variables: QuerySystemVariables,
 }
 
@@ -533,6 +554,10 @@ impl Default for Database {
 impl Database {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn into_concurrent(self) -> ConcurrentDatabase {
+        ConcurrentDatabase::new(self)
     }
 
     pub fn new_with_config(config: DatabaseConfig) -> Self {
@@ -778,13 +803,12 @@ impl Database {
     }
 
     pub fn begin_transaction(&mut self) -> DatabaseTransaction<'_> {
-        let relational_state = self.store.relational_state().clone();
+        let runtime = DatabaseTransactionRuntime::from_database(self);
+        let state = DatabaseTransactionState::from_database(self);
         DatabaseTransaction {
             db: self,
-            mutations: Vec::new(),
-            relational_transaction: skein_storage::RelationalTransaction::default(),
-            relational_state,
-            committed: false,
+            runtime,
+            state,
         }
     }
 
@@ -792,7 +816,8 @@ impl Database {
         let system_variables = self.system_variables.clone();
         DatabaseSession {
             db: self,
-            transaction_mutations: None,
+            graph_transaction: None,
+            transaction_runtime: None,
             system_variables,
         }
     }
@@ -17646,6 +17671,297 @@ impl<'a> NowledgeGraphAdapter<'a> {
     }
 }
 
+impl DatabaseTransactionRuntime {
+    fn from_database(db: &Database) -> Self {
+        Self::from_database_with_system_variables(db, db.system_variables.clone())
+    }
+
+    fn from_database_with_system_variables(
+        db: &Database,
+        system_variables: QuerySystemVariables,
+    ) -> Self {
+        Self {
+            optimizer: db.optimizer.clone(),
+            plan_cache: SharedState::new(PlanCache::new(db.config.max_plan_cache_entries)),
+            optimizer_planning_cache: SharedState::new(
+                db.optimizer_planning_cache.borrow().clone(),
+            ),
+            config: db.config.clone(),
+            system_variables,
+        }
+    }
+
+    fn ensure_writable(&self, store: &GraphStore) -> Result<()> {
+        store.ensure_usable()?;
+        if self.config.read_only {
+            return Err(SkeinError::Execution(
+                "database is opened in read-only mode".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl DatabaseTransactionState {
+    fn from_database(db: &Database) -> Self {
+        Self {
+            graph_transaction: Some(db.store.begin_mutation_transaction(&db.catalog)),
+            relational_transaction: skein_storage::RelationalTransaction::default(),
+            relational_state: db.store.relational_state().clone(),
+        }
+    }
+
+    fn rollback(&mut self) {
+        self.graph_transaction.take();
+        self.relational_transaction.writes.clear();
+    }
+}
+
+fn execute_graph_transaction_statement(
+    runtime: &DatabaseTransactionRuntime,
+    transaction: &mut GraphMutationTransaction,
+    system_variables: &QuerySystemVariables,
+    cypher_text: &str,
+    statement: &cypher::Statement,
+    parameters: &BTreeMap<String, Value>,
+) -> Result<QueryOutput> {
+    query_work_request_for_statement(system_variables, statement)?;
+    let optimizer_search =
+        query_statement_variables_for_statement(system_variables, statement)?.optimizer_search;
+    let optimized = optimized_query_plan_for(
+        cypher_text,
+        statement,
+        parameters,
+        PlanCacheMode::Bypass(PlanCacheBypassReason::MutationPlanning),
+        PlanCacheContext {
+            catalog: transaction.catalog(),
+            store: transaction.store(),
+            optimizer: &runtime.optimizer,
+            config: &runtime.config,
+            cache: &runtime.plan_cache,
+            planning_cache: &runtime.optimizer_planning_cache,
+            access_control: None,
+            optimizer_search,
+        },
+    )?;
+
+    if executor::is_mutation_plan(&optimized.physical_plan)? {
+        runtime.ensure_writable(transaction.store())?;
+        let mutation = executor::mutation_command(&optimized.physical_plan)?.ok_or_else(|| {
+            SkeinError::Execution(
+                "transaction mutation plan cannot be represented as a staged mutation".to_string(),
+            )
+        })?;
+        let is_mutation_return = matches!(
+            optimized.physical_plan,
+            PhysicalPlan::SetNodePropertiesReturn { .. }
+        );
+        let mutation_limits = match &optimized.physical_plan {
+            PhysicalPlan::SetNodePropertiesReturn {
+                returns: crate::planner::SetNodePropertiesReturnMode::Count { .. },
+                ..
+            } => skein_storage::MutationLimits {
+                max_result_rows: runtime.config.mutation_limits.max_affected_rows,
+                max_result_payload_bytes: std::num::NonZeroUsize::new(usize::MAX)
+                    .expect("usize::MAX is non-zero"),
+                ..runtime.config.mutation_limits
+            },
+            _ => runtime.config.mutation_limits,
+        };
+        let mut return_savepoint = is_mutation_return.then(|| transaction.savepoint());
+        let staged = if is_mutation_return {
+            transaction.stage_mutation_without_commit_rows(mutation, mutation_limits)
+        } else {
+            transaction.stage_mutation_with_limits(mutation, mutation_limits)
+        };
+        let summary = match staged {
+            Ok(summary) => summary,
+            Err(error) => {
+                if let Some(savepoint) = return_savepoint.take() {
+                    transaction.restore(savepoint);
+                }
+                return Err(error);
+            }
+        };
+        let returned_rows = match executor::project_staged_mutation_return_rows(
+            &optimized.physical_plan,
+            transaction.catalog(),
+            transaction.store(),
+            &summary.rows,
+            runtime.config.mutation_limits,
+        ) {
+            Ok(rows) => rows,
+            Err(error) => {
+                if let Some(savepoint) = return_savepoint.take() {
+                    transaction.restore(savepoint);
+                }
+                return Err(error);
+            }
+        };
+        return Ok(QueryOutput {
+            rows: returned_rows.unwrap_or_default(),
+        });
+    }
+
+    let query_result = {
+        let (catalog, store) = transaction.catalog_and_store_mut();
+        let mut external = executor::NoExternalReadOperator;
+        executor::execute_with_output_limits_profile_and_external_and_memory(
+            &optimized.physical_plan,
+            catalog,
+            store,
+            parameters,
+            &mut external,
+            runtime.config.max_read_result_rows,
+            runtime.config.max_read_result_payload_bytes,
+            &runtime.config.execution_memory,
+        )
+        .map(|profiled| QueryOutput {
+            rows: profiled.rows,
+        })
+    };
+    transaction.store().poison_on_storage_error(&query_result);
+    query_result
+}
+
+fn execute_database_transaction_query(
+    runtime: &DatabaseTransactionRuntime,
+    state: &mut DatabaseTransactionState,
+    cypher_text: &str,
+    parameters: &BTreeMap<String, Value>,
+) -> Result<QueryOutput> {
+    let statement = cypher::parse(cypher_text)?;
+    let body = statement_body(&statement);
+    if matches!(body, cypher::Statement::SetSystemVariable(_)) {
+        reject_system_variable_parameters(parameters)?;
+        return Err(SkeinError::Execution(
+            "SET system variable is not allowed inside a transaction".to_string(),
+        ));
+    }
+    if matches!(body, cypher::Statement::Explain(_)) {
+        return Err(SkeinError::Execution(
+            "EXPLAIN is not allowed inside a transaction".to_string(),
+        ));
+    }
+    let transaction = state
+        .graph_transaction
+        .as_mut()
+        .expect("database transaction must own a graph workspace");
+    execute_graph_transaction_statement(
+        runtime,
+        transaction,
+        &runtime.system_variables,
+        cypher_text,
+        &statement,
+        parameters,
+    )
+}
+
+fn execute_database_transaction_sql(
+    runtime: &DatabaseTransactionRuntime,
+    state: &mut DatabaseTransactionState,
+    sql_text: &str,
+    parameters: &[Value],
+) -> Result<QueryOutput> {
+    let prepared = skein_sql::prepare_postgres_sql(sql_text)?;
+    if matches!(
+        &prepared.statement,
+        crate::sql::SqlStatement::Select(select)
+            if system_sql::is_virtual_catalog_select(select)
+    ) {
+        let graph_transaction = state
+            .graph_transaction
+            .as_ref()
+            .expect("database transaction must own a graph workspace");
+        let plan_cache_stats = runtime.plan_cache.borrow().stats();
+        return system_sql::query_sql_with_params(
+            sql_text,
+            parameters,
+            runtime.config.max_read_result_rows,
+            runtime.config.max_read_result_payload_bytes,
+            &system_sql::SystemSqlContext {
+                catalog: graph_transaction.catalog(),
+                store: graph_transaction.store(),
+                relational_state: &state.relational_state,
+                runtime: system_sql::SystemRuntimeSnapshot::from_config(&runtime.config),
+                plan_cache_stats: &plan_cache_stats,
+                slow_queries: &[],
+                statement_summaries: &[],
+            },
+        );
+    }
+    if matches!(
+        prepared.statement,
+        crate::sql::SqlStatement::Select(_) | crate::sql::SqlStatement::Explain(_)
+    ) {
+        let output = crate::relational_sql::execute_relational_query_sql_with_runtime(
+            sql_text,
+            parameters,
+            &state.relational_state,
+            relational_query_limits(&runtime.config, runtime.config.max_read_result_rows),
+            &runtime.config.execution_memory,
+            None,
+        )?;
+        return Ok(QueryOutput { rows: output.rows });
+    }
+
+    runtime.ensure_writable(
+        state
+            .graph_transaction
+            .as_ref()
+            .expect("database transaction must own a graph workspace")
+            .store(),
+    )?;
+    let transaction = crate::relational_sql::compile_relational_statement_sql(
+        sql_text,
+        parameters,
+        &state.relational_state,
+    )?;
+    state.relational_state = state
+        .relational_state
+        .stage_transaction(
+            transaction.clone(),
+            skein_storage::RelationalMutationLimits::default(),
+            skein_storage::RelationalOverflowConfig::default(),
+        )
+        .map_err(|error| SkeinError::Execution(error.to_string()))?;
+    state
+        .relational_transaction
+        .writes
+        .extend(transaction.writes);
+    Ok(QueryOutput { rows: Vec::new() })
+}
+
+fn commit_database_transaction_state(
+    db: &mut Database,
+    state: &mut DatabaseTransactionState,
+    allow_stale_rebase: bool,
+) -> Result<QueryOutput> {
+    db.ensure_writable()?;
+    let graph_transaction = state
+        .graph_transaction
+        .take()
+        .expect("database transaction must own a graph workspace");
+    let relational_transaction = std::mem::take(&mut state.relational_transaction);
+    let summary = if allow_stale_rebase {
+        db.store
+            .commit_rebased_mutation_transaction_and_relational(
+                &mut db.catalog,
+                graph_transaction,
+                relational_transaction,
+                db.config.mutation_limits,
+            )?
+    } else {
+        db.store.commit_mutation_transaction_and_relational(
+            &mut db.catalog,
+            graph_transaction,
+            relational_transaction,
+            db.config.mutation_limits,
+        )?
+    };
+    Ok(QueryOutput { rows: summary.rows })
+}
+
 impl DatabaseTransaction<'_> {
     pub fn query(&mut self, cypher_text: &str) -> Result<QueryOutput> {
         self.query_with_params(cypher_text, &BTreeMap::new())
@@ -17656,31 +17972,7 @@ impl DatabaseTransaction<'_> {
         cypher_text: &str,
         parameters: &BTreeMap<String, Value>,
     ) -> Result<QueryOutput> {
-        let statement = cypher::parse(cypher_text)?;
-        let body = statement_body(&statement);
-        if matches!(body, cypher::Statement::SetSystemVariable(_)) {
-            reject_system_variable_parameters(parameters)?;
-            return Err(SkeinError::Execution(
-                "SET system variable is not allowed inside a transaction".to_string(),
-            ));
-        }
-        if matches!(body, cypher::Statement::Explain(_)) {
-            return Err(SkeinError::Execution(
-                "EXPLAIN is not allowed inside a transaction".to_string(),
-            ));
-        }
-        query_work_request_for_statement(&self.db.system_variables, &statement)?;
-        let optimized = self
-            .db
-            .optimized_query_plan(cypher_text, &statement, parameters)?;
-        let Some(mutation) = executor::mutation_command(&optimized.physical_plan)? else {
-            return Err(SkeinError::Execution(
-                "transaction query must be a mutation".to_string(),
-            ));
-        };
-        self.db.ensure_writable()?;
-        self.mutations.push(mutation);
-        Ok(QueryOutput { rows: Vec::new() })
+        execute_database_transaction_query(&self.runtime, &mut self.state, cypher_text, parameters)
     }
 
     pub fn query_sql(&mut self, sql_text: &str) -> Result<QueryOutput> {
@@ -17692,68 +17984,15 @@ impl DatabaseTransaction<'_> {
         sql_text: &str,
         parameters: &[Value],
     ) -> Result<QueryOutput> {
-        let prepared = skein_sql::prepare_postgres_sql(sql_text)?;
-        if matches!(
-            prepared.statement,
-            crate::sql::SqlStatement::Select(_) | crate::sql::SqlStatement::Explain(_)
-        ) {
-            let output = crate::relational_sql::execute_relational_query_sql_with_runtime(
-                sql_text,
-                parameters,
-                &self.relational_state,
-                relational_query_limits(&self.db.config, self.db.config.max_read_result_rows),
-                &self.db.config.execution_memory,
-                None,
-            )?;
-            return Ok(QueryOutput { rows: output.rows });
-        }
-
-        self.db.ensure_writable()?;
-        let transaction = crate::relational_sql::compile_relational_statement_sql(
-            sql_text,
-            parameters,
-            &self.relational_state,
-        )?;
-        self.relational_state = self
-            .relational_state
-            .stage_transaction(
-                transaction.clone(),
-                skein_storage::RelationalMutationLimits::default(),
-                skein_storage::RelationalOverflowConfig::default(),
-            )
-            .map_err(|error| SkeinError::Execution(error.to_string()))?;
-        self.relational_transaction
-            .writes
-            .extend(transaction.writes);
-        Ok(QueryOutput { rows: Vec::new() })
+        execute_database_transaction_sql(&self.runtime, &mut self.state, sql_text, parameters)
     }
 
     pub fn commit(mut self) -> Result<QueryOutput> {
-        self.db.ensure_writable()?;
-        let mutations = std::mem::take(&mut self.mutations);
-        let relational_transaction = std::mem::take(&mut self.relational_transaction);
-        let summary = if relational_transaction.writes.is_empty() {
-            self.db.store.commit_mutations_with_limits(
-                &mut self.db.catalog,
-                mutations,
-                self.db.config.mutation_limits,
-            )?
-        } else {
-            self.db.store.commit_mutations_and_relational(
-                &mut self.db.catalog,
-                mutations,
-                relational_transaction,
-                self.db.config.mutation_limits,
-            )?
-        };
-        self.committed = true;
-        Ok(QueryOutput { rows: summary.rows })
+        commit_database_transaction_state(self.db, &mut self.state, false)
     }
 
     pub fn rollback(mut self) {
-        self.mutations.clear();
-        self.relational_transaction.writes.clear();
-        self.committed = true;
+        self.state.rollback();
     }
 }
 
@@ -17780,7 +18019,7 @@ impl DatabaseSession<'_> {
         cypher_text: &str,
         parameters: &BTreeMap<String, Value>,
     ) -> Result<ExplainOutput> {
-        if self.transaction_mutations.is_some() {
+        if self.graph_transaction.is_some() {
             return Err(SkeinError::Execution(
                 "EXPLAIN is not allowed inside an active transaction".to_string(),
             ));
@@ -17813,45 +18052,55 @@ impl DatabaseSession<'_> {
         match body {
             cypher::Statement::BeginTransaction => {
                 reject_transaction_control_parameters("BEGIN TRANSACTION", parameters)?;
-                if self.transaction_mutations.is_some() {
+                if self.graph_transaction.is_some() {
                     return Err(SkeinError::Execution(
                         "transaction is already active".to_string(),
                     ));
                 }
                 self.db.ensure_writable()?;
-                self.transaction_mutations = Some(Vec::new());
+                self.transaction_runtime = Some(
+                    DatabaseTransactionRuntime::from_database_with_system_variables(
+                        self.db,
+                        self.system_variables.clone(),
+                    ),
+                );
+                self.graph_transaction =
+                    Some(self.db.store.begin_mutation_transaction(&self.db.catalog));
                 Ok(QueryOutput { rows: Vec::new() })
             }
             cypher::Statement::Commit => {
                 reject_transaction_control_parameters("COMMIT", parameters)?;
-                let Some(mut mutations) = self.transaction_mutations.take() else {
+                let Some(transaction) = self.graph_transaction.take() else {
                     return Err(SkeinError::Execution(
                         "COMMIT requires an active transaction".to_string(),
                     ));
                 };
+                self.transaction_runtime.take();
                 self.db.ensure_writable()?;
-                let summary = self.db.store.commit_mutations_with_limits(
+                let summary = self.db.store.commit_mutation_transaction_and_relational(
                     &mut self.db.catalog,
-                    std::mem::take(&mut mutations),
+                    transaction,
+                    skein_storage::RelationalTransaction::default(),
                     self.db.config.mutation_limits,
                 )?;
                 Ok(QueryOutput { rows: summary.rows })
             }
             cypher::Statement::Rollback => {
                 reject_transaction_control_parameters("ROLLBACK", parameters)?;
-                if self.transaction_mutations.take().is_none() {
+                if self.graph_transaction.take().is_none() {
                     return Err(SkeinError::Execution(
                         "ROLLBACK requires an active transaction".to_string(),
                     ));
                 }
+                self.transaction_runtime.take();
                 Ok(QueryOutput { rows: Vec::new() })
             }
-            cypher::Statement::Checkpoint if self.transaction_mutations.is_some() => {
+            cypher::Statement::Checkpoint if self.graph_transaction.is_some() => {
                 Err(SkeinError::Execution(
                     "CHECKPOINT is not allowed inside an active transaction".to_string(),
                 ))
             }
-            cypher::Statement::SetSystemVariable(_) if self.transaction_mutations.is_some() => {
+            cypher::Statement::SetSystemVariable(_) if self.graph_transaction.is_some() => {
                 Err(SkeinError::Execution(
                     "SET system variable is not allowed inside an active transaction".to_string(),
                 ))
@@ -17860,7 +18109,7 @@ impl DatabaseSession<'_> {
                 reject_system_variable_parameters(parameters)?;
                 self.system_variables.apply_set_system_variable(set)
             }
-            cypher::Statement::Explain(_) if self.transaction_mutations.is_some() => {
+            cypher::Statement::Explain(_) if self.graph_transaction.is_some() => {
                 Err(SkeinError::Execution(
                     "EXPLAIN is not allowed inside an active transaction".to_string(),
                 ))
@@ -17868,20 +18117,23 @@ impl DatabaseSession<'_> {
             cypher::Statement::Explain(explain) => {
                 self.execute_explain_statement(cypher_text, explain, parameters)
             }
-            statement if self.transaction_mutations.is_some() => {
-                let mutation =
-                    mutation_command_for_statement(self.db, cypher_text, statement, parameters)?
-                        .ok_or_else(|| {
-                            SkeinError::Execution(
-                                "session transaction query must be a mutation".to_string(),
-                            )
-                        })?;
-                self.db.ensure_writable()?;
-                self.transaction_mutations
+            statement if self.graph_transaction.is_some() => {
+                let transaction = self
+                    .graph_transaction
                     .as_mut()
-                    .expect("checked active transaction")
-                    .push(mutation);
-                Ok(QueryOutput { rows: Vec::new() })
+                    .expect("checked active transaction");
+                let runtime = self
+                    .transaction_runtime
+                    .as_ref()
+                    .expect("active session transaction must own a query runtime");
+                execute_graph_transaction_statement(
+                    runtime,
+                    transaction,
+                    &self.system_variables,
+                    cypher_text,
+                    statement,
+                    parameters,
+                )
             }
             _ => {
                 query_work_request_for_statement(&self.system_variables, &statement)?;
@@ -17952,34 +18204,6 @@ fn reject_transaction_control_parameters(
             "{statement} does not accept parameters"
         )))
     }
-}
-
-fn mutation_command_for_statement(
-    db: &Database,
-    cypher_text: &str,
-    statement: &cypher::Statement,
-    parameters: &BTreeMap<String, Value>,
-) -> Result<Option<GraphMutation>> {
-    let optimizer_search =
-        query_statement_variables_for_statement(&QuerySystemVariables::default(), statement)?
-            .optimizer_search;
-    let optimized = optimized_query_plan_for(
-        cypher_text,
-        statement,
-        parameters,
-        PlanCacheMode::Bypass(PlanCacheBypassReason::MutationPlanning),
-        PlanCacheContext {
-            catalog: &db.catalog,
-            store: &db.store,
-            optimizer: &db.optimizer,
-            config: &db.config,
-            cache: &db.plan_cache,
-            planning_cache: &db.optimizer_planning_cache,
-            access_control: None,
-            optimizer_search,
-        },
-    )?;
-    executor::mutation_command(&optimized.physical_plan)
 }
 
 impl DatabaseReadTransaction {
@@ -18489,7 +18713,7 @@ impl DatabaseReadTransaction {
         if matches!(
             &prepared.statement,
             crate::sql::SqlStatement::Select(select)
-                if select.from.schema.as_deref() == Some("system")
+                if system_sql::is_virtual_catalog_select(select)
         ) {
             return system_sql::query_sql_with_params(
                 sql_text,
@@ -18499,6 +18723,7 @@ impl DatabaseReadTransaction {
                 &system_sql::SystemSqlContext {
                     catalog: &self.catalog,
                     store: &self.store,
+                    relational_state: self.store.relational_state(),
                     runtime: system_sql::SystemRuntimeSnapshot::from_config(&self.config),
                     plan_cache_stats: &self.plan_cache.borrow().stats(),
                     slow_queries: &self.slow_query_snapshot,

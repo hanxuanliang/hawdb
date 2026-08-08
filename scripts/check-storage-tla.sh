@@ -11,6 +11,7 @@ readonly specifications=(
   SkeinStorageDurability
   SkeinGenerationReclamation
   SkeinConcurrentSnapshots
+  SkeinTransactionConcurrency
   SkeinSourceSegmentPublication
 )
 

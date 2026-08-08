@@ -42,6 +42,7 @@ use batch::*;
 use blocking::*;
 use columnar::*;
 use expression::*;
+pub(crate) use mutation::project_staged_mutation_return_rows;
 pub use mutation::{execute_mutation_with_limits, is_mutation_plan, mutation_command};
 use mutation::{
     node_set_assignment, relationship_on_create_property_value,

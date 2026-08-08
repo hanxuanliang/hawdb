@@ -464,11 +464,11 @@ fn transaction_delete_pending_node_rejects_pending_relationship_without_detach()
             "MERGE (:Source {id: 'source-v2'})-[:REVISED_AS {revision_type: 'update'}]->(:Source {id: 'source-v1'})",
         )
         .unwrap();
-    transaction
+    let error = transaction
         .query("MATCH (s:Source {id: 'source-v2'}) DELETE s")
-        .unwrap();
-    let error = transaction.commit().unwrap_err();
+        .expect_err("transaction workspace must reject a non-detach delete immediately");
     assert!(error.to_string().contains("DETACH DELETE"));
+    transaction.rollback();
 }
 
 #[test]

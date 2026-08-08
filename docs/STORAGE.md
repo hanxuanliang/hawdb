@@ -154,8 +154,51 @@ framing and LSN continuity, and poisons the open handle on any integrity error.
 operations inside a batch, so a budgeted recovery either applies a complete
 batch record or rejects the open before applying the next record.
 
-`DatabaseTransaction` buffers mutation statements and commits them as one WAL
-batch. Rollback drops the buffered mutations without touching the store.
+`DatabaseTransaction` owns a transaction-private COW graph workspace. Each
+Cypher mutation is applied to that workspace immediately, so later Cypher reads
+and mutations observe earlier writes. The transaction retains the exact graph
+operations produced by each statement and publishes them, together with staged
+relational SQL writes, as one WAL batch and one commit epoch. Rollback drops the
+workspace without touching the live store. Statement planning, mutation limits,
+and graph constraints are checked against the workspace, so an invalid
+statement fails before `COMMIT` and does not alter either the workspace or the
+live store.
+
+`ConcurrentDatabase` moves the embedded `Database` behind an in-process commit
+coordinator while transaction planning and COW workspace mutation remain outside
+the publication critical section. Optimistic transactions use first-committer-
+wins validation against their base commit epoch and return an explicit conflict
+instead of replaying a stale write set. Pessimistic transactions acquire locks
+on first use rather than at `BEGIN`. The lock table supports compatible shared
+locks, conflicting exclusive locks, inclusive point locks, bounded ranges with
+inclusive or exclusive endpoints, and an unbounded database target that
+overlaps every finer-grained resource.
+
+Simple PostgreSQL reads over a primary key acquire shared point or range locks.
+Full-table reads acquire the full primary-key range. `INSERT` and `ON CONFLICT
+DO NOTHING` acquire exclusive points for the primary key and every declared
+unique key, plus shared points for referenced foreign keys. This permits
+disjoint primary-key inserts prepared from the same COW epoch to publish in
+separate WAL epochs. SQL updates, deletes, schema changes, joins, non-primary-key
+predicates, graph mutations, and query shapes whose complete access set cannot
+be proven acquire the database target conservatively. The fallback is part of
+correctness, not a silent unlocked path.
+
+A pessimistic transaction that waits before its first successful statement
+refreshes its private snapshot after the lock is granted. Acquiring a new lock
+after an earlier successful statement fails with a retryable serialization
+error if the published epoch changed, avoiding execution against a resource
+that changed before it was protected. Lock-complete disjoint writes may rebase
+their exact staged operations onto the current store at commit; constraint
+validation and the durable publication order still run against current state.
+Both transaction modes retain one WAL order, durable-before-publish, and one
+commit epoch per transaction.
+
+Coordinator waits record every blocker in a multi-owner wait-for graph. Adding
+dependencies that close a cycle aborts the current waiter as the deterministic
+deadlock victim and releases all of its locks. Wakeup, timeout, commit,
+rollback, and drop remove both held locks and wait dependencies.
+
 Every durable open acquires an exclusive process-lifetime lease on the database
 directory. The host opens one root `Database` handle and derives sessions,
 transactions, and snapshot readers from that handle. A process-local canonical
@@ -165,6 +208,7 @@ Windows, Linux, and macOS. The sidecar is not canonical state and remains in
 place after close so every process locks the same file. Lock contention fails
 immediately; it never waits, steals ownership, or falls back to unsafe shared
 access.
+
 `DatabaseReadTransaction` owns an immutable catalog and graph snapshot for
 read-only Cypher execution. It rejects mutation statements, does not observe
 later commits, and remains usable after the writer checkpoints. Active read
@@ -173,9 +217,9 @@ registry and unregister on drop. This is an API snapshot slice. The store also
 tracks a commit epoch and publishes a checksummed manifest after each successful
 checkpoint. The manifest records the checkpoint epoch, the checkpoint-covered
 commit epoch, the oldest active reader commit epoch, the safe reclamation commit
-epoch, the WAL replay start LSN, and the next WAL LSN. This does not yet provide
-an in-place page-version chain or concurrent writer coordination. Read snapshots
-share immutable COW map pages and immutable canonical segment readers. A
+epoch, the WAL replay start LSN, and the next WAL LSN. This does not provide an
+in-place page-version chain. Read snapshots share immutable COW map pages and
+immutable canonical segment readers. A
 checkpoint retains all old generations while any snapshot reader is pinned;
 after the last pin is released, a later checkpoint keeps the current and
 immediately previous generations and reclaims older files.
@@ -848,8 +892,11 @@ differential and resource-profile artifacts for the exact release.
 
 The remaining page-store gaps are explicit:
 
-- no concurrent or multi-process writer protocol; directory ownership is
-  exclusive
+- no multi-process writer protocol; directory ownership is exclusive
+- no fine-grained graph-property or relationship-range locking; unsupported
+  Cypher and PostgreSQL access shapes conservatively acquire the database target
+- no per-key version stamps for validating a newly acquired resource against an
+  older transaction snapshot; such transactions abort and retry on epoch drift
 - no in-place page-version chain; snapshots use immutable COW pages and pinned
   canonical generations
 - no columnar property segments

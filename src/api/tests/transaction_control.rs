@@ -7,6 +7,13 @@ fn transaction_rollback_discards_buffered_mutations() {
         let mut tx = db.begin_transaction();
         tx.query("CREATE (:Memory {id: 1, title: 'Graph foundations'})")
             .unwrap();
+        let staged = tx
+            .query("MATCH (m:Memory) WHERE m.id = 1 RETURN m.title AS title")
+            .unwrap();
+        assert_eq!(
+            staged.rows[0].get("title"),
+            Some(&Value::String("Graph foundations".to_string()))
+        );
         tx.rollback();
     }
 
@@ -78,13 +85,72 @@ fn transaction_commit_replays_as_one_wal_batch() {
 }
 
 #[test]
-fn transaction_rejects_reads() {
+fn transaction_reads_own_writes_and_commits_exact_staged_operations() {
     let mut db = Database::new();
-    let mut tx = db.begin_transaction();
-    let error = tx
-        .query("MATCH (m:Memory) RETURN m.title AS title")
-        .unwrap_err();
-    assert!(error.to_string().contains("must be a mutation"));
+    db.query("CREATE (:Memory {id: 1, state: 'old'})").unwrap();
+
+    {
+        let mut tx = db.begin_transaction();
+        tx.query("CREATE (:Memory {id: 2, state: 'created'})")
+            .unwrap();
+        let created = tx
+            .query("MATCH (m:Memory) WHERE m.id = 2 RETURN m.state AS state")
+            .unwrap();
+        assert_eq!(
+            created.rows[0].get("state"),
+            Some(&Value::String("created".to_string()))
+        );
+
+        tx.query("MATCH (m:Memory) WHERE m.id = 1 SET m.state = 'staged'")
+            .unwrap();
+        tx.query("MATCH (m:Memory) WHERE m.state = 'staged' SET m.marker = 'matched-staged-state'")
+            .unwrap();
+
+        let returned = tx
+            .query(
+                "MATCH (m:Memory) WHERE m.id = 2 SET m.state = 'returned' RETURN m.id AS id, m.state AS state",
+            )
+            .unwrap();
+        assert_eq!(returned.rows.len(), 1);
+        assert_eq!(returned.rows[0].get("id"), Some(&Value::Int(2)));
+        assert_eq!(
+            returned.rows[0].get("state"),
+            Some(&Value::String("returned".to_string()))
+        );
+
+        let staged = tx
+            .query(
+                "MATCH (m:Memory) WHERE m.marker = 'matched-staged-state' RETURN m.id AS id, m.state AS state",
+            )
+            .unwrap();
+        assert_eq!(staged.rows.len(), 1);
+        assert_eq!(staged.rows[0].get("id"), Some(&Value::Int(1)));
+        assert_eq!(
+            staged.rows[0].get("state"),
+            Some(&Value::String("staged".to_string()))
+        );
+
+        tx.commit().unwrap();
+    }
+
+    let committed = db
+        .query(
+            "MATCH (m:Memory) WHERE m.marker = 'matched-staged-state' RETURN m.id AS id, m.state AS state",
+        )
+        .unwrap();
+    assert_eq!(committed.rows.len(), 1);
+    assert_eq!(committed.rows[0].get("id"), Some(&Value::Int(1)));
+    assert_eq!(
+        committed.rows[0].get("state"),
+        Some(&Value::String("staged".to_string()))
+    );
+    let returned = db
+        .query("MATCH (m:Memory) WHERE m.id = 2 RETURN m.state AS state")
+        .unwrap();
+    assert_eq!(
+        returned.rows[0].get("state"),
+        Some(&Value::String("returned".to_string()))
+    );
 }
 
 #[test]

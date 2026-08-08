@@ -333,7 +333,10 @@ fn compile_comparison_op(op: SqlComparisonOp) -> RelationalComparisonOp {
     }
 }
 
-fn bind_relational_value(value: SqlValue, parameters: &[Value]) -> Result<RelationalValue> {
+pub(crate) fn bind_relational_value(
+    value: SqlValue,
+    parameters: &[Value],
+) -> Result<RelationalValue> {
     let value = match value {
         SqlValue::Literal(value) => value,
         SqlValue::Parameter(position) => parameters
@@ -540,6 +543,12 @@ fn compile_add_column(alter: AlterTableAddColumnStatement) -> Result<Vec<Relatio
 }
 
 fn reject_non_public_schema(schema: Option<&str>) -> Result<()> {
+    if matches!(schema, Some("system" | "information_schema" | "pg_catalog")) {
+        return Err(SkeinError::Semantic(format!(
+            "PostgreSQL compatibility catalog {} is read-only",
+            schema.unwrap_or_default()
+        )));
+    }
     if schema.is_some_and(|schema| schema != "public") {
         return Err(SkeinError::Semantic(
             "relational content tables must use the public schema".to_string(),
@@ -633,6 +642,186 @@ mod tests {
     }
 
     #[test]
+    fn postgres_catalog_views_expose_relational_schema_and_indexes() {
+        let mut database = Database::new();
+        database
+            .query_sql(
+                "CREATE TABLE public.documents (\
+                 id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, external_id TEXT NOT NULL, \
+                 body TEXT NOT NULL DEFAULT 'draft', score DOUBLE PRECISION, \
+                 UNIQUE (tenant_id, external_id))",
+            )
+            .expect("create relational table");
+        database
+            .query_sql(
+                "CREATE INDEX idx_documents_score ON public.documents (tenant_id, score, id)",
+            )
+            .expect("create relational index");
+
+        let columns = database
+            .query_sql_with_params(
+                "SELECT column_name, ordinal_position, column_default, is_nullable, \
+                 data_type, udt_name FROM information_schema.columns \
+                 WHERE table_schema = 'public' AND table_name = $1 \
+                 ORDER BY ordinal_position",
+                &[Value::String("documents".to_string())],
+            )
+            .expect("query information schema columns");
+        assert_eq!(columns.rows.len(), 5);
+        assert_eq!(
+            columns.rows[0],
+            BTreeMap::from([
+                ("column_default".to_string(), Value::Null),
+                ("column_name".to_string(), Value::String("id".to_string()),),
+                ("data_type".to_string(), Value::String("text".to_string()),),
+                ("is_nullable".to_string(), Value::String("NO".to_string()),),
+                ("ordinal_position".to_string(), Value::Int(1)),
+                ("udt_name".to_string(), Value::String("text".to_string()),),
+            ])
+        );
+        assert_eq!(
+            columns.rows[3].get("column_default"),
+            Some(&Value::String("'draft'::text".to_string()))
+        );
+        let score_column = database
+            .query_sql(
+                "SELECT * FROM information_schema.columns \
+                 WHERE table_name = 'documents' AND column_name = 'score'",
+            )
+            .expect("query complete information schema column");
+        assert_eq!(score_column.rows[0].len(), 44);
+        assert_eq!(
+            score_column.rows[0].get("numeric_precision"),
+            Some(&Value::Int(53))
+        );
+        assert_eq!(
+            score_column.rows[0].get("numeric_precision_radix"),
+            Some(&Value::Int(2))
+        );
+
+        let tables = database
+            .query_sql(
+                "SELECT schemaname, tablename, tableowner, hasindexes, rowsecurity \
+                 FROM pg_catalog.pg_tables WHERE tablename = 'documents'",
+            )
+            .expect("query pg tables");
+        assert_eq!(
+            tables.rows,
+            vec![BTreeMap::from([
+                ("hasindexes".to_string(), Value::Bool(true)),
+                ("rowsecurity".to_string(), Value::Bool(false)),
+                (
+                    "schemaname".to_string(),
+                    Value::String("public".to_string()),
+                ),
+                (
+                    "tablename".to_string(),
+                    Value::String("documents".to_string()),
+                ),
+                ("tableowner".to_string(), Value::String("skein".to_string()),),
+            ])]
+        );
+
+        let indexes = database
+            .query_sql(
+                "SELECT indexname, indexdef FROM pg_indexes \
+                 WHERE tablename = 'documents' ORDER BY indexname",
+            )
+            .expect("query pg indexes");
+        assert_eq!(indexes.rows.len(), 3);
+        assert_eq!(
+            indexes.rows[0].get("indexname"),
+            Some(&Value::String("documents_pkey".to_string()))
+        );
+        assert_eq!(
+            indexes.rows[2].get("indexdef"),
+            Some(&Value::String(
+                "CREATE INDEX \"idx_documents_score\" ON public.\"documents\" USING btree \
+                 (\"tenant_id\", \"score\", \"id\")"
+                    .to_string()
+            ))
+        );
+
+        let read_transaction = database.begin_read_transaction();
+        let snapshot_tables = read_transaction
+            .query_sql(
+                "SELECT table_name, table_type FROM information_schema.tables \
+                 WHERE table_name = 'documents'",
+            )
+            .expect("query pinned information schema snapshot");
+        assert_eq!(
+            snapshot_tables.rows,
+            vec![BTreeMap::from([
+                (
+                    "table_name".to_string(),
+                    Value::String("documents".to_string()),
+                ),
+                (
+                    "table_type".to_string(),
+                    Value::String("BASE TABLE".to_string()),
+                ),
+            ])]
+        );
+        let full_table = read_transaction
+            .query_sql("SELECT * FROM information_schema.tables WHERE table_name = 'documents'")
+            .expect("query complete information schema table");
+        assert_eq!(full_table.rows[0].len(), 12);
+        assert_eq!(
+            full_table.rows[0].get("is_insertable_into"),
+            Some(&Value::String("YES".to_string()))
+        );
+
+        let error = database
+            .query_sql_bounded("SELECT * FROM information_schema.tables", Some(0))
+            .expect_err("catalog row budget must fail closed");
+        assert!(error
+            .to_string()
+            .contains("exceeding max_read_result_rows 0"));
+    }
+
+    #[test]
+    fn postgres_catalog_reads_observe_transaction_private_ddl() {
+        let mut database = Database::new();
+        {
+            let mut transaction = database.begin_transaction();
+            transaction
+                .query_sql("CREATE TABLE public.pending (id BIGINT PRIMARY KEY)")
+                .expect("stage relational table");
+            let output = transaction
+                .query_sql(
+                    "SELECT table_name FROM information_schema.tables \
+                     WHERE table_schema = 'public' AND table_name = 'pending'",
+                )
+                .expect("query transaction-private catalog");
+            assert_eq!(
+                output.rows,
+                vec![BTreeMap::from([(
+                    "table_name".to_string(),
+                    Value::String("pending".to_string()),
+                )])]
+            );
+            transaction.rollback();
+        }
+
+        let output = database
+            .query_sql(
+                "SELECT table_name FROM information_schema.tables \
+                 WHERE table_name = 'pending'",
+            )
+            .expect("query committed catalog");
+        assert!(output.rows.is_empty());
+    }
+
+    #[test]
+    fn postgres_compatibility_catalogs_are_read_only() {
+        let mut database = Database::new();
+        let error = database
+            .query_sql("CREATE TABLE pg_catalog.shadow (id BIGINT PRIMARY KEY)")
+            .expect_err("catalog mutation must fail");
+        assert!(error.to_string().contains("pg_catalog is read-only"));
+    }
+
+    #[test]
     fn database_transaction_commits_cypher_and_sql_in_one_epoch() {
         let mut database = Database::new();
         {
@@ -653,6 +842,10 @@ mod tests {
                 .query_sql("SELECT id FROM public.messages")
                 .expect("read staged relational row");
             assert_eq!(staged.rows.len(), 1);
+            let staged_graph = transaction
+                .query("MATCH (m:Marker) WHERE m.id = 'graph-1' RETURN m.id AS id")
+                .expect("read staged graph row");
+            assert_eq!(staged_graph.rows.len(), 1);
             let staged_plan = transaction
                 .query_sql("EXPLAIN SELECT id FROM public.messages")
                 .expect("plan against staged relational state");

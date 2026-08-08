@@ -13,7 +13,10 @@ use crate::store::GraphStore;
 use crate::value::Value;
 use skein_core::{GraphStatistics, RuntimeCapabilities};
 use skein_query::QueryIdentity;
-use skein_storage::{ProjectedGraphStatus, SearchProjectionChangefeedStatus, StorageResidencyMode};
+use skein_storage::{
+    ProjectedGraphStatus, RelationalScalarType, RelationalState, RelationalTableSchema,
+    RelationalValue, SearchProjectionChangefeedStatus, StorageResidencyMode,
+};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -107,6 +110,7 @@ pub(crate) struct StatementSummary {
 pub(crate) struct SystemSqlContext<'a> {
     pub(crate) catalog: &'a Catalog,
     pub(crate) store: &'a GraphStore,
+    pub(crate) relational_state: &'a RelationalState,
     pub(crate) runtime: SystemRuntimeSnapshot,
     pub(crate) plan_cache_stats: &'a PlanCacheStats,
     pub(crate) slow_queries: &'a [SlowQueryRecord],
@@ -168,6 +172,18 @@ enum SystemTable {
     PlanCache,
     SlowQueries,
     StatementSummary,
+    InformationSchemaTables,
+    InformationSchemaColumns,
+    PgTables,
+    PgIndexes,
+}
+
+pub(crate) fn is_virtual_catalog_select(select: &SelectStatement) -> bool {
+    matches!(
+        (select.from.schema.as_deref(), select.from.name.as_str()),
+        (Some("system" | "information_schema" | "pg_catalog"), _)
+            | (None, "pg_tables" | "pg_indexes")
+    )
 }
 
 impl SlowQueryRecord {
@@ -654,6 +670,14 @@ fn execute_system_table_scan(
         SystemTable::PlanCache => plan_cache_rows(context.plan_cache_stats),
         SystemTable::SlowQueries => slow_query_rows(context.slow_queries),
         SystemTable::StatementSummary => statement_summary_rows(context.statement_summaries),
+        SystemTable::InformationSchemaTables => {
+            information_schema_table_rows(context.relational_state)
+        }
+        SystemTable::InformationSchemaColumns => {
+            information_schema_column_rows(context.relational_state)
+        }
+        SystemTable::PgTables => pg_table_rows(context.relational_state),
+        SystemTable::PgIndexes => pg_index_rows(context.relational_state),
     };
 
     if let Some(predicate) = &scan.predicate {
@@ -739,6 +763,337 @@ fn table_rows(catalog: &Catalog) -> Vec<Row> {
             ])
         })
         .collect()
+}
+
+fn information_schema_table_rows(state: &RelationalState) -> Vec<Row> {
+    state
+        .table_schemas()
+        .map(|schema| {
+            BTreeMap::from([
+                (
+                    "table_catalog".to_string(),
+                    Value::String("skein".to_string()),
+                ),
+                (
+                    "table_schema".to_string(),
+                    Value::String("public".to_string()),
+                ),
+                ("table_name".to_string(), Value::String(schema.name.clone())),
+                (
+                    "table_type".to_string(),
+                    Value::String("BASE TABLE".to_string()),
+                ),
+                ("self_referencing_column_name".to_string(), Value::Null),
+                ("reference_generation".to_string(), Value::Null),
+                ("user_defined_type_catalog".to_string(), Value::Null),
+                ("user_defined_type_schema".to_string(), Value::Null),
+                ("user_defined_type_name".to_string(), Value::Null),
+                (
+                    "is_insertable_into".to_string(),
+                    Value::String("YES".to_string()),
+                ),
+                ("is_typed".to_string(), Value::String("NO".to_string())),
+                ("commit_action".to_string(), Value::Null),
+            ])
+        })
+        .collect()
+}
+
+fn information_schema_column_rows(state: &RelationalState) -> Vec<Row> {
+    state
+        .table_schemas()
+        .flat_map(|schema| {
+            schema
+                .columns
+                .iter()
+                .enumerate()
+                .map(move |(position, column)| {
+                    let type_info = information_schema_type(column.scalar_type);
+                    let ordinal_position = position.saturating_add(1);
+                    BTreeMap::from([
+                        (
+                            "table_catalog".to_string(),
+                            Value::String("skein".to_string()),
+                        ),
+                        (
+                            "table_schema".to_string(),
+                            Value::String("public".to_string()),
+                        ),
+                        ("table_name".to_string(), Value::String(schema.name.clone())),
+                        (
+                            "column_name".to_string(),
+                            Value::String(column.name.clone()),
+                        ),
+                        (
+                            "ordinal_position".to_string(),
+                            usize_value(ordinal_position),
+                        ),
+                        (
+                            "column_default".to_string(),
+                            relational_default_value(column.default.as_ref()),
+                        ),
+                        (
+                            "is_nullable".to_string(),
+                            Value::String(if column.nullable { "YES" } else { "NO" }.to_string()),
+                        ),
+                        (
+                            "data_type".to_string(),
+                            Value::String(type_info.data_type.to_string()),
+                        ),
+                        (
+                            "character_maximum_length".to_string(),
+                            option_i64_value(type_info.character_maximum_length),
+                        ),
+                        (
+                            "character_octet_length".to_string(),
+                            option_i64_value(type_info.character_octet_length),
+                        ),
+                        (
+                            "numeric_precision".to_string(),
+                            option_i64_value(type_info.numeric_precision),
+                        ),
+                        (
+                            "numeric_precision_radix".to_string(),
+                            option_i64_value(type_info.numeric_precision_radix),
+                        ),
+                        (
+                            "numeric_scale".to_string(),
+                            option_i64_value(type_info.numeric_scale),
+                        ),
+                        ("datetime_precision".to_string(), Value::Null),
+                        ("interval_type".to_string(), Value::Null),
+                        ("interval_precision".to_string(), Value::Null),
+                        ("character_set_catalog".to_string(), Value::Null),
+                        ("character_set_schema".to_string(), Value::Null),
+                        ("character_set_name".to_string(), Value::Null),
+                        ("collation_catalog".to_string(), Value::Null),
+                        ("collation_schema".to_string(), Value::Null),
+                        ("collation_name".to_string(), Value::Null),
+                        ("domain_catalog".to_string(), Value::Null),
+                        ("domain_schema".to_string(), Value::Null),
+                        ("domain_name".to_string(), Value::Null),
+                        (
+                            "udt_catalog".to_string(),
+                            Value::String("skein".to_string()),
+                        ),
+                        (
+                            "udt_schema".to_string(),
+                            Value::String("pg_catalog".to_string()),
+                        ),
+                        (
+                            "udt_name".to_string(),
+                            Value::String(type_info.udt_name.to_string()),
+                        ),
+                        ("scope_catalog".to_string(), Value::Null),
+                        ("scope_schema".to_string(), Value::Null),
+                        ("scope_name".to_string(), Value::Null),
+                        ("maximum_cardinality".to_string(), Value::Null),
+                        (
+                            "dtd_identifier".to_string(),
+                            Value::String(ordinal_position.to_string()),
+                        ),
+                        (
+                            "is_self_referencing".to_string(),
+                            Value::String("NO".to_string()),
+                        ),
+                        ("is_identity".to_string(), Value::String("NO".to_string())),
+                        ("identity_generation".to_string(), Value::Null),
+                        ("identity_start".to_string(), Value::Null),
+                        ("identity_increment".to_string(), Value::Null),
+                        ("identity_maximum".to_string(), Value::Null),
+                        ("identity_minimum".to_string(), Value::Null),
+                        ("identity_cycle".to_string(), Value::Null),
+                        (
+                            "is_generated".to_string(),
+                            Value::String("NEVER".to_string()),
+                        ),
+                        ("generation_expression".to_string(), Value::Null),
+                        ("is_updatable".to_string(), Value::String("YES".to_string())),
+                    ])
+                })
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct InformationSchemaType {
+    data_type: &'static str,
+    udt_name: &'static str,
+    character_maximum_length: Option<i64>,
+    character_octet_length: Option<i64>,
+    numeric_precision: Option<i64>,
+    numeric_precision_radix: Option<i64>,
+    numeric_scale: Option<i64>,
+}
+
+fn information_schema_type(scalar_type: RelationalScalarType) -> InformationSchemaType {
+    match scalar_type {
+        RelationalScalarType::Boolean => InformationSchemaType {
+            data_type: "boolean",
+            udt_name: "bool",
+            character_maximum_length: None,
+            character_octet_length: None,
+            numeric_precision: None,
+            numeric_precision_radix: None,
+            numeric_scale: None,
+        },
+        RelationalScalarType::BigInt => InformationSchemaType {
+            data_type: "bigint",
+            udt_name: "int8",
+            character_maximum_length: None,
+            character_octet_length: None,
+            numeric_precision: Some(64),
+            numeric_precision_radix: Some(2),
+            numeric_scale: Some(0),
+        },
+        RelationalScalarType::DoublePrecision => InformationSchemaType {
+            data_type: "double precision",
+            udt_name: "float8",
+            character_maximum_length: None,
+            character_octet_length: None,
+            numeric_precision: Some(53),
+            numeric_precision_radix: Some(2),
+            numeric_scale: None,
+        },
+        RelationalScalarType::Text => InformationSchemaType {
+            data_type: "text",
+            udt_name: "text",
+            character_maximum_length: None,
+            character_octet_length: None,
+            numeric_precision: None,
+            numeric_precision_radix: None,
+            numeric_scale: None,
+        },
+        RelationalScalarType::Bytea => InformationSchemaType {
+            data_type: "bytea",
+            udt_name: "bytea",
+            character_maximum_length: None,
+            character_octet_length: None,
+            numeric_precision: None,
+            numeric_precision_radix: None,
+            numeric_scale: None,
+        },
+    }
+}
+
+fn relational_default_value(default: Option<&RelationalValue>) -> Value {
+    match default {
+        None | Some(RelationalValue::Overflow(_)) => Value::Null,
+        Some(RelationalValue::Null) => Value::String("NULL".to_string()),
+        Some(RelationalValue::Boolean(value)) => Value::String(value.to_string()),
+        Some(RelationalValue::BigInt(value)) => Value::String(value.to_string()),
+        Some(RelationalValue::DoublePrecision(value)) => Value::String(value.to_string()),
+        Some(RelationalValue::Text(value)) => {
+            Value::String(format!("'{}'::text", value.replace('\'', "''")))
+        }
+        Some(RelationalValue::Bytea(value)) => {
+            Value::String(format!("'\\x{}'::bytea", encode_hex(value)))
+        }
+    }
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        encoded.push(HEX[usize::from(byte >> 4)] as char);
+        encoded.push(HEX[usize::from(byte & 0x0f)] as char);
+    }
+    encoded
+}
+
+fn pg_table_rows(state: &RelationalState) -> Vec<Row> {
+    state
+        .table_schemas()
+        .map(|schema| {
+            BTreeMap::from([
+                (
+                    "schemaname".to_string(),
+                    Value::String("public".to_string()),
+                ),
+                ("tablename".to_string(), Value::String(schema.name.clone())),
+                ("tableowner".to_string(), Value::String("skein".to_string())),
+                ("tablespace".to_string(), Value::Null),
+                (
+                    "hasindexes".to_string(),
+                    Value::Bool(
+                        !schema.primary_key.is_empty()
+                            || !schema.unique_constraints.is_empty()
+                            || !schema.indexes.is_empty(),
+                    ),
+                ),
+                ("hasrules".to_string(), Value::Bool(false)),
+                ("hastriggers".to_string(), Value::Bool(false)),
+                ("rowsecurity".to_string(), Value::Bool(false)),
+            ])
+        })
+        .collect()
+}
+
+fn pg_index_rows(state: &RelationalState) -> Vec<Row> {
+    state
+        .table_schemas()
+        .flat_map(relational_schema_index_rows)
+        .collect()
+}
+
+fn relational_schema_index_rows(schema: &RelationalTableSchema) -> Vec<Row> {
+    let mut rows = Vec::with_capacity(
+        1usize
+            .saturating_add(schema.unique_constraints.len())
+            .saturating_add(schema.indexes.len()),
+    );
+    if !schema.primary_key.is_empty() {
+        let name = format!("{}_pkey", schema.name);
+        rows.push(pg_index_row(schema, &name, &schema.primary_key, true));
+    }
+    rows.extend(schema.unique_constraints.iter().map(|columns| {
+        let name = format!("{}_{}_key", schema.name, columns.join("_"));
+        pg_index_row(schema, &name, columns, true)
+    }));
+    rows.extend(
+        schema
+            .indexes
+            .iter()
+            .map(|index| pg_index_row(schema, &index.name, &index.columns, index.unique)),
+    );
+    rows
+}
+
+fn pg_index_row(
+    schema: &RelationalTableSchema,
+    index_name: &str,
+    columns: &[String],
+    unique: bool,
+) -> Row {
+    let unique = if unique { "UNIQUE " } else { "" };
+    let columns = columns
+        .iter()
+        .map(|column| quote_postgres_identifier(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let index_definition = format!(
+        "CREATE {unique}INDEX {} ON public.{} USING btree ({columns})",
+        quote_postgres_identifier(index_name),
+        quote_postgres_identifier(&schema.name),
+    );
+    BTreeMap::from([
+        (
+            "schemaname".to_string(),
+            Value::String("public".to_string()),
+        ),
+        ("tablename".to_string(), Value::String(schema.name.clone())),
+        (
+            "indexname".to_string(),
+            Value::String(index_name.to_string()),
+        ),
+        ("tablespace".to_string(), Value::Null),
+        ("indexdef".to_string(), Value::String(index_definition)),
+    ])
+}
+
+fn quote_postgres_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
 fn property_rows(catalog: &Catalog) -> Vec<Row> {
@@ -1565,8 +1920,14 @@ fn system_table(select: &SelectStatement) -> Result<SystemTable> {
         (Some("system"), "plan_cache") => Ok(SystemTable::PlanCache),
         (Some("system"), "slow_queries") => Ok(SystemTable::SlowQueries),
         (Some("system"), "statement_summary") => Ok(SystemTable::StatementSummary),
+        (Some("information_schema"), "tables") => Ok(SystemTable::InformationSchemaTables),
+        (Some("information_schema"), "columns") => Ok(SystemTable::InformationSchemaColumns),
+        (Some("pg_catalog"), "pg_tables") => Ok(SystemTable::PgTables),
+        (Some("pg_catalog"), "pg_indexes") => Ok(SystemTable::PgIndexes),
+        (None, "pg_tables") => Ok(SystemTable::PgTables),
+        (None, "pg_indexes") => Ok(SystemTable::PgIndexes),
         _ => Err(SkeinError::Semantic(format!(
-            "unknown SQL system table {}",
+            "unknown SQL virtual catalog table {}",
             format_table_name(select)
         ))),
     }
@@ -1629,6 +1990,10 @@ fn validate_column(table: SystemTable, column: &SqlColumnRef) -> Result<()> {
             SystemTable::PlanCache => "plan_cache",
             SystemTable::SlowQueries => "slow_queries",
             SystemTable::StatementSummary => "statement_summary",
+            SystemTable::InformationSchemaTables => "tables",
+            SystemTable::InformationSchemaColumns => "columns",
+            SystemTable::PgTables => "pg_tables",
+            SystemTable::PgIndexes => "pg_indexes",
         };
         if qualifier != table_name {
             return Err(SkeinError::Semantic(format!(
@@ -1751,6 +2116,83 @@ fn table_columns(table: SystemTable) -> &'static [&'static str] {
             "last_success",
             "last_error",
         ],
+        SystemTable::InformationSchemaTables => &[
+            "table_catalog",
+            "table_schema",
+            "table_name",
+            "table_type",
+            "self_referencing_column_name",
+            "reference_generation",
+            "user_defined_type_catalog",
+            "user_defined_type_schema",
+            "user_defined_type_name",
+            "is_insertable_into",
+            "is_typed",
+            "commit_action",
+        ],
+        SystemTable::InformationSchemaColumns => &[
+            "table_catalog",
+            "table_schema",
+            "table_name",
+            "column_name",
+            "ordinal_position",
+            "column_default",
+            "is_nullable",
+            "data_type",
+            "character_maximum_length",
+            "character_octet_length",
+            "numeric_precision",
+            "numeric_precision_radix",
+            "numeric_scale",
+            "datetime_precision",
+            "interval_type",
+            "interval_precision",
+            "character_set_catalog",
+            "character_set_schema",
+            "character_set_name",
+            "collation_catalog",
+            "collation_schema",
+            "collation_name",
+            "domain_catalog",
+            "domain_schema",
+            "domain_name",
+            "udt_catalog",
+            "udt_schema",
+            "udt_name",
+            "scope_catalog",
+            "scope_schema",
+            "scope_name",
+            "maximum_cardinality",
+            "dtd_identifier",
+            "is_self_referencing",
+            "is_identity",
+            "identity_generation",
+            "identity_start",
+            "identity_increment",
+            "identity_maximum",
+            "identity_minimum",
+            "identity_cycle",
+            "is_generated",
+            "generation_expression",
+            "is_updatable",
+        ],
+        SystemTable::PgTables => &[
+            "schemaname",
+            "tablename",
+            "tableowner",
+            "tablespace",
+            "hasindexes",
+            "hasrules",
+            "hastriggers",
+            "rowsecurity",
+        ],
+        SystemTable::PgIndexes => &[
+            "schemaname",
+            "tablename",
+            "indexname",
+            "tablespace",
+            "indexdef",
+        ],
     }
 }
 
@@ -1763,6 +2205,10 @@ fn format_table_name(select: &SelectStatement) -> String {
 
 fn option_usize_value(value: Option<usize>) -> Value {
     value.map(usize_value).unwrap_or(Value::Null)
+}
+
+fn option_i64_value(value: Option<i64>) -> Value {
+    value.map(Value::Int).unwrap_or(Value::Null)
 }
 
 fn option_u64_value(value: Option<u64>) -> Value {
@@ -1847,6 +2293,7 @@ mod tests {
             &SystemSqlContext {
                 catalog: &catalog,
                 store: &store,
+                relational_state: store.relational_state(),
                 runtime: SystemRuntimeSnapshot::from_config(&DatabaseConfig::default()),
                 plan_cache_stats: &stats,
                 slow_queries: &[],
@@ -1879,6 +2326,7 @@ mod tests {
         let context = SystemSqlContext {
             catalog: &catalog,
             store: &store,
+            relational_state: store.relational_state(),
             runtime: SystemRuntimeSnapshot::from_config(&DatabaseConfig::default()),
             plan_cache_stats: &stats,
             slow_queries: &[],
@@ -1927,6 +2375,7 @@ mod tests {
         let context = SystemSqlContext {
             catalog: &catalog,
             store: &store,
+            relational_state: store.relational_state(),
             runtime: SystemRuntimeSnapshot::from_config(&DatabaseConfig::default()),
             plan_cache_stats: &stats,
             slow_queries: &[],
@@ -2031,6 +2480,7 @@ mod tests {
             &SystemSqlContext {
                 catalog: &catalog,
                 store: &store,
+                relational_state: store.relational_state(),
                 runtime: SystemRuntimeSnapshot::from_config(&DatabaseConfig::default()),
                 plan_cache_stats: &stats,
                 slow_queries: &records,
@@ -2076,6 +2526,7 @@ mod tests {
         let context = SystemSqlContext {
             catalog: &catalog,
             store: &store,
+            relational_state: store.relational_state(),
             runtime: SystemRuntimeSnapshot::from_config(&DatabaseConfig::default()),
             plan_cache_stats: &stats,
             slow_queries: &[],

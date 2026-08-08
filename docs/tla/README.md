@@ -15,7 +15,7 @@ a Java 11 or newer runtime. Without `TLA2TOOLS_JAR`, the script downloads TLA+
 Tools 1.7.4 and verifies its SHA-256 digest before execution.
 
 Set `TLA_RESULTS_DIR` and `TLA_SOURCE_REVISION` to retain a release artifact.
-The artifact contains the exact four `.tla` and `.cfg` inputs, one complete TLC
+The artifact contains the exact five `.tla` and `.cfg` inputs, one complete TLC
 log per model, the Java version, and a revision- and tool-bound manifest. CI
 validates the downloaded artifact with:
 
@@ -77,12 +77,35 @@ They are implementation evidence, not a machine-checked refinement proof.
 | Checkpoint publication selects one complete generation | checkpoint failpoints and manifest replacement | `checkpoint_publish_failpoints_recover_one_complete_generation`, `subprocess_crash_matrix_recovers_whole_batches_and_artifact_generations` |
 | Reader pins prevent generation reclamation | `ReaderPins`, `reclaim_old_generations` | `read_transaction_pins_checkpoint_manifest_until_drop`, `out_of_core_reader_pin_retains_its_canonical_generation_until_drop` |
 | Canonical path aliases share one ownership boundary | `DatabaseDirectoryLease::acquire` | `durable_database_open_is_exclusive_until_owner_drops`, `durable_database_rejects_path_alias_until_owner_drops` |
+| Stale optimistic commits fail before publication and fine-grained locks preserve compatibility | `commit_mutation_transaction_and_relational`, `LockTable` | `optimistic_transactions_prepare_in_parallel_and_reject_the_stale_committer`, `disjoint_primary_key_point_locks_allow_both_pessimistic_writers_to_commit`, `shared_primary_key_range_blocks_phantoms_but_not_the_excluded_boundary` |
+| A deadlock-closing multi-owner wait edge selects one victim and releases its dependencies | `WaitForGraph::register`, `ConcurrentDatabaseTransaction::abort_after_lock_failure` | `point_lock_upgrade_cycle_selects_one_deadlock_victim`, `wait_for_graph_detects_a_cycle_with_multiple_blockers` |
 
 ## In-memory Snapshot Publication
 
 `SkeinConcurrentSnapshots.tla` models `skein-storage::SnapshotCoordinator`.
 Readers pin immutable `Arc` snapshots, one writer stages the next epoch, and the
 published pointer changes only after the durability callback succeeds.
+
+## Optimistic and Pessimistic Transaction Publication
+
+`SkeinTransactionConcurrency.tla` models the in-process `ConcurrentDatabase`
+publication boundary. Optimistic transactions prepare on independent immutable
+COW snapshots, acquire the database-exclusive target before publication, and
+use first-committer-wins epoch validation. Pessimistic transactions acquire
+shared or exclusive point/range spans. Database locks are represented by the
+full key set; a point is a singleton and a bounded range is a finite key subset.
+The finite-set abstraction deliberately over-approximates interval shapes while
+preserving overlap and compatibility safety. Both modes serialize the durable
+WAL decision and snapshot publication while readers continue to pin the last
+published epoch.
+
+The model checks that stale optimistic transactions cannot publish, only one
+transaction owns the commit pipeline, overlapping shared/exclusive lock spans
+remain compatible, an optimistic publisher owns the full exclusive span,
+commit epochs are unique, uncommitted work is not exposed to snapshot readers,
+a deadlock-closing multi-owner dependency selects the current waiter as victim,
+the victim releases its locks and dependencies, the wait-for graph stays
+acyclic, and a crash after WAL durability recovers the committed epoch.
 
 ## Derived Source Segment Publication
 
@@ -95,8 +118,10 @@ cannot reference an undurable sidecar.
 
 TLC exhaustively checks the configured finite instances; it is not a proof of
 the Rust implementation, the filesystem, or arbitrary-sized instances. The
-models establish safety invariants, not operation latency or starvation
-freedom, and rely on these environmental assumptions:
+models establish safety invariants, not operation latency, bounded-wait
+implementation behavior, automatic SQL lock-range inference correctness,
+transaction-snapshot refresh or rebase refinement, or starvation freedom, and
+rely on these environmental assumptions:
 
 - successful `sync_data` or `sync_all` survives a crash;
 - durable file replacement is atomic and the parent-directory sync preserves

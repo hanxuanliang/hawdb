@@ -310,15 +310,19 @@ publishing an applied record. Canonical segments, checkpoint state, property
 spill, manifest, and WAL remain non-rebuildable source state and MUST fail
 closed.
 
-Durable-before-publish and pinned-reader invariants MUST be model checked for
-the released storage protocol. Model-check configuration and results MUST be
-part of the release CI artifact set, not only documented as a local command.
+Durable-before-publish, pinned-reader, optimistic first-committer-wins,
+shared/exclusive point and range lock compatibility, pessimistic lock release,
+deadlock-victim cleanup, and multi-owner wait-for graph acyclicity invariants
+MUST be model checked for the released storage protocol. Model-check
+configuration and results MUST be part of the release CI artifact set, not only
+documented as a local command.
 The revision-bound `tla-model-check-<revision>` artifact MUST contain successful
 TLC logs and exact `.tla` and `.cfg` inputs for `SkeinStorageDurability`,
-`SkeinGenerationReclamation`, `SkeinConcurrentSnapshots`, and
-`SkeinSourceSegmentPublication`, together with the Java version and the pinned
-TLA+ Tools version and SHA-256 digest. A downstream CI job MUST download and
-verify the complete artifact before the model-check gate succeeds.
+`SkeinGenerationReclamation`, `SkeinConcurrentSnapshots`,
+`SkeinTransactionConcurrency`, and `SkeinSourceSegmentPublication`, together
+with the Java version and the pinned TLA+ Tools version and SHA-256 digest. A
+downstream CI job MUST download and verify the complete artifact before the
+model-check gate succeeds.
 
 The typed crash artifact protocol is
 `skein-storage-crash-recovery-evidence-v1`. Every required crash point MUST

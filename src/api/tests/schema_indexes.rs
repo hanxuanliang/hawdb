@@ -2260,10 +2260,9 @@ fn failed_transaction_does_not_publish_property_schema_or_wal() {
         let mut tx = db.begin_transaction();
         tx.query("CREATE PROPERTY ON NODE TABLE Memory(id) TYPE INT NOT NULL")
             .unwrap();
-        tx.query("CREATE (:Memory {id: 'bad'})").unwrap();
-
-        let error = tx.commit().unwrap_err();
+        let error = tx.query("CREATE (:Memory {id: 'bad'})").unwrap_err();
         assert!(error.to_string().contains("property schema violation"));
+        tx.rollback();
         assert!(db.property_descriptors().is_empty());
         let after = read_test_wal(&path).unwrap_or_default();
         assert_eq!(before, after);

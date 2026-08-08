@@ -129,7 +129,7 @@ impl Database {
         if matches!(
             &prepared.statement,
             crate::sql::SqlStatement::Select(select)
-                if select.from.schema.as_deref() == Some("system")
+                if system_sql::is_virtual_catalog_select(select)
         ) {
             let plan_cache_stats = self.plan_cache.borrow().stats();
             let slow_queries = self.slow_query_log.borrow().snapshot();
@@ -142,6 +142,7 @@ impl Database {
                 &system_sql::SystemSqlContext {
                     catalog: &self.catalog,
                     store: &self.store,
+                    relational_state: self.store.relational_state(),
                     runtime: system_sql::SystemRuntimeSnapshot::from_config(&self.config),
                     plan_cache_stats: &plan_cache_stats,
                     slow_queries: &slow_queries,

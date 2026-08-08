@@ -161,6 +161,31 @@ fn mutation_payload_limit_rejects_set_return_before_commit() {
 }
 
 #[test]
+fn transaction_mutation_return_error_restores_the_statement_savepoint() {
+    let mut config = DatabaseConfig::default();
+    config.mutation_limits.max_result_payload_bytes = std::num::NonZeroUsize::new(32).unwrap();
+    let mut db = Database::new_with_config(config);
+    db.query("CREATE (:Thread {id: 'payload', state: 'ready'})")
+        .unwrap();
+
+    let mut tx = db.begin_transaction();
+    let error = tx
+        .query("MATCH (t:Thread) SET t.state = 'this-payload-is-larger-than-the-configured-limit' RETURN t.state AS state")
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("max_mutation_result_payload_bytes 32"));
+    let staged = tx
+        .query("MATCH (t:Thread {id: 'payload'}) RETURN t.state AS state")
+        .unwrap();
+    assert_eq!(
+        staged.rows[0].get("state"),
+        Some(&Value::String("ready".to_string()))
+    );
+    tx.rollback();
+}
+
+#[test]
 fn mutation_count_return_uses_result_limit_independently_of_affected_rows() {
     let mut config = DatabaseConfig::default();
     config.mutation_limits.max_result_rows = std::num::NonZeroUsize::new(1).unwrap();
@@ -178,6 +203,32 @@ fn mutation_count_return_uses_result_limit_independently_of_affected_rows() {
         output.rows,
         vec![BTreeMap::from([("count(t)".to_string(), Value::Int(2))])]
     );
+}
+
+#[test]
+fn transaction_mutation_count_return_uses_projected_result_limit() {
+    let mut config = DatabaseConfig::default();
+    config.mutation_limits.max_result_rows = std::num::NonZeroUsize::new(1).unwrap();
+    let mut db = Database::new_with_config(config);
+    db.query("CREATE (:Thread {id: 'one', state: 'ready'})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'two', state: 'ready'})")
+        .unwrap();
+
+    let mut tx = db.begin_transaction();
+    let output = tx
+        .query("MATCH (t:Thread) SET t.state = 'changed' RETURN count(t)")
+        .unwrap();
+    assert_eq!(
+        output.rows,
+        vec![BTreeMap::from([("count(t)".to_string(), Value::Int(2))])]
+    );
+    tx.commit().unwrap();
+
+    let changed = db
+        .query("MATCH (t:Thread) WHERE t.state = 'changed' RETURN count(t)")
+        .unwrap();
+    assert_eq!(changed.rows[0].get("count(t)"), Some(&Value::Int(2)));
 }
 
 #[test]

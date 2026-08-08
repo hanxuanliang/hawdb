@@ -1,0 +1,322 @@
+-------------------- MODULE SkeinTransactionConcurrency --------------------
+EXTENDS FiniteSets, Integers, Naturals, Sequences
+
+CONSTANT Transactions, Readers, Keys, MaxEpoch
+
+VARIABLES publishedEpoch,
+          durableEpoch,
+          txPhase,
+          txMode,
+          baseEpoch,
+          commitEpoch,
+          publisher,
+          heldShared,
+          heldExclusive,
+          waitFor,
+          readerEpoch
+
+vars == <<publishedEpoch,
+          durableEpoch,
+          txPhase,
+          txMode,
+          baseEpoch,
+          commitEpoch,
+          publisher,
+          heldShared,
+          heldExclusive,
+          waitFor,
+          readerEpoch>>
+
+TxPhases == {"idle", "active", "prepared", "durable", "committed", "conflict", "deadlock", "aborted"}
+TxModes == {"none", "optimistic", "pessimistic"}
+LockModes == {"shared", "exclusive"}
+LockSpans == (SUBSET Keys) \ {{}}
+
+OtherTransactions(tx) == Transactions \ {tx}
+
+ExclusiveBlockers(tx, span) ==
+    {owner \in OtherTransactions(tx) : heldExclusive[owner] \intersect span # {}}
+
+AllBlockers(tx, span) ==
+    {owner \in OtherTransactions(tx) :
+        (heldShared[owner] \union heldExclusive[owner]) \intersect span # {}}
+
+Blockers(tx, span, lockMode) ==
+    IF lockMode = "shared"
+      THEN ExclusiveBlockers(tx, span)
+      ELSE AllBlockers(tx, span)
+
+WaitPaths ==
+    UNION {[1..length -> Transactions] :
+            length \in 2..(Cardinality(Transactions) + 1)}
+
+HasWaitPath(from, to) ==
+    \E path \in WaitPaths:
+        /\ path[1] = from
+        /\ path[Len(path)] = to
+        /\ \A index \in 1..(Len(path) - 1):
+            path[index + 1] \in waitFor[path[index]]
+
+WouldDeadlock(waiter, owners) ==
+    waiter \in owners \/ \E owner \in owners: HasWaitPath(owner, waiter)
+
+RemoveDependency(graph, transaction) ==
+    [tx \in Transactions |->
+        IF tx = transaction
+          THEN {}
+          ELSE graph[tx] \ {transaction}]
+
+Init ==
+    /\ publishedEpoch = 0
+    /\ durableEpoch = 0
+    /\ txPhase = [tx \in Transactions |-> "idle"]
+    /\ txMode = [tx \in Transactions |-> "none"]
+    /\ baseEpoch = [tx \in Transactions |-> -1]
+    /\ commitEpoch = [tx \in Transactions |-> -1]
+    /\ publisher = "none"
+    /\ heldShared = [tx \in Transactions |-> {}]
+    /\ heldExclusive = [tx \in Transactions |-> {}]
+    /\ waitFor = [tx \in Transactions |-> {}]
+    /\ readerEpoch = [reader \in Readers |-> -1]
+
+Begin(tx, mode) ==
+    /\ txPhase[tx] = "idle"
+    /\ mode \in {"optimistic", "pessimistic"}
+    /\ publisher = "none"
+    /\ publishedEpoch < MaxEpoch
+    /\ txPhase' = [txPhase EXCEPT ![tx] = "active"]
+    /\ txMode' = [txMode EXCEPT ![tx] = mode]
+    /\ baseEpoch' = [baseEpoch EXCEPT ![tx] = publishedEpoch]
+    /\ UNCHANGED <<publishedEpoch, durableEpoch, commitEpoch, publisher,
+                    heldShared, heldExclusive, waitFor, readerEpoch>>
+
+AcquireLock(tx, span, lockMode) ==
+    /\ txPhase[tx] = "active"
+    /\ span \in LockSpans
+    /\ lockMode \in LockModes
+    /\ waitFor[tx] = {}
+    /\ Blockers(tx, span, lockMode) = {}
+    /\ IF lockMode = "shared"
+          THEN /\ heldShared' = [heldShared EXCEPT ![tx] = @ \union span]
+               /\ UNCHANGED heldExclusive
+          ELSE /\ heldExclusive' = [heldExclusive EXCEPT ![tx] = @ \union span]
+               /\ UNCHANGED heldShared
+    /\ UNCHANGED <<publishedEpoch, durableEpoch, txPhase, txMode, baseEpoch,
+                    commitEpoch, publisher, waitFor, readerEpoch>>
+
+RegisterWait(waiter, span, lockMode) ==
+    LET owners == Blockers(waiter, span, lockMode) IN
+    /\ txPhase[waiter] = "active"
+    /\ span \in LockSpans
+    /\ lockMode \in LockModes
+    /\ owners # {}
+    /\ waitFor[waiter] = {}
+    /\ ~WouldDeadlock(waiter, owners)
+    /\ waitFor' = [waitFor EXCEPT ![waiter] = owners]
+    /\ UNCHANGED <<publishedEpoch, durableEpoch, txPhase, txMode, baseEpoch,
+                    commitEpoch, publisher, heldShared, heldExclusive, readerEpoch>>
+
+ReleaseWait(waiter) ==
+    /\ waitFor[waiter] # {}
+    /\ waitFor' = [waitFor EXCEPT ![waiter] = {}]
+    /\ UNCHANGED <<publishedEpoch, durableEpoch, txPhase, txMode, baseEpoch,
+                    commitEpoch, publisher, heldShared, heldExclusive, readerEpoch>>
+
+RejectDeadlock(waiter, span, lockMode) ==
+    LET owners == Blockers(waiter, span, lockMode) IN
+    /\ txPhase[waiter] = "active"
+    /\ span \in LockSpans
+    /\ lockMode \in LockModes
+    /\ owners # {}
+    /\ waitFor[waiter] = {}
+    /\ WouldDeadlock(waiter, owners)
+    /\ txPhase' = [txPhase EXCEPT ![waiter] = "deadlock"]
+    /\ heldShared' = [heldShared EXCEPT ![waiter] = {}]
+    /\ heldExclusive' = [heldExclusive EXCEPT ![waiter] = {}]
+    /\ waitFor' = RemoveDependency(waitFor, waiter)
+    /\ UNCHANGED <<publishedEpoch, durableEpoch, txMode, baseEpoch,
+                    commitEpoch, publisher, readerEpoch>>
+
+PrepareCommit(tx) ==
+    /\ txPhase[tx] = "active"
+    /\ publisher = "none"
+    /\ waitFor[tx] = {}
+    /\ IF txMode[tx] = "optimistic"
+          THEN /\ baseEpoch[tx] = publishedEpoch
+               /\ heldExclusive[tx] = Keys
+          ELSE TRUE
+    /\ txPhase' = [txPhase EXCEPT ![tx] = "prepared"]
+    /\ publisher' = tx
+    /\ UNCHANGED <<publishedEpoch, durableEpoch, txMode, baseEpoch,
+                    commitEpoch, heldShared, heldExclusive, waitFor, readerEpoch>>
+
+RejectOptimisticConflict(tx) ==
+    /\ txPhase[tx] = "active"
+    /\ txMode[tx] = "optimistic"
+    /\ baseEpoch[tx] # publishedEpoch
+    /\ waitFor[tx] = {}
+    /\ txPhase' = [txPhase EXCEPT ![tx] = "conflict"]
+    /\ heldShared' = [heldShared EXCEPT ![tx] = {}]
+    /\ heldExclusive' = [heldExclusive EXCEPT ![tx] = {}]
+    /\ waitFor' = RemoveDependency(waitFor, tx)
+    /\ UNCHANGED <<publishedEpoch, durableEpoch, txMode, baseEpoch,
+                    commitEpoch, publisher, readerEpoch>>
+
+MakeDurable(tx) ==
+    /\ publisher = tx
+    /\ txPhase[tx] = "prepared"
+    /\ durableEpoch = publishedEpoch
+    /\ durableEpoch' = publishedEpoch + 1
+    /\ txPhase' = [txPhase EXCEPT ![tx] = "durable"]
+    /\ UNCHANGED <<publishedEpoch, txMode, baseEpoch, commitEpoch, publisher,
+                    heldShared, heldExclusive, waitFor, readerEpoch>>
+
+Publish(tx) ==
+    /\ publisher = tx
+    /\ txPhase[tx] = "durable"
+    /\ durableEpoch = publishedEpoch + 1
+    /\ publishedEpoch' = durableEpoch
+    /\ txPhase' = [txPhase EXCEPT ![tx] = "committed"]
+    /\ commitEpoch' = [commitEpoch EXCEPT ![tx] = durableEpoch]
+    /\ publisher' = "none"
+    /\ heldShared' = [heldShared EXCEPT ![tx] = {}]
+    /\ heldExclusive' = [heldExclusive EXCEPT ![tx] = {}]
+    /\ waitFor' = RemoveDependency(waitFor, tx)
+    /\ UNCHANGED <<durableEpoch, txMode, baseEpoch, readerEpoch>>
+
+Rollback(tx) ==
+    /\ txPhase[tx] = "active"
+    /\ txPhase' = [txPhase EXCEPT ![tx] = "aborted"]
+    /\ heldShared' = [heldShared EXCEPT ![tx] = {}]
+    /\ heldExclusive' = [heldExclusive EXCEPT ![tx] = {}]
+    /\ waitFor' = RemoveDependency(waitFor, tx)
+    /\ UNCHANGED <<publishedEpoch, durableEpoch, txMode, baseEpoch,
+                    commitEpoch, publisher, readerEpoch>>
+
+BeginRead(reader) ==
+    /\ readerEpoch[reader] = -1
+    /\ readerEpoch' = [readerEpoch EXCEPT ![reader] = publishedEpoch]
+    /\ UNCHANGED <<publishedEpoch, durableEpoch, txPhase, txMode, baseEpoch,
+                    commitEpoch, publisher, heldShared, heldExclusive, waitFor>>
+
+EndRead(reader) ==
+    /\ readerEpoch[reader] >= 0
+    /\ readerEpoch' = [readerEpoch EXCEPT ![reader] = -1]
+    /\ UNCHANGED <<publishedEpoch, durableEpoch, txPhase, txMode, baseEpoch,
+                    commitEpoch, publisher, heldShared, heldExclusive, waitFor>>
+
+Crash ==
+    /\ publishedEpoch' = durableEpoch
+    /\ txPhase' =
+        [tx \in Transactions |->
+            IF txPhase[tx] = "durable"
+              THEN "committed"
+              ELSE IF txPhase[tx] \in {"active", "prepared"}
+                THEN "aborted"
+                ELSE txPhase[tx]]
+    /\ commitEpoch' =
+        [tx \in Transactions |->
+            IF txPhase[tx] = "durable" THEN durableEpoch ELSE commitEpoch[tx]]
+    /\ publisher' = "none"
+    /\ heldShared' = [tx \in Transactions |-> {}]
+    /\ heldExclusive' = [tx \in Transactions |-> {}]
+    /\ waitFor' = [tx \in Transactions |-> {}]
+    /\ readerEpoch' = [reader \in Readers |-> -1]
+    /\ UNCHANGED <<durableEpoch, txMode, baseEpoch>>
+
+Next ==
+    \/ \E tx \in Transactions, mode \in {"optimistic", "pessimistic"}: Begin(tx, mode)
+    \/ \E tx \in Transactions, span \in LockSpans, lockMode \in LockModes:
+        AcquireLock(tx, span, lockMode)
+    \/ \E waiter \in Transactions, span \in LockSpans, lockMode \in LockModes:
+        RegisterWait(waiter, span, lockMode)
+    \/ \E waiter \in Transactions: ReleaseWait(waiter)
+    \/ \E waiter \in Transactions, span \in LockSpans, lockMode \in LockModes:
+        RejectDeadlock(waiter, span, lockMode)
+    \/ \E tx \in Transactions: PrepareCommit(tx)
+    \/ \E tx \in Transactions: RejectOptimisticConflict(tx)
+    \/ \E tx \in Transactions: MakeDurable(tx)
+    \/ \E tx \in Transactions: Publish(tx)
+    \/ \E tx \in Transactions: Rollback(tx)
+    \/ \E reader \in Readers: BeginRead(reader)
+    \/ \E reader \in Readers: EndRead(reader)
+    \/ Crash
+
+TypeInvariant ==
+    /\ publishedEpoch \in 0..MaxEpoch
+    /\ durableEpoch \in 0..MaxEpoch
+    /\ txPhase \in [Transactions -> TxPhases]
+    /\ txMode \in [Transactions -> TxModes]
+    /\ baseEpoch \in [Transactions -> -1..MaxEpoch]
+    /\ commitEpoch \in [Transactions -> -1..MaxEpoch]
+    /\ publisher \in Transactions \union {"none"}
+    /\ heldShared \in [Transactions -> SUBSET Keys]
+    /\ heldExclusive \in [Transactions -> SUBSET Keys]
+    /\ waitFor \in [Transactions -> SUBSET Transactions]
+    /\ readerEpoch \in [Readers -> -1..MaxEpoch]
+
+DurableBeforePublish ==
+    /\ publishedEpoch <= durableEpoch
+    /\ durableEpoch <= publishedEpoch + 1
+
+SinglePublisher ==
+    (publisher = "none") <=>
+        (\A tx \in Transactions: txPhase[tx] \notin {"prepared", "durable"})
+
+PublisherOwnsCommitPipeline ==
+    publisher # "none" => txPhase[publisher] \in {"prepared", "durable"}
+
+LockCompatibility ==
+    \A left, right \in Transactions:
+        left # right =>
+            heldExclusive[left] \intersect
+                (heldShared[right] \union heldExclusive[right]) = {}
+
+OptimisticPublisherOwnsDatabaseLock ==
+    \A tx \in Transactions:
+        /\ txMode[tx] = "optimistic"
+        /\ txPhase[tx] \in {"prepared", "durable"}
+        => heldExclusive[tx] = Keys
+
+OptimisticFirstCommitterWins ==
+    \A tx \in Transactions:
+        /\ txMode[tx] = "optimistic"
+        /\ txPhase[tx] = "committed"
+        => commitEpoch[tx] = baseEpoch[tx] + 1
+
+ConflictRequiresStaleSnapshot ==
+    \A tx \in Transactions:
+        txPhase[tx] = "conflict" =>
+            /\ txMode[tx] = "optimistic"
+            /\ baseEpoch[tx] < publishedEpoch
+
+CommitEpochsAreUnique ==
+    \A left, right \in Transactions:
+        /\ left # right
+        /\ txPhase[left] = "committed"
+        /\ txPhase[right] = "committed"
+        => commitEpoch[left] # commitEpoch[right]
+
+ReadersSeeOnlyPublishedSnapshots ==
+    \A reader \in Readers:
+        readerEpoch[reader] = -1 \/ readerEpoch[reader] <= publishedEpoch
+
+DurableCommitIsRecoverable ==
+    durableEpoch > publishedEpoch =>
+        /\ publisher # "none"
+        /\ txPhase[publisher] = "durable"
+
+WaitForGraphIsAcyclic ==
+    ~\E tx \in Transactions: HasWaitPath(tx, tx)
+
+DeadlockVictimReleasesDependencies ==
+    \A victim \in Transactions:
+        txPhase[victim] = "deadlock" =>
+            /\ waitFor[victim] = {}
+            /\ heldShared[victim] = {}
+            /\ heldExclusive[victim] = {}
+            /\ \A waiter \in Transactions: victim \notin waitFor[waiter]
+
+Spec == Init /\ [][Next]_vars
+
+=============================================================================
