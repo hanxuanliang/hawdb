@@ -1,6 +1,12 @@
 mod coordinator;
+mod group_commit;
 
 use self::coordinator::{CommitSequencer, LockManager, TransactionIdAllocator};
+pub use self::group_commit::{
+    WalGroupCommitActivation, WalGroupCommitConfig, WalGroupCommitEvidence, WalGroupCommitSnapshot,
+    DEFAULT_WAL_GROUP_COMMIT_MAX_BYTES, DEFAULT_WAL_GROUP_COMMIT_MAX_DELAY,
+    DEFAULT_WAL_GROUP_COMMIT_MAX_ENTRIES,
+};
 use super::transaction_locks::{LockMode, LockRequest};
 use super::{
     commit_database_transaction_state, execute_database_transaction_query,
@@ -88,9 +94,16 @@ pub struct ConcurrentDatabaseTransaction {
 
 impl ConcurrentDatabase {
     pub fn new(database: Database) -> Self {
+        Self::new_with_wal_group_commit(database, WalGroupCommitConfig::default())
+    }
+
+    pub fn new_with_wal_group_commit(
+        database: Database,
+        wal_group_commit: WalGroupCommitConfig,
+    ) -> Self {
         Self {
             inner: Arc::new(ConcurrentDatabaseInner {
-                commits: CommitSequencer::new(database),
+                commits: CommitSequencer::new(database, wal_group_commit),
                 locks: LockManager::default(),
                 transaction_ids: TransactionIdAllocator::default(),
                 checkpoint_serial: Mutex::new(()),
@@ -127,6 +140,10 @@ impl ConcurrentDatabase {
 
     pub fn published_read_view(&self) -> Result<crate::store::PublishedReadView> {
         Ok(self.inner.commits.lock()?.published_read_view())
+    }
+
+    pub fn wal_group_commit_snapshot(&self) -> Result<WalGroupCommitSnapshot> {
+        self.inner.commits.group_commit_snapshot()
     }
 
     pub fn begin_read_transaction(&self) -> Result<DatabaseReadTransaction> {
@@ -302,15 +319,13 @@ impl ConcurrentDatabaseTransaction {
 
         let allow_stale_rebase = self.options.mode == ConcurrentTransactionMode::Pessimistic;
         let inner = Arc::clone(&self.inner);
-        let result = match inner.commits.lock() {
-            Ok(mut database) => commit_database_transaction_state(
-                &mut database,
-                &mut self.state,
-                allow_stale_rebase,
-            ),
-            Err(error) => Err(error),
-        }
-        .map_err(|error| self.map_commit_error(error));
+        let mut state = self.state.take_for_commit();
+        let result = inner
+            .commits
+            .execute_grouped(move |database| {
+                commit_database_transaction_state(database, &mut state, allow_stale_rebase)
+            })
+            .map_err(|error| self.map_commit_error(error));
         self.inner.locks.release(self.transaction_id);
         self.finished = true;
         result

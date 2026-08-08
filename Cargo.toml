@@ -167,3 +167,7 @@ harness = false
 [[bench]]
 name = "relational_index_access"
 harness = false
+
+[[bench]]
+name = "wal_group_commit"
+harness = false

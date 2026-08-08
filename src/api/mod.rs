@@ -144,7 +144,10 @@ pub use canonical_snapshot::{
 };
 pub use concurrent::{
     ConcurrentDatabase, ConcurrentDatabaseTransaction, ConcurrentTransactionMode,
-    ConcurrentTransactionOptions, DEFAULT_PESSIMISTIC_LOCK_TIMEOUT,
+    ConcurrentTransactionOptions, WalGroupCommitActivation, WalGroupCommitConfig,
+    WalGroupCommitEvidence, WalGroupCommitSnapshot, DEFAULT_PESSIMISTIC_LOCK_TIMEOUT,
+    DEFAULT_WAL_GROUP_COMMIT_MAX_BYTES, DEFAULT_WAL_GROUP_COMMIT_MAX_DELAY,
+    DEFAULT_WAL_GROUP_COMMIT_MAX_ENTRIES,
 };
 pub use plan_cache::{PlanCacheBypassReason, PlanCacheLookup, PlanCacheStats};
 pub use resource_profile::{
@@ -614,6 +617,18 @@ impl Database {
 
     pub fn published_read_view(&self) -> PublishedReadView {
         self.store.published_read_view()
+    }
+
+    pub(crate) fn begin_wal_sync_group(&mut self) -> Result<bool> {
+        self.store.begin_wal_sync_group()
+    }
+
+    pub(crate) fn wal_sync_group_progress(&self) -> crate::store::WalSyncGroupProgress {
+        self.store.wal_sync_group_progress()
+    }
+
+    pub(crate) fn finish_wal_sync_group(&mut self) -> Result<crate::store::WalSyncGroupFlush> {
+        self.store.finish_wal_sync_group()
     }
 
     pub(crate) fn search_projection_changefeed_status(
@@ -17917,6 +17932,14 @@ impl DatabaseTransactionState {
     fn rollback(&mut self) {
         self.graph_transaction.take();
         self.relational_transaction.writes.clear();
+    }
+
+    fn take_for_commit(&mut self) -> Self {
+        Self {
+            graph_transaction: self.graph_transaction.take(),
+            relational_transaction: std::mem::take(&mut self.relational_transaction),
+            relational_state: std::mem::take(&mut self.relational_state),
+        }
     }
 }
 

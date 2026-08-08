@@ -165,6 +165,9 @@ thread_local! {
     static WAL_APPLY_FAILPOINT_REMAINING: std::cell::Cell<Option<usize>> = const {
         std::cell::Cell::new(None)
     };
+    static WAL_GROUP_SYNC_FAILPOINT: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
 }
 
 fn wal_apply_failpoint() -> Result<()> {
@@ -190,6 +193,21 @@ fn wal_apply_failpoint() -> Result<()> {
 #[cfg(test)]
 pub(crate) fn set_wal_apply_failpoint(operations_before_failure: Option<usize>) {
     WAL_APPLY_FAILPOINT_REMAINING.with(|remaining| remaining.set(operations_before_failure));
+}
+
+#[cfg(test)]
+pub(crate) fn set_wal_group_sync_failpoint(enabled: bool) {
+    WAL_GROUP_SYNC_FAILPOINT.with(|failpoint| failpoint.set(enabled));
+}
+
+fn wal_group_sync_failpoint() -> Result<()> {
+    #[cfg(test)]
+    if WAL_GROUP_SYNC_FAILPOINT.with(std::cell::Cell::take) {
+        return Err(SkeinError::Storage(
+            "injected WAL group sync failure".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn checkpoint_generation_file(generation: u64) -> String {
@@ -1330,6 +1348,20 @@ pub struct StorageResidencyReport {
     pub segment_cache_eviction_count: u64,
     pub segment_cache_admission_rejection_count: u64,
     pub segment_cache_digest_mismatch_count: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct WalSyncGroupProgress {
+    pub entry_count: usize,
+    pub byte_count: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct WalSyncGroupFlush {
+    pub entry_count: usize,
+    pub byte_count: u64,
+    pub fsync_micros: u64,
+    pub fsync_performed: bool,
 }
 
 pub struct GraphNodeIterator {
@@ -6533,6 +6565,34 @@ impl GraphStore {
         )
     }
 
+    pub(crate) fn begin_wal_sync_group(&mut self) -> Result<bool> {
+        let Some(durable) = &mut self.durable else {
+            return Ok(false);
+        };
+        durable.begin_wal_sync_group()
+    }
+
+    pub(crate) fn wal_sync_group_progress(&self) -> WalSyncGroupProgress {
+        self.durable
+            .as_ref()
+            .map_or_else(WalSyncGroupProgress::default, |durable| {
+                durable.wal_sync_group_progress()
+            })
+    }
+
+    pub(crate) fn finish_wal_sync_group(&mut self) -> Result<WalSyncGroupFlush> {
+        let Some(durable) = &mut self.durable else {
+            return Ok(WalSyncGroupFlush::default());
+        };
+        match durable.finish_wal_sync_group() {
+            Ok(flush) => Ok(flush),
+            Err(error) => {
+                self.post_wal_apply_poisoned = true;
+                Err(error)
+            }
+        }
+    }
+
     pub fn search_projection_change_log_start_epoch(&self) -> u64 {
         self.search_projection_change_log_start_epoch
     }
@@ -11722,6 +11782,14 @@ struct DurableStore {
     max_record_bytes: Option<usize>,
     max_batch_operations: Option<usize>,
     telemetry: Option<Arc<dyn TelemetrySink>>,
+    wal_sync_group: Option<WalSyncGroupState>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct WalSyncGroupState {
+    entry_count: usize,
+    byte_count: u64,
+    created: bool,
 }
 
 struct CheckpointImage<'a> {
@@ -12056,11 +12124,58 @@ impl DurableStore {
             max_record_bytes,
             max_batch_operations,
             telemetry: None,
+            wal_sync_group: None,
         })
     }
 
     fn root_path(&self) -> &Path {
         &self.root_path
+    }
+
+    fn begin_wal_sync_group(&mut self) -> Result<bool> {
+        if self.durability != DurabilityPolicy::SyncOnEveryWrite {
+            return Ok(false);
+        }
+        if self.wal_sync_group.is_some() {
+            return Err(SkeinError::Storage(
+                "nested WAL sync groups are not allowed".to_string(),
+            ));
+        }
+        self.wal_sync_group = Some(WalSyncGroupState::default());
+        Ok(true)
+    }
+
+    fn wal_sync_group_progress(&self) -> WalSyncGroupProgress {
+        self.wal_sync_group
+            .map_or_else(WalSyncGroupProgress::default, |group| {
+                WalSyncGroupProgress {
+                    entry_count: group.entry_count,
+                    byte_count: group.byte_count,
+                }
+            })
+    }
+
+    fn finish_wal_sync_group(&mut self) -> Result<WalSyncGroupFlush> {
+        let Some(group) = self.wal_sync_group.take() else {
+            return Ok(WalSyncGroupFlush::default());
+        };
+        if group.entry_count == 0 {
+            return Ok(WalSyncGroupFlush::default());
+        }
+        wal_group_sync_failpoint()?;
+        let started = std::time::Instant::now();
+        let file = OpenOptions::new().write(true).open(&self.wal_path)?;
+        file.sync_data()?;
+        if group.created {
+            sync_parent_dir(&self.wal_path)?;
+        }
+        process_crash_failpoint("after_wal_sync");
+        Ok(WalSyncGroupFlush {
+            entry_count: group.entry_count,
+            byte_count: group.byte_count,
+            fsync_micros: elapsed_micros(started),
+            fsync_performed: true,
+        })
     }
 
     fn wal_age_millis(&self) -> Option<u64> {
@@ -12638,6 +12753,7 @@ impl DurableStore {
         }
         self.ensure_wal_admission(self.wal_bytes.saturating_add(byte_count))?;
         process_crash_failpoint("before_wal_append");
+        let sync_deferred = self.wal_sync_group.is_some();
         let result = (|| {
             let (mut file, created) = self.open_wal_append()?;
             if created {
@@ -12647,7 +12763,9 @@ impl DurableStore {
             writeln!(file, "{encoded_entry}")?;
             process_crash_failpoint("after_wal_append");
             let fsync_micros = self.finish_wal_append(&mut file, created)?;
-            process_crash_failpoint("after_wal_sync");
+            if !sync_deferred {
+                process_crash_failpoint("after_wal_sync");
+            }
             Ok(fsync_micros)
         })();
         if let Some(telemetry) = &self.telemetry {
@@ -12664,6 +12782,10 @@ impl DurableStore {
         if result.is_ok() {
             self.next_lsn += 1;
             self.wal_bytes = self.wal_bytes.saturating_add(byte_count);
+            if let Some(group) = &mut self.wal_sync_group {
+                group.entry_count = group.entry_count.saturating_add(1);
+                group.byte_count = group.byte_count.saturating_add(byte_count);
+            }
         } else if let Ok(metadata) = fs::metadata(&self.wal_path) {
             self.wal_bytes = metadata.len();
         }
@@ -12701,8 +12823,12 @@ impl DurableStore {
         Ok((file, created))
     }
 
-    fn finish_wal_append(&self, file: &mut File, created: bool) -> Result<u64> {
+    fn finish_wal_append(&mut self, file: &mut File, created: bool) -> Result<u64> {
         file.flush()?;
+        if let Some(group) = &mut self.wal_sync_group {
+            group.created |= created;
+            return Ok(0);
+        }
         let mut fsync_micros = 0;
         if self.durability == DurabilityPolicy::SyncOnEveryWrite {
             let started = std::time::Instant::now();

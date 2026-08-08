@@ -1,4 +1,8 @@
-use crate::{ConcurrentTransactionOptions, Database, SkeinError, Value};
+use crate::{
+    ConcurrentDatabase, ConcurrentTransactionOptions, Database, SkeinError, Value,
+    WalGroupCommitActivation, WalGroupCommitConfig, WalGroupCommitEvidence,
+};
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
@@ -164,6 +168,177 @@ fn disjoint_primary_key_point_locks_allow_both_pessimistic_writers_to_commit() {
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].get("id"), Some(&Value::Int(1)));
     assert_eq!(rows[1].get("id"), Some(&Value::Int(2)));
+}
+
+#[test]
+fn wal_group_commit_requires_performance_and_recovery_evidence() {
+    let bounds = (
+        NonZeroUsize::new(8).unwrap(),
+        NonZeroU64::new(1024 * 1024).unwrap(),
+        Duration::from_millis(1),
+    );
+    let rejected = WalGroupCommitConfig::enabled_after_evidence(
+        WalGroupCommitEvidence {
+            commit_count: 8,
+            baseline_elapsed_micros: 100,
+            baseline_fsync_count: 8,
+            grouped_elapsed_micros: 100,
+            grouped_fsync_count: 8,
+            grouped_p95_commit_micros: 20,
+            max_accepted_p95_commit_micros: 25,
+            strict_recovery_verified: false,
+            wal_order_verified: false,
+        },
+        bounds.0,
+        bounds.1,
+        bounds.2,
+    )
+    .unwrap_err();
+    assert!(rejected
+        .to_string()
+        .contains("throughput_improvement_not_proven"));
+    assert!(rejected
+        .to_string()
+        .contains("strict_recovery_not_verified"));
+
+    let admitted = WalGroupCommitConfig::enabled_after_evidence(
+        WalGroupCommitEvidence {
+            commit_count: 8,
+            baseline_elapsed_micros: 200,
+            baseline_fsync_count: 8,
+            grouped_elapsed_micros: 100,
+            grouped_fsync_count: 1,
+            grouped_p95_commit_micros: 20,
+            max_accepted_p95_commit_micros: 25,
+            strict_recovery_verified: true,
+            wal_order_verified: true,
+        },
+        bounds.0,
+        bounds.1,
+        bounds.2,
+    )
+    .unwrap();
+    assert_eq!(
+        admitted.activation(),
+        WalGroupCommitActivation::EvidenceValidated
+    );
+}
+
+#[test]
+fn wal_group_commit_shares_one_sync_without_changing_record_order() {
+    const WRITERS: usize = 8;
+    let path = super::unique_test_dir("wal_group_commit");
+    let mut database = Database::open(&path).unwrap();
+    database
+        .query_sql("CREATE TABLE public.messages (id BIGINT PRIMARY KEY, body TEXT NOT NULL)")
+        .unwrap();
+    let group_commit = WalGroupCommitConfig::benchmark_candidate(
+        NonZeroUsize::new(WRITERS).unwrap(),
+        NonZeroU64::new(1024 * 1024).unwrap(),
+        Duration::from_millis(5),
+    )
+    .unwrap();
+    let db = ConcurrentDatabase::new_with_wal_group_commit(database, group_commit);
+    let barrier = Arc::new(Barrier::new(WRITERS));
+    let writers = (0..WRITERS)
+        .map(|id| {
+            let db = db.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let mut transaction = db
+                    .begin_transaction(ConcurrentTransactionOptions::pessimistic(
+                        Duration::from_secs(1),
+                    ))
+                    .unwrap();
+                transaction
+                    .query_sql(&format!(
+                        "INSERT INTO public.messages (id, body) VALUES ({id}, 'writer-{id}')"
+                    ))
+                    .unwrap();
+                barrier.wait();
+                transaction.commit().unwrap();
+            })
+        })
+        .collect::<Vec<_>>();
+    for writer in writers {
+        writer.join().unwrap();
+    }
+
+    let snapshot = db.wal_group_commit_snapshot().unwrap();
+    assert_eq!(
+        snapshot.activation,
+        WalGroupCommitActivation::BenchmarkCandidate
+    );
+    assert_eq!(snapshot.submitted_commits, WRITERS as u64);
+    assert_eq!(snapshot.completed_commits, WRITERS as u64);
+    assert_eq!(snapshot.shared_sync_count, 1);
+    assert_eq!(snapshot.grouped_wal_entries, WRITERS as u64);
+    assert_eq!(snapshot.max_observed_group_entries, WRITERS);
+    assert_eq!(db.commit_epoch().unwrap(), WRITERS as u64 + 1);
+    drop(db);
+
+    let wal = super::read_test_wal(&path).unwrap();
+    let lsns = wal
+        .lines()
+        .map(|line| line.split('\t').next().unwrap().parse::<u64>().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(lsns, (1..=WRITERS as u64 + 1).collect::<Vec<_>>());
+
+    let mut reopened = Database::open(&path).unwrap();
+    let rows = reopened
+        .query_sql("SELECT id FROM public.messages ORDER BY id")
+        .unwrap();
+    assert_eq!(rows.rows.len(), WRITERS);
+    assert_eq!(reopened.commit_epoch(), WRITERS as u64 + 1);
+    drop(reopened);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn wal_group_sync_failure_rejects_commit_and_poisons_until_reopen() {
+    let path = super::unique_test_dir("wal_group_sync_failure");
+    let mut database = Database::open(&path).unwrap();
+    database
+        .query_sql("CREATE TABLE public.messages (id BIGINT PRIMARY KEY)")
+        .unwrap();
+    let group_commit = WalGroupCommitConfig::benchmark_candidate(
+        NonZeroUsize::new(1).unwrap(),
+        NonZeroU64::new(1024 * 1024).unwrap(),
+        Duration::ZERO,
+    )
+    .unwrap();
+    let db = ConcurrentDatabase::new_with_wal_group_commit(database, group_commit);
+    let mut transaction = db
+        .begin_transaction(ConcurrentTransactionOptions::pessimistic(
+            Duration::from_secs(1),
+        ))
+        .unwrap();
+    transaction
+        .query_sql("INSERT INTO public.messages (id) VALUES (1)")
+        .unwrap();
+
+    crate::store::set_wal_group_sync_failpoint(true);
+    let error = transaction.commit().unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("WAL group durability barrier failed"));
+    assert!(db
+        .query_sql("SELECT id FROM public.messages")
+        .unwrap_err()
+        .to_string()
+        .contains("close and reopen"));
+    let snapshot = db.wal_group_commit_snapshot().unwrap();
+    assert_eq!(snapshot.completed_commits, 0);
+    assert_eq!(snapshot.shared_sync_count, 0);
+    drop(db);
+
+    let mut reopened = Database::open(&path).unwrap();
+    let rows = reopened
+        .query_sql("SELECT id FROM public.messages")
+        .unwrap();
+    assert_eq!(rows.rows.len(), 1);
+    drop(reopened);
+    std::fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
