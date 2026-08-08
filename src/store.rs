@@ -29,12 +29,12 @@ pub use doctor::{
     WalTailRepairReason, WalTailRepairReport, WAL_DOCTOR_REPAIR_PROTOCOL,
 };
 use skein_storage::{
-    decode_relational_checkpoint_file, decode_relational_wal_batch, durable_replace_file,
-    encode_relational_checkpoint_to_writer, encode_relational_wal_batch, sync_parent_directory,
-    AdjacencyPostingList, CanonicalEndpointDirection, CanonicalNodeIterator,
-    CanonicalRelationshipIterator, CanonicalSegmentError, DatabaseDirectoryLease,
-    RelationalDecodeLimits, RelationalMutationLimits, RelationalOverflowConfig, RelationalState,
-    RelationalTransaction,
+    decode_relational_checkpoint, decode_relational_checkpoint_file, decode_relational_wal_batch,
+    durable_replace_file, encode_relational_checkpoint, encode_relational_checkpoint_to_writer,
+    encode_relational_wal_batch, sync_parent_directory, AdjacencyPostingList,
+    CanonicalEndpointDirection, CanonicalNodeIterator, CanonicalRelationshipIterator,
+    CanonicalSegmentError, DatabaseDirectoryLease, RelationalDecodeLimits,
+    RelationalMutationLimits, RelationalOverflowConfig, RelationalState, RelationalTransaction,
 };
 pub use skein_storage::{
     AdjacencyDirection, AdjacencyGroupConsistencyMismatch, AdjacencyGroupKey, AdjacencyGroupStats,
@@ -2886,19 +2886,19 @@ impl GraphStore {
     ) -> Result<()> {
         if self.basic_statistics.node_count != 0 || self.basic_statistics.relationship_count != 0 {
             return Err(SkeinError::Storage(
-                "graph lightning initial import requires an empty target graph".to_string(),
+                "Skein Lightning initial import requires an empty target graph".to_string(),
             ));
         }
         let mut node_ids = BTreeSet::new();
         for (id, label, _) in &nodes {
             if label.is_empty() {
                 return Err(SkeinError::Storage(
-                    "graph lightning initial import node label is empty".to_string(),
+                    "Skein Lightning initial import node label is empty".to_string(),
                 ));
             }
             if !node_ids.insert(*id) {
                 return Err(SkeinError::Storage(format!(
-                    "graph lightning initial import duplicate node id {}",
+                    "Skein Lightning initial import duplicate node id {}",
                     id.0
                 )));
             }
@@ -2907,24 +2907,24 @@ impl GraphStore {
         for (id, source, target, rel_type, _) in &relationships {
             if rel_type.is_empty() {
                 return Err(SkeinError::Storage(
-                    "graph lightning initial import relationship type is empty".to_string(),
+                    "Skein Lightning initial import relationship type is empty".to_string(),
                 ));
             }
             if !relationship_ids.insert(*id) {
                 return Err(SkeinError::Storage(format!(
-                    "graph lightning initial import duplicate relationship id {}",
+                    "Skein Lightning initial import duplicate relationship id {}",
                     id.0
                 )));
             }
             if !node_ids.contains(source) {
                 return Err(SkeinError::Storage(format!(
-                    "graph lightning initial import relationship {} references missing source node {}",
+                    "Skein Lightning initial import relationship {} references missing source node {}",
                     id.0, source.0
                 )));
             }
             if !node_ids.contains(target) {
                 return Err(SkeinError::Storage(format!(
-                    "graph lightning initial import relationship {} references missing target node {}",
+                    "Skein Lightning initial import relationship {} references missing target node {}",
                     id.0, target.0
                 )));
             }
@@ -2979,20 +2979,23 @@ impl GraphStore {
         Ok(())
     }
 
-    pub fn import_graph_snapshot_rows_with_source_fingerprint(
+    pub fn import_skein_snapshot_rows_with_source_fingerprint(
         &mut self,
         catalog: &mut Catalog,
         stable_id_mapping: StoreStableIdMapping,
         source_fingerprint: String,
         nodes: Vec<GraphSnapshotNodeImport>,
         relationships: Vec<GraphSnapshotRelationshipImport>,
+        relational_state: RelationalState,
     ) -> Result<()> {
         if self.initial_import_source_fingerprint.is_some()
             || !self.nodes.is_empty()
             || !self.relationships.is_empty()
+            || !self.relational_state.is_empty()
+            || !catalog.is_empty()
         {
             return Err(SkeinError::Storage(
-                "graph lightning initial import requires an empty target graph".to_string(),
+                "skein lightning initial import requires an empty target database".to_string(),
             ));
         }
 
@@ -3000,12 +3003,12 @@ impl GraphStore {
         for (id, label, _) in &nodes {
             if label.is_empty() {
                 return Err(SkeinError::Storage(
-                    "graph lightning initial import node label is empty".to_string(),
+                    "skein lightning initial import node label is empty".to_string(),
                 ));
             }
             if !node_ids.insert(*id) {
                 return Err(SkeinError::Storage(format!(
-                    "graph lightning initial import duplicate node id {}",
+                    "skein lightning initial import duplicate node id {}",
                     id.0
                 )));
             }
@@ -3014,18 +3017,18 @@ impl GraphStore {
         for (id, source, target, rel_type, _) in &relationships {
             if rel_type.is_empty() {
                 return Err(SkeinError::Storage(
-                    "graph lightning initial import relationship type is empty".to_string(),
+                    "skein lightning initial import relationship type is empty".to_string(),
                 ));
             }
             if !relationship_ids.insert(*id) {
                 return Err(SkeinError::Storage(format!(
-                    "graph lightning initial import duplicate relationship id {}",
+                    "skein lightning initial import duplicate relationship id {}",
                     id.0
                 )));
             }
             if !node_ids.contains(source) || !node_ids.contains(target) {
                 return Err(SkeinError::Storage(format!(
-                    "graph lightning initial import relationship {} references a missing endpoint",
+                    "skein lightning initial import relationship {} references a missing endpoint",
                     id.0
                 )));
             }
@@ -3038,8 +3041,14 @@ impl GraphStore {
         for (_, _, _, rel_type, _) in &relationships {
             working_catalog.get_or_create_rel_type(rel_type);
         }
-        let mut ops = Vec::with_capacity(nodes.len() + relationships.len() + 1);
+        let relational_record =
+            encode_relational_checkpoint(self.commit_epoch.saturating_add(1), &relational_state)
+                .map_err(|error| SkeinError::Storage(error.to_string()))?;
+        let mut ops = Vec::with_capacity(nodes.len() + relationships.len() + 2);
         ops.push(WalOp::MarkInitialImportSource { source_fingerprint });
+        ops.push(WalOp::RelationalSnapshot {
+            record: Arc::from(relational_record),
+        });
         ops.extend(
             nodes
                 .iter()
@@ -7243,7 +7252,8 @@ impl GraphStore {
                 | WalOp::SetRelationshipProperty { .. }
                 | WalOp::ProjectGraph { .. }
                 | WalOp::MarkInitialImportSource { .. }
-                | WalOp::Relational { .. } => {}
+                | WalOp::Relational { .. }
+                | WalOp::RelationalSnapshot { .. } => {}
             }
         }
     }
@@ -9964,7 +9974,8 @@ impl GraphStore {
                 | WalOp::CreateRelationshipPropertyExistsConstraint { .. }
                 | WalOp::ProjectGraph { .. }
                 | WalOp::MarkInitialImportSource { .. }
-                | WalOp::Relational { .. } => {}
+                | WalOp::Relational { .. }
+                | WalOp::RelationalSnapshot { .. } => {}
             }
         }
         Ok(bytes)
@@ -11395,6 +11406,19 @@ impl GraphStore {
                         self.relational_overflow_config,
                     )
                     .map_err(|error| SkeinError::Storage(error.to_string()))?;
+            }
+            WalOp::RelationalSnapshot { record } => {
+                let checkpoint =
+                    decode_relational_checkpoint(&record, RelationalDecodeLimits::checkpoint())
+                        .map_err(|error| SkeinError::Storage(error.to_string()))?;
+                let expected_epoch = self.commit_epoch.saturating_add(1);
+                if checkpoint.epoch != expected_epoch {
+                    return Err(SkeinError::Storage(format!(
+                        "relational snapshot WAL epoch mismatch: expected {expected_epoch}, got {}",
+                        checkpoint.epoch
+                    )));
+                }
+                self.relational_state = checkpoint.state;
             }
             WalOp::Batch(ops) => {
                 for op in ops {
@@ -14762,6 +14786,9 @@ enum WalOp {
     Relational {
         record: Arc<[u8]>,
     },
+    RelationalSnapshot {
+        record: Arc<[u8]>,
+    },
     Batch(Vec<WalOp>),
 }
 
@@ -14937,6 +14964,9 @@ impl WalEntry {
             ),
             WalOp::Relational { record } => {
                 format!("relational\t{}", encode_bytes_base64(record))
+            }
+            WalOp::RelationalSnapshot { record } => {
+                format!("relational_snapshot\t{}", encode_bytes_base64(record))
             }
             WalOp::Batch(ops) => format!(
                 "batch\t{}",
@@ -15196,6 +15226,12 @@ impl WalEntry {
                     record: Arc::from(decode_bytes_base64(raw_record)?),
                 },
             })),
+            [raw_lsn, "relational_snapshot", raw_record] => Ok(WalDecodeResult::Entry(WalEntry {
+                lsn: parse_u64(raw_lsn, "wal lsn")?,
+                op: WalOp::RelationalSnapshot {
+                    record: Arc::from(decode_bytes_base64(raw_record)?),
+                },
+            })),
             [raw_lsn, "batch", raw_ops] => Ok(WalDecodeResult::Entry(WalEntry {
                 lsn: parse_u64(raw_lsn, "wal lsn")?,
                 op: WalOp::Batch(decode_wal_batch(raw_ops)?),
@@ -15395,6 +15431,9 @@ fn encode_wal_op_for_batch(op: &WalOp) -> String {
         WalOp::Relational { record } => {
             format!("relational,{}", encode_bytes_base64(record))
         }
+        WalOp::RelationalSnapshot { record } => {
+            format!("relational_snapshot,{}", encode_bytes_base64(record))
+        }
         WalOp::Batch(_) => unreachable!("nested wal batches are not encoded"),
     }
 }
@@ -15537,6 +15576,9 @@ fn decode_wal_op_from_batch(input: &str) -> Result<WalOp> {
             })
         }
         ["relational", raw_record] => Ok(WalOp::Relational {
+            record: Arc::from(decode_bytes_base64(raw_record)?),
+        }),
+        ["relational_snapshot", raw_record] => Ok(WalOp::RelationalSnapshot {
             record: Arc::from(decode_bytes_base64(raw_record)?),
         }),
         _ => Err(SkeinError::Storage(format!(
@@ -15811,7 +15853,8 @@ fn apply_wal_op_to_snapshot(
         | WalOp::CreateRelationshipPropertyExistsConstraint { .. }
         | WalOp::ProjectGraph { .. }
         | WalOp::MarkInitialImportSource { .. }
-        | WalOp::Relational { .. } => {}
+        | WalOp::Relational { .. }
+        | WalOp::RelationalSnapshot { .. } => {}
     }
 }
 

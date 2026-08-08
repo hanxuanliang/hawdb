@@ -94,50 +94,52 @@ pub use artifact_jobs::{
     ExternalContentArtifactRuntimeManifest,
 };
 pub use canonical_snapshot::{
-    graph_lightning_initial_import_advance_checkpoint,
-    graph_lightning_initial_import_advance_durable_state_streaming,
-    graph_lightning_initial_import_advance_durable_state_with_search_projection_batch,
-    graph_lightning_initial_import_checkpoint_readiness,
-    graph_lightning_initial_import_cutover_catch_up_report,
-    graph_lightning_initial_import_decode_durable_state,
-    graph_lightning_initial_import_document_identity_coverage,
-    graph_lightning_initial_import_durable_state_report,
-    graph_lightning_initial_import_encode_durable_state, graph_lightning_initial_import_plan,
-    graph_lightning_initial_import_plan_with_document_identities,
-    graph_lightning_initial_import_readiness, graph_lightning_initial_import_recovery_readiness,
-    graph_lightning_initial_import_resume_action,
-    graph_lightning_initial_import_search_projection_batch_report,
-    graph_lightning_initial_import_search_projection_batch_report_with_document_identities,
-    graph_lightning_initial_import_session_bundle_readiness,
-    graph_lightning_initial_import_session_report,
-    graph_lightning_initial_import_source_bundle_readiness,
-    graph_lightning_initial_import_source_fingerprint,
-    graph_lightning_initial_import_startup_readiness, parse_graph_lightning_graph_stream_export,
-    validate_graph_lightning_graph_stream, CanonicalGraphSnapshotExport,
+    parse_skein_lightning_graph_stream_export, skein_lightning_initial_import_advance_checkpoint,
+    skein_lightning_initial_import_advance_durable_state_streaming,
+    skein_lightning_initial_import_advance_durable_state_with_search_projection_batch,
+    skein_lightning_initial_import_checkpoint_readiness,
+    skein_lightning_initial_import_cutover_catch_up_report,
+    skein_lightning_initial_import_decode_durable_state,
+    skein_lightning_initial_import_document_identity_coverage,
+    skein_lightning_initial_import_durable_state_report,
+    skein_lightning_initial_import_encode_durable_state, skein_lightning_initial_import_plan,
+    skein_lightning_initial_import_plan_with_document_identities,
+    skein_lightning_initial_import_readiness, skein_lightning_initial_import_recovery_readiness,
+    skein_lightning_initial_import_resume_action,
+    skein_lightning_initial_import_search_projection_batch_report,
+    skein_lightning_initial_import_search_projection_batch_report_with_document_identities,
+    skein_lightning_initial_import_session_bundle_readiness,
+    skein_lightning_initial_import_session_report,
+    skein_lightning_initial_import_source_bundle_readiness,
+    skein_lightning_initial_import_source_fingerprint,
+    skein_lightning_initial_import_startup_readiness, validate_skein_lightning_graph_stream,
+    validate_skein_lightning_relational_stream, CanonicalGraphSnapshotExport,
     CanonicalGraphSnapshotValidation, CanonicalSnapshotEndpointViolation,
     CanonicalSnapshotIdentityAudit, CanonicalSnapshotNode, CanonicalSnapshotRelationship,
-    CanonicalStableIdMapping, GraphLightningBootstrapExport, GraphLightningBootstrapManifest,
-    GraphLightningGraphStream, GraphLightningGraphStreamValidation,
-    GraphLightningInitialImportApplyReport, GraphLightningInitialImportCheckpoint,
-    GraphLightningInitialImportCheckpointProgress,
-    GraphLightningInitialImportCheckpointProgressReport,
-    GraphLightningInitialImportCheckpointReadiness,
-    GraphLightningInitialImportCutoverCatchUpReport, GraphLightningInitialImportDocumentIdentity,
-    GraphLightningInitialImportDocumentIdentityCoverage,
-    GraphLightningInitialImportDocumentIdentityKindReport,
-    GraphLightningInitialImportDurableBatchAdvanceReport, GraphLightningInitialImportDurableState,
-    GraphLightningInitialImportDurableStateCodecReport,
-    GraphLightningInitialImportDurableStateReport, GraphLightningInitialImportIdempotencyKey,
-    GraphLightningInitialImportPlan, GraphLightningInitialImportReadiness,
-    GraphLightningInitialImportRecoveryReadinessReport, GraphLightningInitialImportResumeAction,
-    GraphLightningInitialImportResumeActionKind,
-    GraphLightningInitialImportSearchProjectionBatchReport,
-    GraphLightningInitialImportSessionBundleReadiness, GraphLightningInitialImportSessionReport,
-    GraphLightningInitialImportSourceBundleReadiness, GraphLightningInitialImportSourceFingerprint,
-    GraphLightningInitialImportStartupReadinessReport,
-    GraphLightningInitialImportStreamingBatchAdvanceReport,
-    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION, GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION,
-    GRAPH_LIGHTNING_INITIAL_IMPORT_DURABLE_STATE_PROTOCOL,
+    CanonicalStableIdMapping, SkeinLightningBootstrapExport, SkeinLightningBootstrapManifest,
+    SkeinLightningGraphStream, SkeinLightningGraphStreamValidation,
+    SkeinLightningInitialImportApplyReport, SkeinLightningInitialImportCheckpoint,
+    SkeinLightningInitialImportCheckpointProgress,
+    SkeinLightningInitialImportCheckpointProgressReport,
+    SkeinLightningInitialImportCheckpointReadiness,
+    SkeinLightningInitialImportCutoverCatchUpReport, SkeinLightningInitialImportDocumentIdentity,
+    SkeinLightningInitialImportDocumentIdentityCoverage,
+    SkeinLightningInitialImportDocumentIdentityKindReport,
+    SkeinLightningInitialImportDurableBatchAdvanceReport, SkeinLightningInitialImportDurableState,
+    SkeinLightningInitialImportDurableStateCodecReport,
+    SkeinLightningInitialImportDurableStateReport, SkeinLightningInitialImportIdempotencyKey,
+    SkeinLightningInitialImportPlan, SkeinLightningInitialImportReadiness,
+    SkeinLightningInitialImportRecoveryReadinessReport, SkeinLightningInitialImportResumeAction,
+    SkeinLightningInitialImportResumeActionKind,
+    SkeinLightningInitialImportSearchProjectionBatchReport,
+    SkeinLightningInitialImportSessionBundleReadiness, SkeinLightningInitialImportSessionReport,
+    SkeinLightningInitialImportSourceBundleReadiness, SkeinLightningInitialImportSourceFingerprint,
+    SkeinLightningInitialImportStartupReadinessReport,
+    SkeinLightningInitialImportStreamingBatchAdvanceReport, SkeinLightningRelationalStream,
+    SkeinLightningRelationalStreamValidation, SKEIN_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    SKEIN_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION,
+    SKEIN_LIGHTNING_INITIAL_IMPORT_DURABLE_STATE_PROTOCOL,
+    SKEIN_LIGHTNING_RELATIONAL_STREAM_FORMAT_VERSION,
 };
 pub use concurrent::{
     ConcurrentDatabase, ConcurrentDatabaseTransaction, ConcurrentTransactionMode,
@@ -157,20 +159,25 @@ pub use source_candidates::{
 };
 pub use system_variables::QuerySystemVariables;
 
-fn graph_lightning_initial_import_source_fingerprint_key(
-    manifest: &GraphLightningBootstrapManifest,
+fn skein_lightning_initial_import_source_fingerprint_key(
+    manifest: &SkeinLightningBootstrapManifest,
 ) -> String {
-    let fingerprint = graph_lightning_initial_import_source_fingerprint(manifest);
+    let fingerprint = skein_lightning_initial_import_source_fingerprint(manifest);
     format!(
-        "v{}:{}:{}:{}:{}:{}:{}:{}",
+        "v{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
         fingerprint.protocol_version,
+        fingerprint.database_commit_epoch,
         fingerprint.graph_commit_epoch,
         fingerprint.logical_checksum,
         fingerprint.graph_stream_checksum,
         fingerprint.graph_stream_byte_len,
+        fingerprint.relational_stream_checksum,
+        fingerprint.relational_stream_byte_len,
         fingerprint.schema_checksum,
         fingerprint.node_count,
         fingerprint.relationship_count,
+        fingerprint.relational_table_count,
+        fingerprint.relational_row_count,
     )
 }
 
@@ -1109,71 +1116,78 @@ impl Database {
             .with_stable_id_mapping(&mapping))
     }
 
-    pub fn prepare_graph_lightning_bootstrap_export(
+    pub fn prepare_skein_lightning_bootstrap_export(
         &mut self,
-    ) -> Result<GraphLightningBootstrapExport> {
+    ) -> Result<SkeinLightningBootstrapExport> {
         let snapshot = self.export_canonical_graph_snapshot_with_persisted_stable_ids()?;
-        let manifest = snapshot.graph_lightning_bootstrap_manifest();
-        let graph_stream = snapshot.graph_lightning_graph_stream();
-        Ok(GraphLightningBootstrapExport {
+        let relational_stream = SkeinLightningRelationalStream::from_state(
+            self.store.commit_epoch(),
+            self.store.relational_state(),
+        )?;
+        let manifest = snapshot.skein_lightning_bootstrap_manifest(&relational_stream);
+        let graph_stream = snapshot.skein_lightning_graph_stream();
+        Ok(SkeinLightningBootstrapExport {
             snapshot,
             manifest,
             graph_stream,
+            relational_stream,
         })
     }
 
-    pub fn graph_lightning_initial_import_readiness(
+    pub fn skein_lightning_initial_import_readiness(
         &self,
-        manifest: &GraphLightningBootstrapManifest,
+        manifest: &SkeinLightningBootstrapManifest,
         projection_freshness: Option<&SearchProjectionFreshness>,
-    ) -> GraphLightningInitialImportReadiness {
-        graph_lightning_initial_import_readiness(
+    ) -> SkeinLightningInitialImportReadiness {
+        skein_lightning_initial_import_readiness(
             manifest,
             self.store.commit_epoch(),
             projection_freshness,
         )
     }
 
-    pub fn graph_lightning_initial_import_cutover_catch_up_report(
+    pub fn skein_lightning_initial_import_cutover_catch_up_report(
         &self,
-        session: &GraphLightningInitialImportSessionReport,
+        session: &SkeinLightningInitialImportSessionReport,
         live_projection_freshness: Option<&SearchProjectionFreshness>,
-    ) -> GraphLightningInitialImportCutoverCatchUpReport {
-        graph_lightning_initial_import_cutover_catch_up_report(
+    ) -> SkeinLightningInitialImportCutoverCatchUpReport {
+        skein_lightning_initial_import_cutover_catch_up_report(
             session,
             self.store.commit_epoch(),
             live_projection_freshness,
         )
     }
 
-    pub fn graph_lightning_initial_import_session_bundle_readiness(
+    pub fn skein_lightning_initial_import_session_bundle_readiness(
         &self,
-        source_bundle: &GraphLightningInitialImportSourceBundleReadiness,
-        session: &GraphLightningInitialImportSessionReport,
-        catch_up: Option<&GraphLightningInitialImportCutoverCatchUpReport>,
-    ) -> GraphLightningInitialImportSessionBundleReadiness {
-        graph_lightning_initial_import_session_bundle_readiness(source_bundle, session, catch_up)
+        source_bundle: &SkeinLightningInitialImportSourceBundleReadiness,
+        session: &SkeinLightningInitialImportSessionReport,
+        catch_up: Option<&SkeinLightningInitialImportCutoverCatchUpReport>,
+    ) -> SkeinLightningInitialImportSessionBundleReadiness {
+        skein_lightning_initial_import_session_bundle_readiness(source_bundle, session, catch_up)
     }
 
-    pub fn graph_lightning_initial_import_decode_durable_state(
+    pub fn skein_lightning_initial_import_decode_durable_state(
         &self,
-        manifest: &GraphLightningBootstrapManifest,
+        manifest: &SkeinLightningBootstrapManifest,
         raw: &str,
-    ) -> Result<GraphLightningInitialImportDurableStateCodecReport> {
-        graph_lightning_initial_import_decode_durable_state(manifest, raw)
+    ) -> Result<SkeinLightningInitialImportDurableStateCodecReport> {
+        skein_lightning_initial_import_decode_durable_state(manifest, raw)
     }
 
-    pub fn graph_lightning_initial_import_startup_readiness(
+    pub fn skein_lightning_initial_import_startup_readiness(
         &self,
         encoded_graph_stream: &str,
-        manifest: &GraphLightningBootstrapManifest,
+        encoded_relational_stream: &[u8],
+        manifest: &SkeinLightningBootstrapManifest,
         projection_batches: &[SearchProjectionDelta],
         target_projection_freshness: Option<&SearchProjectionFreshness>,
         live_projection_freshness: Option<&SearchProjectionFreshness>,
-        durable_state: Option<&GraphLightningInitialImportDurableState>,
-    ) -> GraphLightningInitialImportStartupReadinessReport {
-        graph_lightning_initial_import_startup_readiness(
+        durable_state: Option<&SkeinLightningInitialImportDurableState>,
+    ) -> SkeinLightningInitialImportStartupReadinessReport {
+        skein_lightning_initial_import_startup_readiness(
             encoded_graph_stream,
+            encoded_relational_stream,
             manifest,
             self.store.commit_epoch(),
             projection_batches,
@@ -1183,17 +1197,19 @@ impl Database {
         )
     }
 
-    pub fn graph_lightning_initial_import_recovery_readiness(
+    pub fn skein_lightning_initial_import_recovery_readiness(
         &self,
         encoded_graph_stream: &str,
-        manifest: &GraphLightningBootstrapManifest,
+        encoded_relational_stream: &[u8],
+        manifest: &SkeinLightningBootstrapManifest,
         projection_batches: &[SearchProjectionDelta],
         target_projection_freshness: Option<&SearchProjectionFreshness>,
         live_projection_freshness: Option<&SearchProjectionFreshness>,
         durable_state_payload: Option<&str>,
-    ) -> GraphLightningInitialImportRecoveryReadinessReport {
-        graph_lightning_initial_import_recovery_readiness(
+    ) -> SkeinLightningInitialImportRecoveryReadinessReport {
+        skein_lightning_initial_import_recovery_readiness(
             encoded_graph_stream,
+            encoded_relational_stream,
             manifest,
             self.store.commit_epoch(),
             projection_batches,
@@ -1203,15 +1219,17 @@ impl Database {
         )
     }
 
-    pub fn graph_lightning_initial_import_plan(
+    pub fn skein_lightning_initial_import_plan(
         &self,
         encoded_graph_stream: &str,
-        manifest: &GraphLightningBootstrapManifest,
+        encoded_relational_stream: &[u8],
+        manifest: &SkeinLightningBootstrapManifest,
         projection_freshness: Option<&SearchProjectionFreshness>,
-        checkpoint: Option<&GraphLightningInitialImportCheckpoint>,
-    ) -> GraphLightningInitialImportPlan {
-        graph_lightning_initial_import_plan(
+        checkpoint: Option<&SkeinLightningInitialImportCheckpoint>,
+    ) -> SkeinLightningInitialImportPlan {
+        skein_lightning_initial_import_plan(
             encoded_graph_stream,
+            encoded_relational_stream,
             manifest,
             self.store.commit_epoch(),
             projection_freshness,
@@ -1219,16 +1237,18 @@ impl Database {
         )
     }
 
-    pub fn graph_lightning_initial_import_plan_with_document_identities(
+    pub fn skein_lightning_initial_import_plan_with_document_identities(
         &self,
         encoded_graph_stream: &str,
-        manifest: &GraphLightningBootstrapManifest,
+        encoded_relational_stream: &[u8],
+        manifest: &SkeinLightningBootstrapManifest,
         projection_freshness: Option<&SearchProjectionFreshness>,
-        checkpoint: Option<&GraphLightningInitialImportCheckpoint>,
-        document_identities: &[GraphLightningInitialImportDocumentIdentity],
-    ) -> GraphLightningInitialImportPlan {
-        graph_lightning_initial_import_plan_with_document_identities(
+        checkpoint: Option<&SkeinLightningInitialImportCheckpoint>,
+        document_identities: &[SkeinLightningInitialImportDocumentIdentity],
+    ) -> SkeinLightningInitialImportPlan {
+        skein_lightning_initial_import_plan_with_document_identities(
             encoded_graph_stream,
+            encoded_relational_stream,
             manifest,
             self.store.commit_epoch(),
             projection_freshness,
@@ -1237,15 +1257,17 @@ impl Database {
         )
     }
 
-    pub fn graph_lightning_initial_import_apply(
+    pub fn skein_lightning_initial_import_apply(
         &mut self,
         encoded_graph_stream: &str,
-        manifest: &GraphLightningBootstrapManifest,
+        encoded_relational_stream: &[u8],
+        manifest: &SkeinLightningBootstrapManifest,
         projection_freshness: Option<&SearchProjectionFreshness>,
-        checkpoint: Option<&GraphLightningInitialImportCheckpoint>,
-    ) -> Result<GraphLightningInitialImportApplyReport> {
-        self.graph_lightning_initial_import_apply_internal(
+        checkpoint: Option<&SkeinLightningInitialImportCheckpoint>,
+    ) -> Result<SkeinLightningInitialImportApplyReport> {
+        self.skein_lightning_initial_import_apply_internal(
             encoded_graph_stream,
+            encoded_relational_stream,
             manifest,
             projection_freshness,
             checkpoint,
@@ -1253,16 +1275,18 @@ impl Database {
         )
     }
 
-    pub fn graph_lightning_initial_import_apply_with_document_identities(
+    pub fn skein_lightning_initial_import_apply_with_document_identities(
         &mut self,
         encoded_graph_stream: &str,
-        manifest: &GraphLightningBootstrapManifest,
+        encoded_relational_stream: &[u8],
+        manifest: &SkeinLightningBootstrapManifest,
         projection_freshness: Option<&SearchProjectionFreshness>,
-        checkpoint: Option<&GraphLightningInitialImportCheckpoint>,
-        document_identities: &[GraphLightningInitialImportDocumentIdentity],
-    ) -> Result<GraphLightningInitialImportApplyReport> {
-        self.graph_lightning_initial_import_apply_internal(
+        checkpoint: Option<&SkeinLightningInitialImportCheckpoint>,
+        document_identities: &[SkeinLightningInitialImportDocumentIdentity],
+    ) -> Result<SkeinLightningInitialImportApplyReport> {
+        self.skein_lightning_initial_import_apply_internal(
             encoded_graph_stream,
+            encoded_relational_stream,
             manifest,
             projection_freshness,
             checkpoint,
@@ -1270,53 +1294,77 @@ impl Database {
         )
     }
 
-    fn graph_lightning_initial_import_apply_internal(
+    fn skein_lightning_initial_import_apply_internal(
         &mut self,
         encoded_graph_stream: &str,
-        manifest: &GraphLightningBootstrapManifest,
+        encoded_relational_stream: &[u8],
+        manifest: &SkeinLightningBootstrapManifest,
         projection_freshness: Option<&SearchProjectionFreshness>,
-        checkpoint: Option<&GraphLightningInitialImportCheckpoint>,
-        document_identities: Option<&[GraphLightningInitialImportDocumentIdentity]>,
-    ) -> Result<GraphLightningInitialImportApplyReport> {
+        checkpoint: Option<&SkeinLightningInitialImportCheckpoint>,
+        document_identities: Option<&[SkeinLightningInitialImportDocumentIdentity]>,
+    ) -> Result<SkeinLightningInitialImportApplyReport> {
         self.ensure_writable()?;
         let mut blocker_codes = BTreeSet::new();
-        let plan = graph_lightning_initial_import_plan_with_document_identities(
+        let plan = skein_lightning_initial_import_plan_with_document_identities(
             encoded_graph_stream,
+            encoded_relational_stream,
             manifest,
             self.store.commit_epoch(),
             projection_freshness,
             checkpoint,
             document_identities,
         );
-        if !plan.ready_for_graph_import {
-            blocker_codes.insert("graph_lightning_graph_stream_not_import_ready".to_string());
+        if !plan.ready_for_database_import {
+            blocker_codes.insert("skein_lightning_database_streams_not_import_ready".to_string());
         }
-        let source_fingerprint = graph_lightning_initial_import_source_fingerprint_key(manifest);
+        let source_fingerprint = skein_lightning_initial_import_source_fingerprint_key(manifest);
         if let Some(imported_source_fingerprint) = self.store.initial_import_source_fingerprint() {
-            if imported_source_fingerprint == source_fingerprint {
-                return Ok(GraphLightningInitialImportApplyReport {
+            if imported_source_fingerprint == source_fingerprint && plan.ready_for_database_import {
+                let (relational_table_count, relational_row_count) =
+                    relational_state_counts(self.store.relational_state());
+                return Ok(SkeinLightningInitialImportApplyReport {
                     applied: false,
                     ready_for_cutover: plan.ready_for_cutover,
-                    graph_commit_epoch: self.store.commit_epoch(),
+                    database_commit_epoch: self.store.commit_epoch(),
                     node_count: self.store.basic_statistics().node_count as usize,
                     relationship_count: self.store.basic_statistics().relationship_count as usize,
+                    relational_table_count,
+                    relational_row_count,
                     plan,
                     blocker_codes: Vec::new(),
                 });
             }
-            blocker_codes
-                .insert("graph_lightning_initial_import_source_fingerprint_mismatch".to_string());
+            if imported_source_fingerprint != source_fingerprint {
+                blocker_codes.insert(
+                    "skein_lightning_initial_import_source_fingerprint_mismatch".to_string(),
+                );
+            }
         }
         let statistics = self.store.basic_statistics();
-        let target_empty = statistics.node_count == 0 && statistics.relationship_count == 0;
+        let target_empty = statistics.node_count == 0
+            && statistics.relationship_count == 0
+            && self.store.relational_state().is_empty()
+            && self.catalog.is_empty();
         if !target_empty {
-            blocker_codes.insert("graph_lightning_initial_import_target_not_empty".to_string());
+            blocker_codes.insert("skein_lightning_initial_import_target_not_empty".to_string());
         }
         let snapshot = if blocker_codes.is_empty() {
-            Some(parse_graph_lightning_graph_stream_export(
+            Some(parse_skein_lightning_graph_stream_export(
                 encoded_graph_stream,
                 Some(manifest),
             )?)
+        } else {
+            None
+        };
+        let relational_state = if blocker_codes.is_empty() {
+            Some(
+                skein_storage::decode_relational_checkpoint(
+                    encoded_relational_stream,
+                    skein_storage::RelationalDecodeLimits::checkpoint(),
+                )
+                .map_err(|error| SkeinError::Storage(error.to_string()))?
+                .state,
+            )
         } else {
             None
         };
@@ -1324,24 +1372,30 @@ impl Database {
             for node in &snapshot.nodes {
                 if node.labels.len() != 1 {
                     blocker_codes.insert(
-                        "graph_lightning_initial_import_multi_label_node_unsupported".to_string(),
+                        "skein_lightning_initial_import_multi_label_node_unsupported".to_string(),
                     );
                     break;
                 }
             }
         }
         if !blocker_codes.is_empty() {
-            return Ok(GraphLightningInitialImportApplyReport {
+            let (relational_table_count, relational_row_count) =
+                relational_state_counts(self.store.relational_state());
+            return Ok(SkeinLightningInitialImportApplyReport {
                 applied: false,
                 ready_for_cutover: false,
-                graph_commit_epoch: self.store.commit_epoch(),
+                database_commit_epoch: self.store.commit_epoch(),
                 node_count: self.store.basic_statistics().node_count as usize,
                 relationship_count: self.store.basic_statistics().relationship_count as usize,
+                relational_table_count,
+                relational_row_count,
                 plan,
                 blocker_codes: blocker_codes.into_iter().collect(),
             });
         }
         let snapshot = snapshot.expect("snapshot should be available without import blockers");
+        let relational_state =
+            relational_state.expect("relational state should be available without import blockers");
         let stable_id_mapping = StoreStableIdMapping {
             node_stable_ids: snapshot
                 .nodes
@@ -1388,37 +1442,43 @@ impl Database {
             })
             .collect::<Result<Vec<GraphSnapshotRelationshipImport>>>()?;
         self.store
-            .import_graph_snapshot_rows_with_source_fingerprint(
+            .import_skein_snapshot_rows_with_source_fingerprint(
                 &mut self.catalog,
                 stable_id_mapping,
                 source_fingerprint,
                 node_rows,
                 relationship_rows,
+                relational_state,
             )?;
-        let updated_plan = graph_lightning_initial_import_plan_with_document_identities(
+        let updated_plan = skein_lightning_initial_import_plan_with_document_identities(
             encoded_graph_stream,
+            encoded_relational_stream,
             manifest,
             self.store.commit_epoch(),
             projection_freshness,
             checkpoint,
             document_identities,
         );
-        Ok(GraphLightningInitialImportApplyReport {
+        let (relational_table_count, relational_row_count) =
+            relational_state_counts(self.store.relational_state());
+        Ok(SkeinLightningInitialImportApplyReport {
             applied: true,
             ready_for_cutover: updated_plan.ready_for_cutover,
-            graph_commit_epoch: self.store.commit_epoch(),
+            database_commit_epoch: self.store.commit_epoch(),
             node_count: self.store.basic_statistics().node_count as usize,
             relationship_count: self.store.basic_statistics().relationship_count as usize,
+            relational_table_count,
+            relational_row_count,
             plan: updated_plan,
             blocker_codes: Vec::new(),
         })
     }
 
-    pub fn graph_lightning_bootstrap_export_background_work_plan(
+    pub fn skein_lightning_bootstrap_export_background_work_plan(
         &self,
         hint: BackgroundWorkHint,
     ) -> Option<BackgroundWorkPlan> {
-        let estimated_operations = self.graph_lightning_bootstrap_export_estimated_operations();
+        let estimated_operations = self.skein_lightning_bootstrap_export_estimated_operations();
         if estimated_operations == 0 {
             return None;
         }
@@ -1429,36 +1489,36 @@ impl Database {
         ))
     }
 
-    pub fn prepare_background_graph_lightning_bootstrap_export(
+    pub fn prepare_background_skein_lightning_bootstrap_export(
         &mut self,
         policy: &LocalQosPolicy,
         state: &LocalQosState,
-    ) -> Result<GraphLightningBootstrapExport> {
+    ) -> Result<SkeinLightningBootstrapExport> {
         self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
-        let estimated_operations = self.graph_lightning_bootstrap_export_estimated_operations();
+        let estimated_operations = self.skein_lightning_bootstrap_export_estimated_operations();
         if estimated_operations == 0 {
-            return self.prepare_graph_lightning_bootstrap_export();
+            return self.prepare_skein_lightning_bootstrap_export();
         }
         let request = WorkRequest::background(WorkClass::Import, estimated_operations);
         match policy.admit(state, &request) {
-            QosAdmission::Admit => self.prepare_graph_lightning_bootstrap_export(),
+            QosAdmission::Admit => self.prepare_skein_lightning_bootstrap_export(),
             QosAdmission::Defer { reason, .. } => Err(SkeinError::Storage(format!(
-                "background graph lightning bootstrap export deferred: {reason}"
+                "background Skein Lightning bootstrap export deferred: {reason}"
             ))),
             QosAdmission::Reject { reason, .. } => Err(SkeinError::Storage(format!(
-                "background graph lightning bootstrap export rejected: {reason}"
+                "background Skein Lightning bootstrap export rejected: {reason}"
             ))),
         }
     }
 
-    pub fn prepare_scheduled_background_graph_lightning_bootstrap_export(
+    pub fn prepare_scheduled_background_skein_lightning_bootstrap_export(
         &mut self,
         scheduler: &mut LocalQosScheduler,
-    ) -> Result<GraphLightningBootstrapExport> {
+    ) -> Result<SkeinLightningBootstrapExport> {
         self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
-        let estimated_operations = self.graph_lightning_bootstrap_export_estimated_operations();
+        let estimated_operations = self.skein_lightning_bootstrap_export_estimated_operations();
         if estimated_operations == 0 {
-            return self.prepare_graph_lightning_bootstrap_export();
+            return self.prepare_skein_lightning_bootstrap_export();
         }
         self.configure_qos_scheduler_telemetry(scheduler);
         let permit = match scheduler.try_start(WorkRequest::background(
@@ -1468,28 +1528,39 @@ impl Database {
             Ok(permit) => permit,
             Err(QosAdmission::Defer { reason, .. }) => {
                 return Err(SkeinError::Storage(format!(
-                    "background graph lightning bootstrap export deferred: {reason}"
+                    "background Skein Lightning bootstrap export deferred: {reason}"
                 )));
             }
             Err(QosAdmission::Reject { reason, .. }) => {
                 return Err(SkeinError::Storage(format!(
-                    "background graph lightning bootstrap export rejected: {reason}"
+                    "background Skein Lightning bootstrap export rejected: {reason}"
                 )));
             }
             Err(QosAdmission::Admit) => unreachable!("admitted work returns a permit"),
         };
 
-        let result = self.prepare_graph_lightning_bootstrap_export();
+        let result = self.prepare_skein_lightning_bootstrap_export();
         scheduler.finish_with_outcome(permit, result.is_ok());
         result
     }
 
-    fn graph_lightning_bootstrap_export_estimated_operations(&self) -> usize {
+    fn skein_lightning_bootstrap_export_estimated_operations(&self) -> usize {
         let statistics = self.store.statistics();
-        let total = statistics
+        let graph_total = statistics
             .node_count
             .saturating_add(statistics.relationship_count);
-        usize::try_from(total).unwrap_or(usize::MAX)
+        let relational_total = self
+            .store
+            .relational_state()
+            .table_schemas()
+            .map(|schema| {
+                1usize.saturating_add(self.store.relational_state().row_count(&schema.name))
+            })
+            .fold(0usize, usize::saturating_add)
+            .saturating_add(self.store.relational_state().overflow_segment_count());
+        usize::try_from(graph_total)
+            .unwrap_or(usize::MAX)
+            .saturating_add(relational_total)
     }
 
     pub fn storage_version(&self) -> &'static str {
@@ -2370,12 +2441,12 @@ impl Database {
             }
         }
 
-        if options.include_graph_lightning_bootstrap_export
+        if options.include_skein_lightning_bootstrap_export
             && let Some(plan) =
-                self.graph_lightning_bootstrap_export_background_work_plan(options.hint.clone())
+                self.skein_lightning_bootstrap_export_background_work_plan(options.hint.clone())
         {
             candidates.push(BackgroundMaintenanceCandidate::new(
-                BackgroundMaintenanceKind::GraphLightningBootstrapExport,
+                BackgroundMaintenanceKind::SkeinLightningBootstrapExport,
                 plan,
             ));
         }
@@ -18897,12 +18968,21 @@ fn single_import_label(node: &CanonicalSnapshotNode) -> Result<String> {
     match node.labels.as_slice() {
         [label] => Ok(label.clone()),
         [] => Err(SkeinError::Storage(
-            "graph lightning initial import node has no label".to_string(),
+            "Skein Lightning initial import node has no label".to_string(),
         )),
         _ => Err(SkeinError::Storage(
-            "graph lightning initial import multi-label node is unsupported".to_string(),
+            "Skein Lightning initial import multi-label node is unsupported".to_string(),
         )),
     }
+}
+
+fn relational_state_counts(state: &skein_storage::RelationalState) -> (usize, usize) {
+    let table_count = state.table_schemas().count();
+    let row_count = state
+        .table_schemas()
+        .map(|schema| state.row_count(&schema.name))
+        .sum();
+    (table_count, row_count)
 }
 
 #[cfg(test)]

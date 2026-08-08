@@ -172,6 +172,16 @@ pub struct Catalog {
 }
 
 impl Catalog {
+    pub fn is_empty(&self) -> bool {
+        self.labels_by_name.is_empty()
+            && self.rel_types_by_name.is_empty()
+            && self.tables_by_key.is_empty()
+            && self.properties_by_key.is_empty()
+            && self.property_indexes_by_key.is_empty()
+            && self.composite_property_indexes_by_key.is_empty()
+            && self.constraints_by_key.is_empty()
+    }
+
     pub fn get_or_create_label(&mut self, name: &str) -> LabelId {
         if let Some(id) = self.labels_by_name.get(name) {
             return *id;

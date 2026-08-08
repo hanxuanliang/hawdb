@@ -118,7 +118,7 @@ pub struct BackgroundMaintenanceOptions {
     pub include_search_projection_graph_delta_freshness: bool,
     pub include_search_projection_rebuild: bool,
     pub include_search_projection_metadata_repair: bool,
-    pub include_graph_lightning_bootstrap_export: bool,
+    pub include_skein_lightning_bootstrap_export: bool,
     pub include_external_content_artifact_jobs: bool,
     pub external_content_artifact_estimated_operations: usize,
     pub search_projection_graph_delta: Option<SearchProjectionGraphDeltaRequest>,
@@ -133,7 +133,7 @@ impl Default for BackgroundMaintenanceOptions {
             include_search_projection_graph_delta_freshness: true,
             include_search_projection_rebuild: true,
             include_search_projection_metadata_repair: true,
-            include_graph_lightning_bootstrap_export: true,
+            include_skein_lightning_bootstrap_export: true,
             include_external_content_artifact_jobs: true,
             external_content_artifact_estimated_operations: 1,
             search_projection_graph_delta: None,
@@ -222,7 +222,7 @@ pub enum BackgroundMaintenanceKind {
     SearchProjectionGraphDelta,
     SearchProjectionRebuild,
     SearchProjectionMetadataRepair,
-    GraphLightningBootstrapExport,
+    SkeinLightningBootstrapExport,
     ExternalContentArtifactJob,
 }
 
@@ -238,8 +238,8 @@ impl BackgroundMaintenanceKind {
             BackgroundMaintenanceKind::SearchProjectionMetadataRepair => {
                 "search_projection_metadata_repair"
             }
-            BackgroundMaintenanceKind::GraphLightningBootstrapExport => {
-                "graph_lightning_bootstrap_export"
+            BackgroundMaintenanceKind::SkeinLightningBootstrapExport => {
+                "skein_lightning_bootstrap_export"
             }
             BackgroundMaintenanceKind::ExternalContentArtifactJob => {
                 "external_content_artifact_job"
@@ -262,8 +262,8 @@ impl FromStr for BackgroundMaintenanceKind {
             "search_projection_metadata_repair" => {
                 Ok(BackgroundMaintenanceKind::SearchProjectionMetadataRepair)
             }
-            "graph_lightning_bootstrap_export" => {
-                Ok(BackgroundMaintenanceKind::GraphLightningBootstrapExport)
+            "skein_lightning_bootstrap_export" => {
+                Ok(BackgroundMaintenanceKind::SkeinLightningBootstrapExport)
             }
             "external_content_artifact_job" => {
                 Ok(BackgroundMaintenanceKind::ExternalContentArtifactJob)

@@ -238,7 +238,7 @@ jobs:
           grep -q '"protocol": "skein-background-maintenance-report"' "$root/background.json"
           grep -q '"total_candidates": 4' "$root/background.json"
           grep -q '"kind": "search_projection_graph_delta"' "$root/background.json"
-          grep -q '"kind": "graph_lightning_bootstrap_export"' "$root/background.json"
+          grep -q '"kind": "skein_lightning_bootstrap_export"' "$root/background.json"
           grep -q '"priority": "background"' "$root/background.json"
           grep -q '"admission": "admit"' "$root/background.json"
 

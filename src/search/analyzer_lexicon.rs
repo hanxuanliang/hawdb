@@ -24,8 +24,8 @@ pub(super) const CORE_SEMANTIC_ALIAS_RULES: &[(&[&str], &[&str])] = &[
     (&["full_text", "full_text_search", "text_search"], &["fts"]),
     (&["fts"], &["full_text_search", "text_search"]),
     (
-        &["bulk_graph_import", "bulk_import", "graph_import"],
-        &["graph_lightning"],
+        &["bulk_import", "database_import", "skein_import"],
+        &["skein_lightning"],
     ),
     (
         &["checkpoint", "checkpointed"],
@@ -33,12 +33,16 @@ pub(super) const CORE_SEMANTIC_ALIAS_RULES: &[(&[&str], &[&str])] = &[
     ),
     (&["content_stream", "contentstream"], &["value_stream"]),
     (
+        &["relational_stream", "relationalstream", "sql_stream"],
+        &["value_stream"],
+    ),
+    (
         &["graph_export", "graph_stream", "graphstream"],
         &["graphstream"],
     ),
     (
-        &["graph_lightning", "graphlightning", "lightning_import"],
-        &["bulk_graph_import", "graph_import"],
+        &["skein_lightning", "lightning_import"],
+        &["bulk_import", "database_import"],
     ),
     (&["graphstream"], &["graph_stream", "graph_export"]),
     (&["hybrid_retrieval"], &["hybrid_retrieve", "hybrid_search"]),

@@ -9207,26 +9207,26 @@ mod tests {
         let mut index = SearchIndex::in_memory();
         index
             .upsert(SearchDocument {
-                id: "graph-lightning".to_string(),
-                title: "GraphLightning publishes GraphStream and ContentStream".to_string(),
+                id: "skein-lightning".to_string(),
+                title: "SkeinLightning publishes GraphStream and RelationalStream".to_string(),
                 content: "Checkpointed snapshots track projection freshness".to_string(),
                 embedding: None,
                 metadata: BTreeMap::new(),
             })
             .unwrap();
 
-        let import_hits = index.search("bulk graph import", None, SearchMode::Text, 10);
+        let import_hits = index.search("database import", None, SearchMode::Text, 10);
         let export_hits = index.search("graph export", None, SearchMode::Text, 10);
         let value_hits = index.search("value stream", None, SearchMode::Text, 10);
         let checkpoint_hits =
             index.search_with_report("checkpoint freshness", None, SearchMode::Text, 10);
         let staleness_hits = index.search("projection staleness", None, SearchMode::Text, 10);
 
-        assert_eq!(import_hits[0].id, "graph-lightning");
-        assert_eq!(export_hits[0].id, "graph-lightning");
-        assert_eq!(value_hits[0].id, "graph-lightning");
-        assert_eq!(checkpoint_hits.hits[0].id, "graph-lightning");
-        assert_eq!(staleness_hits[0].id, "graph-lightning");
+        assert_eq!(import_hits[0].id, "skein-lightning");
+        assert_eq!(export_hits[0].id, "skein-lightning");
+        assert_eq!(value_hits[0].id, "skein-lightning");
+        assert_eq!(checkpoint_hits.hits[0].id, "skein-lightning");
+        assert_eq!(staleness_hits[0].id, "skein-lightning");
         assert!(checkpoint_hits.hits[0]
             .matched_terms
             .iter()

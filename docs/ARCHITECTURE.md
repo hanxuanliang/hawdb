@@ -927,14 +927,23 @@ the QoS ranker prioritize stale graph-derived projection maintenance by expected
 value. This keeps FTS/vector projection maintenance incremental without writing
 search state into the graph WAL.
 
-Graph Lightning bootstrap export follows the same resource boundary for
-embedded deployments. A direct caller can still request
-`prepare_graph_lightning_bootstrap_export` without local background admission,
+Skein Lightning bootstrap export follows the same resource boundary for
+embedded deployments. One export pins a shared database commit epoch and emits
+two authoritative logical streams: canonical graph rows and the complete
+relational checkpoint, including SQL schemas, rows, and overflow values. Initial
+import validates both streams before writing and publishes their contents in one
+WAL batch. A corrupt or mismatched stream therefore cannot expose a graph-only
+or relational-only target. WAL history, physical pages, statistics, and search
+or analytics projection artifacts are excluded and rebuilt through their normal
+maintenance paths.
+
+A direct caller can still request
+`prepare_skein_lightning_bootstrap_export` without local background admission,
 but caller-owned pre-upload or background import loops can first ask
-`graph_lightning_bootstrap_export_background_work_plan` for an `Import` lane
+`skein_lightning_bootstrap_export_background_work_plan` for an `Import` lane
 estimate and then execute through the background or scheduled background export
 facades. The same plan can appear in `background_maintenance_candidates`, so a
-caller-owned multi-queue loop can rank Graph Lightning pre-export against
+caller-owned multi-queue loop can rank Skein Lightning pre-export against
 projection, parser, schema, and analytics maintenance before attempting
 admission. Deferred background export does not generate stable-ID mapping files,
 so QoS rejection cannot create partial import state.

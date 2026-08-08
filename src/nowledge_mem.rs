@@ -14,21 +14,21 @@ use crate::search_projection_evidence::{
 use crate::{
     cypher, BackgroundMaintenanceKind, BackgroundMaintenanceOptions, BackgroundMaintenanceSummary,
     BackgroundWorkHint, BackgroundWorkPlan, BoundedReadQueryOutput, Database, DatabaseConfig,
-    GraphLightningBootstrapManifest, GraphLightningInitialImportApplyReport,
-    GraphLightningInitialImportCheckpoint, GraphLightningInitialImportCutoverCatchUpReport,
-    GraphLightningInitialImportDocumentIdentity,
-    GraphLightningInitialImportRecoveryReadinessReport, GraphRagGeneratedQuery,
-    GraphRagSchemaContext, GraphRagSchemaContextOptions, KnowledgeEntityDeleteBatchOutput,
-    KnowledgeEntityDeleteBatchRequest, KnowledgeMemoryEvolvesCreateBatchOutput,
-    KnowledgeMemoryEvolvesCreateBatchRequest, KnowledgeMemoryLifecycleBatchOutput,
-    KnowledgeMemoryLifecycleBatchRequest, KnowledgeRetrievalOutput, KnowledgeRetrievalRequest,
-    LocalQosPolicy, LocalQosScheduler, LocalQosState, NowledgeGraphStatement, PlanCacheLookup,
-    QueryOutput, QueryStreamOptions, QueryStreamReport, ReadExecutionProfile, Result,
-    ScheduledSearchProjectionCatchUpReport, SearchDocument, SearchIndex,
-    SearchProjectionCatchUpReport, SearchProjectionChangefeedReadiness,
-    SearchProjectionChangefeedStatus, SearchProjectionDelta, SearchProjectionDeltaReport,
-    SearchProjectionFreshness, SearchProjectionGraphDeltaRequest, SearchProjectionMutationId,
-    SearchProjectionProbeOptions, SearchResultSet, SkeinError, SlowQueryLogRecordSummary,
+    GraphRagGeneratedQuery, GraphRagSchemaContext, GraphRagSchemaContextOptions,
+    KnowledgeEntityDeleteBatchOutput, KnowledgeEntityDeleteBatchRequest,
+    KnowledgeMemoryEvolvesCreateBatchOutput, KnowledgeMemoryEvolvesCreateBatchRequest,
+    KnowledgeMemoryLifecycleBatchOutput, KnowledgeMemoryLifecycleBatchRequest,
+    KnowledgeRetrievalOutput, KnowledgeRetrievalRequest, LocalQosPolicy, LocalQosScheduler,
+    LocalQosState, NowledgeGraphStatement, PlanCacheLookup, QueryOutput, QueryStreamOptions,
+    QueryStreamReport, ReadExecutionProfile, Result, ScheduledSearchProjectionCatchUpReport,
+    SearchDocument, SearchIndex, SearchProjectionCatchUpReport,
+    SearchProjectionChangefeedReadiness, SearchProjectionChangefeedStatus, SearchProjectionDelta,
+    SearchProjectionDeltaReport, SearchProjectionFreshness, SearchProjectionGraphDeltaRequest,
+    SearchProjectionMutationId, SearchProjectionProbeOptions, SearchResultSet, SkeinError,
+    SkeinLightningBootstrapManifest, SkeinLightningInitialImportApplyReport,
+    SkeinLightningInitialImportCheckpoint, SkeinLightningInitialImportCutoverCatchUpReport,
+    SkeinLightningInitialImportDocumentIdentity,
+    SkeinLightningInitialImportRecoveryReadinessReport, SlowQueryLogRecordSummary,
     StorageResourceProfileLimits, StorageResourceProfileReport, TelemetrySink, Value,
     STORAGE_RESOURCE_PROFILE_PROTOCOL,
 };
@@ -1097,7 +1097,7 @@ impl NowledgeMemCutoverControlsReport {
     fn from_status_with_initial_import_cutover_catch_up(
         controls: NowledgeMemCutoverControls,
         production_status: NowledgeMemProductionStatus,
-        initial_import_cutover_catch_up: Option<&GraphLightningInitialImportCutoverCatchUpReport>,
+        initial_import_cutover_catch_up: Option<&SkeinLightningInitialImportCutoverCatchUpReport>,
     ) -> Self {
         let graph_read_selected_skein = controls.graph_reads.selects_skein();
         let search_read_selected_skein = controls.search_reads.selects_skein();
@@ -8128,26 +8128,31 @@ impl NowledgeMemEmbeddedStoreHandle {
         operation(&mut transaction)
     }
 
-    pub fn graph_lightning_initial_import_apply_with_document_identities(
+    pub fn skein_lightning_initial_import_apply_with_document_identities(
         &self,
         encoded_graph_stream: &str,
-        manifest: &GraphLightningBootstrapManifest,
+        encoded_relational_stream: &[u8],
+        manifest: &SkeinLightningBootstrapManifest,
         projection_freshness: Option<&SearchProjectionFreshness>,
-        checkpoint: Option<&GraphLightningInitialImportCheckpoint>,
-        document_identities: &[GraphLightningInitialImportDocumentIdentity],
-    ) -> Result<GraphLightningInitialImportApplyReport> {
-        let estimated_input_bytes = encoded_graph_stream.len().saturating_add(
-            document_identities
-                .iter()
-                .map(|identity| identity.document_id.len())
-                .sum::<usize>(),
-        );
+        checkpoint: Option<&SkeinLightningInitialImportCheckpoint>,
+        document_identities: &[SkeinLightningInitialImportDocumentIdentity],
+    ) -> Result<SkeinLightningInitialImportApplyReport> {
+        let estimated_input_bytes = encoded_graph_stream
+            .len()
+            .saturating_add(encoded_relational_stream.len())
+            .saturating_add(
+                document_identities
+                    .iter()
+                    .map(|identity| identity.document_id.len())
+                    .sum::<usize>(),
+            );
         let _permit = self.admit_typed_maintenance(estimated_input_bytes, 1)?;
         self.write_store()?
             .graph_mut()
             .database_mut()
-            .graph_lightning_initial_import_apply_with_document_identities(
+            .skein_lightning_initial_import_apply_with_document_identities(
                 encoded_graph_stream,
+                encoded_relational_stream,
                 manifest,
                 projection_freshness,
                 checkpoint,
@@ -8498,7 +8503,7 @@ impl NowledgeMemEmbeddedStoreHandle {
         &self,
         controls: NowledgeMemCutoverControls,
         route_ownership: Option<&NowledgeMemRouteOwnershipReadinessReport>,
-        initial_import_cutover_catch_up: Option<&GraphLightningInitialImportCutoverCatchUpReport>,
+        initial_import_cutover_catch_up: Option<&SkeinLightningInitialImportCutoverCatchUpReport>,
     ) -> Result<NowledgeMemCutoverControlsReport> {
         Ok(self
             .read_store()?
@@ -8513,7 +8518,7 @@ impl NowledgeMemEmbeddedStoreHandle {
         &self,
         controls: NowledgeMemCutoverControls,
         route_ownership: Option<&NowledgeMemRouteOwnershipReadinessReport>,
-        initial_import_recovery: Option<&GraphLightningInitialImportRecoveryReadinessReport>,
+        initial_import_recovery: Option<&SkeinLightningInitialImportRecoveryReadinessReport>,
     ) -> Result<NowledgeMemCutoverControlsReport> {
         Ok(self
             .read_store()?
@@ -8538,7 +8543,7 @@ impl NowledgeMemEmbeddedStoreHandle {
         &self,
         controls: NowledgeMemCutoverControls,
         route_ownership: Option<&NowledgeMemRouteOwnershipReadinessReport>,
-        initial_import_cutover_catch_up: Option<&GraphLightningInitialImportCutoverCatchUpReport>,
+        initial_import_cutover_catch_up: Option<&SkeinLightningInitialImportCutoverCatchUpReport>,
     ) -> Result<serde_json::Value> {
         Ok(self
             .read_store()?
@@ -8982,7 +8987,7 @@ impl NowledgeMemEmbeddedStore {
         delta: SearchProjectionDelta,
         import_source_graph_commit_epoch: u64,
     ) -> Result<SearchProjectionDeltaReport> {
-        // The frozen legacy source epoch is provenance only. The graph import
+        // The frozen legacy source epoch is provenance only. The database import
         // created a new local WAL history, so the projection cursor must be
         // stamped from that local history before it is made durable.
         let local_graph_commit_epoch = self.graph.database().commit_epoch();
@@ -9093,7 +9098,7 @@ impl NowledgeMemEmbeddedStore {
         &self,
         controls: NowledgeMemCutoverControls,
         route_ownership: Option<&NowledgeMemRouteOwnershipReadinessReport>,
-        initial_import_cutover_catch_up: Option<&GraphLightningInitialImportCutoverCatchUpReport>,
+        initial_import_cutover_catch_up: Option<&SkeinLightningInitialImportCutoverCatchUpReport>,
     ) -> NowledgeMemCutoverControlsReport {
         NowledgeMemCutoverControlsReport::from_status_with_initial_import_cutover_catch_up(
             controls,
@@ -9106,7 +9111,7 @@ impl NowledgeMemEmbeddedStore {
         &self,
         controls: NowledgeMemCutoverControls,
         route_ownership: Option<&NowledgeMemRouteOwnershipReadinessReport>,
-        initial_import_recovery: Option<&GraphLightningInitialImportRecoveryReadinessReport>,
+        initial_import_recovery: Option<&SkeinLightningInitialImportRecoveryReadinessReport>,
     ) -> NowledgeMemCutoverControlsReport {
         let recovery_ready = initial_import_recovery.is_some_and(|report| {
             report.ready
@@ -9149,7 +9154,7 @@ impl NowledgeMemEmbeddedStore {
         &self,
         controls: NowledgeMemCutoverControls,
         route_ownership: Option<&NowledgeMemRouteOwnershipReadinessReport>,
-        initial_import_cutover_catch_up: Option<&GraphLightningInitialImportCutoverCatchUpReport>,
+        initial_import_cutover_catch_up: Option<&SkeinLightningInitialImportCutoverCatchUpReport>,
     ) -> serde_json::Value {
         self.cutover_controls_report_with_initial_import_cutover_catch_up(
             controls,
@@ -12611,16 +12616,16 @@ mod tests {
     use crate::Value;
     use crate::{
         BackgroundMaintenanceKind, BackgroundMaintenanceOptions, BackgroundWorkHint, Database,
-        DatabaseConfig, GraphLightningInitialImportCheckpoint,
-        GraphLightningInitialImportCutoverCatchUpReport,
-        GraphLightningInitialImportDocumentIdentity, GraphRagQueryBinding, GraphRagQueryDraft,
-        GraphRagQueryPattern, GraphRagQueryPredicate, GraphRagQueryPredicateOperator,
-        GraphRagQueryProjection, GraphRagSchemaContextOptions, KnowledgeCandidateScoringPolicy,
-        KnowledgeRetrievalRequest, LocalQosPolicy, LocalQosScheduler, LocalQosState,
-        NowledgeGraphStatement, ProductionEvidenceBinding, ProductionQualificationIdentity,
-        RecoveryMode, SearchEmbeddingManifest, SearchIndex, SearchMode, SearchProjectionDelta,
+        DatabaseConfig, GraphRagQueryBinding, GraphRagQueryDraft, GraphRagQueryPattern,
+        GraphRagQueryPredicate, GraphRagQueryPredicateOperator, GraphRagQueryProjection,
+        GraphRagSchemaContextOptions, KnowledgeCandidateScoringPolicy, KnowledgeRetrievalRequest,
+        LocalQosPolicy, LocalQosScheduler, LocalQosState, NowledgeGraphStatement,
+        ProductionEvidenceBinding, ProductionQualificationIdentity, RecoveryMode,
+        SearchEmbeddingManifest, SearchIndex, SearchMode, SearchProjectionDelta,
         SearchProjectionFreshness, SearchProjectionKind, SearchProjectionProbeOptions,
-        SearchProjectionRow, StorageRecoveryReport, StorageResidencyMode,
+        SearchProjectionRow, SkeinLightningInitialImportCheckpoint,
+        SkeinLightningInitialImportCutoverCatchUpReport,
+        SkeinLightningInitialImportDocumentIdentity, StorageRecoveryReport, StorageResidencyMode,
         StorageResourceProfileLimits, VectorRecallValidationOptions, VectorRecallValidationReport,
         WorkClass, PRODUCTION_QUALIFICATION_POLICY_VERSION, VECTOR_RECALL_VALIDATION_PROTOCOL,
     };
@@ -17619,8 +17624,8 @@ mod tests {
     }
 
     fn ready_initial_import_cutover_catch_up_report(
-    ) -> GraphLightningInitialImportCutoverCatchUpReport {
-        GraphLightningInitialImportCutoverCatchUpReport {
+    ) -> SkeinLightningInitialImportCutoverCatchUpReport {
+        SkeinLightningInitialImportCutoverCatchUpReport {
             ready: true,
             session_ready_for_cutover: true,
             durable_state_present: true,
@@ -17640,13 +17645,13 @@ mod tests {
     }
 
     fn ready_initial_import_recovery_report(
-    ) -> crate::GraphLightningInitialImportRecoveryReadinessReport {
+    ) -> crate::SkeinLightningInitialImportRecoveryReadinessReport {
         let mut source = Database::new();
         source
             .query("CREATE (:Memory {id: 'import-root'})-[:LINKS {id: 'import-rel'}]->(:Entity {id: 'import-entity'})")
             .unwrap();
-        let export = source.prepare_graph_lightning_bootstrap_export().unwrap();
-        let checkpoint = GraphLightningInitialImportCheckpoint {
+        let export = source.prepare_skein_lightning_bootstrap_export().unwrap();
+        let checkpoint = SkeinLightningInitialImportCheckpoint {
             protocol_version: 1,
             import_id: "import-controls".to_string(),
             task_id: "import-controls-task".to_string(),
@@ -17655,6 +17660,9 @@ mod tests {
             schema_checksum: export.manifest.schema_checksum,
             graph_stream_checksum: export.manifest.graph_stream_checksum,
             graph_stream_byte_len: export.manifest.graph_stream_byte_len,
+            relational_stream_checksum: export.manifest.relational_stream_checksum,
+            relational_stream_byte_len: export.manifest.relational_stream_byte_len,
+            manifest_database_commit_epoch: export.manifest.database_commit_epoch,
             manifest_graph_commit_epoch: export.manifest.graph_commit_epoch,
             applied_graph_commit_epoch: export.manifest.graph_commit_epoch,
             applied_search_projection_commit_epoch: Some(export.manifest.graph_commit_epoch),
@@ -17672,12 +17680,12 @@ mod tests {
             SearchProjectionKind::Community,
         ]
         .into_iter()
-        .map(|kind| GraphLightningInitialImportDocumentIdentity {
+        .map(|kind| SkeinLightningInitialImportDocumentIdentity {
             kind,
             document_id: format!("{}:import", kind.as_str()),
         })
         .collect::<Vec<_>>();
-        let durable_state = crate::graph_lightning_initial_import_durable_state_report(
+        let durable_state = crate::skein_lightning_initial_import_durable_state_report(
             &export.manifest,
             &checkpoint,
             &identities,
@@ -17685,7 +17693,7 @@ mod tests {
         .state
         .expect("expected persistable durable state");
         let durable_state_payload =
-            crate::graph_lightning_initial_import_encode_durable_state(&durable_state).unwrap();
+            crate::skein_lightning_initial_import_encode_durable_state(&durable_state).unwrap();
         let projection_rows = identities
             .iter()
             .map(|identity| SearchProjectionRow {
@@ -17719,8 +17727,9 @@ mod tests {
             embedding_dimension: None,
         };
 
-        let recovery = source.graph_lightning_initial_import_recovery_readiness(
+        let recovery = source.skein_lightning_initial_import_recovery_readiness(
             &export.graph_stream.encoded,
+            &export.relational_stream.encoded,
             &export.manifest,
             &[projection_delta],
             Some(&freshness),
@@ -20141,7 +20150,7 @@ mod tests {
                 include_property_index_projection: false,
                 include_search_projection_rebuild: false,
                 include_search_projection_metadata_repair: false,
-                include_graph_lightning_bootstrap_export: false,
+                include_skein_lightning_bootstrap_export: false,
                 include_external_content_artifact_jobs: false,
                 ..BackgroundMaintenanceOptions::default()
             },
@@ -20182,7 +20191,7 @@ mod tests {
                 include_property_index_projection: false,
                 include_search_projection_rebuild: false,
                 include_search_projection_metadata_repair: false,
-                include_graph_lightning_bootstrap_export: false,
+                include_skein_lightning_bootstrap_export: false,
                 include_external_content_artifact_jobs: false,
                 ..BackgroundMaintenanceOptions::default()
             },
@@ -20233,7 +20242,7 @@ mod tests {
                 include_search_projection_graph_delta_freshness: false,
                 include_search_projection_rebuild: false,
                 include_search_projection_metadata_repair: false,
-                include_graph_lightning_bootstrap_export: false,
+                include_skein_lightning_bootstrap_export: false,
                 include_external_content_artifact_jobs: false,
                 ..BackgroundMaintenanceOptions::default()
             },

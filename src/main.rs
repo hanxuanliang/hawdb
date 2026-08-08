@@ -37,11 +37,11 @@ use skein::{
     CanonicalGraphSnapshotValidation, CanonicalSnapshotIdentityAudit, CompatibilityCheck,
     CompatibilityRollbackEvidence, CompatibilityShadowReport, CompatibilityShadowStatus,
     CypherFixtureCheck, CypherFixtureStatement, Database, DatabaseConfig, ExpectedRows,
-    ExternalShadowCommand, ExternalShadowReady, GraphLightningBootstrapManifest,
-    NowledgeCypherMigrationGateJsonOptions, NowledgeMemGraph, NowledgeMemGraphMode,
-    NowledgeMemReadOptions, ProjectedGraphFixtureCheck, RecoveryMode, Result, SearchIndex,
-    SkeinError, StorageRecoveryReport, StorageResidencyMode, StorageResourceProfileLimits, Value,
-    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION, REQUIRED_EXTERNAL_SHADOW_CAPABILITIES,
+    ExternalShadowCommand, ExternalShadowReady, NowledgeCypherMigrationGateJsonOptions,
+    NowledgeMemGraph, NowledgeMemGraphMode, NowledgeMemReadOptions, ProjectedGraphFixtureCheck,
+    RecoveryMode, Result, SearchIndex, SkeinError, SkeinLightningBootstrapManifest,
+    StorageRecoveryReport, StorageResidencyMode, StorageResourceProfileLimits, Value,
+    REQUIRED_EXTERNAL_SHADOW_CAPABILITIES, SKEIN_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use skein::{
     nowledge_memory_core_fixture, run_compatibility_fixture_with_shadow,
@@ -56,7 +56,7 @@ use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
-const GRAPH_LIGHTNING_STAGING_CATALOG_PROTOCOL_VERSION: u64 = 1;
+const SKEIN_LIGHTNING_STAGING_CATALOG_PROTOCOL_VERSION: u64 = 1;
 const SKEIN_ENABLE_COMPATIBILITY_TOOLS_ENV: &str = "SKEIN_ENABLE_COMPATIBILITY_TOOLS";
 
 fn main() -> Result<()> {
@@ -1172,7 +1172,7 @@ fn main() -> Result<()> {
             }
             return Ok(());
         }
-        if command == "graph-lightning-bootstrap-manifest" {
+        if command == "skein-lightning-bootstrap-manifest" {
             let mut require_ready = false;
             while let Some(flag) = args.peek() {
                 match flag.as_str() {
@@ -1185,24 +1185,28 @@ fn main() -> Result<()> {
             }
             let path = args
                 .next()
-                .ok_or_else(|| SkeinError::Semantic(graph_lightning_bootstrap_manifest_usage()))?;
+                .ok_or_else(|| SkeinError::Semantic(skein_lightning_bootstrap_manifest_usage()))?;
             if args.next().is_some() {
                 return Err(SkeinError::Semantic(
-                    graph_lightning_bootstrap_manifest_usage(),
+                    skein_lightning_bootstrap_manifest_usage(),
                 ));
             }
             let mut db = Database::open(path)?;
-            let export = db.prepare_graph_lightning_bootstrap_export()?;
-            let rendered = graph_lightning_bootstrap_manifest_json(&export.manifest);
+            let export = db.prepare_skein_lightning_bootstrap_export()?;
+            let rendered = skein_lightning_bootstrap_manifest_json(&export.manifest);
             println!("{}", serde_json::to_string_pretty(&rendered).unwrap());
-            if require_ready && !export.manifest.validation.is_import_ready {
+            if require_ready
+                && (!export.manifest.validation.is_import_ready
+                    || !export.manifest.relational_validation.is_valid
+                    || export.manifest.database_commit_epoch != export.manifest.graph_commit_epoch)
+            {
                 return Err(SkeinError::Execution(
-                    "graph lightning bootstrap manifest is not import ready".to_string(),
+                    "Skein Lightning bootstrap manifest is not import ready".to_string(),
                 ));
             }
             return Ok(());
         }
-        if command == "graph-lightning-bootstrap-bundle" {
+        if command == "skein-lightning-bootstrap-bundle" {
             let mut require_ready = false;
             while let Some(flag) = args.peek() {
                 match flag.as_str() {
@@ -1215,15 +1219,15 @@ fn main() -> Result<()> {
             }
             let path = args
                 .next()
-                .ok_or_else(|| SkeinError::Semantic(graph_lightning_bootstrap_bundle_usage()))?;
+                .ok_or_else(|| SkeinError::Semantic(skein_lightning_bootstrap_bundle_usage()))?;
             if args.next().is_some() {
                 return Err(SkeinError::Semantic(
-                    graph_lightning_bootstrap_bundle_usage(),
+                    skein_lightning_bootstrap_bundle_usage(),
                 ));
             }
             let mut db = Database::open(path)?;
-            let export = db.prepare_graph_lightning_bootstrap_export()?;
-            let rendered = graph_lightning_bootstrap_bundle_json_with_storage_recovery(
+            let export = db.prepare_skein_lightning_bootstrap_export()?;
+            let rendered = skein_lightning_bootstrap_bundle_json_with_storage_recovery(
                 &export,
                 db.storage_version(),
                 &db.storage_recovery_report(),
@@ -1237,12 +1241,12 @@ fn main() -> Result<()> {
                     != Some("ready")
             {
                 return Err(SkeinError::Execution(
-                    "graph lightning bootstrap bundle is not ready".to_string(),
+                    "Skein Lightning bootstrap bundle is not ready".to_string(),
                 ));
             }
             return Ok(());
         }
-        if command == "graph-lightning-stage-bootstrap" {
+        if command == "skein-lightning-stage-bootstrap" {
             let mut require_ready = false;
             while let Some(flag) = args.peek() {
                 match flag.as_str() {
@@ -1255,16 +1259,16 @@ fn main() -> Result<()> {
             }
             let database_path = args
                 .next()
-                .ok_or_else(|| SkeinError::Semantic(graph_lightning_stage_bootstrap_usage()))?;
+                .ok_or_else(|| SkeinError::Semantic(skein_lightning_stage_bootstrap_usage()))?;
             let staging_dir = args
                 .next()
-                .ok_or_else(|| SkeinError::Semantic(graph_lightning_stage_bootstrap_usage()))?;
+                .ok_or_else(|| SkeinError::Semantic(skein_lightning_stage_bootstrap_usage()))?;
             if args.next().is_some() {
-                return Err(SkeinError::Semantic(graph_lightning_stage_bootstrap_usage()));
+                return Err(SkeinError::Semantic(skein_lightning_stage_bootstrap_usage()));
             }
             let mut db = Database::open(database_path)?;
-            let export = db.prepare_graph_lightning_bootstrap_export()?;
-            let catalog = stage_graph_lightning_bootstrap_export_with_storage_recovery(
+            let export = db.prepare_skein_lightning_bootstrap_export()?;
+            let catalog = stage_skein_lightning_bootstrap_export_with_storage_recovery(
                 &export,
                 staging_dir,
                 db.storage_version(),
@@ -1279,12 +1283,12 @@ fn main() -> Result<()> {
                     != Some("ready")
             {
                 return Err(SkeinError::Execution(
-                    "graph lightning staged bootstrap is not ready".to_string(),
+                    "Skein Lightning staged bootstrap is not ready".to_string(),
                 ));
             }
             return Ok(());
         }
-        if command == "graph-lightning-verify-staging" {
+        if command == "skein-lightning-verify-staging" {
             let mut require_ready = false;
             while let Some(flag) = args.peek() {
                 match flag.as_str() {
@@ -1297,11 +1301,11 @@ fn main() -> Result<()> {
             }
             let staging_dir = args
                 .next()
-                .ok_or_else(|| SkeinError::Semantic(graph_lightning_verify_staging_usage()))?;
+                .ok_or_else(|| SkeinError::Semantic(skein_lightning_verify_staging_usage()))?;
             if args.next().is_some() {
-                return Err(SkeinError::Semantic(graph_lightning_verify_staging_usage()));
+                return Err(SkeinError::Semantic(skein_lightning_verify_staging_usage()));
             }
-            let report = verify_graph_lightning_staging_catalog(staging_dir)?;
+            let report = verify_skein_lightning_staging_catalog(staging_dir)?;
             println!("{}", serde_json::to_string_pretty(&report).unwrap());
             if require_ready
                 && report
@@ -1311,18 +1315,18 @@ fn main() -> Result<()> {
                     != Some("ready")
             {
                 return Err(SkeinError::Execution(
-                    "graph lightning staging verification is not ready".to_string(),
+                    "Skein Lightning staging verification is not ready".to_string(),
                 ));
             }
             return Ok(());
         }
-        if command == "graph-lightning-publish-staging" {
+        if command == "skein-lightning-publish-staging" {
             let (options, staging_dir, publish_dir) =
-                parse_graph_lightning_publish_staging_args(args)?;
-            let report = if options == PublishGraphLightningOptions::default() {
-                publish_graph_lightning_staging_catalog(staging_dir, publish_dir)?
+                parse_skein_lightning_publish_staging_args(args)?;
+            let report = if options == PublishSkeinLightningOptions::default() {
+                publish_skein_lightning_staging_catalog(staging_dir, publish_dir)?
             } else {
-                publish_graph_lightning_staging_catalog_with_options(
+                publish_skein_lightning_staging_catalog_with_options(
                     staging_dir,
                     publish_dir,
                     options,
@@ -1331,53 +1335,53 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&report).unwrap());
             return Ok(());
         }
-        if command == "graph-lightning-verify-published" {
+        if command == "skein-lightning-verify-published" {
             let staging_dir = args
                 .next()
-                .ok_or_else(|| SkeinError::Semantic(graph_lightning_verify_published_usage()))?;
+                .ok_or_else(|| SkeinError::Semantic(skein_lightning_verify_published_usage()))?;
             let publish_dir = args
                 .next()
-                .ok_or_else(|| SkeinError::Semantic(graph_lightning_verify_published_usage()))?;
+                .ok_or_else(|| SkeinError::Semantic(skein_lightning_verify_published_usage()))?;
             if args.next().is_some() {
                 return Err(SkeinError::Semantic(
-                    graph_lightning_verify_published_usage(),
+                    skein_lightning_verify_published_usage(),
                 ));
             }
-            let report = verify_graph_lightning_published_manifest(staging_dir, publish_dir)?;
+            let report = verify_skein_lightning_published_manifest(staging_dir, publish_dir)?;
             println!("{}", serde_json::to_string_pretty(&report).unwrap());
             return Ok(());
         }
-        if command == "graph-lightning-gc-staging-report" {
+        if command == "skein-lightning-gc-staging-report" {
             let staging_dir = args
                 .next()
-                .ok_or_else(|| SkeinError::Semantic(graph_lightning_gc_staging_report_usage()))?;
+                .ok_or_else(|| SkeinError::Semantic(skein_lightning_gc_staging_report_usage()))?;
             let publish_dir = args
                 .next()
-                .ok_or_else(|| SkeinError::Semantic(graph_lightning_gc_staging_report_usage()))?;
+                .ok_or_else(|| SkeinError::Semantic(skein_lightning_gc_staging_report_usage()))?;
             if args.next().is_some() {
                 return Err(SkeinError::Semantic(
-                    graph_lightning_gc_staging_report_usage(),
+                    skein_lightning_gc_staging_report_usage(),
                 ));
             }
-            let report = graph_lightning_gc_staging_report(staging_dir, publish_dir)?;
+            let report = skein_lightning_gc_staging_report(staging_dir, publish_dir)?;
             println!("{}", serde_json::to_string_pretty(&report).unwrap());
             return Ok(());
         }
-        if command == "graph-lightning-import-status" {
+        if command == "skein-lightning-import-status" {
             let staging_dir = args
                 .next()
-                .ok_or_else(|| SkeinError::Semantic(graph_lightning_import_status_usage()))?;
+                .ok_or_else(|| SkeinError::Semantic(skein_lightning_import_status_usage()))?;
             let publish_dir = args
                 .next()
-                .ok_or_else(|| SkeinError::Semantic(graph_lightning_import_status_usage()))?;
+                .ok_or_else(|| SkeinError::Semantic(skein_lightning_import_status_usage()))?;
             if args.next().is_some() {
-                return Err(SkeinError::Semantic(graph_lightning_import_status_usage()));
+                return Err(SkeinError::Semantic(skein_lightning_import_status_usage()));
             }
-            let report = graph_lightning_import_status(staging_dir, publish_dir)?;
+            let report = skein_lightning_import_status(staging_dir, publish_dir)?;
             println!("{}", serde_json::to_string_pretty(&report).unwrap());
             return Ok(());
         }
-        if command == "graph-lightning-graph-stream" {
+        if command == "skein-lightning-graph-stream" {
             let mut require_ready = false;
             while let Some(flag) = args.peek() {
                 match flag.as_str() {
@@ -1390,21 +1394,53 @@ fn main() -> Result<()> {
             }
             let path = args
                 .next()
-                .ok_or_else(|| SkeinError::Semantic(graph_lightning_graph_stream_usage()))?;
+                .ok_or_else(|| SkeinError::Semantic(skein_lightning_graph_stream_usage()))?;
             if args.next().is_some() {
-                return Err(SkeinError::Semantic(graph_lightning_graph_stream_usage()));
+                return Err(SkeinError::Semantic(skein_lightning_graph_stream_usage()));
             }
             let mut db = Database::open(path)?;
-            let export = db.prepare_graph_lightning_bootstrap_export()?;
+            let export = db.prepare_skein_lightning_bootstrap_export()?;
             if require_ready && !export.manifest.validation.is_import_ready {
                 return Err(SkeinError::Execution(
-                    "graph lightning graph stream is not import ready".to_string(),
+                    "Skein Lightning graph stream is not import ready".to_string(),
                 ));
             }
             print!("{}", export.graph_stream.encoded);
             return Ok(());
         }
-        if command == "graph-lightning-verify-export" {
+        if command == "skein-lightning-relational-stream" {
+            let mut require_ready = false;
+            while let Some(flag) = args.peek() {
+                match flag.as_str() {
+                    "--require-ready" => {
+                        require_ready = true;
+                        args.next();
+                    }
+                    _ => break,
+                }
+            }
+            let path = args
+                .next()
+                .ok_or_else(|| SkeinError::Semantic(skein_lightning_relational_stream_usage()))?;
+            if args.next().is_some() {
+                return Err(SkeinError::Semantic(
+                    skein_lightning_relational_stream_usage(),
+                ));
+            }
+            let mut db = Database::open(path)?;
+            let export = db.prepare_skein_lightning_bootstrap_export()?;
+            let validation = export
+                .relational_stream
+                .validate_against_manifest(&export.manifest);
+            if require_ready && !validation.is_valid {
+                return Err(SkeinError::Execution(
+                    "Skein Lightning relational stream is not import ready".to_string(),
+                ));
+            }
+            std::io::stdout().write_all(&export.relational_stream.encoded)?;
+            return Ok(());
+        }
+        if command == "skein-lightning-verify-export" {
             let mut require_valid = false;
             while let Some(flag) = args.peek() {
                 match flag.as_str() {
@@ -1417,20 +1453,33 @@ fn main() -> Result<()> {
             }
             let path = args
                 .next()
-                .ok_or_else(|| SkeinError::Semantic(graph_lightning_verify_export_usage()))?;
+                .ok_or_else(|| SkeinError::Semantic(skein_lightning_verify_export_usage()))?;
             if args.next().is_some() {
-                return Err(SkeinError::Semantic(graph_lightning_verify_export_usage()));
+                return Err(SkeinError::Semantic(skein_lightning_verify_export_usage()));
             }
             let mut db = Database::open(path)?;
-            let export = db.prepare_graph_lightning_bootstrap_export()?;
-            let validation = export
+            let export = db.prepare_skein_lightning_bootstrap_export()?;
+            let graph_validation = export
                 .graph_stream
                 .validate_against_manifest(&export.manifest);
-            let rendered = graph_lightning_graph_stream_validation_json(&validation);
+            let relational_validation = export
+                .relational_stream
+                .validate_against_manifest(&export.manifest);
+            let valid = graph_validation.is_valid && relational_validation.is_valid;
+            let rendered = serde_json::json!({
+                "protocol": "skein-lightning-export-validation",
+                "valid": valid,
+                "graph_stream_validation": skein_lightning_graph_stream_validation_json(
+                    &graph_validation,
+                ),
+                "relational_stream_validation": skein_lightning_relational_stream_validation_json(
+                    &relational_validation,
+                ),
+            });
             println!("{}", serde_json::to_string_pretty(&rendered).unwrap());
-            if require_valid && !validation.is_valid {
+            if require_valid && !valid {
                 return Err(SkeinError::Execution(
-                    "graph lightning graph stream validation failed".to_string(),
+                    "Skein Lightning export validation failed".to_string(),
                 ));
             }
             return Ok(());
@@ -1536,38 +1585,42 @@ fn background_maintenance_report_usage() -> String {
         .to_string()
 }
 
-fn graph_lightning_bootstrap_manifest_usage() -> String {
-    "graph-lightning-bootstrap-manifest requires [--require-ready] <database-path>".to_string()
+fn skein_lightning_bootstrap_manifest_usage() -> String {
+    "skein-lightning-bootstrap-manifest requires [--require-ready] <database-path>".to_string()
 }
 
-fn graph_lightning_bootstrap_bundle_usage() -> String {
-    "graph-lightning-bootstrap-bundle requires [--require-ready] <database-path>".to_string()
+fn skein_lightning_bootstrap_bundle_usage() -> String {
+    "skein-lightning-bootstrap-bundle requires [--require-ready] <database-path>".to_string()
 }
 
-fn graph_lightning_stage_bootstrap_usage() -> String {
-    "graph-lightning-stage-bootstrap requires [--require-ready] <database-path> <staging-dir>"
+fn skein_lightning_stage_bootstrap_usage() -> String {
+    "skein-lightning-stage-bootstrap requires [--require-ready] <database-path> <staging-dir>"
         .to_string()
 }
 
-fn graph_lightning_verify_staging_usage() -> String {
-    "graph-lightning-verify-staging requires [--require-ready] <staging-dir>".to_string()
+fn skein_lightning_verify_staging_usage() -> String {
+    "skein-lightning-verify-staging requires [--require-ready] <staging-dir>".to_string()
 }
 
-fn graph_lightning_publish_staging_usage() -> String {
-    "graph-lightning-publish-staging requires [--require-state-marker] [--fencing-token <token>] [--expected-graph-epoch <epoch>] <staging-dir> <publish-dir>".to_string()
+fn skein_lightning_relational_stream_usage() -> String {
+    "skein-lightning-relational-stream requires [--require-ready] <database-path>".to_string()
+}
+
+fn skein_lightning_publish_staging_usage() -> String {
+    "skein-lightning-publish-staging requires [--require-state-marker] [--fencing-token <token>] [--expected-database-epoch <epoch>] <staging-dir> <publish-dir>".to_string()
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct PublishGraphLightningOptions {
+struct PublishSkeinLightningOptions {
     require_state_marker: bool,
     fencing_token: Option<String>,
-    expected_graph_epoch: Option<u64>,
+    expected_database_epoch: Option<u64>,
 }
 
-fn parse_graph_lightning_publish_staging_args(
+fn parse_skein_lightning_publish_staging_args(
     args: impl Iterator<Item = String>,
-) -> Result<(PublishGraphLightningOptions, String, String)> {
-    let mut options = PublishGraphLightningOptions::default();
+) -> Result<(PublishSkeinLightningOptions, String, String)> {
+    let mut options = PublishSkeinLightningOptions::default();
     let mut positional = Vec::new();
     let mut args = args.peekable();
     while let Some(arg) = args.next() {
@@ -1577,49 +1630,49 @@ fn parse_graph_lightning_publish_staging_args(
             }
             "--fencing-token" => {
                 let Some(value) = args.next() else {
-                    return Err(SkeinError::Semantic(graph_lightning_publish_staging_usage()));
+                    return Err(SkeinError::Semantic(skein_lightning_publish_staging_usage()));
                 };
                 options.fencing_token = Some(value);
             }
-            "--expected-graph-epoch" => {
+            "--expected-database-epoch" => {
                 let Some(value) = args.next() else {
-                    return Err(SkeinError::Semantic(graph_lightning_publish_staging_usage()));
+                    return Err(SkeinError::Semantic(skein_lightning_publish_staging_usage()));
                 };
                 let epoch = value
                     .parse::<u64>()
-                    .map_err(|_| SkeinError::Semantic(graph_lightning_publish_staging_usage()))?;
-                options.expected_graph_epoch = Some(epoch);
+                    .map_err(|_| SkeinError::Semantic(skein_lightning_publish_staging_usage()))?;
+                options.expected_database_epoch = Some(epoch);
             }
             value if value.starts_with("--") => {
-                return Err(SkeinError::Semantic(graph_lightning_publish_staging_usage()));
+                return Err(SkeinError::Semantic(skein_lightning_publish_staging_usage()));
             }
             value => positional.push(value.to_string()),
         }
     }
     if positional.len() != 2 {
-        return Err(SkeinError::Semantic(graph_lightning_publish_staging_usage()));
+        return Err(SkeinError::Semantic(skein_lightning_publish_staging_usage()));
     }
     Ok((options, positional.remove(0), positional.remove(0)))
 }
 
-fn graph_lightning_verify_published_usage() -> String {
-    "graph-lightning-verify-published requires <staging-dir> <publish-dir>".to_string()
+fn skein_lightning_verify_published_usage() -> String {
+    "skein-lightning-verify-published requires <staging-dir> <publish-dir>".to_string()
 }
 
-fn graph_lightning_gc_staging_report_usage() -> String {
-    "graph-lightning-gc-staging-report requires <staging-dir> <publish-dir>".to_string()
+fn skein_lightning_gc_staging_report_usage() -> String {
+    "skein-lightning-gc-staging-report requires <staging-dir> <publish-dir>".to_string()
 }
 
-fn graph_lightning_import_status_usage() -> String {
-    "graph-lightning-import-status requires <staging-dir> <publish-dir>".to_string()
+fn skein_lightning_import_status_usage() -> String {
+    "skein-lightning-import-status requires <staging-dir> <publish-dir>".to_string()
 }
 
-fn graph_lightning_graph_stream_usage() -> String {
-    "graph-lightning-graph-stream requires [--require-ready] <database-path>".to_string()
+fn skein_lightning_graph_stream_usage() -> String {
+    "skein-lightning-graph-stream requires [--require-ready] <database-path>".to_string()
 }
 
-fn graph_lightning_verify_export_usage() -> String {
-    "graph-lightning-verify-export requires [--require-valid] <database-path>".to_string()
+fn skein_lightning_verify_export_usage() -> String {
+    "skein-lightning-verify-export requires [--require-valid] <database-path>".to_string()
 }
 
 fn parse_shadow_timeout_ms(raw_timeout: &str) -> Result<Duration> {
@@ -2679,16 +2732,23 @@ fn recovery_mode_name(recovery_mode: RecoveryMode) -> &'static str {
     }
 }
 
-fn graph_lightning_bootstrap_manifest_json(
-    manifest: &GraphLightningBootstrapManifest,
+fn skein_lightning_bootstrap_manifest_json(
+    manifest: &SkeinLightningBootstrapManifest,
 ) -> serde_json::Value {
     serde_json::json!({
-        "protocol": "graph-lightning-bootstrap",
+        "protocol": "skein-lightning-bootstrap",
         "protocol_version": manifest.protocol_version,
+        "database_commit_epoch": manifest.database_commit_epoch,
         "graph_commit_epoch": manifest.graph_commit_epoch,
         "logical_checksum": manifest.logical_checksum,
         "graph_stream_checksum": manifest.graph_stream_checksum,
         "graph_stream_byte_len": manifest.graph_stream_byte_len,
+        "relational_stream_format_version": manifest.relational_stream_format_version,
+        "relational_stream_checksum": manifest.relational_stream_checksum,
+        "relational_stream_byte_len": manifest.relational_stream_byte_len,
+        "relational_table_count": manifest.relational_table_count,
+        "relational_row_count": manifest.relational_row_count,
+        "relational_overflow_segment_count": manifest.relational_overflow_segment_count,
         "schema_checksum": manifest.schema_checksum,
         "node_count": manifest.node_count,
         "relationship_count": manifest.relationship_count,
@@ -2708,40 +2768,49 @@ fn graph_lightning_bootstrap_manifest_json(
             "duplicate_relationship_ids": manifest.validation.duplicate_relationship_ids,
             "missing_sources": endpoint_violations_json(&manifest.validation.missing_sources),
             "missing_targets": endpoint_violations_json(&manifest.validation.missing_targets),
-        }
+        },
+        "relational_validation": skein_lightning_relational_stream_validation_json(
+            &manifest.relational_validation,
+        ),
     })
 }
 
 #[cfg(test)]
-fn graph_lightning_bootstrap_bundle_json(
-    export: &skein::GraphLightningBootstrapExport,
+fn skein_lightning_bootstrap_bundle_json(
+    export: &skein::SkeinLightningBootstrapExport,
 ) -> serde_json::Value {
-    graph_lightning_bootstrap_bundle_json_with_optional_storage_recovery(export, None)
+    skein_lightning_bootstrap_bundle_json_with_optional_storage_recovery(export, None)
 }
 
-fn graph_lightning_bootstrap_bundle_json_with_storage_recovery(
-    export: &skein::GraphLightningBootstrapExport,
+fn skein_lightning_bootstrap_bundle_json_with_storage_recovery(
+    export: &skein::SkeinLightningBootstrapExport,
     storage_version: &str,
     storage_recovery: &StorageRecoveryReport,
 ) -> serde_json::Value {
     let storage_recovery_json = storage_recovery_report_json(storage_version, storage_recovery);
-    graph_lightning_bootstrap_bundle_json_with_optional_storage_recovery(
+    skein_lightning_bootstrap_bundle_json_with_optional_storage_recovery(
         export,
         Some(storage_recovery_json),
     )
 }
 
-fn graph_lightning_bootstrap_bundle_json_with_optional_storage_recovery(
-    export: &skein::GraphLightningBootstrapExport,
+fn skein_lightning_bootstrap_bundle_json_with_optional_storage_recovery(
+    export: &skein::SkeinLightningBootstrapExport,
     storage_recovery: Option<serde_json::Value>,
 ) -> serde_json::Value {
     let graph_stream_validation = export
         .graph_stream
         .validate_against_manifest(&export.manifest);
+    let relational_stream_validation = export
+        .relational_stream
+        .validate_against_manifest(&export.manifest);
     let mut blockers = Vec::new();
     let mut manifest_blocker_messages = Vec::new();
     if !export.manifest.validation.is_import_ready {
         manifest_blocker_messages.push("manifest validation is not import ready");
+    }
+    if !export.manifest.relational_validation.is_valid {
+        manifest_blocker_messages.push("manifest relational validation is not import ready");
     }
     blockers.extend(manifest_blocker_messages.iter().copied());
     let mut graph_stream_blocker_messages = Vec::new();
@@ -2749,21 +2818,29 @@ fn graph_lightning_bootstrap_bundle_json_with_optional_storage_recovery(
         graph_stream_blocker_messages.push("graph stream validation failed");
     }
     blockers.extend(graph_stream_blocker_messages.iter().copied());
+    let mut relational_stream_blocker_messages = Vec::new();
+    if !relational_stream_validation.is_valid {
+        relational_stream_blocker_messages.push("relational stream validation failed");
+    }
+    blockers.extend(relational_stream_blocker_messages.iter().copied());
     let decision = if blockers.is_empty() {
         "ready"
     } else {
         "blocked"
     };
     let mut bundle = serde_json::json!({
-        "protocol": "graph-lightning-bootstrap-bundle",
-        "manifest": graph_lightning_bootstrap_manifest_json(&export.manifest),
-        "graph_stream_validation": graph_lightning_graph_stream_validation_json(&graph_stream_validation),
+        "protocol": "skein-lightning-bootstrap-bundle",
+        "manifest": skein_lightning_bootstrap_manifest_json(&export.manifest),
+        "graph_stream_validation": skein_lightning_graph_stream_validation_json(&graph_stream_validation),
+        "relational_stream_validation": skein_lightning_relational_stream_validation_json(&relational_stream_validation),
         "export_gate": {
             "decision": decision,
             "manifest_blockers": manifest_blocker_messages.len(),
             "graph_stream_blockers": graph_stream_blocker_messages.len(),
+            "relational_stream_blockers": relational_stream_blocker_messages.len(),
             "manifest_blocker_messages": manifest_blocker_messages,
             "graph_stream_blocker_messages": graph_stream_blocker_messages,
+            "relational_stream_blocker_messages": relational_stream_blocker_messages,
             "blockers": blockers,
         },
     });
@@ -2777,41 +2854,44 @@ fn graph_lightning_bootstrap_bundle_json_with_optional_storage_recovery(
 }
 
 #[cfg(test)]
-fn stage_graph_lightning_bootstrap_export(
-    export: &skein::GraphLightningBootstrapExport,
+fn stage_skein_lightning_bootstrap_export(
+    export: &skein::SkeinLightningBootstrapExport,
     staging_dir: impl AsRef<Path>,
 ) -> Result<serde_json::Value> {
-    stage_graph_lightning_bootstrap_export_with_optional_storage_recovery(export, staging_dir, None)
+    stage_skein_lightning_bootstrap_export_with_optional_storage_recovery(export, staging_dir, None)
 }
 
-fn stage_graph_lightning_bootstrap_export_with_storage_recovery(
-    export: &skein::GraphLightningBootstrapExport,
+fn stage_skein_lightning_bootstrap_export_with_storage_recovery(
+    export: &skein::SkeinLightningBootstrapExport,
     staging_dir: impl AsRef<Path>,
     storage_version: &str,
     storage_recovery: &StorageRecoveryReport,
 ) -> Result<serde_json::Value> {
     let storage_recovery_json = storage_recovery_report_json(storage_version, storage_recovery);
-    stage_graph_lightning_bootstrap_export_with_optional_storage_recovery(
+    stage_skein_lightning_bootstrap_export_with_optional_storage_recovery(
         export,
         staging_dir,
         Some(storage_recovery_json),
     )
 }
 
-fn stage_graph_lightning_bootstrap_export_with_optional_storage_recovery(
-    export: &skein::GraphLightningBootstrapExport,
+fn stage_skein_lightning_bootstrap_export_with_optional_storage_recovery(
+    export: &skein::SkeinLightningBootstrapExport,
     staging_dir: impl AsRef<Path>,
     storage_recovery: Option<serde_json::Value>,
 ) -> Result<serde_json::Value> {
     let staging_dir = staging_dir.as_ref();
     fs::create_dir_all(staging_dir)?;
-    let bundle = graph_lightning_bootstrap_bundle_json_with_optional_storage_recovery(
+    let bundle = skein_lightning_bootstrap_bundle_json_with_optional_storage_recovery(
         export,
         storage_recovery,
     );
-    let manifest = graph_lightning_bootstrap_manifest_json(&export.manifest);
+    let manifest = skein_lightning_bootstrap_manifest_json(&export.manifest);
     let graph_stream_validation = export
         .graph_stream
+        .validate_against_manifest(&export.manifest);
+    let relational_stream_validation = export
+        .relational_stream
         .validate_against_manifest(&export.manifest);
     let stage_state = if bundle
         .get("export_gate")
@@ -2825,65 +2905,80 @@ fn stage_graph_lightning_bootstrap_export_with_optional_storage_recovery(
     };
     let manifest_bytes = serde_json::to_vec_pretty(&manifest).unwrap();
     let graph_stream_bytes = export.graph_stream.encoded.as_bytes();
+    let relational_stream_bytes = export.relational_stream.encoded.as_slice();
     let bundle_bytes = serde_json::to_vec_pretty(&bundle).unwrap();
     let manifest_artifact = write_staging_artifact(
         staging_dir,
-        "graph_lightning_bootstrap_manifest.json",
+        "skein_lightning_bootstrap_manifest.json",
         &manifest_bytes,
     )?;
     let graph_stream_artifact = write_staging_artifact(
         staging_dir,
-        "graph_lightning_graph_stream.txt",
+        "skein_lightning_graph_stream.txt",
         graph_stream_bytes,
+    )?;
+    let relational_stream_artifact = write_staging_artifact(
+        staging_dir,
+        "skein_lightning_relational_stream.bin",
+        relational_stream_bytes,
     )?;
     let bundle_artifact = write_staging_artifact(
         staging_dir,
-        "graph_lightning_bootstrap_bundle.json",
+        "skein_lightning_bootstrap_bundle.json",
         &bundle_bytes,
     )?;
-    let artifacts = vec![manifest_artifact, graph_stream_artifact, bundle_artifact];
-    let artifact_summary = graph_lightning_artifact_summary(&artifacts, "byte_len");
+    let artifacts = vec![
+        manifest_artifact,
+        graph_stream_artifact,
+        relational_stream_artifact,
+        bundle_artifact,
+    ];
+    let artifact_summary = skein_lightning_artifact_summary(&artifacts, "byte_len");
     let catalog = serde_json::json!({
-        "protocol": "graph-lightning-staging-catalog",
-        "protocol_version": GRAPH_LIGHTNING_STAGING_CATALOG_PROTOCOL_VERSION,
+        "protocol": "skein-lightning-staging-catalog",
+        "protocol_version": SKEIN_LIGHTNING_STAGING_CATALOG_PROTOCOL_VERSION,
         "stage_state": stage_state,
+        "database_commit_epoch": export.manifest.database_commit_epoch,
         "graph_commit_epoch": export.manifest.graph_commit_epoch,
         "logical_checksum": export.manifest.logical_checksum,
         "schema_checksum": export.manifest.schema_checksum,
         "export_gate": bundle["export_gate"].clone(),
         "artifact_summary": artifact_summary,
         "artifacts": artifacts,
-        "graph_stream_validation": graph_lightning_graph_stream_validation_json(&graph_stream_validation),
+        "graph_stream_validation": skein_lightning_graph_stream_validation_json(&graph_stream_validation),
+        "relational_stream_validation": skein_lightning_relational_stream_validation_json(&relational_stream_validation),
     });
     let catalog_bytes = serde_json::to_vec_pretty(&catalog).unwrap();
     write_staging_artifact(
         staging_dir,
-        "graph_lightning_staging_catalog.json",
+        "skein_lightning_staging_catalog.json",
         &catalog_bytes,
     )?;
     sync_directory(staging_dir)?;
     Ok(catalog)
 }
 
-fn verify_graph_lightning_staging_catalog(
+fn verify_skein_lightning_staging_catalog(
     staging_dir: impl AsRef<Path>,
 ) -> Result<serde_json::Value> {
     let staging_dir = staging_dir.as_ref();
-    let catalog_path = staging_dir.join("graph_lightning_staging_catalog.json");
+    let catalog_path = staging_dir.join("skein_lightning_staging_catalog.json");
     let catalog = read_json_file(&catalog_path)?;
     let mut errors = Vec::new();
     let mut artifact_errors = Vec::new();
     let mut manifest_errors = Vec::new();
     let mut graph_stream_errors = Vec::new();
+    let mut relational_stream_errors = Vec::new();
     let mut bundle_errors = Vec::new();
     let mut catalog_errors = Vec::new();
     let mut artifact_reports = Vec::new();
     let mut manifest = None;
     let mut graph_stream = None;
+    let mut relational_stream = None;
     let mut bundle = None;
 
     let catalog_protocol_matches = catalog.get("protocol").and_then(serde_json::Value::as_str)
-        == Some("graph-lightning-staging-catalog");
+        == Some("skein-lightning-staging-catalog");
     if !catalog_protocol_matches {
         push_grouped_error(
             &mut errors,
@@ -2894,7 +2989,7 @@ fn verify_graph_lightning_staging_catalog(
     let catalog_protocol_version_matches = catalog
         .get("protocol_version")
         .and_then(serde_json::Value::as_u64)
-        == Some(GRAPH_LIGHTNING_STAGING_CATALOG_PROTOCOL_VERSION);
+        == Some(SKEIN_LIGHTNING_STAGING_CATALOG_PROTOCOL_VERSION);
     if !catalog_protocol_version_matches {
         push_grouped_error(
             &mut errors,
@@ -2978,6 +3073,7 @@ fn verify_graph_lightning_staging_catalog(
                             format!("invalid GraphStream UTF-8: {error}"),
                         ),
                     },
+                    "relational_stream" => relational_stream = Some(bytes),
                     "bundle" => match serde_json::from_slice::<serde_json::Value>(&bytes) {
                         Ok(value) => bundle = Some(value),
                         Err(error) => push_grouped_error(
@@ -3027,7 +3123,7 @@ fn verify_graph_lightning_staging_catalog(
         .as_ref()
         .and_then(|manifest| manifest.get("protocol_version"))
         .and_then(serde_json::Value::as_u64)
-        == Some(GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION);
+        == Some(SKEIN_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION);
     if !manifest_protocol_version_matches {
         push_grouped_error(
             &mut errors,
@@ -3038,10 +3134,22 @@ fn verify_graph_lightning_staging_catalog(
 
     let graph_stream_validation = graph_stream
         .as_ref()
-        .map(|encoded| skein::validate_graph_lightning_graph_stream(encoded, None));
+        .map(|encoded| skein::validate_skein_lightning_graph_stream(encoded, None));
     let graph_stream_validation_json = graph_stream_validation
         .as_ref()
-        .map(graph_lightning_graph_stream_validation_json);
+        .map(skein_lightning_graph_stream_validation_json);
+    let relational_stream_validation = relational_stream
+        .as_ref()
+        .map(|encoded| skein::validate_skein_lightning_relational_stream(encoded, None));
+    let mut relational_stream_validation_json = relational_stream_validation
+        .as_ref()
+        .map(skein_lightning_relational_stream_validation_json);
+    if let (Some(validation), Some(manifest)) = (
+        relational_stream_validation_json.as_mut(),
+        manifest.as_ref(),
+    ) {
+        validation["expected_stream_checksum"] = manifest["relational_stream_checksum"].clone();
+    }
     let manifest_matches_graph_stream = match (&manifest, &graph_stream, &graph_stream_validation) {
         (Some(manifest), Some(graph_stream), Some(validation)) => {
             let matches = manifest
@@ -3086,16 +3194,71 @@ fn verify_graph_lightning_staging_catalog(
             false
         }
     };
-    let bundle_matches_artifacts = match (&bundle, &manifest, &graph_stream_validation_json) {
-        (Some(bundle), Some(manifest), Some(validation)) => {
+    let manifest_matches_relational_stream =
+        match (&manifest, &relational_stream, &relational_stream_validation) {
+            (Some(manifest), Some(relational_stream), Some(validation)) => {
+                let matches = manifest
+                    .get("relational_stream_format_version")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(skein::SKEIN_LIGHTNING_RELATIONAL_STREAM_FORMAT_VERSION)
+                    && manifest
+                        .get("relational_stream_checksum")
+                        .and_then(serde_json::Value::as_u64)
+                        == Some(validation.actual_stream_checksum)
+                    && manifest
+                        .get("relational_stream_byte_len")
+                        .and_then(serde_json::Value::as_u64)
+                        == Some(relational_stream.len() as u64)
+                    && manifest
+                        .get("database_commit_epoch")
+                        .and_then(serde_json::Value::as_u64)
+                        == validation.database_commit_epoch
+                    && manifest
+                        .get("relational_table_count")
+                        .and_then(serde_json::Value::as_u64)
+                        == Some(validation.table_count as u64)
+                    && manifest
+                        .get("relational_row_count")
+                        .and_then(serde_json::Value::as_u64)
+                        == Some(validation.row_count as u64)
+                    && manifest
+                        .get("relational_overflow_segment_count")
+                        .and_then(serde_json::Value::as_u64)
+                        == Some(validation.overflow_segment_count as u64);
+                if !matches {
+                    push_grouped_error(
+                        &mut errors,
+                        &mut manifest_errors,
+                        "manifest does not match relational stream artifact",
+                    );
+                }
+                matches
+            }
+            _ => {
+                push_grouped_error(
+                    &mut errors,
+                    &mut manifest_errors,
+                    "manifest or relational stream artifact missing",
+                );
+                false
+            }
+        };
+    let bundle_matches_artifacts = match (
+        &bundle,
+        &manifest,
+        &graph_stream_validation_json,
+        &relational_stream_validation_json,
+    ) {
+        (Some(bundle), Some(manifest), Some(graph_validation), Some(relational_validation)) => {
             let matches = bundle.get("manifest") == Some(manifest)
-                && bundle.get("graph_stream_validation") == Some(validation)
+                && bundle.get("graph_stream_validation") == Some(graph_validation)
+                && bundle.get("relational_stream_validation") == Some(relational_validation)
                 && bundle.get("export_gate") == catalog.get("export_gate");
             if !matches {
                 push_grouped_error(
                     &mut errors,
                     &mut bundle_errors,
-                    "bundle does not match staged manifest, GraphStream validation, or catalog gate",
+                    "bundle does not match staged manifest, stream validations, or catalog gate",
                 );
             }
             matches
@@ -3124,7 +3287,7 @@ fn verify_graph_lightning_staging_catalog(
                 .and_then(serde_json::Value::as_bool)
                 == Some(true)
     });
-    let artifact_summary = graph_lightning_artifact_summary(&artifact_reports, "actual_byte_len");
+    let artifact_summary = skein_lightning_artifact_summary(&artifact_reports, "actual_byte_len");
     let catalog_state_ready = catalog
         .get("stage_state")
         .and_then(serde_json::Value::as_str)
@@ -3151,30 +3314,43 @@ fn verify_graph_lightning_staging_catalog(
             "GraphStream validation failed",
         );
     }
+    let relational_stream_valid = relational_stream_validation
+        .as_ref()
+        .is_some_and(|validation| validation.is_valid);
+    if !relational_stream_valid {
+        push_grouped_error(
+            &mut errors,
+            &mut relational_stream_errors,
+            "relational stream validation failed",
+        );
+    }
     let decision = if errors.is_empty()
         && artifact_integrity
         && catalog_protocol_matches
         && catalog_protocol_version_matches
         && manifest_protocol_version_matches
         && manifest_matches_graph_stream
+        && manifest_matches_relational_stream
         && bundle_matches_artifacts
         && storage_recovery_evidence.valid
         && catalog_state_ready
         && graph_stream_valid
+        && relational_stream_valid
     {
         "ready"
     } else {
         "blocked"
     };
     Ok(serde_json::json!({
-        "protocol": "graph-lightning-staging-verification",
-        "protocol_version": GRAPH_LIGHTNING_STAGING_CATALOG_PROTOCOL_VERSION,
-        "catalog_path": "graph_lightning_staging_catalog.json",
+        "protocol": "skein-lightning-staging-verification",
+        "protocol_version": SKEIN_LIGHTNING_STAGING_CATALOG_PROTOCOL_VERSION,
+        "catalog_path": "skein_lightning_staging_catalog.json",
         "artifact_integrity": artifact_integrity,
         "catalog_protocol_matches": catalog_protocol_matches,
         "catalog_protocol_version_matches": catalog_protocol_version_matches,
         "manifest_protocol_version_matches": manifest_protocol_version_matches,
         "manifest_matches_graph_stream": manifest_matches_graph_stream,
+        "manifest_matches_relational_stream": manifest_matches_relational_stream,
         "bundle_matches_artifacts": bundle_matches_artifacts,
         "storage_recovery_evidence": {
             "present": storage_recovery_evidence.present,
@@ -3185,6 +3361,7 @@ fn verify_graph_lightning_staging_catalog(
         },
         "catalog_state_ready": catalog_state_ready,
         "graph_stream_validation": graph_stream_validation_json,
+        "relational_stream_validation": relational_stream_validation_json,
         "artifact_summary": artifact_summary,
         "artifacts": artifact_reports,
         "validation_gate": {
@@ -3192,11 +3369,13 @@ fn verify_graph_lightning_staging_catalog(
             "artifact_errors": artifact_errors.len(),
             "manifest_errors": manifest_errors.len(),
             "graph_stream_errors": graph_stream_errors.len(),
+            "relational_stream_errors": relational_stream_errors.len(),
             "bundle_errors": bundle_errors.len(),
             "catalog_errors": catalog_errors.len(),
             "artifact_error_messages": artifact_errors,
             "manifest_error_messages": manifest_errors,
             "graph_stream_error_messages": graph_stream_errors,
+            "relational_stream_error_messages": relational_stream_errors,
             "bundle_error_messages": bundle_errors,
             "catalog_error_messages": catalog_errors,
             "errors": errors,
@@ -3264,13 +3443,13 @@ fn verify_bundle_storage_recovery_evidence(
         .get("recovered_commit_epoch")
         .and_then(serde_json::Value::as_u64)
         == manifest
-            .get("graph_commit_epoch")
+            .get("database_commit_epoch")
             .and_then(serde_json::Value::as_u64);
     if !recovered_commit_epoch_matches_manifest {
         push_grouped_error(
             errors,
             bundle_errors,
-            "bundle storage_recovery recovered commit epoch does not match manifest graph epoch",
+            "bundle storage_recovery recovered commit epoch does not match manifest database epoch",
         );
     }
 
@@ -3285,25 +3464,25 @@ fn verify_bundle_storage_recovery_evidence(
     }
 }
 
-fn publish_graph_lightning_staging_catalog(
+fn publish_skein_lightning_staging_catalog(
     staging_dir: impl AsRef<Path>,
     publish_dir: impl AsRef<Path>,
 ) -> Result<serde_json::Value> {
-    publish_graph_lightning_staging_catalog_with_options(
+    publish_skein_lightning_staging_catalog_with_options(
         staging_dir,
         publish_dir,
-        PublishGraphLightningOptions::default(),
+        PublishSkeinLightningOptions::default(),
     )
 }
 
-fn publish_graph_lightning_staging_catalog_with_options(
+fn publish_skein_lightning_staging_catalog_with_options(
     staging_dir: impl AsRef<Path>,
     publish_dir: impl AsRef<Path>,
-    options: PublishGraphLightningOptions,
+    options: PublishSkeinLightningOptions,
 ) -> Result<serde_json::Value> {
     let staging_dir = staging_dir.as_ref();
     let publish_dir = publish_dir.as_ref();
-    let verification = verify_graph_lightning_staging_catalog(staging_dir)?;
+    let verification = verify_skein_lightning_staging_catalog(staging_dir)?;
     if verification
         .get("validation_gate")
         .and_then(|gate| gate.get("decision"))
@@ -3311,37 +3490,42 @@ fn publish_graph_lightning_staging_catalog_with_options(
         != Some("ready")
     {
         return Err(SkeinError::Execution(
-            "graph lightning staging verification is not ready".to_string(),
+            "Skein Lightning staging verification is not ready".to_string(),
         ));
     }
 
-    let catalog_path = staging_dir.join("graph_lightning_staging_catalog.json");
+    let catalog_path = staging_dir.join("skein_lightning_staging_catalog.json");
     let catalog_bytes = fs::read(&catalog_path)?;
     let catalog_checksum = checksum_bytes(&catalog_bytes);
     let catalog = serde_json::from_slice::<serde_json::Value>(&catalog_bytes)
         .map_err(|_| SkeinError::Execution("invalid JSON file: invalid_json".to_string()))?;
     let manifest = read_staging_artifact_json(&catalog, staging_dir, "manifest")?;
-    let publish_preflight = graph_lightning_publish_preflight(staging_dir, &manifest, &options)?;
+    let publish_preflight = skein_lightning_publish_preflight(staging_dir, &manifest, &options)?;
     let pointer = serde_json::json!({
-        "protocol": "graph-lightning-published-manifest",
+        "protocol": "skein-lightning-published-manifest",
         "protocol_version": 1,
         "state": "PUBLISHED",
+        "database_commit_epoch": manifest["database_commit_epoch"].clone(),
         "graph_commit_epoch": manifest["graph_commit_epoch"].clone(),
         "logical_checksum": manifest["logical_checksum"].clone(),
         "schema_checksum": manifest["schema_checksum"].clone(),
         "graph_stream_checksum": manifest["graph_stream_checksum"].clone(),
         "graph_stream_byte_len": manifest["graph_stream_byte_len"].clone(),
+        "relational_stream_checksum": manifest["relational_stream_checksum"].clone(),
+        "relational_stream_byte_len": manifest["relational_stream_byte_len"].clone(),
+        "relational_table_count": manifest["relational_table_count"].clone(),
+        "relational_row_count": manifest["relational_row_count"].clone(),
         "node_count": manifest["node_count"].clone(),
         "relationship_count": manifest["relationship_count"].clone(),
         "staging_catalog": {
-            "path": "graph_lightning_staging_catalog.json",
+            "path": "skein_lightning_staging_catalog.json",
             "checksum": catalog_checksum,
             "byte_len": catalog_bytes.len(),
         },
     });
 
     fs::create_dir_all(publish_dir)?;
-    let pointer_path = publish_dir.join("graph_lightning_published_manifest.json");
+    let pointer_path = publish_dir.join("skein_lightning_published_manifest.json");
     if pointer_path.exists() {
         let existing = read_json_file(&pointer_path)?;
         if same_published_manifest_identity(&existing, &pointer) {
@@ -3359,7 +3543,7 @@ fn publish_graph_lightning_staging_catalog_with_options(
             return Ok(report);
         }
         return Err(SkeinError::Execution(
-            "published graph lightning manifest already points to a different snapshot".to_string(),
+            "published Skein Lightning manifest already points to a different snapshot".to_string(),
         ));
     }
 
@@ -3377,22 +3561,22 @@ fn publish_graph_lightning_staging_catalog_with_options(
     let pointer_bytes = serde_json::to_vec_pretty(&report).unwrap();
     write_atomic_file(
         publish_dir,
-        "graph_lightning_published_manifest.json",
+        "skein_lightning_published_manifest.json",
         &pointer_bytes,
     )?;
     sync_directory(publish_dir)?;
     Ok(report)
 }
 
-fn graph_lightning_publish_preflight(
+fn skein_lightning_publish_preflight(
     staging_dir: &Path,
     manifest: &serde_json::Value,
-    options: &PublishGraphLightningOptions,
+    options: &PublishSkeinLightningOptions,
 ) -> Result<serde_json::Value> {
     let mut errors = Vec::new();
     let mut state_errors = Vec::new();
     let state_marker =
-        graph_lightning_import_state_marker(staging_dir, &mut errors, &mut state_errors);
+        skein_lightning_import_state_marker(staging_dir, &mut errors, &mut state_errors);
     let marker_present = state_marker
         .get("present")
         .and_then(serde_json::Value::as_bool)
@@ -3404,7 +3588,7 @@ fn graph_lightning_publish_preflight(
         push_grouped_error(
             &mut errors,
             &mut state_errors,
-            "publish requires graph lightning import state marker",
+            "publish requires Skein Lightning import state marker",
         );
     }
     if marker_present && marker_state != Some("VALIDATING") {
@@ -3419,18 +3603,18 @@ fn graph_lightning_publish_preflight(
     }
 
     let manifest_epoch = manifest
-        .get("graph_commit_epoch")
+        .get("database_commit_epoch")
         .and_then(serde_json::Value::as_u64);
-    let expected_graph_epoch_matches = options
-        .expected_graph_epoch
+    let expected_database_epoch_matches = options
+        .expected_database_epoch
         .is_none_or(|expected| manifest_epoch == Some(expected));
-    if !expected_graph_epoch_matches {
+    if !expected_database_epoch_matches {
         push_grouped_error(
             &mut errors,
             &mut state_errors,
             format!(
-                "expected graph epoch {:?} did not match staged manifest epoch {:?}",
-                options.expected_graph_epoch, manifest_epoch
+                "expected database epoch {:?} did not match staged manifest epoch {:?}",
+                options.expected_database_epoch, manifest_epoch
             ),
         );
     }
@@ -3453,7 +3637,7 @@ fn graph_lightning_publish_preflight(
 
     if !errors.is_empty() {
         return Err(SkeinError::Execution(format!(
-            "graph lightning publish preflight blocked: {}",
+            "Skein Lightning publish preflight blocked: {}",
             errors.join("; ")
         )));
     }
@@ -3461,9 +3645,9 @@ fn graph_lightning_publish_preflight(
     Ok(serde_json::json!({
         "decision": "ready",
         "require_state_marker": options.require_state_marker,
-        "expected_graph_epoch": options.expected_graph_epoch,
-        "manifest_graph_epoch": manifest_epoch,
-        "expected_graph_epoch_matches": expected_graph_epoch_matches,
+        "expected_database_epoch": options.expected_database_epoch,
+        "manifest_database_epoch": manifest_epoch,
+        "expected_database_epoch_matches": expected_database_epoch_matches,
         "fencing_token_required": options.fencing_token.is_some(),
         "fencing_token_matches": fencing_token_matches,
         "state_marker": state_marker,
@@ -3473,16 +3657,16 @@ fn graph_lightning_publish_preflight(
     }))
 }
 
-fn verify_graph_lightning_published_manifest(
+fn verify_skein_lightning_published_manifest(
     staging_dir: impl AsRef<Path>,
     publish_dir: impl AsRef<Path>,
 ) -> Result<serde_json::Value> {
     let staging_dir = staging_dir.as_ref();
     let publish_dir = publish_dir.as_ref();
-    let published_path = publish_dir.join("graph_lightning_published_manifest.json");
+    let published_path = publish_dir.join("skein_lightning_published_manifest.json");
     let published = read_json_file(&published_path)?;
-    let staging_verification = verify_graph_lightning_staging_catalog(staging_dir)?;
-    let catalog_path = staging_dir.join("graph_lightning_staging_catalog.json");
+    let staging_verification = verify_skein_lightning_staging_catalog(staging_dir)?;
+    let catalog_path = staging_dir.join("skein_lightning_staging_catalog.json");
     let catalog_bytes = fs::read(&catalog_path)?;
     let actual_catalog_checksum = checksum_bytes(&catalog_bytes);
     let actual_catalog_byte_len = catalog_bytes.len() as u64;
@@ -3518,12 +3702,19 @@ fn verify_graph_lightning_published_manifest(
     let catalog = serde_json::from_slice::<serde_json::Value>(&catalog_bytes)
         .map_err(|_| SkeinError::Execution("invalid JSON file: invalid_json".to_string()))?;
     let manifest = read_staging_artifact_json(&catalog, staging_dir, "manifest")?;
-    let pointer_matches_manifest = published.get("graph_commit_epoch")
-        == manifest.get("graph_commit_epoch")
+    let pointer_matches_manifest = published.get("database_commit_epoch")
+        == manifest.get("database_commit_epoch")
+        && published.get("graph_commit_epoch") == manifest.get("graph_commit_epoch")
         && published.get("logical_checksum") == manifest.get("logical_checksum")
         && published.get("schema_checksum") == manifest.get("schema_checksum")
         && published.get("graph_stream_checksum") == manifest.get("graph_stream_checksum")
         && published.get("graph_stream_byte_len") == manifest.get("graph_stream_byte_len")
+        && published.get("relational_stream_checksum")
+            == manifest.get("relational_stream_checksum")
+        && published.get("relational_stream_byte_len")
+            == manifest.get("relational_stream_byte_len")
+        && published.get("relational_table_count") == manifest.get("relational_table_count")
+        && published.get("relational_row_count") == manifest.get("relational_row_count")
         && published.get("node_count") == manifest.get("node_count")
         && published.get("relationship_count") == manifest.get("relationship_count");
     let mut errors = Vec::new();
@@ -3571,7 +3762,7 @@ fn verify_graph_lightning_published_manifest(
         "blocked"
     };
     Ok(serde_json::json!({
-        "protocol": "graph-lightning-published-verification",
+        "protocol": "skein-lightning-published-verification",
         "protocol_version": 1,
         "pointer_state_published": pointer_state_published,
         "catalog_checksum_matches": catalog_checksum_matches,
@@ -3594,23 +3785,23 @@ fn verify_graph_lightning_published_manifest(
     }))
 }
 
-fn graph_lightning_gc_staging_report(
+fn skein_lightning_gc_staging_report(
     staging_dir: impl AsRef<Path>,
     publish_dir: impl AsRef<Path>,
 ) -> Result<serde_json::Value> {
     let staging_dir = staging_dir.as_ref();
     let publish_dir = publish_dir.as_ref();
-    let catalog_path = staging_dir.join("graph_lightning_staging_catalog.json");
+    let catalog_path = staging_dir.join("skein_lightning_staging_catalog.json");
     let catalog_bytes = fs::read(&catalog_path)?;
     let catalog = serde_json::from_slice::<serde_json::Value>(&catalog_bytes)
         .map_err(|_| SkeinError::Execution("invalid JSON file: invalid_json".to_string()))?;
-    let candidates = graph_lightning_staging_gc_candidates(&catalog, &catalog_bytes)?;
-    let published_path = publish_dir.join("graph_lightning_published_manifest.json");
+    let candidates = skein_lightning_staging_gc_candidates(&catalog, &catalog_bytes)?;
+    let published_path = publish_dir.join("skein_lightning_published_manifest.json");
     let mut errors = Vec::new();
     let mut published_pointer_errors = Vec::new();
     let mut pinned_paths = BTreeSet::new();
     let pointer_state = if published_path.exists() {
-        let verification = verify_graph_lightning_published_manifest(staging_dir, publish_dir)?;
+        let verification = verify_skein_lightning_published_manifest(staging_dir, publish_dir)?;
         if verification
             .get("validation_gate")
             .and_then(|gate| gate.get("decision"))
@@ -3697,27 +3888,27 @@ fn graph_lightning_gc_staging_report(
                 == Some(true)
         })
         .count();
-    let total_bytes = graph_lightning_sum_artifact_bytes(&candidate_reports, |_| true);
-    let deletable_bytes = graph_lightning_sum_artifact_bytes(&candidate_reports, |candidate| {
+    let total_bytes = skein_lightning_sum_artifact_bytes(&candidate_reports, |_| true);
+    let deletable_bytes = skein_lightning_sum_artifact_bytes(&candidate_reports, |candidate| {
         candidate
             .get("deletable")
             .and_then(serde_json::Value::as_bool)
             == Some(true)
     });
-    let pinned_bytes = graph_lightning_sum_artifact_bytes(&candidate_reports, |candidate| {
+    let pinned_bytes = skein_lightning_sum_artifact_bytes(&candidate_reports, |candidate| {
         candidate
             .get("pinned_by_published_pointer")
             .and_then(serde_json::Value::as_bool)
             == Some(true)
     });
-    let artifact_summary = graph_lightning_artifact_summary(&candidate_reports, "byte_len");
+    let artifact_summary = skein_lightning_artifact_summary(&candidate_reports, "byte_len");
     let decision = if errors.is_empty() {
         "ready"
     } else {
         "blocked"
     };
     Ok(serde_json::json!({
-        "protocol": "graph-lightning-staging-gc-report",
+        "protocol": "skein-lightning-staging-gc-report",
         "protocol_version": 1,
         "published_pointer_state": pointer_state,
         "candidate_count": candidate_reports.len(),
@@ -3737,14 +3928,14 @@ fn graph_lightning_gc_staging_report(
     }))
 }
 
-fn graph_lightning_staging_gc_candidates(
+fn skein_lightning_staging_gc_candidates(
     catalog: &serde_json::Value,
     catalog_bytes: &[u8],
 ) -> Result<Vec<serde_json::Value>> {
     let mut candidates = Vec::new();
     candidates.push(serde_json::json!({
         "kind": "staging_catalog",
-        "path": "graph_lightning_staging_catalog.json",
+        "path": "skein_lightning_staging_catalog.json",
         "byte_len": catalog_bytes.len(),
         "checksum": checksum_bytes(catalog_bytes),
     }));
@@ -3778,7 +3969,7 @@ fn graph_lightning_staging_gc_candidates(
     Ok(candidates)
 }
 
-fn graph_lightning_artifact_summary(
+fn skein_lightning_artifact_summary(
     artifacts: &[serde_json::Value],
     byte_len_field: &str,
 ) -> serde_json::Value {
@@ -3812,7 +4003,7 @@ fn graph_lightning_artifact_summary(
     })
 }
 
-fn graph_lightning_sum_artifact_bytes(
+fn skein_lightning_sum_artifact_bytes(
     artifacts: &[serde_json::Value],
     predicate: impl Fn(&serde_json::Value) -> bool,
 ) -> u64 {
@@ -3823,14 +4014,14 @@ fn graph_lightning_sum_artifact_bytes(
         .sum()
 }
 
-fn graph_lightning_import_status(
+fn skein_lightning_import_status(
     staging_dir: impl AsRef<Path>,
     publish_dir: impl AsRef<Path>,
 ) -> Result<serde_json::Value> {
     let staging_dir = staging_dir.as_ref();
     let publish_dir = publish_dir.as_ref();
-    let catalog_path = staging_dir.join("graph_lightning_staging_catalog.json");
-    let published_path = publish_dir.join("graph_lightning_published_manifest.json");
+    let catalog_path = staging_dir.join("skein_lightning_staging_catalog.json");
+    let published_path = publish_dir.join("skein_lightning_published_manifest.json");
     let staging_catalog_present = catalog_path.exists();
     let published_pointer_present = published_path.exists();
     let mut errors = Vec::new();
@@ -3843,9 +4034,9 @@ fn graph_lightning_import_status(
     let mut staging_verification = None;
     let mut published_verification = None;
     let state_marker =
-        graph_lightning_import_state_marker(staging_dir, &mut errors, &mut state_errors);
+        skein_lightning_import_state_marker(staging_dir, &mut errors, &mut state_errors);
     let checkpoint_log =
-        graph_lightning_import_checkpoint_log(staging_dir, &mut errors, &mut checkpoint_errors);
+        skein_lightning_import_checkpoint_log(staging_dir, &mut errors, &mut checkpoint_errors);
     let artifact_state = if !staging_catalog_present && published_pointer_present {
         push_grouped_error(
             &mut errors,
@@ -3856,7 +4047,7 @@ fn graph_lightning_import_status(
     } else if !staging_catalog_present {
         "CREATED"
     } else {
-        let staging_report = verify_graph_lightning_staging_catalog(staging_dir)?;
+        let staging_report = verify_skein_lightning_staging_catalog(staging_dir)?;
         let staging_ready = gate_decision(&staging_report, "validation_gate") == Some("ready");
         if !staging_ready {
             for error in gate_errors(&staging_report, "validation_gate") {
@@ -3868,7 +4059,7 @@ fn graph_lightning_import_status(
             "QUARANTINED"
         } else if published_pointer_present {
             let published_report =
-                verify_graph_lightning_published_manifest(staging_dir, publish_dir)?;
+                verify_skein_lightning_published_manifest(staging_dir, publish_dir)?;
             let published_ready =
                 gate_decision(&published_report, "validation_gate") == Some("ready");
             if !published_ready {
@@ -3886,14 +4077,14 @@ fn graph_lightning_import_status(
             "READY"
         }
     };
-    let import_state = graph_lightning_effective_import_state(
+    let import_state = skein_lightning_effective_import_state(
         artifact_state,
         state_marker
             .get("import_state")
             .and_then(serde_json::Value::as_str),
     );
-    let resume_action = graph_lightning_import_resume_action(import_state);
-    let resource_retention = graph_lightning_import_resource_retention(
+    let resume_action = skein_lightning_import_resume_action(import_state);
+    let resource_retention = skein_lightning_import_resource_retention(
         import_state,
         staging_catalog_present,
         staging_dir,
@@ -3901,7 +4092,7 @@ fn graph_lightning_import_status(
         &mut errors,
         &mut resource_errors,
     );
-    let storage_recovery_evidence = graph_lightning_import_storage_recovery_evidence(
+    let storage_recovery_evidence = skein_lightning_import_storage_recovery_evidence(
         staging_verification.as_ref(),
         published_verification.as_ref(),
     );
@@ -3915,7 +4106,7 @@ fn graph_lightning_import_status(
         "ready"
     };
     Ok(serde_json::json!({
-        "protocol": "graph-lightning-import-status",
+        "protocol": "skein-lightning-import-status",
         "protocol_version": 1,
         "import_state": import_state,
         "artifact_state": artifact_state,
@@ -3947,7 +4138,7 @@ fn graph_lightning_import_status(
     }))
 }
 
-fn graph_lightning_import_storage_recovery_evidence(
+fn skein_lightning_import_storage_recovery_evidence(
     staging_verification: Option<&serde_json::Value>,
     published_verification: Option<&serde_json::Value>,
 ) -> serde_json::Value {
@@ -3969,16 +4160,16 @@ fn graph_lightning_import_storage_recovery_evidence(
         })
 }
 
-fn graph_lightning_import_checkpoint_log(
+fn skein_lightning_import_checkpoint_log(
     staging_dir: &Path,
     errors: &mut Vec<String>,
     checkpoint_errors: &mut Vec<String>,
 ) -> serde_json::Value {
-    let checkpoint_path = staging_dir.join("graph_lightning_import_checkpoints.jsonl");
+    let checkpoint_path = staging_dir.join("skein_lightning_import_checkpoints.jsonl");
     if !checkpoint_path.exists() {
         return serde_json::json!({
             "present": false,
-            "path": "graph_lightning_import_checkpoints.jsonl",
+            "path": "skein_lightning_import_checkpoints.jsonl",
             "entry_count": 0,
             "idempotency_key_count": 0,
             "idempotency_conflicts": 0,
@@ -4016,7 +4207,7 @@ fn graph_lightning_import_checkpoint_log(
                 checkpoint_errors,
                 format!("checkpoint log could not be read: {error}"),
             );
-            return graph_lightning_import_checkpoint_blocked_json(checkpoint_errors);
+            return skein_lightning_import_checkpoint_blocked_json(checkpoint_errors);
         }
     };
 
@@ -4051,7 +4242,7 @@ fn graph_lightning_import_checkpoint_log(
                 continue;
             }
         };
-        graph_lightning_validate_checkpoint_entry(
+        skein_lightning_validate_checkpoint_entry(
             &entry,
             line_index + 1,
             errors,
@@ -4059,7 +4250,7 @@ fn graph_lightning_import_checkpoint_log(
         );
         increment_string_field(&entry, "stage", &mut stage_counts);
         increment_string_field(&entry, "status", &mut status_counts);
-        if let Some((key, fingerprint)) = graph_lightning_checkpoint_idempotency_fingerprint(&entry)
+        if let Some((key, fingerprint)) = skein_lightning_checkpoint_idempotency_fingerprint(&entry)
         {
             if let Some(previous) = idempotency_fingerprints.get(&key) {
                 if previous != &fingerprint {
@@ -4094,7 +4285,7 @@ fn graph_lightning_import_checkpoint_log(
     };
     serde_json::json!({
         "present": true,
-        "path": "graph_lightning_import_checkpoints.jsonl",
+        "path": "skein_lightning_import_checkpoints.jsonl",
         "entry_count": entries.len(),
         "idempotency_key_count": idempotency_fingerprints.len(),
         "idempotency_conflicts": idempotency_conflicts.len(),
@@ -4124,7 +4315,7 @@ fn graph_lightning_import_checkpoint_log(
     })
 }
 
-fn graph_lightning_checkpoint_idempotency_fingerprint(
+fn skein_lightning_checkpoint_idempotency_fingerprint(
     entry: &serde_json::Value,
 ) -> Option<(String, serde_json::Value)> {
     let import_id = marker_string_field(entry, "import_id")?;
@@ -4146,12 +4337,12 @@ fn graph_lightning_checkpoint_idempotency_fingerprint(
     Some((key, fingerprint))
 }
 
-fn graph_lightning_import_checkpoint_blocked_json(
+fn skein_lightning_import_checkpoint_blocked_json(
     checkpoint_errors: &[String],
 ) -> serde_json::Value {
     serde_json::json!({
         "present": true,
-        "path": "graph_lightning_import_checkpoints.jsonl",
+        "path": "skein_lightning_import_checkpoints.jsonl",
         "entry_count": 0,
         "idempotency_key_count": 0,
         "idempotency_conflicts": 0,
@@ -4181,7 +4372,7 @@ fn graph_lightning_import_checkpoint_blocked_json(
     })
 }
 
-fn graph_lightning_validate_checkpoint_entry(
+fn skein_lightning_validate_checkpoint_entry(
     entry: &serde_json::Value,
     line_number: usize,
     errors: &mut Vec<String>,
@@ -4251,16 +4442,16 @@ fn increment_string_field(
     }
 }
 
-fn graph_lightning_import_state_marker(
+fn skein_lightning_import_state_marker(
     staging_dir: &Path,
     errors: &mut Vec<String>,
     state_errors: &mut Vec<String>,
 ) -> serde_json::Value {
-    let state_path = staging_dir.join("graph_lightning_import_state.json");
+    let state_path = staging_dir.join("skein_lightning_import_state.json");
     if !state_path.exists() {
         return serde_json::json!({
             "present": false,
-            "path": "graph_lightning_import_state.json",
+            "path": "skein_lightning_import_state.json",
             "import_state": serde_json::Value::Null,
             "idempotency_ready": false,
             "idempotency_key": serde_json::Value::Null,
@@ -4278,7 +4469,7 @@ fn graph_lightning_import_state_marker(
             );
             return serde_json::json!({
                 "present": true,
-                "path": "graph_lightning_import_state.json",
+                "path": "skein_lightning_import_state.json",
                 "import_state": "QUARANTINED",
                 "idempotency_ready": false,
                 "idempotency_key": serde_json::Value::Null,
@@ -4287,7 +4478,7 @@ fn graph_lightning_import_state_marker(
         }
     };
     let protocol_valid = marker.get("protocol").and_then(serde_json::Value::as_str)
-        == Some("graph-lightning-import-state");
+        == Some("skein-lightning-import-state");
     let version_valid = marker
         .get("protocol_version")
         .and_then(serde_json::Value::as_u64)
@@ -4311,7 +4502,7 @@ fn graph_lightning_import_state_marker(
             "import state marker protocol version mismatch",
         );
     }
-    if !graph_lightning_import_marker_state_allowed(import_state) {
+    if !skein_lightning_import_marker_state_allowed(import_state) {
         push_grouped_error(
             errors,
             state_errors,
@@ -4319,11 +4510,11 @@ fn graph_lightning_import_state_marker(
         );
     }
     let idempotency_key =
-        graph_lightning_import_marker_idempotency_key(&marker, import_state, errors, state_errors);
+        skein_lightning_import_marker_idempotency_key(&marker, import_state, errors, state_errors);
 
     serde_json::json!({
         "present": true,
-        "path": "graph_lightning_import_state.json",
+        "path": "skein_lightning_import_state.json",
         "import_state": if state_errors.is_empty() { import_state } else { "QUARANTINED" },
         "idempotency_ready": state_errors.is_empty() && idempotency_key.is_some(),
         "idempotency_key": idempotency_key,
@@ -4331,14 +4522,14 @@ fn graph_lightning_import_state_marker(
     })
 }
 
-fn graph_lightning_import_marker_state_allowed(import_state: &str) -> bool {
+fn skein_lightning_import_marker_state_allowed(import_state: &str) -> bool {
     matches!(
         import_state,
         "EXPORTING" | "UPLOADING" | "MERGING" | "VALIDATING" | "FAILED" | "CANCELED"
     )
 }
 
-fn graph_lightning_import_marker_idempotency_key(
+fn skein_lightning_import_marker_idempotency_key(
     marker: &serde_json::Value,
     import_state: &str,
     errors: &mut Vec<String>,
@@ -4348,7 +4539,7 @@ fn graph_lightning_import_marker_idempotency_key(
     let task_id = marker_string_field(marker, "task_id");
     let fencing_token = marker_string_field(marker, "fencing_token");
     let object_digest = marker_string_field(marker, "object_digest");
-    if graph_lightning_import_marker_state_is_active(import_state) {
+    if skein_lightning_import_marker_state_is_active(import_state) {
         for missing in [
             ("import_id", import_id),
             ("task_id", task_id),
@@ -4374,7 +4565,7 @@ fn graph_lightning_import_marker_idempotency_key(
     }))
 }
 
-fn graph_lightning_import_marker_state_is_active(import_state: &str) -> bool {
+fn skein_lightning_import_marker_state_is_active(import_state: &str) -> bool {
     matches!(
         import_state,
         "EXPORTING" | "UPLOADING" | "MERGING" | "VALIDATING"
@@ -4388,7 +4579,7 @@ fn marker_string_field<'a>(marker: &'a serde_json::Value, field: &str) -> Option
         .filter(|value| !value.is_empty())
 }
 
-fn graph_lightning_effective_import_state<'a>(
+fn skein_lightning_effective_import_state<'a>(
     artifact_state: &'a str,
     marker_state: Option<&'a str>,
 ) -> &'a str {
@@ -4398,7 +4589,7 @@ fn graph_lightning_effective_import_state<'a>(
     marker_state.unwrap_or(artifact_state)
 }
 
-fn graph_lightning_import_resource_retention(
+fn skein_lightning_import_resource_retention(
     import_state: &str,
     staging_catalog_present: bool,
     staging_dir: &Path,
@@ -4417,7 +4608,7 @@ fn graph_lightning_import_resource_retention(
         });
     }
 
-    let gc_report = match graph_lightning_gc_staging_report(staging_dir, publish_dir) {
+    let gc_report = match skein_lightning_gc_staging_report(staging_dir, publish_dir) {
         Ok(report) => report,
         Err(error) => {
             push_grouped_error(
@@ -4507,7 +4698,7 @@ fn graph_lightning_import_resource_retention(
     }
 }
 
-fn graph_lightning_import_resume_action(import_state: &str) -> serde_json::Value {
+fn skein_lightning_import_resume_action(import_state: &str) -> serde_json::Value {
     match import_state {
         "CREATED" => serde_json::json!({
             "operation": "stage_bootstrap",
@@ -4626,11 +4817,16 @@ fn read_staging_artifact_json(
 
 fn same_published_manifest_identity(left: &serde_json::Value, right: &serde_json::Value) -> bool {
     [
+        "database_commit_epoch",
         "graph_commit_epoch",
         "logical_checksum",
         "schema_checksum",
         "graph_stream_checksum",
         "graph_stream_byte_len",
+        "relational_stream_checksum",
+        "relational_stream_byte_len",
+        "relational_table_count",
+        "relational_row_count",
         "node_count",
         "relationship_count",
     ]
@@ -4653,7 +4849,7 @@ fn write_staging_artifact(
     let tmp_path = staging_dir.join(format!("{file_name}.tmp"));
     write_atomic_path(&path, &tmp_path, bytes)?;
     Ok(serde_json::json!({
-        "kind": graph_lightning_artifact_kind(file_name),
+        "kind": skein_lightning_artifact_kind(file_name),
         "path": file_name,
         "byte_len": bytes.len(),
         "checksum": checksum_bytes(bytes),
@@ -4676,12 +4872,13 @@ fn write_atomic_path(path: &Path, tmp_path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn graph_lightning_artifact_kind(file_name: &str) -> &'static str {
+fn skein_lightning_artifact_kind(file_name: &str) -> &'static str {
     match file_name {
-        "graph_lightning_bootstrap_manifest.json" => "manifest",
-        "graph_lightning_graph_stream.txt" => "graph_stream",
-        "graph_lightning_bootstrap_bundle.json" => "bundle",
-        "graph_lightning_staging_catalog.json" => "staging_catalog",
+        "skein_lightning_bootstrap_manifest.json" => "manifest",
+        "skein_lightning_graph_stream.txt" => "graph_stream",
+        "skein_lightning_relational_stream.bin" => "relational_stream",
+        "skein_lightning_bootstrap_bundle.json" => "bundle",
+        "skein_lightning_staging_catalog.json" => "staging_catalog",
         _ => "unknown",
     }
 }
@@ -4695,8 +4892,8 @@ fn sync_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn graph_lightning_graph_stream_validation_json(
-    validation: &skein::GraphLightningGraphStreamValidation,
+fn skein_lightning_graph_stream_validation_json(
+    validation: &skein::SkeinLightningGraphStreamValidation,
 ) -> serde_json::Value {
     serde_json::json!({
         "is_valid": validation.is_valid,
@@ -4716,6 +4913,26 @@ fn graph_lightning_graph_stream_validation_json(
         "duplicate_relationship_ids": validation.duplicate_relationship_ids,
         "missing_sources": endpoint_violations_json(&validation.missing_sources),
         "missing_targets": endpoint_violations_json(&validation.missing_targets),
+        "errors": validation.errors,
+    })
+}
+
+fn skein_lightning_relational_stream_validation_json(
+    validation: &skein::SkeinLightningRelationalStreamValidation,
+) -> serde_json::Value {
+    serde_json::json!({
+        "is_valid": validation.is_valid,
+        "checksum_matches": validation.checksum_matches,
+        "format_version_matches": validation.format_version_matches,
+        "epoch_matches": validation.epoch_matches,
+        "count_matches": validation.count_matches,
+        "manifest_matches": validation.manifest_matches,
+        "expected_stream_checksum": validation.expected_stream_checksum,
+        "actual_stream_checksum": validation.actual_stream_checksum,
+        "database_commit_epoch": validation.database_commit_epoch,
+        "table_count": validation.table_count,
+        "row_count": validation.row_count,
+        "overflow_segment_count": validation.overflow_segment_count,
         "errors": validation.errors,
     })
 }
@@ -5092,27 +5309,27 @@ mod tests {
         enforce_storage_recovery_requirements, explain_analyze_json_usage,
         explain_analyze_output_json, explain_json_usage, explain_output_json, explain_table_usage,
         external_shadow_adapter_smoke_fixture, external_shadow_adapter_smoke_report_json,
-        graph_lightning_bootstrap_bundle_json,
-        graph_lightning_bootstrap_bundle_json_with_storage_recovery,
-        graph_lightning_bootstrap_bundle_usage, graph_lightning_bootstrap_manifest_json,
-        graph_lightning_bootstrap_manifest_usage, graph_lightning_gc_staging_report,
-        graph_lightning_graph_stream_usage, graph_lightning_graph_stream_validation_json,
-        graph_lightning_import_status, graph_lightning_publish_staging_usage,
-        graph_lightning_stage_bootstrap_usage, graph_lightning_verify_export_usage,
-        graph_lightning_verify_published_usage, graph_lightning_verify_staging_usage,
         is_self_shadow_command, merge_replacement_summary_evidence,
         nowledge_bounded_read_report_json, nowledge_bounded_read_report_usage,
         nowledge_cypher_migration_gate_usage, parse_background_maintenance_limit,
         parse_max_blockers, parse_max_family_items, parse_max_wal_replay_entries,
         parse_parameters_json, parse_positive_usize, parse_shadow_timeout_ms,
-        publish_graph_lightning_staging_catalog,
-        publish_graph_lightning_staging_catalog_with_options, read_json_file,
-        should_run_shadow_ready, stable_identity_audit_json,
-        stage_graph_lightning_bootstrap_export,
-        stage_graph_lightning_bootstrap_export_with_storage_recovery, storage_recovery_report_json,
-        validate_canonical_snapshot_usage, value_json, verify_graph_lightning_published_manifest,
-        verify_graph_lightning_staging_catalog, BackgroundMaintenanceReportOptions,
-        PublishGraphLightningOptions, StorageRecoveryRequirements,
+        publish_skein_lightning_staging_catalog,
+        publish_skein_lightning_staging_catalog_with_options, read_json_file,
+        should_run_shadow_ready, skein_lightning_bootstrap_bundle_json,
+        skein_lightning_bootstrap_bundle_json_with_storage_recovery,
+        skein_lightning_bootstrap_bundle_usage, skein_lightning_bootstrap_manifest_json,
+        skein_lightning_bootstrap_manifest_usage, skein_lightning_gc_staging_report,
+        skein_lightning_graph_stream_usage, skein_lightning_graph_stream_validation_json,
+        skein_lightning_import_status, skein_lightning_publish_staging_usage,
+        skein_lightning_relational_stream_usage, skein_lightning_stage_bootstrap_usage,
+        skein_lightning_verify_export_usage, skein_lightning_verify_published_usage,
+        skein_lightning_verify_staging_usage, stable_identity_audit_json,
+        stage_skein_lightning_bootstrap_export,
+        stage_skein_lightning_bootstrap_export_with_storage_recovery, storage_recovery_report_json,
+        validate_canonical_snapshot_usage, value_json, verify_skein_lightning_published_manifest,
+        verify_skein_lightning_staging_catalog, BackgroundMaintenanceReportOptions,
+        PublishSkeinLightningOptions, StorageRecoveryRequirements,
     };
     use skein::{
         api::ExplainOutput,
@@ -5122,9 +5339,10 @@ mod tests {
         BackgroundMaintenanceOptions, CanonicalGraphSnapshotValidation,
         CanonicalSnapshotEndpointViolation, CanonicalSnapshotIdentityAudit, CompatibilityCheck,
         CompatibilityCheckReport, CompatibilityShadowCheckReport, CompatibilityShadowReport,
-        CompatibilityShadowStatus, Database, ExternalShadowReady, GraphLightningBootstrapManifest,
-        GraphLightningGraphStreamValidation, LocalQosPolicy, NowledgeMemReadOptions,
-        PlanCacheStats, RecoveryMode, StorageRecoveryReport, Value, WorkClass, WorkRequest,
+        CompatibilityShadowStatus, Database, ExternalShadowReady, LocalQosPolicy,
+        NowledgeMemReadOptions, PlanCacheStats, RecoveryMode, SkeinLightningBootstrapManifest,
+        SkeinLightningGraphStreamValidation, SkeinLightningRelationalStreamValidation,
+        StorageRecoveryReport, Value, WorkClass, WorkRequest,
     };
     use std::collections::BTreeMap;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -6255,7 +6473,7 @@ mod tests {
                     include_property_index_projection: false,
                     include_search_projection_rebuild: false,
                     include_search_projection_metadata_repair: false,
-                    include_graph_lightning_bootstrap_export: false,
+                    include_skein_lightning_bootstrap_export: false,
                     include_external_content_artifact_jobs: false,
                     ..BackgroundMaintenanceOptions::default()
                 },
@@ -6597,7 +6815,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_graph_lightning_bootstrap_manifest_json() {
+    fn renders_skein_lightning_bootstrap_manifest_json() {
         let validation = CanonicalGraphSnapshotValidation {
             is_valid: true,
             is_import_ready: true,
@@ -6617,12 +6835,19 @@ mod tests {
             missing_sources: Vec::new(),
             missing_targets: Vec::new(),
         };
-        let manifest = GraphLightningBootstrapManifest {
+        let manifest = SkeinLightningBootstrapManifest {
             protocol_version: 1,
+            database_commit_epoch: 5,
             graph_commit_epoch: 5,
             logical_checksum: 99,
             graph_stream_checksum: 101,
             graph_stream_byte_len: 4096,
+            relational_stream_format_version: 1,
+            relational_stream_checksum: 202,
+            relational_stream_byte_len: 8192,
+            relational_table_count: 2,
+            relational_row_count: 7,
+            relational_overflow_segment_count: 1,
             schema_checksum: 77,
             node_count: 3,
             relationship_count: 2,
@@ -6631,25 +6856,47 @@ mod tests {
             node_property_count: 6,
             relationship_property_count: 2,
             validation,
+            relational_validation: SkeinLightningRelationalStreamValidation {
+                is_valid: true,
+                checksum_matches: true,
+                format_version_matches: true,
+                epoch_matches: true,
+                count_matches: true,
+                manifest_matches: true,
+                expected_stream_checksum: Some(202),
+                actual_stream_checksum: 202,
+                database_commit_epoch: Some(5),
+                table_count: 2,
+                row_count: 7,
+                overflow_segment_count: 1,
+                errors: Vec::new(),
+            },
         };
 
-        let json = graph_lightning_bootstrap_manifest_json(&manifest);
+        let json = skein_lightning_bootstrap_manifest_json(&manifest);
 
-        assert_eq!(json["protocol"], "graph-lightning-bootstrap");
+        assert_eq!(json["protocol"], "skein-lightning-bootstrap");
         assert_eq!(json["protocol_version"], 1);
+        assert_eq!(json["database_commit_epoch"], 5);
         assert_eq!(json["graph_commit_epoch"], 5);
         assert_eq!(json["logical_checksum"], 99);
         assert_eq!(json["graph_stream_checksum"], 101);
         assert_eq!(json["graph_stream_byte_len"], 4096);
+        assert_eq!(json["relational_stream_checksum"], 202);
+        assert_eq!(json["relational_stream_byte_len"], 8192);
+        assert_eq!(json["relational_table_count"], 2);
+        assert_eq!(json["relational_row_count"], 7);
+        assert_eq!(json["relational_overflow_segment_count"], 1);
         assert_eq!(json["schema_checksum"], 77);
         assert_eq!(json["node_count"], 3);
         assert_eq!(json["relationship_count"], 2);
         assert_eq!(json["validation"]["is_import_ready"], true);
+        assert_eq!(json["relational_validation"]["is_valid"], true);
     }
 
     #[test]
-    fn renders_graph_lightning_graph_stream_validation_json() {
-        let validation = GraphLightningGraphStreamValidation {
+    fn renders_skein_lightning_graph_stream_validation_json() {
+        let validation = SkeinLightningGraphStreamValidation {
             is_valid: false,
             checksum_matches: false,
             format_version_matches: true,
@@ -6676,7 +6923,7 @@ mod tests {
             errors: vec!["graph stream checksum mismatch".to_string()],
         };
 
-        let json = graph_lightning_graph_stream_validation_json(&validation);
+        let json = skein_lightning_graph_stream_validation_json(&validation);
 
         assert_eq!(json["is_valid"], false);
         assert_eq!(json["checksum_matches"], false);
@@ -6691,18 +6938,18 @@ mod tests {
     }
 
     #[test]
-    fn renders_graph_lightning_bootstrap_bundle_json() {
+    fn renders_skein_lightning_bootstrap_bundle_json() {
         let mut db = Database::new();
         db.query(
             "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
         )
         .unwrap();
-        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+        let export = db.prepare_skein_lightning_bootstrap_export().unwrap();
 
-        let json = graph_lightning_bootstrap_bundle_json(&export);
+        let json = skein_lightning_bootstrap_bundle_json(&export);
 
-        assert_eq!(json["protocol"], "graph-lightning-bootstrap-bundle");
-        assert_eq!(json["manifest"]["protocol"], "graph-lightning-bootstrap");
+        assert_eq!(json["protocol"], "skein-lightning-bootstrap-bundle");
+        assert_eq!(json["manifest"]["protocol"], "skein-lightning-bootstrap");
         assert_eq!(json["manifest"]["validation"]["is_import_ready"], true);
         assert_eq!(json["graph_stream_validation"]["is_valid"], true);
         assert_eq!(json["export_gate"]["decision"], "ready");
@@ -6727,10 +6974,10 @@ mod tests {
         let mut db = Database::new();
         db.query("CREATE (:Memory {id: 'root', title: 'Root'})")
             .unwrap();
-        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+        let export = db.prepare_skein_lightning_bootstrap_export().unwrap();
         let recovery = test_storage_recovery_report(export.manifest.graph_commit_epoch);
 
-        let json = graph_lightning_bootstrap_bundle_json_with_storage_recovery(
+        let json = skein_lightning_bootstrap_bundle_json_with_storage_recovery(
             &export,
             "skein-storage-v1",
             &recovery,
@@ -6753,22 +7000,22 @@ mod tests {
             json["storage_recovery"]["readiness"]["wal_replay_bounded"],
             true
         );
-        assert_eq!(json["manifest"]["protocol"], "graph-lightning-bootstrap");
+        assert_eq!(json["manifest"]["protocol"], "skein-lightning-bootstrap");
         assert_eq!(json["export_gate"]["decision"], "ready");
     }
 
     #[test]
-    fn graph_lightning_bootstrap_bundle_groups_export_gate_blockers() {
+    fn skein_lightning_bootstrap_bundle_groups_export_gate_blockers() {
         let mut db = Database::new();
         db.query(
             "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
         )
         .unwrap();
-        let mut export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+        let mut export = db.prepare_skein_lightning_bootstrap_export().unwrap();
         export.manifest.validation.is_import_ready = false;
         export.graph_stream.encoded.push_str("corrupt");
 
-        let json = graph_lightning_bootstrap_bundle_json(&export);
+        let json = skein_lightning_bootstrap_bundle_json(&export);
 
         assert_eq!(json["export_gate"]["decision"], "blocked");
         assert_eq!(json["export_gate"]["manifest_blockers"], 1);
@@ -6785,23 +7032,23 @@ mod tests {
     }
 
     #[test]
-    fn stages_graph_lightning_bootstrap_export_artifacts() {
+    fn stages_skein_lightning_bootstrap_export_artifacts() {
         let mut db = Database::new();
         db.query(
             "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
         )
         .unwrap();
-        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
-        let staging_dir = unique_main_test_dir("graph_lightning_stage_bootstrap");
+        let export = db.prepare_skein_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("skein_lightning_stage_bootstrap");
 
-        let catalog = stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+        let catalog = stage_skein_lightning_bootstrap_export(&export, &staging_dir).unwrap();
 
-        assert_eq!(catalog["protocol"], "graph-lightning-staging-catalog");
+        assert_eq!(catalog["protocol"], "skein-lightning-staging-catalog");
         assert_eq!(catalog["stage_state"], "READY");
         assert_eq!(catalog["export_gate"]["decision"], "ready");
-        assert_eq!(catalog["artifacts"].as_array().unwrap().len(), 3);
-        assert_eq!(catalog["artifact_summary"]["object_count"], 3);
-        assert_eq!(catalog["artifact_summary"]["measured_object_count"], 3);
+        assert_eq!(catalog["artifacts"].as_array().unwrap().len(), 4);
+        assert_eq!(catalog["artifact_summary"]["object_count"], 4);
+        assert_eq!(catalog["artifact_summary"]["measured_object_count"], 4);
         assert_eq!(catalog["artifact_summary"]["missing_byte_len_count"], 0);
         assert!(
             catalog["artifact_summary"]["total_byte_len"]
@@ -6814,21 +7061,28 @@ mod tests {
             catalog["artifact_summary"]["kind_counts"]["graph_stream"],
             1
         );
+        assert_eq!(
+            catalog["artifact_summary"]["kind_counts"]["relational_stream"],
+            1
+        );
         assert_eq!(catalog["artifact_summary"]["kind_counts"]["bundle"], 1);
         assert!(staging_dir
-            .join("graph_lightning_bootstrap_manifest.json")
+            .join("skein_lightning_bootstrap_manifest.json")
             .exists());
         assert!(staging_dir
-            .join("graph_lightning_graph_stream.txt")
+            .join("skein_lightning_graph_stream.txt")
             .exists());
         assert!(staging_dir
-            .join("graph_lightning_bootstrap_bundle.json")
+            .join("skein_lightning_relational_stream.bin")
             .exists());
         assert!(staging_dir
-            .join("graph_lightning_staging_catalog.json")
+            .join("skein_lightning_bootstrap_bundle.json")
+            .exists());
+        assert!(staging_dir
+            .join("skein_lightning_staging_catalog.json")
             .exists());
         let persisted_catalog =
-            std::fs::read_to_string(staging_dir.join("graph_lightning_staging_catalog.json"))
+            std::fs::read_to_string(staging_dir.join("skein_lightning_staging_catalog.json"))
                 .unwrap();
         let persisted_catalog =
             serde_json::from_str::<serde_json::Value>(&persisted_catalog).unwrap();
@@ -6838,28 +7092,29 @@ mod tests {
     }
 
     #[test]
-    fn verifies_graph_lightning_staging_catalog() {
+    fn verifies_skein_lightning_staging_catalog() {
         let mut db = Database::new();
         db.query(
             "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
         )
         .unwrap();
-        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
-        let staging_dir = unique_main_test_dir("graph_lightning_verify_staging");
-        stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+        let export = db.prepare_skein_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("skein_lightning_verify_staging");
+        stage_skein_lightning_bootstrap_export(&export, &staging_dir).unwrap();
 
-        let report = verify_graph_lightning_staging_catalog(&staging_dir).unwrap();
+        let report = verify_skein_lightning_staging_catalog(&staging_dir).unwrap();
 
-        assert_eq!(report["protocol"], "graph-lightning-staging-verification");
+        assert_eq!(report["protocol"], "skein-lightning-staging-verification");
         assert_eq!(report["validation_gate"]["decision"], "ready");
         assert_eq!(report["artifact_integrity"], true);
         assert_eq!(report["catalog_protocol_matches"], true);
         assert_eq!(report["catalog_protocol_version_matches"], true);
         assert_eq!(report["manifest_protocol_version_matches"], true);
         assert_eq!(report["manifest_matches_graph_stream"], true);
+        assert_eq!(report["manifest_matches_relational_stream"], true);
         assert_eq!(report["bundle_matches_artifacts"], true);
-        assert_eq!(report["artifact_summary"]["object_count"], 3);
-        assert_eq!(report["artifact_summary"]["measured_object_count"], 3);
+        assert_eq!(report["artifact_summary"]["object_count"], 4);
+        assert_eq!(report["artifact_summary"]["measured_object_count"], 4);
         assert_eq!(report["artifact_summary"]["missing_byte_len_count"], 0);
         assert!(
             report["artifact_summary"]["total_byte_len"]
@@ -6870,6 +7125,7 @@ mod tests {
         assert_eq!(report["validation_gate"]["artifact_errors"], 0);
         assert_eq!(report["validation_gate"]["manifest_errors"], 0);
         assert_eq!(report["validation_gate"]["graph_stream_errors"], 0);
+        assert_eq!(report["validation_gate"]["relational_stream_errors"], 0);
         assert_eq!(report["validation_gate"]["bundle_errors"], 0);
         assert_eq!(report["validation_gate"]["catalog_errors"], 0);
 
@@ -6881,10 +7137,10 @@ mod tests {
         let mut db = Database::new();
         db.query("CREATE (:Memory {id: 'root', title: 'Root'})")
             .unwrap();
-        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+        let export = db.prepare_skein_lightning_bootstrap_export().unwrap();
         let recovery = test_storage_recovery_report(export.manifest.graph_commit_epoch);
-        let staging_dir = unique_main_test_dir("graph_lightning_verify_staging_recovery");
-        stage_graph_lightning_bootstrap_export_with_storage_recovery(
+        let staging_dir = unique_main_test_dir("skein_lightning_verify_staging_recovery");
+        stage_skein_lightning_bootstrap_export_with_storage_recovery(
             &export,
             &staging_dir,
             "skein-storage-v1",
@@ -6892,7 +7148,7 @@ mod tests {
         )
         .unwrap();
 
-        let report = verify_graph_lightning_staging_catalog(&staging_dir).unwrap();
+        let report = verify_skein_lightning_staging_catalog(&staging_dir).unwrap();
 
         assert_eq!(report["validation_gate"]["decision"], "ready");
         assert_eq!(report["storage_recovery_evidence"]["present"], true);
@@ -6918,24 +7174,24 @@ mod tests {
         let mut db = Database::new();
         db.query("CREATE (:Memory {id: 'root', title: 'Root'})")
             .unwrap();
-        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+        let export = db.prepare_skein_lightning_bootstrap_export().unwrap();
         let recovery = test_storage_recovery_report(export.manifest.graph_commit_epoch);
-        let staging_dir = unique_main_test_dir("graph_lightning_verify_staging_recovery_tampered");
-        stage_graph_lightning_bootstrap_export_with_storage_recovery(
+        let staging_dir = unique_main_test_dir("skein_lightning_verify_staging_recovery_tampered");
+        stage_skein_lightning_bootstrap_export_with_storage_recovery(
             &export,
             &staging_dir,
             "skein-storage-v1",
             &recovery,
         )
         .unwrap();
-        let bundle_path = staging_dir.join("graph_lightning_bootstrap_bundle.json");
+        let bundle_path = staging_dir.join("skein_lightning_bootstrap_bundle.json");
         let bundle = std::fs::read_to_string(&bundle_path).unwrap().replace(
             "\"recovered_commit_epoch\": 1",
             "\"recovered_commit_epoch\": 99",
         );
         std::fs::write(&bundle_path, bundle).unwrap();
 
-        let report = verify_graph_lightning_staging_catalog(&staging_dir).unwrap();
+        let report = verify_skein_lightning_staging_catalog(&staging_dir).unwrap();
 
         assert_eq!(report["validation_gate"]["decision"], "blocked");
         assert_eq!(report["artifact_integrity"], false);
@@ -6952,7 +7208,7 @@ mod tests {
             .any(|error| error
                 .as_str()
                 .unwrap()
-                .contains("recovered commit epoch does not match manifest graph epoch")));
+                .contains("recovered commit epoch does not match manifest database epoch")));
 
         std::fs::remove_dir_all(staging_dir).unwrap();
     }
@@ -6964,16 +7220,16 @@ mod tests {
             "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
         )
         .unwrap();
-        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
-        let staging_dir = unique_main_test_dir("graph_lightning_verify_staging_catalog_version");
-        stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
-        let catalog_path = staging_dir.join("graph_lightning_staging_catalog.json");
+        let export = db.prepare_skein_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("skein_lightning_verify_staging_catalog_version");
+        stage_skein_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+        let catalog_path = staging_dir.join("skein_lightning_staging_catalog.json");
         let catalog = std::fs::read_to_string(&catalog_path)
             .unwrap()
             .replace("\"protocol_version\": 1", "\"protocol_version\": 99");
         std::fs::write(&catalog_path, catalog).unwrap();
 
-        let report = verify_graph_lightning_staging_catalog(&staging_dir).unwrap();
+        let report = verify_skein_lightning_staging_catalog(&staging_dir).unwrap();
 
         assert_eq!(report["validation_gate"]["decision"], "blocked");
         assert_eq!(report["catalog_protocol_matches"], true);
@@ -6998,16 +7254,16 @@ mod tests {
             "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
         )
         .unwrap();
-        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
-        let staging_dir = unique_main_test_dir("graph_lightning_verify_staging_manifest_version");
-        stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
-        let manifest_path = staging_dir.join("graph_lightning_bootstrap_manifest.json");
+        let export = db.prepare_skein_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("skein_lightning_verify_staging_manifest_version");
+        stage_skein_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+        let manifest_path = staging_dir.join("skein_lightning_bootstrap_manifest.json");
         let manifest = std::fs::read_to_string(&manifest_path)
             .unwrap()
             .replace("\"protocol_version\": 1", "\"protocol_version\": 99");
         std::fs::write(&manifest_path, manifest).unwrap();
 
-        let report = verify_graph_lightning_staging_catalog(&staging_dir).unwrap();
+        let report = verify_skein_lightning_staging_catalog(&staging_dir).unwrap();
 
         assert_eq!(report["validation_gate"]["decision"], "blocked");
         assert_eq!(report["manifest_protocol_version_matches"], false);
@@ -7030,16 +7286,16 @@ mod tests {
             "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
         )
         .unwrap();
-        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
-        let staging_dir = unique_main_test_dir("graph_lightning_verify_staging_tampered");
-        stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
-        let graph_stream_path = staging_dir.join("graph_lightning_graph_stream.txt");
+        let export = db.prepare_skein_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("skein_lightning_verify_staging_tampered");
+        stage_skein_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+        let graph_stream_path = staging_dir.join("skein_lightning_graph_stream.txt");
         let tampered = std::fs::read_to_string(&graph_stream_path)
             .unwrap()
             .replace("relationship\t0\t0\t1", "relationship\t0\t0\t99");
         std::fs::write(&graph_stream_path, tampered).unwrap();
 
-        let report = verify_graph_lightning_staging_catalog(&staging_dir).unwrap();
+        let report = verify_skein_lightning_staging_catalog(&staging_dir).unwrap();
 
         assert_eq!(report["validation_gate"]["decision"], "blocked");
         assert_eq!(report["artifact_integrity"], false);
@@ -7074,28 +7330,66 @@ mod tests {
     }
 
     #[test]
-    fn publishes_graph_lightning_staging_catalog_idempotently() {
+    fn staging_verification_reports_tampered_relational_stream() {
+        let mut db = Database::new();
+        db.query("CREATE (:Memory {id: 'root'})").unwrap();
+        db.query_sql("CREATE TABLE public.messages (id TEXT PRIMARY KEY)")
+            .unwrap();
+        let export = db.prepare_skein_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("skein_lightning_relational_stream_tampered");
+        stage_skein_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+        let relational_stream_path = staging_dir.join("skein_lightning_relational_stream.bin");
+        let mut tampered = std::fs::read(&relational_stream_path).unwrap();
+        let last = tampered
+            .last_mut()
+            .expect("relational stream must not be empty");
+        *last ^= 0xff;
+        std::fs::write(&relational_stream_path, tampered).unwrap();
+
+        let report = verify_skein_lightning_staging_catalog(&staging_dir).unwrap();
+
+        assert_eq!(report["validation_gate"]["decision"], "blocked");
+        assert_eq!(report["artifact_integrity"], false);
+        assert_eq!(report["manifest_matches_relational_stream"], false);
+        assert!(report["validation_gate"]["relational_stream_errors"]
+            .as_u64()
+            .is_some_and(|count| count > 0));
+        assert!(report["relational_stream_validation"]["is_valid"] == false);
+        assert!(report["validation_gate"]["artifact_error_messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error
+                .as_str()
+                .unwrap()
+                .contains("relational_stream checksum mismatch")));
+
+        std::fs::remove_dir_all(staging_dir).unwrap();
+    }
+
+    #[test]
+    fn publishes_skein_lightning_staging_catalog_idempotently() {
         let mut db = Database::new();
         db.query(
             "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
         )
         .unwrap();
-        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
-        let staging_dir = unique_main_test_dir("graph_lightning_publish_staging");
-        let publish_dir = unique_main_test_dir("graph_lightning_publish_target");
-        stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+        let export = db.prepare_skein_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("skein_lightning_publish_staging");
+        let publish_dir = unique_main_test_dir("skein_lightning_publish_target");
+        stage_skein_lightning_bootstrap_export(&export, &staging_dir).unwrap();
 
         let published =
-            publish_graph_lightning_staging_catalog(&staging_dir, &publish_dir).unwrap();
+            publish_skein_lightning_staging_catalog(&staging_dir, &publish_dir).unwrap();
         let idempotent =
-            publish_graph_lightning_staging_catalog(&staging_dir, &publish_dir).unwrap();
+            publish_skein_lightning_staging_catalog(&staging_dir, &publish_dir).unwrap();
 
-        assert_eq!(published["protocol"], "graph-lightning-published-manifest");
+        assert_eq!(published["protocol"], "skein-lightning-published-manifest");
         assert_eq!(published["state"], "PUBLISHED");
         assert_eq!(published["publish_gate"]["decision"], "published");
         assert_eq!(idempotent["publish_gate"]["decision"], "idempotent");
         assert!(publish_dir
-            .join("graph_lightning_published_manifest.json")
+            .join("skein_lightning_published_manifest.json")
             .exists());
 
         std::fs::remove_dir_all(staging_dir).unwrap();
@@ -7109,14 +7403,14 @@ mod tests {
             "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
         )
         .unwrap();
-        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
-        let staging_dir = unique_main_test_dir("graph_lightning_publish_preflight_staging");
-        let publish_dir = unique_main_test_dir("graph_lightning_publish_preflight_target");
-        stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+        let export = db.prepare_skein_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("skein_lightning_publish_preflight_staging");
+        let publish_dir = unique_main_test_dir("skein_lightning_publish_preflight_target");
+        stage_skein_lightning_bootstrap_export(&export, &staging_dir).unwrap();
         std::fs::write(
-            staging_dir.join("graph_lightning_import_state.json"),
+            staging_dir.join("skein_lightning_import_state.json"),
             serde_json::json!({
-                "protocol": "graph-lightning-import-state",
+                "protocol": "skein-lightning-import-state",
                 "protocol_version": 1,
                 "import_state": "VALIDATING",
                 "import_id": "import-1",
@@ -7128,13 +7422,13 @@ mod tests {
         )
         .unwrap();
 
-        let published = publish_graph_lightning_staging_catalog_with_options(
+        let published = publish_skein_lightning_staging_catalog_with_options(
             &staging_dir,
             &publish_dir,
-            PublishGraphLightningOptions {
+            PublishSkeinLightningOptions {
                 require_state_marker: true,
                 fencing_token: Some("fence-1".to_string()),
-                expected_graph_epoch: Some(export.manifest.graph_commit_epoch),
+                expected_database_epoch: Some(export.manifest.graph_commit_epoch),
             },
         )
         .unwrap();
@@ -7151,11 +7445,11 @@ mod tests {
             "fence-1"
         );
         assert_eq!(
-            published["publish_gate"]["preflight"]["expected_graph_epoch"],
+            published["publish_gate"]["preflight"]["expected_database_epoch"],
             export.manifest.graph_commit_epoch
         );
         assert_eq!(
-            published["publish_gate"]["preflight"]["expected_graph_epoch_matches"],
+            published["publish_gate"]["preflight"]["expected_database_epoch_matches"],
             true
         );
         assert_eq!(
@@ -7174,27 +7468,27 @@ mod tests {
             "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
         )
         .unwrap();
-        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
-        let staging_dir = unique_main_test_dir("graph_lightning_publish_missing_marker_staging");
-        let publish_dir = unique_main_test_dir("graph_lightning_publish_missing_marker_target");
-        stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+        let export = db.prepare_skein_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("skein_lightning_publish_missing_marker_staging");
+        let publish_dir = unique_main_test_dir("skein_lightning_publish_missing_marker_target");
+        stage_skein_lightning_bootstrap_export(&export, &staging_dir).unwrap();
 
-        let error = publish_graph_lightning_staging_catalog_with_options(
+        let error = publish_skein_lightning_staging_catalog_with_options(
             &staging_dir,
             &publish_dir,
-            PublishGraphLightningOptions {
+            PublishSkeinLightningOptions {
                 require_state_marker: true,
                 fencing_token: None,
-                expected_graph_epoch: None,
+                expected_database_epoch: None,
             },
         )
         .unwrap_err();
 
         assert!(error
             .to_string()
-            .contains("publish requires graph lightning import state marker"));
+            .contains("publish requires Skein Lightning import state marker"));
         assert!(!publish_dir
-            .join("graph_lightning_published_manifest.json")
+            .join("skein_lightning_published_manifest.json")
             .exists());
 
         std::fs::remove_dir_all(staging_dir).unwrap();
@@ -7207,14 +7501,14 @@ mod tests {
             "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
         )
         .unwrap();
-        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
-        let staging_dir = unique_main_test_dir("graph_lightning_publish_stale_fence_staging");
-        let publish_dir = unique_main_test_dir("graph_lightning_publish_stale_fence_target");
-        stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+        let export = db.prepare_skein_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("skein_lightning_publish_stale_fence_staging");
+        let publish_dir = unique_main_test_dir("skein_lightning_publish_stale_fence_target");
+        stage_skein_lightning_bootstrap_export(&export, &staging_dir).unwrap();
         std::fs::write(
-            staging_dir.join("graph_lightning_import_state.json"),
+            staging_dir.join("skein_lightning_import_state.json"),
             serde_json::json!({
-                "protocol": "graph-lightning-import-state",
+                "protocol": "skein-lightning-import-state",
                 "protocol_version": 1,
                 "import_state": "VALIDATING",
                 "import_id": "import-1",
@@ -7226,13 +7520,13 @@ mod tests {
         )
         .unwrap();
 
-        let error = publish_graph_lightning_staging_catalog_with_options(
+        let error = publish_skein_lightning_staging_catalog_with_options(
             &staging_dir,
             &publish_dir,
-            PublishGraphLightningOptions {
+            PublishSkeinLightningOptions {
                 require_state_marker: true,
                 fencing_token: Some("stale-fence".to_string()),
-                expected_graph_epoch: Some(export.manifest.graph_commit_epoch),
+                expected_database_epoch: Some(export.manifest.graph_commit_epoch),
             },
         )
         .unwrap_err();
@@ -7241,38 +7535,38 @@ mod tests {
             .to_string()
             .contains("publish fencing token did not match"));
         assert!(!publish_dir
-            .join("graph_lightning_published_manifest.json")
+            .join("skein_lightning_published_manifest.json")
             .exists());
 
         std::fs::remove_dir_all(staging_dir).unwrap();
     }
 
     #[test]
-    fn publish_staging_rejects_unexpected_graph_epoch() {
+    fn publish_staging_rejects_unexpected_database_epoch() {
         let mut db = Database::new();
         db.query(
             "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
         )
         .unwrap();
-        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
-        let staging_dir = unique_main_test_dir("graph_lightning_publish_epoch_staging");
-        let publish_dir = unique_main_test_dir("graph_lightning_publish_epoch_target");
-        stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+        let export = db.prepare_skein_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("skein_lightning_publish_epoch_staging");
+        let publish_dir = unique_main_test_dir("skein_lightning_publish_epoch_target");
+        stage_skein_lightning_bootstrap_export(&export, &staging_dir).unwrap();
 
-        let error = publish_graph_lightning_staging_catalog_with_options(
+        let error = publish_skein_lightning_staging_catalog_with_options(
             &staging_dir,
             &publish_dir,
-            PublishGraphLightningOptions {
+            PublishSkeinLightningOptions {
                 require_state_marker: false,
                 fencing_token: None,
-                expected_graph_epoch: Some(export.manifest.graph_commit_epoch + 1),
+                expected_database_epoch: Some(export.manifest.graph_commit_epoch + 1),
             },
         )
         .unwrap_err();
 
-        assert!(error.to_string().contains("expected graph epoch"));
+        assert!(error.to_string().contains("expected database epoch"));
         assert!(!publish_dir
-            .join("graph_lightning_published_manifest.json")
+            .join("skein_lightning_published_manifest.json")
             .exists());
 
         std::fs::remove_dir_all(staging_dir).unwrap();
@@ -7280,18 +7574,18 @@ mod tests {
 
     #[test]
     fn publish_staging_rejects_different_manifest_overwrite() {
-        let staging_dir = unique_main_test_dir("graph_lightning_publish_staging_conflict_a");
-        let second_staging_dir = unique_main_test_dir("graph_lightning_publish_staging_conflict_b");
-        let publish_dir = unique_main_test_dir("graph_lightning_publish_target_conflict");
+        let staging_dir = unique_main_test_dir("skein_lightning_publish_staging_conflict_a");
+        let second_staging_dir = unique_main_test_dir("skein_lightning_publish_staging_conflict_b");
+        let publish_dir = unique_main_test_dir("skein_lightning_publish_target_conflict");
         let mut first = Database::new();
         first
             .query(
                 "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
             )
             .unwrap();
-        let first_export = first.prepare_graph_lightning_bootstrap_export().unwrap();
-        stage_graph_lightning_bootstrap_export(&first_export, &staging_dir).unwrap();
-        publish_graph_lightning_staging_catalog(&staging_dir, &publish_dir).unwrap();
+        let first_export = first.prepare_skein_lightning_bootstrap_export().unwrap();
+        stage_skein_lightning_bootstrap_export(&first_export, &staging_dir).unwrap();
+        publish_skein_lightning_staging_catalog(&staging_dir, &publish_dir).unwrap();
 
         let mut second = Database::new();
         second
@@ -7302,11 +7596,11 @@ mod tests {
         second
             .query("CREATE (:Source {id: 'source-1', path: '/tmp/source.md'})")
             .unwrap();
-        let second_export = second.prepare_graph_lightning_bootstrap_export().unwrap();
-        stage_graph_lightning_bootstrap_export(&second_export, &second_staging_dir).unwrap();
+        let second_export = second.prepare_skein_lightning_bootstrap_export().unwrap();
+        stage_skein_lightning_bootstrap_export(&second_export, &second_staging_dir).unwrap();
 
         let error =
-            publish_graph_lightning_staging_catalog(&second_staging_dir, &publish_dir).unwrap_err();
+            publish_skein_lightning_staging_catalog(&second_staging_dir, &publish_dir).unwrap_err();
 
         assert!(error.to_string().contains("different snapshot"));
 
@@ -7316,21 +7610,21 @@ mod tests {
     }
 
     #[test]
-    fn verifies_graph_lightning_published_manifest() {
+    fn verifies_skein_lightning_published_manifest() {
         let mut db = Database::new();
         db.query(
             "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
         )
         .unwrap();
-        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
-        let staging_dir = unique_main_test_dir("graph_lightning_verify_published_staging");
-        let publish_dir = unique_main_test_dir("graph_lightning_verify_published_target");
-        stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
-        publish_graph_lightning_staging_catalog(&staging_dir, &publish_dir).unwrap();
+        let export = db.prepare_skein_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("skein_lightning_verify_published_staging");
+        let publish_dir = unique_main_test_dir("skein_lightning_verify_published_target");
+        stage_skein_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+        publish_skein_lightning_staging_catalog(&staging_dir, &publish_dir).unwrap();
 
-        let report = verify_graph_lightning_published_manifest(&staging_dir, &publish_dir).unwrap();
+        let report = verify_skein_lightning_published_manifest(&staging_dir, &publish_dir).unwrap();
 
-        assert_eq!(report["protocol"], "graph-lightning-published-verification");
+        assert_eq!(report["protocol"], "skein-lightning-published-verification");
         assert_eq!(report["validation_gate"]["decision"], "ready");
         assert_eq!(report["catalog_checksum_matches"], true);
         assert_eq!(report["catalog_byte_len_matches"], true);
@@ -7349,20 +7643,20 @@ mod tests {
         let mut db = Database::new();
         db.query("CREATE (:Memory {id: 'root', title: 'Root'})")
             .unwrap();
-        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+        let export = db.prepare_skein_lightning_bootstrap_export().unwrap();
         let recovery = test_storage_recovery_report(export.manifest.graph_commit_epoch);
-        let staging_dir = unique_main_test_dir("graph_lightning_verify_published_recovery");
-        let publish_dir = unique_main_test_dir("graph_lightning_verify_published_recovery_target");
-        stage_graph_lightning_bootstrap_export_with_storage_recovery(
+        let staging_dir = unique_main_test_dir("skein_lightning_verify_published_recovery");
+        let publish_dir = unique_main_test_dir("skein_lightning_verify_published_recovery_target");
+        stage_skein_lightning_bootstrap_export_with_storage_recovery(
             &export,
             &staging_dir,
             "skein-storage-v1",
             &recovery,
         )
         .unwrap();
-        publish_graph_lightning_staging_catalog(&staging_dir, &publish_dir).unwrap();
+        publish_skein_lightning_staging_catalog(&staging_dir, &publish_dir).unwrap();
 
-        let report = verify_graph_lightning_published_manifest(&staging_dir, &publish_dir).unwrap();
+        let report = verify_skein_lightning_published_manifest(&staging_dir, &publish_dir).unwrap();
 
         assert_eq!(report["validation_gate"]["decision"], "ready");
         assert_eq!(report["storage_recovery_evidence"]["present"], true);
@@ -7383,19 +7677,19 @@ mod tests {
             "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
         )
         .unwrap();
-        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
-        let staging_dir = unique_main_test_dir("graph_lightning_verify_published_tampered_staging");
-        let publish_dir = unique_main_test_dir("graph_lightning_verify_published_tampered_target");
-        stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
-        publish_graph_lightning_staging_catalog(&staging_dir, &publish_dir).unwrap();
-        let catalog_path = staging_dir.join("graph_lightning_staging_catalog.json");
+        let export = db.prepare_skein_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("skein_lightning_verify_published_tampered_staging");
+        let publish_dir = unique_main_test_dir("skein_lightning_verify_published_tampered_target");
+        stage_skein_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+        publish_skein_lightning_staging_catalog(&staging_dir, &publish_dir).unwrap();
+        let catalog_path = staging_dir.join("skein_lightning_staging_catalog.json");
         let tampered = std::fs::read_to_string(&catalog_path).unwrap().replace(
             "\"stage_state\": \"READY\"",
             "\"stage_state\": \"QUARANTINED\"",
         );
         std::fs::write(&catalog_path, tampered).unwrap();
 
-        let report = verify_graph_lightning_published_manifest(&staging_dir, &publish_dir).unwrap();
+        let report = verify_skein_lightning_published_manifest(&staging_dir, &publish_dir).unwrap();
 
         assert_eq!(report["validation_gate"]["decision"], "blocked");
         assert_eq!(report["catalog_checksum_matches"], false);
@@ -7431,21 +7725,21 @@ mod tests {
             "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
         )
         .unwrap();
-        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
-        let staging_dir = unique_main_test_dir("graph_lightning_gc_published_staging");
-        let publish_dir = unique_main_test_dir("graph_lightning_gc_published_target");
-        stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
-        publish_graph_lightning_staging_catalog(&staging_dir, &publish_dir).unwrap();
+        let export = db.prepare_skein_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("skein_lightning_gc_published_staging");
+        let publish_dir = unique_main_test_dir("skein_lightning_gc_published_target");
+        stage_skein_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+        publish_skein_lightning_staging_catalog(&staging_dir, &publish_dir).unwrap();
 
-        let report = graph_lightning_gc_staging_report(&staging_dir, &publish_dir).unwrap();
+        let report = skein_lightning_gc_staging_report(&staging_dir, &publish_dir).unwrap();
 
-        assert_eq!(report["protocol"], "graph-lightning-staging-gc-report");
+        assert_eq!(report["protocol"], "skein-lightning-staging-gc-report");
         assert_eq!(report["published_pointer_state"], "verified");
-        assert_eq!(report["candidate_count"], 4);
-        assert_eq!(report["pinned_count"], 4);
+        assert_eq!(report["candidate_count"], 5);
+        assert_eq!(report["pinned_count"], 5);
         assert_eq!(report["deletable_count"], 0);
-        assert_eq!(report["artifact_summary"]["object_count"], 4);
-        assert_eq!(report["artifact_summary"]["measured_object_count"], 4);
+        assert_eq!(report["artifact_summary"]["object_count"], 5);
+        assert_eq!(report["artifact_summary"]["measured_object_count"], 5);
         assert!(report["total_bytes"].as_u64().unwrap() > 0);
         assert_eq!(report["pinned_bytes"], report["total_bytes"]);
         assert_eq!(report["deletable_bytes"], 0);
@@ -7470,19 +7764,19 @@ mod tests {
             "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
         )
         .unwrap();
-        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
-        let staging_dir = unique_main_test_dir("graph_lightning_gc_unpublished_staging");
-        let publish_dir = unique_main_test_dir("graph_lightning_gc_unpublished_target");
-        stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+        let export = db.prepare_skein_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("skein_lightning_gc_unpublished_staging");
+        let publish_dir = unique_main_test_dir("skein_lightning_gc_unpublished_target");
+        stage_skein_lightning_bootstrap_export(&export, &staging_dir).unwrap();
 
-        let report = graph_lightning_gc_staging_report(&staging_dir, &publish_dir).unwrap();
+        let report = skein_lightning_gc_staging_report(&staging_dir, &publish_dir).unwrap();
 
         assert_eq!(report["published_pointer_state"], "missing");
-        assert_eq!(report["candidate_count"], 4);
+        assert_eq!(report["candidate_count"], 5);
         assert_eq!(report["pinned_count"], 0);
-        assert_eq!(report["deletable_count"], 4);
-        assert_eq!(report["artifact_summary"]["object_count"], 4);
-        assert_eq!(report["artifact_summary"]["measured_object_count"], 4);
+        assert_eq!(report["deletable_count"], 5);
+        assert_eq!(report["artifact_summary"]["object_count"], 5);
+        assert_eq!(report["artifact_summary"]["measured_object_count"], 5);
         assert!(report["total_bytes"].as_u64().unwrap() > 0);
         assert_eq!(report["pinned_bytes"], 0);
         assert_eq!(report["deletable_bytes"], report["total_bytes"]);
@@ -7506,22 +7800,22 @@ mod tests {
             "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
         )
         .unwrap();
-        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
-        let staging_dir = unique_main_test_dir("graph_lightning_gc_tampered_staging");
-        let publish_dir = unique_main_test_dir("graph_lightning_gc_tampered_target");
-        stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
-        publish_graph_lightning_staging_catalog(&staging_dir, &publish_dir).unwrap();
-        let catalog_path = staging_dir.join("graph_lightning_staging_catalog.json");
+        let export = db.prepare_skein_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("skein_lightning_gc_tampered_staging");
+        let publish_dir = unique_main_test_dir("skein_lightning_gc_tampered_target");
+        stage_skein_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+        publish_skein_lightning_staging_catalog(&staging_dir, &publish_dir).unwrap();
+        let catalog_path = staging_dir.join("skein_lightning_staging_catalog.json");
         let tampered = std::fs::read_to_string(&catalog_path).unwrap().replace(
             "\"stage_state\": \"READY\"",
             "\"stage_state\": \"QUARANTINED\"",
         );
         std::fs::write(&catalog_path, tampered).unwrap();
 
-        let report = graph_lightning_gc_staging_report(&staging_dir, &publish_dir).unwrap();
+        let report = skein_lightning_gc_staging_report(&staging_dir, &publish_dir).unwrap();
 
         assert_eq!(report["published_pointer_state"], "verification_failed");
-        assert_eq!(report["candidate_count"], 4);
+        assert_eq!(report["candidate_count"], 5);
         assert_eq!(report["pinned_count"], 0);
         assert_eq!(report["deletable_count"], 0);
         assert!(report["total_bytes"].as_u64().unwrap() > 0);
@@ -7557,13 +7851,13 @@ mod tests {
 
     #[test]
     fn import_status_reports_created_without_staging_catalog() {
-        let staging_dir = unique_main_test_dir("graph_lightning_status_created_staging");
-        let publish_dir = unique_main_test_dir("graph_lightning_status_created_target");
+        let staging_dir = unique_main_test_dir("skein_lightning_status_created_staging");
+        let publish_dir = unique_main_test_dir("skein_lightning_status_created_target");
         std::fs::create_dir_all(&staging_dir).unwrap();
 
-        let report = graph_lightning_import_status(&staging_dir, &publish_dir).unwrap();
+        let report = skein_lightning_import_status(&staging_dir, &publish_dir).unwrap();
 
-        assert_eq!(report["protocol"], "graph-lightning-import-status");
+        assert_eq!(report["protocol"], "skein-lightning-import-status");
         assert_eq!(report["import_state"], "CREATED");
         assert_eq!(report["staging_catalog_present"], false);
         assert_eq!(report["published_pointer_present"], false);
@@ -7585,13 +7879,13 @@ mod tests {
 
     #[test]
     fn import_status_reports_active_state_marker_without_staging_catalog() {
-        let staging_dir = unique_main_test_dir("graph_lightning_status_exporting_marker_staging");
-        let publish_dir = unique_main_test_dir("graph_lightning_status_exporting_marker_target");
+        let staging_dir = unique_main_test_dir("skein_lightning_status_exporting_marker_staging");
+        let publish_dir = unique_main_test_dir("skein_lightning_status_exporting_marker_target");
         std::fs::create_dir_all(&staging_dir).unwrap();
         std::fs::write(
-            staging_dir.join("graph_lightning_import_state.json"),
+            staging_dir.join("skein_lightning_import_state.json"),
             serde_json::json!({
-                "protocol": "graph-lightning-import-state",
+                "protocol": "skein-lightning-import-state",
                 "protocol_version": 1,
                 "import_state": "EXPORTING",
                 "import_id": "import-1",
@@ -7603,7 +7897,7 @@ mod tests {
         )
         .unwrap();
 
-        let report = graph_lightning_import_status(&staging_dir, &publish_dir).unwrap();
+        let report = skein_lightning_import_status(&staging_dir, &publish_dir).unwrap();
 
         assert_eq!(report["artifact_state"], "CREATED");
         assert_eq!(report["import_state"], "EXPORTING");
@@ -7639,13 +7933,13 @@ mod tests {
 
     #[test]
     fn import_status_summarizes_checkpoint_log_failures() {
-        let staging_dir = unique_main_test_dir("graph_lightning_status_checkpoint_log_staging");
-        let publish_dir = unique_main_test_dir("graph_lightning_status_checkpoint_log_target");
+        let staging_dir = unique_main_test_dir("skein_lightning_status_checkpoint_log_staging");
+        let publish_dir = unique_main_test_dir("skein_lightning_status_checkpoint_log_target");
         std::fs::create_dir_all(&staging_dir).unwrap();
         std::fs::write(
-            staging_dir.join("graph_lightning_import_state.json"),
+            staging_dir.join("skein_lightning_import_state.json"),
             serde_json::json!({
-                "protocol": "graph-lightning-import-state",
+                "protocol": "skein-lightning-import-state",
                 "protocol_version": 1,
                 "import_state": "UPLOADING",
                 "import_id": "import-1",
@@ -7657,7 +7951,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(
-            staging_dir.join("graph_lightning_import_checkpoints.jsonl"),
+            staging_dir.join("skein_lightning_import_checkpoints.jsonl"),
             [
                 serde_json::json!({
                     "stage": "source_range_scanned",
@@ -7684,7 +7978,7 @@ mod tests {
         )
         .unwrap();
 
-        let report = graph_lightning_import_status(&staging_dir, &publish_dir).unwrap();
+        let report = skein_lightning_import_status(&staging_dir, &publish_dir).unwrap();
 
         assert_eq!(report["import_state"], "UPLOADING");
         assert_eq!(report["checkpoint_log"]["present"], true);
@@ -7754,11 +8048,11 @@ mod tests {
     #[test]
     fn import_status_blocks_checkpoint_log_idempotency_conflict() {
         let staging_dir =
-            unique_main_test_dir("graph_lightning_status_checkpoint_conflict_staging");
-        let publish_dir = unique_main_test_dir("graph_lightning_status_checkpoint_conflict_target");
+            unique_main_test_dir("skein_lightning_status_checkpoint_conflict_staging");
+        let publish_dir = unique_main_test_dir("skein_lightning_status_checkpoint_conflict_target");
         std::fs::create_dir_all(&staging_dir).unwrap();
         std::fs::write(
-            staging_dir.join("graph_lightning_import_checkpoints.jsonl"),
+            staging_dir.join("skein_lightning_import_checkpoints.jsonl"),
             [
                 serde_json::json!({
                     "stage": "object_uploaded",
@@ -7787,7 +8081,7 @@ mod tests {
         )
         .unwrap();
 
-        let report = graph_lightning_import_status(&staging_dir, &publish_dir).unwrap();
+        let report = skein_lightning_import_status(&staging_dir, &publish_dir).unwrap();
 
         assert_eq!(
             report["checkpoint_log"]["checkpoint_gate"]["decision"],
@@ -7809,12 +8103,12 @@ mod tests {
     #[test]
     fn import_status_blocks_checkpoint_log_without_object_idempotency_key() {
         let staging_dir =
-            unique_main_test_dir("graph_lightning_status_checkpoint_missing_key_staging");
+            unique_main_test_dir("skein_lightning_status_checkpoint_missing_key_staging");
         let publish_dir =
-            unique_main_test_dir("graph_lightning_status_checkpoint_missing_key_target");
+            unique_main_test_dir("skein_lightning_status_checkpoint_missing_key_target");
         std::fs::create_dir_all(&staging_dir).unwrap();
         std::fs::write(
-            staging_dir.join("graph_lightning_import_checkpoints.jsonl"),
+            staging_dir.join("skein_lightning_import_checkpoints.jsonl"),
             serde_json::json!({
                 "stage": "object_uploaded",
                 "status": "completed",
@@ -7824,7 +8118,7 @@ mod tests {
         )
         .unwrap();
 
-        let report = graph_lightning_import_status(&staging_dir, &publish_dir).unwrap();
+        let report = skein_lightning_import_status(&staging_dir, &publish_dir).unwrap();
 
         assert_eq!(report["artifact_state"], "CREATED");
         assert_eq!(
@@ -7855,16 +8149,16 @@ mod tests {
 
     #[test]
     fn import_status_quarantines_pointer_without_staging_catalog() {
-        let staging_dir = unique_main_test_dir("graph_lightning_status_pointer_only_staging");
-        let publish_dir = unique_main_test_dir("graph_lightning_status_pointer_only_target");
+        let staging_dir = unique_main_test_dir("skein_lightning_status_pointer_only_staging");
+        let publish_dir = unique_main_test_dir("skein_lightning_status_pointer_only_target");
         std::fs::create_dir_all(&publish_dir).unwrap();
         std::fs::write(
-            publish_dir.join("graph_lightning_published_manifest.json"),
+            publish_dir.join("skein_lightning_published_manifest.json"),
             "{}",
         )
         .unwrap();
 
-        let report = graph_lightning_import_status(&staging_dir, &publish_dir).unwrap();
+        let report = skein_lightning_import_status(&staging_dir, &publish_dir).unwrap();
 
         assert_eq!(report["import_state"], "QUARANTINED");
         assert_eq!(report["staging_catalog_present"], false);
@@ -7908,12 +8202,12 @@ mod tests {
             "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
         )
         .unwrap();
-        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
-        let staging_dir = unique_main_test_dir("graph_lightning_status_ready_staging");
-        let publish_dir = unique_main_test_dir("graph_lightning_status_ready_target");
-        stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+        let export = db.prepare_skein_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("skein_lightning_status_ready_staging");
+        let publish_dir = unique_main_test_dir("skein_lightning_status_ready_target");
+        stage_skein_lightning_bootstrap_export(&export, &staging_dir).unwrap();
 
-        let report = graph_lightning_import_status(&staging_dir, &publish_dir).unwrap();
+        let report = skein_lightning_import_status(&staging_dir, &publish_dir).unwrap();
 
         assert_eq!(report["import_state"], "READY");
         assert_eq!(report["staging_catalog_present"], true);
@@ -7929,9 +8223,9 @@ mod tests {
         assert_eq!(report["resume_action"]["terminal"], false);
         assert_eq!(report["resource_retention"]["action"], "retain_for_publish");
         assert_eq!(report["resource_retention"]["safe_to_collect"], false);
-        assert_eq!(report["resource_retention"]["protected_count"], 4);
+        assert_eq!(report["resource_retention"]["protected_count"], 5);
         assert_eq!(report["resource_retention"]["deletable_count"], 0);
-        assert_eq!(report["resource_retention"]["gc_deletable_count"], 4);
+        assert_eq!(report["resource_retention"]["gc_deletable_count"], 5);
         assert_eq!(
             report["resource_retention"]["gc_report"]["gc_gate"]["decision"],
             "ready"
@@ -7949,11 +8243,11 @@ mod tests {
         let mut db = Database::new();
         db.query("CREATE (:Memory {id: 'root', title: 'Root'})")
             .unwrap();
-        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+        let export = db.prepare_skein_lightning_bootstrap_export().unwrap();
         let recovery = test_storage_recovery_report(export.manifest.graph_commit_epoch);
-        let staging_dir = unique_main_test_dir("graph_lightning_status_ready_recovery");
-        let publish_dir = unique_main_test_dir("graph_lightning_status_ready_recovery_target");
-        stage_graph_lightning_bootstrap_export_with_storage_recovery(
+        let staging_dir = unique_main_test_dir("skein_lightning_status_ready_recovery");
+        let publish_dir = unique_main_test_dir("skein_lightning_status_ready_recovery_target");
+        stage_skein_lightning_bootstrap_export_with_storage_recovery(
             &export,
             &staging_dir,
             "skein-storage-v1",
@@ -7961,7 +8255,7 @@ mod tests {
         )
         .unwrap();
 
-        let report = graph_lightning_import_status(&staging_dir, &publish_dir).unwrap();
+        let report = skein_lightning_import_status(&staging_dir, &publish_dir).unwrap();
 
         assert_eq!(report["import_state"], "READY");
         assert_eq!(report["storage_recovery_evidence"]["present"], true);
@@ -7981,13 +8275,13 @@ mod tests {
             "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
         )
         .unwrap();
-        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
-        let staging_dir = unique_main_test_dir("graph_lightning_status_published_staging");
-        let publish_dir = unique_main_test_dir("graph_lightning_status_published_target");
-        stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
-        publish_graph_lightning_staging_catalog(&staging_dir, &publish_dir).unwrap();
+        let export = db.prepare_skein_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("skein_lightning_status_published_staging");
+        let publish_dir = unique_main_test_dir("skein_lightning_status_published_target");
+        stage_skein_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+        publish_skein_lightning_staging_catalog(&staging_dir, &publish_dir).unwrap();
 
-        let report = graph_lightning_import_status(&staging_dir, &publish_dir).unwrap();
+        let report = skein_lightning_import_status(&staging_dir, &publish_dir).unwrap();
 
         assert_eq!(report["import_state"], "PUBLISHED");
         assert_eq!(report["published_pointer_present"], true);
@@ -8001,7 +8295,7 @@ mod tests {
         assert_eq!(report["resume_action"]["terminal"], true);
         assert_eq!(report["resource_retention"]["action"], "follow_gc_report");
         assert_eq!(report["resource_retention"]["safe_to_collect"], false);
-        assert_eq!(report["resource_retention"]["protected_count"], 4);
+        assert_eq!(report["resource_retention"]["protected_count"], 5);
         assert_eq!(report["resource_retention"]["deletable_count"], 0);
         assert_eq!(report["resource_retention"]["gc_deletable_count"], 0);
         assert_eq!(
@@ -8022,20 +8316,20 @@ mod tests {
         let mut db = Database::new();
         db.query("CREATE (:Memory {id: 'root', title: 'Root'})")
             .unwrap();
-        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+        let export = db.prepare_skein_lightning_bootstrap_export().unwrap();
         let recovery = test_storage_recovery_report(export.manifest.graph_commit_epoch);
-        let staging_dir = unique_main_test_dir("graph_lightning_status_published_recovery");
-        let publish_dir = unique_main_test_dir("graph_lightning_status_published_recovery_target");
-        stage_graph_lightning_bootstrap_export_with_storage_recovery(
+        let staging_dir = unique_main_test_dir("skein_lightning_status_published_recovery");
+        let publish_dir = unique_main_test_dir("skein_lightning_status_published_recovery_target");
+        stage_skein_lightning_bootstrap_export_with_storage_recovery(
             &export,
             &staging_dir,
             "skein-storage-v1",
             &recovery,
         )
         .unwrap();
-        publish_graph_lightning_staging_catalog(&staging_dir, &publish_dir).unwrap();
+        publish_skein_lightning_staging_catalog(&staging_dir, &publish_dir).unwrap();
 
-        let report = graph_lightning_import_status(&staging_dir, &publish_dir).unwrap();
+        let report = skein_lightning_import_status(&staging_dir, &publish_dir).unwrap();
 
         assert_eq!(report["import_state"], "PUBLISHED");
         assert_eq!(report["storage_recovery_evidence"]["present"], true);
@@ -8056,18 +8350,18 @@ mod tests {
             "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
         )
         .unwrap();
-        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
-        let staging_dir = unique_main_test_dir("graph_lightning_status_quarantined_staging");
-        let publish_dir = unique_main_test_dir("graph_lightning_status_quarantined_target");
-        stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
-        let catalog_path = staging_dir.join("graph_lightning_staging_catalog.json");
+        let export = db.prepare_skein_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("skein_lightning_status_quarantined_staging");
+        let publish_dir = unique_main_test_dir("skein_lightning_status_quarantined_target");
+        stage_skein_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+        let catalog_path = staging_dir.join("skein_lightning_staging_catalog.json");
         let tampered = std::fs::read_to_string(&catalog_path).unwrap().replace(
             "\"stage_state\": \"READY\"",
             "\"stage_state\": \"QUARANTINED\"",
         );
         std::fs::write(&catalog_path, tampered).unwrap();
 
-        let report = graph_lightning_import_status(&staging_dir, &publish_dir).unwrap();
+        let report = skein_lightning_import_status(&staging_dir, &publish_dir).unwrap();
 
         assert_eq!(report["import_state"], "QUARANTINED");
         assert_eq!(report["status_gate"]["decision"], "blocked");
@@ -8079,9 +8373,9 @@ mod tests {
             "hold_for_inspection"
         );
         assert_eq!(report["resource_retention"]["safe_to_collect"], false);
-        assert_eq!(report["resource_retention"]["protected_count"], 4);
+        assert_eq!(report["resource_retention"]["protected_count"], 5);
         assert_eq!(report["resource_retention"]["deletable_count"], 0);
-        assert_eq!(report["resource_retention"]["gc_deletable_count"], 4);
+        assert_eq!(report["resource_retention"]["gc_deletable_count"], 5);
         assert_eq!(report["status_gate"]["presence_errors"], 0);
         assert_eq!(report["status_gate"]["staging_errors"], 1);
         assert_eq!(report["status_gate"]["published_errors"], 0);
@@ -8113,14 +8407,14 @@ mod tests {
             "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
         )
         .unwrap();
-        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
-        let staging_dir = unique_main_test_dir("graph_lightning_status_canceled_marker_staging");
-        let publish_dir = unique_main_test_dir("graph_lightning_status_canceled_marker_target");
-        stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+        let export = db.prepare_skein_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("skein_lightning_status_canceled_marker_staging");
+        let publish_dir = unique_main_test_dir("skein_lightning_status_canceled_marker_target");
+        stage_skein_lightning_bootstrap_export(&export, &staging_dir).unwrap();
         std::fs::write(
-            staging_dir.join("graph_lightning_import_state.json"),
+            staging_dir.join("skein_lightning_import_state.json"),
             serde_json::json!({
-                "protocol": "graph-lightning-import-state",
+                "protocol": "skein-lightning-import-state",
                 "protocol_version": 1,
                 "import_state": "CANCELED",
                 "import_id": "import-canceled"
@@ -8129,7 +8423,7 @@ mod tests {
         )
         .unwrap();
 
-        let report = graph_lightning_import_status(&staging_dir, &publish_dir).unwrap();
+        let report = skein_lightning_import_status(&staging_dir, &publish_dir).unwrap();
 
         assert_eq!(report["artifact_state"], "READY");
         assert_eq!(report["import_state"], "CANCELED");
@@ -8146,7 +8440,7 @@ mod tests {
             report["resource_retention"]["action"],
             "hold_for_inspection"
         );
-        assert_eq!(report["resource_retention"]["protected_count"], 4);
+        assert_eq!(report["resource_retention"]["protected_count"], 5);
         assert_eq!(report["resource_retention"]["safe_to_collect"], false);
         assert_eq!(report["status_gate"]["decision"], "ready");
         assert_eq!(report["status_gate"]["state_errors"], 0);
@@ -8156,13 +8450,13 @@ mod tests {
 
     #[test]
     fn import_status_blocks_when_resource_retention_cannot_read_candidates() {
-        let staging_dir = unique_main_test_dir("graph_lightning_status_resource_blocked_staging");
-        let publish_dir = unique_main_test_dir("graph_lightning_status_resource_blocked_target");
+        let staging_dir = unique_main_test_dir("skein_lightning_status_resource_blocked_staging");
+        let publish_dir = unique_main_test_dir("skein_lightning_status_resource_blocked_target");
         std::fs::create_dir_all(&staging_dir).unwrap();
         std::fs::write(
-            staging_dir.join("graph_lightning_staging_catalog.json"),
+            staging_dir.join("skein_lightning_staging_catalog.json"),
             serde_json::json!({
-                "protocol": "graph-lightning-staging-catalog",
+                "protocol": "skein-lightning-staging-catalog",
                 "stage_state": "READY",
                 "export_gate": {
                     "decision": "ready"
@@ -8172,7 +8466,7 @@ mod tests {
         )
         .unwrap();
 
-        let report = graph_lightning_import_status(&staging_dir, &publish_dir).unwrap();
+        let report = skein_lightning_import_status(&staging_dir, &publish_dir).unwrap();
 
         assert_eq!(report["import_state"], "QUARANTINED");
         assert_eq!(report["status_gate"]["decision"], "blocked");
@@ -8203,14 +8497,14 @@ mod tests {
     #[test]
     fn import_status_quarantines_active_state_marker_without_idempotency_key() {
         let staging_dir =
-            unique_main_test_dir("graph_lightning_status_missing_idempotency_marker_staging");
+            unique_main_test_dir("skein_lightning_status_missing_idempotency_marker_staging");
         let publish_dir =
-            unique_main_test_dir("graph_lightning_status_missing_idempotency_marker_target");
+            unique_main_test_dir("skein_lightning_status_missing_idempotency_marker_target");
         std::fs::create_dir_all(&staging_dir).unwrap();
         std::fs::write(
-            staging_dir.join("graph_lightning_import_state.json"),
+            staging_dir.join("skein_lightning_import_state.json"),
             serde_json::json!({
-                "protocol": "graph-lightning-import-state",
+                "protocol": "skein-lightning-import-state",
                 "protocol_version": 1,
                 "import_state": "UPLOADING",
                 "import_id": "import-1",
@@ -8220,7 +8514,7 @@ mod tests {
         )
         .unwrap();
 
-        let report = graph_lightning_import_status(&staging_dir, &publish_dir).unwrap();
+        let report = skein_lightning_import_status(&staging_dir, &publish_dir).unwrap();
 
         assert_eq!(report["artifact_state"], "CREATED");
         assert_eq!(report["import_state"], "QUARANTINED");
@@ -8254,11 +8548,11 @@ mod tests {
 
     #[test]
     fn import_status_quarantines_invalid_state_marker() {
-        let staging_dir = unique_main_test_dir("graph_lightning_status_invalid_marker_staging");
-        let publish_dir = unique_main_test_dir("graph_lightning_status_invalid_marker_target");
+        let staging_dir = unique_main_test_dir("skein_lightning_status_invalid_marker_staging");
+        let publish_dir = unique_main_test_dir("skein_lightning_status_invalid_marker_target");
         std::fs::create_dir_all(&staging_dir).unwrap();
         std::fs::write(
-            staging_dir.join("graph_lightning_import_state.json"),
+            staging_dir.join("skein_lightning_import_state.json"),
             serde_json::json!({
                 "protocol": "wrong-protocol",
                 "protocol_version": 99,
@@ -8268,7 +8562,7 @@ mod tests {
         )
         .unwrap();
 
-        let report = graph_lightning_import_status(&staging_dir, &publish_dir).unwrap();
+        let report = skein_lightning_import_status(&staging_dir, &publish_dir).unwrap();
 
         assert_eq!(report["artifact_state"], "CREATED");
         assert_eq!(report["import_state"], "QUARANTINED");
@@ -8368,55 +8662,61 @@ mod tests {
     }
 
     #[test]
-    fn validates_graph_lightning_bootstrap_manifest_usage_text() {
-        assert!(graph_lightning_bootstrap_manifest_usage().contains("<database-path>"));
-        assert!(graph_lightning_bootstrap_manifest_usage().contains("--require-ready"));
+    fn validates_skein_lightning_bootstrap_manifest_usage_text() {
+        assert!(skein_lightning_bootstrap_manifest_usage().contains("<database-path>"));
+        assert!(skein_lightning_bootstrap_manifest_usage().contains("--require-ready"));
     }
 
     #[test]
-    fn validates_graph_lightning_bootstrap_bundle_usage_text() {
-        assert!(graph_lightning_bootstrap_bundle_usage().contains("<database-path>"));
-        assert!(graph_lightning_bootstrap_bundle_usage().contains("--require-ready"));
+    fn validates_skein_lightning_bootstrap_bundle_usage_text() {
+        assert!(skein_lightning_bootstrap_bundle_usage().contains("<database-path>"));
+        assert!(skein_lightning_bootstrap_bundle_usage().contains("--require-ready"));
     }
 
     #[test]
-    fn validates_graph_lightning_stage_bootstrap_usage_text() {
-        assert!(graph_lightning_stage_bootstrap_usage().contains("<database-path>"));
-        assert!(graph_lightning_stage_bootstrap_usage().contains("<staging-dir>"));
-        assert!(graph_lightning_stage_bootstrap_usage().contains("--require-ready"));
+    fn validates_skein_lightning_stage_bootstrap_usage_text() {
+        assert!(skein_lightning_stage_bootstrap_usage().contains("<database-path>"));
+        assert!(skein_lightning_stage_bootstrap_usage().contains("<staging-dir>"));
+        assert!(skein_lightning_stage_bootstrap_usage().contains("--require-ready"));
     }
 
     #[test]
-    fn validates_graph_lightning_verify_staging_usage_text() {
-        assert!(graph_lightning_verify_staging_usage().contains("<staging-dir>"));
-        assert!(graph_lightning_verify_staging_usage().contains("--require-ready"));
+    fn validates_skein_lightning_verify_staging_usage_text() {
+        assert!(skein_lightning_verify_staging_usage().contains("<staging-dir>"));
+        assert!(skein_lightning_verify_staging_usage().contains("--require-ready"));
     }
 
     #[test]
-    fn validates_graph_lightning_publish_staging_usage_text() {
-        assert!(graph_lightning_publish_staging_usage().contains("<staging-dir>"));
-        assert!(graph_lightning_publish_staging_usage().contains("<publish-dir>"));
-        assert!(graph_lightning_publish_staging_usage().contains("--require-state-marker"));
-        assert!(graph_lightning_publish_staging_usage().contains("--fencing-token"));
-        assert!(graph_lightning_publish_staging_usage().contains("--expected-graph-epoch"));
+    fn validates_skein_lightning_publish_staging_usage_text() {
+        assert!(skein_lightning_publish_staging_usage().contains("<staging-dir>"));
+        assert!(skein_lightning_publish_staging_usage().contains("<publish-dir>"));
+        assert!(skein_lightning_publish_staging_usage().contains("--require-state-marker"));
+        assert!(skein_lightning_publish_staging_usage().contains("--fencing-token"));
+        assert!(skein_lightning_publish_staging_usage().contains("--expected-database-epoch"));
     }
 
     #[test]
-    fn validates_graph_lightning_verify_published_usage_text() {
-        assert!(graph_lightning_verify_published_usage().contains("<staging-dir>"));
-        assert!(graph_lightning_verify_published_usage().contains("<publish-dir>"));
+    fn validates_skein_lightning_verify_published_usage_text() {
+        assert!(skein_lightning_verify_published_usage().contains("<staging-dir>"));
+        assert!(skein_lightning_verify_published_usage().contains("<publish-dir>"));
     }
 
     #[test]
-    fn validates_graph_lightning_graph_stream_usage_text() {
-        assert!(graph_lightning_graph_stream_usage().contains("<database-path>"));
-        assert!(graph_lightning_graph_stream_usage().contains("--require-ready"));
+    fn validates_skein_lightning_graph_stream_usage_text() {
+        assert!(skein_lightning_graph_stream_usage().contains("<database-path>"));
+        assert!(skein_lightning_graph_stream_usage().contains("--require-ready"));
     }
 
     #[test]
-    fn validates_graph_lightning_verify_export_usage_text() {
-        assert!(graph_lightning_verify_export_usage().contains("<database-path>"));
-        assert!(graph_lightning_verify_export_usage().contains("--require-valid"));
+    fn validates_skein_lightning_relational_stream_usage_text() {
+        assert!(skein_lightning_relational_stream_usage().contains("<database-path>"));
+        assert!(skein_lightning_relational_stream_usage().contains("--require-ready"));
+    }
+
+    #[test]
+    fn validates_skein_lightning_verify_export_usage_text() {
+        assert!(skein_lightning_verify_export_usage().contains("<database-path>"));
+        assert!(skein_lightning_verify_export_usage().contains("--require-valid"));
     }
 
     #[test]

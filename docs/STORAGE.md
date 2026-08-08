@@ -361,15 +361,18 @@ local physical-export entry point for this path. It generates missing stable IDs
 once, writes them to `stable_ids.skein`, and reuses the same mapping after
 reopen. The default `export_canonical_graph_snapshot` remains read-only and does
 not create persistent export metadata.
-`Database::prepare_graph_lightning_bootstrap_export` wraps the same persisted
-stable-ID snapshot in a Graph Lightning bootstrap manifest. The manifest records
-protocol version, graph commit epoch, logical checksum, GraphStream checksum and
-byte length, schema checksum, node/relationship counts, label/type counts,
-property counts, and the canonical snapshot validation result. It is the local
-v1 gate before a GraphStream encoder or row-staging adapter consumes the
-snapshot. The paired GraphStream is deterministic canonical text sorted by
-labels, relationship type, stable IDs, and endpoints; it does not copy local
-pages, WAL entries, checkpoint bytes, or adjacency pointers.
+`Database::prepare_skein_lightning_bootstrap_export` wraps the same persisted
+stable-ID snapshot and the relational state at one database commit epoch in a
+Skein Lightning bootstrap manifest. The authoritative logical payload consists
+of the GraphStream plus a RelationalStream checkpoint. The latter carries SQL
+table schemas, rows, indexes, constraints, and overflow values. The manifest
+records both stream checksums and byte lengths, their shared database epoch,
+graph schema and row counts, relational table/row/overflow counts, and both
+validation reports. Skein Lightning deliberately excludes WAL history, physical
+pages, adjacency layouts, statistics, caches, and search or analytics projection
+artifacts; those are recovery history or rebuildable physical state rather than
+portable user data. The GraphStream remains deterministic canonical text sorted
+by labels, relationship type, stable IDs, and endpoints.
 The CLI command `skein validate-canonical-snapshot [--require-valid]
 [--require-import-ready] <database-path>` opens the database read-only, exports
 the current canonical snapshot, and prints the validation report as JSON.
@@ -377,64 +380,69 @@ the current canonical snapshot, and prints the validation report as JSON.
 inconsistent. `--require-import-ready` additionally requires every node and
 relationship to have unique stable identity, so the export can enter a physical
 import path without first creating an external ID mapping.
-The CLI command `skein graph-lightning-bootstrap-manifest [--require-ready]
+The CLI command `skein skein-lightning-bootstrap-manifest [--require-ready]
 <database-path>` opens the database read-write, creates or reuses
 `stable_ids.skein`, and prints the bootstrap manifest as JSON. `--require-ready`
 returns a non-zero status if the manifest's embedded validation is not
-import-ready.
-The CLI command `skein graph-lightning-graph-stream [--require-ready]
+import-ready or the relational stream is invalid.
+The CLI command `skein skein-lightning-graph-stream [--require-ready]
 <database-path>` uses the same bootstrap export path and prints the deterministic
 GraphStream text. The final `checksum` line covers the stream body and matches
 the manifest's `graph_stream_checksum`.
-`GraphLightningGraphStream::validate_against_manifest` and the CLI command
-`skein graph-lightning-verify-export [--require-valid] <database-path>` verify
+`skein skein-lightning-relational-stream [--require-ready] <database-path>`
+writes the binary relational stream to stdout. It is a component command for
+upload pipelines; consumers must preserve the bytes without text conversion.
+`SkeinLightningGraphStream::validate_against_manifest`,
+`SkeinLightningRelationalStream::validate_against_manifest`, and the CLI command
+`skein skein-lightning-verify-export [--require-valid] <database-path>` verify
 the local bootstrap artifacts before upload. The report covers GraphStream
-format version, body checksum, manifest checksum and byte-length agreement,
-declared count agreement, duplicate node/relationship IDs, and relationship
-endpoint integrity.
-`skein graph-lightning-bootstrap-bundle [--require-ready] <database-path>`
+format, checksum, count, and endpoint integrity plus relational checkpoint
+decode, checksum, epoch, table/row/overflow counts, and manifest agreement.
+`skein skein-lightning-bootstrap-bundle [--require-ready] <database-path>`
 prints one machine-readable bootstrap evidence bundle containing the manifest,
-the GraphStream validation report, the source database's open-time storage
+both stream validation reports, the source database's open-time storage
 recovery report, and a ready/blocked export gate decision. Use this as the CI or
 upload preflight entry point when the caller needs one JSON artifact instead of
 separate manifest and verifier commands. The storage recovery evidence records
 the actual open configuration used by the bundle command; callers that require
 strict or bounded WAL replay as a hard gate should also run
 `storage-recovery-report` with the matching `--require-*` flags. The export gate
-keeps a flattened `blockers` list for logs and also reports manifest and
-GraphStream blocker counts plus grouped blocker messages so import automation
-can distinguish snapshot readiness failures from stream artifact failures
-without parsing strings.
-`skein graph-lightning-stage-bootstrap [--require-ready] <database-path>
-<staging-dir>` writes a local staging catalog plus manifest, GraphStream, and
-bootstrap bundle artifacts with atomic file publication and directory sync. The
+keeps a flattened `blockers` list for logs and also reports manifest,
+GraphStream, and RelationalStream blocker counts plus grouped blocker messages
+so import automation can distinguish snapshot readiness failures from stream
+artifact failures without parsing strings.
+`skein skein-lightning-stage-bootstrap [--require-ready] <database-path>
+<staging-dir>` writes a local staging catalog plus manifest, GraphStream,
+`skein_lightning_relational_stream.bin`, and bootstrap bundle artifacts with
+atomic file publication and directory sync. The
 catalog is the v1 local checkpoint boundary for offline bootstrap upload/resume;
 it is outside the graph WAL and does not alter the published graph snapshot. The
 catalog also summarizes staged object count, measured byte count, total bytes,
 average object size, and per-kind object counts for upload observability.
-`skein graph-lightning-verify-staging [--require-ready] <staging-dir>` reopens
+`skein skein-lightning-verify-staging [--require-ready] <staging-dir>` reopens
 that staging catalog without the source database, verifies artifact byte
-lengths and checksums, recomputes GraphStream validation, and checks agreement
-between the catalog, manifest, bundle, and GraphStream artifact. Its validation
-gate keeps flat errors for logs and grouped artifact, manifest, GraphStream,
-bundle, and catalog error arrays for local upload/resume automation. If the
+lengths and checksums, recomputes both stream validations, and checks agreement
+between the catalog, manifest, bundle, GraphStream, and RelationalStream
+artifacts. Its validation gate keeps flat errors for logs and grouped artifact,
+manifest, GraphStream, RelationalStream, bundle, and catalog error arrays for
+local upload/resume automation. If the
 bundle carries `storage_recovery`, staging verification also checks its protocol,
 storage-version presence, and recovered commit epoch against the staged
-manifest graph epoch, then reports the result in a structured
+manifest database epoch, then reports the result in a structured
 `storage_recovery_evidence` object. Its artifact summary reports the same count
 and byte metrics from the actually measured artifacts. Unknown staging-catalog
 or bootstrap-manifest protocol versions block validation instead of being read
 on a best-effort basis.
-`skein graph-lightning-publish-staging [--require-state-marker]
-[--fencing-token <token>] [--expected-graph-epoch <epoch>] <staging-dir>
+`skein skein-lightning-publish-staging [--require-state-marker]
+[--fencing-token <token>] [--expected-database-epoch <epoch>] <staging-dir>
 <publish-dir>` verifies a READY staging catalog and atomically writes
-`graph_lightning_published_manifest.json`. Repeating the command for the same
+`skein_lightning_published_manifest.json`. Repeating the command for the same
 manifest is idempotent; attempting to publish a different manifest over an
-existing pointer fails instead of overwriting the published graph pointer. When
+existing pointer fails instead of overwriting the published database pointer. When
 the optional state-marker/fencing preflight is enabled, publish requires a
 VALIDATING import marker, matching fencing token, and matching staged manifest
-graph epoch before writing the pointer.
-`skein graph-lightning-verify-published <staging-dir> <publish-dir>` verifies
+database epoch before writing the pointer.
+`skein skein-lightning-verify-published <staging-dir> <publish-dir>` verifies
 that the published pointer still references the staged catalog by byte length
 and checksum, and that the referenced staging catalog still passes the
 source-independent verifier. The report promotes the staging verifier's
@@ -443,21 +451,21 @@ inspect recovery readiness without traversing the nested staging report. Its
 validation gate keeps flat errors and grouped pointer, catalog, and staging
 error arrays so resume automation can distinguish pointer corruption from
 staging catalog drift.
-`skein graph-lightning-gc-staging-report <staging-dir> <publish-dir>` fails
+`skein skein-lightning-gc-staging-report <staging-dir> <publish-dir>` fails
 closed when a published pointer cannot be verified and groups the propagated
 published-pointer verification errors for cleanup automation. The GC report also
 summarizes total, pinned, and deletable staging bytes so callers can distinguish
 published retention from orphan staging space.
-`skein graph-lightning-import-status <staging-dir> <publish-dir>` summarizes
+`skein skein-lightning-import-status <staging-dir> <publish-dir>` summarizes
 CREATED/READY/PUBLISHED/QUARANTINED state and can merge an optional
-caller-owned `graph_lightning_import_state.json` marker for
+caller-owned `skein_lightning_import_state.json` marker for
 EXPORTING/UPLOADING/MERGING/VALIDATING/FAILED/CANCELED coordinator states. It
 groups presence, staging, published-pointer, state-marker, and resource errors
 for resume automation. Active coordinator states require the marker to carry the
 idempotent retry tuple `import_id`, `task_id`, `fencing_token`, and
 `object_digest`; missing fields quarantine the status report before retry. The
 report can also summarize an optional caller-owned
-`graph_lightning_import_checkpoints.jsonl` append log. Checkpoint entries keep
+`skein_lightning_import_checkpoints.jsonl` append log. Checkpoint entries keep
 resume/failure coordinates such as source range, object digest, partition, and
 validation rule; object-level checkpoints must include the same idempotent retry
 tuple before status automation treats them as resumable. Reusing one complete
