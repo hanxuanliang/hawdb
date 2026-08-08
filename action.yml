@@ -1,0 +1,33 @@
+name: Stage Skein source
+description: Stage this pinned Skein revision for an organization workflow.
+
+inputs:
+  path:
+    description: Workspace-relative destination for the Skein source tree.
+    required: false
+    default: skein
+
+outputs:
+  revision:
+    description: Git revision used to download this private action.
+    value: ${{ steps.stage.outputs.revision }}
+
+runs:
+  using: composite
+  steps:
+    - name: Stage source tree
+      id: stage
+      shell: bash
+      env:
+        SKEIN_DESTINATION: ${{ inputs.path }}
+        SKEIN_SOURCE: ${{ github.action_path }}
+        SKEIN_REVISION: ${{ github.action_ref }}
+      run: |
+        set -euo pipefail
+        if [ -e "$SKEIN_DESTINATION" ]; then
+          echo "Destination already exists: $SKEIN_DESTINATION" >&2
+          exit 1
+        fi
+        mkdir -p "$SKEIN_DESTINATION"
+        cp -R "$SKEIN_SOURCE"/. "$SKEIN_DESTINATION"/
+        echo "revision=$SKEIN_REVISION" >> "$GITHUB_OUTPUT"
