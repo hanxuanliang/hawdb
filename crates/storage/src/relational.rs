@@ -712,6 +712,31 @@ impl RelationalState {
             .map_or(0, |segment| segment.rows.len())
     }
 
+    pub fn total_row_count(&self) -> usize {
+        self.segments
+            .values()
+            .map(|segment| segment.rows.len())
+            .sum()
+    }
+
+    pub fn estimated_checkpoint_bytes(&self) -> u64 {
+        let row_bytes = self.segments.values().fold(0u64, |bytes, segment| {
+            segment.rows.iter().fold(bytes, |bytes, (key, row)| {
+                bytes.saturating_add(relational_row_entry_bytes(key, row) as u64)
+            })
+        });
+        let overflow_bytes = self
+            .overflow_segments
+            .values()
+            .fold(0u64, |bytes, segment| {
+                bytes.saturating_add(match segment {
+                    RelationalOverflowSegment::Inline(value) => value.len() as u64,
+                    RelationalOverflowSegment::FileRange { range, .. } => range.length.get(),
+                })
+            });
+        row_bytes.saturating_add(overflow_bytes)
+    }
+
     pub fn index_lookup(
         &self,
         table: &str,

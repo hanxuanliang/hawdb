@@ -3,6 +3,105 @@ use crate::store::set_wal_apply_failpoint;
 use crate::StorageResidencyMode;
 
 #[test]
+fn wal_pressure_schedules_and_completes_a_bounded_background_checkpoint() {
+    let path = unique_test_dir("wal_pressure_background_checkpoint");
+    let config = DatabaseConfig {
+        max_wal_replay_bytes: Some(32 * 1024),
+        ..DatabaseConfig::default()
+    };
+    let mut db = Database::open_with_config(&path, config).unwrap();
+    let payload = "x".repeat(128);
+
+    let pressure = (0..256)
+        .find_map(|id| {
+            db.query_with_params(
+                "CREATE (:Memory {id: $id, payload: $payload})",
+                &BTreeMap::from([
+                    ("id".to_string(), Value::Int(id)),
+                    ("payload".to_string(), Value::String(payload.clone())),
+                ]),
+            )
+            .unwrap();
+            let pressure = db.storage_pressure_snapshot();
+            (pressure.state == crate::StoragePressureState::SpeedUpMaintenance).then_some(pressure)
+        })
+        .expect("WAL should reach its soft pressure threshold before mutation backpressure");
+    assert!(pressure.recommends_checkpoint());
+    assert!(pressure.wal_pressure_ratio_per_million.unwrap() >= 700_000);
+
+    let candidates = db.background_maintenance_candidates(
+        None,
+        BackgroundMaintenanceOptions {
+            include_schema_maintenance: false,
+            include_property_index_projection: false,
+            include_search_projection_graph_delta_freshness: false,
+            include_search_projection_rebuild: false,
+            include_search_projection_metadata_repair: false,
+            include_skein_lightning_bootstrap_export: false,
+            include_external_content_artifact_jobs: false,
+            ..BackgroundMaintenanceOptions::default()
+        },
+    );
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(
+        candidates[0].kind,
+        BackgroundMaintenanceKind::StorageCheckpoint
+    );
+    assert_eq!(candidates[0].plan.request.class, WorkClass::Mutation);
+
+    db.checkpoint_background(
+        &LocalQosPolicy::default(),
+        &LocalQosState::default(),
+        BackgroundWorkHint::default(),
+    )
+    .unwrap();
+    let after = db.storage_pressure_snapshot();
+    assert!(!after.recommends_checkpoint());
+    assert_eq!(after.current_commit_epoch, after.checkpoint_commit_epoch);
+    drop(db);
+
+    let mut reopened = Database::open(&path).unwrap();
+    let rows = reopened
+        .query("MATCH (m:Memory) RETURN count(m) AS count")
+        .unwrap();
+    assert!(matches!(rows.rows[0].get("count"), Some(Value::Int(count)) if *count > 0));
+    drop(reopened);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn wal_pressure_rejects_before_append_and_leaves_no_partial_mutation() {
+    let path = unique_test_dir("wal_pressure_rejects_before_append");
+    let config = DatabaseConfig {
+        max_wal_replay_bytes: Some(1024),
+        ..DatabaseConfig::default()
+    };
+    let mut db = Database::open_with_config(&path, config).unwrap();
+    let error = db
+        .query_with_params(
+            "CREATE (:Memory {id: $id, payload: $payload})",
+            &BTreeMap::from([
+                ("id".to_string(), Value::Int(1)),
+                ("payload".to_string(), Value::String("x".repeat(2048))),
+            ]),
+        )
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("WAL append rejected by storage pressure"));
+    assert_eq!(db.store.commit_epoch(), 0);
+    drop(db);
+
+    let mut reopened = Database::open(&path).unwrap();
+    let rows = reopened
+        .query("MATCH (m:Memory) RETURN m.id AS id")
+        .unwrap();
+    assert!(rows.rows.is_empty());
+    drop(reopened);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
 fn post_wal_apply_failure_poisons_handle_until_reopen() {
     let path = unique_test_dir("post_wal_apply_poison");
     let mut db = Database::open(&path).unwrap();

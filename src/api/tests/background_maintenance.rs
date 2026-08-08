@@ -127,6 +127,10 @@ fn adjacency_consolidation_is_bounded_and_background_admitted() {
 fn background_maintenance_kinds_have_stable_string_encodings() {
     let cases = [
         (
+            BackgroundMaintenanceKind::StorageCheckpoint,
+            "storage_checkpoint",
+        ),
+        (
             BackgroundMaintenanceKind::SchemaMaintenance,
             "schema_maintenance",
         ),

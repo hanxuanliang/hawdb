@@ -113,6 +113,7 @@ impl SearchProjectionGraphDeltaRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackgroundMaintenanceOptions {
     pub hint: BackgroundWorkHint,
+    pub include_storage_checkpoint: bool,
     pub include_schema_maintenance: bool,
     pub include_property_index_projection: bool,
     pub include_search_projection_graph_delta_freshness: bool,
@@ -128,6 +129,7 @@ impl Default for BackgroundMaintenanceOptions {
     fn default() -> Self {
         Self {
             hint: BackgroundWorkHint::default(),
+            include_storage_checkpoint: true,
             include_schema_maintenance: true,
             include_property_index_projection: true,
             include_search_projection_graph_delta_freshness: true,
@@ -217,6 +219,7 @@ pub struct BackgroundMaintenanceSummaryItem {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackgroundMaintenanceKind {
+    StorageCheckpoint,
     SchemaMaintenance,
     PropertyIndexProjection,
     SearchProjectionGraphDelta,
@@ -229,6 +232,7 @@ pub enum BackgroundMaintenanceKind {
 impl BackgroundMaintenanceKind {
     pub fn as_str(self) -> &'static str {
         match self {
+            BackgroundMaintenanceKind::StorageCheckpoint => "storage_checkpoint",
             BackgroundMaintenanceKind::SchemaMaintenance => "schema_maintenance",
             BackgroundMaintenanceKind::PropertyIndexProjection => "property_index_projection",
             BackgroundMaintenanceKind::SearchProjectionGraphDelta => {
@@ -253,6 +257,7 @@ impl FromStr for BackgroundMaintenanceKind {
 
     fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
         match value {
+            "storage_checkpoint" => Ok(BackgroundMaintenanceKind::StorageCheckpoint),
             "schema_maintenance" => Ok(BackgroundMaintenanceKind::SchemaMaintenance),
             "property_index_projection" => Ok(BackgroundMaintenanceKind::PropertyIndexProjection),
             "search_projection_graph_delta" => {

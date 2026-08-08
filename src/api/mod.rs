@@ -35,8 +35,8 @@ use crate::store::{
     GraphSnapshotNodeImport, GraphSnapshotRelationshipImport, GraphStore, NodeId, NodeRecord,
     PropertyIndexConsistencyReport, PropertyIndexProjectionRebuildAction, RecoveryMode, RelId,
     RelRecord, SchemaMaintenanceAction, SegmentCacheSnapshot, StorageBackupReport,
-    StorageReclamationWatermark, StorageRecoveryReport, StorageRestoreReport, StorageScrubReport,
-    StoreStableIdMapping, WalReplayConfig,
+    StoragePressureSnapshot, StorageReclamationWatermark, StorageRecoveryReport,
+    StorageRestoreReport, StorageScrubReport, StoreStableIdMapping, WalReplayConfig,
 };
 use crate::telemetry::{
     operations_telemetry_readiness, qos_telemetry_sink, KernelTelemetry, KernelTelemetryOperation,
@@ -1094,6 +1094,15 @@ impl Database {
         self.store.storage_residency_report()
     }
 
+    pub fn storage_pressure_snapshot(&self) -> StoragePressureSnapshot {
+        let oldest_reader_epoch = self
+            .reader_pins
+            .lock()
+            .expect("database reader pins lock should not be poisoned")
+            .oldest_epoch();
+        self.store.storage_pressure_snapshot(oldest_reader_epoch)
+    }
+
     pub fn segment_cache_snapshot(&self) -> Option<SegmentCacheSnapshot> {
         self.store.segment_cache_snapshot()
     }
@@ -1605,6 +1614,83 @@ impl Database {
 
     pub fn adjacency_consolidation_plan(&self) -> AdjacencyConsolidationPlan {
         self.store.adjacency_consolidation_plan()
+    }
+
+    pub fn storage_checkpoint_background_work_plan(
+        &self,
+        mut hint: BackgroundWorkHint,
+    ) -> Option<BackgroundWorkPlan> {
+        if self.config.read_only {
+            return None;
+        }
+        let pressure = self.storage_pressure_snapshot();
+        if !pressure.recommends_checkpoint() {
+            return None;
+        }
+        hint.recent_delta_operations = hint
+            .recent_delta_operations
+            .max(self.store.checkpoint_estimated_operations());
+        hint.source_graph_commit_lag = hint.source_graph_commit_lag.max(
+            pressure
+                .current_commit_epoch
+                .saturating_sub(pressure.checkpoint_commit_epoch),
+        );
+        hint.staleness_millis = hint.staleness_millis.max(pressure.wal_age_millis);
+        Some(BackgroundWorkPlan::background(
+            WorkClass::Mutation,
+            self.store.checkpoint_estimated_operations(),
+            hint,
+        ))
+    }
+
+    pub fn checkpoint_background(
+        &mut self,
+        policy: &LocalQosPolicy,
+        state: &LocalQosState,
+        hint: BackgroundWorkHint,
+    ) -> Result<()> {
+        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
+        let Some(plan) = self.storage_checkpoint_background_work_plan(hint) else {
+            return Ok(());
+        };
+        match policy.admit(state, &plan.request) {
+            QosAdmission::Admit => self.checkpoint(),
+            QosAdmission::Defer { reason, .. } => Err(SkeinError::Storage(format!(
+                "background storage checkpoint deferred: {reason}"
+            ))),
+            QosAdmission::Reject { reason, .. } => Err(SkeinError::Storage(format!(
+                "background storage checkpoint rejected: {reason}"
+            ))),
+        }
+    }
+
+    pub fn checkpoint_scheduled_background(
+        &mut self,
+        scheduler: &mut LocalQosScheduler,
+        hint: BackgroundWorkHint,
+    ) -> Result<()> {
+        self.ensure_runtime_capability(skein_core::RuntimeCapability::BackgroundMaintenance)?;
+        let Some(plan) = self.storage_checkpoint_background_work_plan(hint) else {
+            return Ok(());
+        };
+        self.configure_qos_scheduler_telemetry(scheduler);
+        let permit = match scheduler.try_start(plan.request) {
+            Ok(permit) => permit,
+            Err(QosAdmission::Defer { reason, .. }) => {
+                return Err(SkeinError::Storage(format!(
+                    "background storage checkpoint deferred: {reason}"
+                )));
+            }
+            Err(QosAdmission::Reject { reason, .. }) => {
+                return Err(SkeinError::Storage(format!(
+                    "background storage checkpoint rejected: {reason}"
+                )));
+            }
+            Err(QosAdmission::Admit) => unreachable!("admitted work returns a permit"),
+        };
+        let result = self.checkpoint();
+        scheduler.finish_with_outcome(permit, result.is_ok());
+        result
     }
 
     pub fn adjacency_consolidation_background_work_plan(
@@ -2335,6 +2421,15 @@ impl Database {
         options: BackgroundMaintenanceOptions,
     ) -> Vec<BackgroundMaintenanceCandidate> {
         let mut candidates = Vec::new();
+
+        if options.include_storage_checkpoint
+            && let Some(plan) = self.storage_checkpoint_background_work_plan(options.hint.clone())
+        {
+            candidates.push(BackgroundMaintenanceCandidate::new(
+                BackgroundMaintenanceKind::StorageCheckpoint,
+                plan,
+            ));
+        }
 
         if options.include_schema_maintenance
             && let Some(plan) = self.schema_maintenance_background_work_plan(options.hint.clone())

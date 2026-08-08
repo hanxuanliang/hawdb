@@ -8,6 +8,7 @@ pub mod durability;
 pub mod ids;
 pub mod mutation;
 mod ownership;
+pub mod pressure;
 pub mod projection;
 pub mod property_projection;
 pub mod property_spill;
@@ -59,6 +60,11 @@ pub use mutation::{
 };
 pub use ownership::{
     DatabaseDirectoryLease, DatabaseDirectoryLeaseError, DATABASE_DIRECTORY_LOCK_FILE,
+};
+pub use pressure::{
+    available_storage_space, StorageDebtController, StoragePressureReasonCode,
+    StoragePressureSignals, StoragePressureSnapshot, StoragePressureState,
+    STORAGE_PRESSURE_DELAY_RATIO_PER_MILLION, STORAGE_PRESSURE_SOFT_RATIO_PER_MILLION,
 };
 pub use projection::{
     ProjectedGraphDefinition, ProjectedGraphStatus, PropertyIndexProjectionRebuildAction,

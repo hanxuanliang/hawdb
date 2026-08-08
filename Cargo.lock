@@ -1779,6 +1779,7 @@ name = "skein-storage"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "fs2",
  "rayon",
  "roaring",
  "skein-core",

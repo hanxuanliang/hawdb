@@ -29,12 +29,13 @@ pub use doctor::{
     WalTailRepairReason, WalTailRepairReport, WAL_DOCTOR_REPAIR_PROTOCOL,
 };
 use skein_storage::{
-    decode_relational_checkpoint, decode_relational_checkpoint_file, decode_relational_wal_batch,
-    durable_replace_file, encode_relational_checkpoint, encode_relational_checkpoint_to_writer,
-    encode_relational_wal_batch, sync_parent_directory, AdjacencyPostingList,
-    CanonicalEndpointDirection, CanonicalNodeIterator, CanonicalRelationshipIterator,
-    CanonicalSegmentError, DatabaseDirectoryLease, RelationalDecodeLimits,
-    RelationalMutationLimits, RelationalOverflowConfig, RelationalState, RelationalTransaction,
+    available_storage_space, decode_relational_checkpoint, decode_relational_checkpoint_file,
+    decode_relational_wal_batch, durable_replace_file, encode_relational_checkpoint,
+    encode_relational_checkpoint_to_writer, encode_relational_wal_batch, sync_parent_directory,
+    AdjacencyPostingList, CanonicalEndpointDirection, CanonicalNodeIterator,
+    CanonicalRelationshipIterator, CanonicalSegmentError, DatabaseDirectoryLease,
+    RelationalDecodeLimits, RelationalMutationLimits, RelationalOverflowConfig, RelationalState,
+    RelationalTransaction,
 };
 pub use skein_storage::{
     AdjacencyDirection, AdjacencyGroupConsistencyMismatch, AdjacencyGroupKey, AdjacencyGroupStats,
@@ -61,9 +62,11 @@ pub use skein_storage::{
     SearchProjectionGraphChange, SearchProjectionMutationId, SegmentCache, SegmentCacheSnapshot,
     SegmentRangeReader, SegmentReadError, SegmentReadExecutionError, SegmentReadExecutionReport,
     SegmentReadExecutor, SegmentReadPayload, SegmentReadRange, SegmentReadSchedule,
-    SegmentReadScheduler, SegmentReadWave, StorageBackupReport, StorageReclamationWatermark,
-    StorageRecoveryReport, StorageResidencyMode, StorageRestoreReport, StorageScrubReport, StoreId,
-    StoreStableIdMapping, WalReplayConfig,
+    SegmentReadScheduler, SegmentReadWave, StorageBackupReport, StorageDebtController,
+    StoragePressureReasonCode, StoragePressureSignals, StoragePressureSnapshot,
+    StoragePressureState, StorageReclamationWatermark, StorageRecoveryReport, StorageResidencyMode,
+    StorageRestoreReport, StorageScrubReport, StoreId, StoreStableIdMapping, WalReplayConfig,
+    STORAGE_PRESSURE_DELAY_RATIO_PER_MILLION, STORAGE_PRESSURE_SOFT_RATIO_PER_MILLION,
 };
 pub use source_scan::SourceScanRow;
 pub use statistics_refresh::{OptimizerStatisticsRefreshOptions, OptimizerStatisticsRefreshReport};
@@ -91,6 +94,8 @@ const CANONICAL_MANIFEST_MAX_BYTES: u64 = 256 * 1024 * 1024;
 const CANONICAL_ADJACENCY_MANIFEST_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 const PROPERTY_SPILL_MANIFEST_MAX_BYTES: u64 = 256 * 1024 * 1024;
 const PROPERTY_PROJECTION_MANIFEST_MAX_BYTES: u64 = 1024 * 1024 * 1024;
+const CHECKPOINT_TEMPORARY_SPACE_MULTIPLIER: u64 = 4;
+const MIN_CHECKPOINT_TEMPORARY_SPACE_BYTES: u64 = 64 * 1024;
 const MIN_PROPERTY_HISTOGRAM_VALUES: usize = 128;
 const MID_PROPERTY_HISTOGRAM_VALUES: usize = 256;
 const MAX_PROPERTY_HISTOGRAM_VALUES: usize = 512;
@@ -261,6 +266,20 @@ fn parse_property_projection_manifest_generation_file(name: &str) -> Option<u64>
         .strip_suffix(".manifest.skein")?
         .parse()
         .ok()
+}
+
+fn storage_generation_for_file(name: &str) -> Option<u64> {
+    parse_generation_file(name, "checkpoint.")
+        .or_else(|| parse_generation_file(name, "wal."))
+        .or_else(|| parse_generation_file(name, "relational."))
+        .or_else(|| parse_generation_file(name, "canonical."))
+        .or_else(|| parse_canonical_manifest_generation_file(name))
+        .or_else(|| parse_generation_file(name, "adjacency."))
+        .or_else(|| parse_canonical_adjacency_manifest_generation_file(name))
+        .or_else(|| parse_generation_file(name, "properties."))
+        .or_else(|| parse_property_spill_manifest_generation_file(name))
+        .or_else(|| parse_generation_file(name, "property-index."))
+        .or_else(|| parse_property_projection_manifest_generation_file(name))
 }
 
 fn has_storage_artifacts(root: &Path) -> Result<bool> {
@@ -1803,6 +1822,7 @@ impl GraphStore {
                 path.as_ref(),
                 durability,
                 replay_config.segment_cache_capacity_bytes,
+                replay_config.max_bytes,
                 replay_config.max_record_bytes,
                 replay_config.max_batch_operations,
             )?,
@@ -1810,6 +1830,7 @@ impl GraphStore {
                 path.as_ref(),
                 durability,
                 replay_config.segment_cache_capacity_bytes,
+                replay_config.max_bytes,
                 replay_config.max_record_bytes,
                 replay_config.max_batch_operations,
             )?,
@@ -1885,6 +1906,7 @@ impl GraphStore {
             path,
             DurabilityPolicy::default(),
             replay_config.segment_cache_capacity_bytes,
+            replay_config.max_bytes,
             replay_config.max_record_bytes,
             replay_config.max_batch_operations,
         )?;
@@ -6646,6 +6668,91 @@ impl GraphStore {
         }
     }
 
+    pub fn storage_pressure_snapshot(
+        &self,
+        oldest_reader_commit_epoch: Option<u64>,
+    ) -> StoragePressureSnapshot {
+        let cache = self.segment_cache_snapshot().unwrap_or_default();
+        let checkpoint_commit_epoch = self
+            .durable
+            .as_ref()
+            .map_or(self.commit_epoch, |durable| durable.checkpoint_commit_epoch);
+        let (wal_bytes, wal_age_millis, max_wal_bytes, obsolete_generation_bytes) =
+            self.durable.as_ref().map_or((0, 0, None, 0), |durable| {
+                (
+                    durable.wal_bytes,
+                    (self.commit_epoch > durable.checkpoint_commit_epoch)
+                        .then(|| durable.wal_age_millis())
+                        .flatten()
+                        .unwrap_or_default(),
+                    durable.max_wal_bytes,
+                    durable.obsolete_generation_bytes(oldest_reader_commit_epoch),
+                )
+            });
+        let has_checkpoint_debt =
+            self.durable.is_some() && self.commit_epoch > checkpoint_commit_epoch;
+        let estimated_checkpoint_temporary_bytes = if has_checkpoint_debt {
+            self.estimated_logical_record_bytes()
+                .saturating_add(self.relational_state.estimated_checkpoint_bytes())
+                .saturating_mul(CHECKPOINT_TEMPORARY_SPACE_MULTIPLIER)
+                .max(MIN_CHECKPOINT_TEMPORARY_SPACE_BYTES)
+        } else {
+            0
+        };
+        let property_projection_debt =
+            self.persistent_property_projection
+                .as_ref()
+                .map_or(0, |reader| {
+                    usize::try_from(
+                        self.commit_epoch
+                            .saturating_sub(reader.manifest().source_commit_epoch),
+                    )
+                    .unwrap_or(usize::MAX)
+                });
+
+        StorageDebtController.evaluate(StoragePressureSignals {
+            current_commit_epoch: self.commit_epoch,
+            checkpoint_commit_epoch,
+            wal_bytes,
+            wal_age_millis,
+            max_wal_bytes,
+            delta_bytes: if self.canonical_base_out_of_core {
+                self.estimated_delta_resident_bytes()
+            } else {
+                0
+            },
+            max_delta_bytes: if self.canonical_base_out_of_core {
+                self.max_out_of_core_delta_bytes
+            } else {
+                None
+            },
+            adjacency_debt_entries: self.adjacency_consolidation_plan().estimated_entries,
+            projection_debt_operations: property_projection_debt,
+            oldest_reader_commit_epoch,
+            obsolete_generation_bytes,
+            estimated_checkpoint_temporary_bytes,
+            available_free_space_bytes: self
+                .durable
+                .as_ref()
+                .and_then(|durable| available_storage_space(durable.root_path())),
+            cache_capacity_bytes: cache.capacity_bytes,
+            cache_resident_bytes: cache.resident_bytes,
+            cache_pinned_bytes: cache.pinned_bytes,
+            integrity_poisoned: self.storage_handle_poisoned(),
+        })
+    }
+
+    pub(crate) fn checkpoint_estimated_operations(&self) -> usize {
+        let statistics = self.basic_statistics();
+        let graph_operations = statistics
+            .node_count
+            .saturating_add(statistics.relationship_count);
+        usize::try_from(graph_operations)
+            .unwrap_or(usize::MAX)
+            .saturating_add(self.relational_state.total_row_count())
+            .max(1)
+    }
+
     fn estimated_delta_resident_bytes(&self) -> u64 {
         let record_bytes = self
             .nodes
@@ -9848,6 +9955,18 @@ impl GraphStore {
     }
 
     fn ensure_out_of_core_delta_admission(&self, ops: &[WalOp]) -> Result<()> {
+        self.ensure_out_of_core_delta_admission_mode(ops, true)
+    }
+
+    fn ensure_out_of_core_delta_replay_admission(&self, ops: &[WalOp]) -> Result<()> {
+        self.ensure_out_of_core_delta_admission_mode(ops, false)
+    }
+
+    fn ensure_out_of_core_delta_admission_mode(
+        &self,
+        ops: &[WalOp],
+        apply_live_backpressure: bool,
+    ) -> Result<()> {
         if !self.canonical_base_out_of_core {
             return Ok(());
         }
@@ -9866,6 +9985,16 @@ impl GraphStore {
         if projected > limit {
             return Err(SkeinError::Storage(format!(
                 "out-of-core mutation delta admission rejected {projected} estimated bytes under the {limit} byte limit; checkpoint the database or raise max_out_of_core_delta_bytes"
+            )));
+        }
+        let pressure = StorageDebtController.evaluate(StoragePressureSignals {
+            delta_bytes: projected,
+            max_delta_bytes: Some(limit),
+            ..StoragePressureSignals::default()
+        });
+        if apply_live_backpressure && pressure.state == StoragePressureState::DelayMutation {
+            return Err(SkeinError::Storage(format!(
+                "out-of-core mutation delayed by storage pressure at {projected} estimated bytes under the {limit} byte limit; checkpoint the database before retrying"
             )));
         }
         Ok(())
@@ -11091,7 +11220,7 @@ impl GraphStore {
                 .ok_or_else(|| SkeinError::Storage("WAL LSN overflow during replay".to_string()))?;
             match entry.op {
                 WalOp::Batch(ops) => {
-                    self.ensure_out_of_core_delta_admission(&ops)?;
+                    self.ensure_out_of_core_delta_replay_admission(&ops)?;
                     let commit_epoch = self.commit_epoch + 1;
                     self.record_search_projection_graph_changes_for_ops(
                         catalog,
@@ -11104,7 +11233,7 @@ impl GraphStore {
                     self.commit_epoch += 1;
                 }
                 op => {
-                    self.ensure_out_of_core_delta_admission(std::slice::from_ref(&op))?;
+                    self.ensure_out_of_core_delta_replay_admission(std::slice::from_ref(&op))?;
                     let commit_epoch = self.commit_epoch + 1;
                     self.record_search_projection_graph_changes_for_ops(
                         catalog,
@@ -11464,6 +11593,8 @@ struct DurableStore {
     safe_reclaim_commit_epoch: u64,
     wal_replay_start_lsn: u64,
     next_lsn: u64,
+    wal_bytes: u64,
+    max_wal_bytes: Option<u64>,
     source_scan_commit_epoch: Option<u64>,
     source_scan_descriptor_checksum: Option<u64>,
     store_id: StoreId,
@@ -11504,6 +11635,7 @@ struct DurableStoreOpenOptions {
     initialize_if_empty: bool,
     load_rebuildable_artifacts: bool,
     segment_cache_capacity_bytes: u64,
+    max_wal_bytes: Option<u64>,
     max_record_bytes: Option<usize>,
     max_batch_operations: Option<usize>,
 }
@@ -11563,6 +11695,7 @@ impl DurableStore {
         path: &Path,
         durability: DurabilityPolicy,
         segment_cache_capacity_bytes: u64,
+        max_wal_bytes: Option<u64>,
         max_record_bytes: Option<usize>,
         max_batch_operations: Option<usize>,
     ) -> Result<Self> {
@@ -11575,6 +11708,7 @@ impl DurableStore {
                 initialize_if_empty: true,
                 load_rebuildable_artifacts: true,
                 segment_cache_capacity_bytes,
+                max_wal_bytes,
                 max_record_bytes,
                 max_batch_operations,
             },
@@ -11585,6 +11719,7 @@ impl DurableStore {
         path: &Path,
         durability: DurabilityPolicy,
         segment_cache_capacity_bytes: u64,
+        max_wal_bytes: Option<u64>,
         max_record_bytes: Option<usize>,
         max_batch_operations: Option<usize>,
     ) -> Result<Self> {
@@ -11608,6 +11743,7 @@ impl DurableStore {
                 initialize_if_empty: false,
                 load_rebuildable_artifacts: true,
                 segment_cache_capacity_bytes,
+                max_wal_bytes,
                 max_record_bytes,
                 max_batch_operations,
             },
@@ -11618,6 +11754,7 @@ impl DurableStore {
         path: &Path,
         durability: DurabilityPolicy,
         segment_cache_capacity_bytes: u64,
+        max_wal_bytes: Option<u64>,
         max_record_bytes: Option<usize>,
         max_batch_operations: Option<usize>,
     ) -> Result<Self> {
@@ -11635,6 +11772,7 @@ impl DurableStore {
                 initialize_if_empty: false,
                 load_rebuildable_artifacts: false,
                 segment_cache_capacity_bytes,
+                max_wal_bytes,
                 max_record_bytes,
                 max_batch_operations,
             },
@@ -11651,6 +11789,7 @@ impl DurableStore {
             initialize_if_empty,
             load_rebuildable_artifacts,
             segment_cache_capacity_bytes,
+            max_wal_bytes,
             max_record_bytes,
             max_batch_operations,
         } = options;
@@ -11679,6 +11818,9 @@ impl DurableStore {
         manifest.validate()?;
         let checkpoint_path = manifest.checkpoint_path(path);
         let wal_path = manifest.wal_path(path);
+        let wal_bytes = fs::metadata(&wal_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or_default();
         let segment_cache = Arc::new(SegmentCache::new(segment_cache_capacity_bytes));
         let store_id = store_id_for_path(path)?;
         let canonical_segments = load_published_canonical_segments(
@@ -11766,6 +11908,8 @@ impl DurableStore {
             safe_reclaim_commit_epoch: manifest.safe_reclaim_commit_epoch,
             wal_replay_start_lsn: manifest.wal_replay_start_lsn,
             next_lsn: manifest.next_lsn,
+            wal_bytes,
+            max_wal_bytes,
             source_scan_commit_epoch: manifest.source_scan_commit_epoch,
             source_scan_descriptor_checksum: manifest.source_scan_descriptor_checksum,
             store_id,
@@ -11784,6 +11928,32 @@ impl DurableStore {
 
     fn root_path(&self) -> &Path {
         &self.root_path
+    }
+
+    fn wal_age_millis(&self) -> Option<u64> {
+        let modified = fs::metadata(&self.wal_path).ok()?.modified().ok()?;
+        let elapsed = std::time::SystemTime::now().duration_since(modified).ok()?;
+        Some(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+    }
+
+    fn obsolete_generation_bytes(&self, oldest_reader_commit_epoch: Option<u64>) -> u64 {
+        if oldest_reader_commit_epoch.is_none() {
+            return 0;
+        }
+        let retain_from = self.checkpoint_epoch.saturating_sub(1);
+        fs::read_dir(&self.root_path)
+            .into_iter()
+            .flatten()
+            .filter_map(std::result::Result::ok)
+            .filter_map(|entry| {
+                let name = entry.file_name();
+                let name = name.to_str()?;
+                let generation = storage_generation_for_file(name)?;
+                (generation < retain_from)
+                    .then(|| entry.metadata().ok().map(|metadata| metadata.len()))
+                    .flatten()
+            })
+            .fold(0u64, u64::saturating_add)
     }
 
     fn backup_to(&self, destination: &Path) -> Result<StorageBackupReport> {
@@ -12326,12 +12496,19 @@ impl DurableStore {
         }
         let started = std::time::Instant::now();
         let mut byte_count = encoded_entry.len().saturating_add(1) as u64;
+        if self.wal_bytes == 0 {
+            byte_count = byte_count.saturating_add(
+                encode_wal_header(self.wal_generation, self.wal_replay_start_lsn)
+                    .len()
+                    .saturating_add(1) as u64,
+            );
+        }
+        self.ensure_wal_admission(self.wal_bytes.saturating_add(byte_count))?;
         process_crash_failpoint("before_wal_append");
         let result = (|| {
             let (mut file, created) = self.open_wal_append()?;
             if created {
                 let header = encode_wal_header(self.wal_generation, self.wal_replay_start_lsn);
-                byte_count = byte_count.saturating_add(header.len().saturating_add(1) as u64);
                 writeln!(file, "{header}")?;
             }
             writeln!(file, "{encoded_entry}")?;
@@ -12353,8 +12530,33 @@ impl DurableStore {
         }
         if result.is_ok() {
             self.next_lsn += 1;
+            self.wal_bytes = self.wal_bytes.saturating_add(byte_count);
+        } else if let Ok(metadata) = fs::metadata(&self.wal_path) {
+            self.wal_bytes = metadata.len();
         }
         result.map(|_| ())
+    }
+
+    fn ensure_wal_admission(&self, projected_wal_bytes: u64) -> Result<()> {
+        let pressure = StorageDebtController.evaluate(StoragePressureSignals {
+            wal_bytes: projected_wal_bytes,
+            max_wal_bytes: self.max_wal_bytes,
+            ..StoragePressureSignals::default()
+        });
+        if pressure.state.admits_mutation() {
+            return Ok(());
+        }
+        let reasons = pressure
+            .reason_codes
+            .iter()
+            .map(|reason| reason.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        Err(SkeinError::Storage(format!(
+            "WAL append rejected by storage pressure: state={}, projected_wal_bytes={projected_wal_bytes}, max_wal_bytes={}, reasons={reasons}; checkpoint the database before retrying",
+            pressure.state.as_str(),
+            self.max_wal_bytes.unwrap_or_default()
+        )))
     }
 
     fn open_wal_append(&self) -> Result<(File, bool)> {
@@ -13062,6 +13264,7 @@ impl DurableStore {
         self.oldest_reader_commit_epoch = manifest.oldest_reader_commit_epoch;
         self.safe_reclaim_commit_epoch = manifest.safe_reclaim_commit_epoch;
         self.wal_replay_start_lsn = manifest.wal_replay_start_lsn;
+        self.wal_bytes = fs::metadata(&self.wal_path)?.len();
         self.source_scan_commit_epoch = manifest.source_scan_commit_epoch;
         self.source_scan_descriptor_checksum = manifest.source_scan_descriptor_checksum;
         self.canonical_segments = load_published_canonical_segments(
@@ -13114,17 +13317,7 @@ impl DurableStore {
             let Some(name) = name.to_str() else {
                 continue;
             };
-            let generation = parse_generation_file(name, "checkpoint.")
-                .or_else(|| parse_generation_file(name, "wal."))
-                .or_else(|| parse_generation_file(name, "relational."))
-                .or_else(|| parse_generation_file(name, "canonical."))
-                .or_else(|| parse_canonical_manifest_generation_file(name))
-                .or_else(|| parse_generation_file(name, "adjacency."))
-                .or_else(|| parse_canonical_adjacency_manifest_generation_file(name))
-                .or_else(|| parse_generation_file(name, "properties."))
-                .or_else(|| parse_property_spill_manifest_generation_file(name))
-                .or_else(|| parse_generation_file(name, "property-index."))
-                .or_else(|| parse_property_projection_manifest_generation_file(name));
+            let generation = storage_generation_for_file(name);
             if generation.is_some_and(|generation| generation < retain_from) {
                 fs::remove_file(entry.path())?;
             }
