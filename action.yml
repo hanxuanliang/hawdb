@@ -24,8 +24,13 @@ runs:
         SKEIN_REVISION: ${{ github.action_ref }}
       run: |
         set -euo pipefail
-        if [ -e "$SKEIN_DESTINATION" ]; then
-          echo "Destination already exists: $SKEIN_DESTINATION" >&2
+        if [ -e "$SKEIN_DESTINATION" ] && [ ! -d "$SKEIN_DESTINATION" ]; then
+          echo "Destination is not a directory: $SKEIN_DESTINATION" >&2
+          exit 1
+        fi
+        if [ -d "$SKEIN_DESTINATION" ] &&
+          [ -n "$(find "$SKEIN_DESTINATION" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+          echo "Destination is not empty: $SKEIN_DESTINATION" >&2
           exit 1
         fi
         mkdir -p "$SKEIN_DESTINATION"
